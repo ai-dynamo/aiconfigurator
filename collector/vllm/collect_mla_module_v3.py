@@ -848,6 +848,19 @@ def run_mla_module(
     def kernel_func():
         attn_module.forward(positions, hidden_states, None)
 
+    # DSA context captures a ~18 GiB flashmla-sparse scratch into the CUDA
+    # graph's private pool on big shapes. PyTorch doesn't reclaim that pool
+    # aggressively enough between tasks, so after a handful of big captures
+    # the per-worker private-pool retention saturates at ~146 GiB and every
+    # subsequent task — regardless of size — OOMs at
+    # ``WorkspaceManager._ensure_workspace_size``. Running eagerly avoids the
+    # private-pool retention entirely; the bias is <0.5% for DSA context
+    # because per-forward latency is tens of ms while graph launch overhead
+    # is tens of μs. Other ops (MLA context, both generation phases) keep
+    # graph capture because they don't hit this retention pattern and the
+    # overhead matters more for their faster kernels.
+    use_cuda_graph = not (attn_type == "dsa" and is_context)
+
     with benchmark_with_power(
         device=torch.device(device),
         kernel_func=kernel_func,
@@ -855,6 +868,7 @@ def run_mla_module(
         num_runs=test_ite,
         repeat_n=1,
         allow_graph_fail=True,
+        use_cuda_graph=use_cuda_graph,
     ) as results:
         pass
 

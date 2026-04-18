@@ -172,6 +172,8 @@ def benchmark_with_power(
     measure_power: bool | None = None,  # Auto-detect from environment if None
     power_min_duration: float | None = None,  # Auto-detect from environment if None
     allow_graph_fail: bool = False,  # NEW: Enable graceful fallback on graph capture failure
+    use_cuda_graph: bool = True,  # NEW: set False to force eager execution (ops whose captured
+    # private pools retain memory across tasks — see collect_mla_module_v3 DSA context).
 ):
     """
     Context manager that handles warmup, graph capture, timing, and power monitoring.
@@ -187,6 +189,11 @@ def benchmark_with_power(
         allow_graph_fail: If True, gracefully fallback to eager execution when
                          CUDA graph capture fails. Power monitoring continues
                          to work in both paths. Default False for backward compatibility.
+        use_cuda_graph: If False, skip CUDA graph capture entirely and run every
+                         iteration eagerly. Defaults to True so all existing callers
+                         (~30 collectors) keep graph-mode measurement. Callers whose
+                         captured forward pass retains GiB-scale memory in the graph's
+                         private pool across tasks should pass False.
 
     Yields:
         dict with keys:
@@ -241,7 +248,8 @@ def benchmark_with_power(
     # ═══════════════════════════════════════════════════════════════════
     # CUDA Graph Capture with Optional Fallback
     # ═══════════════════════════════════════════════════════════════════
-    if torch.cuda.is_available():
+    g = None  # kept in scope so the finally block below can tear it down
+    if torch.cuda.is_available() and use_cuda_graph:
         use_graph = True
         g = torch.cuda.CUDAGraph()
 
@@ -253,7 +261,8 @@ def benchmark_with_power(
         except Exception as e:
             if allow_graph_fail:
                 logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}. Falling back to eager execution.")
-                torch.cuda.empty_cache()  # CRITICAL: Clean up partial allocations
+                g = None  # drop the partial capture so empty_cache can reclaim its private pool
+                torch.cuda.empty_cache()
                 use_graph = False
             else:
                 # Standard behavior: re-raise exception
@@ -261,88 +270,106 @@ def benchmark_with_power(
     else:
         use_graph = False
 
-    # ═══════════════════════════════════════════════════════════════════
-    # Warmup the ACTUAL execution path (after graph capture)
-    # ═══════════════════════════════════════════════════════════════════
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        for _ in range(num_warmups):
+    # Everything from here to the yield holds live references to the captured
+    # graph's private pool. A try/finally guarantees the graph (and therefore
+    # its pool) is released before we return to the caller, regardless of
+    # whether warmup raises, the yield body raises, or we finish cleanly.
+    try:
+        # ═══════════════════════════════════════════════════════════════
+        # Warmup the ACTUAL execution path (after graph capture)
+        # ═══════════════════════════════════════════════════════════════
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            for _ in range(num_warmups):
+                if use_graph:
+                    g.replay()
+                else:
+                    # Fallback: Direct execution matching actual execution path
+                    for _ in range(repeat_n):
+                        kernel_func()
+            torch.cuda.synchronize()
+
+        # Initialize power monitor if enabled
+        power_monitor = None
+        power_stats = None
+        if measure_power:
+            power_monitor = PowerMonitor(device.index)
+            if not power_monitor.start_sampling():
+                power_monitor = None  # Failed to start
+
+        # Get initial clock info for throttling detection
+        initial_clocks = None
+        if measure_power and _NVML_INITIALIZED:
+            try:
+                import pynvml as nvml
+
+                handle = nvml.nvmlDeviceGetHandleByIndex(device.index)
+                initial_clocks = nvml.nvmlDeviceGetClockInfo(handle, nvml.NVML_CLOCK_SM)
+            except Exception:
+                pass
+
+        # ═══════════════════════════════════════════════════════════════════
+        # Execute with Graph or Eager (both paths measured!)
+        # ═══════════════════════════════════════════════════════════════════
+        start_event = get_device_module().Event(enable_timing=True)
+        end_event = get_device_module().Event(enable_timing=True)
+        start_event.record()
+        for _ in range(actual_num_runs):
             if use_graph:
                 g.replay()
             else:
-                # Fallback: Direct execution matching actual execution path
+                # Fallback: Direct execution
+                # This matches SGLang/VLLM pattern where kernel_func handles internal loops
                 for _ in range(repeat_n):
                     kernel_func()
-        torch.cuda.synchronize()
+        end_event.record()
+        get_device_module().synchronize()
 
-    # Initialize power monitor if enabled
-    power_monitor = None
-    power_stats = None
-    if measure_power:
-        power_monitor = PowerMonitor(device.index)
-        if not power_monitor.start_sampling():
-            power_monitor = None  # Failed to start
+        # Check for throttling
+        throttled = False
+        if initial_clocks is not None:
+            try:
+                import pynvml as nvml
 
-    # Get initial clock info for throttling detection
-    initial_clocks = None
-    if measure_power and _NVML_INITIALIZED:
-        try:
-            import pynvml as nvml
+                handle = nvml.nvmlDeviceGetHandleByIndex(device.index)
+                final_clocks = nvml.nvmlDeviceGetClockInfo(handle, nvml.NVML_CLOCK_SM)
+                # If clocks dropped by more than 10%, likely throttled
+                if final_clocks < initial_clocks * 0.9:
+                    throttled = True
+                    logging.getLogger(__name__).warning(
+                        f"Clock throttling detected: {initial_clocks}MHz -> {final_clocks}MHz"
+                    )
+            except Exception:
+                pass
 
-            handle = nvml.nvmlDeviceGetHandleByIndex(device.index)
-            initial_clocks = nvml.nvmlDeviceGetClockInfo(handle, nvml.NVML_CLOCK_SM)
-        except Exception:
-            pass
+        # Stop power monitoring
+        if power_monitor:
+            power_stats = power_monitor.stop_sampling()
 
-    # ═══════════════════════════════════════════════════════════════════
-    # Execute with Graph or Eager (both paths measured!)
-    # ═══════════════════════════════════════════════════════════════════
-    start_event = get_device_module().Event(enable_timing=True)
-    end_event = get_device_module().Event(enable_timing=True)
-    start_event.record()
-    for _ in range(actual_num_runs):
-        if use_graph:
-            g.replay()
-        else:
-            # Fallback: Direct execution
-            # This matches SGLang/VLLM pattern where kernel_func handles internal loops
-            for _ in range(repeat_n):
-                kernel_func()
-    end_event.record()
-    get_device_module().synchronize()
+        # Calculate latency
+        latency_ms = start_event.elapsed_time(end_event) / actual_num_runs / repeat_n
 
-    # Check for throttling
-    throttled = False
-    if initial_clocks is not None:
-        try:
-            import pynvml as nvml
-
-            handle = nvml.nvmlDeviceGetHandleByIndex(device.index)
-            final_clocks = nvml.nvmlDeviceGetClockInfo(handle, nvml.NVML_CLOCK_SM)
-            # If clocks dropped by more than 10%, likely throttled
-            if final_clocks < initial_clocks * 0.9:
-                throttled = True
-                logging.getLogger(__name__).warning(
-                    f"Clock throttling detected: {initial_clocks}MHz -> {final_clocks}MHz"
-                )
-        except Exception:
-            pass
-
-    # Stop power monitoring
-    if power_monitor:
-        power_stats = power_monitor.stop_sampling()
-
-    # Calculate latency
-    latency_ms = start_event.elapsed_time(end_event) / actual_num_runs / repeat_n
-
-    # Return results
-    yield {
-        "latency_ms": latency_ms,
-        "power_stats": power_stats,
-        "throttled": throttled,
-        "num_runs_executed": actual_num_runs,
-        "used_cuda_graph": use_graph,  # NEW: Inform caller which path was used
-    }
+        # Return results
+        yield {
+            "latency_ms": latency_ms,
+            "power_stats": power_stats,
+            "throttled": throttled,
+            "num_runs_executed": actual_num_runs,
+            "used_cuda_graph": use_graph,  # NEW: Inform caller which path was used
+        }
+    finally:
+        # Drop the CUDA graph and reclaim its private memory pool. CUDA graph
+        # captures sequester intermediate tensors into a private pool that
+        # outlives Python-level GC of the CUDAGraph object in some PyTorch
+        # versions — if we skip this explicit teardown, leaky ops (e.g. DSA
+        # context via flashmla-sparse, which captures ~18 GiB of scratch)
+        # accumulate pool memory across tasks until the worker saturates at
+        # ~146 GiB pinned and subsequent tasks OOM at _ensure_workspace_size.
+        if g is not None:
+            g = None
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
 
 
 @contextmanager
