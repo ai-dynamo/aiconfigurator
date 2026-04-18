@@ -1229,17 +1229,19 @@ def run_mla_module(
         if tc[3] == kv_cache_dtype and tc[4] == compute_dtype and tc[5] == gemm_type and tc[2] == head_num
     ]
 
-    # Known-crash skip: B200 DSv3.2 DSA generation at reduced heads ≤ 32 and
-    # kv_cache_length ≥ 256 produces an async CUDA illegal memory access
-    # inside the flashinfer trtllm_batch_decode_with_kv_cache_mla kernel —
-    # the subprocess SIGABRTs and every remaining (bs, kv_len) in this task
-    # is lost. Root cause is collector-setup divergence from production
-    # (dummy weights + cleared KV pool + json_model_override_args heads
-    # override) rather than a real kernel bug — InferenceX SemiAnalysis
-    # benchmarks show GLM-5 tp=4 on B200 + fp8-KV works in production.
-    # Skipping these points lets the subprocess complete the sweep and
-    # populate rows for bs in {2..1024} x kv_len in {1..128} at reduced heads
-    # instead of losing them behind the first SIGABRT at (bs=1, kv_len=256).
+    # Known-crash skip: B200 DSv3.2 DSA generation at reduced heads <= 32 and
+    # kv_cache_length == 256 produces an async CUDA illegal memory access
+    # inside the flashinfer trtllm_batch_decode_with_kv_cache_mla kernel.
+    # The subprocess SIGABRTs (exit -6) and every remaining (bs, kv_len) in
+    # this task is lost. Root cause is collector-setup divergence from
+    # production (dummy weights + cleared KV pool + json_model_override_args
+    # heads override) rather than a real kernel bug - InferenceX
+    # SemiAnalysis benchmarks show GLM-5 tp=4 on B200 + fp8-KV works in
+    # production. Skipping kv_len=256 specifically (not the whole upper
+    # half of the axis) so we can learn empirically whether the larger
+    # kv_len values {512, 1024, 2048, 4096, 8192, 16384} are collectable;
+    # if one of those also crashes, we'll widen the filter. H200 is fully
+    # dense at 132 rows/bucket so no filter is needed there.
     if (
         not is_prefill
         and attn_type == "dsa"
@@ -1248,12 +1250,12 @@ def run_mla_module(
         and get_sm_version() == 100
     ):
         before = len(cases)
-        cases = [(bs, seq_len, ip) for (bs, seq_len, ip) in cases if seq_len < 256]
+        cases = [(bs, seq_len, ip) for (bs, seq_len, ip) in cases if seq_len != 256]
         skipped = before - len(cases)
         if skipped:
             print(
                 f"[SKIP] B200 DSv3.2 DSA gen reduced-heads: dropping {skipped} "
-                f"(bs, kv_len) cases with kv_len>=256 to avoid SIGABRT "
+                f"cases with kv_len==256 to avoid SIGABRT "
                 f"(heads={head_num}, kv={kv_cache_dtype}, gemm={gemm_type})"
             )
 
