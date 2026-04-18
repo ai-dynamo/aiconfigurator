@@ -453,7 +453,9 @@ def create_kv_cache_and_metadata(
     """
     config = model_config.pretrained_config
     mapping = model_config.mapping
-    tokens_per_block = 64
+    # TRT-LLM PR #10261 (>=1.3.0rc0) dropped numTokensPerPage=64 trtllm-gen MLA
+    # cubins for DeepSeek-V3 dims (headDimQk=576, headDimV=512). Only P32 remains.
+    tokens_per_block = 32 if tensorrt_llm.__version__ >= "1.3.0rc0" else 64
 
     kv_lora_rank = config.kv_lora_rank
     qk_rope_head_dim = config.qk_rope_head_dim

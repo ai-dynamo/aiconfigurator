@@ -28,6 +28,14 @@ from tensorrt_llm.sampling_params import SamplingParams
 from collector.helper import benchmark_with_power, log_perf
 
 
+def _mla_tokens_per_block() -> int:
+    # TRT-LLM PR #10261 (>=1.3.0rc0) dropped numTokensPerPage=64 trtllm-gen MLA
+    # cubins for DeepSeek-V3 dims (headDimQk=576, headDimV=512). Only P32 remains.
+    if tensorrt_llm.__version__ >= "1.3.0rc0":
+        return 32
+    return 64
+
+
 def get_context_mla_test_cases():
     dtype_list = [tensorrt_llm.bindings.DataType.BF16, tensorrt_llm.bindings.DataType.FP8]
     test_cases = []
@@ -52,7 +60,7 @@ def get_context_mla_test_cases():
                                 n,
                                 tp_size,
                                 tp_size,
-                                64,
+                                _mla_tokens_per_block(),
                                 10,
                                 6,
                                 True,
@@ -102,7 +110,7 @@ def get_generation_mla_test_cases():
                                 n,
                                 tp_size,
                                 tp_size,
-                                64,
+                                _mla_tokens_per_block(),
                                 10,
                                 6,
                                 False,
