@@ -489,12 +489,16 @@ def _install_diag_hooks():
         _orig_mqa = deep_gemm.fp8_paged_mqa_logits
 
         def _diag_mqa(q_fp8, kv_cache_fp8, weights, seqlens_32, block_tables, schedule_metadata, max_seq_len, **kw):
+            # shape/dtype only — never call .tolist()/.item() here, both do
+            # D2H syncs that are not permitted inside a CUDA graph capture
+            # and would mask whatever non-captureable op the kernel itself
+            # triggers.
             print(
                 f"[DIAG indexer] {_capture_state_str()} "
                 f"q_fp8={tuple(q_fp8.shape)}/{q_fp8.dtype} "
                 f"kv={tuple(kv_cache_fp8.shape)}/{kv_cache_fp8.dtype} "
                 f"weights={tuple(weights.shape)}/{weights.dtype} "
-                f"seqlens[:8]={seqlens_32.tolist()[:8]} "
+                f"seqlens={tuple(seqlens_32.shape)}/{seqlens_32.dtype} "
                 f"block_tables={tuple(block_tables.shape)} "
                 f"max_seq_len={max_seq_len}",
                 flush=True,
@@ -513,6 +517,7 @@ def _install_diag_hooks():
         _orig_decode = fid.trtllm_batch_decode_with_kv_cache_mla
 
         def _diag_decode(**kw):
+            # shape/dtype only — see note in _diag_mqa about D2H syncs.
             q = kw.get("query")
             kv = kw.get("kv_cache")
             bt = kw.get("block_tables")
@@ -522,7 +527,7 @@ def _install_diag_hooks():
                 f"query={tuple(q.shape) if q is not None else None}/{q.dtype if q is not None else None} "
                 f"kv_cache={tuple(kv.shape) if kv is not None else None}/{kv.dtype if kv is not None else None} "
                 f"block_tables={tuple(bt.shape) if bt is not None else None} "
-                f"seq_lens[:8]={sl.tolist()[:8] if sl is not None else None} "
+                f"seq_lens={tuple(sl.shape) if sl is not None else None}/{sl.dtype if sl is not None else None} "
                 f"max_seq_len={kw.get('max_seq_len')} "
                 f"sparse_mla_top_k={kw.get('sparse_mla_top_k')}",
                 flush=True,
@@ -1074,6 +1079,22 @@ def _run_decode(
                 forward_batch=forward_batch_decode,
                 zero_allocator=zero_allocator,
             )
+
+        # Pre-warm JIT / autotuning before CUDA graph capture.
+        # DSA decode on Blackwell calls DeepGEMM fp8_paged_mqa_logits and
+        # flashinfer trtllm_batch_decode_with_kv_cache_mla, both of which
+        # JIT or autotune on first call to a new (heads, bs, kv_len) shape.
+        # If that work spills into the graph-capture window inside
+        # benchmark_with_power, it emits cudaMemcpy-like ops that aren't
+        # permitted during capture and the whole sweep silently skips
+        # (Issue #3 — reproduces only at reduced heads ∈ {8, 16, 32} where
+        # the warmup-time JIT cache from heads=64 doesn't satisfy the new
+        # template instantiation). A few extra eager kernel_func calls
+        # with explicit syncs in between flush that path before capture.
+        if torch.cuda.is_available():
+            for _ in range(5):
+                kernel_func()
+                torch.cuda.synchronize()
 
         with benchmark_with_power(
             device=device,
