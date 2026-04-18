@@ -105,13 +105,33 @@ def _resolve_local_model_path(model_id: str) -> str:
         config = json.load(f)
 
     # Normalise model_type so sglang's AutoConfig recognises it.
+    original_arch = None
     if config.get("model_type") in ("deepseek_v32", "glm_moe_dsa"):
+        original_arch = (config.get("architectures") or [None])[0]
         config["architectures"] = ["DeepseekV3ForCausalLM"]
         config["model_type"] = "deepseek_v3"
 
     # Strip auto_map to prevent transformers from attempting to download
     # custom config/model classes from HuggingFace when trust_remote_code=True.
     config.pop("auto_map", None)
+
+    # Re-apply GLM-5 arch-specific overrides that sglang would normally
+    # apply in server_args.py:1609-1612 based on
+    # hf_config.architectures[0] == "GlmMoeDsaForCausalLM" - but we just
+    # rewrote that string to "DeepseekV3ForCausalLM" above so AutoConfig
+    # can find the model_type, so sglang's gate never fires. Without
+    # this, on Blackwell every GLM-5 DSA context probe with max_kv_len
+    # <= 2048 (the default DENSE_ATTN threshold) dispatches to
+    # _forward_standard_mha -> flashinfer.prefill.trtllm_ragged_attention_deepseek
+    # which asserts on GLM-5's v_head_dim=256 and kills the subprocess
+    # after ~14 rows/bucket.
+    if original_arch == "GlmMoeDsaForCausalLM":
+        try:
+            sm = torch.cuda.get_device_capability()[0]
+        except Exception:
+            sm = 0
+        if sm >= 10 and "SGLANG_NSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD" not in os.environ:
+            os.environ["SGLANG_NSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD"] = "0"
 
     tmp_dir = os.path.join(
         tempfile.gettempdir(),
