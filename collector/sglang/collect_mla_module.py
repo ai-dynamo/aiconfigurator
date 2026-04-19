@@ -294,6 +294,14 @@ def _build_module_test_cases(attn_type: str, mode: str):
         return [[0, 0, 16, "fp8", "bfloat16", "bfloat16", base_fname, "deepseek-ai/DeepSeek-V3.2", attn_type, None]]
     if os.environ.get("AIC_DIAG_B200") == "1" and attn_type == "dsa" and mode == "context":
         return [[0, 0, 16, "bfloat16", "bfloat16", "fp8_block", base_fname, "zai-org/GLM-5", attn_type, None]]
+    if os.environ.get("AIC_DIAG_ISSUE_D") == "1" and attn_type == "dsa" and mode == "context":
+        # Issue D: async CUDA IMA surfacing at nsa_backend.py:237 topk_transform;
+        # reliably reproduces on DSv3.2 heads=64 x kv=bf16 x gemm=bf16 x compute=bf16
+        # at seq_length=4096 post DeepGEMM JIT pre-compile window. One subprocess
+        # with CUDA_LAUNCH_BLOCKING=1 should surface the real crash site.
+        return [
+            [0, 0, 64, "bfloat16", "bfloat16", "bfloat16", base_fname, "deepseek-ai/DeepSeek-V3.2", attn_type, None]
+        ]
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
     cases = []
     for model_path in model_paths:
@@ -1361,6 +1369,13 @@ def run_mla_module(
         if tc[3] == kv_cache_dtype and tc[4] == compute_dtype and tc[5] == gemm_type and tc[2] == head_num
     ]
 
+    # Issue D diag: narrow inner sweep to the crash neighborhood so
+    # CUDA_LAUNCH_BLOCKING's ~3x slowdown still fits inside the 1800s
+    # subprocess timeout. seq_len=4096 is the empirical trigger (all smaller
+    # seq_lens run clean); keep bs in {1, 2} to get one crash plus a neighbor.
+    if os.environ.get("AIC_DIAG_ISSUE_D") == "1" and is_prefill:
+        cases = [(bs, sl, ip) for (bs, sl, ip) in cases if sl == 4096 and bs <= 2]
+
     # Known-crash skip: B200 DSv3.2 DSA generation at reduced heads ≤ 32 and
     # kv_cache_length ≥ 256 produces an async CUDA illegal memory access
     # inside the flashinfer trtllm_batch_decode_with_kv_cache_mla kernel —
@@ -1446,6 +1461,15 @@ def _run_mla_subprocess(
     """Run MLA/DSA benchmark in a subprocess with CUDA_VISIBLE_DEVICES isolation."""
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+    # Issue D diag probe: force synchronous kernel launches so the CUDA IMA
+    # surfaces at the actual offending kernel rather than at the next sync
+    # point (torch.repeat_interleave inside topk_transform). TORCH_USE_CUDA_DSA
+    # also enables device-side bounds assertions in Triton-compiled kernels.
+    # Safe here because the collector already sets disable_cuda_graph=True.
+    if os.environ.get("AIC_DIAG_ISSUE_D") == "1":
+        env["CUDA_LAUNCH_BLOCKING"] = "1"
+        env["TORCH_USE_CUDA_DSA"] = "1"
 
     phase = "context" if is_prefill else "generation"
     output_repr = f'"{output_path}"' if output_path else "None"
