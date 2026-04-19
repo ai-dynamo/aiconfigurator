@@ -399,6 +399,37 @@ def cleanup_distributed():
         expert_location._global_expert_location_metadata = None
 
 
+def _ensure_fp8_block_quant_config(hf_cfg) -> None:
+    """Populate hf_config.quantization_config with weight_block_size for fp8_block.
+
+    After _resolve_local_model_path rewrites the model_type to deepseek_v3, the
+    JSON's ``quantization_config`` section may not be preserved as an attribute
+    on the HF config object. sglang's _get_quantization_config then falls back
+    to ``Fp8Config()`` with no weight_block_size, which flips Fp8LinearMethod
+    to the channel-FP8 path — that path transposes the weight post-load and
+    breaks downstream DeepseekV2 post_load_weights. Re-inject the block-scale
+    fields so block_quant=True fires.
+    """
+    default_qc = {
+        "quant_method": "fp8",
+        "activation_scheme": "dynamic",
+        "weight_block_size": [128, 128],
+        "fmt": "e4m3",
+    }
+    qc = getattr(hf_cfg, "quantization_config", None)
+    if qc is None:
+        hf_cfg.quantization_config = default_qc
+        return
+    if isinstance(qc, dict):
+        for k, v in default_qc.items():
+            if qc.get(k) is None:
+                qc[k] = v
+        return
+    for k, v in default_qc.items():
+        if getattr(qc, k, None) is None:
+            setattr(qc, k, v)
+
+
 def _patch_channel_quant_contiguous():
     """Workaround for GLM-5 / DeepSeek-V3.2 dummy-weight fp8 init crash.
 
@@ -757,6 +788,18 @@ def load_model_runner(
     nccl_port = 29500 + random.randint(0, 10000) + gpu_id * 100
 
     model_config = ModelConfig.from_server_args(server_args)
+
+    # Bug A fix: ensure hf_config.quantization_config carries weight_block_size
+    # so sglang constructs Fp8Config with block_quant=True. Without this, the
+    # Fp8LinearMethod post-load path at fp8.py:660 transposes kv_b_proj.weight
+    # from (out=7168, in=512) to (in=512, out=7168), and then
+    # deepseek_weight_loader.py:555 unflatten(dim0=512, 448) fails with
+    # `448 ∤ 512`. Our _resolve_local_model_path writes quantization_config into
+    # the tmp config.json, but after the model_type rewrite to deepseek_v3 the
+    # attribute may not survive onto hf_config — re-inject it here.
+    if gemm_type == "fp8_block":
+        _ensure_fp8_block_quant_config(model_config.hf_config)
+
     model_runner = ModelRunner(
         model_config=model_config,
         mem_fraction_static=0.5,
