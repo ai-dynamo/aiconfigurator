@@ -530,7 +530,9 @@ def run_moe_torch(
             False,
             False,
             use_nvfp4=moe_type == "nvfp4",
-            block_shape=None,
+            block_shape=[128, 128]
+            if (moe_type == "fp8_block" and inter_size // moe_tp_size % 128 == 0 and hidden_size % 128 == 0)
+            else None,
             distributed=distributed,
             power_law_alpha=power_law_alpha,
             workloads=rank0_workloads,
@@ -547,7 +549,9 @@ def run_moe_torch(
             False,
             False,
             use_nvfp4=moe_type == "nvfp4",
-            block_shape=None,
+            block_shape=[128, 128]
+            if (moe_type == "fp8_block" and inter_size // moe_tp_size % 128 == 0 and hidden_size % 128 == 0)
+            else None,
             distributed=distributed,
             power_law_alpha=power_law_alpha,
         )
