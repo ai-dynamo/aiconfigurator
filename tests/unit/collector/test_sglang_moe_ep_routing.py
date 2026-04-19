@@ -89,3 +89,35 @@ def test_global_power_law_rank0_workload_keeps_global_distribution():
     assert workload["masked_m"].sum().item() == rank0_info["rank0_total_selections"]
     assert (workload["topk_ids"] == -1).any()
     assert rank0_info["rank0_total_selections"] < workload["num_tokens"] * workload["topk_ids"].shape[1]
+
+
+@pytest.mark.unit
+def test_round_robin_adjust_per_rank_adds_to_local_minimums():
+    helper = _import_helper_module()
+
+    counts = torch.tensor([[3, 1], [2, 0]], dtype=torch.int64)
+    adjusted = helper._round_robin_adjust_per_rank(
+        counts.clone(),
+        remaining=3,
+        is_valid=lambda local_counts: local_counts < 4,
+        pick_local_index=torch.argmin,
+        step=1,
+    )
+
+    assert torch.equal(adjusted, torch.tensor([[3, 3], [2, 1]], dtype=torch.int64))
+
+
+@pytest.mark.unit
+def test_round_robin_adjust_per_rank_subtracts_from_local_maximums():
+    helper = _import_helper_module()
+
+    counts = torch.tensor([[3, 1], [2, 0]], dtype=torch.int64)
+    adjusted = helper._round_robin_adjust_per_rank(
+        counts.clone(),
+        remaining=3,
+        is_valid=lambda local_counts: local_counts > 0,
+        pick_local_index=torch.argmax,
+        step=-1,
+    )
+
+    assert torch.equal(adjusted, torch.tensor([[1, 1], [1, 0]], dtype=torch.int64))
