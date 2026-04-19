@@ -282,13 +282,18 @@ def _build_module_test_cases(attn_type: str, mode: str):
     All test cases are 10 elements so that collect.py's ``func(*task, device)``
     maps positional args correctly to run_mla_module_worker().
 
-    When ``AIC_DIAG_B200=1`` is set, this returns a single task
-    (heads=16, kv=fp8, gemm=bfloat16, model=DSv3.2) so a B200 diagnostic
-    run only has to pay DeepGEMM JIT + model-load cost once.
+    When ``AIC_DIAG_B200=1`` is set, this returns a single task so a
+    diagnostic run only has to pay DeepGEMM JIT + model-load cost once:
+      - dsa generation: (heads=16, kv=fp8, gemm=bfloat16, model=DSv3.2)
+        targets the B200 reduced-heads decode SIGABRT path.
+      - dsa context:    (heads=16, kv=bfloat16, gemm=fp8_block, model=GLM-5)
+        targets the Bug A weight-loader unflatten failure.
     """
     base_fname = f"{attn_type}_{mode}_module_perf.txt"
     if os.environ.get("AIC_DIAG_B200") == "1" and attn_type == "dsa" and mode == "generation":
         return [[0, 0, 16, "fp8", "bfloat16", "bfloat16", base_fname, "deepseek-ai/DeepSeek-V3.2", attn_type, None]]
+    if os.environ.get("AIC_DIAG_B200") == "1" and attn_type == "dsa" and mode == "context":
+        return [[0, 0, 16, "bfloat16", "bfloat16", "fp8_block", base_fname, "zai-org/GLM-5", attn_type, None]]
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
     cases = []
     for model_path in model_paths:
@@ -580,6 +585,70 @@ def _install_diag_hooks():
         torch.cuda.CUDAGraph.capture_end = _diag_ce
     except Exception as e:
         print(f"[DIAG] failed to patch torch.cuda.CUDAGraph: {e}", flush=True)
+
+    # Bug A probe (dsa_context x GLM-5 x fp8_block): sglang's
+    # DeepseekV2WeightLoaderMixin.post_load_weights fails with
+    # ``unflatten: Provided sizes [-1, 448] don't multiply up to the size
+    # of dim 0 (512)`` for GLM-5 under ``quantization="fp8"``. Production
+    # runs the same code path successfully (verified via
+    # /workspace/glm_sgl.nsys-rep), so the failure is a collector-setup
+    # artifact, not an sglang bug. Dump kv_b_proj.weight shape + head
+    # dims for the first attention layer, before the real call runs and
+    # crashes, so we can tell whether the mismatch is
+    # (a) dummy-load shape races the heads override, (b) arch rewrite
+    # picks the wrong attention class, or (c) monkey-patch residue.
+    try:
+        from sglang.srt.models.deepseek_common.deepseek_weight_loader import (
+            DeepseekV2WeightLoaderMixin,
+        )
+
+        _orig_post_load = DeepseekV2WeightLoaderMixin.post_load_weights
+
+        def _diag_post_load(self, *a, **kw):
+            try:
+                model = getattr(self, "model", self)
+                layers = getattr(getattr(model, "model", model), "layers", None)
+                if layers is None:
+                    layers = getattr(model, "layers", [])
+                printed = 0
+                for layer_idx, layer in enumerate(layers):
+                    sa = getattr(layer, "self_attn", None)
+                    if sa is None:
+                        continue
+                    kvbp = getattr(sa, "kv_b_proj", None)
+                    w = getattr(kvbp, "weight", None) if kvbp is not None else None
+                    ws_inv = getattr(kvbp, "weight_scale_inv", None) if kvbp is not None else None
+                    qcfg = getattr(self, "quant_config", None)
+                    wbs = getattr(qcfg, "weight_block_size", None) if qcfg is not None else None
+                    w_shape = tuple(w.shape) if w is not None else None
+                    w_dtype = str(w.dtype) if w is not None else None
+                    ws_shape = tuple(ws_inv.shape) if ws_inv is not None else None
+                    print(
+                        f"[DIAG BugA layer={layer_idx}] "
+                        f"kv_b_proj.weight={w_shape}/{w_dtype} "
+                        f"weight_scale_inv={ws_shape} "
+                        f"qk_nope_head_dim={getattr(sa, 'qk_nope_head_dim', '?')} "
+                        f"v_head_dim={getattr(sa, 'v_head_dim', '?')} "
+                        f"kv_lora_rank={getattr(sa, 'kv_lora_rank', '?')} "
+                        f"num_local_heads={getattr(sa, 'num_local_heads', '?')} "
+                        f"num_attention_heads={getattr(sa, 'num_attention_heads', '?')} "
+                        f"qk_rope_head_dim={getattr(sa, 'qk_rope_head_dim', '?')} "
+                        f"attn_class={type(sa).__name__} "
+                        f"quant_config={type(qcfg).__name__ if qcfg is not None else None} "
+                        f"weight_block_size={wbs} "
+                        f"arch={getattr(getattr(self, 'config', None), 'architectures', '?')}",
+                        flush=True,
+                    )
+                    printed += 1
+                    if printed >= 2:
+                        break
+            except Exception as inner:
+                print(f"[DIAG BugA] probe failed before post_load: {inner}", flush=True)
+            return _orig_post_load(self, *a, **kw)
+
+        DeepseekV2WeightLoaderMixin.post_load_weights = _diag_post_load
+    except Exception as e:
+        print(f"[DIAG] failed to patch DeepseekV2WeightLoaderMixin.post_load_weights: {e}", flush=True)
 
 
 def load_model_runner(
