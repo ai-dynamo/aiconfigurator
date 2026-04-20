@@ -281,19 +281,8 @@ def _build_module_test_cases(attn_type: str, mode: str):
     attention_backend is None for DSA (resolved at runtime by _get_backends()).
     All test cases are 10 elements so that collect.py's ``func(*task, device)``
     maps positional args correctly to run_mla_module_worker().
-
-    When ``AIC_DIAG_B200=1`` is set, this returns a single task so a
-    diagnostic run only has to pay DeepGEMM JIT + model-load cost once:
-      - dsa generation: (heads=16, kv=fp8, gemm=bfloat16, model=DSv3.2)
-        targets the B200 reduced-heads decode SIGABRT path.
-      - dsa context:    (heads=16, kv=bfloat16, gemm=fp8_block, model=GLM-5)
-        targets the Bug A weight-loader unflatten failure.
     """
     base_fname = f"{attn_type}_{mode}_module_perf.txt"
-    if os.environ.get("AIC_DIAG_B200") == "1" and attn_type == "dsa" and mode == "generation":
-        return [[0, 0, 16, "fp8", "bfloat16", "bfloat16", base_fname, "deepseek-ai/DeepSeek-V3.2", attn_type, None]]
-    if os.environ.get("AIC_DIAG_B200") == "1" and attn_type == "dsa" and mode == "context":
-        return [[0, 0, 16, "bfloat16", "bfloat16", "fp8_block", base_fname, "zai-org/GLM-5", attn_type, None]]
     if os.environ.get("AIC_DIAG_ISSUE_D") == "1" and attn_type == "dsa" and mode == "context":
         # Issue D: async CUDA IMA surfacing at nsa_backend.py:237 topk_transform;
         # reliably reproduces on DSv3.2 heads=64 x kv=bf16 x gemm=bf16 x compute=bf16
@@ -438,32 +427,6 @@ def _ensure_fp8_block_quant_config(hf_cfg) -> None:
             setattr(qc, k, v)
 
 
-def _patch_channel_quant_contiguous():
-    """Workaround for GLM-5 / DeepSeek-V3.2 dummy-weight fp8 init crash.
-
-    sglang's ``channel_quant_to_tensor_quant`` path has a downstream ``.view(-1)``
-    that trips on non-contiguous tensors when weights come from GLM-5 dummy
-    load. Force both inputs contiguous before the call so the reshape
-    succeeds. Idempotent — safe to call repeatedly.
-    See SGLANG_DSA_COLLECTION_GAPS.md Phase 2a(ii).
-    """
-    from sglang.srt.layers.quantization import fp8_utils
-
-    orig = fp8_utils.channel_quant_to_tensor_quant
-    if getattr(orig, "_aic_contiguous_patched", False):
-        return
-
-    def patched(x_q_channel, x_s):
-        if not x_q_channel.is_contiguous():
-            x_q_channel = x_q_channel.contiguous()
-        if x_s is not None and not x_s.is_contiguous():
-            x_s = x_s.contiguous()
-        return orig(x_q_channel, x_s)
-
-    patched._aic_contiguous_patched = True
-    fp8_utils.channel_quant_to_tensor_quant = patched
-
-
 def _patch_nsa_rope_contiguity(model_runner):
     """Workaround for sglang rope contiguity bugs on Blackwell (SM>=100).
 
@@ -506,188 +469,6 @@ def _patch_nsa_rope_contiguity(model_runner):
 
         rotary_emb.forward = _make_contiguous_forward(original_forward)
         print(f"Patched rope contiguity for layer {layer}")
-
-
-def _install_diag_hooks():
-    """Instrument the Blackwell fp8 NSA decode path for root-causing the B200
-    illegal memory access at reduced heads x fp8-KV x kv_len>=256.
-
-    Gated on ``AIC_DIAG_B200=1``. Temporary; revert when the collector-setup
-    divergence is understood.
-
-    v2 (2026-04-17): pipeline #1146 showed that ``CUDA_LAUNCH_BLOCKING=1``
-    masks the original race and produces "Offset increment outside graph
-    capture" at every decode probe instead, because blocking mode is
-    incompatible with CUDA graph capture. We drop that flag and instead
-    record the CUDA stream + graph-capture status at every wrapped call,
-    plus hook ``torch.cuda.CUDAGraph`` capture begin/end so we can see when
-    capture windows open and close relative to the kernel launches.
-
-    1. Monkey-patches ``deep_gemm.fp8_paged_mqa_logits`` (NSA indexer
-       scoring) and ``flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla``
-       (B200 decode) to print input shapes + dtypes + capture status
-       before each call.
-    2. Hooks ``torch.cuda.CUDAGraph.{__init__, capture_begin, capture_end}``
-       to print when capture windows open and close.
-    3. Leaves the illegal memory access timing-accurate so the original
-       crash point still reproduces.
-    """
-    if os.environ.get("AIC_DIAG_B200") != "1":
-        return
-    os.environ["TORCH_USE_CUDA_DSA"] = "1"
-
-    def _capture_state_str():
-        try:
-            stream = torch.cuda.current_stream()
-            try:
-                cap = torch.cuda.is_current_stream_capturing()
-            except Exception:
-                cap = "?"
-            return f"stream_id={stream.stream_id} capturing={cap}"
-        except Exception as e:
-            return f"capture_state_err={e}"
-
-    try:
-        import deep_gemm
-
-        _orig_mqa = deep_gemm.fp8_paged_mqa_logits
-
-        def _diag_mqa(q_fp8, kv_cache_fp8, weights, seqlens_32, block_tables, schedule_metadata, max_seq_len, **kw):
-            # shape/dtype only — never call .tolist()/.item() here, both do
-            # D2H syncs that are not permitted inside a CUDA graph capture
-            # and would mask whatever non-captureable op the kernel itself
-            # triggers.
-            print(
-                f"[DIAG indexer] {_capture_state_str()} "
-                f"q_fp8={tuple(q_fp8.shape)}/{q_fp8.dtype} "
-                f"kv={tuple(kv_cache_fp8.shape)}/{kv_cache_fp8.dtype} "
-                f"weights={tuple(weights.shape)}/{weights.dtype} "
-                f"seqlens={tuple(seqlens_32.shape)}/{seqlens_32.dtype} "
-                f"block_tables={tuple(block_tables.shape)} "
-                f"max_seq_len={max_seq_len}",
-                flush=True,
-            )
-            return _orig_mqa(
-                q_fp8, kv_cache_fp8, weights, seqlens_32, block_tables, schedule_metadata, max_seq_len, **kw
-            )
-
-        deep_gemm.fp8_paged_mqa_logits = _diag_mqa
-    except Exception as e:
-        print(f"[DIAG] failed to patch deep_gemm.fp8_paged_mqa_logits: {e}", flush=True)
-
-    try:
-        import flashinfer.decode as fid
-
-        _orig_decode = fid.trtllm_batch_decode_with_kv_cache_mla
-
-        def _diag_decode(**kw):
-            # shape/dtype only — see note in _diag_mqa about D2H syncs.
-            q = kw.get("query")
-            kv = kw.get("kv_cache")
-            bt = kw.get("block_tables")
-            sl = kw.get("seq_lens")
-            print(
-                f"[DIAG trtllm_decode] {_capture_state_str()} "
-                f"query={tuple(q.shape) if q is not None else None}/{q.dtype if q is not None else None} "
-                f"kv_cache={tuple(kv.shape) if kv is not None else None}/{kv.dtype if kv is not None else None} "
-                f"block_tables={tuple(bt.shape) if bt is not None else None} "
-                f"seq_lens={tuple(sl.shape) if sl is not None else None}/{sl.dtype if sl is not None else None} "
-                f"max_seq_len={kw.get('max_seq_len')} "
-                f"sparse_mla_top_k={kw.get('sparse_mla_top_k')}",
-                flush=True,
-            )
-            return _orig_decode(**kw)
-
-        fid.trtllm_batch_decode_with_kv_cache_mla = _diag_decode
-    except Exception as e:
-        print(f"[DIAG] failed to patch flashinfer trtllm_batch_decode: {e}", flush=True)
-
-    try:
-        _orig_init = torch.cuda.CUDAGraph.__init__
-        _orig_cb = torch.cuda.CUDAGraph.capture_begin
-        _orig_ce = torch.cuda.CUDAGraph.capture_end
-
-        def _diag_init(self, *a, **kw):
-            print(f"[DIAG cuda_graph.__init__] {_capture_state_str()}", flush=True)
-            return _orig_init(self, *a, **kw)
-
-        def _diag_cb(self, *a, **kw):
-            print(f"[DIAG cuda_graph.capture_begin] {_capture_state_str()}", flush=True)
-            return _orig_cb(self, *a, **kw)
-
-        def _diag_ce(self, *a, **kw):
-            print(f"[DIAG cuda_graph.capture_end] {_capture_state_str()}", flush=True)
-            return _orig_ce(self, *a, **kw)
-
-        torch.cuda.CUDAGraph.__init__ = _diag_init
-        torch.cuda.CUDAGraph.capture_begin = _diag_cb
-        torch.cuda.CUDAGraph.capture_end = _diag_ce
-    except Exception as e:
-        print(f"[DIAG] failed to patch torch.cuda.CUDAGraph: {e}", flush=True)
-
-    # Bug A probe (dsa_context x GLM-5 x fp8_block): sglang's
-    # DeepseekV2WeightLoaderMixin.post_load_weights fails with
-    # ``unflatten: Provided sizes [-1, 448] don't multiply up to the size
-    # of dim 0 (512)`` for GLM-5 under ``quantization="fp8"``. Production
-    # runs the same code path successfully (verified via
-    # /workspace/glm_sgl.nsys-rep), so the failure is a collector-setup
-    # artifact, not an sglang bug. Dump kv_b_proj.weight shape + head
-    # dims for the first attention layer, before the real call runs and
-    # crashes, so we can tell whether the mismatch is
-    # (a) dummy-load shape races the heads override, (b) arch rewrite
-    # picks the wrong attention class, or (c) monkey-patch residue.
-    try:
-        from sglang.srt.models.deepseek_common.deepseek_weight_loader import (
-            DeepseekV2WeightLoaderMixin,
-        )
-
-        _orig_post_load = DeepseekV2WeightLoaderMixin.post_load_weights
-
-        def _diag_post_load(self, *a, **kw):
-            try:
-                model = getattr(self, "model", self)
-                layers = getattr(getattr(model, "model", model), "layers", None)
-                if layers is None:
-                    layers = getattr(model, "layers", [])
-                printed = 0
-                for layer_idx, layer in enumerate(layers):
-                    sa = getattr(layer, "self_attn", None)
-                    if sa is None:
-                        continue
-                    kvbp = getattr(sa, "kv_b_proj", None)
-                    w = getattr(kvbp, "weight", None) if kvbp is not None else None
-                    ws_inv = getattr(kvbp, "weight_scale_inv", None) if kvbp is not None else None
-                    qcfg = getattr(self, "quant_config", None)
-                    wbs = getattr(qcfg, "weight_block_size", None) if qcfg is not None else None
-                    w_shape = tuple(w.shape) if w is not None else None
-                    w_dtype = str(w.dtype) if w is not None else None
-                    ws_shape = tuple(ws_inv.shape) if ws_inv is not None else None
-                    print(
-                        f"[DIAG BugA layer={layer_idx}] "
-                        f"kv_b_proj.weight={w_shape}/{w_dtype} "
-                        f"weight_scale_inv={ws_shape} "
-                        f"qk_nope_head_dim={getattr(sa, 'qk_nope_head_dim', '?')} "
-                        f"v_head_dim={getattr(sa, 'v_head_dim', '?')} "
-                        f"kv_lora_rank={getattr(sa, 'kv_lora_rank', '?')} "
-                        f"num_local_heads={getattr(sa, 'num_local_heads', '?')} "
-                        f"num_attention_heads={getattr(sa, 'num_attention_heads', '?')} "
-                        f"qk_rope_head_dim={getattr(sa, 'qk_rope_head_dim', '?')} "
-                        f"attn_class={type(sa).__name__} "
-                        f"quant_config={type(qcfg).__name__ if qcfg is not None else None} "
-                        f"weight_block_size={wbs} "
-                        f"arch={getattr(getattr(self, 'config', None), 'architectures', '?')}",
-                        flush=True,
-                    )
-                    printed += 1
-                    if printed >= 2:
-                        break
-            except Exception as inner:
-                print(f"[DIAG BugA] probe failed before post_load: {inner}", flush=True)
-            return _orig_post_load(self, *a, **kw)
-
-        DeepseekV2WeightLoaderMixin.post_load_weights = _diag_post_load
-    except Exception as e:
-        print(f"[DIAG] failed to patch DeepseekV2WeightLoaderMixin.post_load_weights: {e}", flush=True)
 
 
 def _install_issue_d_nochunk_hook():
@@ -777,7 +558,6 @@ def load_model_runner(
     from sglang.srt.server_args import ServerArgs
     from sglang.srt.utils import suppress_other_loggers
 
-    _install_diag_hooks()
     _install_issue_d_nochunk_hook()
     suppress_other_loggers()
 
@@ -815,11 +595,8 @@ def load_model_runner(
 
     # Quantization control: bf16 (dummy weights) vs fp8 (real fp8 weight
     # paths so attention projections and indexer MQA scoring actually fire in
-    # fp8). The GLM-5 dummy-weight fp8 init crash
-    # (channel_quant_to_tensor_quant .view(-1) on non-contiguous tensor) is
-    # worked around by _patch_channel_quant_contiguous below.
+    # fp8).
     if gemm_type == "fp8_block":
-        _patch_channel_quant_contiguous()
         server_args.quantization = "fp8"
     else:
         server_args.quantization = None
