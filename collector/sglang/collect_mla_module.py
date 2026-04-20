@@ -283,14 +283,6 @@ def _build_module_test_cases(attn_type: str, mode: str):
     maps positional args correctly to run_mla_module_worker().
     """
     base_fname = f"{attn_type}_{mode}_module_perf.txt"
-    if os.environ.get("AIC_DIAG_ISSUE_D") == "1" and attn_type == "dsa" and mode == "context":
-        # Issue D: async CUDA IMA surfacing at nsa_backend.py:237 topk_transform;
-        # reliably reproduces on DSv3.2 heads=64 x kv=bf16 x gemm=bf16 x compute=bf16
-        # at seq_length=4096 post DeepGEMM JIT pre-compile window. One subprocess
-        # with CUDA_LAUNCH_BLOCKING=1 should surface the real crash site.
-        return [
-            [0, 0, 64, "bfloat16", "bfloat16", "bfloat16", base_fname, "deepseek-ai/DeepSeek-V3.2", attn_type, None]
-        ]
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
     cases = []
     for model_path in model_paths:
@@ -471,58 +463,6 @@ def _patch_nsa_rope_contiguity(model_runner):
         print(f"Patched rope contiguity for layer {layer}")
 
 
-def _install_issue_d_nochunk_hook():
-    """Force Indexer._should_chunk_mqa_logits to always return (False, 0).
-
-    Gated on AIC_DIAG_ISSUE_D=1. Diagnostic probe to partition the Issue D
-    failure mechanism into "chunk-path bug" vs "non-chunk or gather bug".
-    See docs: 2026-04-20-issue-d-force-nonchunk-mqa-design.md.
-
-    STATUS (2026-04-20, B200 pipeline #1208): Probe ran cleanly on the narrow
-    cell (DSv3.2 heads=64 bf16 sl=4096 bs=1) with this hook active -- 0
-    crashes, valid latency rows emitted -- confirming the IMA is upstream in
-    the ragged chunk path (sglang Indexer._get_topk_ragged loop -> deep_gemm
-    fp8_mqa_logits at runtime-sized max_rows on heads >= 64, sl > index_topk).
-    Production source trace: chunk-path code is what production takes for any
-    prefill with max_kv_len > index_topk=2048 (see nsa_indexer.py:1017-1170
-    dispatch). This hook therefore stays diagnostic-only -- do NOT promote it
-    to default: the non-chunk single-call fp8_mqa_logits is a different kernel
-    shape from production chunk loop, so its latencies would pollute the perf
-    DB. Cells blocked by this IMA (DSv3.2 heads in {64,128} bf16-KV + B200
-    GLM-5 heads=64 bf16-KV at sl >= 4096) stay unpopulated pending upstream
-    fix. Option I (force small max_rows via same hook site, returning
-    (True, synthetic_free_mem)) stays on backlog as an alternative diagnostic;
-    see design doc "Follow-up variant" section.
-
-    Raises AttributeError if the target method has been renamed upstream.
-    A silent no-op would produce a false "Issue D reproduced" signal that
-    looks identical to "hypothesis refuted", so we prefer a hard crash that
-    forces attention.
-    """
-    if os.environ.get("AIC_DIAG_ISSUE_D") != "1":
-        return
-
-    from sglang.srt.layers.attention.nsa.nsa_indexer import Indexer
-
-    if not hasattr(Indexer, "_should_chunk_mqa_logits"):
-        raise AttributeError(
-            "Indexer._should_chunk_mqa_logits not found -- sglang may have "
-            "renamed the chunking decision hook. Update "
-            "_install_issue_d_nochunk_hook in collect_mla_module.py or "
-            "withdraw AIC_DIAG_ISSUE_D."
-        )
-
-    def _never_chunk(self, num_q, num_k, device):
-        # Monkey-patched under AIC_DIAG_ISSUE_D. See Issue D design doc.
-        return False, 0
-
-    Indexer._should_chunk_mqa_logits = _never_chunk
-    print(
-        "[AIC_DIAG_ISSUE_D] Forcing non-chunk mqa_logits path (monkey-patched Indexer._should_chunk_mqa_logits).",
-        flush=True,
-    )
-
-
 def load_model_runner(
     model_path: str,
     head_num: int,
@@ -558,7 +498,6 @@ def load_model_runner(
     from sglang.srt.server_args import ServerArgs
     from sglang.srt.utils import suppress_other_loggers
 
-    _install_issue_d_nochunk_hook()
     suppress_other_loggers()
 
     device_str = str(device)
@@ -1199,13 +1138,6 @@ def run_mla_module(
         if tc[3] == kv_cache_dtype and tc[4] == compute_dtype and tc[5] == gemm_type and tc[2] == head_num
     ]
 
-    # Issue D diag: narrow inner sweep to the crash neighborhood so
-    # CUDA_LAUNCH_BLOCKING's ~3x slowdown still fits inside the 1800s
-    # subprocess timeout. seq_len=4096 is the empirical trigger (all smaller
-    # seq_lens run clean); keep bs in {1, 2} to get one crash plus a neighbor.
-    if os.environ.get("AIC_DIAG_ISSUE_D") == "1" and is_prefill:
-        cases = [(bs, sl, ip) for (bs, sl, ip) in cases if sl == 4096 and bs <= 2]
-
     # Known-crash skip: B200 DSv3.2 DSA generation at reduced heads ≤ 32 and
     # kv_cache_length ≥ 256 produces an async CUDA illegal memory access
     # inside the flashinfer trtllm_batch_decode_with_kv_cache_mla kernel —
@@ -1291,16 +1223,6 @@ def _run_mla_subprocess(
     """Run MLA/DSA benchmark in a subprocess with CUDA_VISIBLE_DEVICES isolation."""
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-
-    # Issue D diag probe: keep normal async execution. Pipeline #1188 showed
-    # CUDA_LAUNCH_BLOCKING=1 masks Issue D (the race disappears under
-    # serialized launches), so the hypothesis-partition probe
-    # (_install_issue_d_nochunk_hook, force non-chunk mqa_logits) must run
-    # under async. TORCH_USE_CUDA_DSA=1 retained -- device-side Triton bounds
-    # assertions are orthogonal to launch ordering and may clarify the IMA if
-    # the non-chunk probe still crashes.
-    if os.environ.get("AIC_DIAG_ISSUE_D") == "1":
-        env["TORCH_USE_CUDA_DSA"] = "1"
 
     phase = "context" if is_prefill else "generation"
     output_repr = f'"{output_path}"' if output_path else "None"
