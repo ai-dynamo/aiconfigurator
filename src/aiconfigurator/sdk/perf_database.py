@@ -284,7 +284,10 @@ def get_database(
                     databases_cache[cache_key][backend][version] = database
                     return database
                 except Exception:
-                    logger.warning(f"failed to load {system=}, {backend=}, {version=}, continuing searching")
+                    logger.warning(
+                        f"failed to load {system=}, {backend=}, {version=}, continuing searching",
+                        exc_info=True,
+                    )
             else:
                 logger.warning(f"data path {data_path} not found, continuing searching")
 
