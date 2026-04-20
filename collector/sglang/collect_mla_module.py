@@ -697,6 +697,22 @@ def _install_issue_d_nochunk_hook():
     failure mechanism into "chunk-path bug" vs "non-chunk or gather bug".
     See docs: 2026-04-20-issue-d-force-nonchunk-mqa-design.md.
 
+    STATUS (2026-04-20, B200 pipeline #1208): Probe ran cleanly on the narrow
+    cell (DSv3.2 heads=64 bf16 sl=4096 bs=1) with this hook active -- 0
+    crashes, valid latency rows emitted -- confirming the IMA is upstream in
+    the ragged chunk path (sglang Indexer._get_topk_ragged loop -> deep_gemm
+    fp8_mqa_logits at runtime-sized max_rows on heads >= 64, sl > index_topk).
+    Production source trace: chunk-path code is what production takes for any
+    prefill with max_kv_len > index_topk=2048 (see nsa_indexer.py:1017-1170
+    dispatch). This hook therefore stays diagnostic-only -- do NOT promote it
+    to default: the non-chunk single-call fp8_mqa_logits is a different kernel
+    shape from production chunk loop, so its latencies would pollute the perf
+    DB. Cells blocked by this IMA (DSv3.2 heads in {64,128} bf16-KV + B200
+    GLM-5 heads=64 bf16-KV at sl >= 4096) stay unpopulated pending upstream
+    fix. Option I (force small max_rows via same hook site, returning
+    (True, synthetic_free_mem)) stays on backlog as an alternative diagnostic;
+    see design doc "Follow-up variant" section.
+
     Raises AttributeError if the target method has been renamed upstream.
     A silent no-op would produce a false "Issue D reproduced" signal that
     looks identical to "hypothesis refuted", so we prefer a hard crash that
