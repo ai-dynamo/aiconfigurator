@@ -691,7 +691,7 @@ def _install_diag_hooks():
 
 
 def _install_issue_d_nochunk_hook():
-    """Force NSAIndexer._should_chunk_mqa_logits to always return (False, 0).
+    """Force Indexer._should_chunk_mqa_logits to always return (False, 0).
 
     Gated on AIC_DIAG_ISSUE_D=1. Diagnostic probe to partition the Issue D
     failure mechanism into "chunk-path bug" vs "non-chunk or gather bug".
@@ -705,11 +705,11 @@ def _install_issue_d_nochunk_hook():
     if os.environ.get("AIC_DIAG_ISSUE_D") != "1":
         return
 
-    from sglang.srt.layers.attention.nsa.nsa_indexer import NSAIndexer
+    from sglang.srt.layers.attention.nsa.nsa_indexer import Indexer
 
-    if not hasattr(NSAIndexer, "_should_chunk_mqa_logits"):
+    if not hasattr(Indexer, "_should_chunk_mqa_logits"):
         raise AttributeError(
-            "NSAIndexer._should_chunk_mqa_logits not found -- sglang may have "
+            "Indexer._should_chunk_mqa_logits not found -- sglang may have "
             "renamed the chunking decision hook. Update "
             "_install_issue_d_nochunk_hook in collect_mla_module.py or "
             "withdraw AIC_DIAG_ISSUE_D."
@@ -719,9 +719,9 @@ def _install_issue_d_nochunk_hook():
         # Monkey-patched under AIC_DIAG_ISSUE_D. See Issue D design doc.
         return False, 0
 
-    NSAIndexer._should_chunk_mqa_logits = _never_chunk
+    Indexer._should_chunk_mqa_logits = _never_chunk
     print(
-        "[AIC_DIAG_ISSUE_D] Forcing non-chunk mqa_logits path (monkey-patched NSAIndexer._should_chunk_mqa_logits).",
+        "[AIC_DIAG_ISSUE_D] Forcing non-chunk mqa_logits path (monkey-patched Indexer._should_chunk_mqa_logits).",
         flush=True,
     )
 

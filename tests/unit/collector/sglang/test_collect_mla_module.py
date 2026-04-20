@@ -274,7 +274,7 @@ class TestBuildWideepMlaTestCases:
 
 def _make_fake_sglang_nsa_indexer_modules(monkeypatch, has_method: bool):
     """Register an in-memory sglang.srt.layers.attention.nsa.nsa_indexer
-    module chain whose NSAIndexer class optionally has
+    module chain whose Indexer class optionally has
     _should_chunk_mqa_logits — so the hook under test can import it
     without real sglang being installed.
     """
@@ -292,17 +292,17 @@ def _make_fake_sglang_nsa_indexer_modules(monkeypatch, has_method: bool):
 
     if has_method:
 
-        class FakeNSAIndexer:
+        class FakeIndexer:
             def _should_chunk_mqa_logits(self, num_q, num_k, device):
                 return True, 12345  # baseline: would chunk
     else:
 
-        class FakeNSAIndexer:  # method intentionally absent
+        class FakeIndexer:  # method intentionally absent
             pass
 
-    indexer_mod.NSAIndexer = FakeNSAIndexer
+    indexer_mod.Indexer = FakeIndexer
     monkeypatch.setitem(sys.modules, "sglang.srt.layers.attention.nsa.nsa_indexer", indexer_mod)
-    return FakeNSAIndexer
+    return FakeIndexer
 
 
 class TestInstallIssueDNochunkHook:
@@ -317,7 +317,7 @@ class TestInstallIssueDNochunkHook:
 
     def test_gate_on_patches_should_chunk(self, monkeypatch):
         monkeypatch.setenv("AIC_DIAG_ISSUE_D", "1")
-        FakeNSAIndexer = _make_fake_sglang_nsa_indexer_modules(  # noqa: N806 -- class reference
+        FakeIndexer = _make_fake_sglang_nsa_indexer_modules(  # noqa: N806 -- class reference
             monkeypatch, has_method=True
         )
 
@@ -327,7 +327,7 @@ class TestInstallIssueDNochunkHook:
         # After hook installs, the class-level attribute is replaced.
         # Calling it as an unbound function via an instance confirms the
         # replacement returns (False, 0) for any arguments.
-        instance = FakeNSAIndexer()
+        instance = FakeIndexer()
         assert instance._should_chunk_mqa_logits(10_000_000, 10_000_000, "cuda") == (
             False,
             0,
@@ -341,5 +341,5 @@ class TestInstallIssueDNochunkHook:
         # match= pins the expected error to the hook's own guard message,
         # so this test can't pass just because the hook itself is missing
         # from the module (which would raise a different AttributeError).
-        with pytest.raises(AttributeError, match=r"NSAIndexer\._should_chunk_mqa_logits not found"):
+        with pytest.raises(AttributeError, match=r"Indexer\._should_chunk_mqa_logits not found"):
             mod._install_issue_d_nochunk_hook()
