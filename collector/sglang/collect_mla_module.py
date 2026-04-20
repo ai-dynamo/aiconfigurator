@@ -1499,13 +1499,14 @@ def _run_mla_subprocess(
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
-    # Issue D diag probe: force synchronous kernel launches so the CUDA IMA
-    # surfaces at the actual offending kernel rather than at the next sync
-    # point (torch.repeat_interleave inside topk_transform). TORCH_USE_CUDA_DSA
-    # also enables device-side bounds assertions in Triton-compiled kernels.
-    # Safe here because the collector already sets disable_cuda_graph=True.
+    # Issue D diag probe: keep normal async execution. Pipeline #1188 showed
+    # CUDA_LAUNCH_BLOCKING=1 masks Issue D (the race disappears under
+    # serialized launches), so the hypothesis-partition probe
+    # (_install_issue_d_nochunk_hook, force non-chunk mqa_logits) must run
+    # under async. TORCH_USE_CUDA_DSA=1 retained -- device-side Triton bounds
+    # assertions are orthogonal to launch ordering and may clarify the IMA if
+    # the non-chunk probe still crashes.
     if os.environ.get("AIC_DIAG_ISSUE_D") == "1":
-        env["CUDA_LAUNCH_BLOCKING"] = "1"
         env["TORCH_USE_CUDA_DSA"] = "1"
 
     phase = "context" if is_prefill else "generation"
