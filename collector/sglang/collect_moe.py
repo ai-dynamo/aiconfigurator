@@ -257,21 +257,23 @@ def benchmark_config(
 
         x = None if workloads is not None else torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
 
-        # Quantize w1: each expert (shard_intermediate_size, hidden_size) -> marlin format
+        # Quantize w1: each expert (shard_intermediate_size, hidden_size)
+        # marlin_quantize expects transposed input: (hidden_size, shard_intermediate_size)
         qw1_l, s1_l = [], []
         for i in range(num_experts):
             w = torch.randn(shard_intermediate_size, hidden_size, dtype=dtype, device=device)
-            _, qw, s, _, _, _ = marlin_quantize(w, quant_type, group_size, False, torch.empty(0, dtype=torch.int, device=device))
+            _, qw, s, _, _, _ = marlin_quantize(w.t(), quant_type, group_size, False, torch.empty(0, dtype=torch.int, device=device))
             qw1_l.append(qw)
             s1_l.append(s)
         w1 = torch.stack(qw1_l).contiguous()
         w1_scale = torch.stack(s1_l).contiguous()
 
-        # Quantize w2: each expert (hidden_size, shard_intermediate_size // 2) -> marlin format
+        # Quantize w2: each expert (hidden_size, shard_intermediate_size // 2)
+        # marlin_quantize expects transposed input: (shard_intermediate_size // 2, hidden_size)
         qw2_l, s2_l = [], []
         for i in range(num_experts):
             w = torch.randn(hidden_size, shard_intermediate_size // 2, dtype=dtype, device=device)
-            _, qw, s, _, _, _ = marlin_quantize(w, quant_type, group_size, False, torch.empty(0, dtype=torch.int, device=device))
+            _, qw, s, _, _, _ = marlin_quantize(w.t(), quant_type, group_size, False, torch.empty(0, dtype=torch.int, device=device))
             qw2_l.append(qw)
             s2_l.append(s)
         w2 = torch.stack(qw2_l).contiguous()
