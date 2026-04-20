@@ -64,7 +64,11 @@ from tensorrt_llm._torch.pyexecutor.model_loader import initialize_dummy_weights
 from tensorrt_llm._torch.utils import AuxStreamType, get_model_extra_attrs, model_extra_attrs
 from tensorrt_llm._utils import torch_dtype_to_binding
 from tensorrt_llm.bindings import DataType
-from tensorrt_llm.bindings.executor import KvCacheConfig
+
+try:
+    from tensorrt_llm.llmapi.llm_args import KvCacheConfig
+except ImportError:
+    from tensorrt_llm.bindings.executor import KvCacheConfig
 from tensorrt_llm.bindings.internal.batch_manager import CacheType
 from tensorrt_llm.functional import AllReduceStrategy
 from tensorrt_llm.mapping import Mapping
@@ -449,7 +453,9 @@ def create_kv_cache_and_metadata(
     """
     config = model_config.pretrained_config
     mapping = model_config.mapping
-    tokens_per_block = 64
+    # TRT-LLM PR #10261 (>=1.3.0rc0) dropped numTokensPerPage=64 trtllm-gen MLA
+    # cubins for DeepSeek-V3 dims (headDimQk=576, headDimV=512). Only P32 remains.
+    tokens_per_block = 32 if tensorrt_llm.__version__ >= "1.3.0rc0" else 64
 
     kv_lora_rank = config.kv_lora_rank
     qk_rope_head_dim = config.qk_rope_head_dim

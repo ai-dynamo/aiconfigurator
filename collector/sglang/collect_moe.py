@@ -648,7 +648,12 @@ def run_moe_torch(
     num_local_experts = num_experts // moe_ep_size
     use_int4_w4a16 = moe_type == "int4_wo"
     # int4_wo uses block_shape=[0, group_size] for grouped scales (group_size=128)
-    int4_block_shape = [0, 128] if use_int4_w4a16 else None
+    if use_int4_w4a16:                                                                                                                                         
+        block_shape = [0, 128]                                                                                                                                 
+    elif moe_type == "fp8_block" and (inter_size // moe_tp_size) % 128 == 0 and hidden_size % 128 == 0:
+        block_shape = [128, 128]                                                                                                                               
+    else:
+        block_shape = None     
 
     rank0_workloads: list[Rank0Workload] | None = None
     if moe_ep_size > 1 and distributed in ("power_law", "balanced"):
@@ -678,7 +683,7 @@ def run_moe_torch(
             False,
             use_nvfp4=moe_type == "nvfp4",
             use_int4_w4a16=use_int4_w4a16,
-            block_shape=int4_block_shape,
+            block_shape=block_shape,
             distributed=distributed,
             power_law_alpha=power_law_alpha,
             workloads=rank0_workloads,
@@ -696,7 +701,7 @@ def run_moe_torch(
             False,
             use_nvfp4=moe_type == "nvfp4",
             use_int4_w4a16=use_int4_w4a16,
-            block_shape=int4_block_shape,
+            block_shape=block_shape,
             distributed=distributed,
             power_law_alpha=power_law_alpha,
         )

@@ -950,6 +950,29 @@ def _assign_experts_from_counts(num_tokens_per_expert, num_tokens, topk):
     return torch.from_numpy(h_selected).to(device=num_tokens_per_expert.device)
 
 
+def _round_robin_adjust_per_rank(counts_2d, remaining, is_valid, pick_local_index, step):
+    """Adjust local expert counts one rank at a time in round-robin order."""
+    import torch
+
+    while remaining > 0:
+        progressed = False
+        for rank_idx in range(counts_2d.size(0)):
+            local_counts = counts_2d[rank_idx]
+            valid_local = torch.nonzero(is_valid(local_counts)).flatten()
+            if valid_local.numel() == 0:
+                continue
+
+            chosen_local_idx = valid_local[pick_local_index(local_counts[valid_local])].item()
+            counts_2d[rank_idx, chosen_local_idx] += step
+            remaining -= 1
+            progressed = True
+            if remaining == 0:
+                break
+        if not progressed:
+            break
+    return counts_2d
+
+
 def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
     """Core function to generate power law token distribution across experts.
 
@@ -985,40 +1008,44 @@ def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
     upper_bound = num_tokens
     overflow = (num_tokens_per_expert - upper_bound).clamp(min=0).sum().item()
     num_tokens_per_expert = num_tokens_per_expert.clamp(max=upper_bound)
+    experts_per_rank = num_experts // ep
 
     # Redistribute overflow to experts that haven't reached the bound
     if overflow > 0:
-        sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
-        for i in range(int(overflow)):
-            # Find an expert that hasn't reached the bound
-            for j in range(len(sorted_indices)):
-                expert_idx = sorted_indices[-(j + 1)]  # Start from smallest
-                if num_tokens_per_expert[expert_idx] < upper_bound:
-                    num_tokens_per_expert[expert_idx] += 1
-                    break
+        num_tokens_per_expert_reshaped = num_tokens_per_expert.view(ep, experts_per_rank)
+        num_tokens_per_expert_reshaped = _round_robin_adjust_per_rank(
+            num_tokens_per_expert_reshaped,
+            remaining=int(overflow),
+            is_valid=lambda local_counts: local_counts < upper_bound,
+            pick_local_index=torch.argmin,
+            step=1,
+        )
+        num_tokens_per_expert = num_tokens_per_expert_reshaped.view(-1)
 
     # Adjust to match exact target sum (respecting upper bound)
     current_sum = num_tokens_per_expert.sum().item()
     delta = target_sum - current_sum
     if delta != 0:
-        sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
         if delta > 0:
-            # Add to experts that haven't reached the bound
-            added = 0
-            for i in range(int(delta) * len(sorted_indices)):  # Extra iterations for safety
-                if added >= delta:
-                    break
-                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]  # Start from smallest
-                if num_tokens_per_expert[expert_idx] < upper_bound:
-                    num_tokens_per_expert[expert_idx] += 1
-                    added += 1
+            num_tokens_per_expert_reshaped = num_tokens_per_expert.view(ep, experts_per_rank)
+            num_tokens_per_expert_reshaped = _round_robin_adjust_per_rank(
+                num_tokens_per_expert_reshaped,
+                remaining=int(delta),
+                is_valid=lambda local_counts: local_counts < upper_bound,
+                pick_local_index=torch.argmin,
+                step=1,
+            )
+            num_tokens_per_expert = num_tokens_per_expert_reshaped.view(-1)
         else:
-            for i in range(-delta):
-                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
-                if num_tokens_per_expert[expert_idx] > 0:
-                    num_tokens_per_expert[expert_idx] -= 1
-                else:
-                    num_tokens_per_expert[torch.argmax(num_tokens_per_expert)] -= 1
+            num_tokens_per_expert_reshaped = num_tokens_per_expert.view(ep, experts_per_rank)
+            num_tokens_per_expert_reshaped = _round_robin_adjust_per_rank(
+                num_tokens_per_expert_reshaped,
+                remaining=int(-delta),
+                is_valid=lambda local_counts: local_counts > 0,
+                pick_local_index=torch.argmax,
+                step=-1,
+            )
+            num_tokens_per_expert = num_tokens_per_expert_reshaped.view(-1)
 
     # Validate distribution
     if len(num_tokens_per_expert) > 1:
