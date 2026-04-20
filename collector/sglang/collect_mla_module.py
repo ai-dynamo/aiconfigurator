@@ -690,6 +690,42 @@ def _install_diag_hooks():
         print(f"[DIAG] failed to patch DeepseekV2WeightLoaderMixin.post_load_weights: {e}", flush=True)
 
 
+def _install_issue_d_nochunk_hook():
+    """Force NSAIndexer._should_chunk_mqa_logits to always return (False, 0).
+
+    Gated on AIC_DIAG_ISSUE_D=1. Diagnostic probe to partition the Issue D
+    failure mechanism into "chunk-path bug" vs "non-chunk or gather bug".
+    See docs: 2026-04-20-issue-d-force-nonchunk-mqa-design.md.
+
+    Raises AttributeError if the target method has been renamed upstream.
+    A silent no-op would produce a false "Issue D reproduced" signal that
+    looks identical to "hypothesis refuted", so we prefer a hard crash that
+    forces attention.
+    """
+    if os.environ.get("AIC_DIAG_ISSUE_D") != "1":
+        return
+
+    from sglang.srt.layers.attention.nsa.nsa_indexer import NSAIndexer
+
+    if not hasattr(NSAIndexer, "_should_chunk_mqa_logits"):
+        raise AttributeError(
+            "NSAIndexer._should_chunk_mqa_logits not found -- sglang may have "
+            "renamed the chunking decision hook. Update "
+            "_install_issue_d_nochunk_hook in collect_mla_module.py or "
+            "withdraw AIC_DIAG_ISSUE_D."
+        )
+
+    def _never_chunk(self, num_q, num_k, device):
+        # Monkey-patched under AIC_DIAG_ISSUE_D. See Issue D design doc.
+        return False, 0
+
+    NSAIndexer._should_chunk_mqa_logits = _never_chunk
+    print(
+        "[AIC_DIAG_ISSUE_D] Forcing non-chunk mqa_logits path (monkey-patched NSAIndexer._should_chunk_mqa_logits).",
+        flush=True,
+    )
+
+
 def load_model_runner(
     model_path: str,
     head_num: int,
@@ -726,6 +762,7 @@ def load_model_runner(
     from sglang.srt.utils import suppress_other_loggers
 
     _install_diag_hooks()
+    _install_issue_d_nochunk_hook()
     suppress_other_loggers()
 
     device_str = str(device)

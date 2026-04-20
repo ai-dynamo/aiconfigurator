@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
+import types
 from unittest.mock import patch
 
 import pytest
@@ -268,3 +270,76 @@ class TestBuildWideepMlaTestCases:
                 assert case[3] == "bfloat16"  # kv_cache_dtype
                 assert case[4] == "bfloat16"  # compute_dtype
                 assert case[5] == "bfloat16"  # gemm_type
+
+
+def _make_fake_sglang_nsa_indexer_modules(monkeypatch, has_method: bool):
+    """Register an in-memory sglang.srt.layers.attention.nsa.nsa_indexer
+    module chain whose NSAIndexer class optionally has
+    _should_chunk_mqa_logits — so the hook under test can import it
+    without real sglang being installed.
+    """
+    parent_names = [
+        "sglang",
+        "sglang.srt",
+        "sglang.srt.layers",
+        "sglang.srt.layers.attention",
+        "sglang.srt.layers.attention.nsa",
+    ]
+    for name in parent_names:
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+
+    indexer_mod = types.ModuleType("sglang.srt.layers.attention.nsa.nsa_indexer")
+
+    if has_method:
+
+        class FakeNSAIndexer:
+            def _should_chunk_mqa_logits(self, num_q, num_k, device):
+                return True, 12345  # baseline: would chunk
+    else:
+
+        class FakeNSAIndexer:  # method intentionally absent
+            pass
+
+    indexer_mod.NSAIndexer = FakeNSAIndexer
+    monkeypatch.setitem(sys.modules, "sglang.srt.layers.attention.nsa.nsa_indexer", indexer_mod)
+    return FakeNSAIndexer
+
+
+class TestInstallIssueDNochunkHook:
+    def test_gate_off_no_op(self, monkeypatch):
+        # Gate off: AIC_DIAG_ISSUE_D not set.
+        monkeypatch.delenv("AIC_DIAG_ISSUE_D", raising=False)
+        # Intentionally do NOT register a fake sglang module chain. If the
+        # hook ignores the gate, it would ImportError here — the test
+        # catches that by asserting the call returns cleanly.
+        mod = _import_module()
+        mod._install_issue_d_nochunk_hook()  # must not raise
+
+    def test_gate_on_patches_should_chunk(self, monkeypatch):
+        monkeypatch.setenv("AIC_DIAG_ISSUE_D", "1")
+        FakeNSAIndexer = _make_fake_sglang_nsa_indexer_modules(  # noqa: N806 -- class reference
+            monkeypatch, has_method=True
+        )
+
+        mod = _import_module()
+        mod._install_issue_d_nochunk_hook()
+
+        # After hook installs, the class-level attribute is replaced.
+        # Calling it as an unbound function via an instance confirms the
+        # replacement returns (False, 0) for any arguments.
+        instance = FakeNSAIndexer()
+        assert instance._should_chunk_mqa_logits(10_000_000, 10_000_000, "cuda") == (
+            False,
+            0,
+        )
+
+    def test_gate_on_missing_attr_raises(self, monkeypatch):
+        monkeypatch.setenv("AIC_DIAG_ISSUE_D", "1")
+        _make_fake_sglang_nsa_indexer_modules(monkeypatch, has_method=False)
+
+        mod = _import_module()
+        # match= pins the expected error to the hook's own guard message,
+        # so this test can't pass just because the hook itself is missing
+        # from the module (which would raise a different AttributeError).
+        with pytest.raises(AttributeError, match=r"NSAIndexer\._should_chunk_mqa_logits not found"):
+            mod._install_issue_d_nochunk_hook()
