@@ -581,7 +581,7 @@ class BaseModel:
         self._use_qk_norm = bool(extra_params.get("use_qk_norm", False)) if isinstance(extra_params, dict) else False
         self.context_ops = []
         self.generation_ops = []
-        self.encoder_ops = [] 
+        self.encoder_ops = []
 
         # internal only
         self._num_layers = num_layers
@@ -953,7 +953,7 @@ class Qwen3VLModel(LLAMAModel):
 
         if encoder_config is None:
             return
-        self.encoder_config = encoder_config 
+        self.encoder_config = encoder_config
 
         tp_size = self.config.tp_size
         depth = encoder_config.depth
@@ -1033,22 +1033,22 @@ class Qwen3VLModel(LLAMAModel):
                 ops.GEMM(
                     "encoder_merger_fc1",
                     n_mergers,
-                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
-                    h_vit * encoder_config.spatial_merge_size ** 2,
+                    (h_vit * encoder_config.spatial_merge_size**2) // tp_size,
+                    h_vit * encoder_config.spatial_merge_size**2,
                     vit_gemm_mode,
                 ),
                 ops.ElementWise(
                     "encoder_merger_act",
                     n_mergers,
-                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
-                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
+                    (h_vit * encoder_config.spatial_merge_size**2) // tp_size,
+                    (h_vit * encoder_config.spatial_merge_size**2) // tp_size,
                     0.8,
                 ),
                 ops.GEMM(
                     "encoder_merger_fc2",
                     n_mergers,
                     h_llm,
-                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
+                    (h_vit * encoder_config.spatial_merge_size**2) // tp_size,
                     vit_gemm_mode,
                 ),
                 ops.CustomAllReduce("encoder_merger_ar", n_mergers, h_llm, tp_size),
@@ -1387,8 +1387,9 @@ class Qwen3VLMoEModel(MOEModel):
     FFN while the ViT encoder is a standard dense transformer.
     """
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int,
-                 *args, encoder_config: common.VisionEncoderConfig) -> None:
+    def __init__(
+        self, topk: int, num_experts: int, moe_inter_size: int, *args, encoder_config: common.VisionEncoderConfig
+    ) -> None:
         super().__init__(topk, num_experts, moe_inter_size, *args)
 
         if encoder_config is None:
@@ -1469,22 +1470,22 @@ class Qwen3VLMoEModel(MOEModel):
                 ops.GEMM(
                     "encoder_merger_fc1",
                     n_mergers,
-                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
-                    h_vit * encoder_config.spatial_merge_size ** 2,
+                    (h_vit * encoder_config.spatial_merge_size**2) // tp_size,
+                    h_vit * encoder_config.spatial_merge_size**2,
                     vit_gemm_mode,
                 ),
                 ops.ElementWise(
                     "encoder_merger_act",
                     n_mergers,
-                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
-                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
+                    (h_vit * encoder_config.spatial_merge_size**2) // tp_size,
+                    (h_vit * encoder_config.spatial_merge_size**2) // tp_size,
                     0.8,
                 ),
                 ops.GEMM(
                     "encoder_merger_fc2",
                     n_mergers,
                     h_llm,
-                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
+                    (h_vit * encoder_config.spatial_merge_size**2) // tp_size,
                     vit_gemm_mode,
                 ),
                 ops.CustomAllReduce("encoder_merger_ar", n_mergers, h_llm, tp_size),

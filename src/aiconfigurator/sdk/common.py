@@ -91,6 +91,7 @@ class HybridMoEConfig:
     sliding_window_size: int = 0
     dense_inter_size: int = 0
 
+
 @dataclass(frozen=True)
 class VisionEncoderConfig:
     """
@@ -107,7 +108,7 @@ class VisionEncoderConfig:
         patch_size (int): Spatial patch size in pixels (applied to H and W)
         temporal_patch_size (int): Temporal patch size for video inputs (1 for image-only)
         spatial_merge_size (int): Pixel-shuffle reduction factor applied after ViT
-            (e.g., 2 means 2×2 patches are merged, dividing token count by 4)
+            (e.g., 2 means 2x2 patches are merged, dividing token count by 4)
         out_hidden_size (int): Output projection dimension (must match LLM hidden size)
     """
 

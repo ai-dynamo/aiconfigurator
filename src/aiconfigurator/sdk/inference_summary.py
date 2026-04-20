@@ -55,7 +55,7 @@ class InferenceSummary:
 
         # raw data dict
         self._memory = {}
-        self._encoder_latency_dict = {}   # ms
+        self._encoder_latency_dict = {}  # ms
         self._context_latency_dict = {}  # ms
         self._generation_latency_dict = {}  # ms
         self._encoder_energy_wms_dict = {}  # W·ms
@@ -186,7 +186,7 @@ class InferenceSummary:
 
         Args:
             energy_wms_dict: Dict of operation -> energy in watt-milliseconds (W·ms).
-                            Note: 1 W·ms = 1 millijoule (mJ).        
+                            Note: 1 W·ms = 1 millijoule (mJ).
         """
         self._encoder_energy_wms_dict = energy_wms_dict
 
@@ -288,7 +288,11 @@ class InferenceSummary:
             bool: True if latency with non-zero energy >= threshold * total latency
         """
         # Calculate total latency
-        total_latency = sum(self._encoder_latency_dict.values()) + sum(self._context_latency_dict.values()) + sum(self._generation_latency_dict.values())
+        total_latency = (
+            sum(self._encoder_latency_dict.values())
+            + sum(self._context_latency_dict.values())
+            + sum(self._generation_latency_dict.values())
+        )
 
         if total_latency == 0:
             return False

@@ -205,13 +205,14 @@ class BaseBackend(ABC):
                 default is 1.0.
                 corrected latency = latency * latency_correction_scale
         """
+
         def _run_encoder(batch_size: int) -> tuple[dict[str, float], dict[str, float], int]:
             """
             Run vision encoder phase (VL models only).
 
             ViT transformer ops use pre-merge patch count: (H // patch_size)²
             Only encoder_proj_to_llm_gemm uses post-merge token count: (H // stride)²
-            Returns img_ctx_tokens (post-merge × n_img) as effective ISL offset for
+            Returns img_ctx_tokens (post-merge x n_img) as effective ISL offset for
             the LLM context and generation phases.
 
             token count resolution order:
@@ -234,28 +235,32 @@ class BaseBackend(ABC):
 
             if runtime_config.image_height > 0 and runtime_config.image_width > 0 and enc_cfg is not None:
                 img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
-                tokens_per_image    = (runtime_config.image_height // img_stride) * (runtime_config.image_width // img_stride)
-                pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (runtime_config.image_width // enc_cfg.patch_size)
+                tokens_per_image = (runtime_config.image_height // img_stride) * (
+                    runtime_config.image_width // img_stride
+                )
+                pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
+                    runtime_config.image_width // enc_cfg.patch_size
+                )
             elif runtime_config.num_image_tokens > 0:
-                tokens_per_image    = runtime_config.num_image_tokens
+                tokens_per_image = runtime_config.num_image_tokens
                 pre_merge_per_image = runtime_config.num_image_tokens  # no merge info, use as-is
             else:
-                tokens_per_image    = isl
+                tokens_per_image = isl
                 pre_merge_per_image = isl
 
-            n_img_post = tokens_per_image * num_images    # post-merge: injected into LLM context
-            n_img_pre  = pre_merge_per_image * num_images  # pre-merge: processed by ViT transformer
+            n_img_post = tokens_per_image * num_images  # post-merge: injected into LLM context
+            n_img_pre = pre_merge_per_image * num_images  # pre-merge: processed by ViT transformer
 
             for op in model.encoder_ops:
-                use_post   = "encoder_merger" in op._name
+                use_post = "encoder_merger" in op._name
                 # ViT attention: each image is an independent varlen sequence.
                 # Model as batch_size*num_images sequences of pre_merge_per_image tokens
                 # rather than one concatenated sequence of n_img_pre tokens.
                 use_varlen = "encoder_attention" in op._name
-                n_img      = n_img_post if use_post else n_img_pre
-                eff_batch  = batch_size * num_images if use_varlen else batch_size
-                eff_s      = pre_merge_per_image     if use_varlen else n_img
-                x          = eff_batch * eff_s
+                n_img = n_img_post if use_post else n_img_pre
+                eff_batch = batch_size * num_images if use_varlen else batch_size
+                eff_s = pre_merge_per_image if use_varlen else n_img
+                x = eff_batch * eff_s
                 result = op.query(
                     database,
                     x=x,

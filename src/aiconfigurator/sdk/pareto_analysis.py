@@ -256,8 +256,12 @@ def disagg_pareto(
     encoder_backend = get_backend(encoder_backend_name) if encoder_backend_name else None
 
     disagg_sess = DisaggInferenceSession(
-        prefill_database, prefill_backend, decode_database, decode_backend,
-        encoder_database=encoder_database, encoder_backend=encoder_backend,
+        prefill_database,
+        prefill_backend,
+        decode_database,
+        decode_backend,
+        encoder_database=encoder_database,
+        encoder_backend=encoder_backend,
     )
     disagg_sess.set_latency_correction_scales(prefill_latency_correction_scale, decode_latency_correction_scale)
 
