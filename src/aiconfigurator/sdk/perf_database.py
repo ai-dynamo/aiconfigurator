@@ -1158,12 +1158,19 @@ DSA_MODEL_DIMS: dict[str, dict] = {
 
 DEFAULT_DSA_ARCHITECTURE = "DeepseekV32ForCausalLM"
 
-# GLM-5 fp8 collection is blocked upstream in sglang 0.5.10 (unflatten in
-# deepseek_weight_loader.py doesn't handle v_head_dim=256) and flashinfer
-# (trtllm_ragged_attention_deepseek asserts v_head_dim<=128). Until the sglang
-# bug is fixed, fall back to DeepseekV32ForCausalLM rows when the user's
-# GlmMoeDsaForCausalLM query has no collected data for the requested gemm_mode.
-# See SGLANG_DSA_COLLECTION_GAPS.md Phase 2 notes.
+# Architecture fallback safety net for DSA perf queries: if the requested
+# architecture has no collected rows for a given (gemm_mode, precision, heads)
+# bucket, fall back to a sibling architecture whose kernels/shapes are close
+# enough to serve as a proxy. Emits a one-time WARNING per query context so
+# consumers see they're getting proxy data, not direct measurement.
+#
+# Current entries:
+#   GlmMoeDsaForCausalLM -> DeepseekV32ForCausalLM
+#     Both use the same NSA indexer + sparse MLA kernels on sglang 0.5.10.
+#     GLM-5 collection itself is unblocked as of 2026-04-19 (Bug A collector
+#     fix in _ensure_fp8_block_quant_config, sparse-MLA override in
+#     _resolve_local_model_path). This fallback covers stragglers where GLM-5
+#     rows are missing but DSv3.2 ones exist for the same shape.
 _DSA_ARCH_FALLBACKS: dict[str, str] = {
     "GlmMoeDsaForCausalLM": "DeepseekV32ForCausalLM",
 }
