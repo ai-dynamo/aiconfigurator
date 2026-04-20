@@ -37,6 +37,15 @@ except ImportError:
     HAS_FLASHINFER_CUTE = False
 
 try:
+    from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import fused_marlin_moe
+    from sglang.test.test_marlin_utils import marlin_quantize
+    from sgl_kernel.scalar_type import scalar_types
+
+    HAS_MARLIN_MOE = True
+except ImportError:
+    HAS_MARLIN_MOE = False
+
+try:
     from common_test_cases import get_common_moe_test_cases
 
     from helper import (
@@ -75,8 +84,12 @@ def get_moe_test_cases():
         moe_list = ["float16"]
     elif sm_version < 100:
         moe_list = ["float16", "fp8_block"]
+        if HAS_MARLIN_MOE:
+            moe_list.append("int4_wo")
     else:
         moe_list = ["float16", "fp8_block", "nvfp4"]
+        if HAS_MARLIN_MOE:
+            moe_list.append("int4_wo")
 
     test_cases = []
 
@@ -96,6 +109,13 @@ def get_moe_test_cases():
 
             # nvfp4 fp4_quantize requires weight dims divisible by 16 after TP sharding
             if moe_type == "nvfp4" and (common_moe_testcase.inter_size // common_moe_testcase.tp) % 16 != 0:
+                continue
+
+            # int4_wo (Marlin W4A16) requires dimensions divisible by group_size (128)
+            if moe_type == "int4_wo" and (
+                common_moe_testcase.hidden_size % 128 != 0
+                or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 128 != 0
+            ):
                 continue
 
             test_cases.append(
@@ -139,6 +159,7 @@ def benchmark_config(
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
     use_nvfp4: bool = False,
+    use_int4_w4a16: bool = False,
     block_shape: list[int] | None = None,
     num_iters: int = 10,
     distributed: str = "power_law",
@@ -226,6 +247,59 @@ def benchmark_config(
                 w2_blockscale=w2_bs,
                 w2_alpha=w2_alpha,
                 masked_m=masked_m_list[i % num_iters],
+            )
+    elif use_int4_w4a16:
+        if not HAS_MARLIN_MOE:
+            raise ImportError("Marlin MOE not available")
+
+        group_size = 128
+        quant_type = scalar_types.uint4b8  # GPTQ symmetric (uint4b8)
+
+        x = None if workloads is not None else torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+
+        # Quantize w1: each expert (shard_intermediate_size, hidden_size) -> marlin format
+        qw1_l, s1_l = [], []
+        for i in range(num_experts):
+            w = torch.randn(shard_intermediate_size, hidden_size, dtype=dtype, device=device)
+            _, qw, s, _, _, _ = marlin_quantize(w, quant_type, group_size, False, torch.empty(0, dtype=torch.int, device=device))
+            qw1_l.append(qw)
+            s1_l.append(s)
+        w1 = torch.stack(qw1_l).contiguous()
+        w1_scale = torch.stack(s1_l).contiguous()
+
+        # Quantize w2: each expert (hidden_size, shard_intermediate_size // 2) -> marlin format
+        qw2_l, s2_l = [], []
+        for i in range(num_experts):
+            w = torch.randn(hidden_size, shard_intermediate_size // 2, dtype=dtype, device=device)
+            _, qw, s, _, _, _ = marlin_quantize(w, quant_type, group_size, False, torch.empty(0, dtype=torch.int, device=device))
+            qw2_l.append(qw)
+            s2_l.append(s)
+        w2 = torch.stack(qw2_l).contiguous()
+        w2_scale = torch.stack(s2_l).contiguous()
+
+        def run_op(i):
+            if workloads is None:
+                current_hidden_states = x
+                input_gating = gating_output[i % num_iters]
+            else:
+                current_hidden_states = workloads[i % num_iters]["hidden_states"]
+                input_gating = torch.randn(
+                    current_hidden_states.shape[0], num_experts, dtype=torch.float32, device=device
+                )
+
+            topk_weights, topk_ids = torch.topk(
+                torch.softmax(input_gating, dim=-1, dtype=torch.float32), topk, dim=-1
+            )
+            fused_marlin_moe(
+                current_hidden_states,
+                w1,
+                w2,
+                w1_scale,
+                w2_scale,
+                input_gating,
+                topk_weights,
+                topk_ids,
+                num_bits=4,
             )
     else:
         init_dtype = torch.float16 if use_fp8_w8a8 else dtype
@@ -338,6 +412,7 @@ def benchmark(
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
     use_nvfp4: bool = False,
+    use_int4_w4a16: bool = False,
     block_shape: list[int] | None = None,
     distributed: str = "power_law",
     power_law_alpha: float = 0,
@@ -361,8 +436,28 @@ def benchmark(
             use_fp8_w8a8,
             use_int8_w8a8,
             use_int8_w8a16,
-            use_nvfp4,
-            block_shape,
+            use_nvfp4=use_nvfp4,
+            block_shape=block_shape,
+            distributed=distributed,
+            power_law_alpha=power_law_alpha,
+            workloads=workloads,
+        )
+        return kernel_time, power_stats
+
+    if use_int4_w4a16:
+        # Marlin W4A16 uses its own CUDA kernel, no triton config needed
+        kernel_time, power_stats = benchmark_config(
+            None,
+            benchmark_num_tokens,
+            num_experts,
+            shard_intermediate_size,
+            hidden_size,
+            topk,
+            dtype,
+            False,
+            False,
+            False,
+            use_int4_w4a16=use_int4_w4a16,
             distributed=distributed,
             power_law_alpha=power_law_alpha,
             workloads=workloads,
@@ -403,8 +498,8 @@ def benchmark(
         use_fp8_w8a8,
         use_int8_w8a8,
         use_int8_w8a16,
-        use_nvfp4,
-        block_shape,
+        use_nvfp4=use_nvfp4,
+        block_shape=block_shape,
         distributed=distributed,
         power_law_alpha=power_law_alpha,
         workloads=workloads,
@@ -497,7 +592,8 @@ def run_moe_torch(
         "fp8_block",
         "float16",
         "nvfp4",
-    ], "only support moe type = fp8_block, float16 or nvfp4"
+        "int4_wo",
+    ], "only support moe type = fp8_block, float16, nvfp4 or int4_wo"
     assert inter_size % moe_tp_size == 0, "inter_size % moe_tp_size must be 0"
     assert num_experts % moe_ep_size == 0, "num_experts must be divisible by moe_ep_size"
 
@@ -530,6 +626,7 @@ def run_moe_torch(
             False,
             False,
             use_nvfp4=moe_type == "nvfp4",
+            use_int4_w4a16=moe_type == "int4_wo",
             block_shape=[128, 128]
             if (moe_type == "fp8_block" and inter_size // moe_tp_size % 128 == 0 and hidden_size % 128 == 0)
             else None,
@@ -549,6 +646,7 @@ def run_moe_torch(
             False,
             False,
             use_nvfp4=moe_type == "nvfp4",
+            use_int4_w4a16=moe_type == "int4_wo",
             block_shape=[128, 128]
             if (moe_type == "fp8_block" and inter_size // moe_tp_size % 128 == 0 and hidden_size % 128 == 0)
             else None,
@@ -575,7 +673,9 @@ def run_moe_torch(
         version=pkg_resources.get_distribution("sglang").version,
         device_name=torch.cuda.get_device_name(device),
         op_name="moe",
-        kernel_source="sglang_flashinfer_cutedsl_moe" if moe_type == "nvfp4" else "sglang_fused_moe_triton",
+        kernel_source="sglang_flashinfer_cutedsl_moe"
+        if moe_type == "nvfp4"
+        else ("sglang_marlin_moe" if moe_type == "int4_wo" else "sglang_fused_moe_triton"),
         perf_filename=perf_filename,
         power_stats=power_stats,
     )
