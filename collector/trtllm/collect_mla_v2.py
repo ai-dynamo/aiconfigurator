@@ -64,7 +64,6 @@ def get_context_mla_test_cases():
                                 10,
                                 6,
                                 True,
-                                "context_mla_perf.txt",
                             ]
                         )
     return test_cases
@@ -114,7 +113,6 @@ def get_generation_mla_test_cases():
                                 10,
                                 6,
                                 False,
-                                "generation_mla_perf.txt",
                             ]
                         )
     return test_cases
@@ -187,8 +185,9 @@ def run_mla(
     warming_up,
     test_ite,
     is_context_phase,
+    *,
     perf_filename,
-    device,
+    device="cuda:0",
 ):
     scenario = Scenario()
     q_lora_rank = scenario.q_lora_rank

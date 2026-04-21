@@ -58,6 +58,7 @@ from vllm.transformers_utils.config import _CONFIG_REGISTRY
 from vllm.version import __version__ as vllm_version
 
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
+from collector.registry_types import PerfFile
 from collector.vllm.utils import (
     BatchSpec,
     create_and_prepopulate_kv_cache_mla,
@@ -179,19 +180,18 @@ def get_context_test_cases(attn_type: str):
     """Context-phase test cases.
 
     Returns list of [seq_len, batch_size, num_heads, kv_cache_dtype,
-                     compute_dtype, gemm_type, perf_filename].
+                     compute_dtype, gemm_type].
     """
     cases = []
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 32768]
-    base_fname = f"{attn_type}_context_module_perf.txt"
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context"):
         for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
             for b in b_list:
                 for s in s_list:
                     if b * s > 131072:
                         continue
-                    cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type, base_fname])
+                    cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
 
 
@@ -199,19 +199,18 @@ def get_generation_test_cases(attn_type: str):
     """Generation-phase test cases.
 
     Returns list of [kv_cache_len, batch_size, num_heads, kv_cache_dtype,
-                     compute_dtype, gemm_type, perf_filename].
+                     compute_dtype, gemm_type].
     """
     cases = []
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     s_list = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
-    base_fname = f"{attn_type}_generation_module_perf.txt"
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation"):
         for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
             for b in b_list:
                 for s in s_list:
                     if b * s > 1024 * 4096 * 2 * 2 * 2:
                         continue
-                    cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type, base_fname])
+                    cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
 
 
@@ -219,14 +218,14 @@ def _build_module_test_cases(attn_type: str, mode: str):
     """Build module-level test cases for a specific attention type and phase.
 
     Output format: [seq_len, batch_size, num_heads, kv_cache_dtype,
-                    compute_dtype, gemm_type, perf_filename, model_path, attn_type]
+                    compute_dtype, gemm_type, model_path, attn_type]
     """
     base_cases = get_context_test_cases(attn_type) if mode == "context" else get_generation_test_cases(attn_type)
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
     cases = []
     for model_path in model_paths:
-        for s, b, h, kv_dtype, compute_dtype, gemm_type, fname in base_cases:
-            cases.append([s, b, h, kv_dtype, compute_dtype, gemm_type, fname, model_path, attn_type])
+        for s, b, h, kv_dtype, compute_dtype, gemm_type in base_cases:
+            cases.append([s, b, h, kv_dtype, compute_dtype, gemm_type, model_path, attn_type])
     return cases
 
 
@@ -890,9 +889,10 @@ def run_mla_module_worker(
     kv_cache_dtype: str,
     compute_dtype: str,
     gemm_type: str,
-    perf_filename: str,
     model_path: str,
     attn_type: str,
+    *,
+    perf_filename: str,
     device: str = "cuda:0",
 ):
     """Worker-compatible positional wrapper used by collector/collect.py."""
@@ -980,7 +980,15 @@ def main():
             kv_dtype = args.kv_cache_dtype or "bfloat16"
             compute = args.compute_dtype or "bfloat16"
             gemm = args.gemm_type or "bfloat16"
-            fname = f"{attn_type}_{args.mode}_module_perf.txt"
+            perf_filename = (
+                PerfFile.MLA_CONTEXT_MODULE
+                if attn_type == "mla" and args.mode == "context"
+                else PerfFile.MLA_GENERATION_MODULE
+                if attn_type == "mla"
+                else PerfFile.DSA_CONTEXT_MODULE
+                if args.mode == "context"
+                else PerfFile.DSA_GENERATION_MODULE
+            )
             run_mla_module(
                 seq_len=s,
                 batch_size=b,
@@ -988,7 +996,7 @@ def main():
                 kv_cache_dtype=kv_dtype,
                 compute_dtype=compute,
                 gemm_type=gemm,
-                perf_filename=fname,
+                perf_filename=perf_filename,
                 model_path=model_path,
                 attn_type=attn_type,
                 device=args.device,
@@ -997,8 +1005,10 @@ def main():
 
         if args.mode == "context":
             test_cases = get_context_test_cases(attn_type=attn_type)
+            perf_filename = PerfFile.MLA_CONTEXT_MODULE if attn_type == "mla" else PerfFile.DSA_CONTEXT_MODULE
         else:
             test_cases = get_generation_test_cases(attn_type=attn_type)
+            perf_filename = PerfFile.MLA_GENERATION_MODULE if attn_type == "mla" else PerfFile.DSA_GENERATION_MODULE
 
         if args.num_heads is not None:
             test_cases = [tc for tc in test_cases if tc[2] == args.num_heads]
@@ -1014,7 +1024,7 @@ def main():
 
         print(f"Running {len(test_cases)} {args.mode} {attn_type.upper()} module test cases...")
 
-        for i, (s, b, h, kv_dtype, compute, gemm, fname) in enumerate(test_cases):
+        for i, (s, b, h, kv_dtype, compute, gemm) in enumerate(test_cases):
             print(f"[{i + 1}/{len(test_cases)}]", end="")
             try:
                 run_mla_module(
@@ -1024,7 +1034,7 @@ def main():
                     kv_cache_dtype=kv_dtype,
                     compute_dtype=compute,
                     gemm_type=gemm,
-                    perf_filename=fname,
+                    perf_filename=perf_filename,
                     model_path=model_path,
                     attn_type=attn_type,
                     device=args.device,

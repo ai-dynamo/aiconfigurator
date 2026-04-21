@@ -44,7 +44,7 @@ def get_mla_gen_pre_test_cases():
     for num_tokens in gen_num_tokens:
         for num_head in num_heads:
             for dtype in dtype_list:
-                test_cases.append([num_tokens, num_head, dtype, 2, 10, "mla_bmm_perf.txt"])
+                test_cases.append([num_tokens, num_head, dtype, 2, 10])
     return test_cases
 
 
@@ -85,11 +85,11 @@ def get_mla_gen_post_test_cases():
     for num_tokens in ctx_num_tokens:
         for num_head in num_heads:
             for dtype in dtype_list:
-                test_cases.append([num_tokens, num_head, dtype, 2, 10, "mla_bmm_perf.txt"])
+                test_cases.append([num_tokens, num_head, dtype, 2, 10])
     return test_cases
 
 
-def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_filename, device="cuda:0"):
+def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, *, perf_filename, device="cuda:0"):
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
@@ -151,7 +151,7 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
     )
 
 
-def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_filename, device="cuda:0"):
+def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, *, perf_filename, device="cuda:0"):
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 

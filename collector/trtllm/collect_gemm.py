@@ -118,12 +118,12 @@ def get_gemm_test_cases():
             if (gemm_type == "nvfp4" or gemm_type == "fp8_block") and (n < 128 or k < 128):
                 continue
             for x in x_list:
-                test_cases.append([gemm_type, x, n, k, "gemm_perf.txt"])
+                test_cases.append([gemm_type, x, n, k])
 
     return test_cases
 
 
-def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
+def run_gemm(gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
     device = torch.device(device)
     torch.cuda.set_device(device)
     torch.set_default_device(device)
@@ -212,5 +212,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
 
 
 if __name__ == "__main__":
+    from collector.registry_types import PerfFile
+
     for test_case in get_gemm_test_cases():
-        run_gemm(*test_case)
+        run_gemm(*test_case, perf_filename=PerfFile.GEMM)

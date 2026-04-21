@@ -201,10 +201,9 @@ def get_context_test_cases(attn_type: str):
     """Context-phase test cases.
 
     Returns list of [seq_len, batch_size, num_heads, kv_cache_dtype,
-                     compute_dtype, gemm_type, perf_filename].
+                     compute_dtype, gemm_type].
     """
     cases = []
-    base_fname = f"{attn_type}_context_module_perf.txt"
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context"):
         for num_heads in _HEAD_NUMS:
             for batch_size in _BATCH_SIZES:
@@ -213,7 +212,7 @@ def get_context_test_cases(attn_type: str):
                         continue
                     if seq_len >= 8192 and batch_size > 8:
                         continue
-                    cases.append([seq_len, batch_size, num_heads, kv_dtype, compute_dtype, gemm_type, base_fname])
+                    cases.append([seq_len, batch_size, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
 
 
@@ -221,10 +220,9 @@ def get_generation_test_cases(attn_type: str):
     """Generation-phase test cases.
 
     Returns list of [kv_cache_len, batch_size, num_heads, kv_cache_dtype,
-                     compute_dtype, gemm_type, perf_filename].
+                     compute_dtype, gemm_type].
     """
     cases = []
-    base_fname = f"{attn_type}_generation_module_perf.txt"
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation"):
         for num_heads in _HEAD_NUMS:
             for batch_size in _BATCH_SIZES:
@@ -233,7 +231,7 @@ def get_generation_test_cases(attn_type: str):
                         continue
                     if seq_len >= 8192 and batch_size > 16:
                         continue
-                    cases.append([seq_len, batch_size, num_heads, kv_dtype, compute_dtype, gemm_type, base_fname])
+                    cases.append([seq_len, batch_size, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
 
 
@@ -241,7 +239,7 @@ def _build_module_test_cases(attn_type: str, mode: str):
     """Build one test case per unique (num_heads, precision, model) group.
 
     Output format: [seq_len, batch_size, num_heads, kv_cache_dtype,
-                    compute_dtype, gemm_type, perf_filename, model_path,
+                    compute_dtype, gemm_type, model_path,
                     attn_type, attention_backend]
 
     Each test case triggers a subprocess that sweeps all (batch_size, seq_len)
@@ -249,10 +247,9 @@ def _build_module_test_cases(attn_type: str, mode: str):
     individual point. seq_len and batch_size are set to 0 as placeholders.
 
     attention_backend is None for DSA (resolved at runtime by _get_backends()).
-    All test cases are 10 elements so that collect.py's ``func(*task, device)``
-    maps positional args correctly to run_mla_module_worker().
+    perf_filename is supplied by collect.py via functools.partial as a keyword
+    argument, so it is not included in the test case tuple.
     """
-    base_fname = f"{attn_type}_{mode}_module_perf.txt"
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
     cases = []
     for model_path in model_paths:
@@ -269,7 +266,6 @@ def _build_module_test_cases(attn_type: str, mode: str):
                         kv_dtype,
                         compute_dtype,
                         gemm_type,
-                        base_fname,
                         model_path,
                         attn_type,
                         None,
@@ -282,16 +278,17 @@ def _build_wideep_mla_test_cases(mode: str):
     """Build test cases for wideep MLA collection (backward-compatible).
 
     Output format: [seq_len, batch_size, num_heads, kv_cache_dtype,
-                    compute_dtype, gemm_type, perf_filename, model_path,
+                    compute_dtype, gemm_type, model_path,
                     attn_type, attention_backend]
 
     Matches the old collect_wideep_attn.py behavior:
     - Single precision combo (bfloat16 run, logged as fp8_block/fp8)
     - Sweeps multiple attention backends per SM version
     - Only DeepSeek-V3 (the MLA model), not V3.2/GLM-5 (DSA models)
+
+    perf_filename is supplied by collect.py via functools.partial as a keyword
+    argument, so it is not included in the test case tuple.
     """
-    phase = "context" if mode == "context" else "generation"
-    base_fname = f"wideep_{phase}_mla_perf.txt"
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == "mla"]
     backends = _get_mla_backend_list()
     cases = []
@@ -310,7 +307,6 @@ def _build_wideep_mla_test_cases(mode: str):
                         "bfloat16",
                         "bfloat16",
                         "bfloat16",
-                        base_fname,
                         model_path,
                         "mla",
                         backend,
@@ -1029,7 +1025,7 @@ def run_mla_module(
         phase_name = "Generation"
 
     # Filter to matching precision combo.
-    # Test case format: [seq_len, batch_size, num_heads, kv_dtype, compute_dtype, gemm_type, ...]
+    # Test case format: [seq_len, batch_size, num_heads, kv_dtype, compute_dtype, gemm_type]
     # run_attention_torch expects: (batch_size, seq_length, is_prefill)
     cases = [
         (tc[1], tc[0], is_prefill)
@@ -1131,22 +1127,26 @@ def run_mla_module_worker(
     kv_cache_dtype: str,
     compute_dtype: str,
     gemm_type: str,
-    perf_filename: str,
     model_path: str,
     attn_type: str,
     attention_backend: str | None = None,
+    *,
+    perf_filename: str,
     device: str = "cuda:0",
 ):
-    """Worker-compatible positional wrapper used by collector/collect.py.
+    """Worker-compatible wrapper used by collector/collect.py.
 
     Each call runs ALL (batch_size, seq_len) combos for the given
     (attn_type, num_heads, precision, model) combo in a subprocess.
     The seq_len and batch_size args from the individual test case are
     ignored here because the subprocess sweeps all combos internally.
 
-    For wideep MLA test cases, attention_backend is the 10th positional
+    For wideep MLA test cases, attention_backend is the 9th positional
     element specifying which backend to benchmark (e.g. "flashinfer", "fa3").
     For DSA test cases, it defaults to None and _get_backends() is used.
+
+    perf_filename and device are keyword-only arguments supplied by
+    collect.py via functools.partial and the worker dispatch loop.
     """
     device_str = str(device) if not isinstance(device, str) else device
     gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
@@ -1251,4 +1251,6 @@ def main():
 
 
 if __name__ == "__main__":
+    from collector.registry_types import PerfFile  # noqa: F401 — available for ad-hoc runs
+
     main()

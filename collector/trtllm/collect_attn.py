@@ -32,6 +32,7 @@ def run_attention_torch(
     use_fp8_kv_cache,
     use_fp8_context_fmha,
     is_context_phase,
+    *,
     perf_filename,
     device="cuda:0",
 ):
@@ -346,7 +347,6 @@ def get_context_attention_test_cases():
                                     False,
                                     False,
                                     True,
-                                    "context_attention_perf.txt",
                                 ]
                             )
                             test_cases.append(
@@ -360,7 +360,6 @@ def get_context_attention_test_cases():
                                     False,
                                     False,
                                     True,
-                                    "context_attention_perf.txt",
                                 ]
                             )
                             if has_fp8:
@@ -375,7 +374,6 @@ def get_context_attention_test_cases():
                                         True,
                                         False,
                                         True,
-                                        "context_attention_perf.txt",
                                     ]
                                 )
                                 test_cases.append(
@@ -389,7 +387,6 @@ def get_context_attention_test_cases():
                                         True,
                                         True,
                                         True,
-                                        "context_attention_perf.txt",
                                     ]
                                 )
                                 test_cases.append(
@@ -403,7 +400,6 @@ def get_context_attention_test_cases():
                                         True,
                                         False,
                                         True,
-                                        "context_attention_perf.txt",
                                     ]
                                 )
                                 test_cases.append(
@@ -417,7 +413,6 @@ def get_context_attention_test_cases():
                                         True,
                                         True,
                                         True,
-                                        "context_attention_perf.txt",
                                     ]
                                 )
                         else:
@@ -432,7 +427,6 @@ def get_context_attention_test_cases():
                                     False,
                                     False,
                                     True,
-                                    "context_attention_perf.txt",
                                 ]
                             )
                             if has_fp8:
@@ -447,7 +441,6 @@ def get_context_attention_test_cases():
                                         True,
                                         False,
                                         True,
-                                        "context_attention_perf.txt",
                                     ]
                                 )
                                 test_cases.append(
@@ -461,7 +454,6 @@ def get_context_attention_test_cases():
                                         True,
                                         True,
                                         True,
-                                        "context_attention_perf.txt",
                                     ]
                                 )
 
@@ -541,10 +533,10 @@ def get_generation_attention_test_cases():
                 # print(f'collecting MHA heads: {n} batchsize: {b}  steps: {s_list_limited}')
                 # fp8 kv cache, fp8 context fmha, is_context_phase
                 for s in target_s_list:
-                    test_cases.append([b, s, n, n, h, 0, False, False, False, "generation_attention_perf.txt"])
+                    test_cases.append([b, s, n, n, h, 0, False, False, False])
 
                     if has_fp8:
-                        test_cases.append([b, s, n, n, h, 0, True, False, False, "generation_attention_perf.txt"])
+                        test_cases.append([b, s, n, n, h, 0, True, False, False])
                         # currently, fp8 is not for generation compute
                         # test_cases.append(
                         #     [b, s, n, n, 128, True, True, False, "generation_attention_perf.txt"]
@@ -603,7 +595,6 @@ def get_generation_attention_test_cases():
                                     False,
                                     False,
                                     False,
-                                    "generation_attention_perf.txt",
                                 ]
                             )
                             test_cases.append(
@@ -617,7 +608,6 @@ def get_generation_attention_test_cases():
                                     False,
                                     False,
                                     False,
-                                    "generation_attention_perf.txt",
                                 ]
                             )
                             if has_fp8:
@@ -632,7 +622,6 @@ def get_generation_attention_test_cases():
                                         True,
                                         False,
                                         False,
-                                        "generation_attention_perf.txt",
                                     ]
                                 )
                                 test_cases.append(
@@ -646,7 +635,6 @@ def get_generation_attention_test_cases():
                                         True,
                                         False,
                                         False,
-                                        "generation_attention_perf.txt",
                                     ]
                                 )
                                 # currently, fp8 is not for generation compute
@@ -675,7 +663,6 @@ def get_generation_attention_test_cases():
                                     False,
                                     False,
                                     False,
-                                    "generation_attention_perf.txt",
                                 ]
                             )
                             if has_fp8:
@@ -690,17 +677,18 @@ def get_generation_attention_test_cases():
                                         True,
                                         False,
                                         False,
-                                        "generation_attention_perf.txt",
                                     ]
                                 )
     return test_cases
 
 
 if __name__ == "__main__":
+    from registry_types import PerfFile
+
     test_cases = get_context_attention_test_cases()
     for test_case in test_cases:
-        run_attention_torch(*test_case)
+        run_attention_torch(*test_case, perf_filename=PerfFile.CONTEXT_ATTENTION)
 
     test_cases = get_generation_attention_test_cases()
     for test_case in test_cases:
-        run_attention_torch(*test_case)
+        run_attention_torch(*test_case, perf_filename=PerfFile.GENERATION_ATTENTION)

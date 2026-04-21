@@ -77,13 +77,13 @@ def get_gemm_test_cases():
                 if sm >= 100 and (x % 4) != 0:
                     continue
 
-            test_cases.append([gemm_type, x, n, k, "gemm_perf.txt"])
+            test_cases.append([gemm_type, x, n, k])
 
     return test_cases
 
 
 @with_exit_stack
-def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
+def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
     # Force DeepGEMM path when available to capture the intended kernel.
     os.environ["VLLM_USE_DEEP_GEMM"] = "1"
 
@@ -237,6 +237,8 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
 
 
 if __name__ == "__main__":
+    from collector.registry_types import PerfFile
+
     test_cases = get_gemm_test_cases()
     for test_case in test_cases[:10]:
-        run_gemm(*test_case)
+        run_gemm(*test_case, perf_filename=PerfFile.GEMM)

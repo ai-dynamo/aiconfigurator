@@ -77,7 +77,6 @@ def get_moe_test_cases():
                         common_moe_testcase.tp,
                         common_moe_testcase.ep,
                         min_latency_mode,
-                        "moe_perf.txt",
                     ]
                 )
 
@@ -94,6 +93,7 @@ def run_moe_torch(
     moe_tp_size,
     moe_ep_size,
     cutlass_min_latency_mode,
+    *,
     perf_filename,
     device="cuda:0",
 ):

@@ -21,12 +21,12 @@ def get_computescale_test_cases():
         if (m, k) in seen_mk:
             continue
         seen_mk.add((m, k))
-        test_cases.append([m, k, "computescale_perf.txt"])
+        test_cases.append([m, k])
 
     return test_cases
 
 
-def run_computescale(m, k, perf_filename, device="cuda:0"):
+def run_computescale(m, k, *, perf_filename, device="cuda:0"):
     device = torch.device(device)
     torch.cuda.set_device(device)
     torch.set_default_device(device)

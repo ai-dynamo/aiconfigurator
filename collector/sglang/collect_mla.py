@@ -205,7 +205,6 @@ def get_context_mla_test_cases():
                                 10,
                                 6,
                                 True,
-                                "context_mla_perf.txt",
                             ]
                         )
     return test_cases
@@ -273,7 +272,6 @@ def get_generation_mla_test_cases():
                                 10,
                                 6,
                                 False,
-                                "generation_mla_perf.txt",
                             ]
                         )
     return test_cases
@@ -291,6 +289,7 @@ def run_mla(
     warming_up,
     test_ite,
     is_context_phase,
+    *,
     perf_filename,
     device="cuda:0",
 ):
@@ -558,12 +557,14 @@ def run_mla(
 
 
 if __name__ == "__main__":
+    from registry_types import PerfFile
+
     test_cases = get_context_mla_test_cases()
     for test_case in test_cases[0:10]:
         print(test_case)
-        run_mla(*test_case)
+        run_mla(*test_case, perf_filename=PerfFile.CONTEXT_MLA)
 
     test_cases = get_generation_mla_test_cases()
     for test_case in test_cases[0:10]:
         print(test_case)
-        run_mla(*test_case)
+        run_mla(*test_case, perf_filename=PerfFile.GENERATION_MLA)

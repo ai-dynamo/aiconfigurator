@@ -589,7 +589,6 @@ def get_wideep_moe_compute_all_test_cases():
                         ep_size,
                         False,  # min_latency_mode = False (no min_latency_mode)
                         common_moe_testcase.model_name,
-                        None,  # perf_filename - determined dynamically based on use_eplb
                         common_moe_testcase.token_expert_distribution,
                         common_moe_testcase.power_law_alpha,
                         use_eplb,
@@ -616,12 +615,13 @@ def run_wideep_moe_compute(
     moe_ep_size,
     min_latency_mode,
     model_name,
-    perf_filename,
     distributed="power_law",
     power_law_alpha=0.0,
     use_eplb=False,
     num_slots=None,
     accurate_wideep_simulation=True,
+    *,
+    perf_filename,
     device="cuda:0",
 ):
     """
@@ -1003,7 +1003,7 @@ def run_wideep_moe_compute(
             device_name=torch.cuda.get_device_name(device),
             op_name="wideep_moe" if not use_eplb else "wideep_moe_eplb",
             kernel_source=source,
-            perf_filename="wideep_moe_perf.txt",
+            perf_filename=perf_filename,
             power_stats=power_stats,
         )
 
@@ -1041,11 +1041,13 @@ def run_wideep_moe_compute(
 # Main Entry Point
 # =============================================================================
 if __name__ == "__main__":
+    from registry_types import PerfFile
+
     all_test_cases = get_wideep_moe_compute_all_test_cases()
 
     print(f"Running {len(all_test_cases)} WideEP MOE compute test configurations...")
 
     for i, test_case in enumerate(all_test_cases):
         print(f"\nProgress: {i + 1}/{len(all_test_cases)}")
-        print(f"  Config: moe_type={test_case[0]}, kernel={test_case[1]}, model={test_case[10]}, eplb={test_case[14]}")
-        run_wideep_moe_compute(*test_case)
+        print(f"  Config: moe_type={test_case[0]}, kernel={test_case[1]}, model={test_case[10]}, eplb={test_case[13]}")
+        run_wideep_moe_compute(*test_case, perf_filename=PerfFile.WIDEEP_MOE)

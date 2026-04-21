@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import contextlib
+import functools
 import os
 import warnings
 
@@ -328,7 +329,7 @@ def worker(
 
         try:
             worker_logger.debug(f"Starting task {task_id}")
-            func(*task, device)
+            func(*task, device=device)
             worker_logger.debug(f"Completed task {task_id}")
         except Exception as e:
             # Build comprehensive error info
@@ -724,6 +725,7 @@ def collect_ops(
 
             get_func = getattr(get_module, collection["get_func"])
             run_func = getattr(run_module, collection["run_func"])
+            run_func = functools.partial(run_func, perf_filename=collection["perf_filename"])
 
             def get_func_with_limit(get_func=get_func):
                 cases = get_func()

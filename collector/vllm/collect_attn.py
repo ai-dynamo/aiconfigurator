@@ -75,6 +75,7 @@ def run_attention_torch(
     head_dim,
     use_fp8_kv_cache,
     is_context_phase,
+    *,
     perf_filename,
     device="cuda:0",
 ):
@@ -444,7 +445,6 @@ def get_context_attention_test_cases(if_unit_test=False):
                                 128,
                                 is_fp8_kv_cache,
                                 True,
-                                "context_attention_perf.txt",
                             ]
                         )
 
@@ -526,21 +526,22 @@ def get_generation_attention_test_cases():
                                 128,
                                 is_fp8_kv_cache,
                                 False,
-                                "generation_attention_perf.txt",
                             ]
                         )
     return test_cases
 
 
 if __name__ == "__main__":
+    from collector.registry_types import PerfFile
+
     test_cases = get_context_attention_test_cases()
     test_cases = test_cases[:10]
     for test_case in test_cases:
         print(f"Running context attention test case: {test_case}")
-        run_attention_torch(*test_case)
+        run_attention_torch(*test_case, perf_filename=PerfFile.CONTEXT_ATTENTION)
 
     test_cases = get_generation_attention_test_cases()
     test_cases = test_cases[:10]
     for test_case in test_cases:
         print(f"Running generation attention test case: {test_case}")
-        run_attention_torch(*test_case)
+        run_attention_torch(*test_case, perf_filename=PerfFile.GENERATION_ATTENTION)

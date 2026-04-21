@@ -175,12 +175,12 @@ def get_context_attention_test_cases():
                         continue
 
                     # BF16 attention - works on all GPUs
-                    test_cases.append([b, s, n, num_kv_heads, 128, False, False, True, "context_attention_perf.txt"])
+                    test_cases.append([b, s, n, num_kv_heads, 128, False, False, True])
 
                     # FP8 attention - requires SM90+ (Hopper)
                     if not skip_fp8:
-                        test_cases.append([b, s, n, num_kv_heads, 128, True, False, True, "context_attention_perf.txt"])
-                        test_cases.append([b, s, n, num_kv_heads, 128, True, True, True, "context_attention_perf.txt"])
+                        test_cases.append([b, s, n, num_kv_heads, 128, True, False, True])
+                        test_cases.append([b, s, n, num_kv_heads, 128, True, True, True])
 
     return test_cases
 
@@ -227,10 +227,10 @@ def get_generation_attention_test_cases():
                 target_s_list = target_s_list[:-1]
             for s in target_s_list:
                 # BF16 attention - works on all GPUs
-                test_cases.append([b, s, n, n, 128, False, False, False, "generation_attention_perf.txt"])
+                test_cases.append([b, s, n, n, 128, False, False, False])
                 # FP8 attention - requires SM90+ (Hopper)
                 if not skip_fp8:
-                    test_cases.append([b, s, n, n, 128, True, False, False, "generation_attention_perf.txt"])
+                    test_cases.append([b, s, n, n, 128, True, False, False])
 
     # XQA
     max_bsn = 8192 * 1024 * 2
@@ -263,10 +263,10 @@ def get_generation_attention_test_cases():
                     continue
                 for s in target_s_list:
                     # BF16 attention - works on all GPUs
-                    test_cases.append([b, s, n, n_kv, 128, False, False, False, "generation_attention_perf.txt"])
+                    test_cases.append([b, s, n, n_kv, 128, False, False, False])
                     # FP8 attention - requires SM90+ (Hopper)
                     if not skip_fp8:
-                        test_cases.append([b, s, n, n_kv, 128, True, False, False, "generation_attention_perf.txt"])
+                        test_cases.append([b, s, n, n_kv, 128, True, False, False])
     return test_cases
 
 
@@ -279,9 +279,9 @@ def run_attention_torch(
     use_fp8_kv_cache,
     use_fp8_context_fmha,
     is_context_phase,
+    *,
     perf_filename,
     device="cuda:0",
-    *,
     page_size: int = 64,
 ):
     if use_fp8_context_fmha:

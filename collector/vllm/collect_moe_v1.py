@@ -186,7 +186,6 @@ def get_moe_test_cases():
                     common_moe_testcase.tp,
                     common_moe_testcase.ep,
                     common_moe_testcase.model_name,
-                    "moe_perf.txt",
                     common_moe_testcase.token_expert_distribution,
                     common_moe_testcase.power_law_alpha,
                 ]
@@ -205,9 +204,10 @@ def run_moe_torch(
     moe_tp_size,
     moe_ep_size,
     model_name,
-    perf_filename,
     distributed="power_law",
     power_law_alpha=0.0,
+    *,
+    perf_filename,
     device="cuda:0",
 ):
     """Run vLLM MoE performance benchmarking"""
@@ -713,13 +713,15 @@ def run_moe_torch(
 
 
 if __name__ == "__main__":
+    from collector.registry_types import PerfFile
+
     test_cases = get_moe_test_cases()
     print(f"Total test cases: {len(test_cases)}")
 
     for test_case in test_cases[:4]:
         print(f"Running test case: {test_case}")
         try:
-            run_moe_torch(*test_case)
+            run_moe_torch(*test_case, perf_filename=PerfFile.MOE)
         except Exception as e:
             print(f"Test case failed: {test_case}")
             print(f"Error: {e}")

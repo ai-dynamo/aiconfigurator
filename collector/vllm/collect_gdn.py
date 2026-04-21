@@ -97,7 +97,6 @@ def get_gdn_test_cases():
                     common_case.batch_size_list,
                     common_case.seq_len_list,
                     common_case.model_name,
-                    "gdn_perf.txt",
                 ]
             )
         else:
@@ -113,7 +112,6 @@ def get_gdn_test_cases():
                     common_case.batch_size_list,
                     None,  # seq_len_list not used for generation
                     common_case.model_name,
-                    "gdn_perf.txt",
                 ]
             )
 
@@ -714,6 +712,7 @@ def run_gdn_torch(
     batch_size_list: list[int],
     seq_len_list: list[int] | None,
     model_name: str,
+    *,
     perf_filename: str,
     device: str = "cuda:0",
 ):
@@ -799,6 +798,8 @@ if __name__ == "__main__":
 
     from vllm.version import __version__ as vllm_version
 
+    from collector.registry_types import PerfFile
+
     print(f"GDN Collector - vLLM {vllm_version}")
     print(f"SM Version: {get_sm_version()}")
     print(f"Device: {torch.cuda.get_device_name()}")
@@ -820,7 +821,6 @@ if __name__ == "__main__":
             batch_size_list,
             seq_len_list,
             model_name,
-            perf_filename,
         ) = test_case
 
         print(f"\n[{i + 1}/{len(test_cases)}] {model_name} - {phase}")
@@ -846,7 +846,7 @@ if __name__ == "__main__":
             batch_size_list=batch_size_list,
             seq_len_list=seq_len_list,
             model_name=model_name,
-            perf_filename=perf_filename,
+            perf_filename=PerfFile.GDN,
         )
 
     sys.exit(last_exit_code)

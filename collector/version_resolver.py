@@ -161,6 +161,7 @@ def build_collections(
                 "module": module,
                 "get_func": entry.get_func,
                 "run_func": entry.run_func,
+                "perf_filename": entry.perf_filename,
             }
         )
 

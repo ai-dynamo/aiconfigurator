@@ -830,7 +830,7 @@ def run_moe(
 
 
 def get_wideep_moe_test_cases(total_experts=256):
-    """Returns list of [num_experts, perf_filename] for MOE collection.
+    """Returns list of [num_experts] for MOE collection.
 
     Each num_experts value simulates a different EP size based on model's total experts.
     Starts from EP=2 (half experts per GPU) to focus on wideep multi-GPU scenarios.
@@ -865,7 +865,7 @@ def get_wideep_moe_test_cases(total_experts=256):
     test_cases = []
     n = total_experts // 2  # Start from EP=2
     while n >= 1:
-        test_cases.append([n, "wideep_moe_perf.txt"])
+        test_cases.append([n])
         n //= 2
     return test_cases
 
@@ -963,7 +963,7 @@ run_moe_benchmark({num_experts}, {gpu_id}, {output_path!r})
         raise RuntimeError(f"MOE subprocess failed with exit code {proc.returncode}")
 
 
-def run_wideep_moe(num_experts, perf_filename, device="cuda:0"):
+def run_wideep_moe(num_experts, *, perf_filename, device="cuda:0"):
     """Run wideep DeepEP MOE benchmark.
 
     Compatible with collect.py framework - uses subprocess for GPU isolation.
@@ -982,6 +982,8 @@ def run_wideep_moe(num_experts, perf_filename, device="cuda:0"):
 if __name__ == "__main__":
     import argparse
 
+    from registry_types import PerfFile
+
     parser = argparse.ArgumentParser(description="SGLang Wideep DeepEP MOE Benchmark")
     parser.add_argument("--output-path", default=None, help="Output directory for perf files")
     args = parser.parse_args()
@@ -990,7 +992,7 @@ if __name__ == "__main__":
 
     # Run all MOE test cases
     for test_case in get_wideep_moe_test_cases():
-        run_wideep_moe(*test_case)
+        run_wideep_moe(*test_case, perf_filename=PerfFile.WIDEEP_MOE)
 
     print("\n" + "=" * 60)
     print("SCRIPT COMPLETED SUCCESSFULLY")

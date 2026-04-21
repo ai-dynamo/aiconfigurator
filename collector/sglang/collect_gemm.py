@@ -65,7 +65,7 @@ def get_gemm_test_cases():
             if (gemm_type == "nvfp4" or gemm_type == "fp8_block") and (n < 128 or k < 128):
                 continue
 
-            test_cases.append([gemm_type, x, n, k, "gemm_perf.txt"])
+            test_cases.append([gemm_type, x, n, k])
 
     # Try to optimize number of JIT precompile cache hits by shuffling test cases.
     random.seed(42)
@@ -120,7 +120,7 @@ def per_token_quant_int8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return x_int8, scale.squeeze(-1)
 
 
-def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
+def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  # noqa: N803
     assert gemm_type in [
         "fp8_block",
         "fp8",
