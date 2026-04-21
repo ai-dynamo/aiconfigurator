@@ -171,8 +171,8 @@ def benchmark_with_power(
     repeat_n: int = 1,  # Default 1; GEMM files use 5
     measure_power: bool | None = None,  # Auto-detect from environment if None
     power_min_duration: float | None = None,  # Auto-detect from environment if None
-    allow_graph_fail: bool = False,  # NEW: Enable graceful fallback on graph capture failure
-    use_cuda_graph: bool = True,  # NEW: set False to force eager execution (ops whose captured
+    allow_graph_fail: bool = False,  # Enable graceful fallback on graph capture failure
+    use_cuda_graph: bool = True,  # set False to force eager execution (ops whose captured
     # private pools retain memory across tasks — see collect_mla_module_v3 DSA context).
 ):
     """
