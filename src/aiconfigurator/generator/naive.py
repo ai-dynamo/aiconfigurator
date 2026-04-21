@@ -218,6 +218,7 @@ def _calculate_min_tp(
     vram_per_gpu: int,
     gpus_per_node: int,
     total_gpus: int,
+    allow_multi_node: bool = False,
 ) -> int:
     """
     Calculate the minimum TP size that fits the model in memory.
@@ -229,9 +230,13 @@ def _calculate_min_tp(
         vram_per_gpu: VRAM per GPU in bytes.
         gpus_per_node: Number of GPUs per node.
         total_gpus: Total GPUs available.
+        allow_multi_node: When True, do not cap the result at ``gpus_per_node``.
+            Use for MoE wide-EP sweeps where an engine can span nodes; the
+            result is still capped at ``total_gpus``.
 
     Returns:
-        Minimum TP size (power of 2, capped at gpus_per_node and total_gpus).
+        Minimum TP size (power of 2). Capped at ``min(gpus_per_node, total_gpus)``
+        by default, or at ``total_gpus`` when ``allow_multi_node=True``.
     """
     # Required VRAM per model copy
     required_vram = model_weight_bytes * _MEMORY_MULTIPLIER
@@ -246,17 +251,18 @@ def _calculate_min_tp(
     while tp < min_tp:
         tp *= 2
 
-    # Cap at gpus_per_node (to stay within a single node) and total_gpus
-    max_tp = min(gpus_per_node, total_gpus)
+    # Cap at gpus_per_node (single-node constraint) unless multi-node is allowed.
+    max_tp = total_gpus if allow_multi_node else min(gpus_per_node, total_gpus)
 
-    # Warn if the model requires more GPUs than available in a single node
+    # Warn if the model requires more GPUs than available.
     if tp > max_tp:
         logger.warning(
             f"Model requires TP={tp} to fit in memory, but max TP is {max_tp} "
-            f"(gpus_per_node={gpus_per_node}, total_gpus={total_gpus}). "
+            f"(gpus_per_node={gpus_per_node}, total_gpus={total_gpus}, "
+            f"allow_multi_node={allow_multi_node}). "
             f"The model may not fit! Consider using PP or other parallelism "
             f"strategies to fit across more than one node, or use a system "
-            f"with more GPUs per node."
+            f"with more GPUs."
         )
         tp = max_tp
 

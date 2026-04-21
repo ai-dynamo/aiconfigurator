@@ -350,6 +350,7 @@ def enumerate_profiling_configs(
     enable_wideep: bool = False,
     backend_version: str | None = None,
     num_gpus_per_node: int | None = None,
+    total_gpus: int | None = None,
     k8s_pvc_name: str | None = None,
     k8s_pvc_mount_path: str = "/workspace/model_cache",
     k8s_model_path_in_pvc: str | None = None,
@@ -385,6 +386,10 @@ def enumerate_profiling_configs(
         backend_version: Optional backend database version.
         num_gpus_per_node: GPUs per physical node.  If ``None`` it is
             read from the system config YAML.
+        total_gpus: Total GPU budget for the deployment (e.g. 32 for a
+            4-node H100 cluster).  Used to cap the enumerated search space
+            and to compute the memory-fit minimum for MoE wide-EP sweeps.
+            When ``None``, defaults to ``num_gpus_per_node`` (single node).
         k8s_pvc_name: PVC claim name for model cache.  When set, the
             generated DGDs will mount this PVC.
         k8s_pvc_mount_path: Where the PVC is mounted inside the container.
@@ -454,11 +459,16 @@ def enumerate_profiling_configs(
     # ------------------------------------------------------------------
     # 2. Memory-based minimum GPUs per engine
     # ------------------------------------------------------------------
+    # For MoE wide-EP, engines can span multiple nodes (DEP/TEP shard weights
+    # across all GPUs), so the memory-fit floor is not capped at a single node.
+    # Otherwise (dense, or MoE intra-node) the floor stays within a node.
+    effective_total_gpus = total_gpus if total_gpus is not None else num_gpus_per_node
     min_gpus = _calculate_min_tp(
         model_weight_bytes=model_weight_bytes,
         vram_per_gpu=vram_per_gpu,
         gpus_per_node=num_gpus_per_node,
-        total_gpus=num_gpus_per_node,  # cap at single node for min calculation
+        total_gpus=effective_total_gpus,
+        allow_multi_node=is_moe and enable_wideep,
     )
     logger.info("Minimum GPUs per engine (memory fit): %d", min_gpus)
 
@@ -481,6 +491,13 @@ def enumerate_profiling_configs(
         # Dense models (and MoE non-wideEP): cap at num_gpus_per_node
         prefill_max_gpus = num_gpus_per_node
         decode_max_gpus = num_gpus_per_node
+
+    # Never enumerate beyond the deployment's GPU budget.  The parallel-list
+    # builder does not know the cluster size, so a 64-GPU candidate can show
+    # up on a 32-GPU system without this cap.
+    if total_gpus is not None:
+        prefill_max_gpus = min(prefill_max_gpus, total_gpus)
+        decode_max_gpus = min(decode_max_gpus, total_gpus)
 
     logger.info(
         "Parallel lists: is_moe=%s, enable_wideep=%s, min_gpus=%d, "
