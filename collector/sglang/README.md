@@ -16,7 +16,6 @@ The collected performance data can be used for performance modeling, scheduling 
 
 - **collect_mla_module.py**: Collects performance data for MLA and DSA attention module operators
 - **collect_wideep_deepep_moe.py**: Collects performance data for DeepSeek MoE operators
-- **collect_wideep_mlp.py**: Collects performance data for Shared Expert (MLP) operators
 
 ## Requirements
 
@@ -35,9 +34,6 @@ The wideep collectors support two execution modes:
 Run scripts directly with command-line arguments for single GPU collection:
 
 ```bash
-# MLP
-python collect_wideep_mlp.py --device cuda:0 --output-path /path/to/output/
-
 # Attention (MLA/DSA Module)
 python collect_mla_module.py --mode context --attn-type mla
 
@@ -58,9 +54,6 @@ cd /path/to/collector/
 
 # Run ALL sglang operators (13 total: 8 non-wideep + 5 wideep)
 python collect.py --backend sglang
-
-# Run wideep collectors only
-python collect.py --backend sglang --ops wideep_mlp_context wideep_mlp_generation
 
 # Run MLA/DSA module operators
 python collect.py --backend sglang --ops wideep_mla_context wideep_mla_generation \
@@ -218,47 +211,4 @@ Output format:
 framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency
 ```
 
-## 3. MLP Operator Collection (collect_wideep_mlp.py)
-
-### Features
-- Tests DeepSeek V2/V3 MLP operator performance
-- Supports FP8 quantization
-- Separately tests prefill (context, direct execution) and decode (generation, CUDA Graph) phases
-
-### Usage
-
-#### Direct Mode
-```bash
-export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
-python collect_wideep_mlp.py --device cuda:0 --output-path /path/to/output/
-```
-
-#### Framework Mode
-```bash
-python collect.py --backend sglang --ops wideep_mlp_context wideep_mlp_generation
-```
-
-#### Environment Variables
-- `DEEPSEEK_MODEL_PATH`: Path to DeepSeek model (default: `/deepseek-v3`)
-
-### Test Parameters
-The script automatically tests the following configurations for both prefill and decode phases:
-- Quantization: FP8 block quantization
-- Number of tokens: 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072
-- Hidden size: 7168
-- Intermediate size: 2048
-
-### Test Phases
-1. **Prefill Phase**: Direct execution without CUDA Graph
-2. **Decode Phase**: CUDA Graph enabled for optimized performance
-
-### Output
-Results are saved to:
-- `wideep_context_mlp_perf.txt`: Prefill phase performance data
-- `wideep_generation_mlp_perf.txt`: Decode phase performance data
-
-Output format:
-```
-framework,version,device,op_name,kernel_source,quant_type,num_token,hidden_size,intermediate_size,avg_ms
-```
 
