@@ -3507,7 +3507,15 @@ class PerfDatabase:
                 return PerformanceResult(get_empirical(), energy=0.0)
 
             exception_msg = error_msg + " Consider using HYBRID mode."
-            logger.exception(exception_msg)
+            # PerfDataNotAvailableError is a structured signal that callers (e.g.
+            # FallbackOp, Pareto search) are expected to handle. Log it without a
+            # stack trace so successful searches that merely skip a candidate do
+            # not spam internal tracebacks. Genuinely unexpected exceptions still
+            # get the full traceback via logger.exception.
+            if isinstance(e, PerfDataNotAvailableError):
+                logger.warning(exception_msg)
+            else:
+                logger.exception(exception_msg)
             # Modify the original exception message
             if e.args:
                 e.args = (str(e.args[0]) + " " + exception_msg,) + e.args[1:]
@@ -4616,9 +4624,23 @@ class PerfDatabase:
 
                 self._custom_allreduce_data.raise_if_not_loaded()
 
-                comm_dict = self._custom_allreduce_data[quant_mode][
-                    min(tp_size, self.system_spec["node"]["num_gpus_per_node"])
-                ]["AUTO"]  # use AUTO for allreduce strategy
+                # The loader returns a 4-deep defaultdict, so chained indexing silently
+                # synthesizes empty dicts for missing (quant_mode, tp_size, strategy)
+                # combinations. Validate explicitly so upstream callers see a structured
+                # PerfDataNotAvailableError instead of an internal AssertionError from
+                # _nearest_1d_point_helper when the CSV has no rows for this bucket.
+                effective_tp = min(tp_size, self.system_spec["node"]["num_gpus_per_node"])
+                by_tp = self._custom_allreduce_data.get(quant_mode, {})
+                strategy_dict = by_tp.get(effective_tp, {})
+                comm_dict = strategy_dict.get("AUTO", {})
+                if not comm_dict:
+                    raise PerfDataNotAvailableError(
+                        f"No custom_allreduce silicon data for quant_mode={quant_mode.value.name}, "
+                        f"tp_size={effective_tp} (requested tp_size={tp_size}). "
+                        f"Available tp_sizes for this quant_mode: {sorted(by_tp.keys())}. "
+                        "Consider using HYBRID mode, or supply custom_allreduce_perf.txt rows "
+                        "covering this tp_size."
+                    )
                 size_left, size_right = self._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
                 result = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
 
