@@ -257,9 +257,6 @@ def benchmark_config(
                 torch.randn(num_tokens, num_experts, dtype=torch.float32, device=device) for _ in range(num_iters)
             ]
 
-        # Pre-compute topk for the first iteration
-        topk_output = select_experts(x, gating_list[0], TopKConfig(top_k=topk))
-
         def run_op(i):
             gating = gating_list[i % num_iters]
             new_topk = select_experts(x, gating, TopKConfig(top_k=topk))
