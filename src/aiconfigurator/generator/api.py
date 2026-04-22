@@ -263,7 +263,8 @@ def generate_backend_artifacts(
     templates_dir: Optional[str] = None,
     output_dir: Optional[str] = None,
     backend_version: Optional[str] = None,
-    deployment_target: str = "dynamo-j2",
+    deployment_target: Optional[str] = None,
+    use_dynamo_generator: bool = False,
 ) -> dict[str, str]:
     """
     Generate complete backend artifacts including run scripts, configs, and k8s YAML.
@@ -277,10 +278,23 @@ def generate_backend_artifacts(
         deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', or 'llm-d').
             'dynamo-j2' uses Jinja2 templates, 'dynamo-python' uses Dynamo's Python config modifiers,
             'llm-d' generates Helm values for llm-d-modelservice chart.
+        use_dynamo_generator: If True, use Dynamo's Python config modifiers
+            (equivalent to deployment_target='dynamo-python'). Cannot be combined
+            with an explicit deployment_target.
 
     Returns:
         Dictionary mapping artifact names to their content
     """
+    if use_dynamo_generator and deployment_target is not None:
+        raise ValueError(
+            "Cannot specify both use_dynamo_generator=True and "
+            f"deployment_target='{deployment_target}'. Use one or the other."
+        )
+    if use_dynamo_generator:
+        deployment_target = "dynamo-python"
+    elif deployment_target is None:
+        deployment_target = "dynamo-j2"
+
     logger = logging.getLogger(__name__)
     artifacts = render_backend_templates(
         params,

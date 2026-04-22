@@ -340,13 +340,13 @@ def render_backend_templates(
             rendered_templates["cli_args_agg"] = cli
 
     # ── Translate: append --trtllm.* dynamic flags from extra_engine_args ──
-    # When the profiler path is active (use_dynamo_generator=True) and the
-    # backend is trtllm, convert the rendered extra_engine_args YAML into
-    # --trtllm.<key>.<subkey> <value> flags and merge them into cli_args.
+    # When the dynamo-python path is active and the backend is trtllm, convert
+    # the rendered extra_engine_args YAML into --trtllm.<key>.<subkey> <value>
+    # flags and merge them into cli_args.
     # Note: list-typed values (e.g. cuda_graph_config.batch_sizes) are skipped
     # because dynamo's infer_type cannot round-trip lists; the engine uses its
     # built-in defaults for those fields.
-    if use_dynamo_generator and backend == "trtllm":
+    if deployment_target == "dynamo-python" and backend == "trtllm":
         from .translate import yaml_to_dynamic_flags
 
         for worker in worker_plan:
