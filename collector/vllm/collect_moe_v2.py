@@ -8,7 +8,7 @@ import os
 import torch
 import torch.nn.functional as F
 from vllm.model_executor.layers.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
+from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config, int4_w4a16_moe_quant_config
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
@@ -33,19 +33,36 @@ from vllm.config import VllmConfig, set_current_vllm_config
 trtllm_fp4_block_scale_routed_moe = None
 _vllm_ops = None
 prepare_static_weights_for_trtllm_fp4_moe = None
+_flashinfer_fp4_quantize = None
 _nvfp4_available = False
+# scaled_fp4_quant dropped is_sf_swizzled_layout in some vLLM builds.
+# Probe the signature once at import time so _run_nvfp4_once doesn't branch per call.
+_scaled_fp4_quant_accepts_swizzled: bool = False
+# trtllm_fp4_block_scale_routed_moe dropped tile_tokens_dim in some flashinfer builds.
+# Probe once at import time to avoid TypeError at call time.
+_trtllm_moe_accepts_tile_tokens_dim: bool = False
 try:
+    import inspect
+
+    from flashinfer import fp4_quantize as _flashinfer_fp4_quantize  # type: ignore[assignment]
     from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe  # type: ignore[assignment]
     from vllm import _custom_ops as _vllm_ops  # type: ignore[assignment]
     from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
         prepare_static_weights_for_trtllm_fp4_moe,  # type: ignore[assignment]
     )
 
+    _scaled_fp4_quant_accepts_swizzled = (
+        "is_sf_swizzled_layout" in inspect.signature(_vllm_ops.scaled_fp4_quant).parameters
+    )
+    _trtllm_moe_accepts_tile_tokens_dim = (
+        "tile_tokens_dim" in inspect.signature(trtllm_fp4_block_scale_routed_moe).parameters
+    )
     _nvfp4_available = True
 except Exception:
     trtllm_fp4_block_scale_routed_moe = None
     _vllm_ops = None
     prepare_static_weights_for_trtllm_fp4_moe = None
+    _flashinfer_fp4_quantize = None
 
 # MXFP4 support: uses vLLM's high-level FusedMoE module with Mxfp4Config.
 # This lets vLLM handle backend selection (FlashInfer/Triton/Marlin) and
@@ -71,7 +88,7 @@ def get_moe_test_cases():
     """Generate MoE test cases"""
 
     # Quantization types supported by vLLM
-    moe_list = ["float16"]
+    moe_list = ["float16", "int4_wo"]
     if get_sm_version() > 86:
         moe_list += ["fp8"]
     if get_sm_version() >= 90 and per_block_cast_to_fp8 is not None:
@@ -124,6 +141,14 @@ def get_moe_test_cases():
             if moe_type == "w4a16_mxfp4" and (
                 common_moe_testcase.hidden_size % 32 != 0
                 or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 32 != 0
+            ):
+                continue
+
+            # int4_wo (W4A16 Marlin): requires dims divisible by group_size (128).
+            # Scales are indexed over original (unpacked) K — no packing factor needed here.
+            if moe_type == "int4_wo" and (
+                common_moe_testcase.hidden_size % 128 != 0
+                or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 128 != 0
             ):
                 continue
 
@@ -194,6 +219,39 @@ def run_moe_torch(
         dtype=torch.float16,
         device=device,
     )
+
+    # INT4_WO path: W4A16 via vLLM's Marlin kernel using int4_w4a16_moe_quant_config.
+    # Weights are packed uint8 (2 int4 per byte, shape K//2). Scales are per-group
+    # along K (group_size=128). Zero-points are None (symmetric quantization).
+    use_int4_wo = moe_type == "int4_wo"
+    if use_int4_wo:
+        int4_group_size = 128
+        # w1: (E, 2*local_inter, hidden) packed → (E, 2*local_inter, hidden//2) uint8
+        w1 = torch.randint(
+            0, 127, (local_num_experts, 2 * local_inter_size, hidden_size // 2), dtype=torch.uint8, device=device
+        )
+        # w2: (E, hidden, local_inter) packed → (E, hidden, local_inter//2) uint8
+        w2 = torch.randint(
+            0, 127, (local_num_experts, hidden_size, local_inter_size // 2), dtype=torch.uint8, device=device
+        )
+        # Per-group scales: (E, N, K//group_size)
+        w1_scale = torch.randn(
+            (local_num_experts, 2 * local_inter_size, hidden_size // int4_group_size),
+            dtype=torch.float16,
+            device=device,
+        )
+        w2_scale = torch.randn(
+            (local_num_experts, hidden_size, local_inter_size // int4_group_size),
+            dtype=torch.float16,
+            device=device,
+        )
+        quant_config = int4_w4a16_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_zp=None,
+            w2_zp=None,
+            block_shape=[0, int4_group_size],
+        )
 
     # MXFP4 path: uses vLLM's high-level FusedMoE module with Mxfp4Config.
     # vLLM handles backend selection (FlashInfer/Triton/Marlin) and weight swizzle.
@@ -424,13 +482,27 @@ def run_moe_torch(
 
         def _run_nvfp4_once(hs, tw, ti):
             """Run a single nvfp4 MoE iteration via FlashInfer TRTLLM FP4 kernel."""
-            # Quantize input to FP4
-            x_fp4, x_scale = _vllm_ops.scaled_fp4_quant(
-                hs.to(torch.bfloat16),
-                nvfp4_data["a1_gscale"][0:1],
-                is_sf_swizzled_layout=False,
-            )
-            num_tok = x_fp4.shape[0]
+            num_tok = hs.shape[0]
+            # Quantize input to FP4 with linear (non-swizzled) scale layout so that
+            # x_scale can be reshaped to [M, K//16] for trtllm_fp4_block_scale_routed_moe.
+            #
+            # vLLM < 0.16.0: scaled_fp4_quant accepts is_sf_swizzled_layout=False directly.
+            # vLLM >= 0.16.0: the parameter was removed and the op returns swizzled layout
+            #   by default (tile-padded, incompatible shape). Fall back to flashinfer's
+            #   fp4_quantize which still supports is_sf_swizzled_layout=False.
+            if _scaled_fp4_quant_accepts_swizzled:
+                x_fp4, x_scale = _vllm_ops.scaled_fp4_quant(
+                    hs.to(torch.bfloat16),
+                    nvfp4_data["a1_gscale"][0:1],
+                    is_sf_swizzled_layout=False,
+                )
+            else:
+                per_tok_scale = nvfp4_data["a1_gscale"][0:1].view(1, 1).expand(num_tok, 1).contiguous()
+                x_fp4, x_scale = _flashinfer_fp4_quantize(
+                    hs.to(torch.bfloat16),
+                    per_tok_scale,
+                    is_sf_swizzled_layout=False,
+                )
             scale_cols = hs.shape[1] // 16
             # Pack topk: (expert_id << 16) | bf16_weight_as_int16
             packed = (ti.to(torch.int32) << 16) | tw.to(torch.bfloat16).view(torch.int16).to(torch.int32)
@@ -461,6 +533,17 @@ def run_moe_torch(
                 routed_scaling_factor=None,
                 routing_method_type=1,  # Renormalize
                 do_finalize=True,
+                # tile_tokens_dim: avg tokens per expert, rounded to next power-of-2,
+                # clamped to [8, 64]. Required by some flashinfer builds, rejected by others.
+                **(
+                    {
+                        "tile_tokens_dim": min(
+                            max(1 << (max(1, (num_tok * topk) // num_experts) - 1).bit_length(), 8), 64
+                        )
+                    }
+                    if _trtllm_moe_accepts_tile_tokens_dim
+                    else {}
+                ),
             )
 
         def run_single_iteration():
@@ -534,6 +617,8 @@ def run_moe_torch(
             source = "vllm_mxfp4_moe"
         elif use_nvfp4:
             source = "vllm_flashinfer_trtllm_moe_fp4"
+        elif use_int4_wo:
+            source = "vllm_marlin_int4_moe"
         else:
             source = "vllm_fused_moe"
 

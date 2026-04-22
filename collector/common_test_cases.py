@@ -33,6 +33,8 @@ _WIDEEP_MOE_MODEL_NAMES: set[str] = {
     "zai-org/GLM-5",
     "MiniMaxAI/MiniMax-M2.5",
     "moonshotai/Kimi-K2-Instruct",
+    "moonshotai/Kimi-K2.5",
+    "nvidia/Kimi-K2.5-NVFP4",
 }
 
 
@@ -53,7 +55,8 @@ _MOE_MODEL_CONFIGS: list[list] = [
     [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B"],  # qwen3-moe, 30b-a3b
     [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B"],  # qwen3-moe, 235b-a22b
     [6144, 2560, 8, 160, "Qwen/Qwen3-Coder-480B-A35B-Instruct"],  # qwen3-moe, 480b-a35b
-    [7168, 2048, 8, 384, "moonshotai/Kimi-K2-Instruct"],  # kimi k2, k2.5
+    [7168, 2048, 8, 384, "moonshotai/Kimi-K2-Instruct"],  # kimi k2
+    [7168, 2048, 8, 384, "nvidia/Kimi-K2.5-NVFP4"],  # kimi k2.5 nvfp4 (same shape, separate collection for fp4 kernels)
     [3072, 1536, 8, 256, "MiniMaxAI/MiniMax-M2.5"],  # minimax m2.5 (also covers nvidia/MiniMax-M2.5-NVFP4)
     [2880, 2880, 4, 128, "openai/gpt-oss-120b"],
     [2880, 2880, 4, 32, "openai/gpt-oss-20b"],
@@ -71,6 +74,7 @@ _MOE_MODEL_CONFIGS: list[list] = [
 # MLA: [num_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, model_name]
 _MLA_MODEL_CONFIGS: list[list] = [
     [128, 1536, 512, 128, 64, 128, "deepseek-ai/DeepSeek-V3"],
+    [64, 1536, 512, 128, 64, 128, "moonshotai/Kimi-K2.5"],  # kimi k2.5: same MLA dims as DSV3 except num_heads=64
 ]
 
 # MLA module: models from collect_mla_module.py's SUPPORTED_MODELS that are not

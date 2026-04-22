@@ -33,19 +33,30 @@ from vllm.config import VllmConfig, set_current_vllm_config
 trtllm_fp4_block_scale_routed_moe = None
 _vllm_ops = None
 prepare_static_weights_for_trtllm_fp4_moe = None
+_flashinfer_fp4_quantize = None
 _nvfp4_available = False
+# scaled_fp4_quant dropped is_sf_swizzled_layout in vLLM >= 0.16.0.
+# Probe the signature once at import time so _run_nvfp4_once doesn't branch per call.
+_scaled_fp4_quant_accepts_swizzled: bool = False
 try:
+    import inspect
+
+    from flashinfer import fp4_quantize as _flashinfer_fp4_quantize  # type: ignore[assignment]
     from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe  # type: ignore[assignment]
     from vllm import _custom_ops as _vllm_ops  # type: ignore[assignment]
     from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
         prepare_static_weights_for_trtllm_fp4_moe,  # type: ignore[assignment]
     )
 
+    _scaled_fp4_quant_accepts_swizzled = (
+        "is_sf_swizzled_layout" in inspect.signature(_vllm_ops.scaled_fp4_quant).parameters
+    )
     _nvfp4_available = True
 except Exception:
     trtllm_fp4_block_scale_routed_moe = None
     _vllm_ops = None
     prepare_static_weights_for_trtllm_fp4_moe = None
+    _flashinfer_fp4_quantize = None
 
 # MXFP4 support: uses vLLM's high-level FusedMoE module with Mxfp4Config.
 # This lets vLLM handle backend selection (FlashInfer/Triton/Marlin) and
@@ -56,6 +67,35 @@ try:
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
 
     _mxfp4_available = True
+except Exception:
+    pass
+
+# int4_wo (W4A16) support: uses vLLM's Marlin GPTQ MoE kernel.
+# gptq_marlin_moe_repack converts GPTQ-packed int32 weights to Marlin tile layout;
+# fused_marlin_moe runs the fused gate+up+silu+down projection.
+#
+# In vLLM >= 0.14.0, both functions are Python-level — NOT registered torch ops.
+# We probe vllm._custom_ops first (0.14.x style), then fall back to torch.ops.vllm.
+_int4_wo_available = False
+_fused_marlin_moe_fn = None
+_gptq_marlin_moe_repack_fn = None
+_int4_wo_quant_type_id: int | None = None
+try:
+    # gptq_marlin_moe_repack: try vllm._custom_ops first, then torch.ops.vllm
+    import vllm._custom_ops as _vllm_custom_ops  # type: ignore[import]
+    from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        fused_marlin_moe as _fused_marlin_moe_fn,
+    )
+    from vllm.scalar_type import scalar_types as _scalar_types  # type: ignore[import]
+
+    _int4_wo_quant_type_id = _scalar_types.uint4b8.id
+
+    _gptq_marlin_moe_repack_fn = getattr(_vllm_custom_ops, "gptq_marlin_moe_repack", None)
+    if _gptq_marlin_moe_repack_fn is None:
+        _gptq_marlin_moe_repack_fn = getattr(getattr(torch.ops, "vllm", None), "gptq_marlin_moe_repack", None)
+
+    if _fused_marlin_moe_fn is not None and _gptq_marlin_moe_repack_fn is not None:
+        _int4_wo_available = True
 except Exception:
     pass
 
@@ -78,6 +118,8 @@ def get_moe_test_cases():
         moe_list += ["nvfp4"]
     if _mxfp4_available:
         moe_list += ["w4a16_mxfp4"]
+    if _int4_wo_available:
+        moe_list += ["int4_wo"]
 
     _gpt_oss_models = {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
 
@@ -122,6 +164,14 @@ def get_moe_test_cases():
             if moe_type == "w4a16_mxfp4" and (
                 common_moe_testcase.hidden_size % 32 != 0
                 or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 32 != 0
+            ):
+                continue
+
+            # int4_wo (W4A16): Marlin kernel requires K and N divisible by group_size (128).
+            # K=hidden_size for w1; K=inter_size//tp (local) for w2.
+            if moe_type == "int4_wo" and (
+                common_moe_testcase.hidden_size % 128 != 0
+                or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 128 != 0
             ):
                 continue
 
@@ -360,7 +410,60 @@ def run_moe_torch(
             block_shape=block_shape,
         )
 
-    if not use_mxfp4 and dtype == torch.float8_e4m3fn:
+    # int4_wo (W4A16) path: uses vLLM's Marlin GPTQ MoE kernel.
+    # Weights are GPTQ-packed (8 int4 per int32) then repacked to Marlin tile layout.
+    # w1: K=hidden, N=2*inter (gate+up)  →  packed (E, hidden, 2*inter//8) int32
+    # w2: K=inter (after silu_and_mul),  →  packed (E, inter, hidden//8) int32
+    #     N=hidden (down proj)
+    # Scales are per-group along K: (E, K//group_size, N) float16
+    use_int4_wo = moe_type == "int4_wo"
+    w1_marlin = w2_marlin = w1_int4_scale = w2_int4_scale = None
+
+    if use_int4_wo:
+        group_size = 128
+        pack_factor = 8  # 32-bit integer packs 8 x int4
+
+        # GPTQ packs along K (reduction dimension): shape (E, K // pack_factor, N)
+        # w1: K=hidden_size, N=2*local_inter_size (gate+up)
+        # w2: K=local_inter_size, N=hidden_size (down)
+        w1_packed_q = torch.randint(
+            -(2**31),
+            2**31 - 1,
+            (local_num_experts, hidden_size // pack_factor, 2 * local_inter_size),
+            dtype=torch.int32,
+            device=device,
+        )
+        w2_packed_q = torch.randint(
+            -(2**31),
+            2**31 - 1,
+            (local_num_experts, local_inter_size // pack_factor, hidden_size),
+            dtype=torch.int32,
+            device=device,
+        )
+        # Empty perm → no act-order permutation (symmetric GPTQ without reordering).
+        # Shape must be (num_experts, 0): vllm 0.14.0's gptq_marlin_moe_repack
+        # loops per-expert and indexes perm[e], so dim-0 must equal num_experts.
+        empty_perm = torch.empty((local_num_experts, 0), dtype=torch.int32, device=device)
+        w1_marlin = _gptq_marlin_moe_repack_fn(w1_packed_q, empty_perm, hidden_size, 2 * local_inter_size, 4)
+        w2_marlin = _gptq_marlin_moe_repack_fn(w2_packed_q, empty_perm, local_inter_size, hidden_size, 4)
+        del w1_packed_q, w2_packed_q
+
+        # Per-group scales along K dimension: (E, K // group_size, N) float16
+        w1_int4_scale = torch.randn(
+            (local_num_experts, hidden_size // group_size, 2 * local_inter_size),
+            dtype=torch.float16,
+            device=device,
+        )
+        w2_int4_scale = torch.randn(
+            (local_num_experts, local_inter_size // group_size, hidden_size),
+            dtype=torch.float16,
+            device=device,
+        )
+
+        # Free the float16 placeholder weights; not used for int4_wo.
+        del w1, w2
+
+    if not use_mxfp4 and not use_int4_wo and dtype == torch.float8_e4m3fn:
         w1 = w1.to(dtype)
         w2 = w2.to(dtype)
 
@@ -424,18 +527,55 @@ def run_moe_torch(
             num_warmups = 1
             num_runs = 1
 
+        def _run_int4_wo_once(hs, tw, ti):
+            """Run a single int4_wo (W4A16) MoE iteration via vLLM Marlin GPTQ kernel."""
+            _fused_marlin_moe_fn(
+                hs,
+                w1_marlin,
+                w2_marlin,
+                None,  # bias1
+                None,  # bias2
+                w1_int4_scale,
+                w2_int4_scale,
+                None,  # gating_output (unused when topk_weights/ids provided)
+                tw.float(),  # fused_marlin_moe asserts float32
+                ti,
+                _int4_wo_quant_type_id,
+                w1_zeros=None,
+                w2_zeros=None,
+                is_k_full=True,
+            )
+
         def _run_nvfp4_once(hs, tw, ti):
             """Run a single nvfp4 MoE iteration via FlashInfer TRTLLM FP4 kernel."""
-            # Quantize input to FP4
-            x_fp4, x_scale = _vllm_ops.scaled_fp4_quant(
-                hs.to(torch.bfloat16),
-                nvfp4_data["a1_gscale"][0:1],
-                is_sf_swizzled_layout=False,
-            )
-            num_tok = x_fp4.shape[0]
+            num_tok = hs.shape[0]
+            # Quantize input to FP4 with linear (non-swizzled) scale layout so that
+            # x_scale can be reshaped to [M, K//16] for trtllm_fp4_block_scale_routed_moe.
+            #
+            # vLLM < 0.16.0: scaled_fp4_quant accepts is_sf_swizzled_layout=False directly.
+            # vLLM >= 0.16.0: the parameter was removed and the op returns swizzled layout
+            #   by default (tile-padded, incompatible shape). Fall back to flashinfer's
+            #   fp4_quantize which still supports is_sf_swizzled_layout=False.
+            if _scaled_fp4_quant_accepts_swizzled:
+                x_fp4, x_scale = _vllm_ops.scaled_fp4_quant(
+                    hs.to(torch.bfloat16),
+                    nvfp4_data["a1_gscale"][0:1],
+                    is_sf_swizzled_layout=False,
+                )
+            else:
+                per_tok_scale = nvfp4_data["a1_gscale"][0:1].view(1, 1).expand(num_tok, 1).contiguous()
+                x_fp4, x_scale = _flashinfer_fp4_quantize(
+                    hs.to(torch.bfloat16),
+                    per_tok_scale,
+                    is_sf_swizzled_layout=False,
+                )
             scale_cols = hs.shape[1] // 16
             # Pack topk: (expert_id << 16) | bf16_weight_as_int16
             packed = (ti.to(torch.int32) << 16) | tw.to(torch.bfloat16).view(torch.int16).to(torch.int32)
+            # tile_tokens_dim: avg tokens per expert, rounded to next power-of-2,
+            # clamped to [8, 64]. Controls GEMM tiling in the FlashInfer kernel.
+            avg_tok = max(1, (num_tok * topk) // num_experts)
+            tile_tokens_dim = min(max(1 << (avg_tok - 1).bit_length(), 8), 64)
             trtllm_fp4_block_scale_routed_moe(
                 topk_ids=packed,
                 routing_bias=None,
@@ -463,6 +603,7 @@ def run_moe_torch(
                 routed_scaling_factor=None,
                 routing_method_type=1,  # Renormalize
                 do_finalize=True,
+                tile_tokens_dim=tile_tokens_dim,
             )
 
         def run_single_iteration():
@@ -479,6 +620,12 @@ def run_moe_torch(
                         _run_nvfp4_once(hidden_states[: tw.shape[0]], tw, ti)
                 else:
                     _run_nvfp4_once(hidden_states, topk_weights, topk_ids)
+            elif use_int4_wo:
+                if distributed == "power_law":
+                    for tw, ti in zip(topk_weights_list, topk_ids_list, strict=True):
+                        _run_int4_wo_once(hidden_states[: tw.shape[0]], tw, ti)
+                else:
+                    _run_int4_wo_once(hidden_states, topk_weights, topk_ids)
             elif distributed == "power_law":
                 for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list, strict=True)):
                     local_num_tokens = tw.shape[0]
@@ -535,6 +682,8 @@ def run_moe_torch(
             source = "vllm_mxfp4_moe"
         elif use_nvfp4:
             source = "vllm_flashinfer_trtllm_moe_fp4"
+        elif use_int4_wo:
+            source = "vllm_marlin_moe"
         else:
             source = "vllm_fused_moe"
 

@@ -10,7 +10,11 @@ from typing import Optional
 
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk.utils import _load_model_config_from_model_path, get_model_config_from_model_path
+from aiconfigurator.sdk.utils import (
+    _load_model_config_from_model_path,
+    get_model_config_from_model_path,
+    parse_compressed_tensors_quant,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +73,17 @@ def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
     elif quant_algo == "mxfp4":
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.float16
         overrides["moe_quant_mode"] = common.MoEQuantMode.w4a16_mxfp4
+    elif quant_algo == "compressed-tensors":
+        # Parse the quantization_config to find which layer categories are quantized.
+        # Only set overrides for quantized categories; unset modes fall through to the
+        # global float16 default in _apply_model_quant_defaults.
+        quant_cfg = raw_config.get("quantization_config") or {}
+        base_algo, ignored = parse_compressed_tensors_quant(quant_cfg)
+        if base_algo:
+            if "attention" not in ignored:
+                overrides["gemm_quant_mode"] = getattr(common.GEMMQuantMode, base_algo)
+            if "routing_experts" not in ignored:
+                overrides["moe_quant_mode"] = getattr(common.MoEQuantMode, base_algo)
     elif quant_algo == "float16":
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.float16
         overrides["moe_quant_mode"] = common.MoEQuantMode.float16
@@ -339,6 +354,26 @@ def get_model(
                 model_config,
                 extra_params,
             )
+    elif model_family == "KIMIK25":
+        model = DeepSeekModel(
+            topk,
+            num_experts,
+            moe_inter_size,
+            model_path,
+            model_family,
+            architecture,
+            layers,
+            n,
+            n_kv,
+            d,
+            hidden,
+            inter,
+            vocab,
+            context,
+            model_config,
+            extra_params,
+            backend_name=backend_name,
+        )
     elif model_family == "DEEPSEEKV32":
         if backend_name == "sglang" and model_config.enable_wideep:
             logger.debug(f"WideEP is enabled for DeepSeekV32 model {model_path} with backend {backend_name}")
@@ -483,7 +518,7 @@ def check_is_moe(model_path: str) -> bool:
     E.g., Nemotron_H is not an MoE model, but Nemotron_3 is an MoE model.
     """
     family = get_model_family(model_path)
-    if family in ("MOE", "DEEPSEEK", "DEEPSEEKV32", "HYBRIDMOE"):
+    if family in ("MOE", "DEEPSEEK", "DEEPSEEKV32", "KIMIK25", "HYBRIDMOE"):
         return True
     if family == "QWEN35":
         model_info = _get_model_info(model_path)
@@ -1229,8 +1264,17 @@ class DeepSeekModel(BaseModel):
     DeepSeek V3/R1 uses this model impl.
     """
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
         super().__init__(*args)
+        # Resolve vLLM attention head size. MLA models (e.g., KIMI K2.5) store v_head_dim=128
+        # in extra_params; generic hidden_size // n_heads would give the wrong value (e.g., 112).
+        self._vllm_head_size = (
+            self.extra_params.get("v_head_dim") or self._head_size
+            if isinstance(self.extra_params, dict)
+            else self._head_size
+        )
+
+        self._backend_name = backend_name
 
         # make sure the paralel width is same
         assert (
@@ -1318,7 +1362,17 @@ class DeepSeekModel(BaseModel):
                             512,
                             gemm_quant_mode,
                         ),
-                        ops.ContextMLA(
+                        ops.ContextAttention(
+                            "context_attention",
+                            self._num_layers,
+                            self._num_heads // tp_size,
+                            self._num_kv_heads // tp_size,
+                            kvcache_quant_mode,
+                            fmha_quant_mode,
+                            head_size=self._vllm_head_size,
+                        )
+                        if self._backend_name == "vllm"
+                        else ops.ContextMLA(
                             "context_attention",
                             self._num_layers,
                             128 // tp_size,
@@ -1477,25 +1531,44 @@ class DeepSeekModel(BaseModel):
                             1536,
                             gemm_quant_mode,
                         ),
-                        ops.MLABmm(
-                            "generation_bmm_pre",
-                            self._num_layers * self._mtp_scale_factor,
-                            self._num_heads // tp_size,
-                            mla_bmm_quant_mode,
-                            if_pre=True,
-                        ),
-                        ops.GenerationMLA(
-                            "generation_attention",
-                            self._num_layers * self._mtp_scale_factor,
-                            128 // tp_size,
-                            kvcache_quant_mode,
-                        ),
-                        ops.MLABmm(
-                            "generation_bmm_post",
-                            self._num_layers * self._mtp_scale_factor,
-                            self._num_heads // tp_size,
-                            mla_bmm_quant_mode,
-                            if_pre=False,
+                        *(
+                            # KIMI K2.5 on vLLM: same reasoning as ContextAttention above —
+                            # vLLM absorbs the KV projection and runs standard GenerationAttention
+                            # with v_head_dim=128. TRT-LLM and SGLang use the full MLA path
+                            # (MLABmm + GenerationMLA + MLABmm).
+                            [
+                                ops.GenerationAttention(
+                                    "generation_attention",
+                                    self._num_layers * self._mtp_scale_factor,
+                                    self._num_heads // tp_size,
+                                    self._num_kv_heads // tp_size,
+                                    kvcache_quant_mode,
+                                    head_size=self._vllm_head_size,
+                                )
+                            ]
+                            if self._backend_name == "vllm"
+                            else [
+                                ops.MLABmm(
+                                    "generation_bmm_pre",
+                                    self._num_layers * self._mtp_scale_factor,
+                                    self._num_heads // tp_size,
+                                    mla_bmm_quant_mode,
+                                    if_pre=True,
+                                ),
+                                ops.GenerationMLA(
+                                    "generation_attention",
+                                    self._num_layers * self._mtp_scale_factor,
+                                    128 // tp_size,
+                                    kvcache_quant_mode,
+                                ),
+                                ops.MLABmm(
+                                    "generation_bmm_post",
+                                    self._num_layers * self._mtp_scale_factor,
+                                    self._num_heads // tp_size,
+                                    mla_bmm_quant_mode,
+                                    if_pre=False,
+                                ),
+                            ]
                         ),
                         ops.GEMM(
                             "generation_proj_gemm",

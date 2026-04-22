@@ -357,7 +357,7 @@ class TaskConfigFactory:
     @staticmethod
     def _base_common_layer(ctx: TaskContext) -> dict:
         # DeepSeek and Qwen3.5 models natively support MTP with nextn=1; other models default to 0
-        nextn = 1 if ctx.model_family in {"DEEPSEEK", "DEEPSEEKV32", "QWEN35"} else 0
+        nextn = 1 if ctx.model_family in {"DEEPSEEK", "DEEPSEEKV32", "KIMIK25", "QWEN35"} else 0
         return {
             "serving_mode": ctx.serving_mode,
             "model_path": ctx.model_path,
@@ -905,16 +905,18 @@ class TaskConfig:
                 worker_cfg[k] = v
 
         model_family = get_model_family(self.model_path)
-        is_deepseek = model_family == "DEEPSEEK"
+        is_deepseek_fam = model_family in ("DEEPSEEK", "KIMIK25")
         is_deepseek_v32 = model_family == "DEEPSEEKV32"
         enable_wideep = bool(getattr(self.config, "enable_wideep", self.enable_wideep))
         moe_backend = getattr(self.config, "moe_backend", None)
 
         # DeepSeek uses MLA perf tables; others use attention perf tables.
+        # vLLM absorbs MLA KV projections into standard attention kernels, so it
+        # has no dedicated MLA perf data — use standard attention tables instead.
         if is_deepseek_v32:
             context_attn_key = "dsa_context_module"
             generation_attn_key = "dsa_generation_module"
-        elif is_deepseek:
+        elif is_deepseek_fam and self.backend_name != "vllm":
             if self.backend_name == "sglang" and enable_wideep:
                 context_attn_key = "wideep_context_mla"
                 generation_attn_key = "wideep_generation_mla"

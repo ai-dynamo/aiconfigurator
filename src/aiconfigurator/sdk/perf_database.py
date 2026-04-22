@@ -2971,6 +2971,8 @@ class PerfDatabase:
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None) or getattr(self, "_oneccl_data", None)),
             }
+        else:
+            self.supported_quant_mode = {}
 
     def is_inter_node(self, num_gpus: int) -> bool:
         """
@@ -5446,10 +5448,17 @@ class PerfDatabase:
                             moe_dict = self._moe_low_latency_data[quant_mode][used_workload_distribution][topk][
                                 num_experts
                             ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                            if not moe_dict:
+                                # Shape not present in low-latency table (nested defaultdict returned
+                                # an empty dict instead of raising KeyError). Fall back to regular data.
+                                raise KeyError(
+                                    f"No low-latency data for nvfp4 shape "
+                                    f"[{hidden_size}, {inter_size}, {topk}, {num_experts}]"
+                                )
                             logger.debug(
-                                f"trying to find low latency data for moe {quant_mode} "
+                                f"Using low-latency kernel for nvfp4 moe "
                                 f"{workload_distribution} {topk} {num_experts} {hidden_size} "
-                                f"{inter_size} {moe_tp_size} {moe_ep_size} but failed."
+                                f"{inter_size} {moe_tp_size} {moe_ep_size}."
                             )
                         except:
                             used_workload_distribution = (

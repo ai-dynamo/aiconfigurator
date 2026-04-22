@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from aiconfigurator.generator.naive import (
+    _calculate_min_tp,
     _estimate_model_weight_bytes,
     _sanitize_rfc1123,
     build_naive_generator_params,
@@ -173,6 +174,57 @@ class TestEstimateModelWeightBytesFailsOnMissingModel:
                 system_name="h200_sxm",
                 backend_name="vllm",
             )
+
+
+@pytest.mark.unit
+class TestCalculateMinTp:
+    """Verify _calculate_min_tp memory-fit floor, including multi-node sweeps."""
+
+    # H100: 80 GiB per GPU.  DeepSeek R1 FP8: ~671 GiB of weights.
+    _H100_VRAM = 80 * 1024**3
+    _R1_FP8_WEIGHTS = 671 * 1024**3
+
+    def test_single_node_caps_at_gpus_per_node(self):
+        """Dense default: min_tp capped at gpus_per_node even if model is larger."""
+        tp = _calculate_min_tp(
+            model_weight_bytes=self._R1_FP8_WEIGHTS,
+            vram_per_gpu=self._H100_VRAM,
+            gpus_per_node=8,
+            total_gpus=32,
+        )
+        assert tp == 8  # capped at node even though model wants more
+
+    def test_multi_node_allows_crossing_node_boundary(self):
+        """MoE wide-EP: min_tp can span nodes, floored to power-of-2 fit."""
+        tp = _calculate_min_tp(
+            model_weight_bytes=self._R1_FP8_WEIGHTS,
+            vram_per_gpu=self._H100_VRAM,
+            gpus_per_node=8,
+            total_gpus=32,
+            allow_multi_node=True,
+        )
+        # 1.5 * 671 / 80 = ~12.6 -> 13 -> round to 16
+        assert tp == 16
+
+    def test_multi_node_capped_by_total_gpus(self):
+        """Even in multi-node mode, result cannot exceed total_gpus budget."""
+        tp = _calculate_min_tp(
+            model_weight_bytes=self._R1_FP8_WEIGHTS,
+            vram_per_gpu=self._H100_VRAM,
+            gpus_per_node=8,
+            total_gpus=8,
+            allow_multi_node=True,
+        )
+        assert tp == 8  # clamped to budget
+
+    def test_small_model_fits_on_one_gpu(self):
+        tp = _calculate_min_tp(
+            model_weight_bytes=10 * 1024**3,
+            vram_per_gpu=self._H100_VRAM,
+            gpus_per_node=8,
+            total_gpus=8,
+        )
+        assert tp == 1
 
 
 @pytest.mark.unit

@@ -574,6 +574,13 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"moe_layers={sum(moe_freq)}, dense_layers={moe_freq.count(0)}, "
             f"sliding_window_size={extra_params.sliding_window_size}"
         )
+    elif architecture == "KimiK25ForConditionalGeneration":
+        # KIMI K2.5 wraps a DeepSeek-V3-style MLA text model. Store v_head_dim so
+        # DeepSeekModel can use the correct attention head size (128) for vLLM's
+        # standard-attention path, instead of the generic hidden_size // n_heads = 112.
+        extra_params = {
+            "v_head_dim": config.get("v_head_dim", 0),
+        }
     elif architecture in {"DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"}:
         # DeepSeek-V3.2 / GLM-5 share the DSA attention pattern but have different
         # projection/indexer dimensions, so keep these structural fields attached
@@ -699,8 +706,90 @@ def _normalize_quant_algo(value: object) -> str | None:
         "nvfp4": "nvfp4",
         "mxfp4": "mxfp4",
         "w4a16_mxfp4": "mxfp4",
+        # compressed-tensors: pass through as-is so models.py can handle it with
+        # the correct partial-quantization semantics (MoE experts only, not all Linear layers).
+        "compressed-tensors": "compressed-tensors",
     }
     return aliases.get(algo, algo)
+
+
+def _categorize_ignore_pattern(pattern: str) -> set[str]:
+    """Return the set of layer categories covered by a single compressed-tensors ignore pattern.
+
+    Recognized categories:
+        ``"attention"``       — self-attention projections (q/k/v/o)
+        ``"routing_experts"`` — MoE routing-expert FFN weights
+        ``"shared_experts"``  — shared-expert FFN weights
+        ``"dense_mlp"``       — dense (non-MoE) FFN projections
+        ``"lm_head"``         — vocabulary projection
+    """
+    p = str(pattern).lower()
+    categories: set[str] = set()
+
+    if any(kw in p for kw in ("self_attn", "q_proj", "k_proj", "v_proj", "o_proj")):
+        categories.add("attention")
+
+    # shared_expert must be checked before the generic expert check
+    if "shared_expert" in p:
+        categories.add("shared_experts")
+    elif "expert" in p:
+        categories.add("routing_experts")
+
+    if "lm_head" in p:
+        categories.add("lm_head")
+
+    # Dense MLP: pattern mentions "mlp" and a projection suffix, but not experts.
+    # Matches both literal paths ("mlp.gate_proj") and regex groups ("mlp\.(gate|up|down)_proj").
+    if "mlp" in p and "_proj" in p and "expert" not in p:
+        categories.add("dense_mlp")
+
+    return categories
+
+
+def parse_compressed_tensors_quant(
+    quantization_config: dict | None,
+) -> tuple[str | None, frozenset[str]]:
+    """Parse a compressed-tensors ``quantization_config`` dict.
+
+    Returns ``(base_algo, ignored_categories)`` where:
+
+    - ``base_algo``: weight quantization algorithm (``"int4_wo"``, ``"int8_wo"``,
+      ``"fp8"``), or ``None`` when the config carries no quantization information.
+    - ``ignored_categories``: frozenset of layer-category names excluded from
+      quantization (i.e. remaining in float16/bfloat16).  Empty when nothing is
+      ignored or when ``base_algo`` is ``None``.
+
+    The caller is responsible for mapping categories to SDK quant-mode fields.
+    Recognized categories: ``"attention"``, ``"routing_experts"``,
+    ``"shared_experts"``, ``"dense_mlp"``, ``"lm_head"``.
+    """
+    if not isinstance(quantization_config, dict):
+        return None, frozenset()
+
+    # Derive base algo from the first config_group's weight spec.
+    base_algo: str | None = None
+    for group in (quantization_config.get("config_groups") or {}).values():
+        weights = (group or {}).get("weights") or {}
+        num_bits = weights.get("num_bits")
+        w_type = str(weights.get("type", "")).lower()
+        if isinstance(num_bits, int):
+            if num_bits == 4 and "int" in w_type:
+                base_algo = "int4_wo"
+            elif num_bits == 8 and "int" in w_type:
+                base_algo = "int8_wo"
+            elif num_bits == 8 and "float" in w_type:
+                base_algo = "fp8"
+        if base_algo:
+            break
+
+    if base_algo is None:
+        return None, frozenset()
+
+    ignored: set[str] = set()
+    for pattern in quantization_config.get("ignore") or []:
+        ignored |= _categorize_ignore_pattern(pattern)
+
+    return base_algo, frozenset(ignored)
 
 
 def _normalize_kv_cache_algo(value: object) -> str | None:

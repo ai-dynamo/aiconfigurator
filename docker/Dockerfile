@@ -9,8 +9,11 @@ WORKDIR /workspace
 ENV VIRTUAL_ENV=/opt/aiconfigurator/venv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN mkdir /opt/aiconfigurator && \
-    uv venv --python 3.12 ${VIRTUAL_ENV} 
+    uv venv --python 3.12 ${VIRTUAL_ENV} && \
+    chmod a+rx /root && \
+    chmod -R a+rX /root/.local
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV MPLCONFIGDIR=/tmp/matplotlib
 
 FROM base AS build
 COPY src/ /workspace/src/

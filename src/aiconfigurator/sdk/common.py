@@ -285,6 +285,9 @@ DefaultHFModels = {
     # DeepSeek V3/V3.1 Models
     "deepseek-ai/DeepSeek-V3",
     "nvidia/DeepSeek-V3.1-NVFP4",
+    # Kimi K2.5 Models
+    "moonshotai/Kimi-K2.5",
+    "nvidia/Kimi-K2.5-NVFP4",
     # DeepSeek V3.2 / GLM-5 (DEEPSEEKV32 family)
     "deepseek-ai/DeepSeek-V3.2",
     "zai-org/GLM-5",
@@ -342,7 +345,18 @@ SupportedSystems = {
 """
 Model family for model definition
 """
-ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "DEEPSEEKV32", "NEMOTRONNAS", "NEMOTRONH", "HYBRIDMOE", "QWEN35"}
+ModelFamily = {
+    "GPT",
+    "LLAMA",
+    "MOE",
+    "DEEPSEEK",
+    "DEEPSEEKV32",
+    "KIMIK25",
+    "NEMOTRONNAS",
+    "NEMOTRONH",
+    "HYBRIDMOE",
+    "QWEN35",
+}
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
     "Qwen2ForCausalLM": "LLAMA",
@@ -352,7 +366,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "DeepseekV3ForCausalLM": "DEEPSEEK",
     "DeepseekV32ForCausalLM": "DEEPSEEKV32",
     "GlmMoeDsaForCausalLM": "DEEPSEEKV32",
-    "KimiK25ForConditionalGeneration": "DEEPSEEK",
+    "KimiK25ForConditionalGeneration": "KIMIK25",
     "NemotronForCausalLM": "NEMOTRONNAS",
     "DeciLMForCausalLM": "NEMOTRONNAS",
     "NemotronHForCausalLM": "NEMOTRONH",
