@@ -905,7 +905,7 @@ class TaskConfig:
                 worker_cfg[k] = v
 
         model_family = get_model_family(self.model_path)
-        is_deepseek = model_family in ("DEEPSEEK", "KIMIK25")
+        is_deepseek_fam = model_family in ("DEEPSEEK", "KIMIK25")
         is_deepseek_v32 = model_family == "DEEPSEEKV32"
         enable_wideep = bool(getattr(self.config, "enable_wideep", self.enable_wideep))
         moe_backend = getattr(self.config, "moe_backend", None)
@@ -916,7 +916,7 @@ class TaskConfig:
         if is_deepseek_v32:
             context_attn_key = "dsa_context_module"
             generation_attn_key = "dsa_generation_module"
-        elif is_deepseek and self.backend_name != "vllm":
+        elif is_deepseek_fam and self.backend_name != "vllm":
             if self.backend_name == "sglang" and enable_wideep:
                 context_attn_key = "wideep_context_mla"
                 generation_attn_key = "wideep_generation_mla"
