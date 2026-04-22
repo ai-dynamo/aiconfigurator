@@ -15,6 +15,16 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 FROM base AS build
 COPY src/ /workspace/src/
 COPY LICENSE pyproject.toml README.md /workspace/
+# Fail fast if Git LFS content wasn't materialized before the build — otherwise
+# the wheel ships pointer stubs in place of perf data (see DYN-2725).
+RUN set -e; \
+    bad=$(grep -rlE "^version https://git-lfs" /workspace/src/aiconfigurator/systems 2>/dev/null || true); \
+    if [ -n "$bad" ]; then \
+        echo "ERROR: Unmaterialized Git LFS pointer files found:" >&2; \
+        echo "$bad" >&2; \
+        echo "Run 'git lfs install && git lfs pull' in the source tree before building." >&2; \
+        exit 1; \
+    fi
 RUN uv build --wheel --out-dir /workspace/dist
 
 FROM base AS runtime
