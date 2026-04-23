@@ -286,9 +286,9 @@ def safe_mkdir(target_path: str, exist_ok: bool = True) -> Path:
         allowed_prefixes = [
             current_dir,
             Path.home(),
-            Path("/tmp"),
+            Path("/tmp").resolve(),
             Path("/workspace"),
-            Path("/var/tmp"),
+            Path("/var/tmp").resolve(),
             Path(tempfile.gettempdir()).resolve(),
         ]
 
