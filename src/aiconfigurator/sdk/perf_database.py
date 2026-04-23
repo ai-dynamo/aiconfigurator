@@ -1131,11 +1131,6 @@ def load_mla_bmm_data(mla_bmm_file):
     return mla_bmm_data
 
 
-def _normalize_dtype_key(raw: str) -> str:
-    """Map collector dtype strings to enum member names (bfloat16 → bfloat16)."""
-    return "bfloat16" if raw == "bfloat16" else raw
-
-
 DSA_MODEL_DIMS: dict[str, dict] = {
     "DeepseekV32ForCausalLM": {
         "hidden_size": 7168,
@@ -1204,9 +1199,9 @@ def load_context_dsa_module_data(dsa_file: str):
         energy = power * latency
 
         arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
-        gemm_mode = common.GEMMQuantMode[_normalize_dtype_key(row["gemm_type"])]
-        fmha_mode = common.FMHAQuantMode[_normalize_dtype_key(row["mla_dtype"])]
-        kv_dtype = common.KVCacheQuantMode[_normalize_dtype_key(row["kv_cache_dtype"])]
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
+        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
         dsa_data[fmha_mode][kv_dtype][gemm_mode][arch][num_heads][s][b] = {
             "latency": latency,
@@ -1254,8 +1249,8 @@ def load_generation_dsa_module_data(dsa_file: str):
         energy = power * latency
 
         arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
-        gemm_mode = common.GEMMQuantMode[_normalize_dtype_key(row["gemm_type"])]
-        kv_dtype = common.KVCacheQuantMode[_normalize_dtype_key(row["kv_cache_dtype"])]
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
         dsa_data[kv_dtype][gemm_mode][arch][num_heads][b][s] = {
             "latency": latency,
@@ -1299,9 +1294,9 @@ def load_context_mla_module_data(mla_module_file: str):
         power = float(row.get("power", 0.0)) if has_power else 0.0
         energy = power * latency
 
-        fmha_mode = common.FMHAQuantMode[_normalize_dtype_key(row["mla_dtype"])]
-        kv_dtype = common.KVCacheQuantMode[_normalize_dtype_key(row["kv_cache_dtype"])]
-        gemm_mode = common.GEMMQuantMode[_normalize_dtype_key(row["gemm_type"])]
+        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
+        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
 
         mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b] = {
             "latency": latency,
@@ -1345,9 +1340,9 @@ def load_generation_mla_module_data(mla_module_file: str):
         power = float(row.get("power", 0.0)) if has_power else 0.0
         energy = power * latency
 
-        fmha_mode = common.FMHAQuantMode[_normalize_dtype_key(row["mla_dtype"])]
-        gemm_mode = common.GEMMQuantMode[_normalize_dtype_key(row["gemm_type"])]
-        kv_dtype = common.KVCacheQuantMode[_normalize_dtype_key(row["kv_cache_dtype"])]
+        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
         mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][b][s] = {
             "latency": latency,

@@ -84,9 +84,6 @@ def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
                 overrides["gemm_quant_mode"] = getattr(common.GEMMQuantMode, base_algo)
             if "routing_experts" not in ignored:
                 overrides["moe_quant_mode"] = getattr(common.MoEQuantMode, base_algo)
-    elif quant_algo == "bfloat16":
-        overrides["gemm_quant_mode"] = common.GEMMQuantMode.bfloat16
-        overrides["moe_quant_mode"] = common.MoEQuantMode.bfloat16
     elif quant_algo is not None:
         raise ValueError(f"Unsupported quant algorithm: {quant_algo}")
 
