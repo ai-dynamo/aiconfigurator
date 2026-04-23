@@ -196,7 +196,7 @@ When power monitoring is enabled, performance CSV files will include additional 
 **Example output:**
 ```csv
 framework,version,device,op_name,kernel_source,gemm_dtype,m,n,k,latency,power,power_limit
-TRTLLM,1.2.0,NVIDIA H200 SXM,gemm,torch_flow,float16,1024,4096,4096,0.234,523.4,700.0
+TRTLLM,1.2.0,NVIDIA H200 SXM,gemm,torch_flow,bfloat16,1024,4096,4096,0.234,523.4,700.0
 ```
 
 ### Requirements
@@ -318,7 +318,7 @@ Suggest to start from lmsysorg docker image. Say, for 0.5.6.post2, we can use lm
 python3 collect.py --backend sglang
 ```
 This collects all SGLang ops in a single pass, including:
-- GEMM operations (FP8, FP16, INT8, INT4)
+- GEMM operations (FP8, BF16, INT8, INT4)
 - MLA (Multi-head Latent Attention) for context and generation
 - MLA BMM (Batch Matrix Multiplication) operations
 - MoE (Mixture of Experts) operations

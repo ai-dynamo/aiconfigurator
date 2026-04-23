@@ -38,7 +38,7 @@ def get_mla_gen_pre_test_cases():
         8192,
     ]
     num_heads = [128, 64, 32, 16, 8, 4, 2, 1]
-    dtype_list = ["float16"]
+    dtype_list = ["bfloat16"]
     if 86 < get_sm_version() < 100:
         dtype_list += ["fp8"]
     for num_tokens in gen_num_tokens:
@@ -81,7 +81,7 @@ def get_mla_gen_post_test_cases():
         20480,
     ]
     num_heads = [128, 64, 32, 16, 8, 4, 2, 1]
-    dtype_list = ["float16"]
+    dtype_list = ["bfloat16"]
     if 86 < get_sm_version() < 100:
         dtype_list += ["fp8"]
     for num_tokens in ctx_num_tokens:
@@ -99,7 +99,7 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
     qk_nope_head_dim = 128
     kv_lora_rank = 512
     # record graph
-    if dtype == "float16":
+    if dtype == "bfloat16":
         q_nope = torch.randn([num_tokens, num_heads, qk_nope_head_dim]).bfloat16().to(torch.device(device))
         k_b_proj_trans = torch.randn([num_heads, kv_lora_rank, qk_nope_head_dim]).bfloat16().to(torch.device(device))
         out = torch.randn([num_tokens, num_heads, kv_lora_rank]).bfloat16().to(torch.device(device))
@@ -214,7 +214,7 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
     kv_lora_rank = 512
     v_head_dim = 128
     # record graph
-    if dtype == "float16":
+    if dtype == "bfloat16":
         attn_out_latent = torch.randn([num_tokens, num_heads, kv_lora_rank]).bfloat16().to(torch.device(device))
         v_b_proj = torch.randn([num_heads, v_head_dim, kv_lora_rank]).bfloat16().to(torch.device(device))
         attn_output = torch.randn([num_tokens, num_heads, v_head_dim]).bfloat16().to(torch.device(device))

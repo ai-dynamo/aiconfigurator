@@ -301,7 +301,7 @@ class TestCorrectData:
     def test_correct_gemm_data(self, comprehensive_perf_db, caplog):
         """Test that _correct_data adjusts GEMM data based on SOL."""
         # Manually set a GEMM value that's too optimistic (lower than SOL)
-        quant_mode = common.GEMMQuantMode.float16
+        quant_mode = common.GEMMQuantMode.bfloat16
         m, n, k = 64, 128, 256
 
         # Calculate what SOL should be
@@ -320,7 +320,7 @@ class TestCorrectData:
 
     def test_correct_generation_attention_data(self, comprehensive_perf_db, caplog):
         """Test that _correct_data adjusts generation attention data."""
-        kv_cache_quant_mode = common.KVCacheQuantMode.float16
+        kv_cache_quant_mode = common.KVCacheQuantMode.bfloat16
         n_kv = 0  # MHA case
         n, b, s = 16, 4, 64
 
@@ -366,5 +366,5 @@ class TestUpdateSupportMatrix:
             assert isinstance(comprehensive_perf_db.supported_quant_mode[key], list)
 
         # Verify some expected quant modes
-        assert "float16" in comprehensive_perf_db.supported_quant_mode["gemm"]
-        assert "float16" in comprehensive_perf_db.supported_quant_mode["context_attention"]
+        assert "bfloat16" in comprehensive_perf_db.supported_quant_mode["gemm"]
+        assert "bfloat16" in comprehensive_perf_db.supported_quant_mode["context_attention"]

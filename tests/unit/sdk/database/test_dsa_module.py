@@ -24,9 +24,9 @@ class TestContextDSAModule:
             s=256,
             prefix=0,
             num_heads=32,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
-            fmha_quant_mode=common.FMHAQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SOL,
         )
         assert float(result) > 0
@@ -37,9 +37,9 @@ class TestContextDSAModule:
             s=256,
             prefix=0,
             num_heads=32,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
-            fmha_quant_mode=common.FMHAQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SOL_FULL,
         )
         assert len(result) == 3
@@ -52,9 +52,9 @@ class TestContextDSAModule:
             s=128,
             prefix=0,
             num_heads=32,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
-            fmha_quant_mode=common.FMHAQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SOL,
         )
         r2 = comprehensive_perf_db.query_context_dsa_module(
@@ -62,9 +62,9 @@ class TestContextDSAModule:
             s=1024,
             prefix=0,
             num_heads=32,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
-            fmha_quant_mode=common.FMHAQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SOL,
         )
         assert r2 > r1
@@ -76,9 +76,9 @@ class TestContextDSAModule:
             s=256,
             prefix=0,
             num_heads=32,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
-            fmha_quant_mode=common.FMHAQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SOL,
         )
         with_prefix = comprehensive_perf_db.query_context_dsa_module(
@@ -86,9 +86,9 @@ class TestContextDSAModule:
             s=256,
             prefix=256,
             num_heads=32,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
-            fmha_quant_mode=common.FMHAQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SOL,
         )
         assert with_prefix > no_prefix
@@ -99,9 +99,9 @@ class TestContextDSAModule:
             s=256,
             prefix=0,
             num_heads=32,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
-            fmha_quant_mode=common.FMHAQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.EMPIRICAL,
         )
         assert float(result) > 0
@@ -113,9 +113,9 @@ class TestContextDSAModule:
             s=256,
             prefix=0,
             num_heads=32,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
-            fmha_quant_mode=common.FMHAQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.HYBRID,
         )
         assert float(result) > 0
@@ -128,9 +128,9 @@ class TestContextDSAModule:
             prefix=0,
             num_heads=32,
             index_topk=2048,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
-            fmha_quant_mode=common.FMHAQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SOL,
         )
         r2 = comprehensive_perf_db.query_context_dsa_module(
@@ -139,9 +139,9 @@ class TestContextDSAModule:
             prefix=0,
             num_heads=32,
             index_topk=512,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
-            fmha_quant_mode=common.FMHAQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SOL,
         )
         assert r1 != r2
@@ -160,8 +160,8 @@ class TestGenerationDSAModule:
             b=4,
             s=1024,
             num_heads=32,
-            kv_cache_dtype=common.KVCacheQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SOL,
         )
         assert float(result) > 0
@@ -171,8 +171,8 @@ class TestGenerationDSAModule:
             b=4,
             s=1024,
             num_heads=32,
-            kv_cache_dtype=common.KVCacheQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SOL_FULL,
         )
         assert len(result) == 3
@@ -184,16 +184,16 @@ class TestGenerationDSAModule:
             b=1,
             s=1024,
             num_heads=32,
-            kv_cache_dtype=common.KVCacheQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SOL,
         )
         r2 = comprehensive_perf_db.query_generation_dsa_module(
             b=64,
             s=1024,
             num_heads=32,
-            kv_cache_dtype=common.KVCacheQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SOL,
         )
         assert r2 > r1
@@ -204,8 +204,8 @@ class TestGenerationDSAModule:
             s=4096,
             num_heads=32,
             index_topk=2048,
-            kv_cache_dtype=common.KVCacheQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SOL,
         )
         r2 = comprehensive_perf_db.query_generation_dsa_module(
@@ -213,8 +213,8 @@ class TestGenerationDSAModule:
             s=4096,
             num_heads=32,
             index_topk=512,
-            kv_cache_dtype=common.KVCacheQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SOL,
         )
         assert r2 < r1
@@ -224,8 +224,8 @@ class TestGenerationDSAModule:
             b=4,
             s=1024,
             num_heads=32,
-            kv_cache_dtype=common.KVCacheQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.EMPIRICAL,
         )
         assert float(result) > 0
@@ -235,8 +235,8 @@ class TestGenerationDSAModule:
             b=4,
             s=1024,
             num_heads=32,
-            kv_cache_dtype=common.KVCacheQuantMode.float16,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.HYBRID,
         )
         assert float(result) > 0

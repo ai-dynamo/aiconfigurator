@@ -54,7 +54,7 @@ class TokenDistribution(Enum):
 class MoEDtype(Enum):
     """Supported MoE data types for All-to-All communication."""
 
-    FLOAT16 = "float16"  # BFloat16/Float16
+    BFLOAT16 = "bfloat16"  # BFloat16
     FP8 = "fp8"  # FP8 E4M3
     NVFP4 = "nvfp4"  # NVFP4 with scale factors
 
@@ -79,7 +79,7 @@ class AlltoallTestCase:
     num_experts: int
     top_k: int
     ep_size: int
-    moe_dtype: MoEDtype = MoEDtype.FLOAT16
+    moe_dtype: MoEDtype = MoEDtype.BFLOAT16
     distribution: TokenDistribution = TokenDistribution.BALANCED
     description: str = ""
 
@@ -371,7 +371,7 @@ def get_dispatch_data_size_bytes(
     Returns:
         Remote data size in bytes
     """
-    if moe_dtype == MoEDtype.FLOAT16:
+    if moe_dtype == MoEDtype.BFLOAT16:
         per_token = hidden_size * 2
     elif moe_dtype == MoEDtype.FP8:
         per_token = hidden_size * 1
@@ -449,7 +449,7 @@ def prepare_test_data(
     # Generate hidden states based on dtype
     hidden_states_sf = None
 
-    if moe_dtype == MoEDtype.FLOAT16:
+    if moe_dtype == MoEDtype.BFLOAT16:
         hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=device)
     elif moe_dtype == MoEDtype.FP8:
         # FP8: generate in bfloat16 then cast

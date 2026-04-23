@@ -51,7 +51,7 @@ class TestTrtLLMWideEPMoEDispatch:
             moe_ep_size=4,
             attention_dp_size=1,
             pre_dispatch=True,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
         )
 
         assert dispatch._name == "test_pre_dispatch"
@@ -61,7 +61,7 @@ class TestTrtLLMWideEPMoEDispatch:
         assert dispatch._moe_tp_size == 2
         assert dispatch._moe_ep_size == 4
         assert dispatch._pre_dispatch
-        assert dispatch._quant_mode == common.MoEQuantMode.float16
+        assert dispatch._quant_mode == common.MoEQuantMode.bfloat16
         assert not dispatch._use_low_precision_combine  # Default
         assert dispatch._node_num is None  # Default
         assert dispatch.num_gpus == 8  # 2 * 4
@@ -102,7 +102,7 @@ class TestTrtLLMWideEPMoEDispatch:
             moe_ep_size=1,
             attention_dp_size=1,
             pre_dispatch=True,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
         )
 
         assert dispatch.get_weights() == 0.0
@@ -119,7 +119,7 @@ class TestTrtLLMWideEPMoEDispatch:
             moe_ep_size=4,
             attention_dp_size=1,
             pre_dispatch=True,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
         )
 
         result = dispatch.query(mock_database, x=16)
@@ -135,7 +135,7 @@ class TestTrtLLMWideEPMoEDispatch:
         assert prepare_call[1]["topk"] == 2
         assert prepare_call[1]["num_experts"] == 8
         assert prepare_call[1]["moe_ep_size"] == 4
-        assert prepare_call[1]["quant_mode"] == common.MoEQuantMode.float16
+        assert prepare_call[1]["quant_mode"] == common.MoEQuantMode.bfloat16
         assert prepare_call[1]["node_num"] is None
 
         # Check dispatch call
@@ -159,7 +159,7 @@ class TestTrtLLMWideEPMoEDispatch:
             moe_ep_size=4,
             attention_dp_size=1,
             pre_dispatch=False,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
             use_low_precision_combine=False,
         )
 
@@ -212,7 +212,7 @@ class TestTrtLLMWideEPMoEDispatch:
             moe_ep_size=4,
             attention_dp_size=1,
             pre_dispatch=True,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
         )
 
         result = dispatch.query(mock_database, x=16)
@@ -233,7 +233,7 @@ class TestTrtLLMWideEPMoEDispatch:
             moe_ep_size=8,
             attention_dp_size=1,
             pre_dispatch=True,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
             node_num=4,  # Custom node count
         )
 
@@ -256,7 +256,7 @@ class TestTrtLLMWideEPMoEDispatch:
             moe_ep_size=1,
             attention_dp_size=1,
             pre_dispatch=True,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
         )
 
         dispatch.query(mock_database, x=16)
@@ -287,7 +287,7 @@ class TestTrtLLMWideEPMoEDispatch:
     def test_different_quant_modes(self, mock_database):
         """Test with different quantization modes."""
         quant_modes = [
-            common.MoEQuantMode.float16,
+            common.MoEQuantMode.bfloat16,
             common.MoEQuantMode.nvfp4,
             common.MoEQuantMode.fp8_block,
         ]

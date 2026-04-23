@@ -8,7 +8,7 @@ gpu:
   mem_empirical_constant_latency: 0.000003 # 3us some nonofficial correction based on observations, you should try to modify based on your own observations
   mem_capacity: 25769803776 # 24GiB
   float32_tc_flops: 12280000000000 # 12.28TFLOPS
-  float16_tc_flops: 98304000000000 # 98.3TFLOPS
+  bfloat16_tc_flops: 98304000000000 # 98.3TFLOPS
   int8_tc_flops: 197000000000000 # 197TOPS
   power: 200 # Watt (Total Board Power)
 

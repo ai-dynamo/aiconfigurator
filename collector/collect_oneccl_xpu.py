@@ -39,7 +39,7 @@ OP_NAME_TO_CCL = {
 
 # Mapping from our dtype names to oneCCL benchmark dtype names
 DTYPE_TO_CCL = {
-    "half": "float16",
+    "half": "bfloat16",
     "int8": "int8",
 }
 

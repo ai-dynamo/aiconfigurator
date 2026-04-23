@@ -88,7 +88,7 @@ def get_moe_test_cases():
     """Generate MoE test cases"""
 
     # Quantization types supported by vLLM
-    moe_list = ["float16", "int4_wo"]
+    moe_list = ["bfloat16", "int4_wo"]
     if get_sm_version() > 86:
         moe_list += ["fp8"]
     if get_sm_version() >= 90 and per_block_cast_to_fp8 is not None:
@@ -192,7 +192,7 @@ def run_moe_torch(
     torch.set_default_device(device)
 
     # Configure quantization parameters
-    dtype = torch.float16
+    dtype = torch.bfloat16
     quant_config = None
     block_shape: list[int] | None = None
     a1_scale = None
@@ -209,14 +209,14 @@ def run_moe_torch(
         local_num_experts,
         2 * local_inter_size,
         hidden_size,
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
         device=device,
     )
     w2 = torch.randn(
         local_num_experts,
         hidden_size,
         local_inter_size,
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
         device=device,
     )
 
@@ -237,12 +237,12 @@ def run_moe_torch(
         # Per-group scales: (E, N, K//group_size)
         w1_scale = torch.randn(
             (local_num_experts, 2 * local_inter_size, hidden_size // int4_group_size),
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
         w2_scale = torch.randn(
             (local_num_experts, hidden_size, local_inter_size // int4_group_size),
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
         quant_config = int4_w4a16_moe_quant_config(
@@ -311,7 +311,7 @@ def run_moe_torch(
         # Trigger backend selection + weight swizzle for current GPU
         moe_module.quant_method.process_weights_after_loading(moe_module)
 
-        # Free float16 weights; not used for mxfp4.
+        # Free bfloat16 weights; not used for mxfp4.
         del w1, w2
 
     # NVFP4 path: uses FlashInfer TRTLLM FP4 monolithic kernel (not fused_experts).
@@ -378,7 +378,7 @@ def run_moe_torch(
             g1_alphas=a13_scale * w13_scale_2,
             g2_alphas=a2_scale_nvfp4 * w2_scale_2,
         )
-        # Free the float16 weights; they are not used for nvfp4.
+        # Free the bfloat16 weights; they are not used for nvfp4.
         del w1, w2
 
     elif moe_type in ["fp8", "fp8_block"]:
@@ -424,7 +424,7 @@ def run_moe_torch(
     for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
         print("num_tokens", num_tokens)
         print("topk", topk)
-        hs_dtype = torch.bfloat16 if use_mxfp4 else torch.float16
+        hs_dtype = torch.bfloat16
         hidden_states = torch.randn([num_tokens, hidden_size], dtype=hs_dtype, device=device)
 
         # Generate routing inputs.
@@ -457,7 +457,7 @@ def run_moe_torch(
                         moe_ep_size,
                         power_law_alpha,
                     )
-                    .half()
+                    .bfloat16()
                     .to(device)
                 )
                 weights, ids = torch.topk(logits, topk, dim=-1)
@@ -467,7 +467,7 @@ def run_moe_torch(
             print("actual num_tokens: ", [topk_ids.shape[0] for topk_ids in topk_ids_list])
 
         elif distributed == "balanced":
-            actual_logits = balanced_logits(num_tokens, num_experts, topk).half().to(device)
+            actual_logits = balanced_logits(num_tokens, num_experts, topk).bfloat16().to(device)
             topk_weights, topk_ids = torch.topk(actual_logits, topk, dim=-1)
             topk_weights = F.softmax(topk_weights, dim=-1)
 

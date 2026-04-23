@@ -197,19 +197,19 @@ class TestKvCacheOomProperties:
     def test_smaller_model_has_more_kv_capacity(self):
         """8B model has much more KV capacity than 32B on the same GPU.
 
-        Both models use float16 KV cache to match benchmark conditions and ensure
+        Both models use bfloat16 KV cache to match benchmark conditions and ensure
         a fair comparison (default KV quant mode differs between model families).
 
-        h100_sxm / tp=1 / isl=osl=2048 / f=0.9 / float16 KV:
+        h100_sxm / tp=1 / isl=osl=2048 / f=0.9 / bfloat16 KV:
           32B threshold ≈ 30, 8B threshold ≈ 88.
           bs=60: OOM for 32B, fits for 8B.
         """
         isl, osl = 2048, 2048
         model_8b, db, backend = _load(
-            "h100_sxm", "meta-llama/Meta-Llama-3.1-8B", tp=1, kvcache_quant_mode=common.KVCacheQuantMode.float16
+            "h100_sxm", "meta-llama/Meta-Llama-3.1-8B", tp=1, kvcache_quant_mode=common.KVCacheQuantMode.bfloat16
         )
         model_32b, _, _ = _load(
-            "h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1, kvcache_quant_mode=common.KVCacheQuantMode.float16
+            "h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1, kvcache_quant_mode=common.KVCacheQuantMode.bfloat16
         )
         assert _is_kv_oom(
             backend, model_32b, db, 60, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK, max_num_tokens=2 * isl
@@ -270,7 +270,7 @@ class TestKvCacheOomProperties:
 #   --max_seq_len $((ISL + OSL + 1000))
 #   --max_num_tokens $((2 * ISL))
 #   --free_gpu_memory_fraction FRAC
-#   KV cache dtype = float16 (TRT-LLM default)
+#   KV cache dtype = bfloat16 (TRT-LLM default)
 #
 # We call _is_kv_oom with the same parameters and assert:
 #   - batch_size = bench_max_bs - tolerance → NOT KV OOM
@@ -383,13 +383,13 @@ def test_kv_oom_boundary(system, model_path, tp, isl, osl, frac, bench_max_bs):
       - batch_size = bench_max_bs + tol + 1 → IS KV OOM
     where tol = max(1, int(bench_max_bs * KV_CACHE_MEMORY_TOLERANCE))
 
-    Uses float16 KV cache to match benchmark conditions.
+    Uses bfloat16 KV cache to match benchmark conditions.
     """
     model, database, backend = _load(
         system,
         model_path,
         tp,
-        kvcache_quant_mode=common.KVCacheQuantMode.float16,
+        kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
     )
 
     tol = max(1, int(bench_max_bs * KV_CACHE_MEMORY_TOLERANCE))

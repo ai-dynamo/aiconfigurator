@@ -40,7 +40,7 @@ def get_mla_gen_pre_test_cases():
         8192,
     ]
     num_heads = [128, 64, 32, 16, 8, 4, 2, 1]
-    dtype_list = ["float16", "fp8"]
+    dtype_list = ["bfloat16", "fp8"]
     for num_tokens in gen_num_tokens:
         for num_head in num_heads:
             for dtype in dtype_list:
@@ -81,7 +81,7 @@ def get_mla_gen_post_test_cases():
         20480,
     ]
     num_heads = [128, 64, 32, 16, 8, 4, 2, 1]
-    dtype_list = ["float16", "fp8"]
+    dtype_list = ["bfloat16", "fp8"]
     for num_tokens in ctx_num_tokens:
         for num_head in num_heads:
             for dtype in dtype_list:
@@ -93,7 +93,7 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
-    assert dtype == "fp8" or dtype == "float16", "only support fp8 and float16"
+    assert dtype == "fp8" or dtype == "bfloat16", "only support fp8 and bfloat16"
 
     qk_nope_head_dim = 128
     kv_lora_rank = 512
@@ -155,13 +155,13 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
-    assert dtype == "float16" or dtype == "fp8", "only support fp8 and float16"
+    assert dtype == "bfloat16" or dtype == "fp8", "only support fp8 and bfloat16"
 
     qk_nope_head_dim = 128
     kv_lora_rank = 512
     v_head_dim = 128
 
-    if dtype == "float16":
+    if dtype == "bfloat16":
         attn_output = torch.randn([num_tokens, num_heads, kv_lora_rank]).bfloat16().to(torch.device(device))
         w_vc = torch.randn([num_heads, v_head_dim, kv_lora_rank]).bfloat16().to(torch.device(device))
         w_vc = w_vc.transpose(1, 2)

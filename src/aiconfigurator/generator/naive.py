@@ -198,7 +198,7 @@ def _estimate_model_weight_bytes(model_path: str) -> int:
         # Total parameters
         total_params = embedding_params + (num_layers * per_layer_params)
 
-        # Convert to bytes (FP16)
+        # Convert to bytes (BF16)
         weight_bytes = total_params * _BYTES_PER_PARAM
 
         logger.info(

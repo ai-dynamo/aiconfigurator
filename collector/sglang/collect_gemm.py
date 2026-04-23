@@ -42,20 +42,20 @@ def get_gemm_test_cases():
 
     sm_version = get_sm_version()
     if sm_version < 89:
-        gemm_list = ["float16"]
+        gemm_list = ["bfloat16"]
     elif sm_version < 90:
         # SM89 (L40S) and earlier don't have TMA - skip fp8_block
-        gemm_list = ["float16", "fp8"]
+        gemm_list = ["bfloat16", "fp8"]
     elif sm_version < 100:
         # Hopper supports fp8_block
         # fp8_block (DeepGEMM) requires SM90+ for TMA support
-        gemm_list = ["fp8_block", "float16", "fp8"]
+        gemm_list = ["fp8_block", "bfloat16", "fp8"]
     elif sm_version < 110:
         # SM100/SM103 (B100/B200 datacenter Blackwell): fp8_block + nvfp4
-        gemm_list = ["fp8_block", "float16", "fp8", "nvfp4"]
+        gemm_list = ["fp8_block", "bfloat16", "fp8", "nvfp4"]
     else:
         # SM120+ (RTX PRO 6000 Blackwell workstation): no DeepGEMM recipe for fp8_block
-        gemm_list = ["float16", "fp8", "nvfp4"]
+        gemm_list = ["bfloat16", "fp8", "nvfp4"]
 
     for gemm_common_testcase in get_gemm_common_test_cases():
         x = gemm_common_testcase.x
@@ -124,7 +124,7 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
     assert gemm_type in [
         "fp8_block",
         "fp8",
-        "float16",
+        "bfloat16",
         "int8_wo",
         "nvfp4",
     ], "not support gemm type"
@@ -214,12 +214,12 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
 
             return gemm_op
 
-        elif gemm_type == "float16":
-            a_fp16 = torch.randn(M, K, dtype=torch.float16, device=device)
-            b_fp16 = torch.randn(N, K, dtype=torch.float16, device=device)
+        elif gemm_type == "bfloat16":
+            a_bfloat16 = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+            b_bfloat16 = torch.randn(N, K, dtype=torch.bfloat16, device=device)
 
             def gemm_op():
-                return F.linear(a_fp16, b_fp16, None)
+                return F.linear(a_bfloat16, b_bfloat16, None)
 
             return gemm_op
 

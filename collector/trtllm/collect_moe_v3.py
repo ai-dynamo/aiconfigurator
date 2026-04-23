@@ -141,7 +141,7 @@ def cleanup_empty_json_files(directory):
 
 def get_moe_test_cases():
     """Build list of MoE test case tuples for trtllm >= 1.1 (power_law, SM-dependent quant modes)."""
-    moe_list = ["float16"]
+    moe_list = ["bfloat16"]
     sm_version = get_sm_version()
     if sm_version > 86:
         moe_list += ["fp8"]
@@ -192,7 +192,7 @@ def get_moe_test_cases():
 
             # TLLM_CHECK_WITH_INFO(inter_size % (256 / sizeof_bits<WeightType>::value) == 0
             weight_bits = {
-                "float16": 16,
+                "bfloat16": 16,
                 "fp8": 8,
                 "fp8_block": 8,
                 "w4a16_mxfp4": 4,
@@ -265,7 +265,7 @@ def run_moe_torch(
     if aic_debug == 1:
         print("MOE Allocated GDRAM:", torch.cuda.memory_allocated(device.index) / 1024**2, "MB")
         print("MOE Reserved GDRAM:", torch.cuda.memory_reserved(device) / 1024**2, "MB")
-    # moe type support float16, fp8_qdq, fp8_block, w4a8, nvfp4(not implemented yet)
+    # moe type support bfloat16, fp8_qdq, fp8_block, w4a8, nvfp4(not implemented yet)
     dtype = torch.bfloat16
     quant_group_size = 128
     quant_algo = None

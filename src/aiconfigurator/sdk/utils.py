@@ -802,7 +802,7 @@ def _normalize_kv_cache_algo(value: object) -> str | None:
     if algo in {"fp8", "e4m3", "e5m2"}:
         return "fp8"
     if algo in {"fp16", "float16", "bf16", "bfloat16"}:
-        return "float16"
+        return "bfloat16"
     return algo
 
 
@@ -873,7 +873,7 @@ def _infer_quantization_fields(raw_config: dict) -> dict[str, object]:
                 if num_bits <= 8:
                     kv_cache_algo = "fp8"
                 elif num_bits >= 16:
-                    kv_cache_algo = "float16"
+                    kv_cache_algo = "bfloat16"
 
     weight_block_size = quant_cfg.get("weight_block_size") or []
     if quant_algo == "fp8" and weight_block_size:

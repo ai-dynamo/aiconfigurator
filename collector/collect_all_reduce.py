@@ -483,8 +483,8 @@ def benchmark_vllm_allreduce(
     min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
 
     # Map dtype string to torch dtype
-    dtype_map = {"float16": torch.float16, "float32": torch.float32, "bfloat16": torch.bfloat16}
-    torch_dtype = dtype_map.get(dtype, torch.float16)
+    dtype_map = {"float32": torch.float32, "bfloat16": torch.bfloat16}
+    torch_dtype = dtype_map.get(dtype, torch.bfloat16)
 
     # Benchmark parameters
     repeat_n = 5
@@ -716,8 +716,8 @@ def benchmark_sglang_allreduce(
     min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
 
     # Map dtype string to torch dtype
-    dtype_map = {"float16": torch.float16, "float32": torch.float32, "bfloat16": torch.bfloat16}
-    torch_dtype = dtype_map.get(dtype, torch.float16)
+    dtype_map = {"float32": torch.float32, "bfloat16": torch.bfloat16}
+    torch_dtype = dtype_map.get(dtype, torch.bfloat16)
 
     # Benchmark parameters
     repeat_n = 5
@@ -1022,7 +1022,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--backend", "-b", choices=["trtllm", "vllm", "sglang"], default="trtllm", help="AllReduce backend to benchmark"
     )
-    parser.add_argument("--dtype", "-t", default="float16")
+    parser.add_argument("--dtype", "-t", default="bfloat16")
     parser.add_argument(
         "--range",
         "-r",

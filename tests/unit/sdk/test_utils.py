@@ -482,10 +482,10 @@ class TestHybridMoEModelBuilder:
             moe_tp_size=1,
             moe_ep_size=1,
             attention_dp_size=1,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
-            fmha_quant_mode=common.FMHAQuantMode.float16,
-            moe_quant_mode=common.MoEQuantMode.float16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.bfloat16,
         )
 
     def test_mimov2flash_model_builds_all_three_layer_types(self):
@@ -780,7 +780,7 @@ class TestParseCompressedTensorsQuant:
     # --- models.py mapping (end-to-end via _infer_quant_modes_from_raw_config) ---
 
     def test_kimi_k25_maps_to_correct_sdk_modes(self):
-        """Kimi K2.5 compressed-tensors config → gemm=float16, moe=int4_wo."""
+        """Kimi K2.5 compressed-tensors config → gemm=bfloat16, moe=int4_wo."""
         from aiconfigurator.sdk import common
         from aiconfigurator.sdk.models import _infer_quant_modes_from_raw_config
 
@@ -798,7 +798,7 @@ class TestParseCompressedTensorsQuant:
             ),
         }
         overrides = _infer_quant_modes_from_raw_config(raw_config)
-        assert overrides.get("gemm_quant_mode") is None  # not set → falls back to float16
+        assert overrides.get("gemm_quant_mode") is None  # not set → falls back to bfloat16
         assert overrides.get("moe_quant_mode") == common.MoEQuantMode.int4_wo
 
     def test_all_layers_quantized_maps_both_modes(self):

@@ -109,7 +109,7 @@ def get_moe_test_cases():
     """Generate MoE test cases"""
 
     # Quantization types supported by vLLM
-    moe_list = ["float16"]
+    moe_list = ["bfloat16"]
     if get_sm_version() > 86:
         moe_list += ["fp8"]
     if get_sm_version() >= 90 and per_block_cast_to_fp8 is not None:
@@ -215,7 +215,7 @@ def run_moe_torch(
     torch.set_default_device(device)
 
     # Configure quantization parameters
-    dtype = torch.float16
+    dtype = torch.bfloat16
     quant_config = None
     block_shape: list[int] | None = None
     a1_scale = None
@@ -238,14 +238,14 @@ def run_moe_torch(
         local_num_experts,
         2 * local_inter_size,
         hidden_size,
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
         device=device,
     )
     w2 = torch.randn(
         local_num_experts,
         hidden_size,
         local_inter_size,
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
         device=device,
     )
 
@@ -294,7 +294,7 @@ def run_moe_torch(
         # Trigger backend selection + weight swizzle for current GPU
         moe_module.quant_method.process_weights_after_loading(moe_module)
 
-        # Free float16 weights; not used for mxfp4.
+        # Free bfloat16 weights; not used for mxfp4.
         del w1, w2
 
     # NVFP4 path: uses FlashInfer TRTLLM FP4 monolithic kernel (not fused_experts).
@@ -372,7 +372,7 @@ def run_moe_torch(
             g1_alphas=a13_scale * w13_scale_2,
             g2_alphas=a2_scale_nvfp4 * w2_scale_2,
         )
-        # Free the float16 weights; they are not used for nvfp4.
+        # Free the bfloat16 weights; they are not used for nvfp4.
         del w1, w2
 
     elif moe_type in ["fp8", "fp8_block"]:
@@ -415,7 +415,7 @@ def run_moe_torch(
     # w1: K=hidden, N=2*inter (gate+up)  →  packed (E, hidden, 2*inter//8) int32
     # w2: K=inter (after silu_and_mul),  →  packed (E, inter, hidden//8) int32
     #     N=hidden (down proj)
-    # Scales are per-group along K: (E, K//group_size, N) float16
+    # Scales are per-group along K: (E, K//group_size, N) bfloat16
     use_int4_wo = moe_type == "int4_wo"
     w1_marlin = w2_marlin = w1_int4_scale = w2_int4_scale = None
 
@@ -448,19 +448,19 @@ def run_moe_torch(
         w2_marlin = _gptq_marlin_moe_repack_fn(w2_packed_q, empty_perm, local_inter_size, hidden_size, 4)
         del w1_packed_q, w2_packed_q
 
-        # Per-group scales along K dimension: (E, K // group_size, N) float16
+        # Per-group scales along K dimension: (E, K // group_size, N) bfloat16
         w1_int4_scale = torch.randn(
             (local_num_experts, hidden_size // group_size, 2 * local_inter_size),
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
         w2_int4_scale = torch.randn(
             (local_num_experts, local_inter_size // group_size, hidden_size),
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
-        # Free the float16 placeholder weights; not used for int4_wo.
+        # Free the bfloat16 placeholder weights; not used for int4_wo.
         del w1, w2
 
     if not use_mxfp4 and not use_int4_wo and dtype == torch.float8_e4m3fn:
@@ -471,7 +471,7 @@ def run_moe_torch(
     for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
         print("num_tokens", num_tokens)
         print("topk", topk)
-        hs_dtype = torch.bfloat16 if use_mxfp4 else torch.float16
+        hs_dtype = torch.bfloat16
         hidden_states = torch.randn([num_tokens, hidden_size], dtype=hs_dtype, device=device)
 
         # Generate routing inputs.
@@ -504,7 +504,7 @@ def run_moe_torch(
                         moe_ep_size,
                         power_law_alpha,
                     )
-                    .half()
+                    .bfloat16()
                     .to(device)
                 )
                 weights, ids = torch.topk(logits, topk, dim=-1)
@@ -514,7 +514,7 @@ def run_moe_torch(
             print("actual num_tokens: ", [topk_ids.shape[0] for topk_ids in topk_ids_list])
 
         elif distributed == "balanced":
-            actual_logits = balanced_logits(num_tokens, num_experts, topk).half().to(device)
+            actual_logits = balanced_logits(num_tokens, num_experts, topk).bfloat16().to(device)
             topk_weights, topk_ids = torch.topk(actual_logits, topk, dim=-1)
             topk_weights = F.softmax(topk_weights, dim=-1)
 

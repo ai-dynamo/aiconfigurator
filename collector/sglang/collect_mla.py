@@ -93,7 +93,7 @@ class MockServerArgs:
     def __init__(self, kv_cache_dtype: torch.dtype, page_size: int):
         self.enable_lora = False
         self.enable_deterministic_inference = False
-        self.kv_cache_dtype = "fp8" if kv_cache_dtype == torch.float8_e4m3fn else "float16"
+        self.kv_cache_dtype = "fp8" if kv_cache_dtype == torch.float8_e4m3fn else "bfloat16"
         self.speculative_eagle_topk = 0
         self.speculative_num_draft_tokens = 0
         self.speculative_attention_mode = "prefill"
@@ -533,11 +533,11 @@ def run_mla(
         isl = 1
         step = input_len
 
-    str_type = "float16" if kv_cache_dtype == torch.bfloat16 else "fp8"
+    str_type = "bfloat16" if kv_cache_dtype == torch.bfloat16 else "fp8"
     log_perf(
         item_list=[
             {
-                "mla_dtype": "float16",
+                "mla_dtype": "bfloat16",
                 "kv_cache_dtype": str_type,
                 "num_heads": local_num_heads,
                 "batch_size": batch_size,

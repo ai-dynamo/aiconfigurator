@@ -558,7 +558,7 @@ def run_attention_torch(
         log_gemm_type = "fp8_block"
     else:
         # DSA: log raw dtypes; perf_database._normalize_dtype_key() handles
-        # the bfloat16 → float16 mapping on the consumer side.
+        # the bfloat16 → bfloat16 mapping on the consumer side.
         log_mla_dtype = compute_dtype
         log_kv_dtype = kv_cache_dtype
         log_gemm_type = gemm_type

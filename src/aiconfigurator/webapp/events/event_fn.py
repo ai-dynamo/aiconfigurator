@@ -1215,18 +1215,18 @@ class EventFn:
                 moe_quant_mode_choices = sorted(supported_quant_mode["moe"])
 
         gemm_quant_mode_choices = (
-            gemm_quant_mode_choices if len(gemm_quant_mode_choices) > 0 else [common.GEMMQuantMode.float16.name]
+            gemm_quant_mode_choices if len(gemm_quant_mode_choices) > 0 else [common.GEMMQuantMode.bfloat16.name]
         )
         kvcache_quant_mode_choices = (
             kvcache_quant_mode_choices
             if len(kvcache_quant_mode_choices) > 0
-            else [common.KVCacheQuantMode.float16.name]
+            else [common.KVCacheQuantMode.bfloat16.name]
         )
         fmha_quant_mode_choices = (
-            fmha_quant_mode_choices if len(fmha_quant_mode_choices) > 0 else [common.FMHAQuantMode.float16.name]
+            fmha_quant_mode_choices if len(fmha_quant_mode_choices) > 0 else [common.FMHAQuantMode.bfloat16.name]
         )
         moe_quant_mode_choices = (
-            moe_quant_mode_choices if len(moe_quant_mode_choices) > 0 else [common.MoEQuantMode.float16.name]
+            moe_quant_mode_choices if len(moe_quant_mode_choices) > 0 else [common.MoEQuantMode.bfloat16.name]
         )
 
         default_gemm_quant_mode = gemm_quant_mode_choices[0]

@@ -87,7 +87,7 @@ def get_gemm_xpu_test_cases() -> list[GemmCommonTestCase]:
 
 
 def get_gemm_test_cases():
-    gemm_list = ["float16", "fp8"]
+    gemm_list = ["bfloat16", "fp8"]
 
     test_cases = []
 
@@ -108,7 +108,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="xpu:0"):
 
     setup_distributed(device)
 
-    dtype = torch.float16
+    dtype = torch.bfloat16
     torch.set_default_dtype(dtype)
     get_device_module().set_device(device)
 

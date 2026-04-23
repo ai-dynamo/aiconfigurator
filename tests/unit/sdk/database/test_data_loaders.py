@@ -230,8 +230,8 @@ def test_load_custom_allreduce_data_basic(tmp_path):
     csv_file = tmp_path / "custom_ar.csv"
     lines = [
         "framework,version,device,op_name,kernel_source,allreduce_dtype,num_gpus,message_size,latency\n",
-        "TRTLLM,1.0.0rc6,NVIDIA B200,all_reduce,TRTLLM,float16,2,128,0.0038\n",
-        "TRTLLM,1.0.0rc6,NVIDIA B200,all_reduce,TRTLLM,float16,2,8192,0.0045\n",
+        "TRTLLM,1.0.0rc6,NVIDIA B200,all_reduce,TRTLLM,bfloat16,2,128,0.0038\n",
+        "TRTLLM,1.0.0rc6,NVIDIA B200,all_reduce,TRTLLM,bfloat16,2,8192,0.0045\n",
     ]
     csv_file.write_text("".join(lines))
 
@@ -322,7 +322,7 @@ def test_load_gemm_data_basic(tmp_path):
     """
     Create a CSV with lines of:
         (backend_name,version,hardware,op_name,quant_mode,m,n,k,layer_name,latency)
-    We pick quant_mode="float16" (which exists as a key in GEMMQuantMode).
+    We pick quant_mode="bfloat16" (which exists as a key in GEMMQuantMode).
     The loader does:
       quant_enum = common.GEMMQuantMode[quant_mode_str]
       m,n,k → int
@@ -332,13 +332,13 @@ def test_load_gemm_data_basic(tmp_path):
     csv_file = tmp_path / "gemm.csv"
     lines = [
         "framework,version,device,op_name,gemm_dtype,m,n,k,latency\n",
-        "trt,1.0,hwX,opX,float16,128,256,512,0.789\n",
+        "trt,1.0,hwX,opX,bfloat16,128,256,512,0.789\n",
     ]
     csv_file.write_text("".join(lines))
 
     data = load_gemm_data(str(csv_file))
 
-    key_mode = GEMMQuantMode.float16
+    key_mode = GEMMQuantMode.bfloat16
     assert key_mode in data
     assert 128 in data[key_mode]
     assert 256 in data[key_mode][128]
@@ -366,7 +366,7 @@ def test_load_moe_data_basic(tmp_path):
         (backend_name,version,hardware,op_name,quant_mode,num_tokens,hidden_size,inter_size,topk,
          num_experts,moe_tp_size,moe_ep_size,workload_distribution,layer_name,latency)
     We pick:
-      quant_mode="float16", num_tokens=1, hidden_size=16, inter_size=32, topk=2,
+      quant_mode="bfloat16", num_tokens=1, hidden_size=16, inter_size=32, topk=2,
       num_experts=4, moe_tp_size=2, moe_ep_size=2, workload_distribution="uniform", latency=1.23
     The loader converts quant_mode→common.MoEQuantMode[quant_mode_str], then:
       moe_data[quant_mode_enum][workload_distribution][topk][num_experts][hidden_size][inter_size]
@@ -385,7 +385,7 @@ def test_load_moe_data_basic(tmp_path):
                 "hwX",  # hardware
                 "opX",  # op_name
                 "moe_torch_flow",  # kernel_source
-                "float16",  # quant_mode
+                "bfloat16",  # quant_mode
                 "1",  # num_tokens
                 "16",  # hidden_size
                 "32",  # inter_size
@@ -403,7 +403,7 @@ def test_load_moe_data_basic(tmp_path):
 
     data, _ = load_moe_data(str(csv_file))
 
-    qm = MoEQuantMode.float16
+    qm = MoEQuantMode.bfloat16
     assert qm in data
     # The exact order of nested dict is:
     #   [qm][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size][num_tokens]  # noqa: E501
@@ -437,14 +437,14 @@ def test_load_context_attention_data_basic(tmp_path):
     Create a CSV with one line of:
         (backend_name,version,hardware,op_name,b,s,n,kv_n,d,beam,quant_mode,kv_cache_dtype,step,latency)
     - b=1, s=2, n=4, kv_n=4 (so internally kv_n becomes 0 because kv_n==n),
-      d=16, beam=8 (ignored after parsing), quant_mode="float16", kv_cache_dtype="float16",
+      d=16, beam=8 (ignored after parsing), quant_mode="bfloat16", kv_cache_dtype="bfloat16",
       step=1, latency=0.321.
     The loader does:
       kv_n = 0 if n == kv_n else kv_n
       quant_mode = common.FMHAQuantMode[quant_mode_str]
       kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype_str]
       context_attention_data[quant_mode_enum][kv_cache_dtype_enum][kv_n][n][s][b] = latency
-    So we expect data[FMHAQuantMode.float16][KVCacheQuantMode.float16][0][4][2][1] == 0.321.
+    So we expect data[FMHAQuantMode.bfloat16][KVCacheQuantMode.bfloat16][0][4][2][1] == 0.321.
     """
     csv_file = tmp_path / "ctx_attn.csv"
     headers = (
@@ -462,8 +462,8 @@ def test_load_context_attention_data_basic(tmp_path):
         "4",  # kv_n  → becomes 0 internally
         "16",  # d  (ignored after parsing)
         "8",  # beam (ignored after parsing)
-        "float16",  # quant_mode → FMHAQuantMode.float16
-        "float16",  # kv_cache_dtype → KVCacheQuantMode.float16
+        "bfloat16",  # quant_mode → FMHAQuantMode.bfloat16
+        "bfloat16",  # kv_cache_dtype → KVCacheQuantMode.bfloat16
         "1",  # step
         "0.321",  # latency
     ]
@@ -471,8 +471,8 @@ def test_load_context_attention_data_basic(tmp_path):
 
     data = load_context_attention_data(str(csv_file))
 
-    qm = FMHAQuantMode.float16
-    kcd = KVCacheQuantMode.float16
+    qm = FMHAQuantMode.bfloat16
+    kcd = KVCacheQuantMode.bfloat16
 
     # kv_n became 0 because n == kv_n in the code
     assert qm in data
@@ -503,14 +503,14 @@ def test_load_generation_attention_data_basic(tmp_path):
     Create a CSV with:
         (backend_name,version,hardware,op_name,b,s,n,kv_n,d,beam,quant_mode,kv_cache_dtype,step,latency)
     - b=1, s=2, n=4, kv_n=4 → becomes 0 internally
-      d=16, beam=8 (ignored), quant_mode="ignored" (not used), kv_cache_dtype="float16",
+      d=16, beam=8 (ignored), quant_mode="ignored" (not used), kv_cache_dtype="bfloat16",
       step=1, so stored s = original s + step = 2 + 1 = 3, latency=0.987.
     The loader does:
       kv_n = 0 if n == kv_n else kv_n
       s = s + step
       kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype_str]
       generation_attention_data[kv_cache_dtype_enum][kv_n][n][b][s] = latency
-    So we expect data[KVCacheQuantMode.float16][0][4][1][3] == 0.987.
+    So we expect data[KVCacheQuantMode.bfloat16][0][4][1][3] == 0.987.
     """
     csv_file = tmp_path / "gen_attn.csv"
     headers = (
@@ -529,7 +529,7 @@ def test_load_generation_attention_data_basic(tmp_path):
         "16",  # d (ignored)
         "8",  # beam (ignored)
         "dummy",  # quant_mode (not actually used downstream)
-        "float16",  # kv_cache_dtype→KVCacheQuantMode.float16
+        "bfloat16",  # kv_cache_dtype→KVCacheQuantMode.bfloat16
         "1",  # step
         "0.987",  # latency
     ]
@@ -537,7 +537,7 @@ def test_load_generation_attention_data_basic(tmp_path):
 
     data = load_generation_attention_data(str(csv_file))
 
-    kcd = KVCacheQuantMode.float16
+    kcd = KVCacheQuantMode.bfloat16
     assert kcd in data
     assert 0 in data[kcd]  # kv_n turned into 0
     assert 4 in data[kcd][0][16][0]  # n == 4
@@ -564,7 +564,7 @@ def test_load_context_mla_data_basic(tmp_path):
     """
     Create a CSV line of (backend_name,version,hardware,op_name,quant_mode,kv_cache_dtype,
     b,s,tp_size,step,latency). We pick:
-      quant_mode="float16", kv_cache_dtype="float16",
+      quant_mode="bfloat16", kv_cache_dtype="bfloat16",
       b=1, s=2, tp_size=4, step=1, latency=1.111.
     The loader does:
       quant_mode_enum = common.FMHAQuantMode[quant_mode_str]
@@ -579,8 +579,8 @@ def test_load_context_mla_data_basic(tmp_path):
         "1.0",  # version (ignored)
         "hwX",  # hardware (ignored)
         "opZ",  # op_name (ignored as key)
-        "float16",  # quant_mode → common.FMHAQuantMode.float16
-        "float16",  # kv_cache_dtype → common.KVCacheQuantMode.float16
+        "bfloat16",  # quant_mode → common.FMHAQuantMode.bfloat16
+        "bfloat16",  # kv_cache_dtype → common.KVCacheQuantMode.bfloat16
         "1",  # b
         "2",  # s
         "4",  # tp_size
@@ -591,8 +591,8 @@ def test_load_context_mla_data_basic(tmp_path):
 
     data = load_context_mla_data(str(csv_file))
 
-    qm = FMHAQuantMode.float16
-    kcd = KVCacheQuantMode.float16
+    qm = FMHAQuantMode.bfloat16
+    kcd = KVCacheQuantMode.bfloat16
 
     num_heads = 128 // 4  # tp_size == 4 -> num_heads == 128 // 4 == 32
 
@@ -622,7 +622,7 @@ def test_load_generation_mla_data_basic(tmp_path):
     """
     Create a CSV with (backend_name,version,hardware,op_name,quant_mode,kv_cache_dtype,
     b,s,tp_size,step,latency). We pick:
-      b=1, s=2, tp_size=4, step=1 → stored s=2+1=3, quant_mode unused, kv_cache_dtype="float16",
+      b=1, s=2, tp_size=4, step=1 → stored s=2+1=3, quant_mode unused, kv_cache_dtype="bfloat16",
       latency=2.222.
     The loader does:
       s = s + step
@@ -637,7 +637,7 @@ def test_load_generation_mla_data_basic(tmp_path):
         "hwY",  # hardware (ignored)
         "opW",  # op_name (ignored)
         "ignored",  # quant_mode (not used downstream)
-        "float16",  # kv_cache_dtype → common.KVCacheQuantMode.float16
+        "bfloat16",  # kv_cache_dtype → common.KVCacheQuantMode.bfloat16
         "1",  # b
         "2",  # s=2
         "4",  # tp_size
@@ -648,7 +648,7 @@ def test_load_generation_mla_data_basic(tmp_path):
 
     data = load_generation_mla_data(str(csv_file))
 
-    kcd = KVCacheQuantMode.float16
+    kcd = KVCacheQuantMode.bfloat16
     num_heads = 128 // 4  # tp_size == 4 -> num_heads == 128 // 4 == 32
 
     assert kcd in data
@@ -689,7 +689,7 @@ def test_load_mla_bmm_data_basic(tmp_path):
         "1.0",  # version (ignored)
         "hwZ",  # hardware (ignored)
         "bmm_op",  # op_name → used as a key in the nested dict
-        "float16",  # quant_mode → common.GEMMQuantMode.float16
+        "bfloat16",  # quant_mode → common.GEMMQuantMode.bfloat16
         "8",  # num_tokens
         "2",  # num_heads
         "3.333",  # latency
@@ -698,7 +698,7 @@ def test_load_mla_bmm_data_basic(tmp_path):
 
     data = load_mla_bmm_data(str(csv_file))
 
-    qg = GEMMQuantMode.float16  # Using 'half' as string in CSV should map to float16
+    qg = GEMMQuantMode.bfloat16  # Using 'half' as string in CSV should map to bfloat16
     assert qg in data
     assert "bmm_op" in data[qg]
     assert 2 in data[qg]["bmm_op"]
@@ -782,13 +782,13 @@ def test_load_context_mla_module_data_basic(tmp_path):
     )
     row = (
         "VLLM,0.17.0,NVIDIA B200,mla_context_module,default,deepseek-ai/DeepSeek-V3,"
-        "DeepseekV3ForCausalLM,float16,fp8,fp8_block,16,2,4000,1,0,1.5\n"
+        "DeepseekV3ForCausalLM,bfloat16,fp8,fp8_block,16,2,4000,1,0,1.5\n"
     )
     csv_file.write_text(headers + row)
 
     data = load_context_mla_module_data(str(csv_file))
 
-    fmha = FMHAQuantMode.float16
+    fmha = FMHAQuantMode.bfloat16
     kv = KVCacheQuantMode.fp8
     gemm = GEMMQuantMode.fp8_block
 
@@ -810,12 +810,12 @@ def test_load_context_mla_module_data_with_power(tmp_path):
     )
     row = (
         "VLLM,0.17.0,NVIDIA B200,mla_context_module,default,deepseek-ai/DeepSeek-V3,"
-        "DeepseekV3ForCausalLM,float16,float16,float16,128,1,1024,1,0,0.5,800.0\n"
+        "DeepseekV3ForCausalLM,bfloat16,bfloat16,bfloat16,128,1,1024,1,0,0.5,800.0\n"
     )
     csv_file.write_text(headers + row)
 
     data = load_context_mla_module_data(str(csv_file))
-    entry = data[FMHAQuantMode.float16][KVCacheQuantMode.float16][GEMMQuantMode.float16][128][1024][1]
+    entry = data[FMHAQuantMode.bfloat16][KVCacheQuantMode.bfloat16][GEMMQuantMode.bfloat16][128][1024][1]
     assert entry["latency"] == pytest.approx(0.5)
     assert entry["power"] == pytest.approx(800.0)
     assert entry["energy"] == pytest.approx(400.0)  # 800 * 0.5
@@ -845,13 +845,13 @@ def test_load_generation_mla_module_data_basic(tmp_path):
     )
     row = (
         "VLLM,0.17.0,NVIDIA B200,mla_generation_module,default,deepseek-ai/DeepSeek-V3,"
-        "DeepseekV3ForCausalLM,float16,fp8,fp8_block,16,4,1,1,255,0.135\n"
+        "DeepseekV3ForCausalLM,bfloat16,fp8,fp8_block,16,4,1,1,255,0.135\n"
     )
     csv_file.write_text(headers + row)
 
     data = load_generation_mla_module_data(str(csv_file))
 
-    fmha = FMHAQuantMode.float16
+    fmha = FMHAQuantMode.bfloat16
     kv = KVCacheQuantMode.fp8
     gemm = GEMMQuantMode.fp8_block
 
@@ -873,18 +873,18 @@ def test_load_generation_mla_module_data_multiple_quant_modes(tmp_path):
     )
     rows = (
         "VLLM,0.17.0,NVIDIA B200,mla_generation_module,default,m,A,"
-        "float16,float16,float16,128,1,1,1,256,0.13\n"
+        "bfloat16,bfloat16,bfloat16,128,1,1,1,256,0.13\n"
         "VLLM,0.17.0,NVIDIA B200,mla_generation_module,default,m,A,"
-        "float16,fp8,fp8_block,128,1,1,1,256,0.10\n"
+        "bfloat16,fp8,fp8_block,128,1,1,1,256,0.10\n"
     )
     csv_file.write_text(headers + rows)
 
     data = load_generation_mla_module_data(str(csv_file))
 
-    # float16/float16/float16 combo
-    entry1 = data[FMHAQuantMode.float16][KVCacheQuantMode.float16][GEMMQuantMode.float16][128][1][257]
+    # bfloat16/bfloat16/bfloat16 combo
+    entry1 = data[FMHAQuantMode.bfloat16][KVCacheQuantMode.bfloat16][GEMMQuantMode.bfloat16][128][1][257]
     assert entry1["latency"] == pytest.approx(0.13)
 
-    # float16/fp8/fp8_block combo
-    entry2 = data[FMHAQuantMode.float16][KVCacheQuantMode.fp8][GEMMQuantMode.fp8_block][128][1][257]
+    # bfloat16/fp8/fp8_block combo
+    entry2 = data[FMHAQuantMode.bfloat16][KVCacheQuantMode.fp8][GEMMQuantMode.fp8_block][128][1][257]
     assert entry2["latency"] == pytest.approx(0.10)

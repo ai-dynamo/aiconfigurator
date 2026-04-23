@@ -156,11 +156,11 @@ class TestQuantizationModes:
         """Test that GEMM quantization modes are defined."""
         assert hasattr(common, "GEMMQuantMode")
 
-        # Should have at least float16 and fp8
+        # Should have at least bfloat16 and fp8
         gemm_modes = list(common.GEMMQuantMode)
         mode_names = [mode.name for mode in gemm_modes]
 
-        assert "float16" in mode_names
+        assert "bfloat16" in mode_names
         assert "fp8" in mode_names
         assert "fp8_static" in mode_names
 
@@ -184,7 +184,7 @@ class TestQuantizationModes:
         moe_modes = list(common.MoEQuantMode)
         mode_names = [mode.name for mode in moe_modes]
 
-        assert "float16" in mode_names
+        assert "bfloat16" in mode_names
         assert "fp8" in mode_names
 
 
@@ -210,13 +210,13 @@ class TestMOEModelFP8BlockQuantizationValidation:
                 True,
                 "invalid_fp8_block",
             ),
-            # Skip validation for float16 (even with invalid moe_tp)
+            # Skip validation for bfloat16 (even with invalid moe_tp)
             (
-                common.MoEQuantMode.float16,
+                common.MoEQuantMode.bfloat16,
                 8,
                 {"weight_block_size": [128, 128]},
                 False,
-                "skip_validation_float16",
+                "skip_validation_bfloat16",
             ),
             # Skip validation for fp8 non-block mode
             (
@@ -299,8 +299,8 @@ class TestGetModelMOESGLangDispatch:
         model_config = config.ModelConfig(
             tp_size=1,
             pp_size=1,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
             moe_tp_size=1,
             moe_ep_size=8,
             attention_dp_size=8,
@@ -315,8 +315,8 @@ class TestGetModelMOESGLangDispatch:
         model_config = config.ModelConfig(
             tp_size=1,
             pp_size=1,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
             moe_tp_size=1,
             moe_ep_size=4,
             attention_dp_size=4,
@@ -331,8 +331,8 @@ class TestGetModelMOESGLangDispatch:
         model_config = config.ModelConfig(
             tp_size=2,
             pp_size=1,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
             moe_tp_size=1,
             moe_ep_size=2,
             attention_dp_size=1,
@@ -347,8 +347,8 @@ class TestGetModelMOESGLangDispatch:
         model_config = config.ModelConfig(
             tp_size=2,
             pp_size=1,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
             moe_tp_size=2,
             moe_ep_size=1,
             attention_dp_size=1,

@@ -15,11 +15,11 @@ pytestmark = pytest.mark.unit
 
 def test_query_gemm_exact_match(stub_perf_db):
     """
-    query_gemm should return the exact latency stored under (quant_mode=fp16, m=64, n=128, k=256).
+    query_gemm should return the exact latency stored under (quant_mode=bfloat16, m=64, n=128, k=256).
     We patched load_gemm_data to have exactly one entry: 10.0.
     However, _correct_data() may update this based on SOL calculation.
     """
-    quant_mode = common.GEMMQuantMode.float16  # matches our dummy key
+    quant_mode = common.GEMMQuantMode.bfloat16  # matches our dummy key
     m, n, k = 64, 128, 256
 
     observed = stub_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SILICON)
@@ -35,7 +35,7 @@ def test_query_gemm_empirical_mode(stub_perf_db):
     """
     EMPIRICAL mode should return the SOL latency scaled by 1 / 0.8.
     """
-    quant_mode = common.GEMMQuantMode.float16
+    quant_mode = common.GEMMQuantMode.bfloat16
     m, n, k = 64, 128, 256
 
     sol_value = stub_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
@@ -48,7 +48,7 @@ def test_query_gemm_empirical_mode(stub_perf_db):
 
 def test_query_gemm_exact_match_skips_3d_interpolation(comprehensive_perf_db, monkeypatch):
     """Exact GEMM hits should bypass both 1D and 3D interpolation."""
-    quant_mode = common.GEMMQuantMode.float16
+    quant_mode = common.GEMMQuantMode.bfloat16
     m, n, k = 16, 128, 128
 
     def _fail_interp_3d(*args, **kwargs):
@@ -68,7 +68,7 @@ def test_query_gemm_exact_match_skips_3d_interpolation(comprehensive_perf_db, mo
 
 def test_query_gemm_interpolates_only_on_m_when_nk_match(comprehensive_perf_db, monkeypatch):
     """GEMM lookup should use 1D interpolation on m when n and k match."""
-    quant_mode = common.GEMMQuantMode.float16
+    quant_mode = common.GEMMQuantMode.bfloat16
     m, n, k = 12, 128, 128
     calls = {}
 
@@ -94,7 +94,7 @@ def test_query_gemm_interpolates_only_on_m_when_nk_match(comprehensive_perf_db, 
 
 def test_query_gemm_fast_paths_support_legacy_scalar_leaves(comprehensive_perf_db, monkeypatch):
     """Fast GEMM paths should support legacy scalar-leaf tables."""
-    quant_mode = common.GEMMQuantMode.float16
+    quant_mode = common.GEMMQuantMode.bfloat16
     comprehensive_perf_db._gemm_data[quant_mode] = {
         8: {128: {128: 0.5}},
         16: {128: {128: 0.9}},
@@ -170,7 +170,7 @@ def test_query_custom_allreduce_database_mode_calculation(stub_perf_db):
     """
     size = 1024
     tp_size = 2
-    quant_mode = "float16"  # for SOL branch we ignore the custom allreduce dict
+    quant_mode = "bfloat16"  # for SOL branch we ignore the custom allreduce dict
 
     sol_time = stub_perf_db.query_custom_allreduce(quant_mode, tp_size, size, database_mode=common.DatabaseMode.SOL)
 
@@ -185,7 +185,7 @@ def test_query_custom_allreduce_sol_full_returns_full_tuple(stub_perf_db):
     """
     size = 1024
     tp_size = 2
-    quant_mode = "float16"
+    quant_mode = "bfloat16"
 
     sol_time, sol_math, sol_mem = stub_perf_db.query_custom_allreduce(
         quant_mode, tp_size, size, database_mode=common.DatabaseMode.SOL_FULL
@@ -207,12 +207,12 @@ def test_query_custom_allreduce_non_database_mode_uses_custom_latency(stub_perf_
         size_left, size_right = nearest keys enveloping `size`
         lat = interpolate between comm_dict[size_left], comm_dict[size_right]
     We patched _custom_allreduce_data so that:
-        _custom_allreduce_data['float16']['2']['AUTO']['1024'] == 5.0
+        _custom_allreduce_data['bfloat16']['2']['AUTO']['1024'] == 5.0
     For tp_size=2 and size=1024 exactly, we expect 5.0.
     """
     size = 1024
     tp_size = 2
-    quant_mode = "float16"
+    quant_mode = "bfloat16"
 
     # Use a “SILICON” mode to force fallback into the custom-data path
     custom_latency = stub_perf_db.query_custom_allreduce(
@@ -281,8 +281,8 @@ def test_query_context_attention_hybrid_fallback(stub_perf_db):
         prefix=0,
         n=32,
         n_kv=16,
-        kvcache_quant_mode=common.KVCacheQuantMode.float16,
-        fmha_quant_mode=common.FMHAQuantMode.float16,
+        kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
         head_size=128,
         window_size=0,
     )
@@ -311,5 +311,5 @@ def test_system_spec_was_loaded_correctly(stub_perf_db):
     """
     spec = stub_perf_db.system_spec
     assert isinstance(spec, dict)
-    assert spec["gpu"]["float16_tc_flops"] == 1_000.0
+    assert spec["gpu"]["bfloat16_tc_flops"] == 1_000.0
     assert spec["node"]["inter_node_bw"] == 100.0

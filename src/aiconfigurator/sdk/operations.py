@@ -982,7 +982,7 @@ class ContextMLA(Operation):
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
         # 2*(1536*24576/tp_size + 128/tp_size*512*128+128/tp_size*512*128)
-        # up q, up k, up v  float16 # 104MB / tpsize per layer
+        # up q, up k, up v  bfloat16 # 104MB / tpsize per layer
         self._weights = 0.0
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
@@ -1022,7 +1022,7 @@ class GenerationMLA(Operation):
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
         # 2*(1536*24576/tp_size + 128/tp_size*512*128+128/tp_size*512*128)
-        # up q, up k, v up float16
+        # up q, up k, v up bfloat16
         self._weights = 0.0
         self._kv_cache_dtype = kv_cache_dtype
 
@@ -1135,7 +1135,7 @@ class ElementWise(Operation):
         """Query element-wise operation latency with power data."""
         x = kwargs.get("x")  # num tokens
         x //= self._scale_num_tokens
-        read_bytes = x * self._dim_in * 2  # fp16 for act
+        read_bytes = x * self._dim_in * 2  # bfloat16 for act
         write_bytes = x * self._dim_out * 2
 
         result = database.query_mem_op(read_bytes + write_bytes)
@@ -1457,7 +1457,7 @@ class Mamba2(Operation):
         # conv1d operates on xbc which has dimension conv_dim
         # Read: x * conv_dim * d_conv (for conv states) + x * conv_dim (input)
         # Write: x * conv_dim (output)
-        conv_read_bytes = x * conv_dim_per_gpu * (self._d_conv + 1) * 2  # fp16
+        conv_read_bytes = x * conv_dim_per_gpu * (self._d_conv + 1) * 2  # bfloat16
         conv_write_bytes = x * conv_dim_per_gpu * 2
         conv_result = database.query_mem_op(conv_read_bytes + conv_write_bytes)
         total_latency += float(conv_result)
@@ -1485,8 +1485,8 @@ class Mamba2(Operation):
 
         # 4. norm: RMSNormGated on d_inner (TRT-LLM mamba2_mixer.py line 315)
         # Read SSM output, apply norm with gating, write normalized output
-        norm_read_bytes = x * d_inner_per_gpu * 2  # fp16
-        norm_write_bytes = x * d_inner_per_gpu * 2  # fp16
+        norm_read_bytes = x * d_inner_per_gpu * 2  # bfloat16
+        norm_write_bytes = x * d_inner_per_gpu * 2  # bfloat16
         norm_result = database.query_mem_op(norm_read_bytes + norm_write_bytes)
         total_latency += float(norm_result)
         total_energy += norm_result.energy

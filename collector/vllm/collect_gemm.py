@@ -47,7 +47,7 @@ _NVFP4_QUANT_ARGS = {
 def get_gemm_test_cases():
     sm = get_sm_version()
 
-    gemm_list = ["float16"]
+    gemm_list = ["bfloat16"]
     if sm > 86:
         gemm_list += ["fp8"]
     # Blockwise FP8 kernels are available on Hopper/Blackwell+
@@ -89,7 +89,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
 
     setup_distributed(device)
 
-    dtype = torch.bfloat16 if gemm_type == "nvfp4" else torch.float16
+    dtype = torch.bfloat16
     torch.set_default_dtype(dtype)
     torch.cuda.set_device(device)
     torch.set_default_device(device)

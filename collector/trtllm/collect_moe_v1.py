@@ -22,7 +22,7 @@ from collector.helper import (
 
 
 def get_moe_test_cases():
-    moe_list = ["float16"]
+    moe_list = ["bfloat16"]
     if get_sm_version() > 86:
         moe_list += ["fp8"]
         if get_sm_version() < 100:
@@ -100,7 +100,7 @@ def run_moe_torch(
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
-    # moe type support float16, fp8_qdq, fp8_block, w4a8, nvfp4(not implemented yet)
+    # moe type support bfloat16, fp8_qdq, fp8_block, w4a8, nvfp4(not implemented yet)
     dtype = torch.bfloat16
     quant_algo = None
     if moe_type == "fp8_block":

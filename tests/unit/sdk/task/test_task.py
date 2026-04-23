@@ -84,7 +84,7 @@ def test_taskconfig_agg_default():
     cfg = task.config
 
     assert cfg.worker_config.system_name == "h200_sxm"
-    assert _enum_name(cfg.worker_config.gemm_quant_mode) == "float16"
+    assert _enum_name(cfg.worker_config.gemm_quant_mode) == "bfloat16"
     assert cfg.worker_config.num_gpu_per_worker == [1, 2, 4, 8]
     assert cfg.applied_layers == ["base-common", "agg-defaults"]
 
@@ -175,7 +175,7 @@ def test_taskconfig_agg_yaml_patch_overrides():
 def test_taskconfig_yaml_file_profiles_and_patch(tmp_path):
     yaml_payload = {
         "mode": "patch",
-        "profiles": ["float16"],
+        "profiles": ["bfloat16"],
         "config": {
             "worker_config": {
                 "tp_list": [1, 2],
@@ -197,7 +197,7 @@ def test_taskconfig_yaml_file_profiles_and_patch(tmp_path):
     cfg = task.config
 
     assert cfg.worker_config.tp_list == [1, 2]
-    assert _enum_name(cfg.worker_config.gemm_quant_mode) == "float16"
+    assert _enum_name(cfg.worker_config.gemm_quant_mode) == "bfloat16"
     assert cfg.applied_layers[-1] == "yaml_patch"
 
 
@@ -376,7 +376,7 @@ def test_taskconfig_rejects_unsupported_quant_mode(monkeypatch):
     class FakeDatabase:
         def __init__(self):
             self.system_spec = {"gpu": {"sm_version": 90}}
-            self.supported_quant_mode = {"gemm": ["float16"]}
+            self.supported_quant_mode = {"gemm": ["bfloat16"]}
 
     def fake_get_database(system, backend, version):
         return FakeDatabase()
@@ -397,10 +397,10 @@ def test_taskconfig_quant_merge_uses_model_info_when_missing(monkeypatch):
         def __init__(self):
             self.system_spec = {"gpu": {"sm_version": 90}}
             self.supported_quant_mode = {
-                "gemm": ["float16"],
-                "moe": ["float16"],
-                "context_attention": ["float16"],
-                "generation_attention": ["float16"],
+                "gemm": ["bfloat16"],
+                "moe": ["bfloat16"],
+                "context_attention": ["bfloat16"],
+                "generation_attention": ["bfloat16"],
             }
 
     def fake_get_database(system, backend, version):
@@ -429,10 +429,10 @@ def test_taskconfig_quant_merge_preserves_explicit_values(monkeypatch):
         def __init__(self):
             self.system_spec = {"gpu": {"sm_version": 90}}
             self.supported_quant_mode = {
-                "gemm": ["float16"],
-                "moe": ["float16"],
-                "context_attention": ["float16"],
-                "generation_attention": ["float16"],
+                "gemm": ["bfloat16"],
+                "moe": ["bfloat16"],
+                "context_attention": ["bfloat16"],
+                "generation_attention": ["bfloat16"],
             }
 
     def fake_get_database(system, backend, version):
@@ -456,10 +456,10 @@ def test_taskconfig_quant_merge_preserves_explicit_values(monkeypatch):
             "mode": "patch",
             "config": {
                 "worker_config": {
-                    "gemm_quant_mode": "float16",
-                    "moe_quant_mode": "float16",
-                    "kvcache_quant_mode": "float16",
-                    "fmha_quant_mode": "float16",
+                    "gemm_quant_mode": "bfloat16",
+                    "moe_quant_mode": "bfloat16",
+                    "kvcache_quant_mode": "bfloat16",
+                    "fmha_quant_mode": "bfloat16",
                 }
             },
         },
@@ -473,7 +473,7 @@ def test_taskconfig_quant_merge_deepseek_fmha_fallback(monkeypatch):
             self.supported_quant_mode = {
                 "gemm": ["fp8"],
                 "moe": ["fp8"],
-                "context_mla": ["float16"],
+                "context_mla": ["bfloat16"],
                 "generation_mla": ["fp8"],
             }
 

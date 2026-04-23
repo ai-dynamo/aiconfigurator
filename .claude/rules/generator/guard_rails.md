@@ -33,7 +33,7 @@ Severity: **CRASH** (engine won't start), **OOM** (out of memory), **SILENT** (w
 | KV transfer backend default: `"nixl"` | CRASH | SGLang >=0.5.6.post2 requires explicit transfer backend for disagg. |
 | `enable_mixed_chunk = true` for agg mode | PERF | Without it, poor prefill/decode scheduling. |
 | KV cache dtype `"fp8"` -> `"fp8_e4m3"` | SILENT | SGLang accepts `"fp8_e4m3"` not `"fp8"`. |
-| KV cache dtype `"float16"` -> `"auto"` | SILENT | SGLang interprets `"float16"` literally. |
+| KV cache dtype `"bfloat16"` -> `"auto"` | SILENT | SGLang interprets `"bfloat16"` literally. |
 | Wideep vs non-wideep are exclusive | CRASH | SGLang doesn't support mixed `moe_tp + moe_ep` configurations. |
 | `enable_attention_dp` when DP > 1 and MoE | SILENT | MoE models with DP>1 require attention DP. |
 | NVFP4 models need explicit `--quantization` | OOM | SGLang can't auto-detect NVFP4; loads in FP16/BF16 without it. |
@@ -46,7 +46,7 @@ Severity: **CRASH** (engine won't start), **OOM** (out of memory), **SILENT** (w
 | `--kv-transfer-config` required for disagg | SILENT | Without it, KV cache silently fails to transfer. |
 | `--max-model-len` and `--max-num-batched-tokens` required | OOM | Without these, vLLM uses model default max length. |
 | `enable_expert_parallel` when `moe_ep > 1` | SILENT | vLLM requires explicit flag; EP silently disabled without it. |
-| KV cache dtype `"float16"` -> `"auto"` | CRASH | vLLM doesn't accept `"float16"` as literal. |
+| KV cache dtype `"bfloat16"` -> `"auto"` | CRASH | vLLM doesn't accept `"bfloat16"` as literal. |
 
 ## Cross-Backend Rules
 

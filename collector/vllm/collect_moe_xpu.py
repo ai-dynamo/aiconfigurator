@@ -171,7 +171,7 @@ def get_moe_test_cases():
     """Generate MoE test cases"""
 
     # Quantization types supported by vLLM
-    moe_list = ["float16"]
+    moe_list = ["bfloat16"]
     if hasattr(torch, "float8_e4m3fn"):
         moe_list += ["fp8"]
     moe_list += ["w4a16_mxfp4"]
@@ -283,14 +283,14 @@ def run_moe_torch(
             local_num_experts,
             2 * local_inter_size,
             hidden_size,
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
         w2 = torch.randn(
             local_num_experts,
             hidden_size,
             local_inter_size,
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
@@ -303,8 +303,8 @@ def run_moe_torch(
         print("num_tokens", num_tokens)
         print("topk", topk)
 
-        # bfloat16 + padded hidden for mxfp4; float16 + original hidden otherwise
-        hs_dtype = torch.bfloat16 if use_mxfp4 else torch.float16
+        # bfloat16 hidden states (padded hidden already selected for mxfp4 path above)
+        hs_dtype = torch.bfloat16
         hidden_states = torch.randn([num_tokens, padded_hidden], dtype=hs_dtype, device=device)
 
         # Generate topk_weights and topk_ids
@@ -322,7 +322,7 @@ def run_moe_torch(
                         moe_ep_size,
                         power_law_alpha,
                     )
-                    .half()
+                    .bfloat16()
                     .to(device)
                 )
                 if not use_mxfp4:
@@ -335,7 +335,7 @@ def run_moe_torch(
             print("actual num_tokens: ", [topk_ids.shape[0] for topk_ids in topk_ids_list])
 
         elif distributed == "balanced":
-            actual_logits = balanced_logits(num_tokens, num_experts, topk).half().to(device)
+            actual_logits = balanced_logits(num_tokens, num_experts, topk).bfloat16().to(device)
             topk_weights, topk_ids = torch.topk(actual_logits, topk, dim=-1)
             topk_weights = F.softmax(topk_weights, dim=-1).float()
 

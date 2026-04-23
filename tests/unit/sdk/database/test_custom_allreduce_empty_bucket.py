@@ -53,7 +53,7 @@ def _db_factory(tmp_path, monkeypatch):
         "data_dir": "data",
         "misc": {"nccl_version": "v1"},
         "gpu": {
-            "float16_tc_flops": 1_000.0,
+            "bfloat16_tc_flops": 1_000.0,
             "mem_bw": 100.0,
             "mem_empirical_constant_latency": 1.0,
         },

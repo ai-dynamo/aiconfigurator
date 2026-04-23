@@ -39,7 +39,7 @@ class TestTrtLLMWideEPMoE:
             num_experts=8,
             moe_tp_size=2,
             moe_ep_size=2,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
             workload_distribution="power_law_1.01_eplb",
             attention_dp_size=1,
         )
@@ -88,7 +88,7 @@ class TestTrtLLMWideEPMoE:
             num_experts=8,
             moe_tp_size=2,
             moe_ep_size=2,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
             workload_distribution="uniform",
             attention_dp_size=1,
             is_gated=True,
@@ -110,7 +110,7 @@ class TestTrtLLMWideEPMoE:
             num_experts=8,
             moe_tp_size=2,
             moe_ep_size=2,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
             workload_distribution="uniform",
             attention_dp_size=1,
             is_gated=False,
@@ -132,7 +132,7 @@ class TestTrtLLMWideEPMoE:
             num_experts=8,
             moe_tp_size=2,
             moe_ep_size=2,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
             workload_distribution="power_law_1.01_eplb",
             attention_dp_size=1,
         )
@@ -149,7 +149,7 @@ class TestTrtLLMWideEPMoE:
             num_slots=8,  # defaults to num_experts
             moe_tp_size=2,
             moe_ep_size=2,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
             workload_distribution="power_law_1.01_eplb",
         )
 
@@ -169,7 +169,7 @@ class TestTrtLLMWideEPMoE:
             num_experts=8,
             moe_tp_size=1,
             moe_ep_size=1,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
             workload_distribution="uniform",
             attention_dp_size=4,  # This should scale the input tokens
         )
@@ -192,7 +192,7 @@ class TestTrtLLMWideEPMoE:
             num_experts=8,
             moe_tp_size=1,
             moe_ep_size=1,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
             workload_distribution="uniform",
             attention_dp_size=1,
         )
@@ -214,7 +214,7 @@ class TestTrtLLMWideEPMoE:
             num_experts=8,
             moe_tp_size=1,
             moe_ep_size=1,
-            quant_mode=common.MoEQuantMode.float16,  # Original mode
+            quant_mode=common.MoEQuantMode.bfloat16,  # Original mode
             workload_distribution="uniform",
             attention_dp_size=1,
         )
@@ -238,7 +238,7 @@ class TestTrtLLMWideEPMoE:
             num_slots=12,  # Custom slots for EPLB
             moe_tp_size=1,
             moe_ep_size=1,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
             workload_distribution="power_law_1.2_eplb",
             attention_dp_size=1,
         )
@@ -262,7 +262,7 @@ class TestTrtLLMWideEPMoE:
             num_slots=16,
             moe_tp_size=1,
             moe_ep_size=1,
-            quant_mode=common.MoEQuantMode.float16,
+            quant_mode=common.MoEQuantMode.bfloat16,
             workload_distribution="uniform",
             attention_dp_size=1,
         )

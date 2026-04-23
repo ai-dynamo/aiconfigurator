@@ -608,7 +608,7 @@ class GEMMQuantMode(Enum):
     GEMM quant mode.
     """
 
-    float16 = QuantMapping(2, 1, "float16")  # w16a16
+    bfloat16 = QuantMapping(2, 1, "bfloat16")  # w16a16
     int8_wo = QuantMapping(1, 1, "int8_wo")  # w8a16
     int4_wo = QuantMapping(0.5, 1, "int4_wo")  # w4a16
     fp8 = QuantMapping(1, 2, "fp8")  # w8fp8
@@ -626,7 +626,7 @@ class MoEQuantMode(Enum):
     MoE quant mode.
     """
 
-    float16 = QuantMapping(2, 1, "float16")  # w16a16
+    bfloat16 = QuantMapping(2, 1, "bfloat16")  # w16a16
     fp8 = QuantMapping(1, 2, "fp8")  # w8fp8
     int4_wo = QuantMapping(0.5, 1, "int4_wo")  # w4a16
     fp8_block = QuantMapping(1, 2, "fp8_block")  # specific for trtllm torch ds fp8
@@ -642,7 +642,7 @@ class FMHAQuantMode(Enum):
     FMHA quant mode.
     """
 
-    float16 = QuantMapping(2, 1, "float16")
+    bfloat16 = QuantMapping(2, 1, "bfloat16")
     fp8 = QuantMapping(1, 2, "fp8")
     fp8_block = QuantMapping(1, 2, "fp8_block")  # FIXME: specific for sglang wideep
 
@@ -652,7 +652,7 @@ class KVCacheQuantMode(Enum):
     KVCache quant mode.
     """
 
-    float16 = QuantMapping(2, 0, "float16")
+    bfloat16 = QuantMapping(2, 0, "bfloat16")
     int8 = QuantMapping(1, 0, "int8")
     fp8 = QuantMapping(1, 0, "fp8")
 

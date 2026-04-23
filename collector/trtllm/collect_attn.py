@@ -234,13 +234,13 @@ def run_attention_torch(
         isl = 1
         step = input_len
         op_name = "generation_attention"
-    kv_cache_dtype_str = "float16"
+    kv_cache_dtype_str = "bfloat16"
     if use_fp8_kv_cache:
         kv_cache_dtype_str = "fp8"
     if use_fp8_context_fmha:
         dtype_str = "fp8"
     else:
-        dtype_str = "float16"
+        dtype_str = "bfloat16"
 
     log_perf(
         item_list=[
@@ -333,7 +333,7 @@ def get_context_attention_test_cases():
                         # use fp8 kv cache, fp8 context fmha, is_context_phase. in torch flow,
                         # int8 kvcache is not supported yet.
                         #
-                        # fp16 kv cache, fp16 context fmha, is_context_phase
+                        # bfloat16 kv cache, bfloat16 context fmha, is_context_phase
                         if h == 64:
                             test_cases.append(
                                 [

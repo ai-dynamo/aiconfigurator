@@ -514,8 +514,8 @@ def run_attention_torch(
                 "num_key_value_heads": num_key_value_heads,
                 "head_dim": head_dim,
                 "beam_width": 1,
-                "attn_dtype": "fp8" if use_fp8_context_fmha else "float16",
-                "kv_cache_dtype": "fp8" if use_fp8_kv_cache else "float16",
+                "attn_dtype": "fp8" if use_fp8_context_fmha else "bfloat16",
+                "kv_cache_dtype": "fp8" if use_fp8_kv_cache else "bfloat16",
                 "step": step,
                 "latency": latency,
             }

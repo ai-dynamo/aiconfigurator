@@ -66,7 +66,7 @@ def _build_weights(gemm_type: str, n: int, k: int, device, dtype, group_size, x)
             "weight_scale": _compute_fp8_block_weight_scales(fp_weight, group_size),
         }
     elif gemm_type == "nvfp4":
-        w = torch.randn((n, k), dtype=torch.float16, device=device)
+        w = torch.randn((n, k), dtype=torch.bfloat16, device=device)
         w_sf_global = (448 * 6) / w.abs().max().float()
         w_fp4, w_sf_block = torch.ops.trtllm.fp4_quantize(w, w_sf_global, 16, False)
         if tensorrt_llm.__version__.startswith(("1.1.0", "1.2.0", "1.3.0")):
@@ -82,12 +82,12 @@ def _build_weights(gemm_type: str, n: int, k: int, device, dtype, group_size, x)
             "weight_scale_2": 1.0 / w_sf_global.cpu(),
             "input_scale": 1.0 / x_sf_global.cpu(),
         }
-    else:  # float16
+    else:  # bfloat16
         return {"weight": torch.randn((n, k), dtype=torch.bfloat16, device=device)}
 
 
 def get_gemm_test_cases():
-    gemm_list = ["float16"]
+    gemm_list = ["bfloat16"]
     sm_version = get_sm_version()
     if sm_version > 86:
         gemm_list += ["fp8"]
@@ -146,7 +146,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         group_size = None
 
     _l2_cache_bytes = _get_l2_cache_bytes(device.index or 0)
-    _bytes_per_elem = {"float16": 2, "fp8": 1, "fp8_block": 1, "nvfp4": 0.5}
+    _bytes_per_elem = {"bfloat16": 2, "fp8": 1, "fp8_block": 1, "nvfp4": 0.5}
     _weight_bytes = int(n * k * _bytes_per_elem[gemm_type])
     outside_loop_count = max(1, min(5, math.ceil(_l2_cache_bytes / _weight_bytes)))
     op_list = []

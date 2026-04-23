@@ -223,7 +223,7 @@ class TestMLAModule:
             True,
             16,
             common.KVCacheQuantMode.fp8,
-            common.FMHAQuantMode.float16,
+            common.FMHAQuantMode.bfloat16,
             common.GEMMQuantMode.fp8_block,
         )
         result = op.query(mock_db, batch_size=4, s=4000, prefix=0)
@@ -234,7 +234,7 @@ class TestMLAModule:
             prefix=0,
             num_heads=16,
             kvcache_quant_mode=common.KVCacheQuantMode.fp8,
-            fmha_quant_mode=common.FMHAQuantMode.float16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
             gemm_quant_mode=common.GEMMQuantMode.fp8_block,
         )
         mock_db.query_generation_mla_module.assert_not_called()
@@ -253,7 +253,7 @@ class TestMLAModule:
             False,
             16,
             common.KVCacheQuantMode.fp8,
-            common.FMHAQuantMode.float16,
+            common.FMHAQuantMode.bfloat16,
             common.GEMMQuantMode.fp8_block,
         )
         result = op.query(mock_db, batch_size=4, s=4000, beam_width=1)
@@ -263,7 +263,7 @@ class TestMLAModule:
             s=4000,
             num_heads=16,
             kv_cache_dtype=common.KVCacheQuantMode.fp8,
-            fmha_quant_mode=common.FMHAQuantMode.float16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
             gemm_quant_mode=common.GEMMQuantMode.fp8_block,
         )
         mock_db.query_context_mla_module.assert_not_called()
@@ -280,7 +280,7 @@ class TestMLAModule:
             False,
             16,
             common.KVCacheQuantMode.fp8,
-            common.FMHAQuantMode.float16,
+            common.FMHAQuantMode.bfloat16,
             common.GEMMQuantMode.fp8_block,
         )
         with pytest.raises(ValueError, match="beam_width=1"):
@@ -299,7 +299,7 @@ class TestMLAModule:
             True,
             16,
             common.KVCacheQuantMode.fp8,
-            common.FMHAQuantMode.float16,
+            common.FMHAQuantMode.bfloat16,
             common.GEMMQuantMode.fp8_block,
         )
         result = op.query(mock_db, batch_size=1, s=1000, prefix=0)

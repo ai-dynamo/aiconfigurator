@@ -62,7 +62,7 @@ class MockAttentionLayer:
 
 
 # https://github.com/vllm-project/vllm/tree/main/vllm/v1/attention/backends
-# support MHA GQA MQA fp16 tensor and float16/fp8 kv cache
+# support MHA GQA MQA bfloat16 tensor and bfloat16/fp8 kv cache
 
 
 @with_exit_stack
@@ -81,7 +81,7 @@ def run_attention_torch(
 ):
     get_device_module().set_device(device)
 
-    dtype = torch.float16
+    dtype = torch.bfloat16
     model = os.path.join(os.path.dirname(__file__), "fake_hf_model")
     block_size = 64
 
@@ -323,7 +323,7 @@ def run_attention_torch(
     warm_up = 3
 
     # XPU's FlashAttention implementation currently expects Query and Output
-    # to be float16/bfloat16 even if the KV Cache is FP8.
+    # to be bfloat16 even if the KV Cache is FP8.
     # TODO: Remove the code if FP8 support will not be in the roadmap.
     if "xpu" not in str(device) and use_fp8_kv_cache and backend_name_str in ("FLASH_ATTN", "FLASHINFER"):
         query_vllm = query_vllm.to(current_platform.fp8_dtype())
@@ -362,8 +362,8 @@ def run_attention_torch(
         step = input_len
         op_name = "generation_attention"
 
-    kv_cache_dtype_str = "float16" if not use_fp8_kv_cache else "fp8"
-    dtype_str = "float16"
+    kv_cache_dtype_str = "bfloat16" if not use_fp8_kv_cache else "fp8"
+    dtype_str = "bfloat16"
     kernel_source = f"vllm_{backend_name_str}".lower()
 
     device_name = get_device_module().get_device_name(device)

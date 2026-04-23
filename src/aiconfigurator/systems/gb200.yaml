@@ -9,7 +9,7 @@ gpu:
   mem_bw_empirical_scaling_factor: 0.8 # some nonofficial correction based on observations, you should try to modify based on your own observations
   mem_empirical_constant_latency: 0.000003 # 3us some nonofficial correction based on observations, you should try to modify based on your own observations
   mem_capacity: 198674743296 # 189471MiB reported by nvidia-smi
-  float16_tc_flops: 2500000000000000 # 2500TFLOPS
+  bfloat16_tc_flops: 2500000000000000 # 2500TFLOPS
   int8_tc_flops: 5000000000000000 # 5000TFLOPS
   fp8_tc_flops: 5000000000000000 # 5000TFLOPS
   fp4_tc_flops: 10000000000000000 # 10PFLOPS

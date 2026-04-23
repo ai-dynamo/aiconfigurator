@@ -21,7 +21,7 @@ agg_prefill_decode enable_attention_dp = ((data_parallel_size or 1) > 1) and Mod
 agg_prefill_decode kv_cache_dtype = ("fp8_e4m3" if kv_cache_dtype == "fp8" else kv_cache_dtype)
 prefill_decode kv_transfer_backend = (kv_transfer_backend if kv_transfer_backend else "nixl")
 
-when kv_cache_dtype == "float16":
+when kv_cache_dtype == "bfloat16":
     kv_cache_dtype = "auto"
 
 when (ModelConfig.prefix or 0) > 0:

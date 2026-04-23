@@ -23,7 +23,7 @@ class TestMoE:
         num_experts = 8
         moe_tp_size = 2
         moe_ep_size = 2
-        quant_mode = common.MoEQuantMode.float16
+        quant_mode = common.MoEQuantMode.bfloat16
         workload_distribution = "uniform"
 
         result = comprehensive_perf_db.query_moe(
@@ -48,7 +48,7 @@ class TestMoE:
             + hidden_size * inter_size * 3 // moe_tp_size * min(num_experts // moe_ep_size, total_tokens)
         )
         sol_math = (
-            ops / (comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+            ops / (comprehensive_perf_db.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
         )
         sol_mem = mem_bytes / comprehensive_perf_db.system_spec["gpu"]["mem_bw"] * 1000
         expected = max(sol_math, sol_mem)
@@ -65,7 +65,7 @@ class TestMoE:
             8,
             1,
             1,
-            common.MoEQuantMode.float16,
+            common.MoEQuantMode.bfloat16,
             "uniform",
             database_mode=common.DatabaseMode.SOL_FULL,
         )
@@ -78,7 +78,7 @@ class TestMoE:
             8,
             1,
             1,
-            common.MoEQuantMode.float16,
+            common.MoEQuantMode.bfloat16,
             "uniform",
             database_mode=common.DatabaseMode.SOL,
         )
@@ -95,7 +95,7 @@ class TestMoE:
         num_experts = 8
         moe_tp_size = 2
         moe_ep_size = 2
-        quant_mode = common.MoEQuantMode.float16
+        quant_mode = common.MoEQuantMode.bfloat16
         workload_distribution = "uniform"
 
         result = comprehensive_perf_db.query_moe(
@@ -127,7 +127,7 @@ class TestMoE:
             "num_experts": 8,
             "moe_tp_size": 1,
             "moe_ep_size": 1,
-            "quant_mode": common.MoEQuantMode.float16,
+            "quant_mode": common.MoEQuantMode.bfloat16,
             "database_mode": common.DatabaseMode.SILICON,
         }
 
@@ -149,7 +149,7 @@ class TestMoE:
             8,
             1,
             1,
-            common.MoEQuantMode.float16,
+            common.MoEQuantMode.bfloat16,
             "uniform",
             database_mode=common.DatabaseMode.SOL,
         )
@@ -164,7 +164,7 @@ class TestMoE:
             8,
             1,
             8,
-            common.MoEQuantMode.float16,
+            common.MoEQuantMode.bfloat16,
             "uniform",
             database_mode=common.DatabaseMode.SOL,
         )
@@ -182,14 +182,14 @@ class TestMoE:
             8,
             2,
             2,
-            common.MoEQuantMode.float16,
+            common.MoEQuantMode.bfloat16,
             "uniform",
             database_mode=common.DatabaseMode.SILICON,
         )
         assert isinstance(result, PerformanceResult)
         assert float(result) > 0
         # Exact hit: fixture uses 0.1 * num_tokens per point
-        expected = comprehensive_perf_db._moe_data[common.MoEQuantMode.float16]["uniform"][2][8][2048][8192][2][2][
+        expected = comprehensive_perf_db._moe_data[common.MoEQuantMode.bfloat16]["uniform"][2][8][2048][8192][2][2][
             num_tokens
         ]
         assert math.isclose(float(result), expected, rel_tol=1e-6)
@@ -207,14 +207,14 @@ class TestMoE:
             8,
             2,
             2,
-            common.MoEQuantMode.float16,
+            common.MoEQuantMode.bfloat16,
             "uniform",
             database_mode=common.DatabaseMode.SILICON,
         )
         assert isinstance(result, PerformanceResult)
         assert float(result) > 0
         # Extrapolated latency should be greater than latency at max stored point
-        latency_at_max = comprehensive_perf_db._moe_data[common.MoEQuantMode.float16]["uniform"][2][8][2048][8192][2][
+        latency_at_max = comprehensive_perf_db._moe_data[common.MoEQuantMode.bfloat16]["uniform"][2][8][2048][8192][2][
             2
         ][max_stored]
         assert float(result) > latency_at_max
@@ -230,12 +230,12 @@ class TestMoE:
             8,
             2,
             2,
-            common.MoEQuantMode.float16,
+            common.MoEQuantMode.bfloat16,
             "uniform",
             database_mode=common.DatabaseMode.SILICON,
         )
         assert isinstance(result, PerformanceResult)
-        expected = comprehensive_perf_db._moe_data[common.MoEQuantMode.float16]["uniform"][2][8][2048][8192][2][2][
+        expected = comprehensive_perf_db._moe_data[common.MoEQuantMode.bfloat16]["uniform"][2][8][2048][8192][2][2][
             max_stored
         ]
         assert math.isclose(float(result), expected, rel_tol=1e-6)
@@ -248,7 +248,7 @@ class TestMLABMM:
         """Test SOL mode calculation for MLA BMM pre operation."""
         num_tokens = 16
         num_heads = 4
-        quant_mode = common.GEMMQuantMode.float16
+        quant_mode = common.GEMMQuantMode.bfloat16
         if_pre = True
 
         result = comprehensive_perf_db.query_mla_bmm(
@@ -259,7 +259,7 @@ class TestMLABMM:
         ops = 2 * num_tokens * num_heads * 128 * 512  # 2 for fma
         mem_bytes = num_heads * (num_tokens * 640 + 128 * 512) * quant_mode.value.memory
         sol_math = (
-            ops / (comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+            ops / (comprehensive_perf_db.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
         )
         sol_mem = mem_bytes / comprehensive_perf_db.system_spec["gpu"]["mem_bw"] * 1000
         expected = max(sol_math, sol_mem)
@@ -281,7 +281,7 @@ class TestMLABMM:
         ops = 2 * num_tokens * num_heads * 128 * 512
         mem_bytes = num_heads * (num_tokens * 640 + 128 * 512) * quant_mode.value.memory
         sol_math = (
-            ops / (comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+            ops / (comprehensive_perf_db.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
         )
         sol_mem = mem_bytes / comprehensive_perf_db.system_spec["gpu"]["mem_bw"] * 1000
         expected = max(sol_math, sol_mem)
@@ -291,11 +291,11 @@ class TestMLABMM:
     def test_query_mla_bmm_sol_full_mode(self, comprehensive_perf_db):
         """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
         sol_time, sol_math, sol_mem = comprehensive_perf_db.query_mla_bmm(
-            8, 4, common.GEMMQuantMode.float16, True, database_mode=common.DatabaseMode.SOL_FULL
+            8, 4, common.GEMMQuantMode.bfloat16, True, database_mode=common.DatabaseMode.SOL_FULL
         )
 
         sol_only = comprehensive_perf_db.query_mla_bmm(
-            8, 4, common.GEMMQuantMode.float16, True, database_mode=common.DatabaseMode.SOL
+            8, 4, common.GEMMQuantMode.bfloat16, True, database_mode=common.DatabaseMode.SOL
         )
         assert sol_time > 0
         assert math.isclose(sol_time, float(sol_only), rel_tol=1e-6)
@@ -305,7 +305,7 @@ class TestMLABMM:
         """Test SILICON mode for pre operation."""
         num_tokens = 8
         num_heads = 4
-        quant_mode = common.GEMMQuantMode.float16
+        quant_mode = common.GEMMQuantMode.bfloat16
 
         result = comprehensive_perf_db.query_mla_bmm(
             num_tokens, num_heads, quant_mode, True, database_mode=common.DatabaseMode.SILICON
@@ -332,8 +332,8 @@ class TestMLABMM:
     def test_query_mla_bmm_different_configs(self, comprehensive_perf_db):
         """Test MLA BMM with different configurations."""
         configs = [
-            (1, 1, common.GEMMQuantMode.float16, True),
-            (32, 8, common.GEMMQuantMode.float16, False),
+            (1, 1, common.GEMMQuantMode.bfloat16, True),
+            (32, 8, common.GEMMQuantMode.bfloat16, False),
             (16, 4, common.GEMMQuantMode.fp8, True),
             (8, 2, common.GEMMQuantMode.fp8, False),
         ]

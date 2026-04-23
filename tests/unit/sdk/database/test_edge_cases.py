@@ -143,7 +143,7 @@ class TestInitializationEdgeCases:
             "data_dir": "data",
             "misc": {"nccl_version": "v1"},
             "gpu": {
-                "float16_tc_flops": 1000.0,
+                "bfloat16_tc_flops": 1000.0,
                 "mem_bw": 100.0,
                 "mem_bw_empirical_scaling_factor": 0.8,
                 "mem_empirical_constant_latency": 0.001,
@@ -173,10 +173,10 @@ class TestInitializationEdgeCases:
                 )
             )
         )
-        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][0][4][16][1] = 0.1
-        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][0][4][32][1] = 0.2
-        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][0][8][16][1] = 0.15
-        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][0][8][32][1] = 0.25
+        dummy_context_data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][0][128][0][4][16][1] = 0.1
+        dummy_context_data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][0][128][0][4][32][1] = 0.2
+        dummy_context_data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][0][128][0][8][16][1] = 0.15
+        dummy_context_data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][0][128][0][8][32][1] = 0.25
 
         monkeypatch.setattr(
             "aiconfigurator.sdk.perf_database.load_context_attention_data",
@@ -241,7 +241,7 @@ class TestGemmInterpolation:
 
     def test_query_gemm_interpolation(self, comprehensive_perf_db):
         """Test GEMM interpolation between known points."""
-        quant_mode = common.GEMMQuantMode.float16
+        quant_mode = common.GEMMQuantMode.bfloat16
 
         # Query a point that requires interpolation
         # Our test data has points at m=[1,2,4,8,...], n=[128,256,...], k=[128,256,...]
@@ -311,7 +311,7 @@ class TestDatabaseCache:
             "data_dir": "data",
             "misc": {"nccl_version": "v1"},
             "gpu": {
-                "float16_tc_flops": 1000.0,
+                "bfloat16_tc_flops": 1000.0,
                 "mem_bw": 100.0,
                 "mem_bw_empirical_scaling_factor": 0.8,
                 "mem_empirical_constant_latency": 0.001,
@@ -351,7 +351,7 @@ class TestDatabaseCache:
             "data_dir": "data",
             "misc": {"nccl_version": "v1"},
             "gpu": {
-                "float16_tc_flops": 1000.0,
+                "bfloat16_tc_flops": 1000.0,
                 "mem_bw": 100.0,
                 "mem_bw_empirical_scaling_factor": 0.8,
                 "mem_empirical_constant_latency": 0.001,
@@ -404,14 +404,14 @@ class TestSupportedQuantModes:
 
     def test_supported_quant_modes_values(self, comprehensive_perf_db):
         """Test that supported modes match the data keys."""
-        # GEMM should support float16 and fp8 based on our fixture
-        assert "float16" in comprehensive_perf_db.supported_quant_mode["gemm"]
+        # GEMM should support bfloat16 and fp8 based on our fixture
+        assert "bfloat16" in comprehensive_perf_db.supported_quant_mode["gemm"]
         assert "fp8" in comprehensive_perf_db.supported_quant_mode["gemm"]
 
-        # Context attention should support float16 and fp8
-        assert "float16" in comprehensive_perf_db.supported_quant_mode["context_attention"]
+        # Context attention should support bfloat16 and fp8
+        assert "bfloat16" in comprehensive_perf_db.supported_quant_mode["context_attention"]
         assert "fp8" in comprehensive_perf_db.supported_quant_mode["context_attention"]
 
-        # MoE should support float16 and fp8
-        assert "float16" in comprehensive_perf_db.supported_quant_mode["moe"]
+        # MoE should support bfloat16 and fp8
+        assert "bfloat16" in comprehensive_perf_db.supported_quant_mode["moe"]
         assert "fp8" in comprehensive_perf_db.supported_quant_mode["moe"]

@@ -69,28 +69,28 @@ def parse(args):
     parser.add_argument(
         "--gemm_quant_mode",
         type=str,
-        default="float16",
+        default="bfloat16",
         choices=list(common.GEMMQuantMode.__members__.keys()),
         help="gemm quantization type",
     )
     parser.add_argument(
         "--moe_quant_mode",
         type=str,
-        default="float16",
+        default="bfloat16",
         choices=list(common.MoEQuantMode.__members__.keys()),
         help="moe quantization type",
     )
     parser.add_argument(
         "--kvcache_quant_mode",
         type=str,
-        default="float16",
+        default="bfloat16",
         choices=list(common.KVCacheQuantMode.__members__.keys()),
         help="kvcache quantization type",
     )
     parser.add_argument(
         "--fmha_quant_mode",
         type=str,
-        default="float16",
+        default="bfloat16",
         choices=list(common.FMHAQuantMode.__members__.keys()),
         help="kvcache quantization type",
     )

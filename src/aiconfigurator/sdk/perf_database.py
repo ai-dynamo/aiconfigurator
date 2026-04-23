@@ -365,7 +365,7 @@ def get_all_databases(
     return database_dict
 
 
-# by default float16
+# by default bfloat16
 def load_custom_allreduce_data(custom_allreduce_file):
     """
     Load the custom allreduce data with power support (backward compatible).
@@ -1132,8 +1132,8 @@ def load_mla_bmm_data(mla_bmm_file):
 
 
 def _normalize_dtype_key(raw: str) -> str:
-    """Map collector dtype strings to enum member names (bfloat16 → float16)."""
-    return "float16" if raw == "bfloat16" else raw
+    """Map collector dtype strings to enum member names (bfloat16 → bfloat16)."""
+    return "bfloat16" if raw == "bfloat16" else raw
 
 
 DSA_MODEL_DIMS: dict[str, dict] = {
@@ -3736,14 +3736,14 @@ class PerfDatabase:
 
         Maps the quant mode's compute factor (1/2/4) to the corresponding
         ``*_tc_flops`` entry in the system GPU spec.  Falls back to
-        ``float16_tc_flops * compute_factor`` when the spec entry is missing.
+        ``bfloat16_tc_flops * compute_factor`` when the spec entry is missing.
         """
-        compute_to_flops_key = {1: "float16_tc_flops", 2: "fp8_tc_flops", 4: "fp4_tc_flops"}
+        compute_to_flops_key = {1: "bfloat16_tc_flops", 2: "fp8_tc_flops", 4: "fp4_tc_flops"}
         gpu = self.system_spec["gpu"]
         key = compute_to_flops_key.get(quant_mode.value.compute)
         if key is not None and key in gpu:
             return gpu[key]
-        return gpu["float16_tc_flops"] * quant_mode.value.compute
+        return gpu["bfloat16_tc_flops"] * quant_mode.value.compute
 
     @staticmethod
     def _normalize_gemm_quant_mode_for_table(quant_mode: common.GEMMQuantMode) -> common.GEMMQuantMode:
@@ -4109,7 +4109,7 @@ class PerfDatabase:
                 )
                 + kvcache_quant_mode.value.memory * b * (2 * n_kv * full_s * h)  # K,V read
             )  # TODO fp8 io
-            sol_math = ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            sol_math = ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -4236,22 +4236,22 @@ class PerfDatabase:
             if kvcache_quant_mode == common.KVCacheQuantMode.fp8:
                 quant_mode_gen = common.FMHAQuantMode.fp8
             else:
-                quant_mode_gen = common.FMHAQuantMode.float16
+                quant_mode_gen = common.FMHAQuantMode.bfloat16
             if w > 0:
                 kv_len = min(s - 1, w)
             else:
                 kv_len = s - 1
-            # only consider fp16 mmha
+            # only consider bfloat16 mmha
             ops = 2 * b * n * h * 2 * (kv_len)  # 2 for fma, 2 for q*k^t+*v
             # kvcache load bytes will depend on kvcache quant. while input q and output might be in
-            # fp16.
+            # bfloat16.
             mem_bytes = b * (
                 n * h * 2  # Query read, assuming 16bits
                 + 2 * n_kv * (kv_len) * h * kvcache_quant_mode.value.memory  # K, V cache read
                 + n * h * 2  # Output write, assuming 16bits
             )
 
-            sol_math = ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / quant_mode_gen.value.compute
+            sol_math = ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / quant_mode_gen.value.compute
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -4370,7 +4370,7 @@ class PerfDatabase:
             mem_bytes = (
                 b * num_heads * (kvcache_quant_mode.value.memory * full_s * (192 + 128) + 2 * s * (192 + 128))
             )  # 2 for qk, TODO
-            sol_math = ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            sol_math = ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -4455,14 +4455,14 @@ class PerfDatabase:
             if kvcache_quant_mode == common.KVCacheQuantMode.fp8:
                 quant_mode_gen = common.FMHAQuantMode.fp8
             else:
-                quant_mode_gen = common.FMHAQuantMode.float16
-            # only consider fp16 mmha
+                quant_mode_gen = common.FMHAQuantMode.bfloat16
+            # only consider bfloat16 mmha
             ops = 2 * b * num_heads * 1088 * s  # 2 for fma
             # kvcache load bytes will depend on kvcache quant.
-            # while input q and output might be in fp16.
+            # while input q and output might be in bfloat16.
             mem_bytes = b * (num_heads * 1088 * 2 + (s - 1) * 576 * kvcache_quant_mode.value.memory)
-            # fp16 io + fp16/fp8 kv cache, TODO fp8 io
-            sol_math = ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / quant_mode_gen.value.compute
+            # bfloat16 io + bfloat16/fp8 kv cache, TODO fp8 io
+            sol_math = ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / quant_mode_gen.value.compute
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -4516,7 +4516,7 @@ class PerfDatabase:
         num_heads: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.float16,
+        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
@@ -4551,7 +4551,7 @@ class PerfDatabase:
             full_s = s + prefix
             ops = b * num_heads * 2 / 2 * (192 + 128) * (full_s * full_s - prefix * prefix)
             mem_bytes = b * num_heads * (kvcache_quant_mode.value.memory * full_s * (192 + 128) + 2 * s * (192 + 128))
-            sol_math = ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            sol_math = ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -4607,8 +4607,8 @@ class PerfDatabase:
         s: int,
         num_heads: int,
         kv_cache_dtype: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode = common.FMHAQuantMode.float16,
-        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.float16,
+        fmha_quant_mode: common.FMHAQuantMode = common.FMHAQuantMode.bfloat16,
+        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
@@ -4640,16 +4640,16 @@ class PerfDatabase:
             if kv_cache_dtype == common.KVCacheQuantMode.fp8:
                 quant_mode_gen = common.FMHAQuantMode.fp8
             else:
-                quant_mode_gen = common.FMHAQuantMode.float16
+                quant_mode_gen = common.FMHAQuantMode.bfloat16
             # MLA attention ops
             attn_ops = 2 * b * num_heads * 1088 * s
             mem_bytes = b * (num_heads * 1088 * 2 + (s - 1) * 576 * kv_cache_dtype.value.memory)
-            sol_math = attn_ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / quant_mode_gen.value.compute
+            sol_math = attn_ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / quant_mode_gen.value.compute
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             # Add BMM pre + post SOL (same as query_mla_bmm)
             bmm_ops = 2 * 2 * b * num_heads * 128 * 512  # pre + post
             bmm_mem = 2 * num_heads * (b * 640 + 128 * 512) * gemm_quant_mode.value.memory
-            bmm_math = bmm_ops / (self.system_spec["gpu"]["float16_tc_flops"] * gemm_quant_mode.value.compute) * 1000
+            bmm_math = bmm_ops / (self.system_spec["gpu"]["bfloat16_tc_flops"] * gemm_quant_mode.value.compute) * 1000
             bmm_mem_time = bmm_mem / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_math += bmm_math
             sol_mem += bmm_mem_time
@@ -4760,8 +4760,8 @@ class PerfDatabase:
 
             ops = q_b_flop + q_w_kc_flop + s_w_vc_flop + attn_out_flop
             mem_bytes = (q_b_mem + q_w_kc_mem + attn_mem * 2 + s_w_vc_mem + attn_out_mem) * fmha_quant_mode.value.memory
-            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
-            sol_math += attn_flop / (self.system_spec["gpu"]["float16_tc_flops"]) * 1000
+            sol_math = ops / (self.system_spec["gpu"]["bfloat16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
+            sol_math += attn_flop / (self.system_spec["gpu"]["bfloat16_tc_flops"]) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
 
@@ -4884,8 +4884,8 @@ class PerfDatabase:
 
             ops = q_b_flop + kv_b_flop + attn_out_flop
             mem_bytes = (q_b_mem + kv_b_mem + attn_mem * 2 + attn_out_mem) * fmha_quant_mode.value.memory
-            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
-            sol_math += attn_flop / (self.system_spec["gpu"]["float16_tc_flops"]) * 1000
+            sol_math = ops / (self.system_spec["gpu"]["bfloat16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
+            sol_math += attn_flop / (self.system_spec["gpu"]["bfloat16_tc_flops"]) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -4983,7 +4983,7 @@ class PerfDatabase:
 
             # assume all are ring allreduce, ignore constant latency
             # (~1us for hopper, ~2us for two-die blackwell)
-            # assume float16
+            # assume bfloat16
             sol_time = 2 * size * 2 / tp_size * (tp_size - 1) / p2p_bw
             return sol_time * 1000, 0, 0
 
@@ -5257,7 +5257,7 @@ class PerfDatabase:
                 // moe_tp_size
                 * min(num_experts // moe_ep_size, total_tokens // moe_ep_size)
             )
-            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_math = ops / (self.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -5619,7 +5619,7 @@ class PerfDatabase:
             """
             ops = 2 * num_tokens * num_heads * 128 * 512  # 2 for fma
             mem_bytes = num_heads * (num_tokens * 640 + 128 * 512) * quant_mode.value.memory
-            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_math = ops / (self.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -5651,7 +5651,7 @@ class PerfDatabase:
             # SILICON or HYBRID mode - use database
             def get_silicon():
                 self._mla_bmm_data.raise_if_not_loaded()
-                quant_mode_lookup = quant_mode if quant_mode in self._mla_bmm_data else common.GEMMQuantMode.float16
+                quant_mode_lookup = quant_mode if quant_mode in self._mla_bmm_data else common.GEMMQuantMode.bfloat16
                 mla_bmm_dict = self._mla_bmm_data[quant_mode_lookup]["mla_gen_pre" if if_pre else "mla_gen_post"][
                     num_heads
                 ]
@@ -5877,7 +5877,7 @@ class PerfDatabase:
                 write_bytes = x * conv_channels * 2
             elif kernel_source == "chunk_gated_delta_rule":
                 # GDN chunked scan (context phase).
-                # State shape: [num_v_heads, head_k_dim, head_v_dim], stored as FP16 in global memory.
+                # State shape: [num_v_heads, head_k_dim, head_v_dim], stored as BF16 in global memory.
                 # Intermediate h_chunks [B, NT, H, K, V] are written by chunk_delta_h and read by
                 # chunk_o via global memory (separate kernel launches). Allocated via k.new_empty()
                 # (no dtype override), so matches input dtype: FP16/BF16 → 2 bytes.
@@ -5896,7 +5896,7 @@ class PerfDatabase:
                     + h_chunks_bytes  # chunk_delta_h writes h_chunks to global memory
                 )
             elif kernel_source == "fused_sigmoid_gating_delta_rule_update":
-                # GDN single-step decode. State stored as FP16 in global memory.
+                # GDN single-step decode. State stored as BF16 in global memory.
                 state_size = num_v_heads * head_k_dim * head_v_dim
                 read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 2 * batch_size
                 write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 2 * batch_size
@@ -6251,7 +6251,7 @@ class PerfDatabase:
                 // moe_tp_size
                 * min(num_slots // moe_ep_size, total_tokens // moe_ep_size)  # weights (use num_slots)
             )
-            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_math = ops / (self.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -6376,7 +6376,7 @@ class PerfDatabase:
             # Simple empirical fallback based on SOL
             total_tokens = num_tokens * topk
             ops = total_tokens * hidden_size * inter_size * 3 * 2 // moe_ep_size // moe_tp_size
-            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_math = ops / (self.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
             return sol_math / 0.4  # Empirical scale factor
 
         return self._query_silicon_or_hybrid(
@@ -6642,7 +6642,7 @@ class PerfDatabase:
         num_heads: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.float16,
+        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
         *,
         prefix: int = 0,
@@ -6853,7 +6853,7 @@ class PerfDatabase:
         s: int,
         num_heads: int,
         kv_cache_dtype: common.KVCacheQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.float16,
+        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
         *,
         architecture: str = DEFAULT_DSA_ARCHITECTURE,
@@ -6898,7 +6898,7 @@ class PerfDatabase:
             Ops split into GEMM group (gemm_quant_mode) and attention group
             (fmha derived from kv_cache_dtype).
             """
-            fmha_mode = common.FMHAQuantMode.float16
+            fmha_mode = common.FMHAQuantMode.bfloat16
 
             tokens = b
             proj_out = q_lora + kv_lora + qk_rope + index_head_dim

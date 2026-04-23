@@ -83,11 +83,11 @@ def get_moe_test_cases():
     # L40S (SM89) has 100KB shared memory, fp8_block kernel needs ~144KB
     sm_version = get_sm_version()
     if sm_version < 90:
-        moe_list = ["float16", "int4_wo"]
+        moe_list = ["bfloat16", "int4_wo"]
     elif sm_version < 100:
-        moe_list = ["float16", "fp8_block", "int4_wo"]
+        moe_list = ["bfloat16", "fp8_block", "int4_wo"]
     else:
-        moe_list = ["float16", "fp8_block", "nvfp4", "int4_wo"]
+        moe_list = ["bfloat16", "fp8_block", "nvfp4", "int4_wo"]
 
     test_cases = []
 
@@ -336,7 +336,7 @@ def benchmark_config(
                 masked_m=masked_m_list[i % num_iters],
             )
     else:
-        init_dtype = torch.float16 if use_fp8_w8a8 else dtype
+        init_dtype = torch.bfloat16 if use_fp8_w8a8 else dtype
         x = None if workloads is not None else torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
         if use_int8_w8a16 or use_int8_w8a8:
             w1 = torch.randint(
@@ -635,10 +635,10 @@ def run_moe_torch(
 
     assert moe_type in [
         "fp8_block",
-        "float16",
+        "bfloat16",
         "nvfp4",
         "int4_wo",
-    ], "only support moe type = fp8_block, float16, nvfp4, or int4_wo"
+    ], "only support moe type = fp8_block, bfloat16, nvfp4, or int4_wo"
     assert inter_size % moe_tp_size == 0, "inter_size % moe_tp_size must be 0"
     assert num_experts % moe_ep_size == 0, "num_experts must be divisible by moe_ep_size"
 

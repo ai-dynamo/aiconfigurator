@@ -56,8 +56,8 @@ def post_sla(
     osl: int = Body(500, description="output sequence length"),
     ttft: int = Body(300, description="first token latency limit"),
     tpot: int = Body(10, description="inter token latency limit"),
-    quant: str = Body("fp8", description="quantization mode: fp8, fp8_block, float16"),
-    kvcache_quant: str = Body("fp8", description="kvcache quantization mode, fp8, int8, float16"),
+    quant: str = Body("fp8", description="quantization mode: fp8, fp8_block, bfloat16"),
+    kvcache_quant: str = Body("fp8", description="kvcache quantization mode, fp8, int8, bfloat16"),
 ):
     logging.basicConfig(level=logging.INFO)
     result_dict = {}
@@ -65,7 +65,7 @@ def post_sla(
         model_config = ModelConfig(
             gemm_quant_mode=common.GEMMQuantMode[quant],
             kvcache_quant_mode=common.KVCacheQuantMode[kvcache_quant],
-            fmha_quant_mode=common.FMHAQuantMode.float16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
         )
         runtime_config = RuntimeConfig(batch_size=1, isl=isl, osl=osl, ttft=ttft, tpot=tpot)
 

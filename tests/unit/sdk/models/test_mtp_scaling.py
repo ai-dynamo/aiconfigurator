@@ -28,8 +28,8 @@ class TestMTPScaling:
         return sdk_config.ModelConfig(
             tp_size=1,
             pp_size=1,
-            gemm_quant_mode=common.GEMMQuantMode.float16,
-            kvcache_quant_mode=common.KVCacheQuantMode.float16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
             nextn=nextn,
             nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
         )
@@ -84,8 +84,8 @@ class TestMTPScaling:
             model_config = sdk_config.ModelConfig(
                 tp_size=2,
                 pp_size=1,
-                gemm_quant_mode=common.GEMMQuantMode.float16,
-                kvcache_quant_mode=common.KVCacheQuantMode.float16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
                 nextn=2,
                 nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
                 moe_tp_size=2,
@@ -117,8 +117,8 @@ class TestMTPScaling:
             deepseek_config = sdk_config.ModelConfig(
                 tp_size=2,
                 pp_size=1,
-                gemm_quant_mode=common.GEMMQuantMode.float16,
-                kvcache_quant_mode=common.KVCacheQuantMode.float16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
                 nextn=1,
                 nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
                 moe_tp_size=2,

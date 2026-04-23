@@ -621,14 +621,14 @@ def _run_attn_for_backend(
         isl = 1
         step = max_context_sequence_length
 
-    dtype_str = "float16"
+    dtype_str = "bfloat16"
     if kv_cache_dtype == tensorrt_llm.bindings.DataType.FP8:
         dtype_str = "fp8"
 
     log_perf(
         item_list=[
             {
-                "mla_dtype": "float16",
+                "mla_dtype": "bfloat16",
                 "kv_cache_dtype": dtype_str,
                 "num_heads": num_heads,
                 "batch_size": len(context_sequence_lengths),

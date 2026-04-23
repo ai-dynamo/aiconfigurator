@@ -684,9 +684,9 @@ def run_mla_module(
             {
                 "model": model_path,
                 "architecture": architecture,
-                "mla_dtype": "float16" if compute_dtype == "bfloat16" else compute_dtype,
-                "kv_cache_dtype": "float16" if kv_cache_dtype == "bfloat16" else kv_cache_dtype,
-                "gemm_type": "float16" if gemm_type == "bfloat16" else gemm_type,
+                "mla_dtype": "bfloat16" if compute_dtype == "bfloat16" else compute_dtype,
+                "kv_cache_dtype": "bfloat16" if kv_cache_dtype == "bfloat16" else kv_cache_dtype,
+                "gemm_type": "bfloat16" if gemm_type == "bfloat16" else gemm_type,
                 "num_heads": num_heads,
                 "batch_size": batch_size,
                 "isl": isl,

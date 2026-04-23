@@ -589,11 +589,11 @@ _quants = {
         "fmha_quant_mode": "fp8",
         "comm_quant_mode": "half",
     },
-    "float16": {
-        "gemm_quant_mode": "float16",
-        "moe_quant_mode": "float16",
-        "kvcache_quant_mode": "float16",
-        "fmha_quant_mode": "float16",
+    "bfloat16": {
+        "gemm_quant_mode": "bfloat16",
+        "moe_quant_mode": "bfloat16",
+        "kvcache_quant_mode": "bfloat16",
+        "fmha_quant_mode": "bfloat16",
         "comm_quant_mode": "half",
     },
     "nvfp4": {
@@ -604,10 +604,10 @@ _quants = {
         "comm_quant_mode": "half",
     },
     "mxfp4": {
-        "gemm_quant_mode": "float16",
+        "gemm_quant_mode": "bfloat16",
         "moe_quant_mode": "w4a16_mxfp4",
-        "kvcache_quant_mode": "float16",
-        "fmha_quant_mode": "float16",
+        "kvcache_quant_mode": "bfloat16",
+        "fmha_quant_mode": "bfloat16",
         "comm_quant_mode": "half",
     },
 }

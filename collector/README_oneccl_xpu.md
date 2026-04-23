@@ -106,7 +106,7 @@ python collect_oneccl_xpu.py --oneccl_op alltoall --dtype int8 --num_gpus 4
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--oneccl_op`, `-O` | `all_gather` | Collective operation: `all_gather`, `alltoall`, `reduce_scatter`, `all_reduce` |
-| `--dtype`, `-t` | `half` | Data type: `half` (fp16, 2 bytes), `int8` (1 byte) |
+| `--dtype`, `-t` | `half` | Data type: `half` (bf16, 2 bytes), `int8` (1 byte) |
 | `--range`, `-r` | `512,536870913,2` | `min_bytes,max_bytes,multiplicative_ratio` |
 | `--num_gpus`, `-n` | `2` | Number of GPUs (MPI ranks) |
 | `--iters`, `-i` | `100` | Benchmark iterations per message size |

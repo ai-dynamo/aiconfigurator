@@ -33,10 +33,10 @@ exp_agg_full:
     nextn: 1 # mtp 1
     nextn_accept_rates: [0.85,0,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
     worker_config: # defines quantization of each component
-      gemm_quant_mode: "fp8_block" # fp8, fp8_block, float16
-      moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, float16
-      kvcache_quant_mode: "float16" # fp8, int8, float16
-      fmha_quant_mode: "float16" # fp8, float16
+      gemm_quant_mode: "fp8_block" # fp8, fp8_block, bfloat16
+      moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, bfloat16
+      kvcache_quant_mode: "bfloat16" # fp8, int8, bfloat16
+      fmha_quant_mode: "bfloat16" # fp8, bfloat16
       comm_quant_mode: "half" # half
       num_gpu_per_worker: [4, 8] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
       tp_list: [1, 2, 4, 8]
@@ -66,10 +66,10 @@ exp_disagg_full:
     nextn_accept_rates: [0.85,0,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
     # each prefill worker config
     prefill_worker_config:
-      gemm_quant_mode: "fp8_block" # fp8, fp8_block, float16
-      moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, float16
-      kvcache_quant_mode: "float16" # fp8, int8, float16
-      fmha_quant_mode: "float16" # fp8, float16
+      gemm_quant_mode: "fp8_block" # fp8, fp8_block, bfloat16
+      moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, bfloat16
+      kvcache_quant_mode: "bfloat16" # fp8, int8, bfloat16
+      fmha_quant_mode: "bfloat16" # fp8, bfloat16
       comm_quant_mode: "half" # half
       num_gpu_per_worker: [4, 8] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
       tp_list: [1, 2, 4, 8]
@@ -79,10 +79,10 @@ exp_disagg_full:
       moe_ep_list: [1, 2, 4, 8]
     # each decode worker config
     decode_worker_config:
-      gemm_quant_mode: "fp8_block" # fp8, fp8_block, float16
-      moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, float16
-      kvcache_quant_mode: "float16" # fp8, int8, float16
-      fmha_quant_mode: "float16" # fp8, float16
+      gemm_quant_mode: "fp8_block" # fp8, fp8_block, bfloat16
+      moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, bfloat16
+      kvcache_quant_mode: "bfloat16" # fp8, int8, bfloat16
+      fmha_quant_mode: "bfloat16" # fp8, bfloat16
       comm_quant_mode: "half" # half
       num_gpu_per_worker: [4, 8] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
       tp_list: [1, 2, 4, 8]
@@ -124,7 +124,7 @@ Once we have the xPyD config, let's look into the config of p or d worker.
 We have two types of setting, quantization and parallelism.
 ### quantization (gemm_quant_mode, etc.)
 We allow users to specify different quant methods for different components even the framework doesn't support it for users to study perf impact. Choose the one you want.
-Options are listed as comment. fp8 stands for fp8 per-tensor quant. fp8 block is for blockwise quant. float16 is bf16.
+Options are listed as comment. fp8 stands for fp8 per-tensor quant. fp8 block is for blockwise quant. bfloat16 is bf16.
 
 Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).  
 Explicit quantization in `profiles` or the YAML `config` overrides those defaults.

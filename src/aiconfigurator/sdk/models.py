@@ -71,12 +71,12 @@ def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.nvfp4
         overrides["moe_quant_mode"] = common.MoEQuantMode.nvfp4
     elif quant_algo == "mxfp4":
-        overrides["gemm_quant_mode"] = common.GEMMQuantMode.float16
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.bfloat16
         overrides["moe_quant_mode"] = common.MoEQuantMode.w4a16_mxfp4
     elif quant_algo == "compressed-tensors":
         # Parse the quantization_config to find which layer categories are quantized.
         # Only set overrides for quantized categories; unset modes fall through to the
-        # global float16 default in _apply_model_quant_defaults.
+        # global bfloat16 default in _apply_model_quant_defaults.
         quant_cfg = raw_config.get("quantization_config") or {}
         base_algo, ignored = parse_compressed_tensors_quant(quant_cfg)
         if base_algo:
@@ -84,9 +84,9 @@ def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
                 overrides["gemm_quant_mode"] = getattr(common.GEMMQuantMode, base_algo)
             if "routing_experts" not in ignored:
                 overrides["moe_quant_mode"] = getattr(common.MoEQuantMode, base_algo)
-    elif quant_algo == "float16":
-        overrides["gemm_quant_mode"] = common.GEMMQuantMode.float16
-        overrides["moe_quant_mode"] = common.MoEQuantMode.float16
+    elif quant_algo == "bfloat16":
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.bfloat16
+        overrides["moe_quant_mode"] = common.MoEQuantMode.bfloat16
     elif quant_algo is not None:
         raise ValueError(f"Unsupported quant algorithm: {quant_algo}")
 
@@ -94,8 +94,8 @@ def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
     # TODO: support fp4 kv cache
     if kv_cache_algo == "fp8":
         overrides["kvcache_quant_mode"] = common.KVCacheQuantMode.fp8
-    elif kv_cache_algo == "float16":
-        overrides["kvcache_quant_mode"] = common.KVCacheQuantMode.float16
+    elif kv_cache_algo == "bfloat16":
+        overrides["kvcache_quant_mode"] = common.KVCacheQuantMode.bfloat16
     elif kv_cache_algo is not None:
         raise ValueError(f"Unsupported kv cache algorithm: {kv_cache_algo}")
 
@@ -126,38 +126,38 @@ def _apply_model_quant_defaults(
             applied.append(f"{key}={value.name}")
 
     if model_config.gemm_quant_mode is None:
-        model_config.gemm_quant_mode = common.GEMMQuantMode.float16
+        model_config.gemm_quant_mode = common.GEMMQuantMode.bfloat16
     if model_config.moe_quant_mode is None:
-        model_config.moe_quant_mode = common.MoEQuantMode.float16
+        model_config.moe_quant_mode = common.MoEQuantMode.bfloat16
     if model_config.kvcache_quant_mode is None:
-        model_config.kvcache_quant_mode = common.KVCacheQuantMode.float16
+        model_config.kvcache_quant_mode = common.KVCacheQuantMode.bfloat16
     if model_config.fmha_quant_mode is None:
-        model_config.fmha_quant_mode = common.FMHAQuantMode.float16
+        model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
     if model_config.comm_quant_mode is None:
         model_config.comm_quant_mode = common.CommQuantMode.half
 
     if applied:
         logger.debug("Using model-provided quantization defaults: %s", ", ".join(applied))
 
-    # FIXME: temporary workaround for Deepseek V3 fp8 fmha quant mode, only float16+fp8kvcache is supported
+    # FIXME: temporary workaround for Deepseek V3 fp8 fmha quant mode, only bfloat16+fp8kvcache is supported
     if (
         architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
         and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
     ):
-        model_config.fmha_quant_mode = common.FMHAQuantMode.float16
+        model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
 
-    # DSA module (DeepSeek-V3.2 / GLM-5): TRT-LLM DSA perf tables only have float16 FMHA currently.
+    # DSA module (DeepSeek-V3.2 / GLM-5): TRT-LLM DSA perf tables only have bfloat16 FMHA currently.
     if (
         architecture in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM")
         and backend_name == "trtllm"
         and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
     ):
-        model_config.fmha_quant_mode = common.FMHAQuantMode.float16
+        model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
 
-    # FIXME: temporary workaround for Qwen3 32B FP8, only float16+fp8kvcache is supported
-    # VLLM perf tables only include float16 FMHA; fall back to float16 for estimation.
+    # FIXME: temporary workaround for Qwen3 32B FP8, only bfloat16+fp8kvcache is supported
+    # VLLM perf tables only include bfloat16 FMHA; fall back to bfloat16 for estimation.
     if backend_name == "vllm" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
-        model_config.fmha_quant_mode = common.FMHAQuantMode.float16
+        model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
 
     # Only log if model_config was modified
     if original_config != model_config:
@@ -684,7 +684,7 @@ class GPTModel(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 ),
             ]
         )
@@ -743,7 +743,7 @@ class GPTModel(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 ),
             ]
         )
@@ -848,7 +848,7 @@ class LLAMAModel(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 ),
             ]
         )
@@ -909,7 +909,7 @@ class LLAMAModel(BaseModel):
                     1 * self._mtp_scale_factor,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 ),
             ]
         )
@@ -1069,7 +1069,7 @@ class MOEModel(BaseModel):
                     self._num_layers,
                     self._num_experts,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 )
             ]
         )
@@ -1157,7 +1157,7 @@ class MOEModel(BaseModel):
                     self._num_layers * self._mtp_scale_factor,
                     self._num_experts,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 )
             ]
         )
@@ -1212,7 +1212,7 @@ class MOEModel(BaseModel):
                     1 * self._mtp_scale_factor,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 )
             ]
         )
@@ -1312,8 +1312,8 @@ class DeepSeekModel(BaseModel):
 
         mla_bmm_quant_mode = (
             common.GEMMQuantMode.fp8
-            if gemm_quant_mode != common.GEMMQuantMode.float16
-            else common.GEMMQuantMode.float16
+            if gemm_quant_mode != common.GEMMQuantMode.bfloat16
+            else common.GEMMQuantMode.bfloat16
         )
 
         h = self._hidden_size  # 7168
@@ -1423,7 +1423,7 @@ class DeepSeekModel(BaseModel):
                     self._num_layers,
                     self._num_experts,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 )
             ]
         )
@@ -1490,7 +1490,7 @@ class DeepSeekModel(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 )
             ]
         )
@@ -1625,7 +1625,7 @@ class DeepSeekModel(BaseModel):
                 self._num_layers * self._mtp_scale_factor,
                 self._num_experts,
                 h,
-                common.GEMMQuantMode.float16,
+                common.GEMMQuantMode.bfloat16,
             ),
             ops.MoEDispatch(
                 "generation_moe_pre_dispatch",
@@ -1677,7 +1677,7 @@ class DeepSeekModel(BaseModel):
                     1 * self._mtp_scale_factor,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 )
             ]
         )
@@ -1781,7 +1781,7 @@ class DeepSeekV32Model(BaseModel):
                     self._num_layers,
                     self._num_experts,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 ),
                 ops.MoEDispatch(
                     "context_moe_pre_dispatch",
@@ -1825,7 +1825,7 @@ class DeepSeekV32Model(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 ),
             ]
         )
@@ -1888,7 +1888,7 @@ class DeepSeekV32Model(BaseModel):
                 self._num_layers * self._mtp_scale_factor,
                 self._num_experts,
                 h,
-                common.GEMMQuantMode.float16,
+                common.GEMMQuantMode.bfloat16,
             ),
             ops.MoEDispatch(
                 "generation_moe_pre_dispatch",
@@ -1937,7 +1937,7 @@ class DeepSeekV32Model(BaseModel):
                 1 * self._mtp_scale_factor,
                 self._vocab_size // tp_size,
                 h,
-                common.GEMMQuantMode.float16,
+                common.GEMMQuantMode.bfloat16,
             )
         )
 
@@ -2064,7 +2064,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                     self._num_layers,
                     self._num_experts,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 ),
                 ops.TrtLLMWideEPMoEDispatch(
                     "context_moe_pre_dispatch",
@@ -2110,7 +2110,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 ),
             ]
         )
@@ -2144,7 +2144,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
             ops.GEMM("generation_shared_ffn2_gemm", generation_scale, h, self._moe_inter_size, gemm_quant_mode),
         ]
         routed_ops = [
-            ops.GEMM("generation_router_gemm", generation_scale, self._num_experts, h, common.GEMMQuantMode.float16),
+            ops.GEMM("generation_router_gemm", generation_scale, self._num_experts, h, common.GEMMQuantMode.bfloat16),
             ops.TrtLLMWideEPMoEDispatch(
                 "generation_moe_pre_dispatch",
                 generation_scale,
@@ -2193,7 +2193,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                 1 * self._mtp_scale_factor,
                 self._vocab_size // tp_size,
                 h,
-                common.GEMMQuantMode.float16,
+                common.GEMMQuantMode.bfloat16,
             )
         )
 
@@ -2462,8 +2462,8 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
 
         mla_bmm_quant_mode = (
             common.GEMMQuantMode.fp8
-            if gemm_quant_mode != common.GEMMQuantMode.float16
-            else common.GEMMQuantMode.float16
+            if gemm_quant_mode != common.GEMMQuantMode.bfloat16
+            else common.GEMMQuantMode.bfloat16
         )
 
         h = self._hidden_size  # 7168
@@ -2604,7 +2604,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     self._num_layers,
                     self._num_experts,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 )
             ]
         )
@@ -2683,7 +2683,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 )
             ]
         )
@@ -2821,7 +2821,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                 self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 self._num_experts,
                 h,
-                common.GEMMQuantMode.float16,
+                common.GEMMQuantMode.bfloat16,
             ),
             ops.TrtLLMWideEPMoEDispatch(
                 "generation_moe_pre_dispatch",
@@ -2891,7 +2891,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     1 * self._mtp_scale_factor,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 )
             ]
         )
@@ -3347,7 +3347,7 @@ class SGLangEPMOEModel(BaseModel):
                         self._num_layers,
                         self._num_experts,
                         h,
-                        common.GEMMQuantMode.float16,
+                        common.GEMMQuantMode.bfloat16,
                     )
                 ]
             )
@@ -3438,7 +3438,7 @@ class SGLangEPMOEModel(BaseModel):
                         self._num_layers * self._mtp_scale_factor,
                         self._num_experts,
                         h,
-                        common.GEMMQuantMode.float16,
+                        common.GEMMQuantMode.bfloat16,
                     )
                 ]
             )
@@ -3494,7 +3494,7 @@ class SGLangEPMOEModel(BaseModel):
                     1 * self._mtp_scale_factor,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 )
             ]
         )
@@ -3674,7 +3674,7 @@ class NemotronNas(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 )
             )
 
@@ -3793,7 +3793,7 @@ class NemotronNas(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 )
             )
 
@@ -4019,7 +4019,7 @@ class NemotronHModel(BaseModel):
                     count,
                     self._num_experts,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 )
             )
 
@@ -4113,7 +4113,7 @@ class NemotronHModel(BaseModel):
                 1,
                 self._vocab_size // tp_size,
                 h,
-                common.GEMMQuantMode.float16,
+                common.GEMMQuantMode.bfloat16,
             )
         )
 
@@ -4278,7 +4278,7 @@ class NemotronHModel(BaseModel):
                     count,
                     self._num_experts,
                     h,
-                    common.GEMMQuantMode.float16,
+                    common.GEMMQuantMode.bfloat16,
                 )
             )
 
@@ -4372,7 +4372,7 @@ class NemotronHModel(BaseModel):
                 1,
                 self._vocab_size // tp_size,
                 h,
-                common.GEMMQuantMode.float16,
+                common.GEMMQuantMode.bfloat16,
             )
         )
 
@@ -4508,7 +4508,7 @@ class HybridMoEModel(BaseModel):
     ) -> list:
         """Return the three MoE FFN ops (pre-dispatch, compute, post-dispatch)."""
         router_ops = (
-            [ops.GEMM(f"{prefix}_router_gemm", count, self._num_experts, h, common.GEMMQuantMode.float16)]
+            [ops.GEMM(f"{prefix}_router_gemm", count, self._num_experts, h, common.GEMMQuantMode.bfloat16)]
             if self._num_experts >= 128
             else []
         )
@@ -4666,7 +4666,7 @@ class HybridMoEModel(BaseModel):
 
         self.context_ops.extend(
             [
-                ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
+                ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp, h, common.GEMMQuantMode.bfloat16),
                 ops.P2P("context_p2p", pp - 1, h, pp),
             ]
         )
@@ -4802,7 +4802,7 @@ class HybridMoEModel(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.GEMM("generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
+                ops.GEMM("generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, common.GEMMQuantMode.bfloat16),
                 ops.P2P("generation_p2p", (pp - 1) * sf, h, pp),
             ]
         )
@@ -4963,7 +4963,7 @@ class Qwen35Model(BaseModel):
 
         self.context_ops.extend(
             [
-                ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
+                ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp, h, common.GEMMQuantMode.bfloat16),
                 ops.P2P("context_p2p", pp - 1, h, pp),
             ]
         )
@@ -4976,7 +4976,7 @@ class Qwen35Model(BaseModel):
         if cfg.num_experts > 0:
             if cfg.num_experts >= 128:
                 ops_list.append(
-                    ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, common.GEMMQuantMode.float16)
+                    ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, common.GEMMQuantMode.bfloat16)
                 )
             ops_list.extend(
                 [
@@ -5160,7 +5160,7 @@ class Qwen35Model(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.GEMM("generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
+                ops.GEMM("generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, common.GEMMQuantMode.bfloat16),
                 ops.P2P("generation_p2p", (pp - 1) * sf, h, pp),
             ]
         )
@@ -5173,7 +5173,7 @@ class Qwen35Model(BaseModel):
         if cfg.num_experts > 0:
             if cfg.num_experts >= 128:
                 ops_list.append(
-                    ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, common.GEMMQuantMode.float16)
+                    ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, common.GEMMQuantMode.bfloat16)
                 )
             ops_list.extend(
                 [

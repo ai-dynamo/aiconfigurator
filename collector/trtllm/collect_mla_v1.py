@@ -374,8 +374,8 @@ def run_mla(
     log_perf(
         item_list=[
             {
-                "mla_dtype": "float16",
-                "kv_cache_dtype": "float16",
+                "mla_dtype": "bfloat16",
+                "kv_cache_dtype": "bfloat16",
                 "num_heads": num_heads,
                 "batch_size": batch_size,
                 "isl": isl,

@@ -91,7 +91,7 @@ exp_disagg_non_wideep:
       gemm_quant_mode: "fp8_block" 
       moe_quant_mode: "fp8_block" 
       kvcache_quant_mode: "fp8" 
-      fmha_quant_mode: "float16" # with 0.5.1 db, we only support float16 for mla
+      fmha_quant_mode: "bfloat16" # with 0.5.1 db, we only support bfloat16 for mla
       comm_quant_mode: "half" 
       num_gpu_per_worker: [8] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
       tp_list: [1, 8]
@@ -104,7 +104,7 @@ exp_disagg_non_wideep:
       gemm_quant_mode: "fp8_block" 
       moe_quant_mode: "fp8_block" 
       kvcache_quant_mode: "fp8" 
-      fmha_quant_mode: "float16" # with 0.5.1 db, we only support float16 for mla
+      fmha_quant_mode: "bfloat16" # with 0.5.1 db, we only support bfloat16 for mla
       comm_quant_mode: "half" 
       num_gpu_per_worker: [8] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
       tp_list: [1, 8]

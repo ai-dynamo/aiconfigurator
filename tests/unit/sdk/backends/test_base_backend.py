@@ -88,10 +88,10 @@ def model():
         attention_dp_size=1,
         moe_tp_size=1,
         moe_ep_size=1,
-        gemm_quant_mode=common.GEMMQuantMode.float16,
-        moe_quant_mode=common.MoEQuantMode.float16,
-        kvcache_quant_mode=common.KVCacheQuantMode.float16,
-        fmha_quant_mode=common.FMHAQuantMode.float16,
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+        moe_quant_mode=common.MoEQuantMode.bfloat16,
+        kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
         comm_quant_mode=common.CommQuantMode.half,
     )
     return model

@@ -343,7 +343,7 @@ def convert_dtype_to_torch(dtype):
     """Convert ModelDType to torch.dtype."""
     if isinstance(dtype, str):
         if dtype == "auto":
-            return torch.float16  # Default dtype for testing
+            return torch.bfloat16  # Default dtype for testing
         elif dtype in STR_DTYPE_TO_TORCH_DTYPE:
             return STR_DTYPE_TO_TORCH_DTYPE[dtype]
         else:
@@ -459,10 +459,10 @@ def create_and_prepopulate_kv_cache_mla(
     # Workaround for XPU FP8 indexing not implemented:
     # Intel Extension for PyTorch (IPEX) currently lacks support for advanced
     # indexing (slicing via LongTensor) on Float8 tensors ("index_xpu" not implemented).
-    # To bypass this, we temporarily cast the KV cache to float16, perform the
+    # To bypass this, we temporarily cast the KV cache to bfloat16, perform the
     # permutation, and then cast it back to the original FP8 format.
     if "xpu" in str(device) and kv_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-        temp_cache = kv_cache.to(torch.float16)
+        temp_cache = kv_cache.to(torch.bfloat16)
         temp_cache_sliced = temp_cache[perm, ...]
         kv_cache[1:blocks_end, ...] = temp_cache_sliced.to(kv_cache.dtype)
     else:
@@ -562,10 +562,10 @@ def create_and_prepopulate_kv_cache(
     # Workaround for XPU FP8 indexing not implemented:
     # Intel Extension for PyTorch (IPEX) currently lacks support for advanced
     # indexing (slicing via LongTensor) on Float8 tensors ("index_xpu" not implemented).
-    # To bypass this, we temporarily cast the KV cache to float16, perform the
+    # To bypass this, we temporarily cast the KV cache to bfloat16, perform the
     # permutation, and then cast it back to the original FP8 format.
     if "xpu" in str(device) and kv_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-        temp_cache = kv_cache.to(torch.float16)
+        temp_cache = kv_cache.to(torch.bfloat16)
         temp_cache_sliced = temp_cache[:, perm, ...]
         kv_cache[:, 1:blocks_end, ...] = temp_cache_sliced.to(kv_cache.dtype)
     else:

@@ -22,7 +22,7 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
         "misc": {"nccl_version": "v1"},
         "gpu": {
             # These two values are used in many "SOL"-mode formulas:
-            "float16_tc_flops": 1_000.0,
+            "bfloat16_tc_flops": 1_000.0,
             "mem_bw": 100.0,
             # For query_nccl SILICON branch:
             "mem_empirical_constant_latency": 1.0,
@@ -38,10 +38,10 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
     monkeypatch.setattr(yaml, "load", lambda stream, Loader=None: dummy_system_spec)  # noqa: N803
 
     # Patch load_gemm_data to return a minimal nested dict keyed by
-    # common.GEMMQuantMode.float16 with multiple entries to avoid extrapolation errors.
+    # common.GEMMQuantMode.bfloat16 with multiple entries to avoid extrapolation errors.
     # Each entry includes {"latency": ..., "power": ..., "energy": ...}.
     dummy_gemm_data = {
-        common.GEMMQuantMode.float16: {
+        common.GEMMQuantMode.bfloat16: {
             64: {
                 128: {
                     256: {"latency": 10.0, "power": 5.0, "energy": 50.0},  # at (m=64, n=128, k=256)
@@ -67,9 +67,9 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_gemm_data", lambda path: dummy_gemm_data)
 
     # Patch load_custom_allreduce_data to return proper structure.
-    # Structure: { 'float16': { 2: { 'AUTO': { 1024:  5.0 } } } }
+    # Structure: { 'bfloat16': { 2: { 'AUTO': { 1024:  5.0 } } } }
     dummy_custom_allreduce_data = {
-        "float16": {
+        "bfloat16": {
             2: {"AUTO": {1024: 5.0, 2048: 15.0}},
             4: {"AUTO": {1024: 10.0, 2048: 20.0}},
             8: {"AUTO": {1024: 15.0, 2048: 30.0}},
@@ -129,7 +129,7 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
         "data_dir": "data",
         "misc": {"nccl_version": "v1"},
         "gpu": {
-            "float16_tc_flops": 1_000_000_000_000.0,  # 1 TFLOPS
+            "bfloat16_tc_flops": 1_000_000_000_000.0,  # 1 TFLOPS
             "mem_bw": 1_000_000_000_000.0,  # 1 TB/s
             "mem_bw_empirical_scaling_factor": 0.8,
             "mem_empirical_constant_latency": 0.001,  # 1 us
@@ -151,7 +151,7 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
 
     # Comprehensive GEMM data with energy
     dummy_gemm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-    for quant_mode in [common.GEMMQuantMode.float16, common.GEMMQuantMode.fp8]:
+    for quant_mode in [common.GEMMQuantMode.bfloat16, common.GEMMQuantMode.fp8]:
         for m in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
             for n in [128, 256, 512, 1024]:
                 for k in [128, 256, 512, 1024]:
@@ -174,8 +174,8 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
             )
         )
     )
-    for quant_mode in [common.FMHAQuantMode.float16, common.FMHAQuantMode.fp8]:
-        for kv_cache_dtype in [common.KVCacheQuantMode.float16, common.KVCacheQuantMode.fp8]:
+    for quant_mode in [common.FMHAQuantMode.bfloat16, common.FMHAQuantMode.fp8]:
+        for kv_cache_dtype in [common.KVCacheQuantMode.bfloat16, common.KVCacheQuantMode.fp8]:
             for kv_n in [0, 1, 2, 4, 8]:  # 0 means MHA
                 for head_size in [64, 128]:
                     for window_size in [0, 128]:
@@ -192,7 +192,7 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
             lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
         )
     )
-    for kv_cache_dtype in [common.KVCacheQuantMode.float16, common.KVCacheQuantMode.fp8]:
+    for kv_cache_dtype in [common.KVCacheQuantMode.bfloat16, common.KVCacheQuantMode.fp8]:
         for kv_n in [0, 1, 2, 4, 8]:
             for head_size in [64, 128]:
                 for window_size in [0, 128]:
@@ -217,7 +217,7 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
             )
         )
     )
-    for quant_mode in [common.MoEQuantMode.float16, common.MoEQuantMode.fp8]:
+    for quant_mode in [common.MoEQuantMode.bfloat16, common.MoEQuantMode.fp8]:
         for workload in ["uniform", "imbalanced"]:
             for topk in [1, 2]:
                 for num_experts in [8, 16]:
@@ -234,8 +234,8 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
     dummy_context_mla_data = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
     )
-    for quant_mode in [common.FMHAQuantMode.float16]:
-        for kv_cache_dtype in [common.KVCacheQuantMode.float16]:
+    for quant_mode in [common.FMHAQuantMode.bfloat16]:
+        for kv_cache_dtype in [common.KVCacheQuantMode.bfloat16]:
             for num_heads in [16, 32, 64, 128]:
                 for s in [16, 32, 64, 128]:
                     for b in [1, 2, 4, 8]:
@@ -245,7 +245,7 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
     dummy_generation_mla_data = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     )
-    for kv_cache_dtype in [common.KVCacheQuantMode.float16]:
+    for kv_cache_dtype in [common.KVCacheQuantMode.bfloat16]:
         for num_heads in [16, 32, 64, 128]:
             for b in [1, 2, 4, 8]:
                 for s in [1, 16, 32, 64, 128]:
@@ -253,7 +253,7 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
 
     # MLA BMM data
     dummy_mla_bmm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-    for quant_mode in [common.GEMMQuantMode.float16, common.GEMMQuantMode.fp8]:
+    for quant_mode in [common.GEMMQuantMode.bfloat16, common.GEMMQuantMode.fp8]:
         for op_name in ["mla_gen_pre", "mla_gen_post"]:
             for num_heads in [1, 2, 4, 8]:
                 for num_tokens in [1, 2, 4, 8, 16, 32]:

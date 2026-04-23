@@ -325,17 +325,17 @@ To estimate performance, we take the following steps:
 
 - **Operations**:
   - Attention
-    - MHA/GQA (FP8, FP16)
-    - MLA (FP8, FP16)
-  - KV Cache (FP16, FP8, INT8)
-  - GEMM (FP16, FP8, FP8-Block, FP8-OOTB, SQ, INT8 WO, INT4 WO, NVFP4)
-  - CustomAllReduce (FP16)
+    - MHA/GQA (FP8, BF16)
+    - MLA (FP8, BF16)
+  - KV Cache (BF16, FP8, INT8)
+  - GEMM (BF16, FP8, FP8-Block, FP8-OOTB, SQ, INT8 WO, INT4 WO, NVFP4)
+  - CustomAllReduce (BF16)
   - Embedding
   - P2P
   - ElementWise
   - NCCL (all_reduce, all_gather, all-to-all, reduce_scatter)
-  - MoE (FP16, FP8, FP8-Block, W4A-FP8, INT4 WO, NVFP4)
-  - MLA BMM (FP16, FP8)
+  - MoE (BF16, FP8, FP8-Block, W4A-FP8, INT4 WO, NVFP4)
+  - MLA BMM (BF16, FP8)
 
 - **Parallel modes**:
   - Tensor-parallel
