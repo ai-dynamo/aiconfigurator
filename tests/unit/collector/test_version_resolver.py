@@ -11,7 +11,7 @@ from typing import ClassVar
 import pytest
 from packaging.version import Version
 
-from collector.registry_types import OpEntry, VersionRoute
+from collector.registry_types import OpEntry, PerfFile, VersionRoute
 from collector.version_resolver import (
     _check_compat,
     _normalize_version,
@@ -140,6 +140,7 @@ class TestResolveModule:
         op="moe",
         get_func="get_moe_test_cases",
         run_func="run_moe_torch",
+        perf_filename=PerfFile.MOE,
         versions=(
             VersionRoute("1.1.0", "collector.trtllm.collect_moe_v3"),
             VersionRoute("0.21.0", "collector.trtllm.collect_moe_v2"),
@@ -152,6 +153,7 @@ class TestResolveModule:
         module="collector.trtllm.collect_gemm",
         get_func="get_gemm_test_cases",
         run_func="run_gemm",
+        perf_filename=PerfFile.GEMM,
     )
 
     def test_unversioned_returns_module_directly(self):
@@ -199,11 +201,13 @@ class TestBuildCollections:
             module="collector.trtllm.collect_gemm",
             get_func="get_gemm_test_cases",
             run_func="run_gemm",
+            perf_filename=PerfFile.GEMM,
         ),
         OpEntry(
             op="moe",
             get_func="get_moe_test_cases",
             run_func="run_moe_torch",
+            perf_filename=PerfFile.MOE,
             versions=(
                 VersionRoute("1.1.0", "collector.trtllm.collect_moe_v3"),
                 VersionRoute("0.20.0", "collector.trtllm.collect_moe_v1"),
@@ -239,8 +243,12 @@ class TestBuildCollections:
     def test_output_dict_shape(self):
         colls = build_collections(self.SAMPLE_REGISTRY, "trtllm", "1.1.0", ops=["gemm"])
         c = colls[0]
-        assert set(c.keys()) == {"name", "type", "module", "get_func", "run_func"}
+        assert set(c.keys()) == {"name", "type", "module", "get_func", "run_func", "perf_filename"}
         assert c["name"] == "trtllm"
+
+    def test_perf_filename_propagated(self):
+        colls = build_collections(self.SAMPLE_REGISTRY, "trtllm", "1.1.0", ops=["gemm"])
+        assert colls[0]["perf_filename"] == PerfFile.GEMM
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +260,7 @@ class TestOpEntryValidation:
 
     def test_rejects_missing_module_and_versions(self):
         with pytest.raises(ValueError, match="must specify 'module' or 'versions'"):
-            OpEntry(op="bad", get_func="f", run_func="r")
+            OpEntry(op="bad", get_func="f", run_func="r", perf_filename="p.txt")
 
     def test_rejects_both_module_and_versions(self):
         with pytest.raises(ValueError, match="cannot specify both"):
@@ -260,23 +268,24 @@ class TestOpEntryValidation:
                 op="bad",
                 get_func="f",
                 run_func="r",
+                perf_filename="p.txt",
                 module="some.module",
                 versions=(VersionRoute("1.0.0", "other.module"),),
             )
 
     def test_accepts_module_only(self):
-        entry = OpEntry(op="ok", get_func="f", run_func="r", module="some.module")
+        entry = OpEntry(op="ok", get_func="f", run_func="r", perf_filename="p.txt", module="some.module")
         assert entry.module == "some.module"
         assert entry.versions == ()
 
     def test_accepts_versions_only(self):
         routes = (VersionRoute("1.0.0", "some.module"),)
-        entry = OpEntry(op="ok", get_func="f", run_func="r", versions=routes)
+        entry = OpEntry(op="ok", get_func="f", run_func="r", perf_filename="p.txt", versions=routes)
         assert entry.module is None
         assert entry.versions == routes
 
     def test_frozen(self):
-        entry = OpEntry(op="ok", get_func="f", run_func="r", module="m")
+        entry = OpEntry(op="ok", get_func="f", run_func="r", perf_filename="p.txt", module="m")
         with pytest.raises(AttributeError):
             entry.op = "changed"
 
@@ -313,6 +322,14 @@ class TestRegistryIntegrity:
         reg, backend = registry
         ops = [e.op for e in reg]
         assert len(ops) == len(set(ops)), f"{backend}: duplicate op names found"
+
+    def test_perf_filename_non_empty(self, registry):
+        reg, backend = registry
+        for entry in reg:
+            assert entry.perf_filename, f"{backend}/{entry.op}: perf_filename is empty"
+            assert entry.perf_filename.endswith("_perf.txt"), (
+                f"{backend}/{entry.op}: perf_filename {entry.perf_filename!r} does not follow *_perf.txt convention"
+            )
 
     # -----------------------------------------------------------------------
     # Module / function existence

@@ -397,13 +397,16 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     Args:
         num_processes: Number of parallel processes. If 0, runs sequentially in main process.
     """
+    # func may be a functools.partial (perf_filename bound by collect_ops),
+    # which lacks __name__. Fall back to partial.func to get the wrapped function.
+    func_name = getattr(func, "__name__", None) or getattr(func, "func", func).__name__
     raw_task_infos = []
     for i, task in enumerate(tasks):
         if isinstance(task, dict) and "id" in task and "params" in task:
             task_id = task["id"]
             task_params = task["params"]
         else:
-            task_id = create_test_case_id(task, func.__name__, module_name)
+            task_id = create_test_case_id(task, func_name, module_name)
             task_params = task
         raw_task_infos.append({"id": task_id, "params": task_params, "index": i})
 
@@ -413,7 +416,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     resume_tracker = ResumeCheckpoint(
         backend=resume_options.get("backend", "unknown") if resume_options else "unknown",
         module_name=module_name,
-        run_func_name=func.__name__,
+        run_func_name=func_name,
         checkpoint_dir=checkpoint_dir,
     )
 
@@ -1024,8 +1027,6 @@ def main():
     if args.model_path:
         logger.info(f"Model filter active: collecting only for '{args.model_path}'")
 
-    num_processes = get_device_module().device_count()
-    logger.info(f"Starting collection with {num_processes} GPU processes")
     resume_options = {
         "resume": args.resume,
         "checkpoint_dir": args.checkpoint_dir,
