@@ -125,13 +125,12 @@ def _resolve_local_model_path(model_id: str) -> str:
     # _forward_standard_mha -> flashinfer.prefill.trtllm_ragged_attention_deepseek
     # which asserts on GLM-5's v_head_dim=256 and kills the subprocess
     # after ~14 rows/bucket.
-    if original_arch == "GlmMoeDsaForCausalLM":
-        try:
-            sm = torch.cuda.get_device_capability()[0]
-        except Exception:
-            sm = 0
-        if sm >= 10 and "SGLANG_NSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD" not in os.environ:
-            os.environ["SGLANG_NSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD"] = "0"
+    if (
+        original_arch == "GlmMoeDsaForCausalLM"
+        and get_sm_version() >= 100
+        and "SGLANG_NSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD" not in os.environ
+    ):
+        os.environ["SGLANG_NSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD"] = "0"
 
     tmp_dir = os.path.join(
         tempfile.gettempdir(),
