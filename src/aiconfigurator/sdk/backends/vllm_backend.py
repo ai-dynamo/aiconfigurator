@@ -42,6 +42,7 @@ class VLLMBackend(BaseBackend):
         ctx_seq_imbalance_correction_scale = runtime_config.seq_imbalance_correction_scale
         gen_seq_imbalance_correction_scale = runtime_config.gen_seq_imbalance_correction_scale
         ctx_tokens = kwargs.get("ctx_tokens")
+        enable_chunked_prefill = kwargs.get("enable_chunked_prefill", False)
         assert ctx_tokens is not None, "ctx_tokens is required"
         balance_score = isl * b / ctx_tokens / osl
 
@@ -131,8 +132,13 @@ class VLLMBackend(BaseBackend):
                 # second pass to get ctx attn, split full isl over
                 # num_steps(=np.ceil(isl/ctx_tokens))
                 # average the ctx attn latency with num_steps to get the ctx_attention_latency
-                num_tokens = isl
-                batch_size = np.ceil(ctx_tokens / isl)
+                if not enable_chunked_prefill or ctx_tokens >= isl:
+                    num_tokens = isl
+                    batch_size = np.ceil(ctx_tokens / isl)
+                else:
+                    # split chunks and simply get the latency of that chunk of ctx_tokens
+                    num_tokens = ctx_tokens
+                    batch_size = 1
                 summary = self.run_static(
                     model,
                     database,
@@ -148,7 +154,10 @@ class VLLMBackend(BaseBackend):
                 )
                 latency_dict = summary.get_context_latency_dict()
                 energy_wms_dict = summary.get_context_energy_wms_dict()
-                scale_factor = np.ceil(isl / ctx_tokens)
+                if not enable_chunked_prefill or ctx_tokens >= isl:
+                    scale_factor = np.ceil(isl / ctx_tokens)
+                else:
+                    scale_factor = 1
                 ctx_attention_latency_ms = latency_dict["context_attention"] / scale_factor
                 ctx_attention_energy_wms = energy_wms_dict.get("context_attention", 0.0) / scale_factor
 
@@ -473,6 +482,7 @@ class VLLMBackend(BaseBackend):
                         seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
                     ),
                     ctx_tokens=ctx_tokens,
+                    enable_chunked_prefill=enable_chunked_prefill,
                 )
 
                 if summary.check_oom() or summary.check_kv_cache_oom():
