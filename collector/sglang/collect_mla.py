@@ -19,7 +19,8 @@ from sglang.srt.mem_cache.memory_pool import MLATokenToKVPool, ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.utils import is_blackwell
 
-from helper import benchmark_with_power, get_sm_version, log_perf
+from collector.helper import benchmark_with_power, get_sm_version, log_perf
+from collector.registry_types import PerfFile
 
 # Mocking for standalone collector script
 sglang.srt.layers.dp_attention._ATTN_TP_SIZE = 1
@@ -557,8 +558,6 @@ def run_mla(
 
 
 if __name__ == "__main__":
-    from registry_types import PerfFile
-
     test_cases = get_context_mla_test_cases()
     for test_case in test_cases[0:10]:
         print(test_case)

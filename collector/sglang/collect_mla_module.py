@@ -1251,6 +1251,4 @@ def main():
 
 
 if __name__ == "__main__":
-    from collector.registry_types import PerfFile  # noqa: F401 — available for ad-hoc runs
-
     main()

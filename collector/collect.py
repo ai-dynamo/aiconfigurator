@@ -541,7 +541,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 task_params = task_info["params"]
 
                 try:
-                    func(*task_params, device)
+                    func(*task_params, device=device)
                     resume_tracker.mark_done(task_id)
                 except Exception as e:
                     error_info = {

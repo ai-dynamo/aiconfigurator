@@ -19,7 +19,8 @@ from tensorrt_llm.llmapi import KvCacheConfig
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
-from helper import benchmark_with_power, get_sm_version, log_perf
+from collector.helper import benchmark_with_power, get_sm_version, log_perf
+from collector.registry_types import PerfFile
 
 
 def run_attention_torch(
@@ -683,8 +684,6 @@ def get_generation_attention_test_cases():
 
 
 if __name__ == "__main__":
-    from registry_types import PerfFile
-
     test_cases = get_context_attention_test_cases()
     for test_case in test_cases:
         run_attention_torch(*test_case, perf_filename=PerfFile.CONTEXT_ATTENTION)
