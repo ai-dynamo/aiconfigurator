@@ -16,6 +16,13 @@ class PerfFile(str, Enum):
     without ``.value``.
     """
 
+    def __str__(self) -> str:
+        """
+        Override behavior of str(x) and f"{x}" to return
+        the perf filename instead of the enum name like "PerfFile.GEMM".
+        """
+        return self.value
+
     GEMM = "gemm_perf.txt"
     CONTEXT_ATTENTION = "context_attention_perf.txt"
     GENERATION_ATTENTION = "generation_attention_perf.txt"

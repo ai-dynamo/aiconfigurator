@@ -58,6 +58,7 @@ from vllm.transformers_utils.config import _CONFIG_REGISTRY
 from vllm.version import __version__ as vllm_version
 
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
+from collector.registry_types import PerfFile
 from collector.vllm.utils import (
     BatchSpec,
     create_and_prepopulate_kv_cache_mla,
@@ -1029,6 +1030,11 @@ def main():
         print(f"Model: {model_path}  |  Attention: {attn_type.upper()}")
         print(f"{'=' * 60}")
 
+        if args.mode == "context":
+            perf_filename = PerfFile.MLA_CONTEXT_MODULE if attn_type == "mla" else PerfFile.DSA_CONTEXT_MODULE
+        else:
+            perf_filename = PerfFile.MLA_GENERATION_MODULE if attn_type == "mla" else PerfFile.DSA_GENERATION_MODULE
+
         if args.quick:
             b = args.batch_size or 4
             s = args.seq_len or 2048
@@ -1036,7 +1042,6 @@ def main():
             kv_dtype = args.kv_cache_dtype or "bfloat16"
             compute = args.compute_dtype or "bfloat16"
             gemm = args.gemm_type or "bfloat16"
-            fname = f"{attn_type}_{args.mode}_module_perf.txt"
             run_mla_module(
                 seq_len=s,
                 batch_size=b,
@@ -1044,7 +1049,7 @@ def main():
                 kv_cache_dtype=kv_dtype,
                 compute_dtype=compute,
                 gemm_type=gemm,
-                perf_filename=fname,
+                perf_filename=perf_filename,
                 model_path=model_path,
                 attn_type=attn_type,
                 device=args.device,
@@ -1069,8 +1074,6 @@ def main():
             test_cases = [tc for tc in test_cases if tc[5] == args.gemm_type]
 
         print(f"Running {len(test_cases)} {args.mode} {attn_type.upper()} module test cases...")
-
-        fname = f"{attn_type}_{args.mode}_module_perf.txt"
         for i, (s, b, h, kv_dtype, compute, gemm) in enumerate(test_cases):
             print(f"[{i + 1}/{len(test_cases)}]", end="")
             try:
@@ -1081,7 +1084,7 @@ def main():
                     kv_cache_dtype=kv_dtype,
                     compute_dtype=compute,
                     gemm_type=gemm,
-                    perf_filename=fname,
+                    perf_filename=perf_filename,
                     model_path=model_path,
                     attn_type=attn_type,
                     device=args.device,
