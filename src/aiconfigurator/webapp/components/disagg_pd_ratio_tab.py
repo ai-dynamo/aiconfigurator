@@ -21,7 +21,7 @@ def create_disagg_pd_ratio_tab(app_config):
                 label="introduction",
                 value=r"""
                     **Please read the readme tab before using this tab.**  
-                    This mode is used to analyze p/d ratioin disaggregated system.  
+                    This mode is used to analyze p/d ratio in disaggregated system.  
                     Please click the 'Estimate' button to run the estimation. It will takes **a few seconds** to complete.  
                     The throughput curve as well as the result dataframe will be shown below.  
                     A dotted vertical line will be shown on the throughput curve, which indicates the ttft limit and tpot limit for prefill and decode respectively.  

@@ -1156,7 +1156,7 @@ class EventFn:
         return gr.update(value=iframe_html)
 
     @staticmethod
-    def donwload_pareto_html(iframe_html):
+    def download_pareto_html(iframe_html):
         with open("pareto_comparison.html", "w") as f:
             f.write(iframe_html)
         return "pareto_comparison.html"

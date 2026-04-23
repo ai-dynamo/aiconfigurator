@@ -29,7 +29,7 @@ def create_readme_tab(app_config):
                 #### Use cases
                     1. Estimate the tokens/s/gpu at a certain tokens/s/user (1/tpot). Understand the trade-off between latency and throughput.
                     2. Reproduce a certain point at the pareto frontier.
-                        2.1 sepcifically, you can bench the service using concurrency reported by the modeling here. Hover on the point to see the concurrency and record index.
+                        2.1 specifically, you can bench the service using concurrency reported by the modeling here. Hover on the point to see the concurrency and record index.
                         2.2 you can get more details using the point record index and find that in Records section.
                         2.3 Note, this aiconfigurator will report more details about how to do the deployment. But you can simply set the max num tokens to isl + max_batch_size in trtllm. It will not affect the performance a lot.
                     3. In near future, we will generate a deployment script automatically.
@@ -39,8 +39,8 @@ def create_readme_tab(app_config):
                     This tab is used to do Disagg Pareto estimation. Points on pareto frontier are the best performance you can get with the given system at a certain tokens/s/user.
                 #### Use cases
                     1. Estimate the tokens/s/gpu at a certain tokens/s/user (1/tpot). Understand the trade-off between latency and throughput.                
-                    2. Reproduce a certain point at the pareto forntier. 
-                        2.1 sepcifically, you can bench the service using concurrency reported by the modeling here. Using concurrency==num_decode_workers*decode_batch_size. 
+                    2. Reproduce a certain point at the pareto frontier. 
+                        2.1 specifically, you can bench the service using concurrency reported by the modeling here. Using concurrency==num_decode_workers*decode_batch_size. 
                         2.2 you can get more details using the point record index and find that in Records section. 
                         2.3 Note, this aiconfigurator will report more details about how to do the deployment. Get info about num prefill/decoder workers, batchsize and parallel config. 
                             2.3.1 Today, it's better to set batch size of prefill worker to 1. As in concurrency-based bench method, it's difficult to saturate prefill batch size slot.
@@ -60,7 +60,7 @@ def create_readme_tab(app_config):
                 label="Parameters Settings",
                 value=r"""
                 #### ---> model name
-                    Please select the model, if you need to specify a customed model, you need to modify the code for now.
+                    Please select the model, if you need to specify a custom model, you need to modify the code for now.
                 #### ---> Runtime config
                     Input sequence length, output sequence length, batch size or first token latency limit, etc.
                     1. For static mode, you specify the batch size. Context and generation phase will use the same batch size.
@@ -76,7 +76,7 @@ def create_readme_tab(app_config):
                     GPU type, which framework to use, specific version of the framework.
                 #### ---> Quantization config
                     Define quant config for each part of the model.
-                    1. For dnese models, you will only see gemm quant config, kvcache quant config and fmha(context flash attention) quant config.
+                    1. For dense models, you will only see gemm quant config, kvcache quant config and fmha(context flash attention) quant config.
                     2. While for MoE models, you will see moe quant config. Different from frameworks, this allows you to specify the quant config for each part of the model separately to study the performance impact.
                 #### ---> Parallel config(in static tab)
                     tp size and pp size. For MoE models, please define attention dp size, moe tp size and moe ep size additionally.
@@ -142,7 +142,7 @@ def create_readme_tab(app_config):
                 #### parallel config error
                     Fix as the error message says.
                 ### hang
-                    A typicall run of agg pareto estimation takes 1~2 minutes with ~5 enumerated configs. Linear to how many parallel options you have.
+                    A typical run of agg pareto estimation takes 1~2 minutes with ~5 enumerated configs. Linear to how many parallel options you have.
                     A typical run of disagg pareto estimation takes ~30 seconds with ~5 enumerated configs. Linear to how many parallel options you have.
                     A run longer than 10 minutes is abnormal. Try to refresh the page. Set smaller search space by selecting fewer parallel options.
                 ### Others

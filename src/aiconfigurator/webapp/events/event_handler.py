@@ -372,7 +372,7 @@ class EventHandler:
             outputs=[components["candidates_dropdown"], pareto_results_state],
         )
         components["download_btn"].click(
-            fn=EventFn.donwload_pareto_html,
+            fn=EventFn.download_pareto_html,
             inputs=[components["pareto_html"]],
             outputs=[components["output_file"]],
         )
