@@ -3501,6 +3501,67 @@ class PerfDatabase:
 
             return {"latency": latency, "power": 0.0, "energy": 0.0}
 
+    def _interp_dsa_context_topk_piecewise(
+        self,
+        num_heads: int,
+        full_s: int,
+        b: int,
+        dsa_dict: dict,
+        index_topk: int | None,
+    ) -> dict | None:
+        """
+        Interpolate DSA context data without crossing the index_topk regime boundary.
+
+        DSA context uses a different kernel path when kv_len crosses index_topk:
+        <= topk can skip indexer logits/topk, while > topk enables that path.
+        A smooth interpolation from 2048 to 4096 can therefore badly
+        underestimate points just above topk. This helper only applies when
+        the exact (num_heads, batch) curve has same-regime anchors bracketing
+        the query; otherwise callers should fall back to the regular 3D
+        interpolation.
+        """
+        if index_topk is None or num_heads not in dsa_dict:
+            return None
+
+        exact_head_data = dsa_dict[num_heads]
+        curve = {
+            seq_len: batch_dict[b]
+            for seq_len, batch_dict in exact_head_data.items()
+            if isinstance(batch_dict, dict) and b in batch_dict
+        }
+        if full_s in curve:
+            value = curve[full_s]
+            if isinstance(value, dict):
+                return {
+                    "latency": self._get_value(value, "latency"),
+                    "power": self._get_value(value, "power"),
+                    "energy": self._get_value(value, "energy"),
+                }
+            return {"latency": float(value), "power": 0.0, "energy": 0.0}
+
+        if full_s <= index_topk:
+            same_regime_keys = sorted(seq_len for seq_len in curve if seq_len <= index_topk)
+        else:
+            same_regime_keys = sorted(seq_len for seq_len in curve if seq_len > index_topk)
+
+        if len(same_regime_keys) < 2 or full_s < same_regime_keys[0] or full_s > same_regime_keys[-1]:
+            return None
+
+        left, right = self._nearest_1d_point_helper(full_s, same_regime_keys)
+        left_value = curve[left]
+        right_value = curve[right]
+
+        def _interp_metric(metric: str) -> float:
+            left_metric = self._get_value(left_value, metric)
+            right_metric = self._get_value(right_value, metric)
+            return self._interp_1d([left, right], [left_metric, right_metric], full_s)
+
+        return {
+            "latency": _interp_metric("latency"),
+            "power": _interp_metric("power"),
+            "energy": _interp_metric("energy"),
+        }
+
     def _get_sample_leaf_value(self, data: dict):
         """Get a sample leaf value from nested dict to determine format."""
         current = data
@@ -6815,7 +6876,9 @@ class PerfDatabase:
                     )
                 dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
                 full_s = s + prefix
-                result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
+                result = self._interp_dsa_context_topk_piecewise(num_heads, full_s, b, dsa_dict, index_topk)
+                if result is None:
+                    result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
                 if prefix > 0:
