@@ -7216,7 +7216,7 @@ class PerfDatabase:
                 + 2 * indexer_pairs * index_n_heads * index_head_dim
             )
             indexer_bfloat16_ops = 2 * indexer_query_tokens * hidden_size * index_n_heads
-            indexer_cache_bytes = b * compressed_len * common.indexer_cache_entry_bytes(index_head_dim)
+            indexer_cache_bytes = b * compressed_len * common.deepseek_v4_indexer_cache_entry_bytes(index_head_dim)
 
         gemm_weight_bytes = (
             hidden_size * q_lora_rank

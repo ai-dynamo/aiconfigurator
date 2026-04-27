@@ -640,13 +640,16 @@ class BaseModel:
 
         seq_len = max(0, seq_len)
         if isinstance(self.extra_params, dict):
-            latent_dim = self.extra_params.get("kv_lora_rank", 512) + self.extra_params.get("qk_rope_head_dim", 64)
+            kv_lora_rank = self.extra_params.get("kv_lora_rank", 512)
+            qk_rope_head_dim = self.extra_params.get("qk_rope_head_dim", 64)
             index_head_dim = self.extra_params.get("index_head_dim", 128)
         else:
-            latent_dim = 576
+            kv_lora_rank = 512
+            qk_rope_head_dim = 64
             index_head_dim = 128
         return self._num_layers * seq_len * (
-            latent_dim * self.config.kvcache_quant_mode.value.memory
+            kv_lora_rank * self.config.kvcache_quant_mode.value.memory
+            + qk_rope_head_dim * common.GEMMQuantMode.bfloat16.value.memory
             + common.indexer_cache_entry_bytes(index_head_dim)
         )
 
@@ -2046,6 +2049,12 @@ class DeepSeekV4Model(BaseModel):
 
         def _attention_ops(is_context: bool, scale_factor: float):
             ratio_counts = Counter(self._compress_ratios)
+            # DeepSeek-V4 Flash has a small number of pure SWA layers
+            # (compress_ratio=0). Approximate their module latency with HCA
+            # (compress_ratio=128) so the model reuses DeepSeek-V4 HCA perf data
+            # instead of requiring a dedicated SWA collector. KV cache capacity
+            # below still uses the real per-layer ratios.
+            ratio_counts[128] += ratio_counts.pop(0, 0)
             op_cls = ops.ContextDeepSeekV4AttentionModule if is_context else ops.GenerationDeepSeekV4AttentionModule
             name = "context_attention" if is_context else "generation_attention"
             return [
@@ -2271,17 +2280,21 @@ class DeepSeekV4Model(BaseModel):
         deepseek_v4_cfg = self.extra_params
         seq_len = max(0, seq_len)
         total = 0.0
+        cache_entry_bytes = deepseek_v4_cfg.head_dim * self.config.kvcache_quant_mode.value.memory
         for ratio in self._compress_ratios:
-            total += (
-                min(seq_len, deepseek_v4_cfg.sliding_window)
-                * deepseek_v4_cfg.head_dim
-                * self.config.kvcache_quant_mode.value.memory
-            )
+            total += min(seq_len, deepseek_v4_cfg.sliding_window) * cache_entry_bytes
             if ratio:
                 compressed_entries = seq_len // ratio
-                total += compressed_entries * deepseek_v4_cfg.head_dim * self.config.kvcache_quant_mode.value.memory
+                total += compressed_entries * cache_entry_bytes
+                coff = 2 if ratio == 4 else 1
+                # Compressor decode state keeps FP32 kv_state and score_state buffers.
+                total += 2 * ratio * coff * deepseek_v4_cfg.head_dim * 4
                 if ratio == 4:
-                    total += compressed_entries * common.indexer_cache_entry_bytes(deepseek_v4_cfg.index_head_dim)
+                    total += compressed_entries * common.deepseek_v4_indexer_cache_entry_bytes(
+                        deepseek_v4_cfg.index_head_dim
+                    )
+                    # CSA has a second FP4 indexer compressor with its own decode state.
+                    total += 2 * ratio * 2 * deepseek_v4_cfg.index_head_dim * 4
         return total
 
 

@@ -142,6 +142,21 @@ def indexer_cache_entry_bytes(index_head_dim: int) -> int:
     return index_head_dim + ((index_head_dim + 127) // 128) * 4
 
 
+def deepseek_v4_indexer_cache_entry_bytes(index_head_dim: int) -> float:
+    """Bytes per compressed token in DeepSeek-V4's FP4 indexer KV cache."""
+    return index_head_dim * 0.5
+
+
+DEEPSEEK_V4_HF_MODELS = frozenset(
+    {
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "deepseek-ai/DeepSeek-V4-Pro",
+        "sgl-project/DeepSeek-V4-Flash-FP8",
+        "sgl-project/DeepSeek-V4-Pro-FP8",
+    }
+)
+
+
 def _get_support_matrix_resource():
     """Get the support_matrix.csv as a Traversable resource."""
     return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"

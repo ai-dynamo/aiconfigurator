@@ -7,6 +7,7 @@ Unit tests for model configuration functionality.
 Tests model validation, default models, and model-specific configurations.
 """
 
+from collections import Counter
 from unittest.mock import patch
 
 import pytest
@@ -220,8 +221,15 @@ class TestHFModelSupport:
         assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
         assert model_config.fmha_quant_mode == common.FMHAQuantMode.bfloat16
         assert sum(op._scale_factor for op in model.context_ops if op._name == "context_attention") == expected_layers
+        op_ratio_counts = Counter()
+        for op in model.context_ops:
+            if op._name == "context_attention":
+                op_ratio_counts[op._compress_ratio] += op._scale_factor
+        assert op_ratio_counts[0] == 0
+        assert op_ratio_counts[4] == expected_ratio_counts.get(4, 0)
+        assert op_ratio_counts[128] == expected_ratio_counts.get(128, 0) + expected_ratio_counts.get(0, 0)
 
-    def test_deepseek_v4_kvcache_bytes_include_csa_indexer_cache(self):
+    def test_deepseek_v4_kvcache_bytes_include_csa_indexer_cache_and_decode_buffers(self):
         model_config = config.ModelConfig(
             tp_size=8,
             moe_tp_size=1,
@@ -236,20 +244,24 @@ class TestHFModelSupport:
 
         expected = 0.0
         without_indexer = 0.0
+        cache_entry_bytes = extra.head_dim * model_config.kvcache_quant_mode.value.memory
         for ratio in extra.compress_ratios:
-            local_bytes = (
-                min(seq_len, extra.sliding_window)
-                * extra.head_dim
-                * model_config.kvcache_quant_mode.value.memory
-            )
+            local_bytes = min(seq_len, extra.sliding_window) * cache_entry_bytes
             expected += local_bytes
             without_indexer += local_bytes
             if ratio:
-                compressed_bytes = (seq_len // ratio) * extra.head_dim * model_config.kvcache_quant_mode.value.memory
+                compressed_bytes = (seq_len // ratio) * cache_entry_bytes
                 expected += compressed_bytes
                 without_indexer += compressed_bytes
+                coff = 2 if ratio == 4 else 1
+                buffer_bytes = 2 * ratio * coff * extra.head_dim * 4
+                expected += buffer_bytes
+                without_indexer += buffer_bytes
                 if ratio == 4:
-                    expected += (seq_len // ratio) * common.indexer_cache_entry_bytes(extra.index_head_dim)
+                    expected += (seq_len // ratio) * common.deepseek_v4_indexer_cache_entry_bytes(
+                        extra.index_head_dim
+                    )
+                    expected += 2 * ratio * 2 * extra.index_head_dim * 4
 
         assert model.get_kvcache_bytes_per_sequence(seq_len) == expected
         assert expected > without_indexer
@@ -265,13 +277,17 @@ class TestHFModelSupport:
         model = get_model("deepseek-ai/DeepSeek-V3.2", model_config, backend_name="trtllm")
         seq_len = 4096
         extra = model.extra_params
-        latent_dim = extra["kv_lora_rank"] + extra["qk_rope_head_dim"]
         indexer_bytes = common.indexer_cache_entry_bytes(extra["index_head_dim"])
 
         expected = model._num_layers * seq_len * (
-            latent_dim * model_config.kvcache_quant_mode.value.memory + indexer_bytes
+            extra["kv_lora_rank"] * model_config.kvcache_quant_mode.value.memory
+            + extra["qk_rope_head_dim"] * common.GEMMQuantMode.bfloat16.value.memory
+            + indexer_bytes
         )
-        old_without_indexer = model._num_layers * seq_len * latent_dim * model_config.kvcache_quant_mode.value.memory
+        old_without_indexer = model._num_layers * seq_len * (
+            extra["kv_lora_rank"] * model_config.kvcache_quant_mode.value.memory
+            + extra["qk_rope_head_dim"] * common.GEMMQuantMode.bfloat16.value.memory
+        )
 
         assert model.get_kvcache_bytes_per_sequence(seq_len) == expected
         assert expected > old_without_indexer
