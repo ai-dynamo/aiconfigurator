@@ -258,9 +258,7 @@ class TestHFModelSupport:
                 expected += buffer_bytes
                 without_indexer += buffer_bytes
                 if ratio == 4:
-                    expected += (seq_len // ratio) * common.deepseek_v4_indexer_cache_entry_bytes(
-                        extra.index_head_dim
-                    )
+                    expected += (seq_len // ratio) * common.deepseek_v4_indexer_cache_entry_bytes(extra.index_head_dim)
                     expected += 2 * ratio * 2 * extra.index_head_dim * 4
 
         assert model.get_kvcache_bytes_per_sequence(seq_len) == expected
@@ -279,14 +277,22 @@ class TestHFModelSupport:
         extra = model.extra_params
         indexer_bytes = common.indexer_cache_entry_bytes(extra["index_head_dim"])
 
-        expected = model._num_layers * seq_len * (
-            extra["kv_lora_rank"] * model_config.kvcache_quant_mode.value.memory
-            + extra["qk_rope_head_dim"] * common.GEMMQuantMode.bfloat16.value.memory
-            + indexer_bytes
+        expected = (
+            model._num_layers
+            * seq_len
+            * (
+                extra["kv_lora_rank"] * model_config.kvcache_quant_mode.value.memory
+                + extra["qk_rope_head_dim"] * common.GEMMQuantMode.bfloat16.value.memory
+                + indexer_bytes
+            )
         )
-        old_without_indexer = model._num_layers * seq_len * (
-            extra["kv_lora_rank"] * model_config.kvcache_quant_mode.value.memory
-            + extra["qk_rope_head_dim"] * common.GEMMQuantMode.bfloat16.value.memory
+        old_without_indexer = (
+            model._num_layers
+            * seq_len
+            * (
+                extra["kv_lora_rank"] * model_config.kvcache_quant_mode.value.memory
+                + extra["qk_rope_head_dim"] * common.GEMMQuantMode.bfloat16.value.memory
+            )
         )
 
         assert model.get_kvcache_bytes_per_sequence(seq_len) == expected

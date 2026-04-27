@@ -7,7 +7,7 @@ import dataclasses
 import logging
 from collections import Counter
 from functools import cache
-from typing import Optional
+from typing import ClassVar, Optional
 
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config
@@ -647,10 +647,14 @@ class BaseModel:
             kv_lora_rank = 512
             qk_rope_head_dim = 64
             index_head_dim = 128
-        return self._num_layers * seq_len * (
-            kv_lora_rank * self.config.kvcache_quant_mode.value.memory
-            + qk_rope_head_dim * common.GEMMQuantMode.bfloat16.value.memory
-            + common.indexer_cache_entry_bytes(index_head_dim)
+        return (
+            self._num_layers
+            * seq_len
+            * (
+                kv_lora_rank * self.config.kvcache_quant_mode.value.memory
+                + qk_rope_head_dim * common.GEMMQuantMode.bfloat16.value.memory
+                + common.indexer_cache_entry_bytes(index_head_dim)
+            )
         )
 
 
@@ -1995,13 +1999,13 @@ class DeepSeekV32Model(BaseModel):
 class DeepSeekV4Model(BaseModel):
     """DeepSeek-V4 model with mHC plus SWA/CSA/HCA compressed attention."""
 
-    _SUPPORTED_COMPRESS_RATIOS = {0, 4, 128}
+    _SUPPORTED_COMPRESS_RATIOS: ClassVar[set[int]] = {0, 4, 128}
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
 
         if not isinstance(self.extra_params, common.DeepSeekV4Config):
-            raise ValueError("DeepSeekV4Model requires DeepSeekV4Config extra_params")
+            raise TypeError("DeepSeekV4Model requires DeepSeekV4Config extra_params")
         deepseek_v4_cfg = self.extra_params
         self._compress_ratios = deepseek_v4_cfg.compress_ratios[: self._num_layers]
         unknown_ratios = set(self._compress_ratios) - self._SUPPORTED_COMPRESS_RATIOS

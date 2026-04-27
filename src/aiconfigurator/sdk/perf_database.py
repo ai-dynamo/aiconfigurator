@@ -7015,7 +7015,6 @@ class PerfDatabase:
                     )
                     raise
 
-
     @staticmethod
     def _causal_limited_pairs(batch_size: int, query_len: int, prefix: int, limit: int) -> int:
         """Return sum over queries of min(prefix + query_index + 1, limit), times batch."""
@@ -7082,8 +7081,7 @@ class PerfDatabase:
                 + 2 * num_tokens * hc_mult * hidden_size
             )
             post_ops = sites * (
-                2 * num_tokens * hc_mult * hc_mult * hidden_size
-                + 2 * num_tokens * hc_mult * hidden_size
+                2 * num_tokens * hc_mult * hc_mult * hidden_size + 2 * num_tokens * hc_mult * hidden_size
             )
             if op == "pre":
                 ops = pre_ops
@@ -7231,9 +7229,11 @@ class PerfDatabase:
             gemm_weight_bytes += q_lora_rank * index_n_heads * index_head_dim * gemm_quant_mode.value.memory
             bfloat16_weight_bytes += hidden_size * index_n_heads * common.GEMMQuantMode.bfloat16.value.memory
 
-        activation_bytes = tokens * (
-            hidden_size + q_lora_rank + num_heads * head_dim + head_dim + local_groups * o_lora_rank
-        ) * gemm_quant_mode.value.memory
+        activation_bytes = (
+            tokens
+            * (hidden_size + q_lora_rank + num_heads * head_dim + head_dim + local_groups * o_lora_rank)
+            * gemm_quant_mode.value.memory
+        )
         kv_cache_bytes = attention_pairs * num_heads * head_dim * kvcache_quant_mode.value.memory
         rope_bytes = tokens * num_heads * rope_head_dim * fmha_quant_mode.value.memory
 
@@ -7244,13 +7244,17 @@ class PerfDatabase:
             + attention_ops / self._get_quant_tc_flops(fmha_quant_mode)
         ) * 1000
         sol_mem = (
-            gemm_weight_bytes
-            + bfloat16_weight_bytes
-            + activation_bytes
-            + kv_cache_bytes
-            + indexer_cache_bytes
-            + rope_bytes
-        ) / self.system_spec["gpu"]["mem_bw"] * 1000
+            (
+                gemm_weight_bytes
+                + bfloat16_weight_bytes
+                + activation_bytes
+                + kv_cache_bytes
+                + indexer_cache_bytes
+                + rope_bytes
+            )
+            / self.system_spec["gpu"]["mem_bw"]
+            * 1000
+        )
         return max(sol_math, sol_mem), sol_math, sol_mem
 
     @functools.lru_cache(maxsize=32768)

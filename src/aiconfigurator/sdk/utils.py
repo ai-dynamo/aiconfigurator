@@ -600,8 +600,7 @@ def _parse_hf_config_json(config: dict) -> dict:
         compress_ratios = tuple(config["compress_ratios"])
         if len(compress_ratios) < layers:
             raise ValueError(
-                f"DeepSeek-V4 compress_ratios length {len(compress_ratios)} is smaller than "
-                f"num_hidden_layers {layers}"
+                f"DeepSeek-V4 compress_ratios length {len(compress_ratios)} is smaller than num_hidden_layers {layers}"
             )
         extra_params = DeepSeekV4Config(
             q_lora_rank=config["q_lora_rank"],
