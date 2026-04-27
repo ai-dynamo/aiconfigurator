@@ -88,10 +88,10 @@ def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
     elif quant_algo is not None:
         raise ValueError(f"Unsupported quant algorithm: {quant_algo}")
 
-    # DeepSeek-V4 ships mixed precision: most non-expert weights are FP8 block
-    # quantized while routed expert weights are FP4 with FP8 activations.
+    # DeepSeek-V4 native checkpoints use MXFP4 routed-expert weights with MXFP8
+    # activations, while non-expert weights remain FP8 block quantized.
     if str(raw_config.get("expert_dtype", "")).lower() == "fp4":
-        overrides["moe_quant_mode"] = common.MoEQuantMode.w4afp8
+        overrides["moe_quant_mode"] = common.MoEQuantMode.w4a8_mxfp4_mxfp8
 
     # KVCache quant mode
     # TODO: support fp4 kv cache

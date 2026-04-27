@@ -1,4 +1,8 @@
 HuggingFaceID,Architecture,System,Backend,Version,Mode,Status,ErrMsg
+deepseek-ai/DeepSeek-V4-Flash,DeepseekV4ForCausalLM,h200_sxm,trtllm,1.2.0rc5,agg,FAIL,Native DSV4 FP4 routed-expert checkpoint is unsupported on Hopper; use sgl-project/DeepSeek-V4-Flash-FP8
+deepseek-ai/DeepSeek-V4-Flash,DeepseekV4ForCausalLM,h200_sxm,trtllm,1.2.0rc5,disagg,FAIL,Native DSV4 FP4 routed-expert checkpoint is unsupported on Hopper; use sgl-project/DeepSeek-V4-Flash-FP8
+deepseek-ai/DeepSeek-V4-Pro,DeepseekV4ForCausalLM,h200_sxm,trtllm,1.2.0rc5,agg,FAIL,Native DSV4 FP4 routed-expert checkpoint is unsupported on Hopper; use sgl-project/DeepSeek-V4-Pro-FP8
+deepseek-ai/DeepSeek-V4-Pro,DeepseekV4ForCausalLM,h200_sxm,trtllm,1.2.0rc5,disagg,FAIL,Native DSV4 FP4 routed-expert checkpoint is unsupported on Hopper; use sgl-project/DeepSeek-V4-Pro-FP8
 sgl-project/DeepSeek-V4-Flash-FP8,DeepseekV4ForCausalLM,h200_sxm,trtllm,1.2.0rc5,agg,FAIL,DSV4 perf data pending; use database_mode SOL or HYBRID
 sgl-project/DeepSeek-V4-Flash-FP8,DeepseekV4ForCausalLM,h200_sxm,trtllm,1.2.0rc5,disagg,FAIL,DSV4 perf data pending; use database_mode SOL or HYBRID
 sgl-project/DeepSeek-V4-Pro-FP8,DeepseekV4ForCausalLM,h200_sxm,trtllm,1.2.0rc5,agg,FAIL,DSV4 perf data pending; use database_mode SOL or HYBRID

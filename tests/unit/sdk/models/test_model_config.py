@@ -35,6 +35,8 @@ class TestSupportedModels:
             "Qwen/Qwen3-32B",
             "meta-llama/Meta-Llama-3.1-8B",
             "deepseek-ai/DeepSeek-V3",
+            "deepseek-ai/DeepSeek-V4-Flash",
+            "deepseek-ai/DeepSeek-V4-Pro",
             "sgl-project/DeepSeek-V4-Flash-FP8",
             "sgl-project/DeepSeek-V4-Pro-FP8",
         ],
@@ -66,6 +68,8 @@ class TestSupportedModels:
             ("meta-llama/Meta-Llama-3.1-8B", False),
             ("deepseek-ai/DeepSeek-V3", True),
             ("deepseek-ai/DeepSeek-V3.2", True),
+            ("deepseek-ai/DeepSeek-V4-Flash", True),
+            ("deepseek-ai/DeepSeek-V4-Pro", True),
             ("sgl-project/DeepSeek-V4-Flash-FP8", True),
             ("sgl-project/DeepSeek-V4-Pro-FP8", True),
             ("zai-org/GLM-5", True),
@@ -104,6 +108,8 @@ class TestHFModelSupport:
             ("meta-llama/Meta-Llama-3.1-8B", "LLAMA"),
             ("deepseek-ai/DeepSeek-V3", "DEEPSEEK"),
             ("deepseek-ai/DeepSeek-V3.2", "DEEPSEEKV32"),
+            ("deepseek-ai/DeepSeek-V4-Flash", "DEEPSEEKV4"),
+            ("deepseek-ai/DeepSeek-V4-Pro", "DEEPSEEKV4"),
             ("sgl-project/DeepSeek-V4-Flash-FP8", "DEEPSEEKV4"),
             ("sgl-project/DeepSeek-V4-Pro-FP8", "DEEPSEEKV4"),
             ("zai-org/GLM-5", "DEEPSEEKV32"),
@@ -124,6 +130,8 @@ class TestHFModelSupport:
             ("meta-llama/Meta-Llama-3.1-8B", False),
             ("deepseek-ai/DeepSeek-V3", True),
             ("deepseek-ai/DeepSeek-V3.2", True),
+            ("deepseek-ai/DeepSeek-V4-Flash", True),
+            ("deepseek-ai/DeepSeek-V4-Pro", True),
             ("sgl-project/DeepSeek-V4-Flash-FP8", True),
             ("sgl-project/DeepSeek-V4-Pro-FP8", True),
             ("zai-org/GLM-5", True),
@@ -139,10 +147,40 @@ class TestHFModelSupport:
         assert is_moe == is_moe_expected
 
     @pytest.mark.parametrize(
-        "hf_id,expected_layers,expected_hidden,expected_index_topk,expected_ratio_counts",
+        "hf_id,expected_layers,expected_hidden,expected_index_topk,expected_ratio_counts,expected_moe_quant",
         [
-            ("sgl-project/DeepSeek-V4-Flash-FP8", 43, 4096, 512, {0: 2, 4: 21, 128: 20}),
-            ("sgl-project/DeepSeek-V4-Pro-FP8", 61, 7168, 1024, {4: 30, 128: 31}),
+            (
+                "deepseek-ai/DeepSeek-V4-Flash",
+                43,
+                4096,
+                512,
+                {0: 2, 4: 21, 128: 20},
+                common.MoEQuantMode.w4a8_mxfp4_mxfp8,
+            ),
+            (
+                "deepseek-ai/DeepSeek-V4-Pro",
+                61,
+                7168,
+                1024,
+                {4: 30, 128: 31},
+                common.MoEQuantMode.w4a8_mxfp4_mxfp8,
+            ),
+            (
+                "sgl-project/DeepSeek-V4-Flash-FP8",
+                43,
+                4096,
+                512,
+                {0: 2, 4: 21, 128: 20},
+                common.MoEQuantMode.fp8_block,
+            ),
+            (
+                "sgl-project/DeepSeek-V4-Pro-FP8",
+                61,
+                7168,
+                1024,
+                {4: 30, 128: 31},
+                common.MoEQuantMode.fp8_block,
+            ),
         ],
     )
     def test_deepseek_v4_config_shape_and_quant(
@@ -152,6 +190,7 @@ class TestHFModelSupport:
         expected_hidden,
         expected_index_topk,
         expected_ratio_counts,
+        expected_moe_quant,
     ):
         model_info = get_model_config_from_model_path(hf_id)
         assert model_info["architecture"] == "DeepseekV4ForCausalLM"
@@ -176,16 +215,23 @@ class TestHFModelSupport:
         model = get_model(hf_id, model_config, backend_name="trtllm")
         assert model.model_family == "DEEPSEEKV4"
         assert model_config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
-        assert model_config.moe_quant_mode == common.MoEQuantMode.fp8_block
+        assert model_config.moe_quant_mode == expected_moe_quant
         assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
         assert model_config.fmha_quant_mode == common.FMHAQuantMode.bfloat16
         assert sum(op._scale_factor for op in model.context_ops if op._name == "context_attention") == expected_layers
 
-    def test_native_deepseek_v4_fp4_checkpoint_rejected_on_hopper(self):
-        with pytest.raises(ValueError, match="Use sgl-project/DeepSeek-V4-Pro-FP8 instead"):
+    @pytest.mark.parametrize(
+        "model_path,replacement",
+        [
+            ("deepseek-ai/DeepSeek-V4-Flash", "sgl-project/DeepSeek-V4-Flash-FP8"),
+            ("deepseek-ai/DeepSeek-V4-Pro", "sgl-project/DeepSeek-V4-Pro-FP8"),
+        ],
+    )
+    def test_native_deepseek_v4_fp4_checkpoint_rejected_on_hopper(self, model_path, replacement):
+        with pytest.raises(ValueError, match=f"Use {replacement} instead"):
             TaskConfig(
                 serving_mode="agg",
-                model_path="deepseek-ai/DeepSeek-V4-Pro",
+                model_path=model_path,
                 system_name="h200_sxm",
                 backend_name="trtllm",
                 database_mode="SOL",

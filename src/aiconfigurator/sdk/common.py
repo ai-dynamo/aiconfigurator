@@ -314,6 +314,8 @@ DefaultHFModels = {
     "deepseek-ai/DeepSeek-V3.2",
     "zai-org/GLM-5",
     # DeepSeek V4
+    "deepseek-ai/DeepSeek-V4-Flash",
+    "deepseek-ai/DeepSeek-V4-Pro",
     "sgl-project/DeepSeek-V4-Flash-FP8",
     "sgl-project/DeepSeek-V4-Pro-FP8",
     # Qwen 3 Models
