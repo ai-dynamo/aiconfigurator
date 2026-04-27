@@ -1617,6 +1617,170 @@ class GenerationDSAModule(Operation):
         return self._weights * self._scale_factor
 
 
+class DSV4MHCModule(Operation):
+    """DeepSeek-V4 manifold-constrained hyper-connection pre/post module."""
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        op: str,
+        hidden_size: int,
+        hc_mult: int,
+        sinkhorn_iters: int,
+        quant_mode: common.GEMMQuantMode,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        if op not in {"pre", "post", "both"}:
+            raise ValueError(f"Unsupported DeepSeek-V4 mHC op: {op}")
+        self._op = op
+        self._hidden_size = hidden_size
+        self._hc_mult = hc_mult
+        self._sinkhorn_iters = sinkhorn_iters
+        self._quant_mode = quant_mode
+        mix_hc = (2 + hc_mult) * hc_mult
+        hc_dim = hc_mult * hidden_size
+        # Two parameter sets per decoder block: attention mHC and FFN mHC.
+        self._weights = 2 * (mix_hc * hc_dim + mix_hc + 3) * 4
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        result = database.query_dsv4_mhc_module(
+            num_tokens=kwargs.get("x"),
+            hidden_size=self._hidden_size,
+            hc_mult=self._hc_mult,
+            sinkhorn_iters=self._sinkhorn_iters,
+            op=self._op,
+            quant_mode=self._quant_mode,
+        )
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
+class _BaseDSV4AttentionModule(Operation):
+    """Common DeepSeek-V4 compressed attention module metadata."""
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        num_heads: int,
+        hidden_size: int,
+        q_lora_rank: int,
+        o_lora_rank: int,
+        head_dim: int,
+        rope_head_dim: int,
+        index_n_heads: int,
+        index_head_dim: int,
+        index_topk: int,
+        window_size: int,
+        compress_ratio: int,
+        o_groups: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        fmha_quant_mode: common.FMHAQuantMode,
+        gemm_quant_mode: common.GEMMQuantMode,
+        architecture: str = "DeepseekV4ForCausalLM",
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._num_heads = num_heads
+        self._hidden_size = hidden_size
+        self._q_lora_rank = q_lora_rank
+        self._o_lora_rank = o_lora_rank
+        self._head_dim = head_dim
+        self._rope_head_dim = rope_head_dim
+        self._index_n_heads = index_n_heads
+        self._index_head_dim = index_head_dim
+        self._index_topk = index_topk
+        self._window_size = window_size
+        self._compress_ratio = compress_ratio
+        self._o_groups = o_groups
+        self._kvcache_quant_mode = kvcache_quant_mode
+        self._fmha_quant_mode = fmha_quant_mode
+        self._gemm_quant_mode = gemm_quant_mode
+        self._architecture = architecture
+        self._weights = self._estimate_weights()
+
+    def _estimate_weights(self) -> float:
+        weight_elems = (
+            self._hidden_size * self._q_lora_rank
+            + self._q_lora_rank * self._num_heads * self._head_dim
+            + self._hidden_size * self._head_dim
+            + self._num_heads * self._head_dim * self._o_lora_rank
+            + self._o_groups * self._o_lora_rank * self._hidden_size
+        )
+        if self._compress_ratio:
+            compressor_mult = 2 if self._compress_ratio == 4 else 1
+            weight_elems += 2 * self._hidden_size * compressor_mult * self._head_dim
+            weight_elems += self._compress_ratio * compressor_mult * self._head_dim
+        if self._compress_ratio == 4:
+            weight_elems += self._q_lora_rank * self._index_n_heads * self._index_head_dim
+            weight_elems += self._hidden_size * self._index_n_heads
+            weight_elems += 2 * self._hidden_size * 2 * self._index_head_dim
+        return weight_elems * self._gemm_quant_mode.value.memory
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
+class ContextDSV4AttentionModule(_BaseDSV4AttentionModule):
+    """Context-phase DeepSeek-V4 SWA/CSA/HCA compressed attention module."""
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        result = database.query_context_dsv4_attention_module(
+            b=kwargs.get("batch_size"),
+            s=kwargs.get("s"),
+            prefix=kwargs.get("prefix", 0),
+            num_heads=self._num_heads,
+            hidden_size=self._hidden_size,
+            q_lora_rank=self._q_lora_rank,
+            o_lora_rank=self._o_lora_rank,
+            head_dim=self._head_dim,
+            rope_head_dim=self._rope_head_dim,
+            index_n_heads=self._index_n_heads,
+            index_head_dim=self._index_head_dim,
+            index_topk=self._index_topk,
+            window_size=self._window_size,
+            compress_ratio=self._compress_ratio,
+            o_groups=self._o_groups,
+            kvcache_quant_mode=self._kvcache_quant_mode,
+            fmha_quant_mode=self._fmha_quant_mode,
+            gemm_quant_mode=self._gemm_quant_mode,
+            architecture=self._architecture,
+        )
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+
+
+class GenerationDSV4AttentionModule(_BaseDSV4AttentionModule):
+    """Decode-phase DeepSeek-V4 SWA/CSA/HCA compressed attention module."""
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        beam_width = kwargs.get("beam_width")
+        if beam_width != 1:
+            raise ValueError(f"{self.__class__.__name__} only supports beam_width=1, got {beam_width}")
+        result = database.query_generation_dsv4_attention_module(
+            b=kwargs.get("batch_size"),
+            s=kwargs.get("s"),
+            num_heads=self._num_heads,
+            hidden_size=self._hidden_size,
+            q_lora_rank=self._q_lora_rank,
+            o_lora_rank=self._o_lora_rank,
+            head_dim=self._head_dim,
+            rope_head_dim=self._rope_head_dim,
+            index_n_heads=self._index_n_heads,
+            index_head_dim=self._index_head_dim,
+            index_topk=self._index_topk,
+            window_size=self._window_size,
+            compress_ratio=self._compress_ratio,
+            o_groups=self._o_groups,
+            kvcache_quant_mode=self._kvcache_quant_mode,
+            fmha_quant_mode=self._fmha_quant_mode,
+            gemm_quant_mode=self._gemm_quant_mode,
+            architecture=self._architecture,
+        )
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+
+
 class MLAModule(Operation):
     """
     Module-level MLA operation for both context and generation phases.

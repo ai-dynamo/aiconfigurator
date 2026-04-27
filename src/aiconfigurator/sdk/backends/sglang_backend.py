@@ -540,7 +540,7 @@ class SGLANGBackend(BaseBackend):
             c_dict = {1: 28, 2: 17, 4: 13, 8: 13}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 90 * 1024 * 1024)  # Higher minimum for SGLANG
-        elif model.model_family in ("DEEPSEEK", "DEEPSEEKV32"):
+        elif model.model_family in ("DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4"):
             c_dict = {1: 28, 2: 17, 4: 13, 8: 13}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations += (
@@ -568,17 +568,27 @@ class SGLANGBackend(BaseBackend):
         activations += sglang_overhead
 
         # ==== KV Cache calculation - SGLANG specific ====
-        if model.model_family in ("DEEPSEEK", "DEEPSEEKV32"):
+        if model.model_family == "DEEPSEEKV4":
+            kvcache = (
+                batch_size
+                * model.config.kvcache_quant_mode.value.memory
+                * model.get_kvcache_elements_per_sequence(isl + beam_width * osl)
+            )
+        elif model.model_family in ("DEEPSEEK", "DEEPSEEKV32"):
             kvcache_per_token = model._num_layers * 576
+            kvcache = (
+                (batch_size * isl + batch_size * beam_width * osl)
+                * model.config.kvcache_quant_mode.value.memory
+                * kvcache_per_token
+            )
         else:
             num_kv_heads_per_gpu = (model._num_kv_heads + model.config.tp_size - 1) // model.config.tp_size
             kvcache_per_token = num_kv_heads_per_gpu * model._head_size * model._num_layers * 2
-
-        kvcache = (
-            (batch_size * isl + batch_size * beam_width * osl)
-            * model.config.kvcache_quant_mode.value.memory
-            * kvcache_per_token
-        )
+            kvcache = (
+                (batch_size * isl + batch_size * beam_width * osl)
+                * model.config.kvcache_quant_mode.value.memory
+                * kvcache_per_token
+            )
 
         # ==== Communication and system memory ====
         nccl_mem = database.system_spec["misc"]["nccl_mem"][min(model.config.tp_size, 8)]

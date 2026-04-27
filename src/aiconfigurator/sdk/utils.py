@@ -18,6 +18,7 @@ from aiconfigurator.sdk.common import (
     ARCHITECTURE_TO_MODEL_FAMILY,
     MULTIMODAL_TEXT_CONFIG_KEY,
     BlockConfig,
+    DeepSeekV4Config,
     DefaultHFModels,
     HybridMoEConfig,
     Qwen35Config,
@@ -595,6 +596,38 @@ def _parse_hf_config_json(config: dict) -> dict:
             "index_n_heads": config["index_n_heads"],
             "index_topk": config["index_topk"],
         }
+    elif architecture == "DeepseekV4ForCausalLM":
+        compress_ratios = tuple(config.get("compress_ratios", []))
+        if len(compress_ratios) < layers:
+            raise ValueError(
+                f"DeepSeek-V4 compress_ratios length {len(compress_ratios)} is smaller than "
+                f"num_hidden_layers {layers}"
+            )
+        extra_params = DeepSeekV4Config(
+            q_lora_rank=config["q_lora_rank"],
+            o_lora_rank=config["o_lora_rank"],
+            o_groups=config["o_groups"],
+            head_dim=config["head_dim"],
+            qk_rope_head_dim=config["qk_rope_head_dim"],
+            index_head_dim=config["index_head_dim"],
+            index_n_heads=config["index_n_heads"],
+            index_topk=config["index_topk"],
+            sliding_window=config["sliding_window"],
+            compress_ratios=compress_ratios[:layers],
+            compress_rope_theta=config["compress_rope_theta"],
+            num_hash_layers=config.get("num_hash_layers", 0),
+            hc_mult=config["hc_mult"],
+            hc_sinkhorn_iters=config["hc_sinkhorn_iters"],
+            hc_eps=config["hc_eps"],
+            n_shared_experts=config.get("n_shared_experts", 1),
+        )
+        logger.info(
+            f"DeepSeek-V4 config: layers={layers}, "
+            f"swa_layers={extra_params.compress_ratios.count(0)}, "
+            f"csa_layers={extra_params.compress_ratios.count(4)}, "
+            f"hca_layers={extra_params.compress_ratios.count(128)}, "
+            f"hc_mult={extra_params.hc_mult}"
+        )
     elif architecture in {"Qwen3ForCausalLM", "Qwen3MoeForCausalLM"}:
         # Qwen3-family attention may include additional Q/K normalization.
         extra_params = {"architecture": architecture, "use_qk_norm": True}

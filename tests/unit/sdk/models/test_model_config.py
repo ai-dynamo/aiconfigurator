@@ -13,6 +13,7 @@ import pytest
 
 from aiconfigurator.sdk import common, config, models
 from aiconfigurator.sdk.models import check_is_moe, get_model, get_model_family
+from aiconfigurator.sdk.task import TaskConfig
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
 pytestmark = pytest.mark.unit
@@ -34,6 +35,8 @@ class TestSupportedModels:
             "Qwen/Qwen3-32B",
             "meta-llama/Meta-Llama-3.1-8B",
             "deepseek-ai/DeepSeek-V3",
+            "sgl-project/DeepSeek-V4-Flash-FP8",
+            "sgl-project/DeepSeek-V4-Pro-FP8",
         ],
     )
     def test_specific_models_are_in_default_list(self, hf_id):
@@ -63,6 +66,8 @@ class TestSupportedModels:
             ("meta-llama/Meta-Llama-3.1-8B", False),
             ("deepseek-ai/DeepSeek-V3", True),
             ("deepseek-ai/DeepSeek-V3.2", True),
+            ("sgl-project/DeepSeek-V4-Flash-FP8", True),
+            ("sgl-project/DeepSeek-V4-Pro-FP8", True),
             ("zai-org/GLM-5", True),
             ("Qwen/Qwen3-30B-A3B", True),
             # NemotronH: check hybrid_override_pattern for 'E' (MoE layers)
@@ -99,6 +104,8 @@ class TestHFModelSupport:
             ("meta-llama/Meta-Llama-3.1-8B", "LLAMA"),
             ("deepseek-ai/DeepSeek-V3", "DEEPSEEK"),
             ("deepseek-ai/DeepSeek-V3.2", "DEEPSEEKV32"),
+            ("sgl-project/DeepSeek-V4-Flash-FP8", "DEEPSEEKV4"),
+            ("sgl-project/DeepSeek-V4-Pro-FP8", "DEEPSEEKV4"),
             ("zai-org/GLM-5", "DEEPSEEKV32"),
             ("Qwen/Qwen3-30B-A3B", "MOE"),
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "NEMOTRONH"),
@@ -117,6 +124,8 @@ class TestHFModelSupport:
             ("meta-llama/Meta-Llama-3.1-8B", False),
             ("deepseek-ai/DeepSeek-V3", True),
             ("deepseek-ai/DeepSeek-V3.2", True),
+            ("sgl-project/DeepSeek-V4-Flash-FP8", True),
+            ("sgl-project/DeepSeek-V4-Pro-FP8", True),
             ("zai-org/GLM-5", True),
             ("Qwen/Qwen3-30B-A3B", True),
             # NemotronH: is_moe depends on 'E' in hybrid_override_pattern
@@ -128,6 +137,59 @@ class TestHFModelSupport:
         """Test that MoE models are correctly identified via HF ID."""
         is_moe = check_is_moe(hf_id)
         assert is_moe == is_moe_expected
+
+    @pytest.mark.parametrize(
+        "hf_id,expected_layers,expected_hidden,expected_index_topk,expected_ratio_counts",
+        [
+            ("sgl-project/DeepSeek-V4-Flash-FP8", 43, 4096, 512, {0: 2, 4: 21, 128: 20}),
+            ("sgl-project/DeepSeek-V4-Pro-FP8", 61, 7168, 1024, {4: 30, 128: 31}),
+        ],
+    )
+    def test_deepseek_v4_config_shape_and_quant(
+        self,
+        hf_id,
+        expected_layers,
+        expected_hidden,
+        expected_index_topk,
+        expected_ratio_counts,
+    ):
+        model_info = get_model_config_from_model_path(hf_id)
+        assert model_info["architecture"] == "DeepseekV4ForCausalLM"
+        assert model_info["layers"] == expected_layers
+        assert model_info["hidden_size"] == expected_hidden
+        assert model_info["topk"] == 6
+        assert model_info["num_experts"] in {256, 384}
+
+        extra = model_info["extra_params"]
+        assert isinstance(extra, common.DeepSeekV4Config)
+        assert extra.index_topk == expected_index_topk
+        assert extra.hc_mult == 4
+        assert {ratio: extra.compress_ratios.count(ratio) for ratio in set(extra.compress_ratios)} == expected_ratio_counts
+
+        model_config = config.ModelConfig(
+            tp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=1,
+            nextn=1,
+            nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+        )
+        model = get_model(hf_id, model_config, backend_name="trtllm")
+        assert model.model_family == "DEEPSEEKV4"
+        assert model_config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
+        assert model_config.moe_quant_mode == common.MoEQuantMode.fp8_block
+        assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+        assert model_config.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_attention") == expected_layers
+
+    def test_native_deepseek_v4_fp4_checkpoint_rejected_on_hopper(self):
+        with pytest.raises(ValueError, match="Use sgl-project/DeepSeek-V4-Pro-FP8 instead"):
+            TaskConfig(
+                serving_mode="agg",
+                model_path="deepseek-ai/DeepSeek-V4-Pro",
+                system_name="h200_sxm",
+                backend_name="trtllm",
+                database_mode="SOL",
+            )
 
 
 class TestBackendConfiguration:

@@ -115,6 +115,28 @@ class Qwen35Config:
     shared_expert_inter_size: int = 0
 
 
+@dataclass(frozen=True)
+class DeepSeekV4Config:
+    """Config fields unique to DeepSeek-V4 compressed attention + mHC models."""
+
+    q_lora_rank: int
+    o_lora_rank: int
+    o_groups: int
+    head_dim: int
+    qk_rope_head_dim: int
+    index_head_dim: int
+    index_n_heads: int
+    index_topk: int
+    sliding_window: int
+    compress_ratios: tuple[int, ...]
+    compress_rope_theta: int
+    num_hash_layers: int
+    hc_mult: int
+    hc_sinkhorn_iters: int
+    hc_eps: float
+    n_shared_experts: int = 1
+
+
 def _get_support_matrix_resource():
     """Get the support_matrix.csv as a Traversable resource."""
     return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
@@ -291,6 +313,9 @@ DefaultHFModels = {
     # DeepSeek V3.2 / GLM-5 (DEEPSEEKV32 family)
     "deepseek-ai/DeepSeek-V3.2",
     "zai-org/GLM-5",
+    # DeepSeek V4
+    "sgl-project/DeepSeek-V4-Flash-FP8",
+    "sgl-project/DeepSeek-V4-Pro-FP8",
     # Qwen 3 Models
     "Qwen/Qwen3-0.6B",
     "Qwen/Qwen3-1.7B",
@@ -351,6 +376,7 @@ ModelFamily = {
     "MOE",
     "DEEPSEEK",
     "DEEPSEEKV32",
+    "DEEPSEEKV4",
     "KIMIK25",
     "NEMOTRONNAS",
     "NEMOTRONH",
@@ -366,6 +392,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "DeepseekV3ForCausalLM": "DEEPSEEK",
     "DeepseekV32ForCausalLM": "DEEPSEEKV32",
     "GlmMoeDsaForCausalLM": "DEEPSEEKV32",
+    "DeepseekV4ForCausalLM": "DEEPSEEKV4",
     "KimiK25ForConditionalGeneration": "KIMIK25",
     "NemotronForCausalLM": "NEMOTRONNAS",
     "DeciLMForCausalLM": "NEMOTRONNAS",
