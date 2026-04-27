@@ -276,10 +276,11 @@ def get_supported_architectures() -> set[str]:
 @cache
 def get_default_models() -> set[str]:
     """
-    Get the set of supported HuggingFace model IDs from support_matrix.csv.
+    Get the set of default HuggingFace model IDs.
 
     Returns:
-        set[str]: Set of unique HuggingFace model IDs that are supported.
+        set[str]: Set of unique HuggingFace model IDs from the support matrix
+            plus locally cached default model configs.
     """
     csv_resource = _get_support_matrix_resource()
     models = set()
@@ -288,13 +289,14 @@ def get_default_models() -> set[str]:
         reader = csv.DictReader(f)
         for row in reader:
             models.add(row["HuggingFaceID"])
+    models.update(DefaultHFModels)
     return models
 
 
 """
 Cached HuggingFace model configs - these are pre-downloaded and stored in model_configs/
 Model parameters are parsed from these configs via get_model_config_from_model_path() in utils.py
-The list of default models for testing is derived from support_matrix.csv via get_default_models()
+The list of default models for testing is derived from support_matrix.csv and this set via get_default_models()
 """
 DefaultHFModels = {
     # Llama 3.1 Models
