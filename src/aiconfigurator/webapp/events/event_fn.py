@@ -1194,8 +1194,8 @@ class EventFn:
         else:
             if model_family == "DEEPSEEKV4":
                 gemm_quant_mode_choices = sorted(supported_quant_mode["gemm"])
-                kvcache_quant_mode_choices = sorted(supported_quant_mode["dsv4_generation_module"])
-                fmha_quant_mode_choices = sorted(supported_quant_mode["dsv4_context_module"])
+                kvcache_quant_mode_choices = sorted(supported_quant_mode["deepseek_v4_generation_module"])
+                fmha_quant_mode_choices = sorted(supported_quant_mode["deepseek_v4_context_module"])
                 moe_quant_mode_choices = sorted(supported_quant_mode["moe"])
             elif model_family == "DEEPSEEKV32":
                 gemm_quant_mode_choices = sorted(supported_quant_mode["gemm"])

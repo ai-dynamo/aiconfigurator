@@ -1617,7 +1617,7 @@ class GenerationDSAModule(Operation):
         return self._weights * self._scale_factor
 
 
-class DSV4MHCModule(Operation):
+class DeepSeekV4MHCModule(Operation):
     """DeepSeek-V4 manifold-constrained hyper-connection pre/post module."""
 
     def __init__(
@@ -1644,7 +1644,7 @@ class DSV4MHCModule(Operation):
         self._weights = 2 * (mix_hc * hc_dim + mix_hc + 3) * 4
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        result = database.query_dsv4_mhc_module(
+        result = database.query_deepseek_v4_mhc_module(
             num_tokens=kwargs.get("x"),
             hidden_size=self._hidden_size,
             hc_mult=self._hc_mult,
@@ -1658,7 +1658,7 @@ class DSV4MHCModule(Operation):
         return self._weights * self._scale_factor
 
 
-class _BaseDSV4AttentionModule(Operation):
+class _BaseDeepSeekV4AttentionModule(Operation):
     """Common DeepSeek-V4 compressed attention module metadata."""
 
     def __init__(
@@ -1702,32 +1702,38 @@ class _BaseDSV4AttentionModule(Operation):
         self._weights = self._estimate_weights()
 
     def _estimate_weights(self) -> float:
-        weight_elems = (
+        gemm_weight_elems = (
             self._hidden_size * self._q_lora_rank
             + self._q_lora_rank * self._num_heads * self._head_dim
             + self._hidden_size * self._head_dim
-            + self._num_heads * self._head_dim * self._o_lora_rank
             + self._o_groups * self._o_lora_rank * self._hidden_size
         )
+        bfloat16_weight_elems = self._num_heads * self._head_dim * self._o_lora_rank
+        float32_weight_elems = self._num_heads
         if self._compress_ratio:
             compressor_mult = 2 if self._compress_ratio == 4 else 1
-            weight_elems += 2 * self._hidden_size * compressor_mult * self._head_dim
-            weight_elems += self._compress_ratio * compressor_mult * self._head_dim
+            gemm_weight_elems += 2 * self._hidden_size * compressor_mult * self._head_dim
+            float32_weight_elems += self._compress_ratio * compressor_mult * self._head_dim
         if self._compress_ratio == 4:
-            weight_elems += self._q_lora_rank * self._index_n_heads * self._index_head_dim
-            weight_elems += self._hidden_size * self._index_n_heads
-            weight_elems += 2 * self._hidden_size * 2 * self._index_head_dim
-        return weight_elems * self._gemm_quant_mode.value.memory
+            gemm_weight_elems += self._q_lora_rank * self._index_n_heads * self._index_head_dim
+            gemm_weight_elems += 2 * self._hidden_size * 2 * self._index_head_dim
+            bfloat16_weight_elems += self._hidden_size * self._index_n_heads
+            float32_weight_elems += self._compress_ratio * 2 * self._index_head_dim
+        return (
+            gemm_weight_elems * self._gemm_quant_mode.value.memory
+            + bfloat16_weight_elems * common.GEMMQuantMode.bfloat16.value.memory
+            + float32_weight_elems * 4
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
 
 
-class ContextDSV4AttentionModule(_BaseDSV4AttentionModule):
+class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
     """Context-phase DeepSeek-V4 SWA/CSA/HCA compressed attention module."""
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        result = database.query_context_dsv4_attention_module(
+        result = database.query_context_deepseek_v4_attention_module(
             b=kwargs.get("batch_size"),
             s=kwargs.get("s"),
             prefix=kwargs.get("prefix", 0),
@@ -1751,14 +1757,14 @@ class ContextDSV4AttentionModule(_BaseDSV4AttentionModule):
         return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
 
-class GenerationDSV4AttentionModule(_BaseDSV4AttentionModule):
+class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
     """Decode-phase DeepSeek-V4 SWA/CSA/HCA compressed attention module."""
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         beam_width = kwargs.get("beam_width")
         if beam_width != 1:
             raise ValueError(f"{self.__class__.__name__} only supports beam_width=1, got {beam_width}")
-        result = database.query_generation_dsv4_attention_module(
+        result = database.query_generation_deepseek_v4_attention_module(
             b=kwargs.get("batch_size"),
             s=kwargs.get("s"),
             num_heads=self._num_heads,

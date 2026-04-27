@@ -2922,9 +2922,11 @@ class PerfDatabase:
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
-                "dsv4_context_module": _enum_key_names(getattr(self, "_context_dsv4_attention_module_data", None)),
-                "dsv4_generation_module": _enum_key_names(
-                    getattr(self, "_generation_dsv4_attention_module_data", None)
+                "deepseek_v4_context_module": _enum_key_names(
+                    getattr(self, "_context_deepseek_v4_attention_module_data", None)
+                ),
+                "deepseek_v4_generation_module": _enum_key_names(
+                    getattr(self, "_generation_deepseek_v4_attention_module_data", None)
                 ),
                 "mla_bmm": _enum_key_names(getattr(self, "_mla_bmm_data", None)),
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
@@ -2946,9 +2948,11 @@ class PerfDatabase:
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
-                "dsv4_context_module": _enum_key_names(getattr(self, "_context_dsv4_attention_module_data", None)),
-                "dsv4_generation_module": _enum_key_names(
-                    getattr(self, "_generation_dsv4_attention_module_data", None)
+                "deepseek_v4_context_module": _enum_key_names(
+                    getattr(self, "_context_deepseek_v4_attention_module_data", None)
+                ),
+                "deepseek_v4_generation_module": _enum_key_names(
+                    getattr(self, "_generation_deepseek_v4_attention_module_data", None)
                 ),
                 "mla_bmm": _enum_key_names(getattr(self, "_mla_bmm_data", None)),
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
@@ -2970,9 +2974,11 @@ class PerfDatabase:
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
-                "dsv4_context_module": _enum_key_names(getattr(self, "_context_dsv4_attention_module_data", None)),
-                "dsv4_generation_module": _enum_key_names(
-                    getattr(self, "_generation_dsv4_attention_module_data", None)
+                "deepseek_v4_context_module": _enum_key_names(
+                    getattr(self, "_context_deepseek_v4_attention_module_data", None)
+                ),
+                "deepseek_v4_generation_module": _enum_key_names(
+                    getattr(self, "_generation_deepseek_v4_attention_module_data", None)
                 ),
                 "mla_bmm": _enum_key_names(getattr(self, "_mla_bmm_data", None)),
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
@@ -6776,7 +6782,7 @@ class PerfDatabase:
             kv_cache_bytes = b * num_heads * effective_kv * attn_head_dim * kvcache_quant_mode.value.memory
             # Indexer K cache read (MQA: 1 shared K head, FP8 with per-128 scales).
             # Per-token bytes: head_dim (FP8) + ceil(head_dim/128)*4 (scales).
-            indexer_entry_bytes = index_head_dim + (index_head_dim + 127) // 128 * 4
+            indexer_entry_bytes = common.indexer_cache_entry_bytes(index_head_dim)
             indexer_cache_bytes = 0 if full_s <= index_topk else b * full_s * indexer_entry_bytes
             # Q activations read + write
             q_io_bytes = tokens * num_heads * qk_head_dim * fmha_quant_mode.value.memory * 2
@@ -6947,7 +6953,7 @@ class PerfDatabase:
                 + num_heads * v_dim * hidden_size  # o_proj
             ) * gemm_quant_mode.value.memory
             # Indexer K cache read: full s (paged, MQA 1 head, FP8 with per-128 scales)
-            indexer_entry_bytes = index_head_dim + (index_head_dim + 127) // 128 * 4
+            indexer_entry_bytes = common.indexer_cache_entry_bytes(index_head_dim)
             indexer_cache_bytes = b * s * indexer_entry_bytes
             # MLA KV cache read: only top-k tokens
             kv_cache_bytes = b * effective_kv * attn_head_dim * kv_cache_dtype.value.memory
@@ -7049,7 +7055,7 @@ class PerfDatabase:
         return batch_size * total
 
     @functools.lru_cache(maxsize=32768)
-    def query_dsv4_mhc_module(
+    def query_deepseek_v4_mhc_module(
         self,
         num_tokens: int,
         hidden_size: int,
@@ -7109,7 +7115,7 @@ class PerfDatabase:
             return PerformanceResult(get_empirical(), energy=0.0)
 
         def get_silicon():
-            mhc_data = getattr(self, "_dsv4_mhc_module_data", None)
+            mhc_data = getattr(self, "_deepseek_v4_mhc_module_data", None)
             if not mhc_data:
                 raise PerfDataNotAvailableError(
                     f"DeepSeek-V4 mHC module data not loaded for system='{self.system}', "
@@ -7132,7 +7138,7 @@ class PerfDatabase:
             ),
         )
 
-    def _dsv4_attention_sol(
+    def _deepseek_v4_attention_sol(
         self,
         *,
         is_context: bool,
@@ -7159,34 +7165,35 @@ class PerfDatabase:
         kv_len = prefix + s if is_context else s
         local_groups = max(1, o_groups)
 
-        projection_ops = (
+        gemm_projection_ops = (
             2 * tokens * hidden_size * q_lora_rank
             + 2 * tokens * q_lora_rank * num_heads * head_dim
             + 2 * tokens * hidden_size * head_dim
-            + 2 * tokens * num_heads * head_dim * o_lora_rank
             + 2 * tokens * local_groups * o_lora_rank * hidden_size
         )
+        output_absorption_ops = 2 * tokens * num_heads * head_dim * o_lora_rank
 
         compressor_mult = 2 if compress_ratio == 4 else 1
-        compressor_scale = 1.0 if is_context else (1.0 / compress_ratio if compress_ratio else 0.0)
         compressor_ops = 0.0
         if compress_ratio:
-            compressor_ops = (
-                4 * tokens * hidden_size * compressor_mult * head_dim
-                + 2 * tokens * compressor_mult * compress_ratio * head_dim
-            ) * compressor_scale
+            compressor_ops = 4 * tokens * hidden_size * compressor_mult * head_dim
+            compressor_ops += 2 * tokens * compressor_mult * head_dim
+            if compress_ratio == 4:
+                indexer_compressor_mult = 2
+                compressor_ops += 4 * tokens * hidden_size * indexer_compressor_mult * index_head_dim
+                compressor_ops += 2 * tokens * indexer_compressor_mult * index_head_dim
 
         if is_context:
             window_pairs = self._causal_limited_pairs(b, s, prefix, window_size)
             if compress_ratio:
-                compressed_limit = index_topk if compress_ratio == 4 else max(1, kv_len // compress_ratio)
+                compressed_limit = index_topk if compress_ratio == 4 else max(0, kv_len // compress_ratio)
                 compressed_pairs = self._compressed_context_pairs(b, s, prefix, compress_ratio, compressed_limit)
             else:
                 compressed_pairs = 0
         else:
             window_pairs = b * min(kv_len, window_size)
             if compress_ratio:
-                compressed_limit = index_topk if compress_ratio == 4 else max(1, kv_len // compress_ratio)
+                compressed_limit = index_topk if compress_ratio == 4 else max(0, kv_len // compress_ratio)
                 compressed_pairs = b * min(kv_len // compress_ratio, compressed_limit)
             else:
                 compressed_pairs = 0
@@ -7195,35 +7202,34 @@ class PerfDatabase:
         attention_ops = 4 * num_heads * head_dim * attention_pairs
 
         indexer_ops = 0.0
+        indexer_bfloat16_ops = 0.0
         indexer_cache_bytes = 0.0
         if compress_ratio == 4:
-            compressed_len = max(1, kv_len // compress_ratio)
+            compressed_len = kv_len // compress_ratio
             if is_context:
                 indexer_query_tokens = b * s
-                indexer_pairs = b * s * min(compressed_len, index_topk)
             else:
                 indexer_query_tokens = b
-                indexer_pairs = b * min(compressed_len, index_topk)
+            indexer_pairs = indexer_query_tokens * compressed_len
             indexer_ops = (
                 2 * indexer_query_tokens * q_lora_rank * index_n_heads * index_head_dim
-                + 2 * indexer_query_tokens * hidden_size * index_n_heads
                 + 2 * indexer_pairs * index_n_heads * index_head_dim
             )
-            indexer_cache_bytes = b * compressed_len * index_head_dim
+            indexer_bfloat16_ops = 2 * indexer_query_tokens * hidden_size * index_n_heads
+            indexer_cache_bytes = b * compressed_len * common.indexer_cache_entry_bytes(index_head_dim)
 
         gemm_weight_bytes = (
             hidden_size * q_lora_rank
             + q_lora_rank * num_heads * head_dim
             + hidden_size * head_dim
-            + num_heads * head_dim * o_lora_rank
             + local_groups * o_lora_rank * hidden_size
         ) * gemm_quant_mode.value.memory
+        bfloat16_weight_bytes = num_heads * head_dim * o_lora_rank * common.GEMMQuantMode.bfloat16.value.memory
         if compress_ratio:
             gemm_weight_bytes += 2 * hidden_size * compressor_mult * head_dim * gemm_quant_mode.value.memory
         if compress_ratio == 4:
-            gemm_weight_bytes += (
-                q_lora_rank * index_n_heads * index_head_dim + hidden_size * index_n_heads
-            ) * gemm_quant_mode.value.memory
+            gemm_weight_bytes += q_lora_rank * index_n_heads * index_head_dim * gemm_quant_mode.value.memory
+            bfloat16_weight_bytes += hidden_size * index_n_heads * common.GEMMQuantMode.bfloat16.value.memory
 
         activation_bytes = tokens * (
             hidden_size + q_lora_rank + num_heads * head_dim + head_dim + local_groups * o_lora_rank
@@ -7232,17 +7238,23 @@ class PerfDatabase:
         rope_bytes = tokens * num_heads * rope_head_dim * fmha_quant_mode.value.memory
 
         sol_math = (
-            (projection_ops + compressor_ops) / self._get_quant_tc_flops(gemm_quant_mode)
+            (gemm_projection_ops + compressor_ops) / self._get_quant_tc_flops(gemm_quant_mode)
+            + (output_absorption_ops + indexer_bfloat16_ops) / self._get_quant_tc_flops(common.GEMMQuantMode.bfloat16)
             + indexer_ops / self._get_quant_tc_flops(common.GEMMQuantMode.fp8)
             + attention_ops / self._get_quant_tc_flops(fmha_quant_mode)
         ) * 1000
-        sol_mem = (gemm_weight_bytes + activation_bytes + kv_cache_bytes + indexer_cache_bytes + rope_bytes) / self.system_spec[
-            "gpu"
-        ]["mem_bw"] * 1000
+        sol_mem = (
+            gemm_weight_bytes
+            + bfloat16_weight_bytes
+            + activation_bytes
+            + kv_cache_bytes
+            + indexer_cache_bytes
+            + rope_bytes
+        ) / self.system_spec["gpu"]["mem_bw"] * 1000
         return max(sol_math, sol_mem), sol_math, sol_mem
 
     @functools.lru_cache(maxsize=32768)
-    def query_context_dsv4_attention_module(
+    def query_context_deepseek_v4_attention_module(
         self,
         b: int,
         s: int,
@@ -7267,7 +7279,7 @@ class PerfDatabase:
         architecture: str = "DeepseekV4ForCausalLM",
     ) -> PerformanceResult | tuple[float, float, float]:
         def get_sol() -> tuple[float, float, float]:
-            return self._dsv4_attention_sol(
+            return self._deepseek_v4_attention_sol(
                 is_context=True,
                 b=b,
                 s=s,
@@ -7302,16 +7314,42 @@ class PerfDatabase:
             return PerformanceResult(get_empirical(), energy=0.0)
 
         def get_silicon():
-            data = getattr(self, "_context_dsv4_attention_module_data", None)
+            data = getattr(self, "_context_deepseek_v4_attention_module_data", None)
             if not data:
                 raise PerfDataNotAvailableError(
                     f"DeepSeek-V4 context attention module data not loaded for system='{self.system}', "
                     f"backend='{self.backend}', version='{self.version}'."
                 )
-            dsv4_dict = data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture][compress_ratio]
-            result = self._interp_3d(num_heads, s + prefix, b, dsv4_dict, "cubic")
+            deepseek_v4_dict = data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture][compress_ratio]
+            result = self._interp_3d(num_heads, s + prefix, b, deepseek_v4_dict, "cubic")
             latency = result["latency"]
             energy = result.get("energy", 0.0)
+            if prefix > 0:
+                base_sol = self._deepseek_v4_attention_sol(
+                    is_context=True,
+                    b=b,
+                    s=s + prefix,
+                    prefix=0,
+                    num_heads=num_heads,
+                    hidden_size=hidden_size,
+                    q_lora_rank=q_lora_rank,
+                    o_lora_rank=o_lora_rank,
+                    head_dim=head_dim,
+                    rope_head_dim=rope_head_dim,
+                    index_n_heads=index_n_heads,
+                    index_head_dim=index_head_dim,
+                    index_topk=index_topk,
+                    window_size=window_size,
+                    compress_ratio=compress_ratio,
+                    o_groups=o_groups,
+                    kvcache_quant_mode=kvcache_quant_mode,
+                    fmha_quant_mode=fmha_quant_mode,
+                    gemm_quant_mode=gemm_quant_mode,
+                )[0]
+                target_sol = get_sol()[0]
+                correction = 1.0 if base_sol <= 0 else target_sol / base_sol
+                latency *= correction
+                energy *= correction
             return PerformanceResult(latency, energy=energy)
 
         return self._query_silicon_or_hybrid(
@@ -7325,7 +7363,7 @@ class PerfDatabase:
         )
 
     @functools.lru_cache(maxsize=32768)
-    def query_generation_dsv4_attention_module(
+    def query_generation_deepseek_v4_attention_module(
         self,
         b: int,
         s: int,
@@ -7349,7 +7387,7 @@ class PerfDatabase:
         architecture: str = "DeepseekV4ForCausalLM",
     ) -> PerformanceResult | tuple[float, float, float]:
         def get_sol() -> tuple[float, float, float]:
-            return self._dsv4_attention_sol(
+            return self._deepseek_v4_attention_sol(
                 is_context=False,
                 b=b,
                 s=s,
@@ -7384,14 +7422,14 @@ class PerfDatabase:
             return PerformanceResult(get_empirical(), energy=0.0)
 
         def get_silicon():
-            data = getattr(self, "_generation_dsv4_attention_module_data", None)
+            data = getattr(self, "_generation_deepseek_v4_attention_module_data", None)
             if not data:
                 raise PerfDataNotAvailableError(
                     f"DeepSeek-V4 generation attention module data not loaded for system='{self.system}', "
                     f"backend='{self.backend}', version='{self.version}'."
                 )
-            dsv4_dict = data[kvcache_quant_mode][gemm_quant_mode][architecture][compress_ratio]
-            result = self._interp_3d(num_heads, b, s, dsv4_dict, "cubic")
+            deepseek_v4_dict = data[kvcache_quant_mode][gemm_quant_mode][architecture][compress_ratio]
+            result = self._interp_3d(num_heads, b, s, deepseek_v4_dict, "cubic")
             latency = result["latency"]
             energy = result.get("energy", 0.0)
             return PerformanceResult(latency, energy=energy)

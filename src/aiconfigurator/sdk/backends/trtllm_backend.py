@@ -642,13 +642,9 @@ class TRTLLMBackend(BaseBackend):
             activations = activations * (model.config.nextn + 1)
 
         seq_tokens = max_seq_len if max_seq_len is not None else isl + beam_width * osl
-        if model.model_family == "DEEPSEEKV4":
-            kvcache = (
-                batch_size
-                * model.config.kvcache_quant_mode.value.memory
-                * model.get_kvcache_elements_per_sequence(seq_tokens)
-            )
-        elif model.model_family in ("DEEPSEEK", "DEEPSEEKV32"):
+        if model.model_family in ("DEEPSEEKV32", "DEEPSEEKV4"):
+            kvcache = batch_size * model.get_kvcache_bytes_per_sequence(seq_tokens)
+        elif model.model_family == "DEEPSEEK":
             kvcache_per_token = model._num_layers * 576
             kvcache = batch_size * seq_tokens * model.config.kvcache_quant_mode.value.memory * kvcache_per_token
         else:

@@ -634,6 +634,22 @@ class BaseModel:
         self._nextn = model_config.nextn
         self._nextn_accept_rates = model_config.nextn_accept_rates
 
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        if self.model_family != "DEEPSEEKV32":
+            raise NotImplementedError(f"{self.__class__.__name__} does not define model-specific KV cache bytes")
+
+        seq_len = max(0, seq_len)
+        if isinstance(self.extra_params, dict):
+            latent_dim = self.extra_params.get("kv_lora_rank", 512) + self.extra_params.get("qk_rope_head_dim", 64)
+            index_head_dim = self.extra_params.get("index_head_dim", 128)
+        else:
+            latent_dim = 576
+            index_head_dim = 128
+        return self._num_layers * seq_len * (
+            latent_dim * self.config.kvcache_quant_mode.value.memory
+            + common.indexer_cache_entry_bytes(index_head_dim)
+        )
+
 
 class GPTModel(BaseModel):
     """
@@ -1983,8 +1999,8 @@ class DeepSeekV4Model(BaseModel):
 
         if not isinstance(self.extra_params, common.DeepSeekV4Config):
             raise ValueError("DeepSeekV4Model requires DeepSeekV4Config extra_params")
-        dsv4 = self.extra_params
-        self._compress_ratios = dsv4.compress_ratios[: self._num_layers]
+        deepseek_v4_cfg = self.extra_params
+        self._compress_ratios = deepseek_v4_cfg.compress_ratios[: self._num_layers]
         unknown_ratios = set(self._compress_ratios) - self._SUPPORTED_COMPRESS_RATIOS
         if unknown_ratios:
             raise ValueError(f"Unsupported DeepSeek-V4 compress_ratios: {sorted(unknown_ratios)}")
@@ -2026,11 +2042,11 @@ class DeepSeekV4Model(BaseModel):
             else self.config.workload_distribution
         )
         local_heads = self._num_heads // tp_size
-        local_o_groups = max(1, dsv4.o_groups // tp_size)
+        local_o_groups = max(1, deepseek_v4_cfg.o_groups // tp_size)
 
         def _attention_ops(is_context: bool, scale_factor: float):
             ratio_counts = Counter(self._compress_ratios)
-            op_cls = ops.ContextDSV4AttentionModule if is_context else ops.GenerationDSV4AttentionModule
+            op_cls = ops.ContextDeepSeekV4AttentionModule if is_context else ops.GenerationDeepSeekV4AttentionModule
             name = "context_attention" if is_context else "generation_attention"
             return [
                 op_cls(
@@ -2038,14 +2054,14 @@ class DeepSeekV4Model(BaseModel):
                     count * scale_factor,
                     local_heads,
                     h,
-                    dsv4.q_lora_rank,
-                    dsv4.o_lora_rank,
-                    dsv4.head_dim,
-                    dsv4.qk_rope_head_dim,
-                    dsv4.index_n_heads,
-                    dsv4.index_head_dim,
-                    dsv4.index_topk,
-                    dsv4.sliding_window,
+                    deepseek_v4_cfg.q_lora_rank,
+                    deepseek_v4_cfg.o_lora_rank,
+                    deepseek_v4_cfg.head_dim,
+                    deepseek_v4_cfg.qk_rope_head_dim,
+                    deepseek_v4_cfg.index_n_heads,
+                    deepseek_v4_cfg.index_head_dim,
+                    deepseek_v4_cfg.index_topk,
+                    deepseek_v4_cfg.sliding_window,
                     ratio,
                     local_o_groups,
                     kvcache_quant_mode,
@@ -2060,24 +2076,24 @@ class DeepSeekV4Model(BaseModel):
         self.context_ops.extend(
             [
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
-                ops.DSV4MHCModule(
+                ops.DeepSeekV4MHCModule(
                     "context_mhc_pre",
                     self._num_layers,
                     "pre",
                     h,
-                    dsv4.hc_mult,
-                    dsv4.hc_sinkhorn_iters,
+                    deepseek_v4_cfg.hc_mult,
+                    deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
                 ),
                 ops.ElementWise("context_attn_norm", self._num_layers, h, h, 0.8),
                 *_attention_ops(is_context=True, scale_factor=1.0),
-                ops.DSV4MHCModule(
+                ops.DeepSeekV4MHCModule(
                     "context_mhc_post",
                     self._num_layers,
                     "post",
                     h,
-                    dsv4.hc_mult,
-                    dsv4.hc_sinkhorn_iters,
+                    deepseek_v4_cfg.hc_mult,
+                    deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
                 ),
                 ops.ElementWise("context_ffn_norm", self._num_layers, h, h, 0.8),
@@ -2141,24 +2157,24 @@ class DeepSeekV4Model(BaseModel):
         self.generation_ops.extend(
             [
                 ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
-                ops.DSV4MHCModule(
+                ops.DeepSeekV4MHCModule(
                     "generation_mhc_pre",
                     self._num_layers * self._mtp_scale_factor,
                     "pre",
                     h,
-                    dsv4.hc_mult,
-                    dsv4.hc_sinkhorn_iters,
+                    deepseek_v4_cfg.hc_mult,
+                    deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
                 ),
                 ops.ElementWise("generation_attn_norm", self._num_layers * self._mtp_scale_factor, h, h, 0.8),
                 *_attention_ops(is_context=False, scale_factor=self._mtp_scale_factor),
-                ops.DSV4MHCModule(
+                ops.DeepSeekV4MHCModule(
                     "generation_mhc_post",
                     self._num_layers * self._mtp_scale_factor,
                     "post",
                     h,
-                    dsv4.hc_mult,
-                    dsv4.hc_sinkhorn_iters,
+                    deepseek_v4_cfg.hc_mult,
+                    deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
                 ),
                 ops.ElementWise("generation_ffn_norm", self._num_layers * self._mtp_scale_factor, h, h, 0.8),
@@ -2251,13 +2267,21 @@ class DeepSeekV4Model(BaseModel):
         self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
 
-    def get_kvcache_elements_per_sequence(self, seq_len: int) -> int:
-        dsv4 = self.extra_params
-        total = 0
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        deepseek_v4_cfg = self.extra_params
+        seq_len = max(0, seq_len)
+        total = 0.0
         for ratio in self._compress_ratios:
-            total += min(seq_len, dsv4.sliding_window) * dsv4.head_dim
+            total += (
+                min(seq_len, deepseek_v4_cfg.sliding_window)
+                * deepseek_v4_cfg.head_dim
+                * self.config.kvcache_quant_mode.value.memory
+            )
             if ratio:
-                total += max(1, seq_len // ratio) * dsv4.head_dim
+                compressed_entries = seq_len // ratio
+                total += compressed_entries * deepseek_v4_cfg.head_dim * self.config.kvcache_quant_mode.value.memory
+                if ratio == 4:
+                    total += compressed_entries * common.indexer_cache_entry_bytes(deepseek_v4_cfg.index_head_dim)
         return total
 
 

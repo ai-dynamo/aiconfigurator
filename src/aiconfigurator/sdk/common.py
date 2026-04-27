@@ -137,6 +137,11 @@ class DeepSeekV4Config:
     n_shared_experts: int = 1
 
 
+def indexer_cache_entry_bytes(index_head_dim: int) -> int:
+    """Bytes per token in the FP8 indexer KV cache, including one scale per 128 values."""
+    return index_head_dim + ((index_head_dim + 127) // 128) * 4
+
+
 def _get_support_matrix_resource():
     """Get the support_matrix.csv as a Traversable resource."""
     return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"

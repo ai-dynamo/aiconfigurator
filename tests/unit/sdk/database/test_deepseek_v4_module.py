@@ -13,7 +13,7 @@ from aiconfigurator.sdk.models import get_model
 pytestmark = pytest.mark.unit
 
 
-def _dsv4_attn_kwargs(compress_ratio: int) -> dict:
+def _deepseek_v4_attn_kwargs(compress_ratio: int) -> dict:
     return {
         "b": 2,
         "s": 256,
@@ -36,10 +36,10 @@ def _dsv4_attn_kwargs(compress_ratio: int) -> dict:
     }
 
 
-class TestDSV4MHCModule:
+class TestDeepSeekV4MHCModule:
     def test_mhc_sol_and_hybrid_return_positive(self, comprehensive_perf_db):
         for mode in (common.DatabaseMode.SOL, common.DatabaseMode.HYBRID):
-            result = comprehensive_perf_db.query_dsv4_mhc_module(
+            result = comprehensive_perf_db.query_deepseek_v4_mhc_module(
                 num_tokens=512,
                 hidden_size=7168,
                 hc_mult=4,
@@ -51,7 +51,7 @@ class TestDSV4MHCModule:
             assert float(result) > 0
 
     def test_mhc_sol_full_shape(self, comprehensive_perf_db):
-        result = comprehensive_perf_db.query_dsv4_mhc_module(
+        result = comprehensive_perf_db.query_deepseek_v4_mhc_module(
             num_tokens=512,
             hidden_size=7168,
             hc_mult=4,
@@ -65,37 +65,100 @@ class TestDSV4MHCModule:
         assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
 
 
-class TestDSV4AttentionModule:
+class TestDeepSeekV4AttentionModule:
     @pytest.mark.parametrize("compress_ratio", [0, 4, 128])
     def test_context_sol_returns_positive_for_all_attention_kinds(self, comprehensive_perf_db, compress_ratio):
-        result = comprehensive_perf_db.query_context_dsv4_attention_module(
-            **_dsv4_attn_kwargs(compress_ratio),
+        result = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+            **_deepseek_v4_attn_kwargs(compress_ratio),
             database_mode=common.DatabaseMode.SOL,
         )
         assert float(result) > 0
 
     @pytest.mark.parametrize("compress_ratio", [0, 4, 128])
     def test_generation_hybrid_falls_back_for_all_attention_kinds(self, comprehensive_perf_db, compress_ratio):
-        kwargs = _dsv4_attn_kwargs(compress_ratio)
+        kwargs = _deepseek_v4_attn_kwargs(compress_ratio)
         kwargs.pop("prefix")
         kwargs["s"] = 4096
-        result = comprehensive_perf_db.query_generation_dsv4_attention_module(
+        result = comprehensive_perf_db.query_generation_deepseek_v4_attention_module(
             **kwargs,
             database_mode=common.DatabaseMode.HYBRID,
         )
         assert float(result) > 0
 
     def test_csa_index_topk_changes_sol(self, comprehensive_perf_db):
-        base = _dsv4_attn_kwargs(4)
-        low_topk = comprehensive_perf_db.query_context_dsv4_attention_module(
+        base = _deepseek_v4_attn_kwargs(4)
+        low_topk = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
             **{**base, "index_topk": 128, "s": 4096},
             database_mode=common.DatabaseMode.SOL,
         )
-        high_topk = comprehensive_perf_db.query_context_dsv4_attention_module(
+        high_topk = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
             **{**base, "index_topk": 1024, "s": 4096},
             database_mode=common.DatabaseMode.SOL,
         )
         assert high_topk > low_topk
+
+    @pytest.mark.parametrize("compress_ratio", [0, 4, 128])
+    def test_context_prefix_changes_sol_for_all_attention_kinds(self, comprehensive_perf_db, compress_ratio):
+        base = {**_deepseek_v4_attn_kwargs(compress_ratio), "s": 512}
+        no_prefix = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+            **base,
+            database_mode=common.DatabaseMode.SOL,
+        )
+        with_prefix = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+            **{**base, "prefix": 1024},
+            database_mode=common.DatabaseMode.SOL,
+        )
+        assert with_prefix > no_prefix
+
+    @pytest.mark.parametrize("compress_ratio", [0, 4, 128])
+    def test_context_sol_increases_with_sequence_length(self, comprehensive_perf_db, compress_ratio):
+        base = _deepseek_v4_attn_kwargs(compress_ratio)
+        short = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+            **{**base, "s": 256},
+            database_mode=common.DatabaseMode.SOL,
+        )
+        long = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+            **{**base, "s": 4096},
+            database_mode=common.DatabaseMode.SOL,
+        )
+        assert long > short
+
+    def test_csa_indexer_logits_scale_with_compressed_length_not_topk_only(self, comprehensive_perf_db):
+        base = {**_deepseek_v4_attn_kwargs(4), "s": 4096}
+        short_cache = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+            **{**base, "prefix": 0, "index_topk": 16},
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+        long_cache = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+            **{**base, "prefix": 4096, "index_topk": 16},
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+        assert long_cache[1] > short_cache[1]
+
+    def test_kvcache_quant_changes_sol_memory(self, comprehensive_perf_db):
+        base = {**_deepseek_v4_attn_kwargs(128), "s": 4096, "prefix": 4096}
+        bf16 = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+            **{**base, "kvcache_quant_mode": common.KVCacheQuantMode.bfloat16},
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+        fp8 = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+            **{**base, "kvcache_quant_mode": common.KVCacheQuantMode.fp8},
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+        assert fp8[2] < bf16[2]
+
+    def test_gemm_quant_changes_sol_math_and_memory(self, comprehensive_perf_db):
+        base = {**_deepseek_v4_attn_kwargs(4), "s": 4096, "prefix": 1024}
+        bf16 = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+            **{**base, "gemm_quant_mode": common.GEMMQuantMode.bfloat16},
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+        fp8 = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+            **{**base, "gemm_quant_mode": common.GEMMQuantMode.fp8_block},
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+        assert fp8[1] < bf16[1]
+        assert fp8[2] < bf16[2]
 
 
 def test_deepseek_v4_static_sol_and_hybrid_run_end_to_end(comprehensive_perf_db):

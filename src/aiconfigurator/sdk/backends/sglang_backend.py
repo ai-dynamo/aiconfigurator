@@ -568,13 +568,9 @@ class SGLANGBackend(BaseBackend):
         activations += sglang_overhead
 
         # ==== KV Cache calculation - SGLANG specific ====
-        if model.model_family == "DEEPSEEKV4":
-            kvcache = (
-                batch_size
-                * model.config.kvcache_quant_mode.value.memory
-                * model.get_kvcache_elements_per_sequence(isl + beam_width * osl)
-            )
-        elif model.model_family in ("DEEPSEEK", "DEEPSEEKV32"):
+        if model.model_family in ("DEEPSEEKV32", "DEEPSEEKV4"):
+            kvcache = batch_size * model.get_kvcache_bytes_per_sequence(isl + beam_width * osl)
+        elif model.model_family == "DEEPSEEK":
             kvcache_per_token = model._num_layers * 576
             kvcache = (
                 (batch_size * isl + batch_size * beam_width * osl)

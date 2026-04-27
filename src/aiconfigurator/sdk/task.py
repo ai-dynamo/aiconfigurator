@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE = 1.1
 DEFAULT_DECODE_LATENCY_CORRECTION_SCALE = 1.08
 
-_DSV4_NATIVE_FP4_TO_FP8_MODEL = {
+_DEEPSEEK_V4_NATIVE_FP4_TO_FP8_MODEL = {
     "deepseek-ai/DeepSeek-V4-Flash": "sgl-project/DeepSeek-V4-Flash-FP8",
     "deepseek-ai/DeepSeek-V4-Pro": "sgl-project/DeepSeek-V4-Pro-FP8",
 }
@@ -36,14 +36,14 @@ def _is_hopper_system(system_name: str | None) -> bool:
     return system_name.startswith(("h100", "h200", "gh200"))
 
 
-def _validate_dsv4_model_hardware_support(
+def _validate_deepseek_v4_model_hardware_support(
     *,
     model_path: str,
     system_name: str,
     decode_system_name: str | None,
 ) -> None:
     """Reject native DeepSeek-V4 FP4-expert checkpoints on Hopper."""
-    replacement = _DSV4_NATIVE_FP4_TO_FP8_MODEL.get(model_path)
+    replacement = _DEEPSEEK_V4_NATIVE_FP4_TO_FP8_MODEL.get(model_path)
     if replacement is None:
         return
 
@@ -764,7 +764,7 @@ class TaskConfig:
         if enable_wideep and moe_backend is None:
             moe_backend = "deepep_moe"
 
-        _validate_dsv4_model_hardware_support(
+        _validate_deepseek_v4_model_hardware_support(
             model_path=model_path,
             system_name=system_name,
             decode_system_name=decode_system_name,
@@ -959,8 +959,8 @@ class TaskConfig:
         # vLLM absorbs MLA KV projections into standard attention kernels, so it
         # has no dedicated MLA perf data — use standard attention tables instead.
         if is_deepseek_v4:
-            context_attn_key = "dsv4_context_module"
-            generation_attn_key = "dsv4_generation_module"
+            context_attn_key = "deepseek_v4_context_module"
+            generation_attn_key = "deepseek_v4_generation_module"
         elif is_deepseek_v32:
             context_attn_key = "dsa_context_module"
             generation_attn_key = "dsa_generation_module"

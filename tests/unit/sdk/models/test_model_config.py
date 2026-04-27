@@ -203,7 +203,8 @@ class TestHFModelSupport:
         assert isinstance(extra, common.DeepSeekV4Config)
         assert extra.index_topk == expected_index_topk
         assert extra.hc_mult == 4
-        assert {ratio: extra.compress_ratios.count(ratio) for ratio in set(extra.compress_ratios)} == expected_ratio_counts
+        observed_ratio_counts = {ratio: extra.compress_ratios.count(ratio) for ratio in set(extra.compress_ratios)}
+        assert observed_ratio_counts == expected_ratio_counts
 
         model_config = config.ModelConfig(
             tp_size=1,
@@ -219,6 +220,61 @@ class TestHFModelSupport:
         assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
         assert model_config.fmha_quant_mode == common.FMHAQuantMode.bfloat16
         assert sum(op._scale_factor for op in model.context_ops if op._name == "context_attention") == expected_layers
+
+    def test_deepseek_v4_kvcache_bytes_include_csa_indexer_cache(self):
+        model_config = config.ModelConfig(
+            tp_size=8,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=1,
+            nextn=1,
+            nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+        )
+        model = get_model("sgl-project/DeepSeek-V4-Pro-FP8", model_config, backend_name="trtllm")
+        seq_len = 4096
+        extra = model.extra_params
+
+        expected = 0.0
+        without_indexer = 0.0
+        for ratio in extra.compress_ratios:
+            local_bytes = (
+                min(seq_len, extra.sliding_window)
+                * extra.head_dim
+                * model_config.kvcache_quant_mode.value.memory
+            )
+            expected += local_bytes
+            without_indexer += local_bytes
+            if ratio:
+                compressed_bytes = (seq_len // ratio) * extra.head_dim * model_config.kvcache_quant_mode.value.memory
+                expected += compressed_bytes
+                without_indexer += compressed_bytes
+                if ratio == 4:
+                    expected += (seq_len // ratio) * common.indexer_cache_entry_bytes(extra.index_head_dim)
+
+        assert model.get_kvcache_bytes_per_sequence(seq_len) == expected
+        assert expected > without_indexer
+
+    def test_deepseek_v32_kvcache_bytes_include_indexer_cache(self):
+        model_config = config.ModelConfig(
+            tp_size=8,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=1,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+        )
+        model = get_model("deepseek-ai/DeepSeek-V3.2", model_config, backend_name="trtllm")
+        seq_len = 4096
+        extra = model.extra_params
+        latent_dim = extra["kv_lora_rank"] + extra["qk_rope_head_dim"]
+        indexer_bytes = common.indexer_cache_entry_bytes(extra["index_head_dim"])
+
+        expected = model._num_layers * seq_len * (
+            latent_dim * model_config.kvcache_quant_mode.value.memory + indexer_bytes
+        )
+        old_without_indexer = model._num_layers * seq_len * latent_dim * model_config.kvcache_quant_mode.value.memory
+
+        assert model.get_kvcache_bytes_per_sequence(seq_len) == expected
+        assert expected > old_without_indexer
 
     @pytest.mark.parametrize(
         "model_path,replacement",
