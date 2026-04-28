@@ -74,7 +74,7 @@ predicted by aiconfigurator. E.g., [1 2 4 8 ... target_concurrency]
 Compare the result at target_concurrency with `TTFT, TPOT, tokens/s/gpu and previous baseline you have`
 
 > In order to reduce the impact of first batch of requests, we use `concurrency * 10` as `num_requests`
-> In order to aovid undefined cache hit rate when benchmarking with random data, we delebrately disable 
+> In order to avoid undefined cache hit rate when benchmarking with random data, we deliberately disable 
 cache reuse to make it fair.
 
 ## Step-by-step Manual Deployment
