@@ -5,9 +5,11 @@
 
 This module is intentionally not registered as a default SGLang collector yet.
 It runs a single-rank DeepGEMM MegaMoE kernel with the target EP rank-local
-expert count and target-EP bottleneck-rank token workload.  The runtime has no
-cross-rank communication because ``num_ranks == 1``; ``moe_ep_size`` in the
-task remains the target EP size recorded for AIC modeling.
+expert count and target-EP bottleneck-rank token workload.  Local pre-dispatch
+is measured separately with a source-rank-local token workload because real
+MegaMoE pre-dispatch happens before EP exchange.  The runtime has no cross-rank
+communication because ``num_ranks == 1``; ``moe_ep_size`` in the task remains
+the target EP size recorded for AIC modeling.
 """
 
 from __future__ import annotations
@@ -365,6 +367,26 @@ def _make_local_topk_tensors(workload: Dsv4MegaMoEWorkload, *, device: str):
     return topk_ids.contiguous(), topk_weights.contiguous(), masked_m.contiguous()
 
 
+def _make_source_predispatch_topk_tensors(workload: Dsv4MegaMoEWorkload, *, device: str):
+    import torch
+
+    if not workload.mega_topk_ids_by_src_rank:
+        raise ValueError("workload has no source-rank topk rows")
+
+    source_rank = max(
+        range(len(workload.mega_topk_ids_by_src_rank)),
+        key=lambda rank: len(workload.mega_topk_ids_by_src_rank[rank]),
+    )
+    source_rows = workload.mega_topk_ids_by_src_rank[source_rank]
+    if source_rows:
+        topk_ids = torch.tensor(source_rows, dtype=torch.int32, device=device)
+    else:
+        topk_ids = torch.empty((0, workload.mega_topk), dtype=torch.int32, device=device)
+    topk_weights = torch.zeros_like(topk_ids, dtype=torch.float32)
+    topk_weights[topk_ids >= 0] = 1.0 / float(workload.mega_topk)
+    return source_rank, topk_ids.contiguous(), topk_weights.contiguous()
+
+
 def _deep_gemm_supports_recv_stats(deep_gemm_module: Any) -> bool:
     try:
         params = signature(deep_gemm_module.fp8_fp4_mega_moe).parameters
@@ -403,11 +425,25 @@ def _prepare_runtime(task: Dsv4MegaMoEComputeTask, moe_layer: Any, device: str) 
         num_fused_shared_experts=num_fused_shared_experts,
         hidden_size=task.hidden_size,
     )
-    local_num_tokens = len(workload.rank0_local_token_indices)
-    if local_num_tokens <= 0:
+    core_num_tokens = len(workload.rank0_local_token_indices)
+    if core_num_tokens <= 0:
         raise RuntimeError("target-EP workload produced no rank0-local tokens")
-    hidden_states = torch.randn(local_num_tokens, task.hidden_size, dtype=torch.bfloat16, device=device)
-    topk_ids, topk_weights, expected_masked_m = _make_local_topk_tensors(workload, device=device)
+    core_hidden_states = torch.randn(core_num_tokens, task.hidden_size, dtype=torch.bfloat16, device=device)
+    core_topk_ids, core_topk_weights, expected_masked_m = _make_local_topk_tensors(workload, device=device)
+
+    source_predispatch_rank, source_topk_ids, source_topk_weights = _make_source_predispatch_topk_tensors(
+        workload,
+        device=device,
+    )
+    source_predispatch_num_tokens = int(source_topk_ids.shape[0])
+    if source_predispatch_num_tokens <= 0:
+        raise RuntimeError("target-EP workload produced no source-local pre-dispatch tokens")
+    source_hidden_states = torch.randn(
+        source_predispatch_num_tokens,
+        task.hidden_size,
+        dtype=torch.bfloat16,
+        device=device,
+    )
 
     local_expert_indices = _local_expert_indices(
         routed_num_experts=routed_num_experts,
@@ -424,31 +460,52 @@ def _prepare_runtime(task: Dsv4MegaMoEComputeTask, moe_layer: Any, device: str) 
         raise RuntimeError(
             f"DSv4 MegaMoE local-compute collector requires a single-rank runtime EP group, got {ep_group.size()}"
         )
-    runtime_token_cap = max(token_cap, local_num_tokens)
-    buf = _get_mega_moe_symm_buffer(
+    core_token_cap = max(token_cap, core_num_tokens)
+    core_buf = _get_mega_moe_symm_buffer(
         ep_group,
         num_experts=runtime_mega_num_experts,
-        num_max_tokens_per_rank=runtime_token_cap,
+        num_max_tokens_per_rank=core_token_cap,
+        num_topk=global_mega_topk,
+        hidden=task.hidden_size,
+        intermediate_hidden=task.inter_size,
+    )
+    source_predispatch_token_cap = max(token_cap, source_predispatch_num_tokens)
+    source_predispatch_buf = _get_mega_moe_symm_buffer(
+        ep_group,
+        num_experts=global_mega_num_experts,
+        num_max_tokens_per_rank=source_predispatch_token_cap,
         num_topk=global_mega_topk,
         hidden=task.hidden_size,
         intermediate_hidden=task.inter_size,
     )
 
+    def prepare_core_func():
+        mega_moe_pre_dispatch(
+            core_hidden_states,
+            core_topk_ids,
+            core_topk_weights,
+            core_buf.x,
+            core_buf.x_sf,
+            core_buf.topk_idx,
+            core_buf.topk_weights,
+            quant_group_size=32,
+        )
+
     def predispatch_func():
         mega_moe_pre_dispatch(
-            hidden_states,
-            topk_ids,
-            topk_weights,
-            buf.x,
-            buf.x_sf,
-            buf.topk_idx,
-            buf.topk_weights,
+            source_hidden_states,
+            source_topk_ids,
+            source_topk_weights,
+            source_predispatch_buf.x,
+            source_predispatch_buf.x_sf,
+            source_predispatch_buf.topk_idx,
+            source_predispatch_buf.topk_weights,
             quant_group_size=32,
         )
 
     swiglu_limit = getattr(moe_layer.config, "swiglu_limit", None)
 
-    y = torch.empty((local_num_tokens, task.hidden_size), dtype=torch.bfloat16, device=device)
+    y = torch.empty((core_num_tokens, task.hidden_size), dtype=torch.bfloat16, device=device)
 
     def core_func(cumulative_local_expert_recv_stats=None):
         kwargs = {
@@ -461,7 +518,7 @@ def _prepare_runtime(task: Dsv4MegaMoEComputeTask, moe_layer: Any, device: str) 
             if not supports_recv_stats:
                 raise RuntimeError("Installed DeepGEMM fp8_fp4_mega_moe does not support recv-stats validation")
             kwargs["cumulative_local_expert_recv_stats"] = cumulative_local_expert_recv_stats
-        deep_gemm.fp8_fp4_mega_moe(y, local_mega_l1_weights, local_mega_l2_weights, buf, **kwargs)
+        deep_gemm.fp8_fp4_mega_moe(y, local_mega_l1_weights, local_mega_l2_weights, core_buf, **kwargs)
 
     validation_stats = (
         torch.empty(runtime_mega_num_experts, dtype=torch.int32, device=device)
@@ -472,13 +529,13 @@ def _prepare_runtime(task: Dsv4MegaMoEComputeTask, moe_layer: Any, device: str) 
     def validate_workload_func():
         if int(expected_masked_m.numel()) != runtime_mega_num_experts:
             raise RuntimeError("rank0_masked_m length does not match runtime MegaMoE expert count")
-        valid_topk = topk_ids >= 0
-        if bool((topk_ids[valid_topk] >= runtime_mega_num_experts).any().item()):
+        valid_topk = core_topk_ids >= 0
+        if bool((core_topk_ids[valid_topk] >= runtime_mega_num_experts).any().item()):
             raise RuntimeError("local topk IDs exceed runtime MegaMoE expert count")
         if int(valid_topk.sum().item()) != int(expected_masked_m.sum().item()):
             raise RuntimeError("rank0_masked_m sum does not match local topk valid selection count")
 
-        predispatch_func()
+        prepare_core_func()
         if supports_recv_stats:
             validation_stats.zero_()
             core_func(validation_stats)
@@ -503,7 +560,10 @@ def _prepare_runtime(task: Dsv4MegaMoEComputeTask, moe_layer: Any, device: str) 
         "local_routed_num_experts": local_routed_num_experts,
         "runtime_mega_num_experts": runtime_mega_num_experts,
         "local_expert_indices": list(local_expert_indices),
-        "rank0_local_num_tokens": local_num_tokens,
+        "rank0_local_num_tokens": core_num_tokens,
+        "core_num_tokens": core_num_tokens,
+        "source_predispatch_rank": source_predispatch_rank,
+        "source_predispatch_num_tokens": source_predispatch_num_tokens,
         "rank0_total_local_selections": int(sum(workload.rank0_masked_m)),
         "rank0_masked_m": list(workload.rank0_masked_m),
         "workload_num_tokens_per_rank": workload.num_tokens_per_rank,
@@ -514,11 +574,17 @@ def _prepare_runtime(task: Dsv4MegaMoEComputeTask, moe_layer: Any, device: str) 
         "traffic_bottleneck_primary_bytes": (
             None if workload.traffic is None else workload.traffic.bottleneck_primary_bytes
         ),
-        "buffer_num_max_tokens_per_rank": int(buf.num_max_tokens_per_rank),
-        "topk_ids_dtype": str(topk_ids.dtype),
-        "topk_weights_dtype": str(topk_weights.dtype),
-        "buf_topk_idx_dtype": str(buf.topk_idx.dtype),
-        "buf_topk_weights_dtype": str(buf.topk_weights.dtype),
+        "buffer_num_max_tokens_per_rank": int(core_buf.num_max_tokens_per_rank),
+        "core_buffer_num_max_tokens_per_rank": int(core_buf.num_max_tokens_per_rank),
+        "source_predispatch_buffer_num_max_tokens_per_rank": int(source_predispatch_buf.num_max_tokens_per_rank),
+        "topk_ids_dtype": str(core_topk_ids.dtype),
+        "topk_weights_dtype": str(core_topk_weights.dtype),
+        "core_topk_ids_dtype": str(core_topk_ids.dtype),
+        "core_topk_weights_dtype": str(core_topk_weights.dtype),
+        "source_predispatch_topk_ids_dtype": str(source_topk_ids.dtype),
+        "source_predispatch_topk_weights_dtype": str(source_topk_weights.dtype),
+        "buf_topk_idx_dtype": str(core_buf.topk_idx.dtype),
+        "buf_topk_weights_dtype": str(core_buf.topk_weights.dtype),
         "model_mega_moe_weights_built": bool(getattr(moe_layer.experts, "_mega_moe_weights_built", False)),
         "local_mega_moe_weights_built": True,
         "local_l1_weight_shape": [list(tensor.shape) for tensor in local_mega_l1_weights],
@@ -530,6 +596,7 @@ def _prepare_runtime(task: Dsv4MegaMoEComputeTask, moe_layer: Any, device: str) 
     }
     return {
         "predispatch_func": predispatch_func,
+        "prepare_core_func": prepare_core_func,
         "core_func": core_func,
         "validate_workload_func": validate_workload_func,
         "metadata": metadata,
@@ -541,11 +608,12 @@ def _benchmark_runtime(runtime: dict[str, Any], device: str) -> tuple[dict[str, 
 
     torch_device = torch.device(device)
     predispatch_func = runtime["predispatch_func"]
+    prepare_core_func = runtime["prepare_core_func"]
     core_func = runtime["core_func"]
     validate_workload_func = runtime["validate_workload_func"]
 
     validate_workload_func()
-    predispatch_func()
+    prepare_core_func()
     torch.cuda.synchronize()
 
     predispatch_latency_ms: float | None = None
@@ -561,8 +629,9 @@ def _benchmark_runtime(runtime: dict[str, Any], device: str) -> tuple[dict[str, 
         ) as predispatch_results:
             pass
         predispatch_latency_ms = float(predispatch_results["latency_ms"])
-        predispatch_func()
-        torch.cuda.synchronize()
+
+    prepare_core_func()
+    torch.cuda.synchronize()
 
     with benchmark_with_power(
         device=torch_device,
@@ -643,6 +712,8 @@ def _run_dsv4_megamoe_compute_inprocess(task: Dsv4MegaMoEComputeTask, device_id:
                 {
                     "moe_dtype": task.moe_type,
                     "num_tokens": observed["rank0_local_num_tokens"],
+                    "core_num_tokens": observed["core_num_tokens"],
+                    "source_predispatch_num_tokens": observed["source_predispatch_num_tokens"],
                     "source_num_tokens": task.num_tokens,
                     "workload_num_global_tokens": observed["workload_num_global_tokens"],
                     "hidden_size": task.hidden_size,

@@ -273,6 +273,45 @@ def test_compute_local_topk_tensors_mask_remote_experts(compute_mod):
 
 
 @pytest.mark.unit
+def test_compute_source_predispatch_topk_uses_source_local_rows(compute_mod):
+    torch = _import_real_torch_or_skip()
+
+    task = compute_mod.Dsv4MegaMoEComputeTask(
+        "mxfp4",
+        17,
+        4096,
+        2048,
+        2,
+        8,
+        1,
+        4,
+        "deepseek-ai/DeepSeek-V4",
+        compute_mod.PERF_FILENAME,
+        "uniform",
+        None,
+    )
+    workload = compute_mod._build_target_ep_workload(
+        task,
+        routed_topk=2,
+        routed_num_experts=8,
+        num_fused_shared_experts=0,
+    )
+
+    source_rank, topk_ids, topk_weights = compute_mod._make_source_predispatch_topk_tensors(
+        workload,
+        device="cpu",
+    )
+
+    assert source_rank == 0
+    assert topk_ids.shape == (workload.num_tokens_per_rank, workload.mega_topk)
+    assert topk_weights.shape == topk_ids.shape
+    assert topk_ids.dtype == torch.int32
+    assert topk_ids.max().item() >= workload.experts_per_rank
+    assert len(workload.rank0_local_token_indices) > topk_ids.shape[0]
+    assert torch.all(topk_weights == 1.0 / float(workload.mega_topk))
+
+
+@pytest.mark.unit
 def test_compute_detects_deep_gemm_recv_stats_signature(compute_mod):
     def with_stats(_y, _l1, _l2, _buf, cumulative_local_expert_recv_stats=None):
         return cumulative_local_expert_recv_stats
