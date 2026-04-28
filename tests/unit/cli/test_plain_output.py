@@ -202,7 +202,10 @@ def test_log_final_summary_no_disagg_results():
         chosen_exp="agg",
         best_throughputs={"agg": 100.0, "disagg": 0.0},
         best_configs=best_configs,
-        pareto_fronts={"agg": pd.DataFrame({"tokens/s/user": [1.0], "tokens/s/gpu_cluster": [10.0]}), "disagg": pd.DataFrame()},
+        pareto_fronts={
+            "agg": pd.DataFrame({"tokens/s/user": [1.0], "tokens/s/gpu_cluster": [10.0]}),
+            "disagg": pd.DataFrame(),
+        },
         task_configs=task_configs,
         mode="default",
         pareto_x_axis={"agg": "tokens/s/user", "disagg": "tokens/s/user"},
