@@ -129,8 +129,14 @@ def _get_system_config(system_name: str) -> dict[str, Any]:
                 continue
             with open(system_yaml_path) as f:
                 system_spec = yaml.safe_load(f)
-            result["gpus_per_node"] = int(system_spec.get("node", {}).get("num_gpus_per_node", _DEFAULT_GPUS_PER_NODE))
-            result["vram_per_gpu"] = int(system_spec.get("gpu", {}).get("mem_capacity", _DEFAULT_VRAM_BYTES))
+            result["gpus_per_node"] = int(
+                system_spec.get("node", {}).get(
+                    "num_gpus_per_node", _DEFAULT_GPUS_PER_NODE
+                )
+            )
+            result["vram_per_gpu"] = int(
+                system_spec.get("gpu", {}).get("mem_capacity", _DEFAULT_VRAM_BYTES)
+            )
             break
     except Exception as e:
         logger.warning(f"Could not read system config for {system_name}: {e}")
@@ -210,7 +216,9 @@ def _estimate_model_weight_bytes(model_path: str) -> int:
 
     except Exception as e:
         logger.exception("Could not estimate model size for %s.", model_path)
-        raise RuntimeError(f"Model {model_path!r} not found or config unavailable") from e
+        raise RuntimeError(
+            f"Model {model_path!r} not found or config unavailable"
+        ) from e
 
 
 def _calculate_min_tp(
@@ -219,12 +227,10 @@ def _calculate_min_tp(
     gpus_per_node: int,
     total_gpus: int,
     allow_multi_node: bool = False,
-) -> int:
+) -> tuple[int, bool, int]:
     """
     Calculate the minimum TP size that fits the model in memory.
-
     Formula: tp * vram_per_gpu > memory_multiplier * model_weight_bytes
-
     Args:
         model_weight_bytes: Estimated model weight size in bytes.
         vram_per_gpu: VRAM per GPU in bytes.
@@ -233,19 +239,17 @@ def _calculate_min_tp(
         allow_multi_node: When True, do not cap the result at ``gpus_per_node``.
             Use for MoE wide-EP sweeps where an engine can span nodes; the
             result is still capped at ``total_gpus``.
-
     Returns:
-        Minimum TP size (power of 2). Capped at ``min(gpus_per_node, total_gpus)``
-        by default, or at ``total_gpus`` when ``allow_multi_node=True``.
+        selected_tp: selected TP (capped to available GPUs)
+        fits: whether model actually fits in memory
+        tp: true TP required for memory fit (before capping)
     """
     # Required VRAM per model copy
     required_vram = model_weight_bytes * _MEMORY_MULTIPLIER
-
     # Find minimum TP where: tp * vram_per_gpu > required_vram
     # => tp > required_vram / vram_per_gpu
     min_tp_float = required_vram / vram_per_gpu
     min_tp = max(1, int(min_tp_float) + (1 if min_tp_float % 1 > 0 else 0))
-
     # Round up to power of 2 for efficiency
     tp = 1
     while tp < min_tp:
@@ -254,9 +258,9 @@ def _calculate_min_tp(
     # Cap at gpus_per_node (single-node constraint) unless multi-node is allowed.
     max_tp = total_gpus if allow_multi_node else min(gpus_per_node, total_gpus)
 
-    # Warn if the model requires more GPUs than available.
-    if tp > max_tp:
-        logger.warning(
+    fits = tp <= max_tp
+    if not fits:
+	    logger.warning(
             f"Model requires TP={tp} to fit in memory, but max TP is {max_tp} "
             f"(gpus_per_node={gpus_per_node}, total_gpus={total_gpus}, "
             f"allow_multi_node={allow_multi_node}). "
@@ -264,16 +268,15 @@ def _calculate_min_tp(
             f"strategies to fit across more than one node, or use a system "
             f"with more GPUs."
         )
-        tp = max_tp
 
+    selected_tp = min(tp, max_tp)
     logger.info(
         f"TP calculation: model={model_weight_bytes / (1024**3):.2f}GiB, "
         f"vram={vram_per_gpu / (1024**3):.2f}GiB, "
         f"required={required_vram / (1024**3):.2f}GiB (1.5x), "
         f"min_tp={min_tp}, selected_tp={tp}"
     )
-
-    return tp
+    return selected_tp, fits, tp
 
 
 def build_naive_generator_params(
@@ -316,7 +319,7 @@ def build_naive_generator_params(
     model_weight_bytes = _estimate_model_weight_bytes(model_name)
 
     # Calculate minimum GPU count that fits the model
-    min_gpus = _calculate_min_tp(
+    min_gpus, fits, required_tp = _calculate_min_tp(
         model_weight_bytes=model_weight_bytes,
         vram_per_gpu=vram_per_gpu,
         gpus_per_node=gpus_per_node,
@@ -345,7 +348,9 @@ def build_naive_generator_params(
         optimization_type=optimization_type,
     )
 
-    strategy = "TP" if not is_moe else ("DEP" if parallel["data_parallel_size"] > 1 else "TEP")
+    strategy = (
+        "TP" if not is_moe else ("DEP" if parallel["data_parallel_size"] > 1 else "TEP")
+    )
     logger.info(
         "Naive config: model=%s, strategy=%s=%d, optimization_type=%s, mode=%s",
         model_name,
@@ -383,7 +388,9 @@ def build_naive_generator_params(
                 total_gpus,
             )
         prefill_workers = 1
-        decode_workers = max(1, (total_gpus // min_gpus) - 1) if total_gpus > min_gpus else 1
+        decode_workers = (
+            max(1, (total_gpus // min_gpus) - 1) if total_gpus > min_gpus else 1
+        )
         params = {
             "ServiceConfig": {
                 "model_name": model_name,
@@ -419,6 +426,8 @@ def build_naive_generator_params(
             },
             "ModelConfig": {
                 "is_moe": is_moe,
+                "fits_in_memory": fits,
+                "required_tp": required_tp,
             },
             "backend": backend_name,
         }
@@ -455,6 +464,8 @@ def build_naive_generator_params(
             },
             "ModelConfig": {
                 "is_moe": is_moe,
+                "fits_in_memory": fits,
+                "required_tp": required_tp,
             },
             "backend": backend_name,
         }

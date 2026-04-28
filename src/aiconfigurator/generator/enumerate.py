@@ -29,7 +29,10 @@ from aiconfigurator.generator.rendering.engine import render_backend_templates
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task import build_disagg_parallel_lists
-from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config_from_model_path
+from aiconfigurator.sdk.utils import (
+    enumerate_parallel_config,
+    get_model_config_from_model_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +99,9 @@ def check_model_hardware_support(
         )
         return result.disagg_supported
     except Exception:
-        logger.warning("Support check failed for %s on %s/%s", model_path, system, backend)
+        logger.warning(
+            "Support check failed for %s on %s/%s", model_path, system, backend
+        )
         return False
 
 
@@ -447,7 +452,9 @@ def enumerate_profiling_configs(
     # ------------------------------------------------------------------
     # 1. Support check
     # ------------------------------------------------------------------
-    aic_supported = check_model_hardware_support(model_path, system, backend, backend_version=backend_version)
+    aic_supported = check_model_hardware_support(
+        model_path, system, backend, backend_version=backend_version
+    )
     logger.info(
         "AIC disagg support for %s on %s/%s: %s",
         model_path,
@@ -463,7 +470,7 @@ def enumerate_profiling_configs(
     # across all GPUs), so the memory-fit floor is not capped at a single node.
     # Otherwise (dense, or MoE intra-node) the floor stays within a node.
     effective_total_gpus = total_gpus if total_gpus is not None else num_gpus_per_node
-    min_gpus = _calculate_min_tp(
+    min_gpus, fits, required_tp = _calculate_min_tp(
         model_weight_bytes=model_weight_bytes,
         vram_per_gpu=vram_per_gpu,
         gpus_per_node=num_gpus_per_node,

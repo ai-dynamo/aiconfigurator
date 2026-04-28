@@ -186,7 +186,7 @@ class TestCalculateMinTp:
 
     def test_single_node_caps_at_gpus_per_node(self):
         """Dense default: min_tp capped at gpus_per_node even if model is larger."""
-        tp = _calculate_min_tp(
+        min_gpus, fits, tp = _calculate_min_tp(
             model_weight_bytes=self._R1_FP8_WEIGHTS,
             vram_per_gpu=self._H100_VRAM,
             gpus_per_node=8,
@@ -196,7 +196,7 @@ class TestCalculateMinTp:
 
     def test_multi_node_allows_crossing_node_boundary(self):
         """MoE wide-EP: min_tp can span nodes, floored to power-of-2 fit."""
-        tp = _calculate_min_tp(
+        min_gpus, fits, tp = _calculate_min_tp(
             model_weight_bytes=self._R1_FP8_WEIGHTS,
             vram_per_gpu=self._H100_VRAM,
             gpus_per_node=8,
@@ -208,7 +208,7 @@ class TestCalculateMinTp:
 
     def test_multi_node_capped_by_total_gpus(self):
         """Even in multi-node mode, result cannot exceed total_gpus budget."""
-        tp = _calculate_min_tp(
+        min_gpus, fits, tp = _calculate_min_tp(
             model_weight_bytes=self._R1_FP8_WEIGHTS,
             vram_per_gpu=self._H100_VRAM,
             gpus_per_node=8,
@@ -218,7 +218,7 @@ class TestCalculateMinTp:
         assert tp == 8  # clamped to budget
 
     def test_small_model_fits_on_one_gpu(self):
-        tp = _calculate_min_tp(
+        min_gpus, fits, tp = _calculate_min_tp(
             model_weight_bytes=10 * 1024**3,
             vram_per_gpu=self._H100_VRAM,
             gpus_per_node=8,
