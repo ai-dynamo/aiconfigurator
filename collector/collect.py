@@ -370,6 +370,21 @@ def worker(
                     done_tasks[task_id] = True
                 except Exception:
                     pass
+            # Clear task ID on success so crash handler knows it completed
+            if current_task_ids is not None:
+                current_task_ids[device_id] = None
+        except SystemExit as e:
+            # EXIT_CODE_RESTART: task completed successfully, worker exits to free GPU memory
+            # (e.g., MOE collectors call sys.exit(EXIT_CODE_RESTART) after finishing)
+            if e.code == EXIT_CODE_RESTART:
+                if done_tasks is not None:
+                    try:
+                        done_tasks[task_id] = True
+                    except Exception:
+                        pass
+                if current_task_ids is not None:
+                    current_task_ids[device_id] = None
+            raise  # re-raise so the worker actually exits
         except Exception as e:
             # Build comprehensive error info
             error_info = {
@@ -395,6 +410,9 @@ def worker(
                     failed_tasks[task_id] = True
                 except Exception:
                     pass
+            # Clear task ID so crash handler knows it was handled
+            if current_task_ids is not None:
+                current_task_ids[device_id] = None
 
             # Force flush logs before any potential exit
             for handler in worker_logger.handlers:
@@ -422,8 +440,6 @@ def worker(
         finally:
             with lock:
                 progress_value.value += 1
-            if current_task_ids is not None:
-                current_task_ids[device_id] = None
 
             # Periodic memory cleanup to reduce fragmentation
             if progress_value.value % 100 == 0:
@@ -660,21 +676,22 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                             f"errors: {len(process_stats[i]['errors'])})"
                         )
 
+                    # Mark active task as failed if the process died while running it
+                    if active_task_id is not None and active_task_id not in done_tasks:
+                        try:
+                            failed_tasks[active_task_id] = True
+                        except Exception:
+                            pass
+                        current_task_ids[i] = None
+                        with lock:
+                            progress_value.value += 1
+
                     crash_error = create_process_exit_error(i, exit_code)
                     if crash_error:
                         errors.append(crash_error)
                         process_stats[i]["errors"].append("process_exit")
                         pbar.set_postfix({"errors": len(errors)})
                         last_error_count = len(errors)
-                        if active_task_id is not None:
-                            # Mark as failed so it's retried on resume
-                            try:
-                                failed_tasks[active_task_id] = True
-                            except Exception:
-                                pass
-                            current_task_ids[i] = None
-                            with lock:
-                                progress_value.value += 1
 
                     if process_stats[i]["restarts"] > 8192:
                         logger.error(f"Process {i} exceeded restart limit, not restarting")
