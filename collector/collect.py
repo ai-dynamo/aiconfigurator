@@ -93,6 +93,7 @@ class ResumeCheckpoint:
             "run_func": run_func_name,
         }
         self._done: set[str] = set()
+        self._failed: set[str] = set()
 
         safe_name = module_name.replace("/", "_").replace(":", "_")
         self._path = Path(checkpoint_dir).expanduser().resolve() / backend / f"{safe_name}.json"
@@ -121,22 +122,47 @@ class ResumeCheckpoint:
                 )
 
         self._done = set(data.get("done", []))
-        logger.info(f"{self.module_name}: loaded {len(self._done)} completed tasks from checkpoint")
+        self._failed = set(data.get("failed", []))
+        logger.info(f"{self.module_name}: loaded checkpoint — {len(self._done)} passed, {len(self._failed)} failed")
 
     # -- public API -------------------------------------------------------
 
-    def filter_done(self, task_infos: list[dict]) -> list[dict]:
-        """Return only tasks that are not yet done."""
-        runnable = [t for t in task_infos if t["id"] not in self._done]
-        skipped = len(task_infos) - len(runnable)
-        if skipped:
-            logger.info(f"{self.module_name}: skipping {skipped} done tasks, running {len(runnable)}")
+    def filter_done(self, task_infos: list[dict], retry_failed: bool = False) -> list[dict]:
+        """Return only tasks that need to run.
+
+        By default, skips both passed and failed tasks. With retry_failed=True,
+        previously failed tasks are retried.
+        """
+        skip_set = self._done if retry_failed else (self._done | self._failed)
+        runnable = [t for t in task_infos if t["id"] not in skip_set]
+        skipped_done = sum(1 for t in task_infos if t["id"] in self._done)
+        skipped_failed = sum(1 for t in task_infos if t["id"] in self._failed)
+        retrying = sum(1 for t in runnable if t["id"] in self._failed) if retry_failed else 0
+        if skipped_done or skipped_failed or retrying:
+            parts = [f"skipping {skipped_done} passed"]
+            if retry_failed:
+                parts.append(f"retrying {retrying} previously failed")
+            else:
+                parts.append(f"skipping {skipped_failed} failed")
+            parts.append(f"running {len(runnable)}")
+            logger.info(f"{self.module_name}: {', '.join(parts)}")
         return runnable
 
-    def mark_done(self, task_id: str):
+    def mark_passed(self, task_id: str):
+        """Mark a task as successfully completed. Skipped on resume."""
         self._done.add(task_id)
+        self._failed.discard(task_id)  # if it was previously failed, it passed now
         self._dirty = True
         self.flush()
+
+    def mark_failed(self, task_id: str):
+        """Mark a task as attempted but failed. Retried on resume."""
+        self._failed.add(task_id)
+        self._dirty = True
+        self.flush()
+
+    # Keep mark_done as alias for backwards compat
+    mark_done = mark_passed
 
     def flush(self, force: bool = False):
         if not self._dirty:
@@ -145,7 +171,12 @@ class ResumeCheckpoint:
         if not force and (now - self._last_flush) < self.FLUSH_INTERVAL_SEC:
             return
 
-        data = {**self._metadata, "updated_at": datetime.now().isoformat(), "done": sorted(self._done)}
+        data = {
+            **self._metadata,
+            "updated_at": datetime.now().isoformat(),
+            "done": sorted(self._done),
+            "failed": sorted(self._failed),
+        }
         tmp_path = self._path.with_suffix(".json.tmp")
         with open(tmp_path, "w") as f:
             json.dump(data, f, indent=2)
@@ -282,6 +313,7 @@ def worker(
     lock,
     error_queue=None,
     done_tasks=None,
+    failed_tasks=None,
     module_name="unknown",
     current_task_ids=None,
     consumed_sentinel=None,
@@ -331,6 +363,13 @@ def worker(
             worker_logger.debug(f"Starting task {task_id}")
             func(*task, device=device)
             worker_logger.debug(f"Completed task {task_id}")
+
+            # Mark done ONLY on success — failed tasks should be retried on resume
+            if done_tasks is not None:
+                try:
+                    done_tasks[task_id] = True
+                except Exception:
+                    pass
         except Exception as e:
             # Build comprehensive error info
             error_info = {
@@ -349,6 +388,13 @@ def worker(
                 error_queue.put(error_info)
 
             worker_logger.exception(f"Task {task_id} failed")
+
+            # Track failed task for checkpoint
+            if failed_tasks is not None:
+                try:
+                    failed_tasks[task_id] = True
+                except Exception:
+                    pass
 
             # Force flush logs before any potential exit
             for handler in worker_logger.handlers:
@@ -374,16 +420,6 @@ def worker(
                 # which we don't want (error already reported above).
                 exit(0)
         finally:
-            # All three writes below use synchronous manager RPCs, so they
-            # are guaranteed to complete before the worker picks up the next
-            # task.  This means even if the *next* task kills the process
-            # via signal, the bookkeeping for *this* task is already safe.
-            if done_tasks is not None:
-                try:
-                    done_tasks[task_id] = True
-                except Exception:
-                    pass
-
             with lock:
                 progress_value.value += 1
             if current_task_ids is not None:
@@ -428,7 +464,8 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
 
     if resume_options and resume_options.get("resume"):
         resume_tracker.load_existing()
-        task_infos = resume_tracker.filter_done(raw_task_infos)
+        retry_failed = resume_options.get("retry_failed", False)
+        task_infos = resume_tracker.filter_done(raw_task_infos, retry_failed=retry_failed)
     else:
         task_infos = raw_task_infos
 
@@ -457,6 +494,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     # task.  Unlike mp.Queue (async feeder thread) this cannot be lost when
     # a worker is killed by a signal on a subsequent task.
     done_tasks = manager.dict()
+    failed_tasks = manager.dict()
 
     def start_process(device_id):
         p = mp.Process(
@@ -469,6 +507,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 lock,
                 error_queue,
                 done_tasks,
+                failed_tasks,
                 module_name,
                 current_task_ids,
                 consumed_sentinel,
@@ -510,9 +549,15 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
 
     def sync_done_to_checkpoint():
         for task_id in list(done_tasks.keys()):
-            resume_tracker.mark_done(task_id)
+            resume_tracker.mark_passed(task_id)
             try:
                 del done_tasks[task_id]
+            except KeyError:
+                pass
+        for task_id in list(failed_tasks.keys()):
+            resume_tracker.mark_failed(task_id)
+            try:
+                del failed_tasks[task_id]
             except KeyError:
                 pass
 
@@ -548,8 +593,9 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
 
                 try:
                     func(*task_params, device=device)
-                    resume_tracker.mark_done(task_id)
+                    resume_tracker.mark_passed(task_id)
                 except Exception as e:
+                    resume_tracker.mark_failed(task_id)
                     error_info = {
                         "module": module_name,
                         "device_id": 0,
@@ -621,7 +667,11 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                         pbar.set_postfix({"errors": len(errors)})
                         last_error_count = len(errors)
                         if active_task_id is not None:
-                            resume_tracker.mark_done(active_task_id)
+                            # Mark as failed so it's retried on resume
+                            try:
+                                failed_tasks[active_task_id] = True
+                            except Exception:
+                                pass
                             current_task_ids[i] = None
                             with lock:
                                 progress_value.value += 1
@@ -974,7 +1024,12 @@ def main():
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume collection from checkpoint, skipping already-attempted tasks",
+        help="Resume collection from checkpoint, skipping passed and failed tasks",
+    )
+    parser.add_argument(
+        "--resume-retry-failed",
+        action="store_true",
+        help="When resuming, retry previously failed tasks instead of skipping them",
     )
     parser.add_argument(
         "--checkpoint-dir",
@@ -1036,9 +1091,13 @@ def main():
     resume_options = {
         "resume": args.resume,
         "checkpoint_dir": args.checkpoint_dir,
+        "retry_failed": args.resume_retry_failed,
     }
     if args.resume:
-        logger.info(f"Resume enabled: dir={Path(args.checkpoint_dir).expanduser()}")
+        logger.info(
+            f"Resume enabled: dir={Path(args.checkpoint_dir).expanduser()}"
+            + (" (retrying previously failed tasks)" if args.resume_retry_failed else "")
+        )
 
     # Determine number of processes (0 = sequential mode for profiling)
     if args.profile:
