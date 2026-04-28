@@ -604,6 +604,31 @@ class BaseModel:
         self._nextn = model_config.nextn
         self._nextn_accept_rates = model_config.nextn_accept_rates
 
+    def get_kvcache_elements_per_token(self) -> int:
+        """KV cache size per token (per GPU) summed over all layers, in elements.
+
+        Multiply by ``kvcache_quant_mode.value.memory`` (bytes/elem) for byte size.
+
+        - MLA models (DeepSeek V3/V3.2, Kimi K2/K2.5): the latent KV is shared
+          across heads and not sharded by attention TP, so the per-GPU cost is
+          ``num_layers * (kv_lora_rank + qk_rope_head_dim)``.
+        - Otherwise (GQA/MHA): ``num_kv_heads_per_gpu * head_size * num_layers * 2``.
+        """
+        if self.model_family in ("DEEPSEEK", "DEEPSEEKV32", "KIMIK25"):
+            kv_lora_rank, qk_rope_head_dim = 0, 0
+            if isinstance(self.extra_params, dict):
+                kv_lora_rank = self.extra_params.get("kv_lora_rank") or 0
+                qk_rope_head_dim = self.extra_params.get("qk_rope_head_dim") or 0
+            # Fallback to DeepSeek-V3 / Kimi K2 defaults if config didn't expose them.
+            if kv_lora_rank == 0:
+                kv_lora_rank = 512
+            if qk_rope_head_dim == 0:
+                qk_rope_head_dim = 64
+            return self._num_layers * (kv_lora_rank + qk_rope_head_dim)
+
+        num_kv_heads_per_gpu = (self._num_kv_heads + self.config.tp_size - 1) // self.config.tp_size
+        return num_kv_heads_per_gpu * self._head_size * self._num_layers * 2
+
 
 class GPTModel(BaseModel):
     """

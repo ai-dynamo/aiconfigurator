@@ -130,6 +130,94 @@ class TestHFModelSupport:
         assert is_moe == is_moe_expected
 
 
+class TestKVCacheElementsPerToken:
+    """Regression tests for ``BaseModel.get_kvcache_elements_per_token``.
+
+    Guards against the bug where MLA models other than DeepSeek (notably
+    KIMIK25 / Kimi K2.5) fell through to the GQA branch in the backend
+    memory model, overestimating per-token KV cache by ~6x and capping the
+    feasible batch size in the agg sweep.
+    """
+
+    @staticmethod
+    def _build_model(hf_id: str, tp_size: int, **extra):
+        model_config = config.ModelConfig(tp_size=tp_size, pp_size=1, attention_dp_size=1, **extra)
+        return models.get_model(hf_id, model_config, backend_name="trtllm")
+
+    @pytest.mark.parametrize(
+        "hf_id,tp,moe_kw,expected_family,expected_elems",
+        [
+            # MLA path: 61 layers * (kv_lora_rank=512 + qk_rope_head_dim=64) = 35136
+            (
+                "nvidia/Kimi-K2.5-NVFP4",
+                4,
+                {"moe_tp_size": 2, "moe_ep_size": 2},
+                "KIMIK25",
+                35136,
+            ),
+            (
+                "deepseek-ai/DeepSeek-V3",
+                4,
+                {"moe_tp_size": 1, "moe_ep_size": 4},
+                "DEEPSEEK",
+                35136,
+            ),
+            (
+                "deepseek-ai/DeepSeek-V3.2",
+                4,
+                {"moe_tp_size": 1, "moe_ep_size": 4},
+                "DEEPSEEKV32",
+                35136,
+            ),
+            # GQA path: num_kv_heads_per_gpu * head_size * num_layers * 2
+            ("meta-llama/Meta-Llama-3.1-8B", 1, {}, "LLAMA", 8 * 128 * 32 * 2),
+            ("Qwen/Qwen3-32B", 4, {}, "LLAMA", 2 * 128 * 64 * 2),
+            (
+                "Qwen/Qwen3-30B-A3B",
+                4,
+                {"moe_tp_size": 1, "moe_ep_size": 4},
+                "MOE",
+                1 * 128 * 48 * 2,
+            ),
+        ],
+    )
+    def test_kvcache_elements_per_token(self, hf_id, tp, moe_kw, expected_family, expected_elems):
+        model = self._build_model(hf_id, tp, **moe_kw)
+        assert model.model_family == expected_family
+        assert model.get_kvcache_elements_per_token() == expected_elems
+
+    @pytest.mark.parametrize(
+        "hf_id",
+        [
+            "nvidia/Kimi-K2.5-NVFP4",
+            "deepseek-ai/DeepSeek-V3",
+            "deepseek-ai/DeepSeek-V3.2",
+        ],
+    )
+    def test_mla_dims_exposed_via_extra_params(self, hf_id):
+        """Parser must expose kv_lora_rank/qk_rope_head_dim so the KV cache
+        size is data-driven instead of relying on the 512/64 fallback."""
+        parsed = get_model_config_from_model_path(hf_id)
+        extra = parsed["extra_params"]
+        assert isinstance(extra, dict), f"{hf_id}: extra_params should be a dict"
+        assert extra.get("kv_lora_rank") == 512, f"{hf_id}: kv_lora_rank not extracted"
+        assert extra.get("qk_rope_head_dim") == 64, f"{hf_id}: qk_rope_head_dim not extracted"
+
+    def test_kimik25_does_not_use_gqa_branch(self):
+        """Direct regression for the original concurrency cap bug: with the
+        GQA branch, KIMIK25 would compute 16*112*61*2 = 218624 elems/token at
+        TP=4 (a ~6.2x overestimate). The MLA branch must produce 35136."""
+        model = self._build_model("nvidia/Kimi-K2.5-NVFP4", tp_size=4, moe_tp_size=2, moe_ep_size=2)
+        gqa_elems = (
+            ((model._num_kv_heads + model.config.tp_size - 1) // model.config.tp_size)
+            * model._head_size
+            * model._num_layers
+            * 2
+        )
+        assert gqa_elems != model.get_kvcache_elements_per_token()
+        assert model.get_kvcache_elements_per_token() == model._num_layers * (512 + 64)
+
+
 class TestBackendConfiguration:
     """Test backend configuration."""
 

@@ -578,8 +578,18 @@ def _parse_hf_config_json(config: dict) -> dict:
         # KIMI K2.5 wraps a DeepSeek-V3-style MLA text model. Store v_head_dim so
         # DeepSeekModel can use the correct attention head size (128) for vLLM's
         # standard-attention path, instead of the generic hidden_size // n_heads = 112.
+        # kv_lora_rank + qk_rope_head_dim drive the MLA latent KV cache size.
         extra_params = {
             "v_head_dim": config.get("v_head_dim", 0),
+            "kv_lora_rank": config.get("kv_lora_rank", 0),
+            "qk_rope_head_dim": config.get("qk_rope_head_dim", 0),
+        }
+    elif architecture in {"DeepSeekForCausalLM", "DeepseekV3ForCausalLM"}:
+        # DeepSeek V3 / R1 / Kimi K2: MLA latent geometry from config so the KV
+        # cache size is data-driven instead of hardcoded.
+        extra_params = {
+            "kv_lora_rank": config.get("kv_lora_rank", 0),
+            "qk_rope_head_dim": config.get("qk_rope_head_dim", 0),
         }
     elif architecture in {"DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"}:
         # DeepSeek-V3.2 / GLM-5 share the DSA attention pattern but have different
