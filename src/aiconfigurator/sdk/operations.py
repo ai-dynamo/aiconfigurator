@@ -1641,7 +1641,7 @@ class DeepSeekV4MHCModule(Operation):
         mix_hc = (2 + hc_mult) * hc_mult
         hc_dim = hc_mult * hidden_size
         # Two parameter sets per decoder block: attention mHC and FFN mHC.
-        self._weights = 2 * (mix_hc * hc_dim + mix_hc + 3) * 4
+        self._weights = 2 * (mix_hc * hc_dim + mix_hc + 3) * quant_mode.value.memory
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         result = database.query_deepseek_v4_mhc_module(

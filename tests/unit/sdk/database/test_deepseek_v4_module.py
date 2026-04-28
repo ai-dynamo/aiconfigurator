@@ -6,6 +6,7 @@ import math
 import pytest
 
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk import operations as ops
 from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.models import get_model
@@ -41,48 +42,12 @@ def _deepseek_v4_attn_kwargs(compress_ratio: int) -> dict:
     }
 
 
-def test_deepseek_v4_module_loaders_accept_collector_filenames(tmp_path):
-    mhc_file = tmp_path / "dsv4_mhc_module_perf.txt"
-    mhc_file.write_text(
-        "framework,version,device,op_name,kernel_source,model,op,num_tokens,hc_mult,hidden_size,latency,power\n"
-        "SGLang,0.0,gpu,dsv4_mhc_pre_module,sglang_mhc,m,pre,512,4,7168,0.25,100\n",
-        encoding="utf-8",
-    )
-    context_file = tmp_path / "dsv4_csa_context_module_perf.txt"
-    context_file.write_text(
-        "framework,version,device,op_name,kernel_source,model,architecture,mla_dtype,kv_cache_dtype,gemm_type,"
-        "num_heads,batch_size,isl,tp_size,step,compress_ratio,latency,power\n"
-        "SGLang,0.0,gpu,dsv4_csa_context_module,compressed_flashmla,m,DeepseekV4ForCausalLM,bfloat16,"
-        "fp8_e4m3,bfloat16,128,2,256,1,0,4,0.50,100\n",
-        encoding="utf-8",
-    )
-    generation_file = tmp_path / "dsv4_hca_generation_module_perf.txt"
-    generation_file.write_text(
-        "framework,version,device,op_name,kernel_source,model,architecture,mla_dtype,kv_cache_dtype,gemm_type,"
-        "num_heads,batch_size,isl,tp_size,step,compress_ratio,latency,power\n"
-        "SGLang,0.0,gpu,dsv4_hca_generation_module,compressed_flashmla,m,DeepseekV4ForCausalLM,bfloat16,"
-        "fp8_e4m3,bfloat16,128,2,1,1,4096,128,0.75,100\n",
-        encoding="utf-8",
-    )
-
-    mhc = load_deepseek_v4_mhc_module_data(str(tmp_path / "deepseek_v4_mhc_module_perf.txt"))
-    context = load_context_deepseek_v4_attention_module_data(str(tmp_path / "deepseek_v4_context_module_perf.txt"))
-    generation = load_generation_deepseek_v4_attention_module_data(
-        str(tmp_path / "deepseek_v4_generation_module_perf.txt")
-    )
-
-    assert mhc[common.GEMMQuantMode.bfloat16]["pre"][4][7168][512]["latency"] == 0.25
+def test_deepseek_v4_module_loaders_are_placeholders(tmp_path):
+    assert load_deepseek_v4_mhc_module_data(str(tmp_path / "deepseek_v4_mhc_module_perf.txt")) is None
+    assert load_context_deepseek_v4_attention_module_data(str(tmp_path / "deepseek_v4_context_module_perf.txt")) is None
     assert (
-        context[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.bfloat16][
-            "DeepseekV4ForCausalLM"
-        ][4][128][256][2]["latency"]
-        == 0.50
-    )
-    assert (
-        generation[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.bfloat16]["DeepseekV4ForCausalLM"][128][128][2][
-            4097
-        ]["latency"]
-        == 0.75
+        load_generation_deepseek_v4_attention_module_data(str(tmp_path / "deepseek_v4_generation_module_perf.txt"))
+        is None
     )
 
 
@@ -113,6 +78,47 @@ class TestDeepSeekV4MHCModule:
         assert len(result) == 3
         sol_time, sol_math, sol_mem = result
         assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
+
+    def test_mhc_weight_memory_uses_quant_mode(self, comprehensive_perf_db):
+        bf16_op = ops.DeepSeekV4MHCModule(
+            "mhc",
+            1,
+            "pre",
+            7168,
+            4,
+            20,
+            common.GEMMQuantMode.bfloat16,
+        )
+        fp8_op = ops.DeepSeekV4MHCModule(
+            "mhc",
+            1,
+            "pre",
+            7168,
+            4,
+            20,
+            common.GEMMQuantMode.fp8_block,
+        )
+        assert fp8_op.get_weights() == pytest.approx(bf16_op.get_weights() / 2)
+
+        bf16_sol = comprehensive_perf_db.query_deepseek_v4_mhc_module(
+            num_tokens=512,
+            hidden_size=7168,
+            hc_mult=4,
+            sinkhorn_iters=20,
+            op="pre",
+            quant_mode=common.GEMMQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+        fp8_sol = comprehensive_perf_db.query_deepseek_v4_mhc_module(
+            num_tokens=512,
+            hidden_size=7168,
+            hc_mult=4,
+            sinkhorn_iters=20,
+            op="pre",
+            quant_mode=common.GEMMQuantMode.fp8_block,
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+        assert fp8_sol[2] < bf16_sol[2]
 
 
 class TestDeepSeekV4AttentionModule:

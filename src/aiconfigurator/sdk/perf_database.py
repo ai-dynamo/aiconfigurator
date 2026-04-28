@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import csv
 import functools
-import glob
 import importlib.resources as pkg_resources
 import logging
 import math
@@ -1262,140 +1261,22 @@ def load_generation_dsa_module_data(dsa_file: str):
     return dsa_data
 
 
-def _candidate_perf_files(perf_file: str, *legacy_patterns: str) -> list[str]:
-    candidates = [perf_file] if os.path.exists(perf_file) else []
-    data_dir = os.path.dirname(perf_file)
-    for pattern in legacy_patterns:
-        candidates.extend(sorted(glob.glob(os.path.join(data_dir, pattern))))
-
-    seen = set()
-    return [path for path in candidates if not (path in seen or seen.add(path))]
-
-
-def _nested_defaultdict(depth: int):
-    if depth <= 1:
-        return defaultdict(dict)
-    return defaultdict(lambda: _nested_defaultdict(depth - 1))
-
-
-def _enum_from_row(enum_cls, value: str, aliases: dict[str, str] | None = None):
-    name = str(value).strip()
-    aliases = aliases or {}
-    return enum_cls[aliases.get(name, name)]
-
-
-def _kv_cache_mode(value: str) -> common.KVCacheQuantMode:
-    return _enum_from_row(
-        common.KVCacheQuantMode,
-        value,
-        {
-            "bf16": "bfloat16",
-            "fp8_e4m3": "fp8",
-            "fp8_e5m2": "fp8",
-            "float8_e4m3fn": "fp8",
-        },
-    )
-
-
 def load_deepseek_v4_mhc_module_data(mhc_file: str):
-    """Load DeepSeek-V4 mHC pre/post module-level performance data."""
-    files = _candidate_perf_files(mhc_file, "dsv4_mhc_module_perf.txt")
-    if not files:
-        logger.debug(f"DeepSeek-V4 mHC module data file {mhc_file} not found.")
-        return None
-
-    mhc_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
-    for file in files:
-        with open(file, encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-
-        has_power = len(rows) > 0 and "power" in rows[0]
-        for row in rows:
-            op = row.get("op", "")
-            if not op:
-                op_name = row.get("op_name", "")
-                op = "pre" if "pre" in op_name else "post" if "post" in op_name else "both"
-            quant_mode = common.GEMMQuantMode[row.get("gemm_type") or row.get("quant_mode") or "bfloat16"]
-            num_tokens = int(row["num_tokens"])
-            hc_mult = int(row["hc_mult"])
-            hidden_size = int(row["hidden_size"])
-            latency = float(row["latency"])
-            power = float(row.get("power", 0.0)) if has_power else 0.0
-            mhc_data[quant_mode][op][hc_mult][hidden_size][num_tokens] = {
-                "latency": latency,
-                "power": power,
-                "energy": power * latency,
-            }
-
-    return mhc_data
+    """Placeholder for future DeepSeek-V4 mHC module-level performance data."""
+    logger.debug(f"DeepSeek-V4 mHC module data file {mhc_file} not loaded.")
+    return None
 
 
 def load_context_deepseek_v4_attention_module_data(attn_file: str):
-    """Load DeepSeek-V4 context SWA/CSA/HCA module-level performance data."""
-    files = _candidate_perf_files(attn_file, "dsv4_*_context_module_perf.txt")
-    if not files:
-        logger.debug(f"DeepSeek-V4 context attention module data file {attn_file} not found.")
-        return None
-
-    attn_data = _nested_defaultdict(7)
-    for file in files:
-        with open(file, encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-
-        has_power = len(rows) > 0 and "power" in rows[0]
-        for row in rows:
-            fmha_mode = common.FMHAQuantMode[row.get("mla_dtype") or row.get("fmha_dtype") or "bfloat16"]
-            kv_dtype = _kv_cache_mode(row.get("kv_cache_dtype", "bfloat16"))
-            gemm_mode = common.GEMMQuantMode[row.get("gemm_type") or "bfloat16"]
-            architecture = row.get("architecture", "DeepseekV4ForCausalLM")
-            compress_ratio = int(row["compress_ratio"])
-            num_heads = int(row["num_heads"])
-            b = int(row["batch_size"])
-            s = int(row["isl"])
-            latency = float(row["latency"])
-            power = float(row.get("power", 0.0)) if has_power else 0.0
-            attn_data[fmha_mode][kv_dtype][gemm_mode][architecture][compress_ratio][num_heads][s][b] = {
-                "latency": latency,
-                "power": power,
-                "energy": power * latency,
-            }
-
-    return attn_data
+    """Placeholder for future DeepSeek-V4 context SWA/CSA/HCA module data."""
+    logger.debug(f"DeepSeek-V4 context attention module data file {attn_file} not loaded.")
+    return None
 
 
 def load_generation_deepseek_v4_attention_module_data(attn_file: str):
-    """Load DeepSeek-V4 decode SWA/CSA/HCA module-level performance data."""
-    files = _candidate_perf_files(attn_file, "dsv4_*_generation_module_perf.txt")
-    if not files:
-        logger.debug(f"DeepSeek-V4 generation attention module data file {attn_file} not found.")
-        return None
-
-    attn_data = _nested_defaultdict(7)
-    for file in files:
-        with open(file, encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-
-        has_power = len(rows) > 0 and "power" in rows[0]
-        for row in rows:
-            kv_dtype = _kv_cache_mode(row.get("kv_cache_dtype", "bfloat16"))
-            gemm_mode = common.GEMMQuantMode[row.get("gemm_type") or "bfloat16"]
-            architecture = row.get("architecture", "DeepseekV4ForCausalLM")
-            compress_ratio = int(row["compress_ratio"])
-            num_heads = int(row["num_heads"])
-            b = int(row["batch_size"])
-            s = int(row["isl"]) + int(row.get("step", 0))
-            latency = float(row["latency"])
-            power = float(row.get("power", 0.0)) if has_power else 0.0
-            attn_data[kv_dtype][gemm_mode][architecture][compress_ratio][num_heads][b][s] = {
-                "latency": latency,
-                "power": power,
-                "energy": power * latency,
-            }
-
-    return attn_data
+    """Placeholder for future DeepSeek-V4 decode SWA/CSA/HCA module data."""
+    logger.debug(f"DeepSeek-V4 generation attention module data file {attn_file} not loaded.")
+    return None
 
 
 def load_context_mla_module_data(mla_module_file: str):
@@ -7237,7 +7118,7 @@ class PerfDatabase:
             else:
                 raise ValueError(f"Unsupported DeepSeek-V4 mHC op: {op}")
 
-            param_bytes = sites * (mix_hc * hc_dim + mix_hc + 3) * 4
+            param_bytes = sites * (mix_hc * hc_dim + mix_hc + 3) * quant_mode.value.memory
             activation_bytes = sites * num_tokens * hc_dim * quant_mode.value.memory * (3 if op == "both" else 2)
             if op in {"pre", "both"}:
                 activation_bytes += sites * num_tokens * (2 * hc_mult + hc_mult * hc_mult) * 4
