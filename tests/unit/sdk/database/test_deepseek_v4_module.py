@@ -141,6 +141,20 @@ class TestDeepSeekV4AttentionModule:
         )
         assert float(result) > 0
 
+    def test_generation_uses_pre_decode_kv_length(self, comprehensive_perf_db):
+        base = _deepseek_v4_attn_kwargs(4)
+        base.pop("prefix")
+        current = comprehensive_perf_db.query_generation_deepseek_v4_attention_module(
+            **{**base, "s": 512},
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+        next_step = comprehensive_perf_db.query_generation_deepseek_v4_attention_module(
+            **{**base, "s": 513},
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+
+        assert next_step[1] > current[1]
+
     def test_csa_topk_changes_attention_workload(self, comprehensive_perf_db):
         base = _deepseek_v4_attn_kwargs(4)
         low_topk = comprehensive_perf_db.query_context_deepseek_v4_attention_module(

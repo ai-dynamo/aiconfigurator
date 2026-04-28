@@ -7186,7 +7186,7 @@ class PerfDatabase:
         gemm_quant_mode: common.GEMMQuantMode,
     ) -> tuple[float, float, float]:
         tokens = b * s if is_context else b
-        kv_len = prefix + s if is_context else s
+        kv_len = prefix + s if is_context else max(0, s - 1)
         local_groups = max(1, o_groups)
 
         gemm_projection_ops = (
