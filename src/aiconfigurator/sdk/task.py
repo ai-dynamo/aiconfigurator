@@ -889,10 +889,21 @@ class TaskConfig:
         supported = getattr(database, "supported_quant_mode", {}) or {}
         database_mode_for_validation = getattr(self.config, "database_mode", None)
 
+        model_family = get_model_family(self.model_path)
+        is_deepseek_fam = model_family in ("DEEPSEEK", "KIMIK25")
+        is_deepseek_v32 = model_family == "DEEPSEEKV32"
+        is_deepseek_v4 = model_family == "DEEPSEEKV4"
+        allow_deepseek_v4_synthetic_mode = is_deepseek_v4 and database_mode_for_validation in {
+            "SOL",
+            "SOL_FULL",
+            "EMPIRICAL",
+            "HYBRID",
+        }
+
         def _supported_or_raise(op: str, mode_name: str | None) -> None:
             if mode_name is None:
                 return
-            if database_mode_for_validation in {"SOL", "SOL_FULL", "EMPIRICAL", "HYBRID"}:
+            if allow_deepseek_v4_synthetic_mode:
                 return
             supported_modes = supported.get(op, []) or []
             if supported_modes and mode_name not in supported_modes:
@@ -948,10 +959,6 @@ class TaskConfig:
             for k, v in quant_modes.items():
                 worker_cfg[k] = v
 
-        model_family = get_model_family(self.model_path)
-        is_deepseek_fam = model_family in ("DEEPSEEK", "KIMIK25")
-        is_deepseek_v32 = model_family == "DEEPSEEKV32"
-        is_deepseek_v4 = model_family == "DEEPSEEKV4"
         enable_wideep = bool(getattr(self.config, "enable_wideep", self.enable_wideep))
         moe_backend = getattr(self.config, "moe_backend", None)
 

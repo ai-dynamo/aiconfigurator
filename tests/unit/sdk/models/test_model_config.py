@@ -264,6 +264,35 @@ class TestHFModelSupport:
         assert model.get_kvcache_bytes_per_sequence(seq_len) == expected
         assert expected > without_indexer
 
+    def test_deepseek_v4_shared_expert_ops_are_tp_sharded(self):
+        model_config = config.ModelConfig(
+            tp_size=4,
+            moe_tp_size=1,
+            moe_ep_size=4,
+            attention_dp_size=1,
+            nextn=1,
+            nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+        )
+        model = get_model("sgl-project/DeepSeek-V4-Pro-FP8", model_config, backend_name="trtllm")
+        local_inter_size = model._moe_inter_size // model_config.tp_size
+
+        context_gate = next(op for op in model.context_ops if op._name == "context_shared_gate_up_gemm")
+        context_act = next(op for op in model.context_ops if op._name == "context_shared_act_gate")
+        context_down = next(op for op in model.context_ops if op._name == "context_shared_ffn2_gemm")
+        generation_overlap = next(op for op in model.generation_ops if op._name == "generation_moe_overlap")
+        generation_gate = next(op for op in generation_overlap._group_b if op._name == "generation_shared_gate_up_gemm")
+        generation_act = next(op for op in generation_overlap._group_b if op._name == "generation_shared_act_gate")
+        generation_down = next(op for op in generation_overlap._group_b if op._name == "generation_shared_ffn2_gemm")
+
+        assert context_gate._n == 2 * local_inter_size
+        assert context_act._dim_in == 2 * local_inter_size
+        assert context_act._dim_out == local_inter_size
+        assert context_down._k == local_inter_size
+        assert generation_gate._n == 2 * local_inter_size
+        assert generation_act._dim_in == 2 * local_inter_size
+        assert generation_act._dim_out == local_inter_size
+        assert generation_down._k == local_inter_size
+
     def test_deepseek_v32_kvcache_bytes_include_indexer_cache(self):
         model_config = config.ModelConfig(
             tp_size=8,

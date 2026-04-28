@@ -9,6 +9,11 @@ from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.models import get_model
+from aiconfigurator.sdk.perf_database import (
+    load_context_deepseek_v4_attention_module_data,
+    load_deepseek_v4_mhc_module_data,
+    load_generation_deepseek_v4_attention_module_data,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -34,6 +39,51 @@ def _deepseek_v4_attn_kwargs(compress_ratio: int) -> dict:
         "fmha_quant_mode": common.FMHAQuantMode.bfloat16,
         "gemm_quant_mode": common.GEMMQuantMode.fp8_block,
     }
+
+
+def test_deepseek_v4_module_loaders_accept_collector_filenames(tmp_path):
+    mhc_file = tmp_path / "dsv4_mhc_module_perf.txt"
+    mhc_file.write_text(
+        "framework,version,device,op_name,kernel_source,model,op,num_tokens,hc_mult,hidden_size,latency,power\n"
+        "SGLang,0.0,gpu,dsv4_mhc_pre_module,sglang_mhc,m,pre,512,4,7168,0.25,100\n",
+        encoding="utf-8",
+    )
+    context_file = tmp_path / "dsv4_csa_context_module_perf.txt"
+    context_file.write_text(
+        "framework,version,device,op_name,kernel_source,model,architecture,mla_dtype,kv_cache_dtype,gemm_type,"
+        "num_heads,batch_size,isl,tp_size,step,compress_ratio,latency,power\n"
+        "SGLang,0.0,gpu,dsv4_csa_context_module,compressed_flashmla,m,DeepseekV4ForCausalLM,bfloat16,"
+        "fp8_e4m3,bfloat16,128,2,256,1,0,4,0.50,100\n",
+        encoding="utf-8",
+    )
+    generation_file = tmp_path / "dsv4_hca_generation_module_perf.txt"
+    generation_file.write_text(
+        "framework,version,device,op_name,kernel_source,model,architecture,mla_dtype,kv_cache_dtype,gemm_type,"
+        "num_heads,batch_size,isl,tp_size,step,compress_ratio,latency,power\n"
+        "SGLang,0.0,gpu,dsv4_hca_generation_module,compressed_flashmla,m,DeepseekV4ForCausalLM,bfloat16,"
+        "fp8_e4m3,bfloat16,128,2,1,1,4096,128,0.75,100\n",
+        encoding="utf-8",
+    )
+
+    mhc = load_deepseek_v4_mhc_module_data(str(tmp_path / "deepseek_v4_mhc_module_perf.txt"))
+    context = load_context_deepseek_v4_attention_module_data(str(tmp_path / "deepseek_v4_context_module_perf.txt"))
+    generation = load_generation_deepseek_v4_attention_module_data(
+        str(tmp_path / "deepseek_v4_generation_module_perf.txt")
+    )
+
+    assert mhc[common.GEMMQuantMode.bfloat16]["pre"][4][7168][512]["latency"] == 0.25
+    assert (
+        context[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.bfloat16][
+            "DeepseekV4ForCausalLM"
+        ][4][128][256][2]["latency"]
+        == 0.50
+    )
+    assert (
+        generation[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.bfloat16]["DeepseekV4ForCausalLM"][128][128][2][
+            4097
+        ]["latency"]
+        == 0.75
+    )
 
 
 class TestDeepSeekV4MHCModule:
@@ -85,7 +135,7 @@ class TestDeepSeekV4AttentionModule:
         )
         assert float(result) > 0
 
-    def test_csa_index_topk_changes_sol(self, comprehensive_perf_db):
+    def test_csa_topk_changes_attention_workload(self, comprehensive_perf_db):
         base = _deepseek_v4_attn_kwargs(4)
         low_topk = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
             **{**base, "index_topk": 128, "s": 4096},

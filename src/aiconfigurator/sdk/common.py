@@ -336,10 +336,7 @@ DefaultHFModels = {
     "deepseek-ai/DeepSeek-V3.2",
     "zai-org/GLM-5",
     # DeepSeek V4
-    "deepseek-ai/DeepSeek-V4-Flash",
-    "deepseek-ai/DeepSeek-V4-Pro",
-    "sgl-project/DeepSeek-V4-Flash-FP8",
-    "sgl-project/DeepSeek-V4-Pro-FP8",
+    *DEEPSEEK_V4_HF_MODELS,
     # Qwen 3 Models
     "Qwen/Qwen3-0.6B",
     "Qwen/Qwen3-1.7B",
@@ -649,6 +646,9 @@ class PerfDataFilename(Enum):
     mla_generation_module = "mla_generation_module_perf.txt"
     dsa_context_module = "dsa_context_module_perf.txt"
     dsa_generation_module = "dsa_generation_module_perf.txt"
+    deepseek_v4_mhc_module = "deepseek_v4_mhc_module_perf.txt"
+    deepseek_v4_context_module = "deepseek_v4_context_module_perf.txt"
+    deepseek_v4_generation_module = "deepseek_v4_generation_module_perf.txt"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])

@@ -814,6 +814,18 @@ class TestParseCompressedTensorsQuant:
         assert overrides.get("gemm_quant_mode") == common.GEMMQuantMode.int4_wo
         assert overrides.get("moe_quant_mode") == common.MoEQuantMode.int4_wo
 
+    def test_expert_dtype_fp4_is_deepseek_v4_specific(self):
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.models import _infer_quant_modes_from_raw_config
+
+        raw_config = {"expert_dtype": "fp4"}
+
+        llama_overrides = _infer_quant_modes_from_raw_config(raw_config, "LlamaForCausalLM")
+        deepseek_v4_overrides = _infer_quant_modes_from_raw_config(raw_config, "DeepseekV4ForCausalLM")
+
+        assert "moe_quant_mode" not in llama_overrides
+        assert deepseek_v4_overrides["moe_quant_mode"] == common.MoEQuantMode.w4a8_mxfp4_mxfp8
+
 
 class TestEnumerateParallelConfigSGLangMoE:
     """Test enumerate_parallel_config for SGLang MoE scenarios."""

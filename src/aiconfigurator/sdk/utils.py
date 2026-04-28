@@ -1014,7 +1014,12 @@ def get_model_config_from_model_path(model_path: str) -> dict:
     parsed = _parse_hf_config_json(raw_config)
     if parsed["architecture"] == "DeepseekV4ForCausalLM" and model_path not in common.DEEPSEEK_V4_HF_MODELS:
         supported = ", ".join(sorted(common.DEEPSEEK_V4_HF_MODELS))
-        raise ValueError(f"DeepSeek-V4 support is limited to the cached model configs: {supported}")
+        logger.warning(
+            "DeepSeek-V4 model path '%s' is not in the preview allowlist. "
+            "Proceeding based on architecture; known cached configs: %s",
+            model_path,
+            supported,
+        )
     logger.info(
         "Loaded model config for %s: %s",
         model_path,

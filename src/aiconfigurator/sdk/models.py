@@ -51,10 +51,13 @@ def _architecture_to_model_family(architecture: str) -> str:
     )
 
 
-def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
+def _infer_quant_modes_from_raw_config(raw_config: dict, architecture: str | None = None) -> dict[str, object]:
     quant_algo = raw_config.get("quant_algo")
     quant_dynamic = raw_config.get("quant_dynamic")
     kv_cache_algo = raw_config.get("kv_cache_quant_algo")
+    if architecture is None:
+        architectures = raw_config.get("architectures") or []
+        architecture = architectures[0] if architectures else raw_config.get("architecture")
 
     overrides: dict[str, object] = {}
 
@@ -90,7 +93,7 @@ def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
 
     # DeepSeek-V4 native checkpoints use MXFP4 routed-expert weights with MXFP8
     # activations, while non-expert weights remain FP8 block quantized.
-    if str(raw_config.get("expert_dtype", "")).lower() == "fp4":
+    if architecture == "DeepseekV4ForCausalLM" and str(raw_config.get("expert_dtype", "")).lower() == "fp4":
         overrides["moe_quant_mode"] = common.MoEQuantMode.w4a8_mxfp4_mxfp8
 
     # KVCache quant mode
@@ -121,7 +124,7 @@ def _apply_model_quant_defaults(
     # Clone original model_config to track if any modifications were made
     original_config = dataclasses.replace(model_config)
 
-    inferred = _infer_quant_modes_from_raw_config(raw_config)
+    inferred = _infer_quant_modes_from_raw_config(raw_config, architecture)
     applied: list[str] = []
     for key, value in inferred.items():
         if getattr(model_config, key, None) is None:
@@ -635,27 +638,7 @@ class BaseModel:
         self._nextn_accept_rates = model_config.nextn_accept_rates
 
     def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
-        if self.model_family != "DEEPSEEKV32":
-            raise NotImplementedError(f"{self.__class__.__name__} does not define model-specific KV cache bytes")
-
-        seq_len = max(0, seq_len)
-        if isinstance(self.extra_params, dict):
-            kv_lora_rank = self.extra_params.get("kv_lora_rank", 512)
-            qk_rope_head_dim = self.extra_params.get("qk_rope_head_dim", 64)
-            index_head_dim = self.extra_params.get("index_head_dim", 128)
-        else:
-            kv_lora_rank = 512
-            qk_rope_head_dim = 64
-            index_head_dim = 128
-        return (
-            self._num_layers
-            * seq_len
-            * (
-                kv_lora_rank * self.config.kvcache_quant_mode.value.memory
-                + qk_rope_head_dim * common.GEMMQuantMode.bfloat16.value.memory
-                + common.indexer_cache_entry_bytes(index_head_dim)
-            )
-        )
+        raise NotImplementedError(f"{self.__class__.__name__} does not define model-specific KV cache bytes")
 
 
 class GPTModel(BaseModel):
@@ -1995,6 +1978,22 @@ class DeepSeekV32Model(BaseModel):
         self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
 
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        seq_len = max(0, seq_len)
+        extra = self.extra_params if isinstance(self.extra_params, dict) else {}
+        kv_lora_rank = extra.get("kv_lora_rank", 512)
+        qk_rope_head_dim = extra.get("qk_rope_head_dim", 64)
+        index_head_dim = extra.get("index_head_dim", 128)
+        return (
+            self._num_layers
+            * seq_len
+            * (
+                kv_lora_rank * self.config.kvcache_quant_mode.value.memory
+                + qk_rope_head_dim * common.GEMMQuantMode.bfloat16.value.memory
+                + common.indexer_cache_entry_bytes(index_head_dim)
+            )
+        )
+
 
 class DeepSeekV4Model(BaseModel):
     """DeepSeek-V4 model with mHC plus SWA/CSA/HCA compressed attention."""
@@ -2007,7 +2006,7 @@ class DeepSeekV4Model(BaseModel):
         if not isinstance(self.extra_params, common.DeepSeekV4Config):
             raise TypeError("DeepSeekV4Model requires DeepSeekV4Config extra_params")
         deepseek_v4_cfg = self.extra_params
-        self._compress_ratios = deepseek_v4_cfg.compress_ratios[: self._num_layers]
+        self._compress_ratios = deepseek_v4_cfg.compress_ratios
         unknown_ratios = set(self._compress_ratios) - self._SUPPORTED_COMPRESS_RATIOS
         if unknown_ratios:
             raise ValueError(f"Unsupported DeepSeek-V4 compress_ratios: {sorted(unknown_ratios)}")
@@ -2050,6 +2049,7 @@ class DeepSeekV4Model(BaseModel):
         )
         local_heads = self._num_heads // tp_size
         local_o_groups = max(1, deepseek_v4_cfg.o_groups // tp_size)
+        local_moe_inter_size = self._moe_inter_size // tp_size
 
         def _attention_ops(is_context: bool, scale_factor: float):
             ratio_counts = Counter(self._compress_ratios)
@@ -2113,18 +2113,18 @@ class DeepSeekV4Model(BaseModel):
                 ops.GEMM(
                     "context_shared_gate_up_gemm",
                     self._num_layers,
-                    2 * self._moe_inter_size,
+                    2 * local_moe_inter_size,
                     h,
                     gemm_quant_mode,
                 ),
                 ops.ElementWise(
                     "context_shared_act_gate",
                     self._num_layers,
-                    2 * self._moe_inter_size,
-                    self._moe_inter_size,
+                    2 * local_moe_inter_size,
+                    local_moe_inter_size,
                     0.8,
                 ),
-                ops.GEMM("context_shared_ffn2_gemm", self._num_layers, h, self._moe_inter_size, gemm_quant_mode),
+                ops.GEMM("context_shared_ffn2_gemm", self._num_layers, h, local_moe_inter_size, gemm_quant_mode),
                 ops.GEMM("context_router_gemm", self._num_layers, self._num_experts, h, common.GEMMQuantMode.bfloat16),
                 ops.MoEDispatch(
                     "context_moe_pre_dispatch",
@@ -2198,22 +2198,22 @@ class DeepSeekV4Model(BaseModel):
             ops.GEMM(
                 "generation_shared_gate_up_gemm",
                 self._num_layers * self._mtp_scale_factor,
-                2 * self._moe_inter_size,
+                2 * local_moe_inter_size,
                 h,
                 gemm_quant_mode,
             ),
             ops.ElementWise(
                 "generation_shared_act_gate",
                 self._num_layers * self._mtp_scale_factor,
-                2 * self._moe_inter_size,
-                self._moe_inter_size,
+                2 * local_moe_inter_size,
+                local_moe_inter_size,
                 0.8,
             ),
             ops.GEMM(
                 "generation_shared_ffn2_gemm",
                 self._num_layers * self._mtp_scale_factor,
                 h,
-                self._moe_inter_size,
+                local_moe_inter_size,
                 gemm_quant_mode,
             ),
         ]
