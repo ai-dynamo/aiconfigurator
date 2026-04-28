@@ -1029,7 +1029,7 @@ def main():
     parser.add_argument(
         "--resume-retry-failed",
         action="store_true",
-        help="When resuming, retry previously failed tasks instead of skipping them",
+        help="When resuming, retry previously failed tasks instead of skipping them. Requires --resume.",
     )
     parser.add_argument(
         "--checkpoint-dir",
@@ -1093,6 +1093,8 @@ def main():
         "checkpoint_dir": args.checkpoint_dir,
         "retry_failed": args.resume_retry_failed,
     }
+    if args.resume_retry_failed and not args.resume:
+        parser.error("--resume-retry-failed requires --resume")
     if args.resume:
         logger.info(
             f"Resume enabled: dir={Path(args.checkpoint_dir).expanduser()}"
