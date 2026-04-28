@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import functools
 import importlib.resources as pkg_resources
@@ -2303,6 +2304,7 @@ class PerfDatabase:
         # Uses same dict structure as MLA so interpolation/query can be reused
         self._context_dsa_module_data = _load_op_data(PerfDataFilename.dsa_context_module)
         self._generation_dsa_module_data = _load_op_data(PerfDataFilename.dsa_generation_module)
+        self._raw_context_dsa_module_data = copy.deepcopy(self._context_dsa_module_data)
 
         # TensorRT-LLM wideep path
         if backend == "trtllm":
@@ -3501,26 +3503,27 @@ class PerfDatabase:
 
             return {"latency": latency, "power": 0.0, "energy": 0.0}
 
-    def _interp_dsa_context_topk_piecewise(
+    def _interp_dsa_context_topk_piecewise_from_raw(
         self,
         num_heads: int,
         full_s: int,
         b: int,
-        dsa_dict: dict,
+        dsa_dict: dict | None,
         index_topk: int | None,
     ) -> dict | None:
         """
-        Interpolate DSA context data without crossing the index_topk regime boundary.
+        Interpolate raw DSA context data without crossing the index_topk regime boundary.
 
         DSA context uses a different kernel path when kv_len crosses index_topk:
         <= topk can skip indexer logits/topk, while > topk enables that path.
         A smooth interpolation from 2048 to 4096 can therefore badly
         underestimate points just above topk. This helper only applies when
-        the exact (num_heads, batch) curve has same-regime anchors bracketing
-        the query; otherwise callers should fall back to the regular 3D
-        interpolation.
+        the exact raw (num_heads, batch) curve has at least two same-regime
+        anchors. Points just above index_topk use the first two right-regime
+        anchors for same-regime extrapolation instead of falling back to cubic
+        interpolation across the topk boundary.
         """
-        if index_topk is None or num_heads not in dsa_dict:
+        if index_topk is None or dsa_dict is None or num_heads not in dsa_dict:
             return None
 
         exact_head_data = dsa_dict[num_heads]
@@ -3544,10 +3547,17 @@ class PerfDatabase:
         else:
             same_regime_keys = sorted(seq_len for seq_len in curve if seq_len > index_topk)
 
-        if len(same_regime_keys) < 2 or full_s < same_regime_keys[0] or full_s > same_regime_keys[-1]:
+        if len(same_regime_keys) < 2:
             return None
 
-        left, right = self._nearest_1d_point_helper(full_s, same_regime_keys)
+        if full_s < same_regime_keys[0]:
+            if full_s <= index_topk:
+                return None
+            left, right = same_regime_keys[0], same_regime_keys[1]
+        elif full_s > same_regime_keys[-1]:
+            return None
+        else:
+            left, right = self._nearest_1d_point_helper(full_s, same_regime_keys)
         left_value = curve[left]
         right_value = curve[right]
 
@@ -6876,7 +6886,15 @@ class PerfDatabase:
                     )
                 dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
                 full_s = s + prefix
-                result = self._interp_dsa_context_topk_piecewise(num_heads, full_s, b, dsa_dict, index_topk)
+                raw_dsa_dict = None
+                raw_dsa_module_data = getattr(self, "_raw_context_dsa_module_data", None)
+                if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
+                    raw_dsa_dict = raw_dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][
+                        architecture
+                    ]
+                result = self._interp_dsa_context_topk_piecewise_from_raw(
+                    num_heads, full_s, b, raw_dsa_dict, index_topk
+                )
                 if result is None:
                     result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
                 latency = result["latency"]
