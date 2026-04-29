@@ -118,20 +118,31 @@ def _checkpoint_path(tmp_path, module_name, backend="unknown"):
     return tmp_path / ".checkpoint" / backend / f"{safe_name}.json"
 
 
-def _load_done_ids(tmp_path, module_name, backend="unknown"):
+def _load_checkpoint_data(tmp_path, module_name, backend="unknown"):
     checkpoint = _checkpoint_path(tmp_path, module_name, backend=backend)
     assert checkpoint.exists(), f"checkpoint not found: {checkpoint}"
     with checkpoint.open() as f:
-        data = json.load(f)
+        return json.load(f)
+
+
+def _load_done_ids(tmp_path, module_name, backend="unknown"):
+    data = _load_checkpoint_data(tmp_path, module_name, backend=backend)
     return set(data.get("done", []))
+
+
+def _load_failed_ids(tmp_path, module_name, backend="unknown"):
+    data = _load_checkpoint_data(tmp_path, module_name, backend=backend)
+    return set(data.get("failed", []))
 
 
 def _assert_all_tasks_attempted(tasks, tmp_path, module_name):
     expected = {task["id"] for task in tasks}
-    actual = _load_done_ids(tmp_path, module_name)
-    missing = expected - actual
-    extra = actual - expected
-    assert actual == expected, f"done mismatch: missing={missing}, extra={extra}"
+    done = _load_done_ids(tmp_path, module_name)
+    failed = _load_failed_ids(tmp_path, module_name)
+    attempted = done | failed
+    missing = expected - attempted
+    extra = attempted - expected
+    assert attempted == expected, f"attempted mismatch: missing={missing}, extra={extra}"
 
 
 def _run_and_assert_all_done(tasks, num_processes, tmp_path, module_name):
@@ -164,10 +175,12 @@ class TestNormalCompletion:
     def test_two_workers(self, tmp_path):
         tasks = _tasks(8)
         assert _run_and_assert_all_done(tasks, 2, tmp_path, module_name="normal_two_workers") == []
+        assert _load_failed_ids(tmp_path, "normal_two_workers") == set()
 
     def test_single_worker(self, tmp_path):
         tasks = _tasks(4)
         assert _run_and_assert_all_done(tasks, 1, tmp_path, module_name="normal_single_worker") == []
+        assert _load_failed_ids(tmp_path, "normal_single_worker") == set()
 
 
 class TestExitCodeRestart:
@@ -204,6 +217,8 @@ class TestTaskExceptions:
         tasks = _tasks([(f"t{i}", "error") for i in range(4)])
         errors = _run_and_assert_all_done(tasks, 2, tmp_path, module_name="all_fail")
         assert len([e for e in errors if e.get("error_type") == "ValueError"]) == 4
+        assert _load_done_ids(tmp_path, "all_fail") == set()
+        assert _load_failed_ids(tmp_path, "all_fail") == {f"t{i}" for i in range(4)}
 
     def test_mixed_success_and_fail(self, tmp_path):
         tasks = _tasks(
@@ -217,6 +232,8 @@ class TestTaskExceptions:
         )
         errors = _run_and_assert_all_done(tasks, 2, tmp_path, module_name="mixed_success_fail")
         assert len([e for e in errors if e.get("error_type") == "ValueError"]) == 2
+        assert _load_done_ids(tmp_path, "mixed_success_fail") == {"a", "c", "e"}
+        assert _load_failed_ids(tmp_path, "mixed_success_fail") == {"b", "d"}
 
 
 class TestMixedFailureModes:
@@ -238,6 +255,10 @@ class TestMixedFailureModes:
         errors = _run_and_assert_all_done(tasks, 2, tmp_path, module_name="restart_and_exception")
         assert len([e for e in errors if e.get("error_type") == "ValueError"]) == 2
         assert _crash_errors(errors) == []
+        done = _load_done_ids(tmp_path, "restart_and_exception")
+        failed = _load_failed_ids(tmp_path, "restart_and_exception")
+        assert {"a", "b", "d", "e", "g", "h"} == done  # normal + exit_restart = passed
+        assert {"c", "f"} == failed  # error = failed
 
 
 class TestSentinelBalance:
@@ -280,7 +301,7 @@ class TestSentinelBalance:
 class TestSignalCrashRecovery:
     """Fatal signal exits should be accounted for exactly once."""
 
-    def test_sigabrt_tasks_are_marked_done(self, tmp_path):
+    def test_sigabrt_tasks_are_tracked(self, tmp_path):
         tasks = _tasks(
             [
                 ("a", "normal"),
@@ -292,6 +313,10 @@ class TestSignalCrashRecovery:
         )
         errors = _run_and_assert_all_done(tasks, 2, tmp_path, module_name="sigabrt_done")
         assert len([e for e in errors if e.get("error_type") == "WorkerSignalCrash"]) >= 2
+        done = _load_done_ids(tmp_path, "sigabrt_done")
+        failed = _load_failed_ids(tmp_path, "sigabrt_done")
+        assert {"a", "c", "e"} == done
+        assert {"b", "d"} == failed
 
     def test_sigabrt_and_restart_mix(self, tmp_path):
         tasks = _tasks(
@@ -306,3 +331,7 @@ class TestSignalCrashRecovery:
         )
         errors = _run_and_assert_all_done(tasks, 2, tmp_path, module_name="sigabrt_restart_mix")
         assert len([e for e in errors if e.get("error_type") == "WorkerSignalCrash"]) >= 2
+        done = _load_done_ids(tmp_path, "sigabrt_restart_mix")
+        failed = _load_failed_ids(tmp_path, "sigabrt_restart_mix")
+        assert {"b", "c", "e", "f"} == done  # exit_restart + normal = passed
+        assert {"a", "d"} == failed  # sigabrt = failed
