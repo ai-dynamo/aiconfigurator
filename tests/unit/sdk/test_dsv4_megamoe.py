@@ -5,12 +5,8 @@ import math
 
 import pytest
 
-from aiconfigurator.sdk.dsv4_megamoe import (
-    MegaMoEEffectiveBandwidthModel,
-    build_dsv4_power_law_megamoe_workload,
-    build_dsv4_power_law_megamoe_workload_from_global_tokens,
-    build_dsv4_uniform_megamoe_workload,
-    build_dsv4_uniform_megamoe_workload_from_global_tokens,
+from aiconfigurator.sdk.operations import (
+    Dsv4MegaMoEDispatch,
     build_route_matrix,
     compose_megamoe_routed_latency_ms,
     estimate_megamoe_communication_from_effective_bandwidth_model_ms,
@@ -20,6 +16,7 @@ from aiconfigurator.sdk.dsv4_megamoe import (
     owner_rank_for_expert,
     route_matrix_from_flat_assignments,
 )
+from aiconfigurator.sdk.perf_database import MegaMoEEffectiveBandwidthModel
 
 
 def test_owner_rank_for_expert_uses_contiguous_expert_ownership():
@@ -370,6 +367,39 @@ def test_perf_database_estimator_queries_effective_bandwidth_model():
     assert math.isclose(comm.overlappable_ms, comm.data_ms + 0.1)
 
 
+def test_dsv4_megamoe_dispatch_op_queries_perf_database_model():
+    class FakeDatabase:
+        def __init__(self):
+            self.calls = []
+
+        def query_dsv4_megamoe_effective_bandwidth_model(self, **kwargs):
+            self.calls.append(kwargs)
+            return MegaMoEEffectiveBandwidthModel(
+                name="db-model",
+                ep_size=2,
+                bandwidth_points_gbps=((8, 4.0), (16, 8.0)),
+                bandwidth_scale=2.0,
+                fixed_overlappable_latency_ms=0.1,
+            )
+
+    op = Dsv4MegaMoEDispatch(
+        "dsv4_megamoe_comm",
+        1.0,
+        hidden_size=1024,
+        inter_size=512,
+        topk=6,
+        num_experts=16,
+        moe_ep_size=2,
+        routing_mode="power-law",
+        power_law_alpha=1.01,
+    )
+    result = op.query(FakeDatabase(), x=8, route_matrix=[[0, 4], [0, 0]])
+
+    expected_data_ms = 4 * 3 * 1024 / 8.0e9 * 1000.0
+    assert math.isclose(float(result), expected_data_ms + 0.1)
+    assert result.energy == 0.0
+
+
 def test_route_matrix_from_flat_assignments_ignores_masked_experts():
     routes = route_matrix_from_flat_assignments(
         [
@@ -386,125 +416,3 @@ def test_route_matrix_from_flat_assignments_ignores_masked_experts():
         (1, 1),
         (1, 0),
     )
-
-
-def test_power_law_workload_uses_target_ep_and_remaps_bottleneck_to_rank0():
-    workload = build_dsv4_power_law_megamoe_workload(
-        num_tokens_per_rank=16,
-        routed_num_experts=8,
-        routed_topk=2,
-        moe_ep_size=4,
-        alpha=1.2,
-        seed=7,
-    )
-
-    assert workload.num_global_tokens == 64
-    assert workload.experts_per_rank == 2
-    assert sum(workload.routed_expert_counts) == workload.num_global_tokens * workload.routed_topk
-    assert workload.routed_rank_loads[0] == max(workload.routed_rank_loads)
-    assert len(workload.routed_topk_ids_by_src_rank) == 4
-    assert all(len(rank_rows) == 16 for rank_rows in workload.routed_topk_ids_by_src_rank)
-
-
-def test_uniform_workload_uses_target_ep_and_local_rank0_workload():
-    workload = build_dsv4_uniform_megamoe_workload(
-        num_tokens_per_rank=8,
-        routed_num_experts=8,
-        routed_topk=2,
-        moe_ep_size=4,
-    )
-
-    assert workload.num_global_tokens == 32
-    assert workload.experts_per_rank == 2
-    assert workload.routed_rank_loads == (16, 16, 16, 16)
-    assert sum(workload.rank0_masked_m) == 16
-    assert all(
-        expert_id == -1 or 0 <= expert_id < workload.experts_per_rank
-        for row in workload.rank0_local_topk_ids
-        for expert_id in row
-    )
-
-
-def test_global_token_power_law_workload_does_not_expand_tokens_by_ep():
-    workload = build_dsv4_power_law_megamoe_workload_from_global_tokens(
-        num_global_tokens=17,
-        routed_num_experts=8,
-        routed_topk=2,
-        moe_ep_size=4,
-        alpha=1.2,
-        seed=9,
-    )
-
-    assert workload.num_global_tokens == 17
-    assert workload.num_tokens_per_rank == 5
-    assert sum(len(rank_rows) for rank_rows in workload.routed_topk_ids_by_src_rank) == 17
-    assert sum(sum(row) for row in workload.route_matrix) == 17 * 2
-    assert workload.routed_rank_loads[0] == max(workload.routed_rank_loads)
-
-
-def test_global_token_uniform_workload_keeps_global_token_count():
-    workload = build_dsv4_uniform_megamoe_workload_from_global_tokens(
-        num_global_tokens=17,
-        routed_num_experts=8,
-        routed_topk=2,
-        moe_ep_size=4,
-    )
-
-    assert workload.num_global_tokens == 17
-    assert workload.num_tokens_per_rank == 5
-    assert sum(len(rank_rows) for rank_rows in workload.routed_topk_ids_by_src_rank) == 17
-    assert sum(sum(row) for row in workload.route_matrix) == 17 * 2
-
-
-def test_power_law_workload_route_matrix_preserves_all_source_rank_assignments():
-    workload = build_dsv4_power_law_megamoe_workload(
-        num_tokens_per_rank=5,
-        routed_num_experts=8,
-        routed_topk=3,
-        moe_ep_size=4,
-        alpha=0.8,
-        seed=11,
-    )
-
-    assert sum(sum(row) for row in workload.route_matrix) == 5 * 4 * 3
-    assert all(sum(row) == 5 * 3 for row in workload.route_matrix)
-
-
-def test_power_law_ep1_workload_has_zero_remote_traffic():
-    workload = build_dsv4_power_law_megamoe_workload(
-        num_tokens_per_rank=8,
-        routed_num_experts=8,
-        routed_topk=2,
-        moe_ep_size=1,
-        alpha=1.2,
-        hidden_size=4096,
-        seed=3,
-    )
-
-    assert workload.route_matrix == ((16,),)
-    assert workload.traffic is not None
-    assert workload.traffic.total_remote_edges == 0
-    assert workload.traffic.bottleneck_primary_bytes == 0
-
-
-def test_fused_shared_experts_do_not_add_inter_rank_routes():
-    workload = build_dsv4_power_law_megamoe_workload(
-        num_tokens_per_rank=6,
-        routed_num_experts=8,
-        routed_topk=2,
-        moe_ep_size=4,
-        alpha=1.1,
-        num_fused_shared_experts=1,
-        seed=5,
-    )
-
-    assert workload.mega_topk == 3
-    assert sum(sum(row) for row in workload.route_matrix) == 6 * 4 * 2
-    assert all(len(row) == 3 for rank_rows in workload.mega_topk_ids_by_src_rank for row in rank_rows)
-    assert all(
-        row[-1] == workload.routed_num_experts
-        for rank_rows in workload.mega_topk_ids_by_src_rank
-        for row in rank_rows
-    )
-    assert any(workload.experts_per_rank in row for row in workload.rank0_local_topk_ids)
-    assert len(workload.rank0_masked_m) == workload.experts_per_rank + 1

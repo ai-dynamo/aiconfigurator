@@ -31,7 +31,7 @@ except ModuleNotFoundError:
     from helper import benchmark_with_power, log_perf
 
 try:
-    from aiconfigurator.sdk.dsv4_megamoe import (
+    from collector.sglang.dsv4_megamoe_workload import (
         Dsv4MegaMoEWorkload,
         build_dsv4_power_law_megamoe_workload_from_global_tokens,
         build_dsv4_uniform_megamoe_workload_from_global_tokens,
@@ -39,7 +39,8 @@ try:
 except ModuleNotFoundError:
     _REPO_ROOT = Path(__file__).resolve().parents[2]
     sys.path.append(str(_REPO_ROOT / "src"))
-    from aiconfigurator.sdk.dsv4_megamoe import (
+    sys.path.append(str(_REPO_ROOT))
+    from collector.sglang.dsv4_megamoe_workload import (
         Dsv4MegaMoEWorkload,
         build_dsv4_power_law_megamoe_workload_from_global_tokens,
         build_dsv4_uniform_megamoe_workload_from_global_tokens,

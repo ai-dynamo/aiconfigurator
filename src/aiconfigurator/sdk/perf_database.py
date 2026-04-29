@@ -11,6 +11,7 @@ import math
 import os
 from collections import UserDict, defaultdict
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -25,6 +26,52 @@ databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
+
+
+def _interpolate_log_log_points(points: Iterable[tuple[int, float]], x: int) -> float:
+    if x <= 0:
+        raise ValueError("x must be positive")
+    sorted_points = tuple(sorted((int(point_x), float(point_y)) for point_x, point_y in points))
+    if not sorted_points:
+        raise ValueError("points must be non-empty")
+    if any(point_x <= 0 or point_y <= 0 for point_x, point_y in sorted_points):
+        raise ValueError("log-log interpolation requires positive points")
+
+    if x <= sorted_points[0][0]:
+        return sorted_points[0][1]
+    if x >= sorted_points[-1][0]:
+        return sorted_points[-1][1]
+
+    for (left_x, left_y), (right_x, right_y) in zip(sorted_points, sorted_points[1:]):
+        if left_x <= x <= right_x:
+            if left_x == x:
+                return left_y
+            if right_x == x:
+                return right_y
+            weight = (math.log(x) - math.log(left_x)) / (math.log(right_x) - math.log(left_x))
+            return math.exp(math.log(left_y) + weight * (math.log(right_y) - math.log(left_y)))
+
+    raise AssertionError("interpolation interval not found")
+
+
+@dataclass(frozen=True)
+class MegaMoEEffectiveBandwidthModel:
+    """Token-dependent fused-kernel effective bandwidth model loaded from perf data."""
+
+    name: str
+    ep_size: int
+    bandwidth_points_gbps: tuple[tuple[int, float], ...]
+    bandwidth_scale: float
+    fixed_overlappable_latency_ms: float
+    source: str = ""
+
+    def raw_bandwidth_bps(self, num_tokens_per_rank: int) -> float:
+        return _interpolate_log_log_points(self.bandwidth_points_gbps, int(num_tokens_per_rank)) * 1_000_000_000.0
+
+    def calibrated_bandwidth_bps(self, num_tokens_per_rank: int) -> float:
+        if self.bandwidth_scale <= 0:
+            raise ValueError("bandwidth_scale must be positive")
+        return self.raw_bandwidth_bps(num_tokens_per_rank) * self.bandwidth_scale
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
@@ -6232,8 +6279,6 @@ class PerfDatabase:
                     "DSv4 MegaMoE effective bandwidth rows for one curve must share fixed_overlappable_latency_ms; "
                     f"mismatch at {num_tokens=}"
                 )
-
-        from aiconfigurator.sdk.dsv4_megamoe import MegaMoEEffectiveBandwidthModel
 
         return MegaMoEEffectiveBandwidthModel(
             name=(
