@@ -12,9 +12,19 @@ on:
 
 jobs:
   build-and-test:
-    name: Build and Test
+    name: Build and Test (${{ matrix.suite.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: unit
+            paths: tests/unit
+            workers: "-n 2"
+          - name: e2e
+            paths: tests/e2e
+            workers: "-n 2"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -30,9 +40,10 @@ jobs:
           docker build -f docker/Dockerfile -t aiconfigurator:test --target test .
           docker run --name aic aiconfigurator:test \
             pytest \
+            ${{ matrix.suite.paths }} \
             -m "unit or build" \
             -v --tb=short --maxfail=1 --timeout=600 \
-            -n 2 \
+            ${{ matrix.suite.workers }} \
             --md-report --md-report-verbose=1 --md-report-flavor gfm --md-report-output test_report.md
       - name: Copy test report from test Container
         if: always()
