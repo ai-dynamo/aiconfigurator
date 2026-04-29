@@ -842,7 +842,7 @@ We defined two experiments. `exp_h200_h200` uses h200 for both prefill and decod
 **Note**: You can also compare different backends by setting different `backend_name` values (trtllm, vllm, sglang) in your experiments.
 
 2. use a specific quantization  
-The example [yaml](../src/aiconfigurator/cli/exps/qwen3_32b_disagg_pertensor.yaml)
+The example [yaml](../src/aiconfigurator/cli/exps/qwen3_32b_pertensor.yaml)
 ```yaml
 exps:
   - exp_agg
