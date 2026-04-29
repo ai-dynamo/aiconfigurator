@@ -10,7 +10,7 @@ flowchart TD
   C --> D[<b>Rule plugins</b><br/>rule_plugin/*.rule]
   D --> E[<b>Parameter mapping</b><br/>config/backend_config_mapping.yaml]
   E --> F[<b>Template rendering</b><br/>config/backend_templates/backend/...]
-  F --> G[<b>Generated artifacts</b><br/>k8s_deploy.yaml,<br/>run_*.sh,<br/>engine configs/cli args]
+  F --> G[<b>Generated artifacts</b><br/>k8s_deploy.yaml OR llm-d-values.yaml,<br/>run_*.sh,<br/>engine configs/cli args]
 ```
 
 ### Key Components
@@ -22,10 +22,12 @@ flowchart TD
     - key: K8sConfig.k8s_image
     - key: K8sConfig.k8s_model_cache
     - key: K8sConfig.k8s_hf_home
+    - key: LlmdConfig.vllm_image
+    - key: LlmdConfig.model_cache_size
     - key: WorkerConfig.prefill_workers
     - key: SlaConfig.isl
   ```
-  Defines the deployment-facing inputs beyond backend flags: service ports and names, per-node GPU counts, K8s image/namespace/engine mode, model cache PVC, HuggingFace home directory, and SLA knobs like ISL/OSL.
+  Defines the deployment-facing inputs beyond backend flags: service ports and names, per-node GPU counts, deployment-specific settings (K8sConfig for Dynamo, LlmdConfig for llm-d), model cache configuration, and SLA knobs like ISL/OSL.
 
   **Model Cache Configuration:**
   - `k8s_model_cache`: Name of the PersistentVolumeClaim (PVC) to mount for caching HuggingFace models. The PVC is mounted at `/workspace/model_cache` in worker pods.
@@ -61,11 +63,12 @@ flowchart TD
 
 ### Using the Generator
 You can use the generator in three ways: AIConfigurator CLI, webapp, or standalone (code/CLI).
-- AIConfigurator CLI end-to-end:
+- AIConfigurator CLI end-to-end (Dynamo deployment):
   ```
   aiconfigurator cli default \
     --backend sglang \
     --backend-version 0.5.6.post2 \
+    --deployment-target dynamo-j2 \
     --model-path Qwen/Qwen3-32B-FP8 \
     --system h200_sxm \
     --total-gpus 8 \
@@ -76,10 +79,24 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
     --generator-set K8sConfig.k8s_namespace=ets-dynamo \
     --save-dir ./results
   ```
+- AIConfigurator CLI end-to-end (llm-d deployment):
+  ```
+  aiconfigurator cli default \
+    --backend vllm \
+    --deployment-target llm-d \
+    --model-path Qwen/Qwen3-32B \
+    --system h200_sxm \
+    --total-gpus 32 \
+    --isl 5000 --osl 1000 --ttft 2000 --tpot 50 \
+    --generator-set LlmdConfig.vllm_image=vllm/vllm-openai:v0.6.0 \
+    --generator-set LlmdConfig.model_cache_size=200Gi \
+    --save-dir ./results
+  ```
   Notes:
-  - Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
-  - If `--generator-dynamo-version` is not provided, the default is the first entry in `backend_version_matrix.yaml` (currently `1.0.0`).
-  - If `--generated-config-version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the selected Dynamo version mapping.
+  - Use `--deployment-target` to choose the orchestration platform: `dynamo-j2` (default, Jinja2 templates), `dynamo-python` (Python config modifiers), or `llm-d` (Helm values).
+  - For Dynamo deployments: Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag. If not provided, defaults to `1.0.0`.
+  - For llm-d deployments: Container image versions are specified via `LlmdConfig.vllm_image` or `LlmdConfig.sglang_image` (defaults to `latest` tags).
+  - If `--generated-config-version` is provided, it overrides the generated backend version for any deployment target.
 - Webapp: start with `--enable_profiling` when launching the webapp to surface generator-driven configs.
 - Standalone:
   - In code:
@@ -154,7 +171,9 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
 - [trtllm] Engine config files (`agg_config.yaml`, `prefill_config.yaml`, `decode_config.yaml`) when the backend provides `extra_engine_args*.j2`.
 - Run scripts (`run_0.sh`, `run_1.sh`, …) that assign workers to nodes and toggle frontend on the first node.
   - Note: If `model_path` is empty and you expect to automatically download the HuggingFace model, multiple processes may fetch the same model concurrently and hit the HF cache lock. In that case, download the model once at the target path before running.
-- Kubernetes manifest (`k8s_deploy.yaml`) with images, namespace, volumes, engine args (inline or ConfigMap), and role-specific settings.
+- Deployment manifests:
+  - **Dynamo**: Kubernetes manifest (`k8s_deploy.yaml`) with images, namespace, volumes, engine args (inline or ConfigMap), and role-specific settings.
+  - **llm-d**: Helm values (`llm-d-values.yaml`) for the llm-d-modelservice chart with model artifacts, parallelism, and container configurations.
 - Benchmark helpers:
   - `bench_run.sh` and `k8s_bench.yaml` are generated alongside deployment artifacts for running `aiperf` benchmarks.
   - `concurrency_array` is built from a base list (`1 2 8 16 32 64 128`) plus `BenchConfig.estimated_concurrency` and its +/-5% neighbors when the estimate is available.
@@ -207,10 +226,14 @@ The generator validator checks that generated engine configs or CLI args are acc
   ```
 
 **`--path` meaning (file or directory):**
+
+Note: The validator currently supports Dynamo deployments only (`--deployment-target dynamo-j2` or `dynamo-python`). Support for llm-d Helm values validation is not yet implemented.
+
 - File: point directly to a single engine config YAML (TRT-LLM) or `k8s_deploy.yaml` (vLLM/SGLang).
 - Directory: point to a generator results root with the expected layout:
   - TRT-LLM: `agg/top1/agg_config.yaml` and `disagg/top1/{decode,prefill}_config.yaml`
-  - vLLM / SGLang: `agg/top1/k8s_deploy.yaml` and `disagg/top1/k8s_deploy.yaml`
+  - vLLM / SGLang (Dynamo): `agg/top1/k8s_deploy.yaml` and `disagg/top1/k8s_deploy.yaml`
+  - vLLM / SGLang (llm-d): `agg/top1/llm-d-values.yaml` and `disagg/top1/llm-d-values.yaml` (validator not yet supported)
 
 **How it works (high level):**
 - TRT-LLM: loads `tensorrt_llm.llmapi.llm_args.TorchLlmArgs` and validates keys against the runtime schema.

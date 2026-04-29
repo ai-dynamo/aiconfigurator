@@ -15,6 +15,9 @@ import torch
 if _server_args_module._global_server_args is None:
     _mock_server_args = MagicMock()
     _mock_server_args.enable_deterministic_inference = False
+    _mock_server_args.enable_fused_moe_sum_all_reduce = (
+        False  # sglang >=0.5.10; prevents fused all-reduce in single-GPU benchmarks
+    )
     _server_args_module._global_server_args = _mock_server_args
 
 from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_moe
@@ -105,9 +108,15 @@ def get_moe_test_cases():
             ):
                 continue
 
-            # nvfp4 fp4_quantize requires weight dims divisible by 16 after TP sharding
-            if moe_type == "nvfp4" and (common_moe_testcase.inter_size // common_moe_testcase.tp) % 16 != 0:
-                continue
+            if moe_type == "nvfp4":
+                shard_k = common_moe_testcase.inter_size // common_moe_testcase.tp
+                # fp4_quantize requires weight dims divisible by 16 after TP sharding.
+                # CuteDSL grouped GEMM additionally requires 16-byte contiguous alignment:
+                # for fp4 (4-bit), that's 32 elements (16 * 8 // 4 = 32).
+                # See: flashinfer/cute_dsl/blockscaled_gemm.py
+                #   Sm100BlockScaledPersistentDenseGemmKernel.is_valid_tensor_alignment()
+                if shard_k % 32 != 0:
+                    continue
 
             # int4_wo (W4A16): packed K dims must be divisible by group_size (128).
             # w1 packed K = hidden_size // 2  → need hidden_size % 256 == 0

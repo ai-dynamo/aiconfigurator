@@ -11,6 +11,7 @@ from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import (
+    LoadedOpData,
     load_context_deepseek_v4_attention_module_data,
     load_deepseek_v4_mhc_module_data,
     load_generation_deepseek_v4_attention_module_data,
@@ -39,6 +40,24 @@ def _deepseek_v4_attn_kwargs(compress_ratio: int) -> dict:
         "kvcache_quant_mode": common.KVCacheQuantMode.fp8,
         "fmha_quant_mode": common.FMHAQuantMode.bfloat16,
         "gemm_quant_mode": common.GEMMQuantMode.fp8_block,
+    }
+
+
+def _deepseek_v4_value(latency: float) -> dict[str, float]:
+    return {"latency": latency, "power": 10.0, "energy": latency * 10.0}
+
+
+def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict) -> dict:
+    return {
+        common.FMHAQuantMode.bfloat16: {
+            common.KVCacheQuantMode.fp8: {
+                common.GEMMQuantMode.fp8_block: {
+                    "DeepseekV4ForCausalLM": {
+                        compress_ratio: attn_dict,
+                    },
+                },
+            },
+        },
     }
 
 
@@ -166,6 +185,46 @@ class TestDeepSeekV4AttentionModule:
             database_mode=common.DatabaseMode.SOL,
         )
         assert high_topk > low_topk
+
+    def test_csa_context_uses_raw_piecewise_around_compressed_topk_boundary(self, comprehensive_perf_db, monkeypatch):
+        raw_attn_dict = {
+            16: {
+                4096: {2: _deepseek_v4_value(20.0)},
+                8192: {2: _deepseek_v4_value(80.0)},
+                12288: {2: _deepseek_v4_value(100.0)},
+            }
+        }
+        extrapolated_attn_dict = {
+            16: {
+                4096: {2: _deepseek_v4_value(20.0)},
+                4097: {2: _deepseek_v4_value(21.0)},
+                8192: {2: _deepseek_v4_value(80.0)},
+                12288: {2: _deepseek_v4_value(100.0)},
+            }
+        }
+        comprehensive_perf_db._raw_context_deepseek_v4_attention_module_data = LoadedOpData(
+            _context_deepseek_v4_data(4, raw_attn_dict), common.PerfDataFilename.deepseek_v4_context_module, "raw"
+        )
+        comprehensive_perf_db._context_deepseek_v4_attention_module_data = LoadedOpData(
+            _context_deepseek_v4_data(4, extrapolated_attn_dict),
+            common.PerfDataFilename.deepseek_v4_context_module,
+            "extrapolated",
+        )
+
+        def fail_interp_3d(*args, **kwargs):
+            raise AssertionError("_interp_3d should not be used when raw same-regime CSA anchors exist")
+
+        monkeypatch.setattr(comprehensive_perf_db, "_interp_3d", fail_interp_3d)
+
+        base = _deepseek_v4_attn_kwargs(4)
+        result = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+            **{**base, "s": 4097, "prefix": 0},
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        expected = 80.0 + (100.0 - 80.0) / (12288 - 8192) * (4097 - 8192)
+        assert float(result) == pytest.approx(expected)
+        assert result.energy == pytest.approx(expected * 10.0)
 
     @pytest.mark.parametrize("compress_ratio", [0, 4, 128])
     def test_context_prefix_changes_sol_for_all_attention_kinds(self, comprehensive_perf_db, compress_ratio):

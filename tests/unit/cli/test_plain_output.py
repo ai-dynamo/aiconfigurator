@@ -153,6 +153,66 @@ def test_log_final_summary(caplog, use_ansi):
     assert "tokens/s/gpu" in text
 
 
+def test_log_final_summary_no_disagg_results():
+    """log_final_summary must not crash when all disagg experiments return no results.
+
+    Regression test for the KeyError: 'disagg' crash that occurs when backend='auto'
+    and all disagg experiments yield nothing. merge_experiment_results_by_mode always
+    inserts a 'disagg' key into best_configs (possibly empty), but task_configs only
+    has per-backend keys like 'agg_trtllm'. The guard in the deployment table loop
+    must skip 'disagg' rather than crashing.
+    """
+    tc = MagicMock()
+    tc.config.model_path = "unit-test-model"
+    tc.config.is_moe = False
+    tc.config.runtime_config.tpot = 50.0
+    tc.config.runtime_config.request_latency = None
+    tc.backend_name = "trtllm"
+    tc.total_gpus = 8
+
+    best_row = {
+        "backend": "trtllm",
+        "tokens/s/gpu": 100.0,
+        "tokens/s/user": 50.0,
+        "tokens/s/gpu_cluster": 100.0,
+        "request_rate": 2.0,
+        "ttft": 100.0,
+        "request_latency": 200.0,
+        "tpot": 10.0,
+        "concurrency": 4.0,
+        "num_total_gpus": 8,
+        "tp": 4,
+        "pp": 2,
+        "dp": 1,
+        "moe_tp": 1,
+        "moe_ep": 1,
+        "bs": 64,
+        "power_w": 400.0,
+    }
+    # best_configs has 'agg' (non-empty) and 'disagg' (empty) — as produced by
+    # merge_experiment_results_by_mode when all disagg experiments yield nothing.
+    best_configs = {
+        "agg": pd.DataFrame([best_row]),
+        "disagg": pd.DataFrame(),
+    }
+    # task_configs only has per-backend keys; 'disagg' is intentionally absent.
+    task_configs = {"agg_trtllm": tc, "disagg_trtllm": tc}
+
+    log_final_summary(
+        chosen_exp="agg",
+        best_throughputs={"agg": 100.0, "disagg": 0.0},
+        best_configs=best_configs,
+        pareto_fronts={
+            "agg": pd.DataFrame({"tokens/s/user": [1.0], "tokens/s/gpu_cluster": [10.0]}),
+            "disagg": pd.DataFrame(),
+        },
+        task_configs=task_configs,
+        mode="default",
+        pareto_x_axis={"agg": "tokens/s/user", "disagg": "tokens/s/user"},
+        top_n=1,
+    )
+
+
 def test_draw_pareto_plain_output_is_pure_ascii():
     """Ensure piped Pareto chart output is pure ASCII (no mojibake under `cat -v`).
 

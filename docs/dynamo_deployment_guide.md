@@ -1,15 +1,17 @@
 # Dynamo Deployment with Aiconfigurator Guide
 
+> **Note:** This guide covers Dynamo platform deployments (`--deployment-target dynamo-j2` or `dynamo-python`). For llm-d platform deployments, see the [llm-d deployment examples in the README](../README.md#deploying-to-llm-d-platform).
+
 This guide walks through   
 - installing aiconfigurator
 - building the Dynamo container  
-- generating configuration files（currently, we only support trtllm)   
+- generating configuration files (supports TRT-LLM, vLLM, and SGLang backends)
 - deploying Dynamo (single-node and two-node)  
 - benchmarking the service and comparison  
 
 Take [qwen3-32b-fp8](https://huggingface.co/Qwen/Qwen3-32B-FP8) model as an example.
 
-> Currently auto configuration / script generation only support trtllm backend
+> **Note:** This guide primarily uses TRT-LLM examples. For vLLM and SGLang examples with Dynamo, use the same workflow with `--backend vllm` or `--backend sglang`.
 
 # All-in-one Automation process
 
@@ -72,7 +74,7 @@ predicted by aiconfigurator. E.g., [1 2 4 8 ... target_concurrency]
 Compare the result at target_concurrency with `TTFT, TPOT, tokens/s/gpu and previous baseline you have`
 
 > In order to reduce the impact of first batch of requests, we use `concurrency * 10` as `num_requests`
-> In order to aovid undefined cache hit rate when benchmarking with random data, we delebrately disable 
+> In order to avoid undefined cache hit rate when benchmarking with random data, we deliberately disable
 cache reuse to make it fair.
 
 ## Step-by-step Manual Deployment

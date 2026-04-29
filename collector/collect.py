@@ -354,10 +354,16 @@ def worker(
             for handler in worker_logger.handlers:
                 handler.flush()
 
-            # This error is could be fatal and require a process restart.
-            if isinstance(e, torch.AcceleratorError):
+            # These errors are fatal and require a process restart to
+            # reset the GPU CUDA context.
+            is_cuda_fatal = isinstance(e, torch.AcceleratorError)
+            if not is_cuda_fatal:
+                # DSLCudaRuntimeError from CUTLASS DSL also corrupts CUDA
+                # context but isn't a torch.AcceleratorError subclass.
+                is_cuda_fatal = type(e).__name__ == "DSLCudaRuntimeError"
+            if is_cuda_fatal:
                 worker_logger.warning(
-                    f"Fatal AcceleratorError encountered on task {task_id}. "
+                    f"Fatal {type(e).__name__} encountered on task {task_id}. "
                     f"Worker {device_id} exiting to reset GPU context. "
                     f"Progress: {progress_value.value}"
                 )

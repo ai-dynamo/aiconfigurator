@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
+import types
 from unittest.mock import patch
 
 import pytest
@@ -9,7 +11,6 @@ import pytest
 @pytest.fixture(autouse=True)
 def _mock_helper_imports(monkeypatch):
     """Ensure the module can be imported without CUDA / SGLang installed."""
-    import types
 
     fake_helper = types.ModuleType("helper")
     fake_helper.get_sm_version = lambda: 90  # default Hopper
@@ -22,7 +23,6 @@ def _mock_helper_imports(monkeypatch):
 def _import_module():
     """Import collect_mla_module after mocking."""
     import importlib.util
-    import sys
 
     mod_name = "collector.sglang.collect_mla_module"
     if mod_name in sys.modules:

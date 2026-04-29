@@ -263,6 +263,7 @@ def generate_backend_artifacts(
     templates_dir: Optional[str] = None,
     output_dir: Optional[str] = None,
     backend_version: Optional[str] = None,
+    deployment_target: Optional[str] = None,
     use_dynamo_generator: bool = False,
 ) -> dict[str, str]:
     """
@@ -274,19 +275,33 @@ def generate_backend_artifacts(
         templates_dir: Optional directory containing templates
         output_dir: Optional directory to save generated files
         backend_version: Optional version string for version-specific template selection
-        use_dynamo_generator: If True, use the Dynamo DPP config generator
-            for the k8s deploy YAML instead of Jinja2 templates.
+        deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', or 'llm-d').
+            'dynamo-j2' uses Jinja2 templates, 'dynamo-python' uses Dynamo's Python config modifiers,
+            'llm-d' generates Helm values for llm-d-modelservice chart.
+        use_dynamo_generator: If True, use Dynamo's Python config modifiers
+            (equivalent to deployment_target='dynamo-python'). Cannot be combined
+            with an explicit deployment_target.
 
     Returns:
         Dictionary mapping artifact names to their content
     """
+    if use_dynamo_generator and deployment_target is not None:
+        raise ValueError(
+            "Cannot specify both use_dynamo_generator=True and "
+            f"deployment_target='{deployment_target}'. Use one or the other."
+        )
+    if use_dynamo_generator:
+        deployment_target = "dynamo-python"
+    elif deployment_target is None:
+        deployment_target = "dynamo-j2"
+
     logger = logging.getLogger(__name__)
     artifacts = render_backend_templates(
         params,
         backend,
         templates_dir,
         backend_version,
-        use_dynamo_generator=use_dynamo_generator,
+        deployment_target=deployment_target,
     )
 
     if output_dir:
@@ -565,6 +580,7 @@ def generate_naive_config(
     backend: str = "trtllm",
     output_dir: str | None = None,
     backend_version: str | None = None,
+    deployment_target: str = "dynamo-j2",
 ) -> dict[str, Any]:
     """
     Generate a naive agg configuration without SLA optimization.
@@ -583,6 +599,7 @@ def generate_naive_config(
             are generated but not saved to disk.
         backend_version: Optional backend version for version-specific templates.
             If None, uses the latest available version.
+        deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', or 'llm-d').
 
     Returns:
         Dictionary containing:
@@ -654,7 +671,9 @@ def generate_naive_config(
         logger.info("Saved generator config to %s", generator_config_path)
 
     # Generate backend artifacts
-    artifacts = render_backend_templates(generator_params, backend, None, backend_version)
+    artifacts = render_backend_templates(
+        generator_params, backend, None, backend_version, deployment_target=deployment_target
+    )
 
     if actual_output_dir:
         params_obj = generator_params.get("params", {})

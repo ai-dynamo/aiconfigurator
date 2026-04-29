@@ -175,7 +175,7 @@ def test_cli_default_build_subset(case: dict):
         raise AssertionError(f"CLI default failed:\n{combined}")
 
     combined_output = f"{completed.stdout}\n{completed.stderr}"
-    assert "Dynamo aiconfigurator Final Results" in combined_output
+    assert "AIConfigurator Final Results" in combined_output
     assert f"Model: {case['model_path']}" in combined_output
     assert f"Total GPUs: {case['total_gpus']}" in combined_output
 

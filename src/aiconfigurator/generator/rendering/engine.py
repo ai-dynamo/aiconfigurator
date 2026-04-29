@@ -109,7 +109,7 @@ def render_backend_templates(
     backend: str,
     templates_dir: Optional[str] = None,
     version: Optional[str] = None,
-    use_dynamo_generator: bool = False,
+    deployment_target: str = "dynamo-j2",
 ) -> dict[str, str]:
     """
     Render templates for a specific backend with version-specific template selection.
@@ -119,6 +119,7 @@ def render_backend_templates(
         backend: Backend name (e.g., 'trtllm', 'vllm', 'sglang')
         templates_dir: Directory containing backend-specific template directories
         version: Version string (e.g., '1.1.0rc5'). If None, uses default templates
+        deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', or 'llm-d')
 
     Returns:
         Dictionary mapping template names to rendered content
@@ -339,13 +340,13 @@ def render_backend_templates(
             rendered_templates["cli_args_agg"] = cli
 
     # ── Translate: append --trtllm.* dynamic flags from extra_engine_args ──
-    # When the profiler path is active (use_dynamo_generator=True) and the
-    # backend is trtllm, convert the rendered extra_engine_args YAML into
-    # --trtllm.<key>.<subkey> <value> flags and merge them into cli_args.
+    # When the dynamo-python path is active and the backend is trtllm, convert
+    # the rendered extra_engine_args YAML into --trtllm.<key>.<subkey> <value>
+    # flags and merge them into cli_args.
     # Note: list-typed values (e.g. cuda_graph_config.batch_sizes) are skipped
     # because dynamo's infer_type cannot round-trip lists; the engine uses its
     # built-in defaults for those fields.
-    if use_dynamo_generator and backend == "trtllm":
+    if deployment_target == "dynamo-python" and backend == "trtllm":
         from .translate import yaml_to_dynamic_flags
 
         for worker in worker_plan:
@@ -377,17 +378,25 @@ def render_backend_templates(
     context["decode_gpu"] = decode_gpu
     context["agg_gpu"] = agg_gpu
 
-    # Render auxiliary templates (k8s deploy, benchmark, and run script)
-
-    # k8s deploy: single file
-    if use_dynamo_generator:
-        # use dynamo planner profiler's config generator to generate k8s config
+    # Render auxiliary templates based on deployment target
+    if deployment_target == "llm-d":
+        # llm-d deployment: render Helm values for llm-d-modelservice chart
+        llmd_values_aux = template_path / "llm-d-values.yaml.j2"
+        if llmd_values_aux.exists():
+            try:
+                tmpl = env.get_template("llm-d-values.yaml.j2")
+                rendered = tmpl.render(**context)
+                rendered_templates["llm-d-values.yaml"] = rendered
+            except Exception as e:
+                logger.warning(f"Failed to render template llm-d-values.yaml.j2: {e}")
+    elif deployment_target == "dynamo-python":
+        # Dynamo deployment using Dynamo's Python config modifiers
         try:
             rendered_templates["k8s_deploy.yaml"] = _generate_k8s_via_dynamo(param_values, backend, context)
         except Exception as e:
             logger.warning(f"Failed to generate k8s config via Dynamo: {e}")
     else:
-        # use the j2 templates in AIC to generate k8s config
+        # Dynamo deployment using Jinja2 templates (default: dynamo-j2)
         k8s_aux = template_path / "k8s_deploy.yaml.j2"
         if k8s_aux.exists():
             try:
@@ -407,26 +416,28 @@ def render_backend_templates(
             except Exception as e:
                 logger.warning(f"Failed to render template k8s_deploy.yaml.j2: {e}")
 
-    # benchmark job: single file from shared benchmark template folder
-    bench_dir = _TEMPLATE_ROOT / "benchmark"
-    bench_aux = bench_dir / "k8s_bench.yaml.j2"
-    if bench_aux.exists():
-        try:
-            tmpl = env.get_template("k8s_bench.yaml.j2")
-            rendered = tmpl.render(**context)
-            rendered_templates["k8s_bench.yaml"] = rendered
-        except Exception as e:
-            logger.warning(f"Failed to render template k8s_bench.yaml.j2: {e}")
+    # Benchmark templates (Dynamo-specific)
+    if deployment_target in ("dynamo-j2", "dynamo-python"):
+        # benchmark job: single file from shared benchmark template folder
+        bench_dir = _TEMPLATE_ROOT / "benchmark"
+        bench_aux = bench_dir / "k8s_bench.yaml.j2"
+        if bench_aux.exists():
+            try:
+                tmpl = env.get_template("k8s_bench.yaml.j2")
+                rendered = tmpl.render(**context)
+                rendered_templates["k8s_bench.yaml"] = rendered
+            except Exception as e:
+                logger.warning(f"Failed to render template k8s_bench.yaml.j2: {e}")
 
-    # benchmark run script: single file from shared benchmark template folder
-    bench_run_aux = bench_dir / "bench_run.sh.j2"
-    if bench_run_aux.exists():
-        try:
-            tmpl = env.get_template("bench_run.sh.j2")
-            rendered = tmpl.render(**context)
-            rendered_templates["bench_run.sh"] = rendered
-        except Exception as e:
-            logger.warning(f"Failed to render template bench_run.sh.j2: {e}")
+        # benchmark run script: single file from shared benchmark template folder
+        bench_run_aux = bench_dir / "bench_run.sh.j2"
+        if bench_run_aux.exists():
+            try:
+                tmpl = env.get_template("bench_run.sh.j2")
+                rendered = tmpl.render(**context)
+                rendered_templates["bench_run.sh"] = rendered
+            except Exception as e:
+                logger.warning(f"Failed to render template bench_run.sh.j2: {e}")
 
     # run scripts: generate per-node scripts when disagg; single when agg
     run_aux = template_path / "run.sh.j2"
@@ -784,6 +795,30 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     ]:
         if nested not in context or not isinstance(context.get(nested), dict):
             context[nested] = {}
+
+    # Extract LlmdConfig for llm-d deployment target
+    llmd_config = param_values.get("LlmdConfig", {})
+    if isinstance(llmd_config, dict):
+        context["LlmdConfig"] = dict(llmd_config)
+
+    # Support top-level worker counts and parallelism settings (for backward compatibility and testing)
+    # These override WorkerConfig values if present
+    for key in [
+        "prefill_workers",
+        "decode_workers",
+        "agg_workers",
+        "prefill_tensor_parallel_size",
+        "decode_tensor_parallel_size",
+        "agg_tensor_parallel_size",
+        "prefill_data_parallel_size",
+        "decode_data_parallel_size",
+        "agg_data_parallel_size",
+        "prefill_cli_args_list",
+        "decode_cli_args_list",
+        "agg_cli_args_list",
+    ]:
+        if key in param_values:
+            context[key] = param_values[key]
 
     return context
 

@@ -63,6 +63,14 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
             "Example: default,/opt/aic/systems,/data/aic/systems."
         ),
     )
+    common_parser.add_argument(
+        "--deployment-target",
+        type=str,
+        choices=["dynamo-j2", "dynamo-python", "llm-d"],
+        default="dynamo-j2",
+        help="Deployment target platform. Options: dynamo-j2 (default, Jinja2 templates), "
+        "dynamo-python (Dynamo Python config modifiers), llm-d (llm-d Helm values).",
+    )
     add_generator_override_arguments(common_parser)
     return common_parser
 
@@ -1154,6 +1162,7 @@ def _run_generate_mode(args):
         system=args.system,
         backend=args.backend,
         output_dir=args.save_dir or "./output",
+        deployment_target=getattr(args, "deployment_target", "dynamo-j2"),
     )
 
     # Extract result data for CLI output
@@ -1529,7 +1538,7 @@ def main(args):
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    logger.info(f"Loading Dynamo AIConfigurator version: {__version__}")
+    logger.info(f"Loading AIConfigurator version: {__version__}")
     logger.info(f"Number of top configurations to output: {args.top_n} (change with --top-n)")
 
     # Handle generate mode separately (no sweeping)
@@ -1624,7 +1633,7 @@ if __name__ == "__main__":
     if generator_cli_helper(sys.argv[1:]):
         sys.exit(0)
     parser = argparse.ArgumentParser(
-        description="Dynamo AIConfigurator for Disaggregated Serving Deployment",
+        description="AIConfigurator for Disaggregated Serving Deployment",
         epilog=_USAGE_EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

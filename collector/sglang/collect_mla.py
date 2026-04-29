@@ -129,8 +129,9 @@ class MockModelRunner:
         self.sliding_window_size = None
         self.is_hybrid = False
         self.model_config = MockModelConfig(num_attention_heads=num_attention_heads, scaling=scaling)
-        # Keep attribute for compatibility across sglang versions (older code ignores it)
+        # Keep attributes for compatibility across sglang versions (older code ignores them)
         self.is_hybrid_swa = self.model_config.is_hybrid_swa
+        self.attn_cp_size = 1  # Context parallelism size; required by FlashAttentionBackend in sglang >=0.5.10
         self.server_args = MockServerArgs(kv_cache_dtype, page_size)
         self.use_mla_backend = True
 
