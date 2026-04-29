@@ -283,11 +283,6 @@ def _build_comprehensive_test_data():
 
 # Module-level singleton: the PerfDatabase is built once (including the expensive
 # _correct_data + _extrapolate_data_grid passes in __init__) and reused by ALL tests.
-#
-# *** THIS OBJECT IS SHARED — DO NOT MUTATE IT IN TESTS. ***
-#
-# If a test must modify the db (e.g. to test _correct_data), it MUST save the
-# original value before the mutation and restore it in a try/finally block.
 _comprehensive_db_singleton: PerfDatabase | None = None
 
 
@@ -372,7 +367,7 @@ def mutable_comprehensive_perf_db():
     _correct_data). Each invocation returns a fresh copy so mutations cannot
     leak between tests.
 
-    Slower than the shared fixture (~100ms for deepcopy) but much faster than
+    Slower than the shared fixture (~1s for deepcopy) but much faster than
     re-running PerfDatabase.__init__ from scratch.
     """
     import copy
