@@ -129,14 +129,8 @@ def _get_system_config(system_name: str) -> dict[str, Any]:
                 continue
             with open(system_yaml_path) as f:
                 system_spec = yaml.safe_load(f)
-            result["gpus_per_node"] = int(
-                system_spec.get("node", {}).get(
-                    "num_gpus_per_node", _DEFAULT_GPUS_PER_NODE
-                )
-            )
-            result["vram_per_gpu"] = int(
-                system_spec.get("gpu", {}).get("mem_capacity", _DEFAULT_VRAM_BYTES)
-            )
+            result["gpus_per_node"] = int(system_spec.get("node", {}).get("num_gpus_per_node", _DEFAULT_GPUS_PER_NODE))
+            result["vram_per_gpu"] = int(system_spec.get("gpu", {}).get("mem_capacity", _DEFAULT_VRAM_BYTES))
             break
     except Exception as e:
         logger.warning(f"Could not read system config for {system_name}: {e}")
@@ -216,9 +210,7 @@ def _estimate_model_weight_bytes(model_path: str) -> int:
 
     except Exception as e:
         logger.exception("Could not estimate model size for %s.", model_path)
-        raise RuntimeError(
-            f"Model {model_path!r} not found or config unavailable"
-        ) from e
+        raise RuntimeError(f"Model {model_path!r} not found or config unavailable") from e
 
 
 def _calculate_min_tp(
@@ -348,9 +340,7 @@ def build_naive_generator_params(
         optimization_type=optimization_type,
     )
 
-    strategy = (
-        "TP" if not is_moe else ("DEP" if parallel["data_parallel_size"] > 1 else "TEP")
-    )
+    strategy = "TP" if not is_moe else ("DEP" if parallel["data_parallel_size"] > 1 else "TEP")
     logger.info(
         "Naive config: model=%s, strategy=%s=%d, optimization_type=%s, mode=%s",
         model_name,
@@ -388,9 +378,7 @@ def build_naive_generator_params(
                 total_gpus,
             )
         prefill_workers = 1
-        decode_workers = (
-            max(1, (total_gpus // min_gpus) - 1) if total_gpus > min_gpus else 1
-        )
+        decode_workers = max(1, (total_gpus // min_gpus) - 1) if total_gpus > min_gpus else 1
         params = {
             "ServiceConfig": {
                 "model_name": model_name,

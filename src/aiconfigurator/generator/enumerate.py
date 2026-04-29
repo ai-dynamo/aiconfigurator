@@ -99,9 +99,7 @@ def check_model_hardware_support(
         )
         return result.disagg_supported
     except Exception:
-        logger.warning(
-            "Support check failed for %s on %s/%s", model_path, system, backend
-        )
+        logger.warning("Support check failed for %s on %s/%s", model_path, system, backend)
         return False
 
 
@@ -452,9 +450,7 @@ def enumerate_profiling_configs(
     # ------------------------------------------------------------------
     # 1. Support check
     # ------------------------------------------------------------------
-    aic_supported = check_model_hardware_support(
-        model_path, system, backend, backend_version=backend_version
-    )
+    aic_supported = check_model_hardware_support(model_path, system, backend, backend_version=backend_version)
     logger.info(
         "AIC disagg support for %s on %s/%s: %s",
         model_path,
