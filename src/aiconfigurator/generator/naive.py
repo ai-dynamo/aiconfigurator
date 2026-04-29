@@ -260,7 +260,7 @@ def _calculate_min_tp(
 
     fits = tp <= max_tp
     if not fits:
-	    logger.warning(
+        logger.warning(
             f"Model requires TP={tp} to fit in memory, but max TP is {max_tp} "
             f"(gpus_per_node={gpus_per_node}, total_gpus={total_gpus}, "
             f"allow_multi_node={allow_multi_node}). "
@@ -274,7 +274,7 @@ def _calculate_min_tp(
         f"TP calculation: model={model_weight_bytes / (1024**3):.2f}GiB, "
         f"vram={vram_per_gpu / (1024**3):.2f}GiB, "
         f"required={required_vram / (1024**3):.2f}GiB (1.5x), "
-        f"min_tp={min_tp}, selected_tp={tp}"
+        f"min_tp={min_tp}, selected_tp={selected_tp}, fit={fits}, required_tp={tp}"
     )
     return selected_tp, fits, tp
 
