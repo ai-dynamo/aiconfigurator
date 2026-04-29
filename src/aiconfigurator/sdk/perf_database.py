@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import functools
 import importlib.resources as pkg_resources
@@ -2303,6 +2304,7 @@ class PerfDatabase:
         # Uses same dict structure as MLA so interpolation/query can be reused
         self._context_dsa_module_data = _load_op_data(PerfDataFilename.dsa_context_module)
         self._generation_dsa_module_data = _load_op_data(PerfDataFilename.dsa_generation_module)
+        self._raw_context_dsa_module_data = copy.deepcopy(self._context_dsa_module_data)
 
         # TensorRT-LLM wideep path
         if backend == "trtllm":
@@ -3500,6 +3502,75 @@ class PerfDatabase:
                 latency = self._interp_2d_1d(x, y, z, data, method)
 
             return {"latency": latency, "power": 0.0, "energy": 0.0}
+
+    def _interp_dsa_context_topk_piecewise_from_raw(
+        self,
+        num_heads: int,
+        full_s: int,
+        b: int,
+        dsa_dict: dict | None,
+        index_topk: int | None,
+    ) -> dict | None:
+        """
+        Interpolate raw DSA context data without crossing the index_topk regime boundary.
+
+        DSA context uses a different kernel path when kv_len crosses index_topk:
+        <= topk can skip indexer logits/topk, while > topk enables that path.
+        A smooth interpolation from 2048 to 4096 can therefore badly
+        underestimate points just above topk. This helper only applies when
+        the exact raw (num_heads, batch) curve has at least two same-regime
+        anchors. Points just above index_topk use the first two right-regime
+        anchors for same-regime extrapolation instead of falling back to cubic
+        interpolation across the topk boundary.
+        """
+        if index_topk is None or dsa_dict is None or num_heads not in dsa_dict:
+            return None
+
+        exact_head_data = dsa_dict[num_heads]
+        curve = {
+            seq_len: batch_dict[b]
+            for seq_len, batch_dict in exact_head_data.items()
+            if isinstance(batch_dict, dict) and b in batch_dict
+        }
+        if full_s in curve:
+            value = curve[full_s]
+            if isinstance(value, dict):
+                return {
+                    "latency": self._get_value(value, "latency"),
+                    "power": self._get_value(value, "power"),
+                    "energy": self._get_value(value, "energy"),
+                }
+            return {"latency": float(value), "power": 0.0, "energy": 0.0}
+
+        if full_s <= index_topk:
+            same_regime_keys = sorted(seq_len for seq_len in curve if seq_len <= index_topk)
+        else:
+            same_regime_keys = sorted(seq_len for seq_len in curve if seq_len > index_topk)
+
+        if len(same_regime_keys) < 2:
+            return None
+
+        if full_s < same_regime_keys[0]:
+            if full_s <= index_topk:
+                return None
+            left, right = same_regime_keys[0], same_regime_keys[1]
+        elif full_s > same_regime_keys[-1]:
+            return None
+        else:
+            left, right = self._nearest_1d_point_helper(full_s, same_regime_keys)
+        left_value = curve[left]
+        right_value = curve[right]
+
+        def _interp_metric(metric: str) -> float:
+            left_metric = self._get_value(left_value, metric)
+            right_metric = self._get_value(right_value, metric)
+            return self._interp_1d([left, right], [left_metric, right_metric], full_s)
+
+        return {
+            "latency": _interp_metric("latency"),
+            "power": _interp_metric("power"),
+            "energy": _interp_metric("energy"),
+        }
 
     def _get_sample_leaf_value(self, data: dict):
         """Get a sample leaf value from nested dict to determine format."""
@@ -6815,7 +6886,17 @@ class PerfDatabase:
                     )
                 dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
                 full_s = s + prefix
-                result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
+                raw_dsa_dict = None
+                raw_dsa_module_data = getattr(self, "_raw_context_dsa_module_data", None)
+                if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
+                    raw_dsa_dict = raw_dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][
+                        architecture
+                    ]
+                result = self._interp_dsa_context_topk_piecewise_from_raw(
+                    num_heads, full_s, b, raw_dsa_dict, index_topk
+                )
+                if result is None:
+                    result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
                 if prefix > 0:
