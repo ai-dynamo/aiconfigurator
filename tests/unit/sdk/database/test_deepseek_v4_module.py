@@ -202,13 +202,24 @@ class TestDeepSeekV4AttentionModule:
                 12288: {2: _deepseek_v4_value(100.0)},
             }
         }
-        comprehensive_perf_db._raw_context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(4, raw_attn_dict), common.PerfDataFilename.deepseek_v4_context_module, "raw"
+        # Save and restore — comprehensive_perf_db is shared across all tests
+        monkeypatch.setattr(
+            comprehensive_perf_db,
+            "_raw_context_deepseek_v4_attention_module_data",
+            LoadedOpData(
+                _context_deepseek_v4_data(4, raw_attn_dict),
+                common.PerfDataFilename.deepseek_v4_context_module,
+                "raw",
+            ),
         )
-        comprehensive_perf_db._context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(4, extrapolated_attn_dict),
-            common.PerfDataFilename.deepseek_v4_context_module,
-            "extrapolated",
+        monkeypatch.setattr(
+            comprehensive_perf_db,
+            "_context_deepseek_v4_attention_module_data",
+            LoadedOpData(
+                _context_deepseek_v4_data(4, extrapolated_attn_dict),
+                common.PerfDataFilename.deepseek_v4_context_module,
+                "extrapolated",
+            ),
         )
 
         def fail_interp_3d(*args, **kwargs):
@@ -290,10 +301,11 @@ class TestDeepSeekV4AttentionModule:
         assert fp8[2] < bf16[2]
 
 
-def test_deepseek_v4_static_sol_and_hybrid_run_end_to_end(comprehensive_perf_db):
-    comprehensive_perf_db.system_spec["gpu"]["mem_capacity"] = 288400343040
-    comprehensive_perf_db.system_spec["misc"]["nccl_mem"] = {1: 0, 2: 0, 4: 0, 8: 0}
-    comprehensive_perf_db.system_spec["misc"]["other_mem"] = 0
+def test_deepseek_v4_static_sol_and_hybrid_run_end_to_end(mutable_comprehensive_perf_db):
+    db = mutable_comprehensive_perf_db
+    db.system_spec["gpu"]["mem_capacity"] = 288400343040
+    db.system_spec["misc"]["nccl_mem"] = {1: 0, 2: 0, 4: 0, 8: 0}
+    db.system_spec["misc"]["other_mem"] = 0
     model_config = config.ModelConfig(
         tp_size=1,
         moe_tp_size=1,
@@ -307,7 +319,7 @@ def test_deepseek_v4_static_sol_and_hybrid_run_end_to_end(comprehensive_perf_db)
     runtime = RuntimeConfig(batch_size=1, beam_width=1, isl=128, osl=4, prefix=0)
 
     for mode in (common.DatabaseMode.SOL, common.DatabaseMode.HYBRID):
-        comprehensive_perf_db.set_default_database_mode(mode)
-        summary = backend.run_static(model, comprehensive_perf_db, runtime, mode="static", stride=1)
+        db.set_default_database_mode(mode)
+        summary = backend.run_static(model, db, runtime, mode="static", stride=1)
         assert sum(summary.get_context_latency_dict().values()) > 0
         assert sum(summary.get_generation_latency_dict().values()) > 0

@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import tempfile
 from collections import defaultdict
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -119,13 +122,9 @@ def stub_perf_db(tmp_path, monkeypatch):
     return PerfDatabase(system, backend, version, systems_dir)
 
 
-@pytest.fixture
-def comprehensive_perf_db(tmp_path, monkeypatch):
-    """
-    Create a PerfDatabase with comprehensive test data for all query methods.
-    """
-    # System spec with all required fields
-    dummy_system_spec = {
+def _build_comprehensive_test_data():
+    """Build all the dummy data dicts for comprehensive_perf_db."""
+    system_spec = {
         "data_dir": "data",
         "misc": {"nccl_version": "v1"},
         "gpu": {
@@ -142,15 +141,8 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
         },
     }
 
-    # Create the yaml file
-    yaml_file = tmp_path / "test_system.yaml"
-    with open(yaml_file, "w") as f:
-        yaml.dump(dummy_system_spec, f)
-
-    monkeypatch.setattr("yaml.load", lambda stream, Loader=None: dummy_system_spec)  # noqa: N803
-
     # Comprehensive GEMM data with energy
-    dummy_gemm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+    gemm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     for quant_mode in [common.GEMMQuantMode.bfloat16, common.GEMMQuantMode.fp8]:
         for m in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
             for n in [128, 256, 512, 1024]:
@@ -158,14 +150,14 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
                     latency = 0.1 + m * 0.001 + n * 0.0001 + k * 0.00001
                     power = 5.0 + m * 0.01  # Dummy power value
                     energy = power * latency
-                    dummy_gemm_data[quant_mode][m][n][k] = {
+                    gemm_data[quant_mode][m][n][k] = {
                         "latency": latency,
                         "power": power,
                         "energy": energy,
                     }
 
     # Context attention data
-    dummy_context_attention_data = defaultdict(
+    context_attention_data = defaultdict(
         lambda: defaultdict(
             lambda: defaultdict(
                 lambda: defaultdict(
@@ -182,12 +174,12 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
                         for n in [4, 8, 16, 32]:
                             for s in [16, 32, 64, 128, 256]:
                                 for b in [1, 2, 4, 8]:
-                                    dummy_context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][
-                                        window_size
-                                    ][n][s][b] = 0.01 * (n * s * b) / 1000.0
+                                    context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][
+                                        s
+                                    ][b] = 0.01 * (n * s * b) / 1000.0
 
     # Generation attention data
-    dummy_generation_attention_data = defaultdict(
+    generation_attention_data = defaultdict(
         lambda: defaultdict(
             lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
         )
@@ -201,12 +193,12 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
                         if kv_n <= n:
                             for b in [1, 2, 4, 8, 16]:
                                 for s in [1, 16, 32, 64, 128, 256, 512, 1024]:
-                                    dummy_generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][
-                                        s
-                                    ] = 0.001 * (n * b * s) / 1000.0
+                                    generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = (
+                                        0.001 * (n * b * s) / 1000.0
+                                    )
 
     # MoE data
-    dummy_moe_data = defaultdict(
+    moe_data = defaultdict(
         lambda: defaultdict(
             lambda: defaultdict(
                 lambda: defaultdict(
@@ -226,12 +218,12 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
                             for moe_tp in [1, 2]:
                                 for moe_ep in [1, 2]:
                                     for num_tokens in [1, 2, 4, 8, 16, 32]:
-                                        dummy_moe_data[quant_mode][workload][topk][num_experts][hidden_size][
-                                            inter_size
-                                        ][moe_tp][moe_ep][num_tokens] = 0.1 * num_tokens
+                                        moe_data[quant_mode][workload][topk][num_experts][hidden_size][inter_size][
+                                            moe_tp
+                                        ][moe_ep][num_tokens] = 0.1 * num_tokens
 
     # Context MLA data
-    dummy_context_mla_data = defaultdict(
+    context_mla_data = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
     )
     for quant_mode in [common.FMHAQuantMode.bfloat16]:
@@ -239,73 +231,150 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
             for num_heads in [16, 32, 64, 128]:
                 for s in [16, 32, 64, 128]:
                     for b in [1, 2, 4, 8]:
-                        dummy_context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b] = 0.0001 * s * b * num_heads
+                        context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b] = 0.0001 * s * b * num_heads
 
     # Generation MLA data
-    dummy_generation_mla_data = defaultdict(
+    generation_mla_data = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     )
     for kv_cache_dtype in [common.KVCacheQuantMode.bfloat16]:
         for num_heads in [16, 32, 64, 128]:
             for b in [1, 2, 4, 8]:
                 for s in [1, 16, 32, 64, 128]:
-                    dummy_generation_mla_data[kv_cache_dtype][num_heads][b][s] = 0.00001 * b * s * num_heads
+                    generation_mla_data[kv_cache_dtype][num_heads][b][s] = 0.00001 * b * s * num_heads
 
     # MLA BMM data
-    dummy_mla_bmm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+    mla_bmm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     for quant_mode in [common.GEMMQuantMode.bfloat16, common.GEMMQuantMode.fp8]:
         for op_name in ["mla_gen_pre", "mla_gen_post"]:
             for num_heads in [1, 2, 4, 8]:
                 for num_tokens in [1, 2, 4, 8, 16, 32]:
-                    dummy_mla_bmm_data[quant_mode][op_name][num_heads][num_tokens] = 0.01 * num_heads * num_tokens
+                    mla_bmm_data[quant_mode][op_name][num_heads][num_tokens] = 0.01 * num_heads * num_tokens
 
     # Custom allreduce data
-    dummy_custom_allreduce_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+    custom_allreduce_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     for dtype in [common.CommQuantMode.half]:
         for tp_size in [1, 2, 4, 8]:
             for strategy in ["AUTO"]:
                 for msg_size in [512, 1024, 2048, 4096, 8192]:
-                    dummy_custom_allreduce_data[dtype][tp_size][strategy][msg_size] = 0.001 * msg_size * tp_size
+                    custom_allreduce_data[dtype][tp_size][strategy][msg_size] = 0.001 * msg_size * tp_size
 
     # NCCL data
-    dummy_nccl_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+    nccl_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     for dtype in [common.CommQuantMode.half, common.CommQuantMode.int8]:  # Use enum objects as keys
         for operation in ["all_gather", "alltoall", "reduce_scatter"]:
             for num_gpus in [1, 2, 4, 8]:
                 for msg_size in [512, 1024, 2048, 4096]:
-                    dummy_nccl_data[dtype][operation][num_gpus][msg_size] = 0.001 * msg_size * num_gpus
+                    nccl_data[dtype][operation][num_gpus][msg_size] = 0.001 * msg_size * num_gpus
 
-    # Apply all patches
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_gemm_data", lambda path: dummy_gemm_data)
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_context_attention_data",
-        lambda path: dummy_context_attention_data,
-    )
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_generation_attention_data",
-        lambda path: dummy_generation_attention_data,
-    )
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_custom_allreduce_data",
-        lambda path: dummy_custom_allreduce_data,
-    )
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_moe_data",
-        lambda path: (dummy_moe_data, dummy_moe_data),
-    )
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_context_mla_data",
-        lambda path: dummy_context_mla_data,
-    )
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_generation_mla_data",
-        lambda path: dummy_generation_mla_data,
-    )
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_mla_bmm_data", lambda path: dummy_mla_bmm_data)
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_nccl_data", lambda path: dummy_nccl_data)
+    return {
+        "system_spec": system_spec,
+        "gemm_data": gemm_data,
+        "context_attention_data": context_attention_data,
+        "generation_attention_data": generation_attention_data,
+        "moe_data": moe_data,
+        "context_mla_data": context_mla_data,
+        "generation_mla_data": generation_mla_data,
+        "mla_bmm_data": mla_bmm_data,
+        "custom_allreduce_data": custom_allreduce_data,
+        "nccl_data": nccl_data,
+    }
 
-    # DSA module-level attention data (same dict structure as MLA)
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_context_dsa_module_data", lambda path: None)
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_generation_dsa_module_data", lambda path: None)
 
-    return PerfDatabase("test_system", "trtllm", "v1", str(tmp_path))
+# Module-level singleton: the PerfDatabase is built once (including the expensive
+# _correct_data + _extrapolate_data_grid passes in __init__) and reused by ALL tests.
+#
+# *** THIS OBJECT IS SHARED — DO NOT MUTATE IT IN TESTS. ***
+#
+# If a test must modify the db (e.g. to test _correct_data), it MUST save the
+# original value before the mutation and restore it in a try/finally block.
+_comprehensive_db_singleton: PerfDatabase | None = None
+
+
+def _get_comprehensive_db_singleton() -> PerfDatabase:
+    """Build and cache a fully-initialized PerfDatabase singleton."""
+    global _comprehensive_db_singleton
+    if _comprehensive_db_singleton is not None:
+        return _comprehensive_db_singleton
+
+    cached = _build_comprehensive_test_data()
+    system_spec = cached["system_spec"]
+
+    tmp_dir = tempfile.mkdtemp()
+    yaml_file = os.path.join(tmp_dir, "test_system.yaml")
+    with open(yaml_file, "w") as f:
+        yaml.dump(system_spec, f)
+
+    # Use unittest.mock.patch (not monkeypatch) so we can call this outside a fixture
+    patches = [
+        patch("yaml.load", side_effect=lambda stream, Loader=None: system_spec),  # noqa: N803
+        patch("aiconfigurator.sdk.perf_database.load_gemm_data", return_value=cached["gemm_data"]),
+        patch(
+            "aiconfigurator.sdk.perf_database.load_context_attention_data",
+            return_value=cached["context_attention_data"],
+        ),
+        patch(
+            "aiconfigurator.sdk.perf_database.load_generation_attention_data",
+            return_value=cached["generation_attention_data"],
+        ),
+        patch(
+            "aiconfigurator.sdk.perf_database.load_custom_allreduce_data",
+            return_value=cached["custom_allreduce_data"],
+        ),
+        patch(
+            "aiconfigurator.sdk.perf_database.load_moe_data",
+            return_value=(cached["moe_data"], cached["moe_data"]),
+        ),
+        patch("aiconfigurator.sdk.perf_database.load_context_mla_data", return_value=cached["context_mla_data"]),
+        patch(
+            "aiconfigurator.sdk.perf_database.load_generation_mla_data",
+            return_value=cached["generation_mla_data"],
+        ),
+        patch("aiconfigurator.sdk.perf_database.load_mla_bmm_data", return_value=cached["mla_bmm_data"]),
+        patch("aiconfigurator.sdk.perf_database.load_nccl_data", return_value=cached["nccl_data"]),
+        patch("aiconfigurator.sdk.perf_database.load_context_dsa_module_data", return_value=None),
+        patch("aiconfigurator.sdk.perf_database.load_generation_dsa_module_data", return_value=None),
+    ]
+
+    for p in patches:
+        p.start()
+    try:
+        _comprehensive_db_singleton = PerfDatabase("test_system", "trtllm", "v1", tmp_dir)
+    finally:
+        for p in patches:
+            p.stop()
+
+    return _comprehensive_db_singleton
+
+
+@pytest.fixture
+def comprehensive_perf_db():
+    """
+    Return a **shared, read-only** PerfDatabase with comprehensive test data.
+
+    This is a singleton — the same object is returned to every test.
+    This avoids the expensive __init__ (data loading + correction + extrapolation)
+    that previously ran per-test and dominated the test suite runtime.
+
+    DO NOT mutate the returned object. If a test needs to modify the db,
+    use the ``mutable_comprehensive_perf_db`` fixture instead.
+    """
+    return _get_comprehensive_db_singleton()
+
+
+@pytest.fixture
+def mutable_comprehensive_perf_db():
+    """
+    Return an independent deep copy of the comprehensive PerfDatabase.
+
+    Use this instead of ``comprehensive_perf_db`` when the test needs to mutate
+    the database (e.g. replacing data dicts, modifying system_spec, calling
+    _correct_data). Each invocation returns a fresh copy so mutations cannot
+    leak between tests.
+
+    Slower than the shared fixture (~100ms for deepcopy) but much faster than
+    re-running PerfDatabase.__init__ from scratch.
+    """
+    import copy
+
+    return copy.deepcopy(_get_comprehensive_db_singleton())

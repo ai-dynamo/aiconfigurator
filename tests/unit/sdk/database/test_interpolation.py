@@ -298,47 +298,48 @@ class TestExtrapolateDataGrid:
 class TestCorrectData:
     """Test cases for _correct_data method."""
 
-    def test_correct_gemm_data(self, comprehensive_perf_db, caplog):
+    def test_correct_gemm_data(self, mutable_comprehensive_perf_db, caplog):
         """Test that _correct_data adjusts GEMM data based on SOL."""
-        # Manually set a GEMM value that's too optimistic (lower than SOL)
+        db = mutable_comprehensive_perf_db
         quant_mode = common.GEMMQuantMode.bfloat16
         m, n, k = 64, 128, 256
 
         # Calculate what SOL should be
-        sol_value = comprehensive_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
+        sol_value = db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
 
         # Set an artificially low value
-        comprehensive_perf_db._gemm_data[quant_mode][m][n][k] = sol_value * 0.5
+        db._gemm_data[quant_mode][m][n][k] = sol_value * 0.5
 
         # Run correction
         with caplog.at_level("DEBUG"):
-            comprehensive_perf_db._correct_data()
+            db._correct_data()
 
         # Check that the value was corrected
-        assert comprehensive_perf_db._gemm_data[quant_mode][m][n][k] >= sol_value
+        assert db._gemm_data[quant_mode][m][n][k] >= sol_value
         assert f"sol {sol_value} > perf_db" in caplog.text or "gemm quant" in caplog.text
 
-    def test_correct_generation_attention_data(self, comprehensive_perf_db, caplog):
+    def test_correct_generation_attention_data(self, mutable_comprehensive_perf_db, caplog):
         """Test that _correct_data adjusts generation attention data."""
+        db = mutable_comprehensive_perf_db
         kv_cache_quant_mode = common.KVCacheQuantMode.bfloat16
         n_kv = 0  # MHA case
         n, b, s = 16, 4, 64
 
         # Calculate SOL
-        sol_value = comprehensive_perf_db.query_generation_attention(
+        sol_value = db.query_generation_attention(
             b, s, n, n, kv_cache_quant_mode, database_mode=common.DatabaseMode.SOL
         )
 
         # Set an artificially low value
-        comprehensive_perf_db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][s] = sol_value * 0.5
+        gen_data = db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b]
+        gen_data[s] = sol_value * 0.5
 
         # Run correction
         with caplog.at_level("DEBUG"):
-            comprehensive_perf_db._correct_data()
+            db._correct_data()
 
         # Check that the value was corrected
-        corrected_value = comprehensive_perf_db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][s]
-        assert corrected_value >= sol_value
+        assert gen_data[s] >= sol_value
 
 
 class TestUpdateSupportMatrix:

@@ -315,28 +315,29 @@ class TestGenerationMLA:
         assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
 
 
-def test_default_database_mode(comprehensive_perf_db):
+def test_default_database_mode(mutable_comprehensive_perf_db):
     """Test setting and getting default database mode, and that query cache is cleared when default mode is changed."""
+    db = mutable_comprehensive_perf_db
     # Initially should be SILICON
-    assert comprehensive_perf_db.get_default_database_mode() == common.DatabaseMode.SILICON
+    assert db.get_default_database_mode() == common.DatabaseMode.SILICON
 
-    non_sol_result = comprehensive_perf_db.query_context_attention(
+    non_sol_result = db.query_context_attention(
         1, 32, 0, 8, 4, common.KVCacheQuantMode.bfloat16, common.FMHAQuantMode.bfloat16
     )
-    assert comprehensive_perf_db.query_context_attention.cache_info().currsize >= 1
+    assert db.query_context_attention.cache_info().currsize >= 1
 
     # Set to SOL mode
-    comprehensive_perf_db.set_default_database_mode(common.DatabaseMode.SOL)
-    assert comprehensive_perf_db.get_default_database_mode() == common.DatabaseMode.SOL
+    db.set_default_database_mode(common.DatabaseMode.SOL)
+    assert db.get_default_database_mode() == common.DatabaseMode.SOL
     # Cache should be cleared
-    assert comprehensive_perf_db.query_context_attention.cache_info().currsize == 0
+    assert db.query_context_attention.cache_info().currsize == 0
 
     # Query should use default mode when not specified
-    sol_result = comprehensive_perf_db.query_context_attention(
+    sol_result = db.query_context_attention(
         1, 32, 0, 8, 4, common.KVCacheQuantMode.bfloat16, common.FMHAQuantMode.bfloat16
     )
 
-    cache_info = comprehensive_perf_db.query_context_attention.cache_info()
+    cache_info = db.query_context_attention.cache_info()
     assert cache_info.misses == 1
     assert cache_info.hits == 0
     assert cache_info.currsize == 1
