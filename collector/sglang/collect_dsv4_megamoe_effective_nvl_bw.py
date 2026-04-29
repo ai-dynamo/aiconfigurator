@@ -18,6 +18,7 @@ number of local GPU ranks spawned per node.
 from __future__ import annotations
 
 import argparse
+import csv
 import inspect
 import json
 import os
@@ -393,6 +394,80 @@ def _aggregate_sample_rows(sample_rows: list[dict[str, Any]]) -> list[dict[str, 
     return aggregated
 
 
+PERF_FIELDNAMES = [
+    "framework",
+    "version",
+    "device",
+    "op_name",
+    "kernel_source",
+    "hidden_size",
+    "inter_size",
+    "topk",
+    "num_experts",
+    "moe_ep_size",
+    "routing_mode",
+    "power_law_alpha",
+    "num_tokens_per_rank",
+    "effective_remote_nvl_gbs",
+    "effective_deepgemm_nvl_gbs",
+    "effective_remote_nvl_gbs_p10",
+    "effective_remote_nvl_gbs_p90",
+    "effective_remote_nvl_gbs_std",
+    "max_t_fused_ms_median",
+    "bandwidth_scale",
+    "fixed_overlappable_latency_ms",
+    "num_samples",
+    "source",
+]
+
+
+def _write_perf_csv(
+    *,
+    path: Path,
+    aggregate_rows: list[dict[str, Any]],
+    args: argparse.Namespace,
+    num_ranks: int,
+    device_name: str,
+    source: str,
+) -> None:
+    power_law_alpha = str(args.power_law_alpha) if args.routing_mode == "power-law" else ""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=PERF_FIELDNAMES)
+        writer.writeheader()
+        for row in aggregate_rows:
+            remote = row["cluster_remote_only_effective_nvl_gbs"]
+            deepgemm = row["cluster_deepgemm_effective_nvl_gbs"]
+            max_t = row["max_t_fused_ms"]
+            writer.writerow(
+                {
+                    "framework": args.framework,
+                    "version": args.backend_version,
+                    "device": device_name,
+                    "op_name": "dsv4_megamoe_effective_nvl_bw",
+                    "kernel_source": args.kernel_source,
+                    "hidden_size": args.hidden,
+                    "inter_size": args.intermediate_hidden,
+                    "topk": args.num_topk,
+                    "num_experts": args.num_experts,
+                    "moe_ep_size": num_ranks,
+                    "routing_mode": args.routing_mode,
+                    "power_law_alpha": power_law_alpha,
+                    "num_tokens_per_rank": row["tokens"],
+                    "effective_remote_nvl_gbs": remote["median"],
+                    "effective_deepgemm_nvl_gbs": deepgemm["median"],
+                    "effective_remote_nvl_gbs_p10": remote["p10"],
+                    "effective_remote_nvl_gbs_p90": remote["p90"],
+                    "effective_remote_nvl_gbs_std": remote["std"],
+                    "max_t_fused_ms_median": max_t["median"],
+                    "bandwidth_scale": args.bandwidth_scale,
+                    "fixed_overlappable_latency_ms": args.fixed_overlappable_latency_ms,
+                    "num_samples": row["num_samples"],
+                    "source": source,
+                }
+            )
+
+
 def _run_worker(local_rank: int, num_local_ranks: int, args: argparse.Namespace) -> None:
     import random
 
@@ -633,13 +708,28 @@ def _run_worker(local_rank: int, num_local_ranks: int, args: argparse.Namespace)
                 print(f"Wrote {output_path}", flush=True)
                 sample_summary_rows.append({"tokens": num_tokens, "sample_idx": sample_idx, **aggregate})
 
-    if (multi_case or args.repeat_samples > 1) and rank_idx == 0:
+    if rank_idx == 0 and ((multi_case or args.repeat_samples > 1) or args.perf_output):
         aggregate_summary_rows = _aggregate_sample_rows(sample_summary_rows)
-        (output_dir / "summary.json").write_text(json.dumps(aggregate_summary_rows, indent=2, sort_keys=True) + "\n")
-        (output_dir / "summary_samples.jsonl").write_text(
-            "".join(json.dumps(row, sort_keys=True) + "\n" for row in sample_summary_rows)
-        )
-        print(f"Wrote {output_dir / 'summary.json'}", flush=True)
+        if multi_case or args.repeat_samples > 1:
+            (output_dir / "summary.json").write_text(
+                json.dumps(aggregate_summary_rows, indent=2, sort_keys=True) + "\n"
+            )
+            (output_dir / "summary_samples.jsonl").write_text(
+                "".join(json.dumps(row, sort_keys=True) + "\n" for row in sample_summary_rows)
+            )
+            print(f"Wrote {output_dir / 'summary.json'}", flush=True)
+        if args.perf_output:
+            device_name = args.device_name or torch.cuda.get_device_name(0)
+            source = args.source or str(output_dir)
+            _write_perf_csv(
+                path=args.perf_output,
+                aggregate_rows=aggregate_summary_rows,
+                args=args,
+                num_ranks=num_ranks,
+                device_name=device_name,
+                source=source,
+            )
+            print(f"Wrote {args.perf_output}", flush=True)
 
     if args.hard_exit_after_write:
         os._exit(0)
@@ -684,6 +774,14 @@ def main() -> None:
     parser.add_argument("--repeat-samples", type=int, default=1)
     parser.add_argument("--dump-profile-traces", type=str, default="")
     parser.add_argument("--output", type=Path, default=Path("artifacts/deepgemm_effective_nvl_bw/result.json"))
+    parser.add_argument("--perf-output", type=Path, default=None)
+    parser.add_argument("--framework", type=str, default="SGLang")
+    parser.add_argument("--backend-version", type=str, default="unknown")
+    parser.add_argument("--device-name", type=str, default="")
+    parser.add_argument("--kernel-source", type=str, default="DeepGEMM_fp8_fp4_mega_moe")
+    parser.add_argument("--bandwidth-scale", type=float, default=1.0)
+    parser.add_argument("--fixed-overlappable-latency-ms", type=float, default=0.0)
+    parser.add_argument("--source", type=str, default="")
     parser.add_argument(
         "--hard-exit-after-write",
         action="store_true",
@@ -695,6 +793,10 @@ def main() -> None:
         parser.error("one of --num-tokens or --num-tokens-list is required")
     if args.repeat_samples <= 0:
         parser.error("--repeat-samples must be positive")
+    if args.bandwidth_scale <= 0:
+        parser.error("--bandwidth-scale must be positive")
+    if args.fixed_overlappable_latency_ms < 0:
+        parser.error("--fixed-overlappable-latency-ms must be non-negative")
 
     if args.dump_profile_traces:
         os.makedirs(args.dump_profile_traces, exist_ok=True)

@@ -6,7 +6,7 @@ import math
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.perf_database import LoadedOpData
+from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataNotAvailableError
 
 # Import PerfDatabase and its dependencies
 
@@ -154,6 +154,82 @@ def test_query_trtllm_alltoall_normalizes_fp8_block_lookup(stub_perf_db):
     )
 
     assert math.isclose(float(result), 3.0)
+
+
+def test_query_dsv4_megamoe_effective_bandwidth_model_from_perf_data(stub_perf_db):
+    stub_perf_db._dsv4_megamoe_effective_nvl_bw_data = LoadedOpData(
+        {
+            "DeepGEMM_fp8_fp4_mega_moe": {
+                "power-law": {
+                    1.01: {
+                        7168: {
+                            3072: {
+                                6: {
+                                    384: {
+                                        8: {
+                                            16: {
+                                                "effective_remote_nvl_gbs": 5.0,
+                                                "effective_deepgemm_nvl_gbs": 6.0,
+                                                "bandwidth_scale": 2.0,
+                                                "fixed_overlappable_latency_ms": 0.1,
+                                                "source": "unit-test",
+                                            },
+                                            32: {
+                                                "effective_remote_nvl_gbs": 10.0,
+                                                "effective_deepgemm_nvl_gbs": 12.0,
+                                                "bandwidth_scale": 2.0,
+                                                "fixed_overlappable_latency_ms": 0.1,
+                                                "source": "unit-test",
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        common.PerfDataFilename.dsv4_megamoe_effective_nvl_bw,
+        "dummy_dsv4_megamoe_effective_nvl_bw_perf.txt",
+    )
+
+    model = stub_perf_db.query_dsv4_megamoe_effective_bandwidth_model(
+        hidden_size=7168,
+        inter_size=3072,
+        topk=6,
+        num_experts=384,
+        moe_ep_size=8,
+        routing_mode="power-law",
+        power_law_alpha=1.01,
+        database_mode=common.DatabaseMode.SILICON,
+    )
+
+    assert model.ep_size == 8
+    assert model.bandwidth_points_gbps == ((16, 5.0), (32, 10.0))
+    assert math.isclose(model.bandwidth_scale, 2.0)
+    assert math.isclose(model.fixed_overlappable_latency_ms, 0.1)
+    assert model.source == "unit-test"
+
+
+def test_query_dsv4_megamoe_effective_bandwidth_model_requires_perf_data(stub_perf_db):
+    stub_perf_db._dsv4_megamoe_effective_nvl_bw_data = LoadedOpData(
+        None,
+        common.PerfDataFilename.dsv4_megamoe_effective_nvl_bw,
+        "missing_dsv4_megamoe_effective_nvl_bw_perf.txt",
+    )
+
+    with pytest.raises(PerfDataNotAvailableError):
+        stub_perf_db.query_dsv4_megamoe_effective_bandwidth_model(
+            hidden_size=7168,
+            inter_size=3072,
+            topk=6,
+            num_experts=384,
+            moe_ep_size=8,
+            routing_mode="power-law",
+            power_law_alpha=1.01,
+            database_mode=common.DatabaseMode.HYBRID,
+        )
 
 
 def test_query_custom_allreduce_database_mode_calculation(stub_perf_db):

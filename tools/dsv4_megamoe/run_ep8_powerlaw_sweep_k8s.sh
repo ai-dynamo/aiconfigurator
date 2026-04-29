@@ -13,6 +13,9 @@ TOKENS=${TOKENS:-1,2,4,8,16,32,64,128,256,384,512,1024,2048,4096,8192,16384}
 REPEAT_SAMPLES=${REPEAT_SAMPLES:-5}
 POWER_LAW_ALPHA=${POWER_LAW_ALPHA:-1.01}
 NUM_MAX_TOKENS_PER_RANK=${NUM_MAX_TOKENS_PER_RANK:-16384}
+BACKEND_VERSION=${BACKEND_VERSION:-0.5.9}
+BANDWIDTH_SCALE=${BANDWIDTH_SCALE:-1.0}
+FIXED_OVERLAPPABLE_LATENCY_MS=${FIXED_OVERLAPPABLE_LATENCY_MS:-0.0}
 ARTIFACT_DIR=${ARTIFACT_DIR:-${REPO_ROOT}/artifacts/deepgemm_effective_nvl_bw/${RUN_ID}}
 KEEP_POD=${KEEP_POD:-0}
 
@@ -112,6 +115,11 @@ python3 /tmp/collect_dsv4_megamoe_effective_nvl_bw.py \
   --routing-mode power-law \
   --power-law-alpha ${POWER_LAW_ALPHA} \
   --output /tmp/aic_powerlaw_ep8/result.json \
+  --perf-output /tmp/aic_powerlaw_ep8/dsv4_megamoe_effective_nvl_bw_perf.txt \
+  --backend-version ${BACKEND_VERSION} \
+  --bandwidth-scale ${BANDWIDTH_SCALE} \
+  --fixed-overlappable-latency-ms ${FIXED_OVERLAPPABLE_LATENCY_MS} \
+  --source ${RUN_ID} \
   --hard-exit-after-write
 nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits
 "

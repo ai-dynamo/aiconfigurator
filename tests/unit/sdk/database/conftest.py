@@ -91,6 +91,7 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
         "load_generation_mla_data",
         "load_mla_bmm_data",
         "load_nccl_data",
+        "load_dsv4_megamoe_effective_nvl_bw_data",
     ]:
         monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{loader_name}", lambda path: {})
     for loader_name in [
@@ -303,6 +304,7 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_mla_bmm_data", lambda path: dummy_mla_bmm_data)
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_nccl_data", lambda path: dummy_nccl_data)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_dsv4_megamoe_effective_nvl_bw_data", lambda path: None)
 
     # DSA module-level attention data (same dict structure as MLA)
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_context_dsa_module_data", lambda path: None)

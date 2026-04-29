@@ -3,10 +3,10 @@
 
 """DeepSeek-V4 MegaMoE traffic and overlap helpers.
 
-These helpers deliberately model communication from routing assignments instead
-of measuring a distributed run.  DeepGEMM MegaMoE uses symmetric-memory remote
-loads/stores inside the fused kernel, so AIC keeps the collector single-rank and
-derives inter-rank movement here.
+These helpers model communication from routing assignments and an explicit
+effective-bandwidth model loaded from AIC perf data.  DeepGEMM MegaMoE uses
+symmetric-memory remote loads/stores inside the fused kernel, so AIC keeps the
+compute collector single-rank and derives inter-rank movement here.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import math
 import random
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -77,15 +78,15 @@ class MegaMoEEffectiveBandwidthModel:
 
     ``bandwidth_points_gbps`` stores the measured remote-only effective
     throughput by local tokens/rank.  ``bandwidth_scale`` and
-    ``fixed_overlappable_latency_ms`` are optional calibration terms used when
-    the measured curve is reused as a communication-effect proxy.
+    ``fixed_overlappable_latency_ms`` are calibration terms from perf data; this
+    module does not provide hard-coded fallback curves.
     """
 
     name: str
     ep_size: int
     bandwidth_points_gbps: tuple[tuple[int, float], ...]
-    bandwidth_scale: float = 1.0
-    fixed_overlappable_latency_ms: float = 0.0
+    bandwidth_scale: float
+    fixed_overlappable_latency_ms: float
     source: str = ""
 
     def raw_bandwidth_bps(self, num_tokens_per_rank: int) -> float:
@@ -126,37 +127,6 @@ class Dsv4MegaMoEWorkload:
     rank0_local_topk_ids: tuple[tuple[int, ...], ...]
     rank0_masked_m: tuple[int, ...]
     traffic: MegaMoETrafficEstimate | None = None
-
-
-DSV4_MEGAMOE_EP8_B200_RANDOM_REMOTE_BW_GBPS: tuple[tuple[int, float], ...] = (
-    (1, 1.2066493652241006),
-    (2, 1.916387761164472),
-    (4, 2.5239754021051573),
-    (8, 3.231173774761464),
-    (16, 5.383984501287102),
-    (32, 9.849811946846357),
-    (64, 19.531970474164893),
-    (128, 38.15023902464839),
-    (256, 72.8950941840086),
-    (384, 104.00569949282979),
-    (512, 131.88423023473004),
-    (1024, 225.66083928166884),
-    (2048, 249.1131981718687),
-    (4096, 298.6390443159923),
-    (8192, 311.7863951774949),
-    (16384, 326.3008118081181),
-)
-
-DSV4_MEGAMOE_EP8_B200_RANDOM_COMMUNICATION_BW_SCALE = 18.1
-DSV4_MEGAMOE_EP8_B200_RANDOM_FIXED_OVERLAPPABLE_LATENCY_MS = 0.150
-DSV4_MEGAMOE_EP8_B200_RANDOM_EFFECTIVE_BW_MODEL = MegaMoEEffectiveBandwidthModel(
-    name="dsv4_megamoe_ep8_b200_random_remote_bw",
-    ep_size=8,
-    bandwidth_points_gbps=DSV4_MEGAMOE_EP8_B200_RANDOM_REMOTE_BW_GBPS,
-    bandwidth_scale=DSV4_MEGAMOE_EP8_B200_RANDOM_COMMUNICATION_BW_SCALE,
-    fixed_overlappable_latency_ms=DSV4_MEGAMOE_EP8_B200_RANDOM_FIXED_OVERLAPPABLE_LATENCY_MS,
-    source="artifacts/deepgemm_effective_nvl_bw/repeat5_ep8_20260429T040334Z",
-)
 
 
 def owner_rank_for_expert(expert_id: int, *, num_experts: int, moe_ep_size: int) -> int:
@@ -206,16 +176,6 @@ def _interpolate_log_log_points(points: Sequence[tuple[int, float]], x: int) -> 
             return math.exp(math.log(left_y) + weight * (math.log(right_y) - math.log(left_y)))
 
     raise AssertionError("interpolation interval not found")
-
-
-def dsv4_megamoe_ep8_b200_random_remote_bandwidth_bps(num_tokens_per_rank: int) -> float:
-    """Return the random-routing EP8/B200 MegaMoE remote-only effective BW.
-
-    The curve is the median ``cluster_remote_only_effective_nvl_gbs`` from
-    ``repeat5_ep8_20260429T040334Z``.  It is a fused-kernel effective metric,
-    not a raw NVLink microbenchmark bandwidth.
-    """
-    return DSV4_MEGAMOE_EP8_B200_RANDOM_EFFECTIVE_BW_MODEL.raw_bandwidth_bps(num_tokens_per_rank)
 
 
 def _round_robin_adjust_per_rank(
@@ -1009,48 +969,6 @@ def estimate_megamoe_communication_ms(
     )
 
 
-def estimate_dsv4_megamoe_ep8_random_calibrated_communication_ms(
-    route_matrix: Sequence[Sequence[int]],
-    *,
-    hidden_size: int,
-    num_tokens_per_rank: int,
-    bandwidth_scale: float = DSV4_MEGAMOE_EP8_B200_RANDOM_COMMUNICATION_BW_SCALE,
-    fixed_overlappable_latency_ms: float = DSV4_MEGAMOE_EP8_B200_RANDOM_FIXED_OVERLAPPABLE_LATENCY_MS,
-    nvl_barrier_latency_us: float = 0.0,
-    nvl_barrier_count: int = 0,
-    cleanup_barrier_count: int = 0,
-    include_metadata: bool = False,
-    quant_group_size: int = 32,
-) -> MegaMoECommunicationEstimate:
-    """Estimate EP8 MegaMoE communication using the random-routing BW curve.
-
-    The raw random curve overestimates the aligned SGLang communication term
-    when used directly.  The default scale and fixed overlappable latency are
-    the current fit against the local EP8 SGLang-vs-collector alignment data;
-    keep this helper experimental until EP8 power-law bandwidth data replaces
-    the random-routing fallback.
-    """
-    model = MegaMoEEffectiveBandwidthModel(
-        name=DSV4_MEGAMOE_EP8_B200_RANDOM_EFFECTIVE_BW_MODEL.name,
-        ep_size=DSV4_MEGAMOE_EP8_B200_RANDOM_EFFECTIVE_BW_MODEL.ep_size,
-        bandwidth_points_gbps=DSV4_MEGAMOE_EP8_B200_RANDOM_EFFECTIVE_BW_MODEL.bandwidth_points_gbps,
-        bandwidth_scale=float(bandwidth_scale),
-        fixed_overlappable_latency_ms=float(fixed_overlappable_latency_ms),
-        source=DSV4_MEGAMOE_EP8_B200_RANDOM_EFFECTIVE_BW_MODEL.source,
-    )
-    return estimate_megamoe_communication_from_effective_bandwidth_model_ms(
-        route_matrix,
-        hidden_size=hidden_size,
-        num_tokens_per_rank=num_tokens_per_rank,
-        bandwidth_model=model,
-        nvl_barrier_latency_us=nvl_barrier_latency_us,
-        nvl_barrier_count=nvl_barrier_count,
-        cleanup_barrier_count=cleanup_barrier_count,
-        include_metadata=include_metadata,
-        quant_group_size=quant_group_size,
-    )
-
-
 def estimate_megamoe_communication_from_effective_bandwidth_model_ms(
     route_matrix: Sequence[Sequence[int]],
     *,
@@ -1079,6 +997,49 @@ def estimate_megamoe_communication_from_effective_bandwidth_model_ms(
         nvl_barrier_count=nvl_barrier_count,
         cleanup_barrier_count=cleanup_barrier_count,
         fixed_overlappable_latency_ms=bandwidth_model.fixed_overlappable_latency_ms,
+        include_metadata=include_metadata,
+        quant_group_size=quant_group_size,
+    )
+
+
+def estimate_megamoe_communication_from_perf_database_ms(
+    route_matrix: Sequence[Sequence[int]],
+    *,
+    database: Any,
+    hidden_size: int,
+    inter_size: int,
+    topk: int,
+    num_experts: int,
+    moe_ep_size: int,
+    routing_mode: str,
+    power_law_alpha: float | None,
+    num_tokens_per_rank: int,
+    kernel_source: str = "DeepGEMM_fp8_fp4_mega_moe",
+    nvl_barrier_latency_us: float = 0.0,
+    nvl_barrier_count: int = 0,
+    cleanup_barrier_count: int = 0,
+    include_metadata: bool = False,
+    quant_group_size: int = 32,
+) -> MegaMoECommunicationEstimate:
+    """Estimate communication using an effective-BW model loaded by PerfDatabase."""
+    bandwidth_model = database.query_dsv4_megamoe_effective_bandwidth_model(
+        hidden_size=hidden_size,
+        inter_size=inter_size,
+        topk=topk,
+        num_experts=num_experts,
+        moe_ep_size=moe_ep_size,
+        routing_mode=routing_mode,
+        power_law_alpha=power_law_alpha,
+        kernel_source=kernel_source,
+    )
+    return estimate_megamoe_communication_from_effective_bandwidth_model_ms(
+        route_matrix,
+        hidden_size=hidden_size,
+        num_tokens_per_rank=num_tokens_per_rank,
+        bandwidth_model=bandwidth_model,
+        nvl_barrier_latency_us=nvl_barrier_latency_us,
+        nvl_barrier_count=nvl_barrier_count,
+        cleanup_barrier_count=cleanup_barrier_count,
         include_metadata=include_metadata,
         quant_group_size=quant_group_size,
     )
