@@ -157,7 +157,7 @@ class VLLMBackend(BaseBackend):
                 if not enable_chunked_prefill or ctx_tokens >= isl:
                     scale_factor = np.ceil(isl / ctx_tokens)
                 else:
-                    scale_factor = 1
+                    scale_factor = 2 / (1 + num_mix_steps)
                 ctx_attention_latency_ms = latency_dict["context_attention"] / scale_factor
                 ctx_attention_energy_wms = energy_wms_dict.get("context_attention", 0.0) / scale_factor
 
