@@ -98,13 +98,13 @@ kubectl get pod -n "${NAMESPACE}" "${POD_NAME}" -o wide
 kubectl exec -n "${NAMESPACE}" "${POD_NAME}" -- nvidia-smi -L
 
 kubectl cp -n "${NAMESPACE}" \
-  "${REPO_ROOT}/tools/dsv4_megamoe/collect_deepgemm_effective_nvl_bw.py" \
-  "${POD_NAME}:/tmp/collect_deepgemm_effective_nvl_bw.py"
+  "${REPO_ROOT}/collector/sglang/collect_dsv4_megamoe_effective_nvl_bw.py" \
+  "${POD_NAME}:/tmp/collect_dsv4_megamoe_effective_nvl_bw.py"
 
 kubectl exec -n "${NAMESPACE}" "${POD_NAME}" -- bash -lc "
 set -euo pipefail
 rm -rf /tmp/aic_powerlaw_ep8
-python3 /tmp/collect_deepgemm_effective_nvl_bw.py \
+python3 /tmp/collect_dsv4_megamoe_effective_nvl_bw.py \
   --num-processes 8 \
   --num-max-tokens-per-rank ${NUM_MAX_TOKENS_PER_RANK} \
   --num-tokens-list ${TOKENS} \

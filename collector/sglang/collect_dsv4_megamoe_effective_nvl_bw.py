@@ -7,6 +7,12 @@
 This intentionally follows DeepGEMM's ``tests/test_mega_moe.py`` accounting:
 ``num_recv_tokens * hidden * 3 / fused_kernel_time``.  It also reports an AIC
 remote-only variant that excludes local source-to-local-owner routes.
+
+For multi-node collection, launch this script on each node with the same
+environment convention used by ``collector/deep_collector`` and DeepGEMM:
+``MASTER_ADDR``/``MASTER_PORT`` identify the rank-0 node, ``WORLD_SIZE`` is the
+number of nodes, ``RANK`` is the node rank, and ``--num-processes`` is the
+number of local GPU ranks spawned per node.
 """
 
 from __future__ import annotations
