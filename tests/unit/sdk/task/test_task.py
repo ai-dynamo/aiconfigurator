@@ -392,6 +392,39 @@ def test_taskconfig_rejects_unsupported_quant_mode(monkeypatch):
         )
 
 
+def test_taskconfig_sol_still_validates_quant_for_non_deepseek_v4(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 90}}
+            self.supported_quant_mode = {"gemm": ["bfloat16"]}
+
+    def fake_get_database(system, backend, version):
+        return FakeDatabase()
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+
+    with pytest.raises(ValueError, match=r"Unsupported gemm quant mode"):
+        TaskConfig(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            profiles=["fp8"],
+            database_mode="SOL",
+        )
+
+
+def test_taskconfig_deepseek_v4_vllm_sol_is_supported():
+    task = TaskConfig(
+        serving_mode="agg",
+        model_path="sgl-project/DeepSeek-V4-Flash-FP8",
+        system_name="h200_sxm",
+        backend_name="vllm",
+        database_mode="SOL",
+    )
+
+    assert task.config.worker_config.backend_name == "vllm"
+
+
 def test_taskconfig_quant_merge_uses_model_info_when_missing(monkeypatch):
     class FakeDatabase:
         def __init__(self):

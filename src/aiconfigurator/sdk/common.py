@@ -115,6 +115,48 @@ class Qwen35Config:
     shared_expert_inter_size: int = 0
 
 
+@dataclass(frozen=True)
+class DeepSeekV4Config:
+    """Config fields unique to DeepSeek-V4 compressed attention + mHC models."""
+
+    q_lora_rank: int
+    o_lora_rank: int
+    o_groups: int
+    head_dim: int
+    qk_rope_head_dim: int
+    index_head_dim: int
+    index_n_heads: int
+    index_topk: int
+    sliding_window: int
+    compress_ratios: tuple[int, ...]
+    compress_rope_theta: int
+    num_hash_layers: int
+    hc_mult: int
+    hc_sinkhorn_iters: int
+    hc_eps: float
+    n_shared_experts: int = 1
+
+
+def indexer_cache_entry_bytes(index_head_dim: int) -> int:
+    """Bytes per token in the FP8 indexer KV cache, including one scale per 128 values."""
+    return index_head_dim + ((index_head_dim + 127) // 128) * 4
+
+
+def deepseek_v4_indexer_cache_entry_bytes(index_head_dim: int) -> float:
+    """Bytes per compressed token in DeepSeek-V4's FP4 indexer KV cache."""
+    return index_head_dim * 0.5
+
+
+DEEPSEEK_V4_HF_MODELS = frozenset(
+    {
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "deepseek-ai/DeepSeek-V4-Pro",
+        "sgl-project/DeepSeek-V4-Flash-FP8",
+        "sgl-project/DeepSeek-V4-Pro-FP8",
+    }
+)
+
+
 def _get_support_matrix_resource():
     """Get the support_matrix.csv as a Traversable resource."""
     return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
@@ -254,10 +296,11 @@ def get_supported_architectures() -> set[str]:
 @cache
 def get_default_models() -> set[str]:
     """
-    Get the set of supported HuggingFace model IDs from support_matrix.csv.
+    Get the set of default HuggingFace model IDs.
 
     Returns:
-        set[str]: Set of unique HuggingFace model IDs that are supported.
+        set[str]: Set of unique HuggingFace model IDs from the support matrix
+            plus locally cached default model configs.
     """
     csv_resource = _get_support_matrix_resource()
     models = set()
@@ -266,13 +309,14 @@ def get_default_models() -> set[str]:
         reader = csv.DictReader(f)
         for row in reader:
             models.add(row["HuggingFaceID"])
+    models.update(DefaultHFModels)
     return models
 
 
 """
 Cached HuggingFace model configs - these are pre-downloaded and stored in model_configs/
 Model parameters are parsed from these configs via get_model_config_from_model_path() in utils.py
-The list of default models for testing is derived from support_matrix.csv via get_default_models()
+The list of default models for testing is derived from support_matrix.csv and this set via get_default_models()
 """
 DefaultHFModels = {
     # Llama 3.1 Models
@@ -291,6 +335,8 @@ DefaultHFModels = {
     # DeepSeek V3.2 / GLM-5 (DEEPSEEKV32 family)
     "deepseek-ai/DeepSeek-V3.2",
     "zai-org/GLM-5",
+    # DeepSeek V4
+    *DEEPSEEK_V4_HF_MODELS,
     # Qwen 3 Models
     "Qwen/Qwen3-0.6B",
     "Qwen/Qwen3-1.7B",
@@ -351,6 +397,7 @@ ModelFamily = {
     "MOE",
     "DEEPSEEK",
     "DEEPSEEKV32",
+    "DEEPSEEKV4",
     "KIMIK25",
     "NEMOTRONNAS",
     "NEMOTRONH",
@@ -366,6 +413,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "DeepseekV3ForCausalLM": "DEEPSEEK",
     "DeepseekV32ForCausalLM": "DEEPSEEKV32",
     "GlmMoeDsaForCausalLM": "DEEPSEEKV32",
+    "DeepseekV4ForCausalLM": "DEEPSEEKV4",
     "KimiK25ForConditionalGeneration": "KIMIK25",
     "NemotronForCausalLM": "NEMOTRONNAS",
     "DeciLMForCausalLM": "NEMOTRONNAS",
@@ -598,6 +646,9 @@ class PerfDataFilename(Enum):
     mla_generation_module = "mla_generation_module_perf.txt"
     dsa_context_module = "dsa_context_module_perf.txt"
     dsa_generation_module = "dsa_generation_module_perf.txt"
+    deepseek_v4_mhc_module = "deepseek_v4_mhc_module_perf.txt"
+    deepseek_v4_context_module = "deepseek_v4_context_module_perf.txt"
+    deepseek_v4_generation_module = "deepseek_v4_generation_module_perf.txt"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])

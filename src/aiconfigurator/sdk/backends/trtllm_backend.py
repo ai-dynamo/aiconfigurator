@@ -611,7 +611,7 @@ class TRTLLMBackend(BaseBackend):
             c_dict = {1: 22, 2: 13, 4: 10, 8: 10}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 70 * 1024 * 1024)  # minimum act
-        elif model.model_family in ("DEEPSEEK", "DEEPSEEKV32", "KIMIK25"):
+        elif model.model_family in ("DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25"):
             c_dict = {1: 22, 2: 13, 4: 10, 8: 10}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             # moe workspace, 128 for block scale, float for 4bytes
@@ -641,10 +641,9 @@ class TRTLLMBackend(BaseBackend):
         if model.config.nextn > 0:
             activations = activations * (model.config.nextn + 1)
 
-        kvcache_per_token = model.get_kvcache_elements_per_token()
-        # should not be divided by pp_size as you need to hold all kvcache for stages.
         seq_tokens = max_seq_len if max_seq_len is not None else isl + beam_width * osl
-        kvcache = batch_size * seq_tokens * model.config.kvcache_quant_mode.value.memory * kvcache_per_token
+        kvcache = batch_size * model.get_kvcache_bytes_per_sequence(seq_tokens)
+        # should not be divided by pp_size as you need to hold all kvcache for stages.
         # if 'DEEPSEEK' in model.model_path or 'MOE' in model.model_path:
         #    kvcache = kvcache * model.config.attention_dp_size # this is incorrect. tp will
         #    duplicate the kvcache while attn_dp will not.

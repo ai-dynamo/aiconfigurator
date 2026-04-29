@@ -24,6 +24,41 @@ logger = logging.getLogger(__name__)
 DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE = 1.1
 DEFAULT_DECODE_LATENCY_CORRECTION_SCALE = 1.08
 
+_DEEPSEEK_V4_NATIVE_FP4_TO_FP8_MODEL = {
+    "deepseek-ai/DeepSeek-V4-Flash": "sgl-project/DeepSeek-V4-Flash-FP8",
+    "deepseek-ai/DeepSeek-V4-Pro": "sgl-project/DeepSeek-V4-Pro-FP8",
+}
+
+
+def _is_hopper_system(system_name: str | None) -> bool:
+    if not system_name:
+        return False
+    return system_name.startswith(("h100", "h200", "gh200"))
+
+
+def _validate_deepseek_v4_model_hardware_support(
+    *,
+    model_path: str,
+    system_name: str,
+    decode_system_name: str | None,
+) -> None:
+    """Reject native DeepSeek-V4 FP4-expert checkpoints on Hopper."""
+    replacement = _DEEPSEEK_V4_NATIVE_FP4_TO_FP8_MODEL.get(model_path)
+    if replacement is None:
+        return
+
+    systems = [system_name]
+    if decode_system_name:
+        systems.append(decode_system_name)
+    hopper_systems = sorted({system for system in systems if _is_hopper_system(system)})
+    if not hopper_systems:
+        return
+
+    raise ValueError(
+        f"{model_path} uses native FP4 routed-expert weights and is not supported on Hopper systems "
+        f"{hopper_systems}. Use {replacement} instead."
+    )
+
 
 @dataclass(frozen=True)
 class ConfigLayer:
@@ -357,7 +392,7 @@ class TaskConfigFactory:
     @staticmethod
     def _base_common_layer(ctx: TaskContext) -> dict:
         # DeepSeek and Qwen3.5 models natively support MTP with nextn=1; other models default to 0
-        nextn = 1 if ctx.model_family in {"DEEPSEEK", "DEEPSEEKV32", "KIMIK25", "QWEN35"} else 0
+        nextn = 1 if ctx.model_family in {"DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25", "QWEN35"} else 0
         return {
             "serving_mode": ctx.serving_mode,
             "model_path": ctx.model_path,
@@ -729,6 +764,12 @@ class TaskConfig:
         if enable_wideep and moe_backend is None:
             moe_backend = "deepep_moe"
 
+        _validate_deepseek_v4_model_hardware_support(
+            model_path=model_path,
+            system_name=system_name,
+            decode_system_name=decode_system_name,
+        )
+
         ctx = TaskContext(
             serving_mode=serving_mode,
             model_path=model_path,
@@ -846,9 +887,23 @@ class TaskConfig:
             return
 
         supported = getattr(database, "supported_quant_mode", {}) or {}
+        database_mode_for_validation = getattr(self.config, "database_mode", None)
+
+        model_family = get_model_family(self.model_path)
+        is_deepseek_fam = model_family in ("DEEPSEEK", "KIMIK25")
+        is_deepseek_v32 = model_family == "DEEPSEEKV32"
+        is_deepseek_v4 = model_family == "DEEPSEEKV4"
+        allow_deepseek_v4_synthetic_mode = is_deepseek_v4 and database_mode_for_validation in {
+            "SOL",
+            "SOL_FULL",
+            "EMPIRICAL",
+            "HYBRID",
+        }
 
         def _supported_or_raise(op: str, mode_name: str | None) -> None:
             if mode_name is None:
+                return
+            if allow_deepseek_v4_synthetic_mode:
                 return
             supported_modes = supported.get(op, []) or []
             if supported_modes and mode_name not in supported_modes:
@@ -904,16 +959,16 @@ class TaskConfig:
             for k, v in quant_modes.items():
                 worker_cfg[k] = v
 
-        model_family = get_model_family(self.model_path)
-        is_deepseek_fam = model_family in ("DEEPSEEK", "KIMIK25")
-        is_deepseek_v32 = model_family == "DEEPSEEKV32"
         enable_wideep = bool(getattr(self.config, "enable_wideep", self.enable_wideep))
         moe_backend = getattr(self.config, "moe_backend", None)
 
         # DeepSeek uses MLA perf tables; others use attention perf tables.
         # vLLM absorbs MLA KV projections into standard attention kernels, so it
         # has no dedicated MLA perf data — use standard attention tables instead.
-        if is_deepseek_v32:
+        if is_deepseek_v4:
+            context_attn_key = "deepseek_v4_context_module"
+            generation_attn_key = "deepseek_v4_generation_module"
+        elif is_deepseek_v32:
             context_attn_key = "dsa_context_module"
             generation_attn_key = "dsa_generation_module"
         elif is_deepseek_fam and self.backend_name != "vllm":

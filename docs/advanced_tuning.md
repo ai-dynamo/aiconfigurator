@@ -132,7 +132,7 @@ Explicit quantization in `profiles` or the YAML `config` overrides those default
 This is the most complicated part of the search space definition.  
 First, `num_gpu_per_worker` is trying to define how many gpus in a worker, the searched result will do exact match.
 Then, we define options for different components, tp for attention module, pp for transformer layer. Specifically for MoE, dp for attention data parallel, 
-moe_tp for moe tensor parallel and moe_ep for moe expert parallel.  
+moe_tp for moe tensor parallel and moe_ep for moe expert parallel.
 Here's the pseudo code about how we enumerate valid configs based on the various list definitions,
 ```python
     for config in space[tp x pp x dp x moe_tp x moe_ep]:
