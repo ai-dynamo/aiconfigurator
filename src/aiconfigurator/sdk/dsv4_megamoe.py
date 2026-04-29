@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import math
 import random
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Sequence
 
 
 @dataclass(frozen=True)
@@ -22,28 +22,79 @@ class MegaMoETrafficEstimate:
     route_matrix: tuple[tuple[int, ...], ...]
     hidden_size: int
     total_remote_edges: int
+    owner_remote_edges: tuple[int, ...]
+    endpoint_remote_edges: tuple[int, ...]
+    bottleneck_owner_rank: int
+    bottleneck_endpoint_rank: int
     primary_bytes_per_remote_selection: int
     total_primary_bytes: int
     owner_primary_bytes: tuple[int, ...]
     endpoint_primary_bytes: tuple[int, ...]
     bottleneck_primary_bytes: int
+    bottleneck_endpoint_primary_bytes: int
     metadata_bytes_per_remote_selection: int
     total_metadata_bytes: int
     owner_metadata_bytes: tuple[int, ...]
+    endpoint_metadata_bytes: tuple[int, ...]
     bottleneck_metadata_bytes: int
+    bottleneck_endpoint_metadata_bytes: int
 
 
 @dataclass(frozen=True)
 class MegaMoECommunicationEstimate:
+    """Communication term for the fused DeepGEMM MegaMoE kernel.
+
+    ``overlappable_ms`` is the hot-path communication term that should be put
+    under ``max(core_compute_ms, overlappable_ms)``.  The cleanup barrier is
+    reported separately because DeepGEMM overlaps workspace cleanup with the
+    combine epilogue; callers that want a conservative tail can add
+    ``tail_ms`` via ``sync_tail_ms``.  ``total_ms`` is an unoverlapped
+    diagnostic total, not the value to place under the compute/communication
+    overlap max.
+    """
+
     traffic: MegaMoETrafficEstimate
     effective_nvlink_bandwidth_bps: float
     nvl_barrier_latency_us: float
     nvl_barrier_count: int
+    cleanup_barrier_count: int
     include_metadata: bool
+    bottleneck_rank: int
     data_bytes: int
     data_ms: float
+    fixed_overlappable_latency_ms: float
     barrier_ms: float
+    cleanup_barrier_ms: float
+    overlappable_ms: float
+    tail_ms: float
+    unoverlapped_ms: float
     total_ms: float
+
+
+@dataclass(frozen=True)
+class MegaMoEEffectiveBandwidthModel:
+    """Token-dependent fused-kernel effective bandwidth model.
+
+    ``bandwidth_points_gbps`` stores the measured remote-only effective
+    throughput by local tokens/rank.  ``bandwidth_scale`` and
+    ``fixed_overlappable_latency_ms`` are optional calibration terms used when
+    the measured curve is reused as a communication-effect proxy.
+    """
+
+    name: str
+    ep_size: int
+    bandwidth_points_gbps: tuple[tuple[int, float], ...]
+    bandwidth_scale: float = 1.0
+    fixed_overlappable_latency_ms: float = 0.0
+    source: str = ""
+
+    def raw_bandwidth_bps(self, num_tokens_per_rank: int) -> float:
+        return _interpolate_log_log_points(self.bandwidth_points_gbps, int(num_tokens_per_rank)) * 1_000_000_000.0
+
+    def calibrated_bandwidth_bps(self, num_tokens_per_rank: int) -> float:
+        if self.bandwidth_scale <= 0:
+            raise ValueError("bandwidth_scale must be positive")
+        return self.raw_bandwidth_bps(num_tokens_per_rank) * self.bandwidth_scale
 
 
 @dataclass(frozen=True)
@@ -77,6 +128,37 @@ class Dsv4MegaMoEWorkload:
     traffic: MegaMoETrafficEstimate | None = None
 
 
+DSV4_MEGAMOE_EP8_B200_RANDOM_REMOTE_BW_GBPS: tuple[tuple[int, float], ...] = (
+    (1, 1.2066493652241006),
+    (2, 1.916387761164472),
+    (4, 2.5239754021051573),
+    (8, 3.231173774761464),
+    (16, 5.383984501287102),
+    (32, 9.849811946846357),
+    (64, 19.531970474164893),
+    (128, 38.15023902464839),
+    (256, 72.8950941840086),
+    (384, 104.00569949282979),
+    (512, 131.88423023473004),
+    (1024, 225.66083928166884),
+    (2048, 249.1131981718687),
+    (4096, 298.6390443159923),
+    (8192, 311.7863951774949),
+    (16384, 326.3008118081181),
+)
+
+DSV4_MEGAMOE_EP8_B200_RANDOM_COMMUNICATION_BW_SCALE = 18.1
+DSV4_MEGAMOE_EP8_B200_RANDOM_FIXED_OVERLAPPABLE_LATENCY_MS = 0.150
+DSV4_MEGAMOE_EP8_B200_RANDOM_EFFECTIVE_BW_MODEL = MegaMoEEffectiveBandwidthModel(
+    name="dsv4_megamoe_ep8_b200_random_remote_bw",
+    ep_size=8,
+    bandwidth_points_gbps=DSV4_MEGAMOE_EP8_B200_RANDOM_REMOTE_BW_GBPS,
+    bandwidth_scale=DSV4_MEGAMOE_EP8_B200_RANDOM_COMMUNICATION_BW_SCALE,
+    fixed_overlappable_latency_ms=DSV4_MEGAMOE_EP8_B200_RANDOM_FIXED_OVERLAPPABLE_LATENCY_MS,
+    source="artifacts/deepgemm_effective_nvl_bw/repeat5_ep8_20260429T040334Z",
+)
+
+
 def owner_rank_for_expert(expert_id: int, *, num_experts: int, moe_ep_size: int) -> int:
     """Return contiguous expert owner rank."""
     if moe_ep_size <= 0:
@@ -98,6 +180,42 @@ def _argmin_index(values: Sequence[int]) -> int:
 
 def _argmax_index(values: Sequence[int]) -> int:
     return max(range(len(values)), key=lambda idx: values[idx])
+
+
+def _interpolate_log_log_points(points: Sequence[tuple[int, float]], x: int) -> float:
+    if x <= 0:
+        raise ValueError("x must be positive")
+    if not points:
+        raise ValueError("points must be non-empty")
+    if any(point_x <= 0 or point_y <= 0 for point_x, point_y in points):
+        raise ValueError("log-log interpolation requires positive points")
+
+    sorted_points = tuple(sorted((int(point_x), float(point_y)) for point_x, point_y in points))
+    if x <= sorted_points[0][0]:
+        return sorted_points[0][1]
+    if x >= sorted_points[-1][0]:
+        return sorted_points[-1][1]
+
+    for (left_x, left_y), (right_x, right_y) in zip(sorted_points, sorted_points[1:]):
+        if left_x <= x <= right_x:
+            if left_x == x:
+                return left_y
+            if right_x == x:
+                return right_y
+            weight = (math.log(x) - math.log(left_x)) / (math.log(right_x) - math.log(left_x))
+            return math.exp(math.log(left_y) + weight * (math.log(right_y) - math.log(left_y)))
+
+    raise AssertionError("interpolation interval not found")
+
+
+def dsv4_megamoe_ep8_b200_random_remote_bandwidth_bps(num_tokens_per_rank: int) -> float:
+    """Return the random-routing EP8/B200 MegaMoE remote-only effective BW.
+
+    The curve is the median ``cluster_remote_only_effective_nvl_gbs`` from
+    ``repeat5_ep8_20260429T040334Z``.  It is a fused-kernel effective metric,
+    not a raw NVLink microbenchmark bandwidth.
+    """
+    return DSV4_MEGAMOE_EP8_B200_RANDOM_EFFECTIVE_BW_MODEL.raw_bandwidth_bps(num_tokens_per_rank)
 
 
 def _round_robin_adjust_per_rank(
@@ -176,7 +294,7 @@ def _generate_power_law_counts_with_bottleneck_remap(
     if sample_sum <= 0:
         raise ValueError("invalid power-law samples")
 
-    counts = [int(round(value / sample_sum * target_sum)) for value in samples]
+    counts = [round(value / sample_sum * target_sum) for value in samples]
     upper_bound = num_tokens
     overflow = sum(max(0, value - upper_bound) for value in counts)
     counts = [min(value, upper_bound) for value in counts]
@@ -534,7 +652,7 @@ def build_dsv4_power_law_megamoe_workload_from_global_tokens(
     )
 
     return Dsv4MegaMoEWorkload(
-        num_tokens_per_rank=int(math.ceil(num_global_tokens / moe_ep_size)),
+        num_tokens_per_rank=math.ceil(num_global_tokens / moe_ep_size),
         num_global_tokens=int(num_global_tokens),
         routed_topk=int(routed_topk),
         mega_topk=int(routed_topk + num_fused_shared_experts),
@@ -701,7 +819,7 @@ def build_dsv4_uniform_megamoe_workload_from_global_tokens(
     )
 
     return Dsv4MegaMoEWorkload(
-        num_tokens_per_rank=int(math.ceil(num_global_tokens / moe_ep_size)),
+        num_tokens_per_rank=math.ceil(num_global_tokens / moe_ep_size),
         num_global_tokens=int(num_global_tokens),
         routed_topk=int(routed_topk),
         mega_topk=int(routed_topk + num_fused_shared_experts),
@@ -806,20 +924,30 @@ def estimate_megamoe_traffic(
     owner_primary = tuple(edges * primary_per_edge for edges in owner_edges)
     endpoint_primary = tuple(edges * primary_per_edge for edges in endpoint_edges)
     owner_metadata = tuple(edges * metadata_per_edge for edges in owner_edges)
+    endpoint_metadata = tuple(edges * metadata_per_edge for edges in endpoint_edges)
+    bottleneck_owner_rank = max(range(ep_size), key=lambda rank: owner_edges[rank])
+    bottleneck_endpoint_rank = max(range(ep_size), key=lambda rank: endpoint_edges[rank])
 
     return MegaMoETrafficEstimate(
         route_matrix=routes,
         hidden_size=hidden_size,
         total_remote_edges=total_remote_edges,
+        owner_remote_edges=tuple(owner_edges),
+        endpoint_remote_edges=tuple(endpoint_edges),
+        bottleneck_owner_rank=bottleneck_owner_rank,
+        bottleneck_endpoint_rank=bottleneck_endpoint_rank,
         primary_bytes_per_remote_selection=primary_per_edge,
         total_primary_bytes=total_remote_edges * primary_per_edge,
         owner_primary_bytes=owner_primary,
         endpoint_primary_bytes=endpoint_primary,
         bottleneck_primary_bytes=max(owner_primary, default=0),
+        bottleneck_endpoint_primary_bytes=max(endpoint_primary, default=0),
         metadata_bytes_per_remote_selection=metadata_per_edge,
         total_metadata_bytes=total_remote_edges * metadata_per_edge,
         owner_metadata_bytes=owner_metadata,
+        endpoint_metadata_bytes=endpoint_metadata,
         bottleneck_metadata_bytes=max(owner_metadata, default=0),
+        bottleneck_endpoint_metadata_bytes=max(endpoint_metadata, default=0),
     )
 
 
@@ -830,6 +958,8 @@ def estimate_megamoe_communication_ms(
     effective_nvlink_bandwidth_bps: float,
     nvl_barrier_latency_us: float,
     nvl_barrier_count: int = 2,
+    cleanup_barrier_count: int = 1,
+    fixed_overlappable_latency_ms: float = 0.0,
     include_metadata: bool = False,
     quant_group_size: int = 32,
 ) -> MegaMoECommunicationEstimate:
@@ -839,6 +969,10 @@ def estimate_megamoe_communication_ms(
         raise ValueError("nvl_barrier_latency_us must be non-negative")
     if nvl_barrier_count < 0:
         raise ValueError("nvl_barrier_count must be non-negative")
+    if cleanup_barrier_count < 0:
+        raise ValueError("cleanup_barrier_count must be non-negative")
+    if fixed_overlappable_latency_ms < 0:
+        raise ValueError("fixed_overlappable_latency_ms must be non-negative")
 
     traffic = estimate_megamoe_traffic(
         route_matrix,
@@ -851,16 +985,102 @@ def estimate_megamoe_communication_ms(
 
     data_ms = data_bytes / effective_nvlink_bandwidth_bps * 1000.0
     barrier_ms = nvl_barrier_count * nvl_barrier_latency_us / 1000.0
+    cleanup_barrier_ms = cleanup_barrier_count * nvl_barrier_latency_us / 1000.0
+    overlappable_ms = data_ms + barrier_ms + fixed_overlappable_latency_ms
+    tail_ms = cleanup_barrier_ms
+    unoverlapped_ms = overlappable_ms + tail_ms
     return MegaMoECommunicationEstimate(
         traffic=traffic,
         effective_nvlink_bandwidth_bps=float(effective_nvlink_bandwidth_bps),
         nvl_barrier_latency_us=float(nvl_barrier_latency_us),
         nvl_barrier_count=int(nvl_barrier_count),
+        cleanup_barrier_count=int(cleanup_barrier_count),
         include_metadata=include_metadata,
+        bottleneck_rank=traffic.bottleneck_owner_rank,
         data_bytes=data_bytes,
         data_ms=data_ms,
+        fixed_overlappable_latency_ms=float(fixed_overlappable_latency_ms),
         barrier_ms=barrier_ms,
-        total_ms=data_ms + barrier_ms,
+        cleanup_barrier_ms=cleanup_barrier_ms,
+        overlappable_ms=overlappable_ms,
+        tail_ms=tail_ms,
+        unoverlapped_ms=unoverlapped_ms,
+        total_ms=unoverlapped_ms,
+    )
+
+
+def estimate_dsv4_megamoe_ep8_random_calibrated_communication_ms(
+    route_matrix: Sequence[Sequence[int]],
+    *,
+    hidden_size: int,
+    num_tokens_per_rank: int,
+    bandwidth_scale: float = DSV4_MEGAMOE_EP8_B200_RANDOM_COMMUNICATION_BW_SCALE,
+    fixed_overlappable_latency_ms: float = DSV4_MEGAMOE_EP8_B200_RANDOM_FIXED_OVERLAPPABLE_LATENCY_MS,
+    nvl_barrier_latency_us: float = 0.0,
+    nvl_barrier_count: int = 0,
+    cleanup_barrier_count: int = 0,
+    include_metadata: bool = False,
+    quant_group_size: int = 32,
+) -> MegaMoECommunicationEstimate:
+    """Estimate EP8 MegaMoE communication using the random-routing BW curve.
+
+    The raw random curve overestimates the aligned SGLang communication term
+    when used directly.  The default scale and fixed overlappable latency are
+    the current fit against the local EP8 SGLang-vs-collector alignment data;
+    keep this helper experimental until EP8 power-law bandwidth data replaces
+    the random-routing fallback.
+    """
+    model = MegaMoEEffectiveBandwidthModel(
+        name=DSV4_MEGAMOE_EP8_B200_RANDOM_EFFECTIVE_BW_MODEL.name,
+        ep_size=DSV4_MEGAMOE_EP8_B200_RANDOM_EFFECTIVE_BW_MODEL.ep_size,
+        bandwidth_points_gbps=DSV4_MEGAMOE_EP8_B200_RANDOM_EFFECTIVE_BW_MODEL.bandwidth_points_gbps,
+        bandwidth_scale=float(bandwidth_scale),
+        fixed_overlappable_latency_ms=float(fixed_overlappable_latency_ms),
+        source=DSV4_MEGAMOE_EP8_B200_RANDOM_EFFECTIVE_BW_MODEL.source,
+    )
+    return estimate_megamoe_communication_from_effective_bandwidth_model_ms(
+        route_matrix,
+        hidden_size=hidden_size,
+        num_tokens_per_rank=num_tokens_per_rank,
+        bandwidth_model=model,
+        nvl_barrier_latency_us=nvl_barrier_latency_us,
+        nvl_barrier_count=nvl_barrier_count,
+        cleanup_barrier_count=cleanup_barrier_count,
+        include_metadata=include_metadata,
+        quant_group_size=quant_group_size,
+    )
+
+
+def estimate_megamoe_communication_from_effective_bandwidth_model_ms(
+    route_matrix: Sequence[Sequence[int]],
+    *,
+    hidden_size: int,
+    num_tokens_per_rank: int,
+    bandwidth_model: MegaMoEEffectiveBandwidthModel,
+    nvl_barrier_latency_us: float = 0.0,
+    nvl_barrier_count: int = 0,
+    cleanup_barrier_count: int = 0,
+    include_metadata: bool = False,
+    quant_group_size: int = 32,
+) -> MegaMoECommunicationEstimate:
+    """Estimate communication from a token-dependent effective BW model."""
+    routes = normalize_route_matrix(route_matrix)
+    if len(routes) != bandwidth_model.ep_size:
+        expected_shape = f"{bandwidth_model.ep_size}x{bandwidth_model.ep_size}"
+        raise ValueError(f"bandwidth model {bandwidth_model.name!r} requires a {expected_shape} route matrix")
+    if num_tokens_per_rank <= 0:
+        raise ValueError("num_tokens_per_rank must be positive")
+
+    return estimate_megamoe_communication_ms(
+        routes,
+        hidden_size=hidden_size,
+        effective_nvlink_bandwidth_bps=bandwidth_model.calibrated_bandwidth_bps(num_tokens_per_rank),
+        nvl_barrier_latency_us=nvl_barrier_latency_us,
+        nvl_barrier_count=nvl_barrier_count,
+        cleanup_barrier_count=cleanup_barrier_count,
+        fixed_overlappable_latency_ms=bandwidth_model.fixed_overlappable_latency_ms,
+        include_metadata=include_metadata,
+        quant_group_size=quant_group_size,
     )
 
 
@@ -868,10 +1088,22 @@ def compose_megamoe_routed_latency_ms(
     *,
     local_routing_prep_ms: float,
     core_compute_ms: float,
-    comm_ms: float,
+    comm_ms: float | None = None,
     sync_tail_ms: float = 0.0,
+    comm_estimate: MegaMoECommunicationEstimate | None = None,
 ) -> float:
-    """Compose routed MegaMoE latency with communication-compute overlap."""
+    """Compose routed MegaMoE latency with communication-compute overlap.
+
+    Pass either ``comm_ms`` directly or a ``MegaMoECommunicationEstimate``.  If
+    an estimate is passed, only its hot-path ``overlappable_ms`` is overlapped
+    with compute; ``tail_ms`` is added to ``sync_tail_ms``.
+    """
+    if (comm_ms is None) == (comm_estimate is None):
+        raise ValueError("exactly one of comm_ms or comm_estimate must be provided")
+    if comm_estimate is not None:
+        comm_ms = comm_estimate.overlappable_ms
+        sync_tail_ms += comm_estimate.tail_ms
+
     values = {
         "local_routing_prep_ms": local_routing_prep_ms,
         "core_compute_ms": core_compute_ms,
@@ -879,6 +1111,8 @@ def compose_megamoe_routed_latency_ms(
         "sync_tail_ms": sync_tail_ms,
     }
     for name, value in values.items():
+        if value is None:
+            raise ValueError(f"{name} must be provided")
         if value < 0:
             raise ValueError(f"{name} must be non-negative")
 

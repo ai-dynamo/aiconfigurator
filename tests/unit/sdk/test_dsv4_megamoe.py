@@ -6,12 +6,17 @@ import math
 import pytest
 
 from aiconfigurator.sdk.dsv4_megamoe import (
+    DSV4_MEGAMOE_EP8_B200_RANDOM_EFFECTIVE_BW_MODEL,
+    MegaMoEEffectiveBandwidthModel,
     build_dsv4_power_law_megamoe_workload,
     build_dsv4_power_law_megamoe_workload_from_global_tokens,
     build_dsv4_uniform_megamoe_workload,
     build_dsv4_uniform_megamoe_workload_from_global_tokens,
     build_route_matrix,
     compose_megamoe_routed_latency_ms,
+    dsv4_megamoe_ep8_b200_random_remote_bandwidth_bps,
+    estimate_dsv4_megamoe_ep8_random_calibrated_communication_ms,
+    estimate_megamoe_communication_from_effective_bandwidth_model_ms,
     estimate_megamoe_communication_ms,
     estimate_megamoe_traffic,
     owner_rank_for_expert,
@@ -80,10 +85,13 @@ def test_remote_routing_uses_deepgemm_primary_byte_convention():
     bytes_per_selection = 3 * hidden
     assert traffic.primary_bytes_per_remote_selection == bytes_per_selection
     assert traffic.total_remote_edges == 4
+    assert traffic.owner_remote_edges == (2, 2)
+    assert traffic.endpoint_remote_edges == (2, 2)
     assert traffic.total_primary_bytes == 4 * bytes_per_selection
     assert traffic.owner_primary_bytes == (2 * bytes_per_selection, 2 * bytes_per_selection)
     assert traffic.endpoint_primary_bytes == (2 * bytes_per_selection, 2 * bytes_per_selection)
     assert traffic.bottleneck_primary_bytes == 2 * bytes_per_selection
+    assert traffic.bottleneck_endpoint_primary_bytes == 2 * bytes_per_selection
 
 
 def test_deepgemm_num_recv_tokens_interpretation_matches_owner_bottleneck():
@@ -99,6 +107,26 @@ def test_deepgemm_num_recv_tokens_interpretation_matches_owner_bottleneck():
 
     assert traffic.owner_primary_bytes[1] == num_recv_tokens * hidden * 3
     assert traffic.bottleneck_primary_bytes == num_recv_tokens * hidden * 3
+    assert traffic.bottleneck_owner_rank == 1
+
+
+def test_active_owner_bottleneck_is_reported_separately_from_source_endpoint():
+    hidden = 1024
+    traffic = estimate_megamoe_traffic(
+        [
+            [0, 5, 0],
+            [0, 0, 0],
+            [0, 5, 0],
+        ],
+        hidden_size=hidden,
+    )
+
+    assert traffic.owner_remote_edges == (0, 10, 0)
+    assert traffic.endpoint_remote_edges == (5, 0, 5)
+    assert traffic.bottleneck_owner_rank == 1
+    assert traffic.bottleneck_endpoint_rank == 0
+    assert traffic.bottleneck_primary_bytes == 10 * 3 * hidden
+    assert traffic.bottleneck_endpoint_primary_bytes == 5 * 3 * hidden
 
 
 def test_metadata_bytes_are_reported_separately_from_primary_bytes():
@@ -132,8 +160,28 @@ def test_communication_estimator_uses_bottleneck_owner_bytes_and_barriers():
     expected_data_bytes = 4 * 3 * 1024
     assert comm.data_bytes == expected_data_bytes
     assert math.isclose(comm.data_ms, expected_data_bytes / 1_000_000_000 * 1000.0)
+    assert math.isclose(comm.fixed_overlappable_latency_ms, 0.0)
     assert math.isclose(comm.barrier_ms, 0.006)
-    assert math.isclose(comm.total_ms, comm.data_ms + comm.barrier_ms)
+    assert math.isclose(comm.cleanup_barrier_ms, 0.003)
+    assert math.isclose(comm.overlappable_ms, comm.data_ms + comm.barrier_ms)
+    assert math.isclose(comm.tail_ms, comm.cleanup_barrier_ms)
+    assert math.isclose(comm.unoverlapped_ms, comm.overlappable_ms + comm.tail_ms)
+    assert math.isclose(comm.total_ms, comm.unoverlapped_ms)
+    assert comm.bottleneck_rank == 1
+
+
+def test_communication_estimator_can_add_fixed_overlappable_latency():
+    comm = estimate_megamoe_communication_ms(
+        [[0, 1], [0, 0]],
+        hidden_size=1024,
+        effective_nvlink_bandwidth_bps=3_072_000_000,
+        nvl_barrier_latency_us=0.0,
+        fixed_overlappable_latency_ms=0.05,
+    )
+
+    assert math.isclose(comm.data_ms, 0.001)
+    assert math.isclose(comm.fixed_overlappable_latency_ms, 0.05)
+    assert math.isclose(comm.overlappable_ms, 0.051)
 
 
 def test_communication_estimator_can_include_metadata_in_data_bytes():
@@ -170,6 +218,93 @@ def test_overlap_composer_uses_max_not_sum():
         comm_ms=1.5,
         sync_tail_ms=0.1,
     ) == 1.8
+
+
+def test_overlap_composer_uses_comm_estimate_hot_path_and_tail():
+    comm = estimate_megamoe_communication_ms(
+        [[0, 1], [0, 0]],
+        hidden_size=1024,
+        effective_nvlink_bandwidth_bps=3_072_000_000,
+        nvl_barrier_latency_us=3.0,
+        nvl_barrier_count=2,
+        cleanup_barrier_count=1,
+    )
+
+    assert math.isclose(comm.data_ms, 0.001)
+    assert math.isclose(comm.overlappable_ms, 0.007)
+    assert math.isclose(comm.tail_ms, 0.003)
+    assert math.isclose(
+        compose_megamoe_routed_latency_ms(
+            local_routing_prep_ms=0.2,
+            core_compute_ms=0.005,
+            comm_estimate=comm,
+            sync_tail_ms=0.1,
+        ),
+        0.310,
+    )
+
+
+def test_random_ep8_b200_bandwidth_curve_uses_log_log_interpolation():
+    exact = dsv4_megamoe_ep8_b200_random_remote_bandwidth_bps(16)
+    model_exact = DSV4_MEGAMOE_EP8_B200_RANDOM_EFFECTIVE_BW_MODEL.raw_bandwidth_bps(16)
+    left = dsv4_megamoe_ep8_b200_random_remote_bandwidth_bps(16)
+    middle = dsv4_megamoe_ep8_b200_random_remote_bandwidth_bps(24)
+    right = dsv4_megamoe_ep8_b200_random_remote_bandwidth_bps(32)
+
+    assert math.isclose(exact, 5.383984501287102e9)
+    assert math.isclose(model_exact, exact)
+    assert left < middle < right
+
+
+def test_effective_bandwidth_model_estimator_is_generic():
+    model = MegaMoEEffectiveBandwidthModel(
+        name="test-ep2",
+        ep_size=2,
+        bandwidth_points_gbps=((1, 1.0), (4, 4.0)),
+        bandwidth_scale=2.0,
+        fixed_overlappable_latency_ms=0.1,
+    )
+
+    comm = estimate_megamoe_communication_from_effective_bandwidth_model_ms(
+        [[0, 4], [0, 0]],
+        hidden_size=1024,
+        num_tokens_per_rank=1,
+        bandwidth_model=model,
+    )
+
+    assert math.isclose(comm.effective_nvlink_bandwidth_bps, 2_000_000_000.0)
+    assert math.isclose(comm.data_ms, 4 * 3 * 1024 / 2_000_000_000.0 * 1000.0)
+    assert math.isclose(comm.overlappable_ms, comm.data_ms + 0.1)
+
+
+def test_random_ep8_b200_calibrated_communication_uses_scaled_curve_and_fixed_latency():
+    routes = [[0 for _ in range(8)] for _ in range(8)]
+    routes[0][1] = 10
+
+    comm = estimate_dsv4_megamoe_ep8_random_calibrated_communication_ms(
+        routes,
+        hidden_size=1024,
+        num_tokens_per_rank=16,
+        bandwidth_scale=2.0,
+        fixed_overlappable_latency_ms=0.123,
+    )
+
+    expected_data_bytes = 10 * 3 * 1024
+    expected_bw = 2.0 * dsv4_megamoe_ep8_b200_random_remote_bandwidth_bps(16)
+    assert comm.data_bytes == expected_data_bytes
+    assert math.isclose(comm.effective_nvlink_bandwidth_bps, expected_bw)
+    assert math.isclose(comm.data_ms, expected_data_bytes / expected_bw * 1000.0)
+    assert math.isclose(comm.overlappable_ms, comm.data_ms + 0.123)
+    assert comm.tail_ms == 0.0
+
+
+def test_random_ep8_b200_calibrated_communication_requires_ep8_routes():
+    with pytest.raises(ValueError, match="8x8"):
+        estimate_dsv4_megamoe_ep8_random_calibrated_communication_ms(
+            [[0, 1], [0, 0]],
+            hidden_size=1024,
+            num_tokens_per_rank=16,
+        )
 
 
 def test_route_matrix_from_flat_assignments_ignores_masked_experts():

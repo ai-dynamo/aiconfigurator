@@ -85,7 +85,7 @@ except ModuleNotFoundError:
 
 PERF_FILENAME = "dsv4_megamoe_compute_perf.txt"
 REPORT_SCHEMA_VERSION = "aic-dsv4-megamoe-compute-v1"
-DEFAULT_POWER_LAW_ALPHA = 1.2
+DEFAULT_POWER_LAW_ALPHA = 1.01
 SUPPORTED_DISTRIBUTIONS = {"uniform", "power_law"}
 DEFAULT_TARGET_EP_LIST = [1, 2, 4, 8, 16, 32, 64, 128, 256]
 
