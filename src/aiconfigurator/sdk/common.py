@@ -568,6 +568,7 @@ class PerfDataFilename(Enum):
     wideep_generation_moe = "wideep_generation_moe_perf.txt"
     wideep_deepep_normal = "wideep_deepep_normal_perf.txt"
     wideep_deepep_ll = "wideep_deepep_ll_perf.txt"
+    dsv4_megamoe_comm_path = "dsv4_megamoe_comm_path_perf.txt"
     dsv4_megamoe_effective_nvl_bw = "dsv4_megamoe_effective_nvl_bw_perf.txt"
     # TensorRT-LLM WideEP specific
     wideep_moe_compute = "wideep_moe_perf.txt"

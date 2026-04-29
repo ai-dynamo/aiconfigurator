@@ -9,6 +9,7 @@ from aiconfigurator.sdk.operations import (
     Dsv4MegaMoEDispatch,
     build_route_matrix,
     compose_megamoe_routed_latency_ms,
+    estimate_megamoe_communication_from_comm_path_model_ms,
     estimate_megamoe_communication_from_effective_bandwidth_model_ms,
     estimate_megamoe_communication_from_perf_database_ms,
     estimate_megamoe_communication_ms,
@@ -16,7 +17,7 @@ from aiconfigurator.sdk.operations import (
     owner_rank_for_expert,
     route_matrix_from_flat_assignments,
 )
-from aiconfigurator.sdk.perf_database import MegaMoEEffectiveBandwidthModel
+from aiconfigurator.sdk.perf_database import MegaMoECommPathModel, MegaMoEEffectiveBandwidthModel
 
 
 def test_owner_rank_for_expert_uses_contiguous_expert_ownership():
@@ -257,28 +258,30 @@ def test_effective_bandwidth_model_uses_log_log_interpolation():
     assert left < middle < right
 
 
-def test_effective_bandwidth_model_estimator_is_generic():
+def test_effective_bandwidth_model_estimator_returns_traffic_path_latency():
     model = MegaMoEEffectiveBandwidthModel(
         name="test-ep2",
         ep_size=2,
         bandwidth_points_gbps=((1, 1.0), (4, 4.0)),
-        bandwidth_scale=2.0,
-        fixed_overlappable_latency_ms=0.1,
+        bandwidth_scale=1.0,
+        fixed_overlappable_latency_ms=0.0,
     )
 
-    comm = estimate_megamoe_communication_from_effective_bandwidth_model_ms(
+    estimate = estimate_megamoe_communication_from_effective_bandwidth_model_ms(
         [[0, 4], [0, 0]],
         hidden_size=1024,
         num_tokens_per_rank=1,
         bandwidth_model=model,
     )
 
-    assert math.isclose(comm.effective_nvlink_bandwidth_bps, 2_000_000_000.0)
-    assert math.isclose(comm.data_ms, 4 * 3 * 1024 / 2_000_000_000.0 * 1000.0)
-    assert math.isclose(comm.overlappable_ms, comm.data_ms + 0.1)
+    expected_data_ms = 4 * 3 * 1024 / 1.0e9 * 1000.0
+    assert estimate.data_bytes == 4 * 3 * 1024
+    assert math.isclose(estimate.effective_nvlink_bandwidth_bps, 1.0e9)
+    assert math.isclose(estimate.data_ms, expected_data_ms)
+    assert math.isclose(estimate.overlappable_ms, expected_data_ms)
 
 
-def test_effective_bandwidth_model_estimator_uses_scale_and_fixed_latency():
+def test_effective_bandwidth_model_estimator_rejects_calibrated_effective_bw():
     routes = [[0 for _ in range(8)] for _ in range(8)]
     routes[0][1] = 10
     model = MegaMoEEffectiveBandwidthModel(
@@ -286,23 +289,31 @@ def test_effective_bandwidth_model_estimator_uses_scale_and_fixed_latency():
         ep_size=8,
         bandwidth_points_gbps=((16, 4.0), (32, 8.0)),
         bandwidth_scale=2.0,
-        fixed_overlappable_latency_ms=0.123,
+        fixed_overlappable_latency_ms=0.0,
     )
 
-    comm = estimate_megamoe_communication_from_effective_bandwidth_model_ms(
-        routes,
-        hidden_size=1024,
-        num_tokens_per_rank=16,
-        bandwidth_model=model,
-    )
+    with pytest.raises(ValueError, match="bandwidth_scale must be 1.0"):
+        estimate_megamoe_communication_from_effective_bandwidth_model_ms(
+            routes,
+            hidden_size=1024,
+            num_tokens_per_rank=16,
+            bandwidth_model=model,
+        )
 
-    expected_data_bytes = 10 * 3 * 1024
-    expected_bw = 2.0 * 4.0e9
-    assert comm.data_bytes == expected_data_bytes
-    assert math.isclose(comm.effective_nvlink_bandwidth_bps, expected_bw)
-    assert math.isclose(comm.data_ms, expected_data_bytes / expected_bw * 1000.0)
-    assert math.isclose(comm.overlappable_ms, comm.data_ms + 0.123)
-    assert comm.tail_ms == 0.0
+    model = MegaMoEEffectiveBandwidthModel(
+        name="test-ep8",
+        ep_size=8,
+        bandwidth_points_gbps=((16, 4.0), (32, 8.0)),
+        bandwidth_scale=1.0,
+        fixed_overlappable_latency_ms=0.1,
+    )
+    with pytest.raises(ValueError, match="fixed_overlappable_latency_ms must be 0.0"):
+        estimate_megamoe_communication_from_effective_bandwidth_model_ms(
+            routes,
+            hidden_size=1024,
+            num_tokens_per_rank=16,
+            bandwidth_model=model,
+        )
 
 
 def test_effective_bandwidth_model_estimator_requires_matching_ep_routes():
@@ -322,23 +333,47 @@ def test_effective_bandwidth_model_estimator_requires_matching_ep_routes():
         )
 
 
-def test_perf_database_estimator_queries_effective_bandwidth_model():
+def test_comm_path_model_estimator_returns_measured_overlap_terms():
+    model = MegaMoECommPathModel(
+        name="test-ep2",
+        ep_size=2,
+        comm_path_points_ms=((8, 0.15), (16, 0.25)),
+        tail_points_ms=((8, 0.01), (16, 0.02)),
+        comm_plus_tail_points_ms=((8, 0.16), (16, 0.27)),
+        target_fused_points_ms=((8, 0.35), (16, 0.45)),
+    )
+
+    estimate = estimate_megamoe_communication_from_comm_path_model_ms(
+        [[0, 4], [0, 0]],
+        hidden_size=1024,
+        num_tokens_per_rank=8,
+        comm_path_model=model,
+    )
+
+    assert estimate.data_bytes == 4 * 3 * 1024
+    assert math.isclose(estimate.overlappable_ms, 0.15)
+    assert math.isclose(estimate.tail_ms, 0.01)
+    assert math.isclose(estimate.total_ms, 0.16)
+
+
+def test_perf_database_estimator_queries_comm_path_model():
     class FakeDatabase:
         def __init__(self):
             self.calls = []
 
-        def query_dsv4_megamoe_effective_bandwidth_model(self, **kwargs):
+        def query_dsv4_megamoe_comm_path_model(self, **kwargs):
             self.calls.append(kwargs)
-            return MegaMoEEffectiveBandwidthModel(
+            return MegaMoECommPathModel(
                 name="db-model",
                 ep_size=2,
-                bandwidth_points_gbps=((8, 4.0), (16, 8.0)),
-                bandwidth_scale=2.0,
-                fixed_overlappable_latency_ms=0.1,
+                comm_path_points_ms=((8, 0.15), (16, 0.25)),
+                tail_points_ms=((8, 0.01), (16, 0.02)),
+                comm_plus_tail_points_ms=((8, 0.16), (16, 0.27)),
+                target_fused_points_ms=((8, 0.35), (16, 0.45)),
             )
 
     database = FakeDatabase()
-    comm = estimate_megamoe_communication_from_perf_database_ms(
+    estimate = estimate_megamoe_communication_from_perf_database_ms(
         [[0, 4], [0, 0]],
         database=database,
         hidden_size=1024,
@@ -363,23 +398,24 @@ def test_perf_database_estimator_queries_effective_bandwidth_model():
             "kernel_source": "DeepGEMM_fp8_fp4_mega_moe",
         }
     ]
-    assert math.isclose(comm.effective_nvlink_bandwidth_bps, 8.0e9)
-    assert math.isclose(comm.overlappable_ms, comm.data_ms + 0.1)
+    assert math.isclose(estimate.overlappable_ms, 0.15)
+    assert math.isclose(estimate.tail_ms, 0.01)
 
 
-def test_dsv4_megamoe_dispatch_op_queries_perf_database_model():
+def test_dsv4_megamoe_dispatch_op_queries_comm_path_model():
     class FakeDatabase:
         def __init__(self):
             self.calls = []
 
-        def query_dsv4_megamoe_effective_bandwidth_model(self, **kwargs):
+        def query_dsv4_megamoe_comm_path_model(self, **kwargs):
             self.calls.append(kwargs)
-            return MegaMoEEffectiveBandwidthModel(
+            return MegaMoECommPathModel(
                 name="db-model",
                 ep_size=2,
-                bandwidth_points_gbps=((8, 4.0), (16, 8.0)),
-                bandwidth_scale=2.0,
-                fixed_overlappable_latency_ms=0.1,
+                comm_path_points_ms=((8, 0.15), (16, 0.25)),
+                tail_points_ms=((8, 0.01), (16, 0.02)),
+                comm_plus_tail_points_ms=((8, 0.16), (16, 0.27)),
+                target_fused_points_ms=((8, 0.35), (16, 0.45)),
             )
 
     op = Dsv4MegaMoEDispatch(
@@ -393,10 +429,22 @@ def test_dsv4_megamoe_dispatch_op_queries_perf_database_model():
         routing_mode="power-law",
         power_law_alpha=1.01,
     )
-    result = op.query(FakeDatabase(), x=8, route_matrix=[[0, 4], [0, 0]])
+    database = FakeDatabase()
+    result = op.query(database, x=8, route_matrix=[[0, 4], [0, 0]])
 
-    expected_data_ms = 4 * 3 * 1024 / 8.0e9 * 1000.0
-    assert math.isclose(float(result), expected_data_ms + 0.1)
+    assert database.calls == [
+        {
+            "hidden_size": 1024,
+            "inter_size": 512,
+            "topk": 6,
+            "num_experts": 16,
+            "moe_ep_size": 2,
+            "routing_mode": "power-law",
+            "power_law_alpha": 1.01,
+            "kernel_source": "DeepGEMM_fp8_fp4_mega_moe",
+        }
+    ]
+    assert math.isclose(float(result), 0.15)
     assert result.energy == 0.0
 
 

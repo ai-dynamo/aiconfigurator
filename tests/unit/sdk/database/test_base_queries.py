@@ -170,15 +170,15 @@ def test_query_dsv4_megamoe_effective_bandwidth_model_from_perf_data(stub_perf_d
                                             16: {
                                                 "effective_remote_nvl_gbs": 5.0,
                                                 "effective_deepgemm_nvl_gbs": 6.0,
-                                                "bandwidth_scale": 2.0,
-                                                "fixed_overlappable_latency_ms": 0.1,
+                                                "bandwidth_scale": 1.0,
+                                                "fixed_overlappable_latency_ms": 0.0,
                                                 "source": "unit-test",
                                             },
                                             32: {
                                                 "effective_remote_nvl_gbs": 10.0,
                                                 "effective_deepgemm_nvl_gbs": 12.0,
-                                                "bandwidth_scale": 2.0,
-                                                "fixed_overlappable_latency_ms": 0.1,
+                                                "bandwidth_scale": 1.0,
+                                                "fixed_overlappable_latency_ms": 0.0,
                                                 "source": "unit-test",
                                             },
                                         }
@@ -207,8 +207,63 @@ def test_query_dsv4_megamoe_effective_bandwidth_model_from_perf_data(stub_perf_d
 
     assert model.ep_size == 8
     assert model.bandwidth_points_gbps == ((16, 5.0), (32, 10.0))
-    assert math.isclose(model.bandwidth_scale, 2.0)
-    assert math.isclose(model.fixed_overlappable_latency_ms, 0.1)
+    assert math.isclose(model.bandwidth_scale, 1.0)
+    assert math.isclose(model.fixed_overlappable_latency_ms, 0.0)
+    assert model.source == "unit-test"
+
+
+def test_query_dsv4_megamoe_comm_path_model_from_perf_data(stub_perf_db):
+    stub_perf_db._dsv4_megamoe_comm_path_data = LoadedOpData(
+        {
+            "DeepGEMM_fp8_fp4_mega_moe": {
+                "random": {
+                    None: {
+                        7168: {
+                            3072: {
+                                6: {
+                                    384: {
+                                        8: {
+                                            16: {
+                                                "comm_path_ms": 0.16,
+                                                "tail_ms": 0.001,
+                                                "comm_plus_tail_ms": 0.161,
+                                                "target_fused_ms": 0.38,
+                                                "source": "unit-test",
+                                            },
+                                            32: {
+                                                "comm_path_ms": 0.20,
+                                                "tail_ms": 0.002,
+                                                "comm_plus_tail_ms": 0.202,
+                                                "target_fused_ms": 0.42,
+                                                "source": "unit-test",
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        common.PerfDataFilename.dsv4_megamoe_comm_path,
+        "dummy_dsv4_megamoe_comm_path_perf.txt",
+    )
+
+    model = stub_perf_db.query_dsv4_megamoe_comm_path_model(
+        hidden_size=7168,
+        inter_size=3072,
+        topk=6,
+        num_experts=384,
+        moe_ep_size=8,
+        routing_mode="random",
+        power_law_alpha=None,
+        database_mode=common.DatabaseMode.SILICON,
+    )
+
+    assert model.ep_size == 8
+    assert model.comm_path_points_ms == ((16, 0.16), (32, 0.20))
+    assert model.tail_points_ms == ((16, 0.001), (32, 0.002))
     assert model.source == "unit-test"
 
 

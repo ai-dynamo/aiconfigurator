@@ -74,6 +74,35 @@ class MegaMoEEffectiveBandwidthModel:
         return self.raw_bandwidth_bps(num_tokens_per_rank) * self.bandwidth_scale
 
 
+@dataclass(frozen=True)
+class MegaMoECommPathModel:
+    """Token-dependent DSv4 MegaMoE communication-path model.
+
+    The points are inferred from fixed-routing inter-size sweeps:
+    ``fused_ms(inter_size) ~= max(comm_path_ms, compute_path_ms) + tail_ms``.
+    """
+
+    name: str
+    ep_size: int
+    comm_path_points_ms: tuple[tuple[int, float], ...]
+    tail_points_ms: tuple[tuple[int, float], ...]
+    comm_plus_tail_points_ms: tuple[tuple[int, float], ...]
+    target_fused_points_ms: tuple[tuple[int, float], ...]
+    source: str = ""
+
+    def comm_path_ms(self, num_tokens_per_rank: int) -> float:
+        return _interpolate_log_log_points(self.comm_path_points_ms, int(num_tokens_per_rank))
+
+    def tail_ms(self, num_tokens_per_rank: int) -> float:
+        return _interpolate_log_log_points(self.tail_points_ms, int(num_tokens_per_rank))
+
+    def comm_plus_tail_ms(self, num_tokens_per_rank: int) -> float:
+        return _interpolate_log_log_points(self.comm_plus_tail_points_ms, int(num_tokens_per_rank))
+
+    def target_fused_ms(self, num_tokens_per_rank: int) -> float:
+        return _interpolate_log_log_points(self.target_fused_points_ms, int(num_tokens_per_rank))
+
+
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
     default_path = os.fspath(pkg_resources.files("aiconfigurator") / "systems")
     if raw_paths is None:
@@ -2167,11 +2196,13 @@ def _set_nested(data: dict, keys: tuple, value: dict) -> None:
 
 def load_dsv4_megamoe_effective_nvl_bw_data(dsv4_megamoe_effective_nvl_bw_file):
     """
-    Load DSv4 DeepGEMM MegaMoE effective NVLink bandwidth calibration data.
+    Load DSv4 DeepGEMM MegaMoE fused-kernel effective NVLink bandwidth data.
 
     The table stores token-dependent fused-kernel effective bandwidth, not a
-    standalone NCCL/NVLink microbenchmark.  Query code uses the bandwidth curve
-    together with route-derived traffic bytes to build the communication term.
+    standalone NCCL/NVLink microbenchmark.  These rows are diagnostic inputs;
+    they must stay raw until a separate comm-impact calibration table exists.
+    The legacy calibration columns are required for schema compatibility but
+    must contain neutral values here.
 
     Structure:
         [kernel_source][routing_mode][power_law_alpha][hidden_size][inter_size][topk]
@@ -2221,10 +2252,15 @@ def load_dsv4_megamoe_effective_nvl_bw_data(dsv4_megamoe_effective_nvl_bw_file):
             bandwidth_scale = float(row["bandwidth_scale"])
             fixed_overlappable_latency_ms = float(row["fixed_overlappable_latency_ms"])
 
-            if bandwidth_scale <= 0:
-                raise ValueError("bandwidth_scale must be positive")
-            if fixed_overlappable_latency_ms < 0:
-                raise ValueError("fixed_overlappable_latency_ms must be non-negative")
+            if not math.isclose(bandwidth_scale, 1.0):
+                raise ValueError(
+                    "DSv4 MegaMoE effective bandwidth data must be raw: bandwidth_scale must be 1.0"
+                )
+            if not math.isclose(fixed_overlappable_latency_ms, 0.0):
+                raise ValueError(
+                    "DSv4 MegaMoE effective bandwidth data must be raw: "
+                    "fixed_overlappable_latency_ms must be 0.0"
+                )
 
             keys = (
                 kernel_source,
@@ -2248,6 +2284,102 @@ def load_dsv4_megamoe_effective_nvl_bw_data(dsv4_megamoe_effective_nvl_bw_file):
                     "num_samples": int(row.get("num_samples", 0) or 0),
                     "source": row.get("source", ""),
                     "calibration_source": row.get("calibration_source", ""),
+                },
+            )
+
+    return data
+
+
+def load_dsv4_megamoe_comm_path_data(dsv4_megamoe_comm_path_file):
+    """
+    Load DSv4 DeepGEMM MegaMoE comm-path calibration data.
+
+    This table is produced by fixed-routing inter-size sweeps.  ``comm_path_ms``
+    is the overlappable communication path inferred from the plateau after
+    subtracting the analytic reduction tail; ``tail_ms`` is the separately
+    reported analytic tail.
+
+    Structure:
+        [kernel_source][routing_mode][power_law_alpha][hidden_size][inter_size][topk]
+        [num_experts][moe_ep_size][num_tokens_per_rank] -> metric dict
+    """
+    if not os.path.exists(dsv4_megamoe_comm_path_file):
+        logger.debug(f"DSv4 MegaMoE comm-path data file {dsv4_megamoe_comm_path_file} not found.")
+        return None
+
+    required_columns = {
+        "kernel_source",
+        "hidden_size",
+        "inter_size",
+        "topk",
+        "num_experts",
+        "moe_ep_size",
+        "routing_mode",
+        "power_law_alpha",
+        "num_tokens_per_rank",
+        "comm_path_ms",
+        "tail_ms",
+        "comm_plus_tail_ms",
+        "target_fused_ms",
+        "plateau_num_points",
+        "max_remote_only_nvlink_bytes",
+        "max_deepgemm_nvlink_bytes",
+    }
+    data: dict = {}
+
+    with open(dsv4_megamoe_comm_path_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        missing = required_columns - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"Missing required columns in {dsv4_megamoe_comm_path_file}: {sorted(missing)}")
+
+        for row in reader:
+            kernel_source = row["kernel_source"]
+            routing_mode = row["routing_mode"]
+            alpha = _parse_optional_float(row["power_law_alpha"])
+            hidden_size = int(row["hidden_size"])
+            inter_size = int(row["inter_size"])
+            topk = int(row["topk"])
+            num_experts = int(row["num_experts"])
+            moe_ep_size = int(row["moe_ep_size"])
+            num_tokens = int(row["num_tokens_per_rank"])
+            comm_path_ms = float(row["comm_path_ms"])
+            tail_ms = float(row["tail_ms"])
+            comm_plus_tail_ms = float(row["comm_plus_tail_ms"])
+            target_fused_ms = float(row["target_fused_ms"])
+            if comm_path_ms <= 0:
+                raise ValueError("DSv4 MegaMoE comm-path data requires positive comm_path_ms")
+            if tail_ms < 0:
+                raise ValueError("DSv4 MegaMoE comm-path data requires non-negative tail_ms")
+            if comm_plus_tail_ms <= 0:
+                raise ValueError("DSv4 MegaMoE comm-path data requires positive comm_plus_tail_ms")
+            if target_fused_ms <= 0:
+                raise ValueError("DSv4 MegaMoE comm-path data requires positive target_fused_ms")
+
+            keys = (
+                kernel_source,
+                routing_mode,
+                alpha,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+                num_tokens,
+            )
+            _set_nested(
+                data,
+                keys,
+                {
+                    "comm_path_ms": comm_path_ms,
+                    "tail_ms": tail_ms,
+                    "comm_plus_tail_ms": comm_plus_tail_ms,
+                    "target_fused_ms": target_fused_ms,
+                    "plateau_num_points": float(row["plateau_num_points"]),
+                    "max_remote_only_nvlink_bytes": float(row["max_remote_only_nvlink_bytes"]),
+                    "max_deepgemm_nvlink_bytes": float(row["max_deepgemm_nvlink_bytes"]),
+                    "num_samples": int(row.get("num_samples", 0) or 0),
+                    "source": row.get("source", ""),
                 },
             )
 
@@ -2387,6 +2519,7 @@ class PerfDatabase:
                 PerfDataFilename.wideep_generation_mla: load_wideep_generation_mla_data,
                 PerfDataFilename.wideep_deepep_normal: load_wideep_deepep_normal_data,
                 PerfDataFilename.wideep_deepep_ll: load_wideep_deepep_ll_data,
+                PerfDataFilename.dsv4_megamoe_comm_path: load_dsv4_megamoe_comm_path_data,
                 PerfDataFilename.dsv4_megamoe_effective_nvl_bw: load_dsv4_megamoe_effective_nvl_bw_data,
                 PerfDataFilename.wideep_moe_compute: load_wideep_moe_compute_data,
                 PerfDataFilename.trtllm_alltoall: load_trtllm_alltoall_data,
@@ -2443,6 +2576,7 @@ class PerfDatabase:
             self._wideep_generation_mla_data = _load_op_data(PerfDataFilename.wideep_generation_mla)
             self._wideep_deepep_normal_data = _load_op_data(PerfDataFilename.wideep_deepep_normal)
             self._wideep_deepep_ll_data = _load_op_data(PerfDataFilename.wideep_deepep_ll)
+            self._dsv4_megamoe_comm_path_data = _load_op_data(PerfDataFilename.dsv4_megamoe_comm_path)
             self._dsv4_megamoe_effective_nvl_bw_data = _load_op_data(
                 PerfDataFilename.dsv4_megamoe_effective_nvl_bw
             )
@@ -6209,6 +6343,80 @@ class PerfDatabase:
             return PerformanceResult(lat / 1000.0, energy=energy / 1000.0)
 
     @functools.lru_cache(maxsize=32768)
+    def query_dsv4_megamoe_comm_path_model(
+        self,
+        *,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        moe_ep_size: int,
+        routing_mode: str,
+        power_law_alpha: float | None = None,
+        kernel_source: str = "DeepGEMM_fp8_fp4_mega_moe",
+        database_mode: common.DatabaseMode | None = None,
+    ):
+        """Query DSv4 MegaMoE communication-path data inferred by inter-size sweeps."""
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode in {
+            common.DatabaseMode.SOL,
+            common.DatabaseMode.SOL_FULL,
+            common.DatabaseMode.EMPIRICAL,
+        }:
+            raise NotImplementedError("DSv4 MegaMoE comm-path data has no analytic or empirical fallback")
+
+        try:
+            data_store = self._dsv4_megamoe_comm_path_data
+        except AttributeError as exc:
+            raise PerfDataNotAvailableError("DSv4 MegaMoE comm-path data is only loaded for the SGLang backend.") from exc
+
+        data_store.raise_if_not_loaded()
+        alpha = _parse_optional_float(str(power_law_alpha) if power_law_alpha is not None else None)
+
+        try:
+            token_data = data_store[kernel_source][routing_mode][alpha][hidden_size][inter_size][topk][num_experts][
+                moe_ep_size
+            ]
+        except KeyError as exc:
+            raise PerfDataNotAvailableError(
+                "DSv4 MegaMoE comm-path perf data is unavailable for "
+                f"{kernel_source=}, {routing_mode=}, {power_law_alpha=}, {hidden_size=}, {inter_size=}, "
+                f"{topk=}, {num_experts=}, {moe_ep_size=}."
+            ) from exc
+
+        comm_points = tuple(
+            sorted((int(num_tokens), float(metrics["comm_path_ms"])) for num_tokens, metrics in token_data.items())
+        )
+        tail_points = tuple(
+            sorted((int(num_tokens), float(metrics["tail_ms"])) for num_tokens, metrics in token_data.items())
+        )
+        comm_plus_tail_points = tuple(
+            sorted(
+                (int(num_tokens), float(metrics["comm_plus_tail_ms"])) for num_tokens, metrics in token_data.items()
+            )
+        )
+        target_fused_points = tuple(
+            sorted((int(num_tokens), float(metrics["target_fused_ms"])) for num_tokens, metrics in token_data.items())
+        )
+        if not comm_points:
+            raise PerfDataNotAvailableError("DSv4 MegaMoE comm-path table has no token points.")
+
+        first_row = token_data[comm_points[0][0]]
+        return MegaMoECommPathModel(
+            name=(
+                f"dsv4_megamoe_comm_path_{kernel_source}_{routing_mode}_"
+                f"ep{moe_ep_size}_hidden{hidden_size}_inter{inter_size}_topk{topk}_experts{num_experts}"
+            ),
+            ep_size=moe_ep_size,
+            comm_path_points_ms=comm_points,
+            tail_points_ms=tail_points,
+            comm_plus_tail_points_ms=comm_plus_tail_points,
+            target_fused_points_ms=target_fused_points,
+            source=first_row.get("source", ""),
+        )
+
+    @functools.lru_cache(maxsize=32768)
     def query_dsv4_megamoe_effective_bandwidth_model(
         self,
         *,
@@ -6225,8 +6433,8 @@ class PerfDatabase:
         """Query DSv4 MegaMoE token-dependent effective bandwidth data.
 
         There is intentionally no SOL/EMPIRICAL/HYBRID fallback here.  The
-        measured fused-kernel effective bandwidth is a calibration input for
-        the MegaMoE communication model, so missing data must remain visible.
+        measured fused-kernel effective bandwidth is diagnostic raw data, not a
+        direct communication latency model, so missing data must remain visible.
         """
         if database_mode is None:
             database_mode = self._default_database_mode
@@ -6268,6 +6476,13 @@ class PerfDatabase:
             raise PerfDataNotAvailableError("DSv4 MegaMoE effective bandwidth table has no token points.")
 
         first_row = token_data[points[0][0]]
+        if not math.isclose(float(first_row["bandwidth_scale"]), 1.0):
+            raise ValueError("DSv4 MegaMoE effective bandwidth curves must remain raw: bandwidth_scale must be 1.0")
+        if not math.isclose(float(first_row["fixed_overlappable_latency_ms"]), 0.0):
+            raise ValueError(
+                "DSv4 MegaMoE effective bandwidth curves must remain raw: "
+                "fixed_overlappable_latency_ms must be 0.0"
+            )
         for num_tokens, metrics in token_data.items():
             if float(metrics["bandwidth_scale"]) != float(first_row["bandwidth_scale"]):
                 raise ValueError(

@@ -23,6 +23,7 @@ from aiconfigurator.sdk.perf_database import (
     load_context_mla_data,
     load_context_mla_module_data,
     load_custom_allreduce_data,
+    load_dsv4_megamoe_comm_path_data,
     load_dsv4_megamoe_effective_nvl_bw_data,
     load_gemm_data,
     load_generation_attention_data,
@@ -226,7 +227,7 @@ def test_load_dsv4_megamoe_effective_nvl_bw_data(tmp_path):
         "moe_ep_size,routing_mode,power_law_alpha,num_tokens_per_rank,effective_remote_nvl_gbs,"
         "effective_deepgemm_nvl_gbs,bandwidth_scale,fixed_overlappable_latency_ms,num_samples,source\n"
         "SGLang,0.5.9,NVIDIA B200,dsv4_megamoe_effective_nvl_bw,DeepGEMM_fp8_fp4_mega_moe,"
-        "7168,3072,6,384,8,power-law,1.01,16,5.5,6.0,2.5,0.25,5,test-run\n",
+        "7168,3072,6,384,8,power-law,1.01,16,5.5,6.0,1.0,0.0,5,test-run\n",
         encoding="utf-8",
     )
 
@@ -235,8 +236,45 @@ def test_load_dsv4_megamoe_effective_nvl_bw_data(tmp_path):
 
     assert row["effective_remote_nvl_gbs"] == 5.5
     assert row["effective_deepgemm_nvl_gbs"] == 6.0
-    assert row["bandwidth_scale"] == 2.5
-    assert row["fixed_overlappable_latency_ms"] == 0.25
+    assert row["bandwidth_scale"] == 1.0
+    assert row["fixed_overlappable_latency_ms"] == 0.0
+    assert row["num_samples"] == 5
+
+
+def test_load_dsv4_megamoe_effective_nvl_bw_data_rejects_calibrated_rows(tmp_path):
+    perf_file = tmp_path / "dsv4_megamoe_effective_nvl_bw_perf.txt"
+    perf_file.write_text(
+        "framework,version,device,op_name,kernel_source,hidden_size,inter_size,topk,num_experts,"
+        "moe_ep_size,routing_mode,power_law_alpha,num_tokens_per_rank,effective_remote_nvl_gbs,"
+        "effective_deepgemm_nvl_gbs,bandwidth_scale,fixed_overlappable_latency_ms,num_samples,source\n"
+        "SGLang,0.5.9,NVIDIA B200,dsv4_megamoe_effective_nvl_bw,DeepGEMM_fp8_fp4_mega_moe,"
+        "7168,3072,6,384,8,power-law,1.01,16,5.5,6.0,18.1,0.15,5,test-run\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="bandwidth_scale must be 1.0"):
+        load_dsv4_megamoe_effective_nvl_bw_data(str(perf_file))
+
+
+def test_load_dsv4_megamoe_comm_path_data(tmp_path):
+    perf_file = tmp_path / "dsv4_megamoe_comm_path_perf.txt"
+    perf_file.write_text(
+        "framework,version,device,op_name,kernel_source,hidden_size,inter_size,topk,num_experts,"
+        "moe_ep_size,routing_mode,power_law_alpha,num_tokens_per_rank,comm_path_ms,tail_ms,"
+        "comm_plus_tail_ms,target_fused_ms,plateau_num_points,max_remote_only_nvlink_bytes,"
+        "max_deepgemm_nvlink_bytes,num_samples,source\n"
+        "SGLang,0.5.9,NVIDIA B200,dsv4_megamoe_comm_path,DeepGEMM_fp8_fp4_mega_moe,"
+        "7168,3072,6,384,8,random,,16,0.16,0.001,0.161,0.38,1,2064384,2214912,5,test-run\n",
+        encoding="utf-8",
+    )
+
+    data = load_dsv4_megamoe_comm_path_data(str(perf_file))
+    row = data["DeepGEMM_fp8_fp4_mega_moe"]["random"][None][7168][3072][6][384][8][16]
+
+    assert row["comm_path_ms"] == 0.16
+    assert row["tail_ms"] == 0.001
+    assert row["comm_plus_tail_ms"] == 0.161
+    assert row["target_fused_ms"] == 0.38
     assert row["num_samples"] == 5
 
 

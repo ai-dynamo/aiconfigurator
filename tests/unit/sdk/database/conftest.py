@@ -91,6 +91,7 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
         "load_generation_mla_data",
         "load_mla_bmm_data",
         "load_nccl_data",
+        "load_dsv4_megamoe_comm_path_data",
         "load_dsv4_megamoe_effective_nvl_bw_data",
     ]:
         monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{loader_name}", lambda path: {})

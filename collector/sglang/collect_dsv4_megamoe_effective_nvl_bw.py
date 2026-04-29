@@ -496,6 +496,8 @@ def _run_worker(local_rank: int, num_local_ranks: int, args: argparse.Namespace)
         raise ValueError("all token counts must be <= num_max_tokens_per_rank")
     if hidden % 128 != 0 or intermediate_hidden % 128 != 0:
         raise ValueError("hidden and intermediate_hidden must be divisible by 128")
+    if intermediate_hidden % 512 != 0:
+        raise ValueError("intermediate_hidden must be divisible by 512 for DeepGEMM MegaMoE TMA-aligned SF buffers")
     if num_experts % num_ranks != 0:
         raise ValueError("num_experts must be divisible by num_ranks")
 
@@ -620,6 +622,7 @@ def _run_worker(local_rank: int, num_local_ranks: int, args: argparse.Namespace)
                     "mega_moe",
                     barrier=lambda: dist.barrier(),
                     trace_path=trace_path,
+                    flush_l2=bool(args.flush_l2),
                 )
             )
 
@@ -770,6 +773,7 @@ def main() -> None:
     )
     parser.add_argument("--activation-clamp", type=float, default=10.0)
     parser.add_argument("--fast-math", type=int, default=1)
+    parser.add_argument("--flush-l2", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--repeat-samples", type=int, default=1)
     parser.add_argument("--dump-profile-traces", type=str, default="")
@@ -779,8 +783,18 @@ def main() -> None:
     parser.add_argument("--backend-version", type=str, default="unknown")
     parser.add_argument("--device-name", type=str, default="")
     parser.add_argument("--kernel-source", type=str, default="DeepGEMM_fp8_fp4_mega_moe")
-    parser.add_argument("--bandwidth-scale", type=float, default=1.0)
-    parser.add_argument("--fixed-overlappable-latency-ms", type=float, default=0.0)
+    parser.add_argument(
+        "--bandwidth-scale",
+        type=float,
+        default=1.0,
+        help="Must remain 1.0 for raw fused-kernel effective BW data.",
+    )
+    parser.add_argument(
+        "--fixed-overlappable-latency-ms",
+        type=float,
+        default=0.0,
+        help="Must remain 0.0 for raw fused-kernel effective BW data.",
+    )
     parser.add_argument("--source", type=str, default="")
     parser.add_argument(
         "--hard-exit-after-write",
@@ -793,10 +807,10 @@ def main() -> None:
         parser.error("one of --num-tokens or --num-tokens-list is required")
     if args.repeat_samples <= 0:
         parser.error("--repeat-samples must be positive")
-    if args.bandwidth_scale <= 0:
-        parser.error("--bandwidth-scale must be positive")
-    if args.fixed_overlappable_latency_ms < 0:
-        parser.error("--fixed-overlappable-latency-ms must be non-negative")
+    if args.bandwidth_scale != 1.0:
+        parser.error("--bandwidth-scale must be 1.0 for raw DSv4 MegaMoE effective BW collection")
+    if args.fixed_overlappable_latency_ms != 0.0:
+        parser.error("--fixed-overlappable-latency-ms must be 0.0 for raw DSv4 MegaMoE effective BW collection")
 
     if args.dump_profile_traces:
         os.makedirs(args.dump_profile_traces, exist_ok=True)

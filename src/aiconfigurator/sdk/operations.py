@@ -279,24 +279,97 @@ def estimate_megamoe_communication_from_effective_bandwidth_model_ms(
     include_metadata: bool = False,
     quant_group_size: int = 32,
 ) -> MegaMoECommunicationEstimate:
-    """Estimate communication from a token-dependent effective BW model."""
+    """Estimate the traffic-normalized fused path from effective BW.
+
+    DSv4 MegaMoE effective bandwidth data is measured as
+    ``remote_bytes / fused_kernel_time``.  The denominator already includes
+    synchronization and communication-compute overlap, so the returned
+    ``data_ms``/``overlappable_ms`` is a traffic-normalized fused path latency,
+    not pure communication time.  Callers should compose it with compute as
+    ``max(compute_ms, traffic_path_ms)``.
+    """
     routes = normalize_route_matrix(route_matrix)
     if len(routes) != bandwidth_model.ep_size:
         expected_shape = f"{bandwidth_model.ep_size}x{bandwidth_model.ep_size}"
         raise ValueError(f"bandwidth model {bandwidth_model.name!r} requires a {expected_shape} route matrix")
     if num_tokens_per_rank <= 0:
         raise ValueError("num_tokens_per_rank must be positive")
+    if bandwidth_model.bandwidth_scale != 1.0:
+        raise ValueError("DSv4 MegaMoE effective bandwidth model must remain raw: bandwidth_scale must be 1.0")
+    if bandwidth_model.fixed_overlappable_latency_ms != 0.0:
+        raise ValueError(
+            "DSv4 MegaMoE effective bandwidth model must remain raw: fixed_overlappable_latency_ms must be 0.0"
+        )
 
     return estimate_megamoe_communication_ms(
         routes,
         hidden_size=hidden_size,
-        effective_nvlink_bandwidth_bps=bandwidth_model.calibrated_bandwidth_bps(num_tokens_per_rank),
+        effective_nvlink_bandwidth_bps=bandwidth_model.raw_bandwidth_bps(num_tokens_per_rank),
         nvl_barrier_latency_us=nvl_barrier_latency_us,
         nvl_barrier_count=nvl_barrier_count,
         cleanup_barrier_count=cleanup_barrier_count,
-        fixed_overlappable_latency_ms=bandwidth_model.fixed_overlappable_latency_ms,
+        fixed_overlappable_latency_ms=0.0,
         include_metadata=include_metadata,
         quant_group_size=quant_group_size,
+    )
+
+
+def estimate_megamoe_communication_from_comm_path_model_ms(
+    route_matrix: Sequence[Sequence[int]],
+    *,
+    hidden_size: int,
+    num_tokens_per_rank: int,
+    comm_path_model,
+    quant_group_size: int = 32,
+) -> MegaMoECommunicationEstimate:
+    """Estimate DSv4 MegaMoE communication from measured comm-path curves.
+
+    The model is inferred by sweeping DeepGEMM MegaMoE ``intermediate_hidden``
+    with fixed traffic.  ``overlappable_ms`` is the inferred communication path
+    under the fused kernel's overlap structure; ``tail_ms`` is the separately
+    reported reduction tail.
+    """
+    routes = normalize_route_matrix(route_matrix)
+    if len(routes) != comm_path_model.ep_size:
+        expected_shape = f"{comm_path_model.ep_size}x{comm_path_model.ep_size}"
+        raise ValueError(f"comm-path model {comm_path_model.name!r} requires a {expected_shape} route matrix")
+    if num_tokens_per_rank <= 0:
+        raise ValueError("num_tokens_per_rank must be positive")
+
+    traffic = estimate_megamoe_traffic(
+        routes,
+        hidden_size=hidden_size,
+        quant_group_size=quant_group_size,
+    )
+    comm_path_ms = comm_path_model.comm_path_ms(num_tokens_per_rank)
+    tail_ms = comm_path_model.tail_ms(num_tokens_per_rank)
+    if comm_path_ms <= 0:
+        raise ValueError("comm-path model returned non-positive comm_path_ms")
+    if tail_ms < 0:
+        raise ValueError("comm-path model returned negative tail_ms")
+
+    effective_bps = (
+        traffic.bottleneck_primary_bytes / (comm_path_ms / 1000.0)
+        if traffic.bottleneck_primary_bytes > 0
+        else float("inf")
+    )
+    return MegaMoECommunicationEstimate(
+        traffic=traffic,
+        effective_nvlink_bandwidth_bps=float(effective_bps),
+        nvl_barrier_latency_us=0.0,
+        nvl_barrier_count=0,
+        cleanup_barrier_count=0,
+        include_metadata=False,
+        bottleneck_rank=traffic.bottleneck_owner_rank,
+        data_bytes=traffic.bottleneck_primary_bytes,
+        data_ms=comm_path_ms,
+        fixed_overlappable_latency_ms=0.0,
+        barrier_ms=0.0,
+        cleanup_barrier_ms=tail_ms,
+        overlappable_ms=comm_path_ms,
+        tail_ms=tail_ms,
+        unoverlapped_ms=comm_path_ms + tail_ms,
+        total_ms=comm_path_ms + tail_ms,
     )
 
 
@@ -319,8 +392,18 @@ def estimate_megamoe_communication_from_perf_database_ms(
     include_metadata: bool = False,
     quant_group_size: int = 32,
 ) -> MegaMoECommunicationEstimate:
-    """Estimate communication using an effective-BW model loaded by PerfDatabase."""
-    bandwidth_model = database.query_dsv4_megamoe_effective_bandwidth_model(
+    """Estimate communication using the measured DSv4 MegaMoE comm-path model."""
+    if any(
+        value
+        for value in (
+            nvl_barrier_latency_us,
+            nvl_barrier_count,
+            cleanup_barrier_count,
+            include_metadata,
+        )
+    ):
+        raise ValueError("DSv4 MegaMoE comm-path model already includes the measured fused overlap structure")
+    comm_path_model = database.query_dsv4_megamoe_comm_path_model(
         hidden_size=hidden_size,
         inter_size=inter_size,
         topk=topk,
@@ -330,15 +413,11 @@ def estimate_megamoe_communication_from_perf_database_ms(
         power_law_alpha=power_law_alpha,
         kernel_source=kernel_source,
     )
-    return estimate_megamoe_communication_from_effective_bandwidth_model_ms(
+    return estimate_megamoe_communication_from_comm_path_model_ms(
         route_matrix,
         hidden_size=hidden_size,
         num_tokens_per_rank=num_tokens_per_rank,
-        bandwidth_model=bandwidth_model,
-        nvl_barrier_latency_us=nvl_barrier_latency_us,
-        nvl_barrier_count=nvl_barrier_count,
-        cleanup_barrier_count=cleanup_barrier_count,
-        include_metadata=include_metadata,
+        comm_path_model=comm_path_model,
         quant_group_size=quant_group_size,
     )
 
@@ -400,12 +479,10 @@ class Operation:
 
 
 class Dsv4MegaMoEDispatch(Operation):
-    """DSv4 MegaMoE fused-kernel communication term.
+    """DSv4 MegaMoE measured communication-path term.
 
-    This follows the existing MoE split in AIC: the operation owns the
-    communication-side query and delegates measured calibration lookup to
-    ``PerfDatabase``.  The route matrix is provided by the model/collector
-    layer because it depends on the target routing distribution.
+    The queried latency comes from fixed-routing inter-size sweeps and should
+    be composed with local compute as ``max(compute_ms, comm_path_ms)``.
     """
 
     def __init__(
