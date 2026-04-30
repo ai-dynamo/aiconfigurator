@@ -1366,12 +1366,14 @@ def _dsv4_flash_robust_3d_lookup(self, dict_, x, y, z):
 
     Caller swallows lower-level exceptions if all three paths fail.
     """
-    try:
-        exact = dict_[x][y][z]
-        if isinstance(exact, dict) and "latency" in exact:
-            return exact
-    except (KeyError, TypeError):
-        pass
+    # Use .get() chain instead of [] indexing: dict_ may be a (nested)
+    # defaultdict, so [] reads would create spurious empty branches that
+    # later poison _interp_3d's grid traversal.
+    level1 = dict_.get(x) if isinstance(dict_, dict) else None
+    level2 = level1.get(y) if isinstance(level1, dict) else None
+    exact = level2.get(z) if isinstance(level2, dict) else None
+    if isinstance(exact, dict) and "latency" in exact:
+        return exact
     try:
         return self._interp_3d(x, y, z, dict_, "cubic")
     except Exception:

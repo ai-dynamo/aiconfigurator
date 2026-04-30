@@ -171,7 +171,7 @@ ATTN_KIND_TO_COMPRESS_RATIO = {
 
 COMPRESS_RATIO_TO_ATTN_KIND = {v: k for k, v in ATTN_KIND_TO_COMPRESS_RATIO.items()}
 
-DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
+CLI_DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
 _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
 
 
@@ -888,7 +888,7 @@ def _log_result(
 
 def run_dsv4_mla_module(
     *,
-    model_path: str = DEFAULT_MODEL,
+    model_path: str = CLI_DEFAULT_MODEL,
     mode: str,
     attn_kind: str,
     batch_sizes: Iterable[int],
@@ -1213,7 +1213,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Collect DeepSeek-V4-Flash HCA/CSA/SWA attention-module latency on SGLang."
     )
-    parser.add_argument("--model-path", default=DEFAULT_MODEL)
+    parser.add_argument("--model-path", default=CLI_DEFAULT_MODEL)
     parser.add_argument("--mode", choices=["context", "generation"], required=True)
     parser.add_argument(
         "--attn-kind",

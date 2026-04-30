@@ -3,6 +3,7 @@
 import dataclasses
 import itertools
 import os
+import sys
 from typing import Optional
 
 
@@ -726,8 +727,6 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
 # Both backends re-export the relevant ``get_*`` functions so collect.py
 # can resolve them via getattr on each per-backend module.
 
-import sys as _sys
-
 _DSV4_FLASH_DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
 DSV4_FLASH_ATTN_KINDS = ("swa", "csa", "hca")
 
@@ -1028,7 +1027,7 @@ def _build_dsv4_flash_sparse_test_cases(
 def _dsv4_flash_sparse_smoke_or_full(kernel: str):
     if not _dsv4_flash_active():
         return []
-    if "--smoke" in _sys.argv:
+    if "--smoke" in sys.argv:
         return [[1, 1024, 8192, 1, kernel, _DSV4_FLASH_DEFAULT_MODEL]]
     return _build_dsv4_flash_sparse_test_cases(kernels=(kernel,))
 

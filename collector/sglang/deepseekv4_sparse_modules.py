@@ -83,6 +83,9 @@ except ModuleNotFoundError:
         _DSV4_FLASH_SPARSE_TP_LIST_ATTN as DEFAULT_TP_LIST_ATTN,
     )
     from common_test_cases import (
+        _DSV4_FLASH_SPARSE_TP_LIST_INDEXER as DEFAULT_TP_LIST_INDEXER,
+    )
+    from common_test_cases import (
         DSV4_FLASH_SPARSE_KERNELS as KERNELS,
     )
     from common_test_cases import (

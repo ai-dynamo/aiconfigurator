@@ -1100,7 +1100,7 @@ def main():
         # model).  All other models keep the default behaviour: run every
         # op and let each get_func's ``_filter_model_config_list`` filter
         # cases at the test-case level.
-        if not ops and args.model_path == "deepseek-ai/DeepSeek-V4-Flash":
+        if args.ops is None and args.model_path == "deepseek-ai/DeepSeek-V4-Flash":
             ops = [name for name in _all_op_names() if name.startswith("dsv4_flash_")]
             _dsv4_auto_expand = True
     else:
@@ -1121,7 +1121,7 @@ def main():
 
     if args.model_path:
         logger.info(f"Model filter active: collecting only for '{args.model_path}'")
-        if ops and not args.ops:
+        if ops and args.ops is None:
             logger.info(f"  expanded to model-specific ops: {ops}")
 
     resume_options = {
