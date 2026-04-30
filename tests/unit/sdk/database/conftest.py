@@ -1,13 +1,60 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import tempfile
 from collections import defaultdict
+from unittest.mock import patch
 
 import pytest
 import yaml
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.perf_database import PerfDatabase
+
+# ---------------------------------------------------------------------------
+# Single source of truth: every loader function that PerfDatabase.__init__
+# can call via its internal _load_op_data / func_map.
+#
+# Mapping: function_name -> default stub return value.
+#   * Most loaders return None when the perf file is absent.
+#   * load_moe_data is special: it returns a *tuple* of two dicts.
+#   * load_nccl_data covers both nccl and oneccl keys in func_map.
+#
+# When PerfDatabase adds a new loader, add a line here.  Both
+# _patch_all_loaders_and_yaml() and _get_comprehensive_db_singleton()
+# derive their patch lists from this dict, so they cannot drift.
+# ---------------------------------------------------------------------------
+_LOADER_STUBS: dict[str, object] = {
+    "load_gemm_data": None,
+    "load_context_attention_data": None,
+    "load_generation_attention_data": None,
+    "load_moe_data": (None, None),  # returns tuple
+    "load_custom_allreduce_data": None,
+    "load_nccl_data": None,  # also used for oneccl
+    "load_context_mla_data": None,
+    "load_generation_mla_data": None,
+    "load_mla_bmm_data": None,
+    "load_mamba2_data": None,
+    "load_gdn_data": None,
+    "load_compute_scale_data": None,
+    "load_scale_matrix_data": None,
+    "load_wideep_context_moe_data": None,
+    "load_wideep_generation_moe_data": None,
+    "load_wideep_context_mla_data": None,
+    "load_wideep_generation_mla_data": None,
+    "load_wideep_deepep_normal_data": None,
+    "load_wideep_deepep_ll_data": None,
+    "load_wideep_moe_compute_data": None,
+    "load_trtllm_alltoall_data": None,
+    "load_context_mla_module_data": None,
+    "load_generation_mla_module_data": None,
+    "load_context_dsa_module_data": None,
+    "load_generation_dsa_module_data": None,
+    "load_deepseek_v4_mhc_module_data": None,
+    "load_context_deepseek_v4_attention_module_data": None,
+    "load_generation_deepseek_v4_attention_module_data": None,
+}
 
 
 def _patch_all_loaders_and_yaml(monkeypatch) -> None:
@@ -64,7 +111,6 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
             },
         }
     }
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_gemm_data", lambda path: dummy_gemm_data)
 
     # Patch load_custom_allreduce_data to return proper structure.
     # Structure: { 'bfloat16': { 2: { 'AUTO': { 1024:  5.0 } } } }
@@ -75,29 +121,17 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
             8: {"AUTO": {1024: 15.0, 2048: 30.0}},
         }
     }
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_custom_allreduce_data",
-        lambda path: dummy_custom_allreduce_data,
-    )
 
-    # load_moe_data needs to return 2 dicts
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_moe_data", lambda path: ({}, {}))
+    # Per-loader overrides for stub_perf_db (most stay at the default from _LOADER_STUBS)
+    overrides = {
+        "load_gemm_data": dummy_gemm_data,
+        "load_custom_allreduce_data": dummy_custom_allreduce_data,
+        "load_moe_data": ({}, {}),
+    }
 
-    # Patch every other loader to return an empty dict (or None for optional loaders)
-    for loader_name in [
-        "load_context_attention_data",
-        "load_generation_attention_data",
-        "load_context_mla_data",
-        "load_generation_mla_data",
-        "load_mla_bmm_data",
-        "load_nccl_data",
-    ]:
-        monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{loader_name}", lambda path: {})
-    for loader_name in [
-        "load_context_dsa_module_data",
-        "load_generation_dsa_module_data",
-    ]:
-        monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{loader_name}", lambda path: None)
+    for name, default_value in _LOADER_STUBS.items():
+        ret = overrides.get(name, default_value)
+        monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{name}", lambda path, _r=ret: _r)
 
 
 @pytest.fixture
@@ -119,12 +153,8 @@ def stub_perf_db(tmp_path, monkeypatch):
     return PerfDatabase(system, backend, version, systems_dir)
 
 
-@pytest.fixture
-def comprehensive_perf_db(tmp_path, monkeypatch):
-    """
-    Create a PerfDatabase with comprehensive test data for all query methods.
-    """
-    # System spec with all required fields
+def _build_comprehensive_test_data():
+    """Build all the dummy data dicts for comprehensive_perf_db."""
     dummy_system_spec = {
         "data_dir": "data",
         "misc": {"nccl_version": "v1"},
@@ -141,13 +171,6 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
             "p2p_latency": 0.000001,  # 1 us
         },
     }
-
-    # Create the yaml file
-    yaml_file = tmp_path / "test_system.yaml"
-    with open(yaml_file, "w") as f:
-        yaml.dump(dummy_system_spec, f)
-
-    monkeypatch.setattr("yaml.load", lambda stream, Loader=None: dummy_system_spec)  # noqa: N803
 
     # Comprehensive GEMM data with energy
     dummy_gemm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
@@ -275,37 +298,99 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
                 for msg_size in [512, 1024, 2048, 4096]:
                     dummy_nccl_data[dtype][operation][num_gpus][msg_size] = 0.001 * msg_size * num_gpus
 
-    # Apply all patches
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_gemm_data", lambda path: dummy_gemm_data)
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_context_attention_data",
-        lambda path: dummy_context_attention_data,
-    )
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_generation_attention_data",
-        lambda path: dummy_generation_attention_data,
-    )
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_custom_allreduce_data",
-        lambda path: dummy_custom_allreduce_data,
-    )
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_moe_data",
-        lambda path: (dummy_moe_data, dummy_moe_data),
-    )
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_context_mla_data",
-        lambda path: dummy_context_mla_data,
-    )
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_generation_mla_data",
-        lambda path: dummy_generation_mla_data,
-    )
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_mla_bmm_data", lambda path: dummy_mla_bmm_data)
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_nccl_data", lambda path: dummy_nccl_data)
+    return {
+        "system_spec": dummy_system_spec,
+        "gemm_data": dummy_gemm_data,
+        "context_attention_data": dummy_context_attention_data,
+        "generation_attention_data": dummy_generation_attention_data,
+        "moe_data": dummy_moe_data,
+        "context_mla_data": dummy_context_mla_data,
+        "generation_mla_data": dummy_generation_mla_data,
+        "mla_bmm_data": dummy_mla_bmm_data,
+        "custom_allreduce_data": dummy_custom_allreduce_data,
+        "nccl_data": dummy_nccl_data,
+    }
 
-    # DSA module-level attention data (same dict structure as MLA)
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_context_dsa_module_data", lambda path: None)
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_generation_dsa_module_data", lambda path: None)
 
-    return PerfDatabase("test_system", "trtllm", "v1", str(tmp_path))
+# Module-level singleton: the PerfDatabase is built once (including the expensive
+# _correct_data + _extrapolate_data_grid passes in __init__) and reused by ALL tests.
+_comprehensive_db_singleton: PerfDatabase | None = None
+
+
+def _get_comprehensive_db_singleton() -> PerfDatabase:
+    """Build and cache a fully-initialized PerfDatabase singleton."""
+    global _comprehensive_db_singleton
+    if _comprehensive_db_singleton is not None:
+        return _comprehensive_db_singleton
+
+    cached = _build_comprehensive_test_data()
+    system_spec = cached["system_spec"]
+
+    tmp_dir = tempfile.mkdtemp()
+    yaml_file = os.path.join(tmp_dir, "test_system.yaml")
+    with open(yaml_file, "w") as f:
+        yaml.dump(system_spec, f)
+
+    # Use unittest.mock.patch (not monkeypatch) so we can call this outside a fixture.
+    # Per-loader overrides — anything not listed here falls through to
+    # the default in _LOADER_STUBS (None for most, (None, None) for moe).
+    overrides = {
+        "load_gemm_data": cached["gemm_data"],
+        "load_context_attention_data": cached["context_attention_data"],
+        "load_generation_attention_data": cached["generation_attention_data"],
+        "load_moe_data": (cached["moe_data"], cached["moe_data"]),
+        "load_custom_allreduce_data": cached["custom_allreduce_data"],
+        "load_nccl_data": cached["nccl_data"],
+        "load_context_mla_data": cached["context_mla_data"],
+        "load_generation_mla_data": cached["generation_mla_data"],
+        "load_mla_bmm_data": cached["mla_bmm_data"],
+    }
+    patches = [
+        patch("yaml.load", side_effect=lambda stream, Loader=None: system_spec),  # noqa: N803
+    ]
+    for name, default_value in _LOADER_STUBS.items():
+        ret = overrides.get(name, default_value)
+        patches.append(patch(f"aiconfigurator.sdk.perf_database.{name}", return_value=ret))
+
+    for p in patches:
+        p.start()
+    try:
+        _comprehensive_db_singleton = PerfDatabase("test_system", "trtllm", "v1", tmp_dir)
+    finally:
+        for p in patches:
+            p.stop()
+
+    return _comprehensive_db_singleton
+
+
+@pytest.fixture
+def comprehensive_perf_db():
+    """
+    Return a **shared, read-only** PerfDatabase with comprehensive test data.
+
+    This is a singleton — the same object is returned to every test.
+    This avoids the expensive __init__ (data loading + correction + extrapolation)
+    that previously ran per-test and dominated the test suite runtime.
+
+    DO NOT mutate the returned object. If a test needs to modify the db,
+    use the ``mutable_comprehensive_perf_db`` fixture instead.
+    """
+    return _get_comprehensive_db_singleton()
+
+
+@pytest.fixture
+def mutable_comprehensive_perf_db():
+    """
+    Return an independent deep copy of the comprehensive PerfDatabase.
+
+    Use this instead of ``comprehensive_perf_db`` when the test needs to mutate
+    the database (e.g. replacing data dicts, modifying system_spec, calling
+    _correct_data). Each invocation returns a fresh copy so mutations cannot
+    leak between tests.
+
+    Slower than the shared fixture (~1s for deepcopy) but much faster than
+    re-running PerfDatabase.__init__ from scratch.
+    """
+    import copy
+
+    return copy.deepcopy(_get_comprehensive_db_singleton())
