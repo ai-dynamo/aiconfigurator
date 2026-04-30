@@ -237,12 +237,12 @@ def run_moe_torch(
         # Per-group scales: (E, N, K//group_size)
         w1_scale = torch.randn(
             (local_num_experts, 2 * local_inter_size, hidden_size // int4_group_size),
-            dtype=torch.float32,
+            dtype=torch.bfloat16,
             device=device,
         )
         w2_scale = torch.randn(
             (local_num_experts, hidden_size, local_inter_size // int4_group_size),
-            dtype=torch.float32,
+            dtype=torch.bfloat16,
             device=device,
         )
         quant_config = int4_w4a16_moe_quant_config(
@@ -568,7 +568,7 @@ def run_moe_torch(
                         hidden_states[:local_num_tokens],
                         w1,
                         w2,
-                        tw,
+                        tw.float() if use_int4_wo else tw,
                         ti,
                         inplace=False,
                         quant_config=quant_config,
@@ -580,7 +580,7 @@ def run_moe_torch(
                     hidden_states,
                     w1,
                     w2,
-                    topk_weights,
+                    topk_weights.float() if use_int4_wo else topk_weights,
                     topk_ids,
                     inplace=False,
                     quant_config=quant_config,
