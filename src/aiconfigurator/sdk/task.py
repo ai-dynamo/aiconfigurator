@@ -1152,14 +1152,17 @@ class TaskRunner:
     def _get_database(system: str, backend: str, version: str, database_mode: str | None = None):
         """Fetch a database from the global cache.
 
-        When *database_mode* is set the returned object is a deep copy (because
-        `set_default_database_mode` mutates state).  Otherwise the cached
-        instance is returned directly.
+        When *database_mode* would change the cached database's default mode,
+        return a deep copy first because `set_default_database_mode` mutates
+        query-cache state. If the requested mode already matches, reuse the
+        cached instance directly.
         """
         db = get_database(system=system, backend=backend, version=version)
         if database_mode is not None:
-            db = copy.deepcopy(db)
-            db.set_default_database_mode(common.DatabaseMode[database_mode])
+            mode = common.DatabaseMode[database_mode]
+            if mode != db.get_default_database_mode():
+                db = copy.deepcopy(db)
+                db.set_default_database_mode(mode)
         return db
 
     def run_agg(self, task_config: DefaultMunch) -> dict[str, pd.DataFrame | None]:
