@@ -17,11 +17,15 @@ ALLOW_DRA_NODES=${ALLOW_DRA_NODES:-0}
 
 TOKENS=${TOKENS:-1,8,16,32,64,128,256,512,1024,2048,4096,8192}
 INTERMEDIATE_HIDDENS=${INTERMEDIATE_HIDDENS:-512,1024,1536,2048,2560,3072}
+TARGET_INTERMEDIATE_HIDDEN=${TARGET_INTERMEDIATE_HIDDEN:-3072}
 REPEAT_SAMPLES=${REPEAT_SAMPLES:-5}
 POWER_LAW_ALPHA=${POWER_LAW_ALPHA:-1.01}
 SEED=${SEED:-0}
 NUM_MAX_TOKENS_PER_RANK=${NUM_MAX_TOKENS_PER_RANK:-8192}
 FLUSH_L2=${FLUSH_L2:-1}
+HIDDEN_SIZE=${HIDDEN_SIZE:-7168}
+NUM_EXPERTS=${NUM_EXPERTS:-384}
+TOPK=${TOPK:-6}
 BACKEND_VERSION=${BACKEND_VERSION:-0.5.9}
 PLATEAU_TOLERANCE_PCT=${PLATEAU_TOLERANCE_PCT:-5}
 REMOTE_POLL_SECONDS=${REMOTE_POLL_SECONDS:-30}
@@ -98,6 +102,7 @@ fi
 echo "Submitting ${POD_NAME}: GPU_PRODUCT=${GPU_PRODUCT}, TARGET_HOSTNAME=${TARGET_HOSTNAME:-<unset>}, "\
 "EXCLUDED_HOSTS=${EXCLUDED_HOSTS:-<unset>}, ALLOW_DRA_NODES=${ALLOW_DRA_NODES}, "\
 "TOKENS=${TOKENS}, INTERMEDIATE_HIDDENS=${INTERMEDIATE_HIDDENS}, "\
+"TARGET_INTERMEDIATE_HIDDEN=${TARGET_INTERMEDIATE_HIDDEN}, HIDDEN_SIZE=${HIDDEN_SIZE}, "\
 "REPEAT_SAMPLES=${REPEAT_SAMPLES}, ROUTING_MODE=${ROUTING_MODE}, "\
 "ALPHA=${POWER_LAW_ALPHA}, SEED=${SEED}"
 
@@ -201,29 +206,37 @@ kubectl cp -n "${NAMESPACE}" \
   "${REPO_ROOT}/collector/sglang/collect_dsv4_megamoe_effective_nvl_bw.py" \
   "${POD_NAME}:/tmp/collect_dsv4_megamoe_effective_nvl_bw.py"
 kubectl cp -n "${NAMESPACE}" \
+  "${REPO_ROOT}/collector/sglang/collect_dsv4_megamoe_comm_path.py" \
+  "${POD_NAME}:/tmp/collect_dsv4_megamoe_comm_path.py"
+kubectl cp -n "${NAMESPACE}" \
   "${REPO_ROOT}/collector/sglang/analyze_dsv4_megamoe_comm_sweep.py" \
   "${POD_NAME}:/tmp/analyze_dsv4_megamoe_comm_sweep.py"
-kubectl cp -n "${NAMESPACE}" \
-  "${REPO_ROOT}/tools/dsv4_megamoe/remote_comm_path_sweep_inner.sh" \
-  "${POD_NAME}:/tmp/remote_comm_path_sweep_inner.sh"
 
 kubectl_exec_retry bash -lc "
 set -euo pipefail
-chmod +x /tmp/remote_comm_path_sweep_inner.sh
 rm -f /tmp/aic_comm_path_sweep_ep8.log /tmp/aic_comm_path_sweep_ep8.exit /tmp/aic_comm_path_sweep_ep8.pid
-nohup env \
-  RUN_ID='${RUN_ID}' \
-  INTERMEDIATE_HIDDENS='${INTERMEDIATE_HIDDENS}' \
-  NUM_MAX_TOKENS_PER_RANK='${NUM_MAX_TOKENS_PER_RANK}' \
-  TOKENS='${TOKENS}' \
-  REPEAT_SAMPLES='${REPEAT_SAMPLES}' \
-  ROUTING_MODE='${ROUTING_MODE}' \
-  POWER_LAW_ALPHA='${POWER_LAW_ALPHA}' \
-  SEED='${SEED}' \
-  FLUSH_L2='${FLUSH_L2}' \
-  BACKEND_VERSION='${BACKEND_VERSION}' \
-  PLATEAU_TOLERANCE_PCT='${PLATEAU_TOLERANCE_PCT}' \
-  bash -lc '/tmp/remote_comm_path_sweep_inner.sh > /tmp/aic_comm_path_sweep_ep8.log 2>&1; echo \$? > /tmp/aic_comm_path_sweep_ep8.exit' \
+nohup bash -lc 'python3 /tmp/collect_dsv4_megamoe_comm_path.py \
+  --num-processes 8 \
+  --num-max-tokens-per-rank \"${NUM_MAX_TOKENS_PER_RANK}\" \
+  --num-tokens-list \"${TOKENS}\" \
+  --intermediate-hiddens \"${INTERMEDIATE_HIDDENS}\" \
+  --target-intermediate-hidden \"${TARGET_INTERMEDIATE_HIDDEN}\" \
+  --repeat-samples \"${REPEAT_SAMPLES}\" \
+  --routing-mode \"${ROUTING_MODE}\" \
+  --power-law-alpha \"${POWER_LAW_ALPHA}\" \
+  --hidden-size \"${HIDDEN_SIZE}\" \
+  --num-experts \"${NUM_EXPERTS}\" \
+  --topk \"${TOPK}\" \
+  --seed \"${SEED}\" \
+  --flush-l2 \"${FLUSH_L2}\" \
+  --backend-version \"${BACKEND_VERSION}\" \
+  --plateau-tolerance-pct \"${PLATEAU_TOLERANCE_PCT}\" \
+  --output-dir /tmp/aic_comm_path_sweep_ep8 \
+  --analysis-output-dir /tmp/aic_comm_path_sweep_ep8/analysis \
+  --perf-output /tmp/aic_comm_path_sweep_ep8/analysis/dsv4_megamoe_comm_path_perf.txt \
+  --source \"${RUN_ID}\" \
+  --effective-collector /tmp/collect_dsv4_megamoe_effective_nvl_bw.py \
+  > /tmp/aic_comm_path_sweep_ep8.log 2>&1; echo \$? > /tmp/aic_comm_path_sweep_ep8.exit' \
   >/tmp/aic_comm_path_sweep_ep8.launch.log 2>&1 &
 echo \$! > /tmp/aic_comm_path_sweep_ep8.pid
 cat /tmp/aic_comm_path_sweep_ep8.pid

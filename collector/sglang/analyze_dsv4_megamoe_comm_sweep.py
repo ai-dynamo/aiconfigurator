@@ -329,6 +329,89 @@ def _write_perf_csv(path: Path, rows: list[dict[str, Any]], args: argparse.Names
             )
 
 
+def analyze_comm_sweep(
+    *,
+    input_dir: Path,
+    output_dir: Path,
+    plateau_tolerance_pct: float = 5.0,
+    target_intermediate_hidden: int = 3072,
+    perf_output: Path | None = None,
+    framework: str = "SGLang",
+    backend_version: str = "unknown",
+    device_name: str = "unknown",
+    kernel_source: str = "DeepGEMM_fp8_fp4_mega_moe",
+    hidden_size: int = 7168,
+    topk: int = 6,
+    num_experts: int = 384,
+    moe_ep_size: int = 8,
+    routing_mode: str = "random",
+    power_law_alpha: float = 1.01,
+    source: str = "",
+) -> dict[str, Any]:
+    rows = _load_rows(input_dir)
+    if not rows:
+        raise ValueError(f"no compute-sweep rows found under {input_dir}")
+
+    mismatches = _validate_fixed_traffic(rows)
+    inferred_rows = _infer_plateaus(
+        rows,
+        plateau_tol=plateau_tolerance_pct / 100.0,
+        target_intermediate_hidden=target_intermediate_hidden,
+    )
+    aggregate_rows = _aggregate_by_tokens(inferred_rows)
+
+    args = argparse.Namespace(
+        framework=framework,
+        backend_version=backend_version,
+        device_name=device_name,
+        kernel_source=kernel_source,
+        hidden_size=hidden_size,
+        topk=topk,
+        num_experts=num_experts,
+        moe_ep_size=moe_ep_size,
+        routing_mode=routing_mode,
+        power_law_alpha=power_law_alpha,
+        source=source,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    curves_path = output_dir / "curves.csv"
+    inferred_path = output_dir / "inferred_comm_tail_by_sample.csv"
+    aggregate_path = output_dir / "inferred_comm_tail_by_tokens.csv"
+    validation_path = output_dir / "validation.json"
+    _write_csv(curves_path, rows)
+    _write_csv(inferred_path, inferred_rows)
+    _write_csv(aggregate_path, aggregate_rows)
+    if perf_output is not None:
+        _write_perf_csv(perf_output, aggregate_rows, args)
+    validation_path.write_text(
+        json.dumps(
+            {
+                "num_curve_rows": len(rows),
+                "num_fixed_traffic_mismatches": len(mismatches),
+                "fixed_traffic_mismatches": mismatches,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    if mismatches:
+        raise ValueError(f"fixed-traffic validation failed with {len(mismatches)} mismatches")
+
+    return {
+        "curves_path": str(curves_path),
+        "inferred_by_sample_path": str(inferred_path),
+        "inferred_by_tokens_path": str(aggregate_path),
+        "perf_output": str(perf_output) if perf_output is not None else "",
+        "validation_path": str(validation_path),
+        "num_curve_rows": len(rows),
+        "num_perf_rows": len(aggregate_rows),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, required=True)
@@ -364,46 +447,34 @@ def main() -> None:
     parser.add_argument("--source", default="")
     args = parser.parse_args()
 
-    rows = _load_rows(args.input_dir)
-    if not rows:
-        raise SystemExit(f"no compute-sweep rows found under {args.input_dir}")
-
-    mismatches = _validate_fixed_traffic(rows)
-    inferred_rows = _infer_plateaus(
-        rows,
-        plateau_tol=args.plateau_tolerance_pct / 100.0,
-        target_intermediate_hidden=args.target_intermediate_hidden,
-    )
-    aggregate_rows = _aggregate_by_tokens(inferred_rows)
-
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    _write_csv(args.output_dir / "curves.csv", rows)
-    _write_csv(args.output_dir / "inferred_comm_tail_by_sample.csv", inferred_rows)
-    _write_csv(args.output_dir / "inferred_comm_tail_by_tokens.csv", aggregate_rows)
-    if args.perf_output is not None:
-        _write_perf_csv(args.perf_output, aggregate_rows, args)
-    (args.output_dir / "validation.json").write_text(
-        json.dumps(
-            {
-                "num_curve_rows": len(rows),
-                "num_fixed_traffic_mismatches": len(mismatches),
-                "fixed_traffic_mismatches": mismatches,
-            },
-            indent=2,
-            sort_keys=True,
+    try:
+        result = analyze_comm_sweep(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            plateau_tolerance_pct=args.plateau_tolerance_pct,
+            target_intermediate_hidden=args.target_intermediate_hidden,
+            perf_output=args.perf_output,
+            framework=args.framework,
+            backend_version=args.backend_version,
+            device_name=args.device_name,
+            kernel_source=args.kernel_source,
+            hidden_size=args.hidden_size,
+            topk=args.topk,
+            num_experts=args.num_experts,
+            moe_ep_size=args.moe_ep_size,
+            routing_mode=args.routing_mode,
+            power_law_alpha=args.power_law_alpha,
+            source=args.source,
         )
-        + "\n",
-        encoding="utf-8",
-    )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
-    print(f"Wrote {args.output_dir / 'curves.csv'}")
-    print(f"Wrote {args.output_dir / 'inferred_comm_tail_by_sample.csv'}")
-    print(f"Wrote {args.output_dir / 'inferred_comm_tail_by_tokens.csv'}")
+    print(f"Wrote {result['curves_path']}")
+    print(f"Wrote {result['inferred_by_sample_path']}")
+    print(f"Wrote {result['inferred_by_tokens_path']}")
     if args.perf_output is not None:
-        print(f"Wrote {args.perf_output}")
-    print(f"Wrote {args.output_dir / 'validation.json'}")
-    if mismatches:
-        raise SystemExit(f"fixed-traffic validation failed with {len(mismatches)} mismatches")
+        print(f"Wrote {result['perf_output']}")
+    print(f"Wrote {result['validation_path']}")
 
 
 if __name__ == "__main__":
