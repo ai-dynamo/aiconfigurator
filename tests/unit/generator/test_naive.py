@@ -179,8 +179,7 @@ class TestEstimateModelWeightBytesFailsOnMissingModel:
 @pytest.mark.unit
 class TestCalculateMinTp:
     """Verify _calculate_min_tp memory-fit floor, including multi-node sweeps."""
-
-    # H100: 80 GiB per GPU.  DeepSeek R1 FP8: ~671 GiB of weights.
+     # H100: 80 GiB per GPU.  DeepSeek R1 FP8: ~671 GiB of weights.
     _H100_VRAM = 80 * 1024**3
     _R1_FP8_WEIGHTS = 671 * 1024**3
 
@@ -192,7 +191,8 @@ class TestCalculateMinTp:
             gpus_per_node=8,
             total_gpus=32,
         )
-        assert tp == 8  # capped at node even though model wants more
+        assert min_gpus == 8          # capped
+        assert tp == 16               # actual requirement
 
     def test_multi_node_allows_crossing_node_boundary(self):
         """MoE wide-EP: min_tp can span nodes, floored to power-of-2 fit."""
@@ -203,11 +203,10 @@ class TestCalculateMinTp:
             total_gpus=32,
             allow_multi_node=True,
         )
-        # 1.5 * 671 / 80 = ~12.6 -> 13 -> round to 16
         assert tp == 16
+        assert min_gpus == 16
 
     def test_multi_node_capped_by_total_gpus(self):
-        """Even in multi-node mode, result cannot exceed total_gpus budget."""
         min_gpus, fits, tp = _calculate_min_tp(
             model_weight_bytes=self._R1_FP8_WEIGHTS,
             vram_per_gpu=self._H100_VRAM,
@@ -215,7 +214,8 @@ class TestCalculateMinTp:
             total_gpus=8,
             allow_multi_node=True,
         )
-        assert tp == 8  # clamped to budget
+        assert min_gpus == 8          # capped by total GPUs
+        assert tp == 16               # still required
 
     def test_small_model_fits_on_one_gpu(self):
         min_gpus, fits, tp = _calculate_min_tp(
@@ -224,9 +224,8 @@ class TestCalculateMinTp:
             gpus_per_node=8,
             total_gpus=8,
         )
+        assert min_gpus == 1
         assert tp == 1
-
-
 @pytest.mark.unit
 class TestRenderingNameFallback:
     """Verify prepare_template_context uses 'dynamo' fallback for missing name_prefix."""
