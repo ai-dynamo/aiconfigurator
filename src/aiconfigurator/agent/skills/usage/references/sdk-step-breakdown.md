@@ -12,7 +12,7 @@ aiconfigurator cli estimate \
   --model Qwen/Qwen3-32B \
   --system h200_sxm \
   --backend trtllm \
-  --database-mode HYBRID \
+  --database-mode SILICON \
   --isl 4000 \
   --osl 1000 \
   --batch-size 128 \
@@ -31,7 +31,7 @@ aiconfigurator cli estimate \
   --model Qwen/Qwen3-32B \
   --system h200_sxm \
   --backend trtllm \
-  --database-mode HYBRID \
+  --database-mode SILICON \
   --isl 4000 \
   --osl 1000 \
   --prefill-batch-size 1 \
@@ -80,3 +80,5 @@ cleanly to CLI estimate arguments. It returns structured fields plus
 - Include batch size, TP/PP/DP, MoE TP/EP, ISL, OSL, database mode, and backend
   version.
 - Do not claim a step breakdown is live profiling; it is still AIC estimation.
+- Keep final diagnosis grounded in `SILICON`; use `SOL` only for an upper-bound
+  cross-check.

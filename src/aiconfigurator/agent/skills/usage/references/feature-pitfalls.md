@@ -43,7 +43,9 @@ Use this checklist before enabling advanced AIC features in CLI or YAML.
 ## Quantization
 
 - Quantization defaults are inferred from model config when possible.
-- Explicit YAML quantization overrides inferred defaults.
+- Explicit YAML quantization overrides inferred defaults. Do not add explicit
+  quantization in agent-authored YAML unless the user asks for a quantization
+  study or a known runtime requires a specific mode.
 - Validate quant mode support against the selected system/backend/version. AIC
   may reject unsupported modes before the sweep.
 - `fp8_static` GEMM mode is currently TRT-LLM-only.
@@ -52,7 +54,10 @@ Use this checklist before enabling advanced AIC features in CLI or YAML.
 
 ## Database Mode
 
-- Use `SILICON` for measured database-only comparisons.
-- Use `HYBRID` when frontier models or new backend coverage may be incomplete.
-- Use `EMPIRICAL` or `SOL` only when the user accepts estimation-only analysis.
-- Do not compare `SILICON` and `HYBRID` as if both were measured silicon data.
+- Use `SILICON` for final experiments, analysis, deployment sizing, and config
+  generation.
+- Use `SOL` only as an upper-bound or feasibility sanity check.
+- Avoid `HYBRID` and `EMPIRICAL` in agent-led experiments. They are not mature
+  enough to mix into actual experiment results.
+- If silicon data is missing, report the coverage gap instead of substituting
+  another database mode into the final result.

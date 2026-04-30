@@ -9,15 +9,15 @@ aiconfigurator cli support \
   --backend all
 ```
 
-## Default Search With Hybrid Coverage
+## Rough Default Run
 
 ```bash
 aiconfigurator cli default \
   --model Qwen/Qwen3-32B \
   --system h200_sxm \
-  --backend auto \
-  --total-gpus 8 \
-  --database-mode HYBRID \
+  --backend trtllm \
+  --total-gpus 16 \
+  --database-mode SILICON \
   --isl 4000 \
   --osl 1000 \
   --ttft 2000 \
@@ -25,15 +25,14 @@ aiconfigurator cli default \
   --save-dir results
 ```
 
-## Disaggregated Hardware Split
+## Precise Disagg Experiment From Template
 
 ```bash
-aiconfigurator cli default \
-  --model Qwen/Qwen3-32B \
-  --system b200_sxm \
-  --decode-system h200_sxm \
-  --backend trtllm \
-  --total-gpus 16 \
+aiconfigurator agent usage --ref experiment-template > template.yaml
+# Keep the disagg entry and narrow prefill/decode search lists based on the
+# rough default run.
+aiconfigurator cli exp \
+  --yaml-path template.yaml \
   --save-dir results
 ```
 
@@ -45,6 +44,7 @@ aiconfigurator cli estimate \
   --estimate-mode agg \
   --system h200_sxm \
   --backend trtllm \
+  --database-mode SILICON \
   --isl 4000 \
   --osl 1000 \
   --batch-size 128 \

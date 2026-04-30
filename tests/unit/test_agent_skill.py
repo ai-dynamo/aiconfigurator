@@ -16,6 +16,7 @@ def test_agent_skill_text_uses_progressive_references():
     assert "Load References Only When Needed" in text
     assert "aiconfigurator agent usage --ref cli-modes" in text
     assert "aiconfigurator agent usage --ref single-experiment-yaml" in text
+    assert "aiconfigurator agent usage --ref experiment-template" in text
     assert "aiconfigurator agent usage --ref feature-pitfalls" in text
 
 
@@ -32,18 +33,22 @@ def test_usage_reference_text_loads():
     sdk_text = get_agent_text("usage", "sdk-step-breakdown")
     deployment_text = get_agent_text("usage", "deployment-bench")
     pitfalls_text = get_agent_text("usage", "feature-pitfalls")
+    template_text = get_agent_text("usage", "experiment-template")
 
-    assert "Use `aiconfigurator cli exp --yaml-path ...`" in yaml_text
+    assert "after a rough `default` run" in yaml_text
     assert "`tokens/s/gpu_cluster`" in result_text
     assert "--print-per-ops-latency" in sdk_text
     assert "--generated-config-version" in deployment_text
     assert "MTP / `nextn`" in pitfalls_text
+    assert "database_mode: SILICON" in template_text
+    assert "Do not add quantization overrides by default" in template_text
 
 
 def test_agent_lists_skills_and_refs():
     assert list_agent_skills() == ("usage", "development")
     assert "examples" in list_agent_refs("usage")
     assert "single-experiment-yaml" in list_agent_refs("usage")
+    assert "experiment-template" in list_agent_refs("usage")
     assert "feature-pitfalls" in list_agent_refs("usage")
     assert "generator" in list_agent_refs("development")
 
@@ -68,6 +73,7 @@ def test_agent_cli_lists_new_usage_references(capsys):
 
     out = capsys.readouterr().out
     assert "single-experiment-yaml" in out
+    assert "experiment-template" in out
     assert "result-interpretation" in out
     assert "sdk-step-breakdown" in out
     assert "deployment-bench" in out

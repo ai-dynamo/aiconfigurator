@@ -7,7 +7,9 @@ and total GPU count. Then check:
 
 - SLA too tight: relax `--ttft`, `--tpot`, or `--request-latency`.
 - Not enough GPUs: increase `--total-gpus`.
-- Missing silicon rows: retry with `--database-mode HYBRID`.
+- Missing silicon rows: report a silicon coverage gap with the exact
+  model/system/backend/version/workload. Do not silently switch the final
+  experiment to another database mode.
 - Unsupported backend/system: run `aiconfigurator cli support`.
 
 ## Missing Database
@@ -19,7 +21,9 @@ If AIC reports no perf database for a system/backend/version, remove
 ## New Model
 
 For frontier or newly added models, do not assume `SILICON` coverage. Use
-`support` first, then run `default` with `HYBRID` if silicon data is incomplete.
+`support` first. If silicon data is incomplete, report that the final experiment
+is blocked on coverage instead of presenting `HYBRID` or `EMPIRICAL` as a
+deployment-quality result.
 
 ## Local Model Config
 

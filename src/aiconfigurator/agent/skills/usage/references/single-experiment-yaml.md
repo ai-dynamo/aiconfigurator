@@ -1,87 +1,100 @@
-# Single Experiment YAML
+# Experiment YAML Guide
 
-Use `aiconfigurator cli exp --yaml-path ...` even for one experiment when the
-user needs exact control over worker search space, quantization, WideEP, MTP,
-replica shape, or latency correction. A YAML file is easier to review and reuse
-than a long CLI command.
+Use `aiconfigurator cli exp --yaml-path ...` after a rough `default` run when
+the agent needs precise control over a planned experiment. This is usually the
+right path for narrowing a disaggregated search after `default` has shown the
+rough backend, GPU shape, batch-size, and SLA range.
+
+Start from the bundled template:
+
+```bash
+aiconfigurator agent usage --ref experiment-template > template.yaml
+```
+
+Then edit the copied YAML for the user's model, system, backend, GPU budget,
+workload, SLA, and disaggregated search space.
 
 ## Authoring Workflow
 
-1. Start from `src/aiconfigurator/cli/example.yaml` or the closest file under
-   `src/aiconfigurator/cli/exps/`.
-2. Keep `exps` to one entry unless the user explicitly wants comparison.
-3. Prefer `mode: patch` so defaults still supply backend versions, worker
-   fields, and runtime metadata.
-4. Put workload and SLA at the experiment top level: `isl`, `osl`, `prefix`,
+1. Copy the complete template and keep only the experiment entries needed for
+   the task.
+2. Run or inspect a `default` result first and extract the promising disagg
+   region: backend, GPUs per replica, TP/PP/DP, MoE TP/EP, worker counts, batch
+   sizes, and whether SLA failures are TTFT- or TPOT-driven.
+3. Keep `mode: patch` unless a developer explicitly asks for full replacement.
+4. Keep `database_mode: SILICON` for experiments that will drive analysis,
+   deployment sizing, or generated configs.
+5. Put workload and SLA at the experiment top level: `isl`, `osl`, `prefix`,
    `ttft`, `tpot`, and optionally `request_latency`.
-5. Put advanced model/search changes under `config`.
-6. Run with `--save-dir` and inspect the saved `exp_config.yaml`,
+6. Change search-space lists under `prefill_worker_config`,
+   `decode_worker_config`, and `replica_config` for precise disagg experiments.
+   Use `worker_config` for aggregate-only follow-ups.
+7. Do not override quantization by default. Let model config and AIC defaults
+   infer quantization unless the user asks for a quantization study or a known
+   runtime requires an explicit mode.
+8. Run with `--save-dir`, then inspect `exp_config.yaml`,
    `best_config_topn.csv`, `pareto.csv`, and `top*/generator_config.yaml`.
 
-## Minimal Aggregate Template
+## Default-to-YAML Handoff
 
-```yaml
-exps:
-  - agg_one
+Use the `default` run to decide what to keep in the YAML:
 
-agg_one:
-  mode: patch
-  serving_mode: agg
-  model_path: Qwen/Qwen3-32B
-  total_gpus: 8
-  system_name: h200_sxm
-  backend_name: trtllm
-  database_mode: HYBRID
-  isl: 4000
-  osl: 1000
-  ttft: 2000.0
-  tpot: 30.0
-  config:
-    worker_config:
-      num_gpu_per_worker: [1, 2, 4, 8]
-      tp_list: [1, 2, 4, 8]
-      pp_list: [1]
-```
+- Keep the backend and serving mode that look promising under `SILICON`.
+- Center `num_gpu_per_replica` and `max_gpu_per_replica` around realistic
+  disagg shapes from the default result.
+- Narrow `prefill_worker_config` around TTFT-sensitive candidates.
+- Narrow `decode_worker_config` around TPOT-sensitive candidates.
+- Keep batch-size caps practical; do not blindly expand decode batch size just
+  because the theoretical result improves.
+- Preserve the workload and SLA from the default command unless the user is
+  intentionally changing the target.
 
-## Minimal Disaggregated Template
+## Database Mode Policy
 
-```yaml
-exps:
-  - disagg_one
+- `SILICON`: required for final analysis, deployment sizing, and generated
+  configs.
+- `SOL`: allowed as an upper-bound or feasibility sanity check. It should not be
+  mixed into final experiment tables.
+- `HYBRID` and `EMPIRICAL`: avoid for agent-led experiments. If a developer
+  explicitly requests them for a non-final what-if, label the output clearly and
+  do not reuse those rows for deployment config decisions.
+- Missing silicon data is a coverage gap. Report it with model, system, backend,
+  version, workload, and database mode.
 
-disagg_one:
-  mode: patch
-  serving_mode: disagg
-  model_path: Qwen/Qwen3-32B
-  total_gpus: 16
-  system_name: h200_sxm
-  decode_system_name: h200_sxm
-  backend_name: trtllm
-  database_mode: HYBRID
-  isl: 4000
-  osl: 1000
-  ttft: 2000.0
-  tpot: 30.0
-  config:
-    prefill_worker_config:
-      num_gpu_per_worker: [1, 2, 4, 8]
-      tp_list: [1, 2, 4, 8]
-      pp_list: [1]
-      dp_list: [1]
-    decode_worker_config:
-      num_gpu_per_worker: [1, 2, 4, 8]
-      tp_list: [1, 2, 4, 8]
-      pp_list: [1]
-      dp_list: [1]
-    replica_config:
-      max_gpu_per_replica: 128
-      max_prefill_worker: 32
-      max_decode_worker: 32
-```
+## Top-Level Experiment Fields
 
-## MTP and WideEP Fields
+- `serving_mode`: `agg` or `disagg`.
+- `model_path`: Hugging Face model ID or local model config directory.
+- `total_gpus`: GPU budget for the cluster-level search.
+- `system_name`: prefill or aggregate system.
+- `decode_system_name`: decode system for disaggregated serving. Omit only when
+  it is the same as `system_name`.
+- `backend_name`: `trtllm`, `vllm`, or `sglang`.
+- `backend_version`: optional. Prefer omitting it unless the user needs a
+  specific silicon database version.
+- `database_mode`: keep `SILICON`.
+- `enable_wideep`: only for MoE experiments with supported WideEP data.
 
-Add MTP only when the model is known to support it:
+## Search-Space Fields
+
+Aggregate experiments use `config.worker_config`. Disaggregated experiments,
+which are the usual precise follow-up, use `config.prefill_worker_config`,
+`config.decode_worker_config`, and `config.replica_config`.
+
+Useful search fields:
+
+- `num_gpu_per_worker`: exact worker GPU counts to evaluate.
+- `tp_list`, `pp_list`, `dp_list`: attention/model parallel candidates.
+- `moe_tp_list`, `moe_ep_list`: MoE parallel candidates.
+- `max_gpu_per_replica`: cap for disaggregated replica size.
+- `max_prefill_worker`, `max_decode_worker`: worker-count caps per replica.
+- `prefill_max_batch_size`, `decode_max_batch_size`: practical per-worker batch
+  caps.
+
+## MTP and WideEP
+
+Do not add MTP just because a model is MoE. Only set `nextn` when the model and
+backend runtime are intended to use MTP/speculative decoding.
 
 ```yaml
   config:
@@ -89,8 +102,8 @@ Add MTP only when the model is known to support it:
     nextn_accept_rates: [0.85, 0.3, 0.0, 0.0, 0.0]
 ```
 
-Enable WideEP only for MoE experiments where the backend and database have
-WideEP coverage:
+Only enable WideEP for supported MoE paths. WideEP changes the search space, so
+verify the normalized `exp_config.yaml` after the run.
 
 ```yaml
   enable_wideep: true
@@ -100,16 +113,13 @@ WideEP coverage:
       moe_ep_list: [8, 16, 32]
 ```
 
-For disaggregated experiments, the same idea applies independently to
-`prefill_worker_config` and `decode_worker_config`.
+For disaggregated experiments, apply the corresponding search-space edits to
+both `prefill_worker_config` and `decode_worker_config` when appropriate.
 
-## Checklist
+## Review Checklist
 
-- Confirm `model_path`, `system_name`, `decode_system_name`, `backend_name`, and
-  `backend_version` are real supported values.
-- Use `database_mode: HYBRID` for frontier or new model work unless the user
-  explicitly wants strict silicon-only data.
-- Keep `replace` mode rare; it must provide every required config field.
-- Reduce search space first when a YAML run is slow.
-- Check the saved `exp_config.yaml`; it is the normalized config AIC actually
-  used.
+- The experiment keeps `database_mode: SILICON`.
+- Quantization is not overridden unless there is a specific reason.
+- Search lists are narrow enough to run in reasonable time.
+- WideEP, DeepEP, EPLB, and MTP are only enabled with an explicit rationale.
+- Saved `exp_config.yaml` reflects the intended normalized search definition.

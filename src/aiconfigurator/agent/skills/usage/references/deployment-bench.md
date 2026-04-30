@@ -11,6 +11,7 @@ aiconfigurator cli default \
   --system h200_sxm \
   --backend trtllm \
   --total-gpus 8 \
+  --database-mode SILICON \
   --isl 4000 \
   --osl 1000 \
   --ttft 2000 \
@@ -41,6 +42,8 @@ config must match a specific runtime.
 - `--generator-dynamo-version` maps a Dynamo release to backend config versions
   and image defaults.
 - These versions can differ. Call out that difference explicitly.
+- The selected row used for generated deployment artifacts should come from a
+  `SILICON` experiment, not `HYBRID`, `EMPIRICAL`, or `SOL`.
 
 ## Validation
 

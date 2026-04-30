@@ -14,6 +14,7 @@ _REFERENCE_FILES = {
     "usage": {
         "cli-modes": "skills/usage/references/cli-modes.md",
         "single-experiment-yaml": "skills/usage/references/single-experiment-yaml.md",
+        "experiment-template": "skills/usage/templates/experiment-template.yaml",
         "result-interpretation": "skills/usage/references/result-interpretation.md",
         "sdk-step-breakdown": "skills/usage/references/sdk-step-breakdown.md",
         "deployment-bench": "skills/usage/references/deployment-bench.md",

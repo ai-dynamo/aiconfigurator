@@ -39,8 +39,10 @@ Do not rely only on the console table when explaining an AIC run. Use
   `backend` column in the explanation.
 - Disaggregated configs are scalable replicas. Explain both per-replica shape
   and cluster-scale replicas.
-- `HYBRID`, `EMPIRICAL`, and `SOL` are estimation modes, not silicon benchmark
-  results. Keep them separate from `SILICON` in comparisons.
+- `HYBRID`, `EMPIRICAL`, and `SOL` are not measured silicon experiment results.
+  Do not mix them into final analysis or deployment config selection.
+- `SOL` may be useful as an upper-bound sanity check, but final rows should be
+  based on `SILICON`.
 - A configuration can appear in a Pareto frontier yet fail a stricter SLA if
   `--strict-sla` was not used.
 - If no rows meet SLA, report which constraint filtered the run instead of only
