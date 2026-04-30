@@ -109,4 +109,11 @@ REGISTRY: list[OpEntry] = [
         run_func="run_gdn_torch",
         perf_filename=PerfFile.GDN,
     ),
+    OpEntry(
+        op="mhc_module",
+        module="collector.sglang.collect_mhc_module",
+        get_func="get_mhc_module_test_cases",
+        run_func="run_mhc_module_worker",
+        perf_filename=PerfFile.MHC_MODULE,
+    ),
 ]

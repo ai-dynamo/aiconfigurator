@@ -42,6 +42,7 @@ class PerfFile(str, Enum):
     MLA_GENERATION_MODULE = "mla_generation_module_perf.txt"
     DSA_CONTEXT_MODULE = "dsa_context_module_perf.txt"
     DSA_GENERATION_MODULE = "dsa_generation_module_perf.txt"
+    MHC_MODULE = "mhc_module_perf.txt"
     NCCL = "nccl_perf.txt"
     CUSTOM_ALLREDUCE = "custom_allreduce_perf.txt"
     TRTLLM_ALLTOALL = "trtllm_alltoall_perf.txt"

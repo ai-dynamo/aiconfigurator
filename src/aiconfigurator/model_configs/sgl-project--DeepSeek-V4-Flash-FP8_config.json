@@ -83,6 +83,15 @@
       128
     ]
   },
+  "rope_scaling": {
+    "beta_fast": 32,
+    "beta_slow": 1,
+    "factor": 16,
+    "original_max_position_embeddings": 65536,
+    "type": "yarn"
+  },
+  "topk_method": "noaux_tc",
+  "scoring_func": "sqrtsoftplus",
   "torch_dtype": "bfloat16",
   "model_type": "deepseek_ref"
 }
