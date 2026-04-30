@@ -300,6 +300,7 @@ class TestCorrectData:
 
     def test_correct_gemm_data(self, mutable_comprehensive_perf_db, caplog):
         """Test that _correct_data adjusts GEMM data based on SOL."""
+        # Manually set a GEMM value that's too optimistic (lower than SOL)
         db = mutable_comprehensive_perf_db
         quant_mode = common.GEMMQuantMode.bfloat16
         m, n, k = 64, 128, 256
@@ -331,15 +332,15 @@ class TestCorrectData:
         )
 
         # Set an artificially low value
-        gen_data = db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b]
-        gen_data[s] = sol_value * 0.5
+        db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][s] = sol_value * 0.5
 
         # Run correction
         with caplog.at_level("DEBUG"):
             db._correct_data()
 
         # Check that the value was corrected
-        assert gen_data[s] >= sol_value
+        corrected_value = db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][s]
+        assert corrected_value >= sol_value
 
 
 class TestUpdateSupportMatrix:

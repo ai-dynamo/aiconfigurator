@@ -124,7 +124,7 @@ def stub_perf_db(tmp_path, monkeypatch):
 
 def _build_comprehensive_test_data():
     """Build all the dummy data dicts for comprehensive_perf_db."""
-    system_spec = {
+    dummy_system_spec = {
         "data_dir": "data",
         "misc": {"nccl_version": "v1"},
         "gpu": {
@@ -142,7 +142,7 @@ def _build_comprehensive_test_data():
     }
 
     # Comprehensive GEMM data with energy
-    gemm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+    dummy_gemm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     for quant_mode in [common.GEMMQuantMode.bfloat16, common.GEMMQuantMode.fp8]:
         for m in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
             for n in [128, 256, 512, 1024]:
@@ -150,14 +150,14 @@ def _build_comprehensive_test_data():
                     latency = 0.1 + m * 0.001 + n * 0.0001 + k * 0.00001
                     power = 5.0 + m * 0.01  # Dummy power value
                     energy = power * latency
-                    gemm_data[quant_mode][m][n][k] = {
+                    dummy_gemm_data[quant_mode][m][n][k] = {
                         "latency": latency,
                         "power": power,
                         "energy": energy,
                     }
 
     # Context attention data
-    context_attention_data = defaultdict(
+    dummy_context_attention_data = defaultdict(
         lambda: defaultdict(
             lambda: defaultdict(
                 lambda: defaultdict(
@@ -174,12 +174,12 @@ def _build_comprehensive_test_data():
                         for n in [4, 8, 16, 32]:
                             for s in [16, 32, 64, 128, 256]:
                                 for b in [1, 2, 4, 8]:
-                                    context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][
-                                        s
-                                    ][b] = 0.01 * (n * s * b) / 1000.0
+                                    dummy_context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][
+                                        window_size
+                                    ][n][s][b] = 0.01 * (n * s * b) / 1000.0
 
     # Generation attention data
-    generation_attention_data = defaultdict(
+    dummy_generation_attention_data = defaultdict(
         lambda: defaultdict(
             lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
         )
@@ -193,12 +193,12 @@ def _build_comprehensive_test_data():
                         if kv_n <= n:
                             for b in [1, 2, 4, 8, 16]:
                                 for s in [1, 16, 32, 64, 128, 256, 512, 1024]:
-                                    generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = (
-                                        0.001 * (n * b * s) / 1000.0
-                                    )
+                                    dummy_generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][
+                                        s
+                                    ] = 0.001 * (n * b * s) / 1000.0
 
     # MoE data
-    moe_data = defaultdict(
+    dummy_moe_data = defaultdict(
         lambda: defaultdict(
             lambda: defaultdict(
                 lambda: defaultdict(
@@ -218,12 +218,12 @@ def _build_comprehensive_test_data():
                             for moe_tp in [1, 2]:
                                 for moe_ep in [1, 2]:
                                     for num_tokens in [1, 2, 4, 8, 16, 32]:
-                                        moe_data[quant_mode][workload][topk][num_experts][hidden_size][inter_size][
-                                            moe_tp
-                                        ][moe_ep][num_tokens] = 0.1 * num_tokens
+                                        dummy_moe_data[quant_mode][workload][topk][num_experts][hidden_size][
+                                            inter_size
+                                        ][moe_tp][moe_ep][num_tokens] = 0.1 * num_tokens
 
     # Context MLA data
-    context_mla_data = defaultdict(
+    dummy_context_mla_data = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
     )
     for quant_mode in [common.FMHAQuantMode.bfloat16]:
@@ -231,53 +231,53 @@ def _build_comprehensive_test_data():
             for num_heads in [16, 32, 64, 128]:
                 for s in [16, 32, 64, 128]:
                     for b in [1, 2, 4, 8]:
-                        context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b] = 0.0001 * s * b * num_heads
+                        dummy_context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b] = 0.0001 * s * b * num_heads
 
     # Generation MLA data
-    generation_mla_data = defaultdict(
+    dummy_generation_mla_data = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     )
     for kv_cache_dtype in [common.KVCacheQuantMode.bfloat16]:
         for num_heads in [16, 32, 64, 128]:
             for b in [1, 2, 4, 8]:
                 for s in [1, 16, 32, 64, 128]:
-                    generation_mla_data[kv_cache_dtype][num_heads][b][s] = 0.00001 * b * s * num_heads
+                    dummy_generation_mla_data[kv_cache_dtype][num_heads][b][s] = 0.00001 * b * s * num_heads
 
     # MLA BMM data
-    mla_bmm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+    dummy_mla_bmm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     for quant_mode in [common.GEMMQuantMode.bfloat16, common.GEMMQuantMode.fp8]:
         for op_name in ["mla_gen_pre", "mla_gen_post"]:
             for num_heads in [1, 2, 4, 8]:
                 for num_tokens in [1, 2, 4, 8, 16, 32]:
-                    mla_bmm_data[quant_mode][op_name][num_heads][num_tokens] = 0.01 * num_heads * num_tokens
+                    dummy_mla_bmm_data[quant_mode][op_name][num_heads][num_tokens] = 0.01 * num_heads * num_tokens
 
     # Custom allreduce data
-    custom_allreduce_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+    dummy_custom_allreduce_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     for dtype in [common.CommQuantMode.half]:
         for tp_size in [1, 2, 4, 8]:
             for strategy in ["AUTO"]:
                 for msg_size in [512, 1024, 2048, 4096, 8192]:
-                    custom_allreduce_data[dtype][tp_size][strategy][msg_size] = 0.001 * msg_size * tp_size
+                    dummy_custom_allreduce_data[dtype][tp_size][strategy][msg_size] = 0.001 * msg_size * tp_size
 
     # NCCL data
-    nccl_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+    dummy_nccl_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     for dtype in [common.CommQuantMode.half, common.CommQuantMode.int8]:  # Use enum objects as keys
         for operation in ["all_gather", "alltoall", "reduce_scatter"]:
             for num_gpus in [1, 2, 4, 8]:
                 for msg_size in [512, 1024, 2048, 4096]:
-                    nccl_data[dtype][operation][num_gpus][msg_size] = 0.001 * msg_size * num_gpus
+                    dummy_nccl_data[dtype][operation][num_gpus][msg_size] = 0.001 * msg_size * num_gpus
 
     return {
-        "system_spec": system_spec,
-        "gemm_data": gemm_data,
-        "context_attention_data": context_attention_data,
-        "generation_attention_data": generation_attention_data,
-        "moe_data": moe_data,
-        "context_mla_data": context_mla_data,
-        "generation_mla_data": generation_mla_data,
-        "mla_bmm_data": mla_bmm_data,
-        "custom_allreduce_data": custom_allreduce_data,
-        "nccl_data": nccl_data,
+        "system_spec": dummy_system_spec,
+        "gemm_data": dummy_gemm_data,
+        "context_attention_data": dummy_context_attention_data,
+        "generation_attention_data": dummy_generation_attention_data,
+        "moe_data": dummy_moe_data,
+        "context_mla_data": dummy_context_mla_data,
+        "generation_mla_data": dummy_generation_mla_data,
+        "mla_bmm_data": dummy_mla_bmm_data,
+        "custom_allreduce_data": dummy_custom_allreduce_data,
+        "nccl_data": dummy_nccl_data,
     }
 
 

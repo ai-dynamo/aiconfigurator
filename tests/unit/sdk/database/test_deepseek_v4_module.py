@@ -186,7 +186,8 @@ class TestDeepSeekV4AttentionModule:
         )
         assert high_topk > low_topk
 
-    def test_csa_context_uses_raw_piecewise_around_compressed_topk_boundary(self, comprehensive_perf_db, monkeypatch):
+    def test_csa_context_uses_raw_piecewise_around_compressed_topk_boundary(self, mutable_comprehensive_perf_db):
+        db = mutable_comprehensive_perf_db
         raw_attn_dict = {
             16: {
                 4096: {2: _deepseek_v4_value(20.0)},
@@ -202,33 +203,22 @@ class TestDeepSeekV4AttentionModule:
                 12288: {2: _deepseek_v4_value(100.0)},
             }
         }
-        # Save and restore — comprehensive_perf_db is shared across all tests
-        monkeypatch.setattr(
-            comprehensive_perf_db,
-            "_raw_context_deepseek_v4_attention_module_data",
-            LoadedOpData(
-                _context_deepseek_v4_data(4, raw_attn_dict),
-                common.PerfDataFilename.deepseek_v4_context_module,
-                "raw",
-            ),
+        db._raw_context_deepseek_v4_attention_module_data = LoadedOpData(
+            _context_deepseek_v4_data(4, raw_attn_dict), common.PerfDataFilename.deepseek_v4_context_module, "raw"
         )
-        monkeypatch.setattr(
-            comprehensive_perf_db,
-            "_context_deepseek_v4_attention_module_data",
-            LoadedOpData(
-                _context_deepseek_v4_data(4, extrapolated_attn_dict),
-                common.PerfDataFilename.deepseek_v4_context_module,
-                "extrapolated",
-            ),
+        db._context_deepseek_v4_attention_module_data = LoadedOpData(
+            _context_deepseek_v4_data(4, extrapolated_attn_dict),
+            common.PerfDataFilename.deepseek_v4_context_module,
+            "extrapolated",
         )
 
         def fail_interp_3d(*args, **kwargs):
             raise AssertionError("_interp_3d should not be used when raw same-regime CSA anchors exist")
 
-        monkeypatch.setattr(comprehensive_perf_db, "_interp_3d", fail_interp_3d)
+        db._interp_3d = fail_interp_3d
 
         base = _deepseek_v4_attn_kwargs(4)
-        result = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+        result = db.query_context_deepseek_v4_attention_module(
             **{**base, "s": 4097, "prefix": 0},
             database_mode=common.DatabaseMode.SILICON,
         )

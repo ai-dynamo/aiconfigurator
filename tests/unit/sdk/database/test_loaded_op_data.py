@@ -176,21 +176,20 @@ class TestLoadedOpDataIntegration:
         db = mutable_comprehensive_perf_db
         # Provide enough points for 2D interpolation (>=2 keys in each axis).
         # This is similar to what we do in test_fp8_static.py
+        compute_scale_data_dict = {
+            common.GEMMQuantMode.fp8: {
+                64: {
+                    256: {"latency": 1.0, "energy": 10.0},
+                    512: {"latency": 2.0, "energy": 20.0},
+                },
+                128: {
+                    256: {"latency": 1.5, "energy": 15.0},
+                    512: {"latency": 2.5, "energy": 25.0},
+                },
+            }
+        }
         db._compute_scale_data = LoadedOpData(
-            {
-                common.GEMMQuantMode.fp8: {
-                    64: {
-                        256: {"latency": 1.0, "energy": 10.0},
-                        512: {"latency": 2.0, "energy": 20.0},
-                    },
-                    128: {
-                        256: {"latency": 1.5, "energy": 15.0},
-                        512: {"latency": 2.5, "energy": 25.0},
-                    },
-                }
-            },
-            common.PerfDataFilename.compute_scale,
-            "dummy_path",
+            compute_scale_data_dict, common.PerfDataFilename.compute_scale, "dummy_path"
         )
 
         # Query should work - test exact match

@@ -30,22 +30,19 @@ def test_query_gemm_fp8_static_reuses_fp8_table(comprehensive_perf_db):
 def test_query_compute_scale_fp8_static_reuses_fp8_table(mutable_comprehensive_perf_db):
     db = mutable_comprehensive_perf_db
     # Provide enough points for 2D interpolation (>=2 keys in each axis).
-    db._compute_scale_data = LoadedOpData(
-        {
-            common.GEMMQuantMode.fp8: {
-                64: {
-                    256: {"latency": 1.0, "energy": 10.0},
-                    512: {"latency": 2.0, "energy": 20.0},
-                },
-                128: {
-                    256: {"latency": 1.5, "energy": 15.0},
-                    512: {"latency": 2.5, "energy": 25.0},
-                },
-            }
-        },
-        common.PerfDataFilename.compute_scale,
-        "dummy_path",
-    )
+    compute_scale_data_dict = {
+        common.GEMMQuantMode.fp8: {
+            64: {
+                256: {"latency": 1.0, "energy": 10.0},
+                512: {"latency": 2.0, "energy": 20.0},
+            },
+            128: {
+                256: {"latency": 1.5, "energy": 15.0},
+                512: {"latency": 2.5, "energy": 25.0},
+            },
+        }
+    }
+    db._compute_scale_data = LoadedOpData(compute_scale_data_dict, common.PerfDataFilename.compute_scale, "dummy_path")
 
     # Query an interior point so we avoid any boundary corner cases.
     m, k = 96, 384
@@ -64,22 +61,19 @@ def test_query_compute_scale_fp8_static_reuses_fp8_table(mutable_comprehensive_p
 
 def test_query_scale_matrix_fp8_static_reuses_fp8_table(mutable_comprehensive_perf_db):
     db = mutable_comprehensive_perf_db
-    db._scale_matrix_data = LoadedOpData(
-        {
-            common.GEMMQuantMode.fp8: {
-                64: {
-                    256: {"latency": 3.0, "energy": 30.0},
-                    512: {"latency": 4.0, "energy": 40.0},
-                },
-                128: {
-                    256: {"latency": 3.5, "energy": 35.0},
-                    512: {"latency": 4.5, "energy": 45.0},
-                },
-            }
-        },
-        common.PerfDataFilename.scale_matrix,
-        "dummy_path",
-    )
+    scale_matrix_data_dict = {
+        common.GEMMQuantMode.fp8: {
+            64: {
+                256: {"latency": 3.0, "energy": 30.0},
+                512: {"latency": 4.0, "energy": 40.0},
+            },
+            128: {
+                256: {"latency": 3.5, "energy": 35.0},
+                512: {"latency": 4.5, "energy": 45.0},
+            },
+        }
+    }
+    db._scale_matrix_data = LoadedOpData(scale_matrix_data_dict, common.PerfDataFilename.scale_matrix, "dummy_path")
 
     m, k = 96, 384
     fp8_result = db.query_scale_matrix(m, k, common.GEMMQuantMode.fp8)
