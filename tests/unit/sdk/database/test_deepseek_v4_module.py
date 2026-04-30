@@ -188,15 +188,17 @@ class TestDeepSeekV4AttentionModule:
 
     def test_csa_context_uses_raw_piecewise_around_compressed_topk_boundary(self, mutable_comprehensive_perf_db):
         db = mutable_comprehensive_perf_db
+        # Data keyed by tp_size (=4 for num_heads=16, recovered as 64 // num_heads).
+        # See _dsv4_flash_tp_from_num_heads in perf_database.py.
         raw_attn_dict = {
-            16: {
+            4: {
                 4096: {2: _deepseek_v4_value(20.0)},
                 8192: {2: _deepseek_v4_value(80.0)},
                 12288: {2: _deepseek_v4_value(100.0)},
             }
         }
         extrapolated_attn_dict = {
-            16: {
+            4: {
                 4096: {2: _deepseek_v4_value(20.0)},
                 4097: {2: _deepseek_v4_value(21.0)},
                 8192: {2: _deepseek_v4_value(80.0)},

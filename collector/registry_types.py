@@ -43,6 +43,17 @@ class PerfFile(str, Enum):
     DSA_CONTEXT_MODULE = "dsa_context_module_perf.txt"
     DSA_GENERATION_MODULE = "dsa_generation_module_perf.txt"
     MHC_MODULE = "mhc_module_perf.txt"
+    # V4-Flash module-level data — one OpEntry per (attn_kind, mode) pair,
+    # mirroring the existing aic_dev "1 OpEntry = 1 file" convention.
+    DSV4_FLASH_CSA_CONTEXT_MODULE = "dsv4_flash_csa_context_module_perf.txt"
+    DSV4_FLASH_HCA_CONTEXT_MODULE = "dsv4_flash_hca_context_module_perf.txt"
+    DSV4_FLASH_CSA_GENERATION_MODULE = "dsv4_flash_csa_generation_module_perf.txt"
+    DSV4_FLASH_HCA_GENERATION_MODULE = "dsv4_flash_hca_generation_module_perf.txt"
+    # V4-Flash sparse-kernel data — bench-collected (paged_mqa_logits +
+    # hca_attn).  topk_512 + csa_attn are modeled analytically in
+    # perf_database — no CSV is collected for them.
+    DSV4_FLASH_PAGED_MQA_LOGITS_MODULE = "dsv4_flash_paged_mqa_logits_module_perf.txt"
+    DSV4_FLASH_HCA_ATTN_MODULE = "dsv4_flash_hca_attn_module_perf.txt"
     NCCL = "nccl_perf.txt"
     CUSTOM_ALLREDUCE = "custom_allreduce_perf.txt"
     TRTLLM_ALLTOALL = "trtllm_alltoall_perf.txt"
