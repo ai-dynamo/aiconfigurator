@@ -647,3 +647,12 @@ class CommQuantMode(Enum):
     half = QuantMapping(2, 0, "half")
     int8 = QuantMapping(1, 0, "int8")
     fp8 = QuantMapping(1, 0, "fp8")
+
+
+# Alias "bfloat16" -> "float16" for the 16-bit float enum members. The perf data
+# on main (post PR #895) uses "bfloat16" as the dtype string. Release/0.8.0 still
+# defines the member as `float16`, so we register the newer name as an alias so
+# the release branch can load main-branch data files without renaming the enum.
+for _enum_cls in (GEMMQuantMode, MoEQuantMode, FMHAQuantMode, KVCacheQuantMode):
+    _enum_cls._member_map_["bfloat16"] = _enum_cls.float16
+del _enum_cls
