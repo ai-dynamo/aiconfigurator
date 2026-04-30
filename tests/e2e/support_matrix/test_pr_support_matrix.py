@@ -78,8 +78,7 @@ def test_pr_support_matrix(model: str, system: str, backend: str, version: str):
 
     from tools.support_matrix.support_matrix import SupportMatrix
 
-    sm = SupportMatrix()
-    success_dict, error_dict = sm.run_single_test(
+    success_dict, error_dict = SupportMatrix.run_single_test(
         model=model,
         system=system,
         backend=backend,

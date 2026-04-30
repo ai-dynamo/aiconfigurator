@@ -155,8 +155,8 @@ class SupportMatrix:
         combinations = list(self.__get_model_and_hardware_and_backend_combinations())
         return combinations
 
+    @staticmethod
     def run_single_test(
-        self,
         model: str,
         system: str,
         backend: str,
