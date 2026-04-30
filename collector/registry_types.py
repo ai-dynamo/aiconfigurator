@@ -47,10 +47,8 @@ class PerfFile(str, Enum):
     # mirroring the existing aic_dev "1 OpEntry = 1 file" convention.
     DSV4_FLASH_CSA_CONTEXT_MODULE = "dsv4_flash_csa_context_module_perf.txt"
     DSV4_FLASH_HCA_CONTEXT_MODULE = "dsv4_flash_hca_context_module_perf.txt"
-    DSV4_FLASH_SWA_CONTEXT_MODULE = "dsv4_flash_swa_context_module_perf.txt"
     DSV4_FLASH_CSA_GENERATION_MODULE = "dsv4_flash_csa_generation_module_perf.txt"
     DSV4_FLASH_HCA_GENERATION_MODULE = "dsv4_flash_hca_generation_module_perf.txt"
-    DSV4_FLASH_SWA_GENERATION_MODULE = "dsv4_flash_swa_generation_module_perf.txt"
     # V4-Flash sparse-kernel data — bench-collected (paged_mqa_logits +
     # hca_attn).  topk_512 + csa_attn are modeled analytically in
     # perf_database — no CSV is collected for them.

@@ -728,7 +728,7 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
 # can resolve them via getattr on each per-backend module.
 
 _DSV4_FLASH_DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
-DSV4_FLASH_ATTN_KINDS = ("swa", "csa", "hca")
+DSV4_FLASH_ATTN_KINDS = ("csa", "hca")
 
 
 def _dsv4_flash_active() -> bool:
@@ -883,12 +883,6 @@ def get_dsv4_flash_hca_context_test_cases():
     return _build_dsv4_flash_module_test_cases("context", ("hca",))
 
 
-def get_dsv4_flash_swa_context_test_cases():
-    if not _dsv4_flash_active():
-        return []
-    return _build_dsv4_flash_module_test_cases("context", ("swa",))
-
-
 def get_dsv4_flash_csa_generation_test_cases():
     if not _dsv4_flash_active():
         return []
@@ -899,12 +893,6 @@ def get_dsv4_flash_hca_generation_test_cases():
     if not _dsv4_flash_active():
         return []
     return _build_dsv4_flash_module_test_cases("generation", ("hca",))
-
-
-def get_dsv4_flash_swa_generation_test_cases():
-    if not _dsv4_flash_active():
-        return []
-    return _build_dsv4_flash_module_test_cases("generation", ("swa",))
 
 
 # --- Sparse-kernel sweep (paged_mqa_logits / hca_attn) ---

@@ -1303,7 +1303,7 @@ def load_mhc_module_data(mhc_file: str):
 def load_context_deepseek_v4_attention_module_data(attn_file: str):
     """Legacy single-file loader (kept for backwards compat with the old
     combined ``deepseek_v4_context_module_perf.txt`` convention).  V4-Flash
-    data is now split across ``dsv4_flash_{csa,hca,swa}_context_*`` files —
+    data is now split across ``dsv4_flash_{csa,hca}_context_*`` files —
     see ``load_context_dsv4_flash_kind_module_data``."""
     logger.debug(f"DeepSeek-V4 context attention module data file {attn_file} not loaded.")
     return None
@@ -2537,10 +2537,8 @@ class PerfDatabase:
                 PerfDataFilename.deepseek_v4_generation_module: load_generation_deepseek_v4_attention_module_data,
                 PerfDataFilename.dsv4_flash_csa_context_module: load_context_dsv4_flash_kind_module_data,
                 PerfDataFilename.dsv4_flash_hca_context_module: load_context_dsv4_flash_kind_module_data,
-                PerfDataFilename.dsv4_flash_swa_context_module: load_context_dsv4_flash_kind_module_data,
                 PerfDataFilename.dsv4_flash_csa_generation_module: load_generation_dsv4_flash_kind_module_data,
                 PerfDataFilename.dsv4_flash_hca_generation_module: load_generation_dsv4_flash_kind_module_data,
-                PerfDataFilename.dsv4_flash_swa_generation_module: load_generation_dsv4_flash_kind_module_data,
                 PerfDataFilename.dsv4_flash_paged_mqa_logits_module: load_dsv4_flash_sparse_kernel_data,
                 PerfDataFilename.dsv4_flash_hca_attn_module: load_dsv4_flash_sparse_kernel_data,
             }
@@ -2608,12 +2606,10 @@ class PerfDatabase:
         ctx_split = [
             _load_op_data(PerfDataFilename.dsv4_flash_csa_context_module),
             _load_op_data(PerfDataFilename.dsv4_flash_hca_context_module),
-            _load_op_data(PerfDataFilename.dsv4_flash_swa_context_module),
         ]
         gen_split = [
             _load_op_data(PerfDataFilename.dsv4_flash_csa_generation_module),
             _load_op_data(PerfDataFilename.dsv4_flash_hca_generation_module),
-            _load_op_data(PerfDataFilename.dsv4_flash_swa_generation_module),
         ]
         self._context_deepseek_v4_attention_module_data = _load_dsv4_flash_split(ctx_split) or _load_op_data(
             PerfDataFilename.deepseek_v4_context_module
@@ -7863,7 +7859,6 @@ class PerfDatabase:
                     f"backend='{self.backend}', version='{self.version}'."
                 )
             deepseek_v4_dict = data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture][compress_ratio]
-
             # V4-Flash special-case: data is keyed by ``tp_size`` (sglang
             # never splits attention heads, so the "post-TP local_heads"
             # value the model layer passes here is just a label — recover

@@ -95,7 +95,7 @@ REGISTRY: list[OpEntry] = [
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_GENERATION_MODULE,
     ),
-    # V4-Flash module-level data (csa/hca/swa x ctx/gen = 6 ops, 1 file each)
+    # V4-Flash module-level data (csa/hca x ctx/gen = 4 ops, 1 file each).
     OpEntry(
         op="dsv4_flash_csa_context_module",
         module="collector.sglang.collect_dsv4_flash_attn",
@@ -111,13 +111,6 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.DSV4_FLASH_HCA_CONTEXT_MODULE,
     ),
     OpEntry(
-        op="dsv4_flash_swa_context_module",
-        module="collector.sglang.collect_dsv4_flash_attn",
-        get_func="get_dsv4_flash_swa_context_test_cases",
-        run_func="run_dsv4_flash_attn_worker",
-        perf_filename=PerfFile.DSV4_FLASH_SWA_CONTEXT_MODULE,
-    ),
-    OpEntry(
         op="dsv4_flash_csa_generation_module",
         module="collector.sglang.collect_dsv4_flash_attn",
         get_func="get_dsv4_flash_csa_generation_test_cases",
@@ -130,13 +123,6 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsv4_flash_hca_generation_test_cases",
         run_func="run_dsv4_flash_attn_worker",
         perf_filename=PerfFile.DSV4_FLASH_HCA_GENERATION_MODULE,
-    ),
-    OpEntry(
-        op="dsv4_flash_swa_generation_module",
-        module="collector.sglang.collect_dsv4_flash_attn",
-        get_func="get_dsv4_flash_swa_generation_test_cases",
-        run_func="run_dsv4_flash_attn_worker",
-        perf_filename=PerfFile.DSV4_FLASH_SWA_GENERATION_MODULE,
     ),
     # V4-Flash sparse-kernel data (kernel-level past_kv Δ correction)
     OpEntry(

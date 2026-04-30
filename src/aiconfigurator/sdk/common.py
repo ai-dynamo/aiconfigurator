@@ -649,15 +649,15 @@ class PerfDataFilename(Enum):
     mhc_module = "mhc_module_perf.txt"
     deepseek_v4_context_module = "deepseek_v4_context_module_perf.txt"
     deepseek_v4_generation_module = "deepseek_v4_generation_module_perf.txt"
-    # V4-Flash module-level data — one CSV per (attn_kind ∈ {csa, hca, swa},
-    # mode ∈ {context, generation}) = 6 files.  Each file contains all
-    # (tp_size, gemm_type, b, s) rows for that kind+mode.
+    # V4-Flash module-level data — one CSV per (attn_kind ∈ {csa, hca},
+    # mode ∈ {context, generation}) = 4 files.  Each file contains all
+    # (tp_size, gemm_type, b, s) rows for that kind+mode.  SWA layers are
+    # folded into HCA at the model layer (see models.py:_attention_ops),
+    # so no separate SWA collector / data is needed.
     dsv4_flash_csa_context_module = "dsv4_flash_csa_context_module_perf.txt"
     dsv4_flash_hca_context_module = "dsv4_flash_hca_context_module_perf.txt"
-    dsv4_flash_swa_context_module = "dsv4_flash_swa_context_module_perf.txt"
     dsv4_flash_csa_generation_module = "dsv4_flash_csa_generation_module_perf.txt"
     dsv4_flash_hca_generation_module = "dsv4_flash_hca_generation_module_perf.txt"
-    dsv4_flash_swa_generation_module = "dsv4_flash_swa_generation_module_perf.txt"
     # V4-Flash sparse-kernel data (kernel-level past_kv Δ correction).
     # Indexed by ``arch -> tp -> past_kv -> isl -> bs``.
     # topk_512 and csa_attn are modeled analytically — no CSV needed.

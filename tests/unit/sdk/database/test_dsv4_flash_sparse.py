@@ -190,21 +190,19 @@ def test_load_generation_dsv4_flash_kind_module_data_b_before_s(tmp_path):
 
 
 # ───────────────────────────────────────────────────────────────────────
-# _deep_merge_dsv4_dicts — combining csa/hca/swa split files
+# _deep_merge_dsv4_dicts — combining csa/hca split files
 # ───────────────────────────────────────────────────────────────────────
 
 
 def test_deep_merge_dsv4_dicts_preserves_disjoint_keys():
     csa = {"f": {"k": {"g": {"a": {4: {"x": 1}}}}}}
     hca = {"f": {"k": {"g": {"a": {128: {"x": 2}}}}}}
-    swa = {"f": {"k": {"g": {"a": {0: {"x": 3}}}}}}
     merged = {}
-    for d in (csa, hca, swa):
+    for d in (csa, hca):
         _deep_merge_dsv4_dicts(merged, d)
-    assert sorted(merged["f"]["k"]["g"]["a"].keys()) == [0, 4, 128]
+    assert sorted(merged["f"]["k"]["g"]["a"].keys()) == [4, 128]
     assert merged["f"]["k"]["g"]["a"][4] == {"x": 1}
     assert merged["f"]["k"]["g"]["a"][128] == {"x": 2}
-    assert merged["f"]["k"]["g"]["a"][0] == {"x": 3}
 
 
 def test_deep_merge_dsv4_dicts_handles_none():

@@ -6,7 +6,7 @@
 ONE file containing both:
 
   1. The bench engine — builds an sglang ``ModelRunner`` for a single
-     attn_kind (CSA / HCA / SWA) layer and times CUDA-Graph replay of
+     attn_kind (CSA / HCA) layer and times CUDA-Graph replay of
      ``layer.self_attn(...)`` (Q/KV proj + norm/rope + cache store +
      compressor + C4 indexer/topk for CSA + final FlashMLA).
   2. The registry-facing entrypoints — ``run_dsv4_flash_attn_worker``
@@ -31,6 +31,7 @@ import copy
 import gc
 import json
 import os
+import random
 import shutil
 import socket
 import subprocess
@@ -62,9 +63,6 @@ except ModuleNotFoundError:
 # can resolve them via getattr.
 try:
     from collector.common_test_cases import (
-        _DSV4_FLASH_DEFAULT_MODEL as DEFAULT_MODEL,
-    )
-    from collector.common_test_cases import (
         _DSV4_FLASH_MODULE_BATCH_SIZES as _BATCH_SIZES,
     )
     from collector.common_test_cases import (
@@ -82,9 +80,6 @@ try:
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import (
-        _DSV4_FLASH_DEFAULT_MODEL as DEFAULT_MODEL,
-    )
-    from common_test_cases import (
         _DSV4_FLASH_MODULE_BATCH_SIZES as _BATCH_SIZES,
     )
     from common_test_cases import (
@@ -101,9 +96,8 @@ except ModuleNotFoundError:
     )
 
 
-def _expand_grid(mode: str):
-    """Return ``(batch_sizes, seq_lens)`` for the given mode (no caps applied)."""
-    del mode
+def _expand_grid():
+    """Return ``(batch_sizes, seq_lens)`` for the module-level sweep."""
     return list(_BATCH_SIZES), list(_SEQ_LENGTHS)
 
 
@@ -131,21 +125,8 @@ def get_dsv4_flash_hca_generation_test_cases():
     return _impl()
 
 
-def get_dsv4_flash_swa_context_test_cases():
-    from collector.common_test_cases import get_dsv4_flash_swa_context_test_cases as _impl
-
-    return _impl()
-
-
-def get_dsv4_flash_swa_generation_test_cases():
-    from collector.common_test_cases import get_dsv4_flash_swa_generation_test_cases as _impl
-
-    return _impl()
-
-
 __all__ = [
     "ATTN_KINDS",
-    "DEFAULT_MODEL",
     "_BATCH_SIZES",
     "_SEQ_LENGTHS",
     "_TP_SIZES",
@@ -154,42 +135,47 @@ __all__ = [
     "get_dsv4_flash_csa_generation_test_cases",
     "get_dsv4_flash_hca_context_test_cases",
     "get_dsv4_flash_hca_generation_test_cases",
-    "get_dsv4_flash_swa_context_test_cases",
-    "get_dsv4_flash_swa_generation_test_cases",
     "run_dsv4_flash_attn_worker",
 ]
 
 
-DEFAULT_ARCHITECTURE = "DeepseekV4ForCausalLM"
 NATIVE_HEADS = 64
 
 ATTN_KIND_TO_COMPRESS_RATIO = {
-    "swa": 0,
     "csa": 4,
     "hca": 128,
 }
 
-COMPRESS_RATIO_TO_ATTN_KIND = {v: k for k, v in ATTN_KIND_TO_COMPRESS_RATIO.items()}
 
 CLI_DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
 _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
 
 
-def _pick_free_port() -> int:
-    """Bind to an OS-assigned ephemeral port and return it.
+def _pick_free_port(gpu_id: int) -> int:
+    """Return a free TCP port from a ``gpu_id``-scoped 1000-port range.
 
     Used as ``nccl_port`` for the per-subprocess torch.distributed
-    rendezvous.  collect.py runs up to 8 GPU workers in parallel; a
-    fixed-range ``random.randint`` port had a ~80% chance of birthday-
-    paradox collision (EADDRINUSE) under that concurrency.  Letting the
-    OS pick guarantees uniqueness within the lifetime of this process.
+    rendezvous.  Up to 8 collector workers run in parallel, each pinned
+    to one GPU.  Partitioning the port space by ``gpu_id`` makes
+    cross-worker collision impossible: worker N's candidate set is
+    [40000 + N*1000, 40000 + N*1000 + 999], disjoint from every other
+    worker's.  The bind / close / subprocess re-bind window inside one
+    worker is harmless because no peer worker can race for the same
+    port (unrelated system services landing on our specific freed port
+    in <1ms is negligibly rare).
     """
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+    base = 40000 + gpu_id * 1000
+    for _ in range(100):
+        port = random.randint(base, base + 999)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            s.close()
+            continue
+        s.close()
+        return port
+    raise RuntimeError(f"no free port in [{base}, {base + 999}] for gpu_id={gpu_id}")
 
 
 def _kv_dtype_db_to_sglang(kv_dtype_db: str) -> str:
@@ -527,7 +513,7 @@ def _load_model_runner(
             pp_size=1,
             moe_ep_rank=0,
             moe_ep_size=1,
-            nccl_port=_pick_free_port(),
+            nccl_port=_pick_free_port(gpu_id),
             server_args=server_args,
         )
     allocator = model_runner.token_to_kv_pool_allocator
@@ -1098,7 +1084,7 @@ def _subprocess_entry(
     The KV pool is sized for ``(bs, max_sl_for_this_bs)`` so every sl
     forward reuses the same allocator without re-init.
     """
-    bs_grid, sl_grid = _expand_grid(mode)
+    bs_grid, sl_grid = _expand_grid()
     pairs = _filter_pairs(mode, [batch_size], sl_grid)
     if not pairs:
         print(f"[dsv4-flash] no valid sl values for mode={mode}, bs={batch_size}")
@@ -1111,7 +1097,7 @@ def _subprocess_entry(
     #      grow / re-alloc.
     sl_for_bs = sorted({sl for _, sl in pairs}, reverse=True)
 
-    # All kinds (csa/hca/swa) write the swa_k_cache sub-pool — see
+    # Both kinds (csa/hca) write the swa_k_cache sub-pool — see
     # ``deepseek_v4_backend_radix.py`` line ~1020.  Sub-pool ratios out of
     # ``max_total`` (page-256 aligned, not exact):
     #   swa_pool / max_total: ~1/10 at max_total≥100k, ~1/16 at smaller
@@ -1211,7 +1197,7 @@ def _parse_int_list(value: str) -> list[int]:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Collect DeepSeek-V4-Flash HCA/CSA/SWA attention-module latency on SGLang."
+        description="Collect DeepSeek-V4-Flash HCA/CSA attention-module latency on SGLang."
     )
     parser.add_argument("--model-path", default=CLI_DEFAULT_MODEL)
     parser.add_argument("--mode", choices=["context", "generation"], required=True)
@@ -1219,7 +1205,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--attn-kind",
         choices=ATTN_KINDS,
         default=None,
-        help="If unset, sweeps swa/csa/hca in turn.",
+        help="If unset, sweeps csa/hca in turn.",
     )
     parser.add_argument("--batch-sizes", default=None)
     parser.add_argument("--seq-lens", default=None)
@@ -1250,11 +1236,11 @@ def main() -> None:
     if args.batch_sizes is not None:
         batch_sizes = _parse_int_list(args.batch_sizes)
     else:
-        batch_sizes, _ = _expand_grid(args.mode)
+        batch_sizes, _ = _expand_grid()
     if args.seq_lens is not None:
         seq_lens = _parse_int_list(args.seq_lens)
     else:
-        _, seq_lens = _expand_grid(args.mode)
+        _, seq_lens = _expand_grid()
 
     pairs = _filter_pairs(args.mode, batch_sizes, seq_lens)
     _bs_grid = sorted({bs for bs, _ in pairs})

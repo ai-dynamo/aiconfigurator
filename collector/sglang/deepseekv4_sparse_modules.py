@@ -30,13 +30,18 @@ distinguishes CSA(=4) / HCA(=128).
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 import sys
 import traceback
 from collections.abc import Callable
 
 import torch
+
+try:
+    from collector.sglang.helper import benchmark_with_power, log_perf
+except ModuleNotFoundError:
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from helper import benchmark_with_power, log_perf
 
 # Re-export test case generators from the centralised common_test_cases
 # module so collect.py's registry can resolve them via getattr on this module.
@@ -55,9 +60,6 @@ try:
     )
     from collector.common_test_cases import (
         _DSV4_FLASH_SPARSE_TP_LIST_ATTN as DEFAULT_TP_LIST_ATTN,
-    )
-    from collector.common_test_cases import (
-        _DSV4_FLASH_SPARSE_TP_LIST_INDEXER as DEFAULT_TP_LIST_INDEXER,
     )
     from collector.common_test_cases import (
         DSV4_FLASH_SPARSE_KERNELS as KERNELS,
@@ -81,9 +83,6 @@ except ModuleNotFoundError:
     )
     from common_test_cases import (
         _DSV4_FLASH_SPARSE_TP_LIST_ATTN as DEFAULT_TP_LIST_ATTN,
-    )
-    from common_test_cases import (
-        _DSV4_FLASH_SPARSE_TP_LIST_INDEXER as DEFAULT_TP_LIST_INDEXER,
     )
     from common_test_cases import (
         DSV4_FLASH_SPARSE_KERNELS as KERNELS,
@@ -111,7 +110,6 @@ __all__ = [
     "DEFAULT_MODEL",
     "DEFAULT_PAST_KV_LIST",
     "DEFAULT_TP_LIST_ATTN",
-    "DEFAULT_TP_LIST_INDEXER",
     "KERNELS",
     "_build_sparse_test_cases",
     "get_dsv4_flash_hca_attn_test_cases",
@@ -186,27 +184,6 @@ KERNEL_TO_DEFAULT_FILENAME = {
     "hca_attn": "dsv4_flash_hca_attn_module_perf.txt",
 }
 
-CSV_FIELDS = [
-    "framework",
-    "version",
-    "device",
-    "op_name",
-    "kernel_source",
-    "model",
-    "architecture",
-    "mla_dtype",
-    "kv_cache_dtype",
-    "gemm_type",
-    "num_heads",
-    "batch_size",
-    "isl",
-    "tp_size",
-    "step",
-    "compress_ratio",
-    "latency",
-]
-
-
 # ═══════════════════════════════════════════════════════════════════════
 # Bench helper
 # ═══════════════════════════════════════════════════════════════════════
@@ -219,26 +196,40 @@ def _bench_cuda_graph(
     num_iterations: int = 20,
     graph_repeat: int = 4,
     device: str = "cuda:0",
-) -> float:
-    dev = torch.device(device)
-    for _ in range(num_warmup):
-        kernel_fn()
-    torch.cuda.synchronize(dev)
+) -> dict:
+    """Benchmark a kernel via AIC's benchmark_with_power helper.
 
-    g = torch.cuda.CUDAGraph()
-    mempool = torch.cuda.graph_pool_handle()
-    with torch.cuda.graph(g, pool=mempool):
-        for _ in range(graph_repeat):
-            kernel_fn()
+    benchmark_with_power handles warmup, CUDA-Graph capture/replay, optional
+    power sampling, and graph-private-pool teardown. Capture failure is a
+    hard error: ``allow_graph_fail=False`` and ``used_cuda_graph`` is
+    checked explicitly. Returns ``{"latency_ms", "power_stats"}``.
+    """
+    if num_iterations < 3:
+        raise ValueError("num_iterations must be at least 3")
+    if graph_repeat < 1:
+        raise ValueError("graph_repeat must be at least 1")
 
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(num_iterations):
-        g.replay()
-    end.record()
-    torch.cuda.synchronize(dev)
-    return start.elapsed_time(end) / (num_iterations * graph_repeat)
+    def timed_kernel():
+        with torch.no_grad():
+            return kernel_fn()
+
+    with benchmark_with_power(
+        device=torch.device(device),
+        kernel_func=timed_kernel,
+        num_warmups=num_warmup,
+        num_runs=num_iterations,
+        repeat_n=graph_repeat,
+        allow_graph_fail=False,
+    ) as result:
+        pass
+
+    if not result.get("used_cuda_graph", False):
+        raise RuntimeError("benchmark_with_power did not use CUDA Graph")
+
+    return {
+        "latency_ms": float(result["latency_ms"]),
+        "power_stats": result.get("power_stats"),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -569,41 +560,39 @@ def _write_row(
     device_name: str,
     model_path: str = DEFAULT_MODEL,
     architecture: str = DEFAULT_ARCHITECTURE,
+    power_stats: dict | None = None,
 ) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(perf_filename)) or ".", exist_ok=True)
-    write_header = not os.path.exists(perf_filename)
 
-    if kernel == "hca_attn":
-        mla_dtype = "bfloat16"
-    else:
-        mla_dtype = "fp8_e4m3"
+    mla_dtype = "bfloat16" if kernel == "hca_attn" else "fp8_e4m3"
     kv_cache_dtype = "fp8_e4m3"
     gemm_type = "fp8_block"
 
-    row = {
-        "framework": "SGLang",
-        "version": "kernel-level",
-        "device": device_name,
-        "op_name": KERNEL_TO_OP_NAME[kernel],
-        "kernel_source": KERNEL_TO_KERNEL_SOURCE[kernel],
-        "model": model_path,
-        "architecture": architecture,
-        "mla_dtype": mla_dtype,
-        "kv_cache_dtype": kv_cache_dtype,
-        "gemm_type": gemm_type,
-        "num_heads": N_HEADS_Q,
-        "batch_size": bs,
-        "isl": isl,
-        "tp_size": tp_size,
-        "step": past_kv,
-        "compress_ratio": KERNEL_TO_COMPRESS_RATIO[kernel],
-        "latency": f"{latency_ms:.6f}",
-    }
-    with open(perf_filename, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        if write_header:
-            writer.writeheader()
-        writer.writerow(row)
+    log_perf(
+        item_list=[
+            {
+                "model": model_path,
+                "architecture": architecture,
+                "mla_dtype": mla_dtype,
+                "kv_cache_dtype": kv_cache_dtype,
+                "gemm_type": gemm_type,
+                "num_heads": N_HEADS_Q,
+                "batch_size": bs,
+                "isl": isl,
+                "tp_size": tp_size,
+                "step": past_kv,
+                "compress_ratio": KERNEL_TO_COMPRESS_RATIO[kernel],
+                "latency": f"{latency_ms:.6f}",
+            }
+        ],
+        framework="SGLang",
+        version="kernel-level",
+        device_name=device_name,
+        op_name=KERNEL_TO_OP_NAME[kernel],
+        kernel_source=KERNEL_TO_KERNEL_SOURCE[kernel],
+        perf_filename=perf_filename,
+        power_stats=power_stats,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -658,7 +647,7 @@ def run_dsv4_sparse_kernel_worker(
         kwargs = dict(batch_size=1, device=device)
 
     try:
-        latency_ms = bench_fn(M, past_kv, **kwargs)
+        bench_result = bench_fn(M, past_kv, **kwargs)
     except torch.cuda.OutOfMemoryError:
         print(f"  OOM at bs={bs} isl={isl} past_kv={past_kv}; skipping")
         torch.cuda.empty_cache()
@@ -669,6 +658,8 @@ def run_dsv4_sparse_kernel_worker(
         torch.cuda.empty_cache()
         return
 
+    latency_ms = float(bench_result["latency_ms"])
+    power_stats = bench_result.get("power_stats")
     device_name = torch.cuda.get_device_name(device)
     _write_row(
         perf_path,
@@ -680,8 +671,10 @@ def run_dsv4_sparse_kernel_worker(
         latency_ms=latency_ms,
         device_name=device_name,
         model_path=model_path,
+        power_stats=power_stats,
     )
-    print(f"  latency={latency_ms:.4f} ms")
+    power_str = f", power={power_stats['power']:.1f}W" if power_stats and power_stats.get("power") is not None else ""
+    print(f"  latency={latency_ms:.4f} ms{power_str}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
