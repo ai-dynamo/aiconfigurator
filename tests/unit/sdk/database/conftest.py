@@ -12,6 +12,50 @@ import yaml
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.perf_database import PerfDatabase
 
+# ---------------------------------------------------------------------------
+# Single source of truth: every loader function that PerfDatabase.__init__
+# can call via its internal _load_op_data / func_map.
+#
+# Mapping: function_name -> default stub return value.
+#   * Most loaders return None when the perf file is absent.
+#   * load_moe_data is special: it returns a *tuple* of two dicts.
+#   * load_nccl_data covers both nccl and oneccl keys in func_map.
+#
+# When PerfDatabase adds a new loader, add a line here.  Both
+# _patch_all_loaders_and_yaml() and _get_comprehensive_db_singleton()
+# derive their patch lists from this dict, so they cannot drift.
+# ---------------------------------------------------------------------------
+_LOADER_STUBS: dict[str, object] = {
+    "load_gemm_data": None,
+    "load_context_attention_data": None,
+    "load_generation_attention_data": None,
+    "load_moe_data": (None, None),  # returns tuple
+    "load_custom_allreduce_data": None,
+    "load_nccl_data": None,  # also used for oneccl
+    "load_context_mla_data": None,
+    "load_generation_mla_data": None,
+    "load_mla_bmm_data": None,
+    "load_mamba2_data": None,
+    "load_gdn_data": None,
+    "load_compute_scale_data": None,
+    "load_scale_matrix_data": None,
+    "load_wideep_context_moe_data": None,
+    "load_wideep_generation_moe_data": None,
+    "load_wideep_context_mla_data": None,
+    "load_wideep_generation_mla_data": None,
+    "load_wideep_deepep_normal_data": None,
+    "load_wideep_deepep_ll_data": None,
+    "load_wideep_moe_compute_data": None,
+    "load_trtllm_alltoall_data": None,
+    "load_context_mla_module_data": None,
+    "load_generation_mla_module_data": None,
+    "load_context_dsa_module_data": None,
+    "load_generation_dsa_module_data": None,
+    "load_deepseek_v4_mhc_module_data": None,
+    "load_context_deepseek_v4_attention_module_data": None,
+    "load_generation_deepseek_v4_attention_module_data": None,
+}
+
 
 def _patch_all_loaders_and_yaml(monkeypatch) -> None:
     """
@@ -67,7 +111,6 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
             },
         }
     }
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_gemm_data", lambda path: dummy_gemm_data)
 
     # Patch load_custom_allreduce_data to return proper structure.
     # Structure: { 'bfloat16': { 2: { 'AUTO': { 1024:  5.0 } } } }
@@ -78,29 +121,17 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
             8: {"AUTO": {1024: 15.0, 2048: 30.0}},
         }
     }
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_custom_allreduce_data",
-        lambda path: dummy_custom_allreduce_data,
-    )
 
-    # load_moe_data needs to return 2 dicts
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_moe_data", lambda path: ({}, {}))
+    # Per-loader overrides for stub_perf_db (most stay at the default from _LOADER_STUBS)
+    overrides = {
+        "load_gemm_data": dummy_gemm_data,
+        "load_custom_allreduce_data": dummy_custom_allreduce_data,
+        "load_moe_data": ({}, {}),
+    }
 
-    # Patch every other loader to return an empty dict (or None for optional loaders)
-    for loader_name in [
-        "load_context_attention_data",
-        "load_generation_attention_data",
-        "load_context_mla_data",
-        "load_generation_mla_data",
-        "load_mla_bmm_data",
-        "load_nccl_data",
-    ]:
-        monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{loader_name}", lambda path: {})
-    for loader_name in [
-        "load_context_dsa_module_data",
-        "load_generation_dsa_module_data",
-    ]:
-        monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{loader_name}", lambda path: None)
+    for name, default_value in _LOADER_STUBS.items():
+        ret = overrides.get(name, default_value)
+        monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{name}", lambda path, _r=ret: _r)
 
 
 @pytest.fixture
@@ -300,36 +331,26 @@ def _get_comprehensive_db_singleton() -> PerfDatabase:
     with open(yaml_file, "w") as f:
         yaml.dump(system_spec, f)
 
-    # Use unittest.mock.patch (not monkeypatch) so we can call this outside a fixture
+    # Use unittest.mock.patch (not monkeypatch) so we can call this outside a fixture.
+    # Per-loader overrides — anything not listed here falls through to
+    # the default in _LOADER_STUBS (None for most, (None, None) for moe).
+    overrides = {
+        "load_gemm_data": cached["gemm_data"],
+        "load_context_attention_data": cached["context_attention_data"],
+        "load_generation_attention_data": cached["generation_attention_data"],
+        "load_moe_data": (cached["moe_data"], cached["moe_data"]),
+        "load_custom_allreduce_data": cached["custom_allreduce_data"],
+        "load_nccl_data": cached["nccl_data"],
+        "load_context_mla_data": cached["context_mla_data"],
+        "load_generation_mla_data": cached["generation_mla_data"],
+        "load_mla_bmm_data": cached["mla_bmm_data"],
+    }
     patches = [
         patch("yaml.load", side_effect=lambda stream, Loader=None: system_spec),  # noqa: N803
-        patch("aiconfigurator.sdk.perf_database.load_gemm_data", return_value=cached["gemm_data"]),
-        patch(
-            "aiconfigurator.sdk.perf_database.load_context_attention_data",
-            return_value=cached["context_attention_data"],
-        ),
-        patch(
-            "aiconfigurator.sdk.perf_database.load_generation_attention_data",
-            return_value=cached["generation_attention_data"],
-        ),
-        patch(
-            "aiconfigurator.sdk.perf_database.load_custom_allreduce_data",
-            return_value=cached["custom_allreduce_data"],
-        ),
-        patch(
-            "aiconfigurator.sdk.perf_database.load_moe_data",
-            return_value=(cached["moe_data"], cached["moe_data"]),
-        ),
-        patch("aiconfigurator.sdk.perf_database.load_context_mla_data", return_value=cached["context_mla_data"]),
-        patch(
-            "aiconfigurator.sdk.perf_database.load_generation_mla_data",
-            return_value=cached["generation_mla_data"],
-        ),
-        patch("aiconfigurator.sdk.perf_database.load_mla_bmm_data", return_value=cached["mla_bmm_data"]),
-        patch("aiconfigurator.sdk.perf_database.load_nccl_data", return_value=cached["nccl_data"]),
-        patch("aiconfigurator.sdk.perf_database.load_context_dsa_module_data", return_value=None),
-        patch("aiconfigurator.sdk.perf_database.load_generation_dsa_module_data", return_value=None),
     ]
+    for name, default_value in _LOADER_STUBS.items():
+        ret = overrides.get(name, default_value)
+        patches.append(patch(f"aiconfigurator.sdk.perf_database.{name}", return_value=ret))
 
     for p in patches:
         p.start()
