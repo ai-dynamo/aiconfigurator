@@ -116,6 +116,8 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           signoff: true
+          author: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+          committer: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
           commit-message: "fix: update support matrix"
           title: "fix: update support matrix [${{ env.TARGET_BRANCH }}]"
           body-path: pr_body.md
