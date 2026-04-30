@@ -237,12 +237,12 @@ def run_moe_torch(
         # Per-group scales: (E, N, K//group_size)
         w1_scale = torch.randn(
             (local_num_experts, 2 * local_inter_size, hidden_size // int4_group_size),
-            dtype=torch.bfloat16,
+            dtype=torch.float32,
             device=device,
         )
         w2_scale = torch.randn(
             (local_num_experts, hidden_size, local_inter_size // int4_group_size),
-            dtype=torch.bfloat16,
+            dtype=torch.float32,
             device=device,
         )
         quant_config = int4_w4a16_moe_quant_config(
@@ -461,7 +461,10 @@ def run_moe_torch(
                     .to(device)
                 )
                 weights, ids = torch.topk(logits, topk, dim=-1)
-                topk_weights_list.append(F.softmax(weights, dim=-1))
+                topk_weights = F.softmax(weights, dim=-1)
+                if use_int4_wo:
+                    topk_weights = topk_weights.float()
+                topk_weights_list.append(topk_weights)
                 topk_ids_list.append(ids)
 
             print("actual num_tokens: ", [topk_ids.shape[0] for topk_ids in topk_ids_list])
@@ -470,6 +473,8 @@ def run_moe_torch(
             actual_logits = balanced_logits(num_tokens, num_experts, topk).bfloat16().to(device)
             topk_weights, topk_ids = torch.topk(actual_logits, topk, dim=-1)
             topk_weights = F.softmax(topk_weights, dim=-1)
+            if use_int4_wo:
+                topk_weights = topk_weights.float()
 
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
