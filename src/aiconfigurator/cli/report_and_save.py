@@ -434,6 +434,10 @@ def log_final_summary(
         else:
             task_config_key = exp_name
 
+        if task_config_key not in task_configs:
+            logger.info("No task config for %s, skipping deployment table.", exp_name)
+            continue
+
         if not config_df.empty and "backend" not in config_df.columns:
             config_df = config_df.copy()
             config_df["backend"] = task_configs[task_config_key].backend_name
