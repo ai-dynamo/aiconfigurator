@@ -28,8 +28,8 @@ as measured silicon data.
    batch sizes, throughput, and SLA feasibility.
 4. Use the rough `default` result to build a precise `exp` YAML, usually focused
    on disaggregated serving and a narrower search space.
-5. Start from the bundled experiment template, then patch only the fields needed
-   for the target workload and search definition.
+5. Start from the bundled CLI example template, then keep only the experiments
+   and fields needed for the target workload and search definition.
 6. Use `--save-dir` by default when results need analysis, reproducibility, or
    generated deployment artifacts.
 7. Use `aiconfigurator cli estimate` only for a known single configuration or
@@ -66,7 +66,7 @@ as measured silicon data.
 
 - CLI modes and required arguments: `aiconfigurator agent usage --ref cli-modes`
 - Single experiment YAML authoring: `aiconfigurator agent usage --ref single-experiment-yaml`
-- Complete YAML template: `aiconfigurator agent usage --ref experiment-template`
+- CI-covered CLI YAML template: `aiconfigurator agent usage --ref experiment-template`
 - Result analysis: `aiconfigurator agent usage --ref result-interpretation`
 - SDK/per-step latency breakdown: `aiconfigurator agent usage --ref sdk-step-breakdown`
 - Deployment and benchmark artifacts: `aiconfigurator agent usage --ref deployment-bench`

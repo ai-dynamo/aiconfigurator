@@ -5,14 +5,16 @@ the agent needs precise control over a planned experiment. This is usually the
 right path for narrowing a disaggregated search after `default` has shown the
 rough backend, GPU shape, batch-size, and SLA range.
 
-Start from the bundled template:
+Start from the bundled CLI example template:
 
 ```bash
 aiconfigurator agent usage --ref experiment-template > template.yaml
 ```
 
-Then edit the copied YAML for the user's model, system, backend, GPU budget,
-workload, SLA, and disaggregated search space.
+This reference reads `aiconfigurator.cli/example.yaml`, the same packaged YAML
+used by the CLI help path and covered by CI. Edit the copied YAML for the user's
+model, system, backend, GPU budget, workload, SLA, and disaggregated search
+space.
 
 ## Authoring Workflow
 
@@ -26,13 +28,15 @@ workload, SLA, and disaggregated search space.
    deployment sizing, or generated configs.
 5. Put workload and SLA at the experiment top level: `isl`, `osl`, `prefix`,
    `ttft`, `tpot`, and optionally `request_latency`.
-6. Change search-space lists under `prefill_worker_config`,
+6. Delete experiments that are not part of the comparison. For a precise disagg
+   follow-up, usually keep only the disagg entries.
+7. Change search-space lists under `prefill_worker_config`,
    `decode_worker_config`, and `replica_config` for precise disagg experiments.
    Use `worker_config` for aggregate-only follow-ups.
-7. Do not override quantization by default. Let model config and AIC defaults
-   infer quantization unless the user asks for a quantization study or a known
-   runtime requires an explicit mode.
-8. Run with `--save-dir`, then inspect `exp_config.yaml`,
+8. The CLI example contains explicit quantization fields for demonstration.
+   Remove or avoid carrying them into the final agent YAML unless the user asks
+   for a quantization study or a known runtime requires an explicit mode.
+9. Run with `--save-dir`, then inspect `exp_config.yaml`,
    `best_config_topn.csv`, `pareto.csv`, and `top*/generator_config.yaml`.
 
 ## Default-to-YAML Handoff

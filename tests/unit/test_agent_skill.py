@@ -42,8 +42,8 @@ def test_usage_reference_text_loads():
     assert "--generated-config-version" in deployment_text
     assert "MTP / `nextn`" in pitfalls_text
     assert "Multi-Experiment Comparisons" in yaml_text
-    assert "database_mode: SILICON" in template_text
-    assert "Do not add quantization overrides by default" in template_text
+    assert "exp_disagg_full" in template_text
+    assert 'database_mode: "SILICON"' in template_text
 
 
 def test_agent_lists_skills_and_refs():

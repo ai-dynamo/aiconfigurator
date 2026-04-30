@@ -51,7 +51,9 @@ aiconfigurator cli exp --yaml-path template.yaml --save-dir results
 ```
 
 Keep `database_mode: SILICON` for final experiments. Modify search lists in the
-YAML instead of adding quantization overrides by default.
+YAML instead of adding quantization overrides by default. The template is the
+packaged CLI example YAML, so remove demonstration-only fields that are not part
+of the intended experiment.
 
 ## Estimate
 

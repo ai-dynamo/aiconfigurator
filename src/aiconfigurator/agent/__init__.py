@@ -14,7 +14,7 @@ _REFERENCE_FILES = {
     "usage": {
         "cli-modes": "skills/usage/references/cli-modes.md",
         "single-experiment-yaml": "skills/usage/references/single-experiment-yaml.md",
-        "experiment-template": "skills/usage/templates/experiment-template.yaml",
+        "experiment-template": ("aiconfigurator.cli", "example.yaml"),
         "result-interpretation": "skills/usage/references/result-interpretation.md",
         "sdk-step-breakdown": "skills/usage/references/sdk-step-breakdown.md",
         "deployment-bench": "skills/usage/references/deployment-bench.md",
@@ -30,6 +30,14 @@ _REFERENCE_FILES = {
         "pr-checklist": "skills/development/references/pr-checklist.md",
     },
 }
+
+
+def _read_resource(resource: str | tuple[str, str]) -> str:
+    """Read a bundled resource from this package or another package."""
+    if isinstance(resource, tuple):
+        package, resource_path = resource
+        return files(package).joinpath(*resource_path.split("/")).read_text(encoding="utf-8")
+    return files(__name__).joinpath(*resource.split("/")).read_text(encoding="utf-8")
 
 
 def list_agent_skills() -> tuple[str, ...]:
@@ -58,4 +66,4 @@ def get_agent_text(skill: str = "usage", reference: str | None = None) -> str:
             raise ValueError(f"Unknown reference '{reference}' for skill '{skill}'. Available references: {available}")
         resource_path = references[reference]
 
-    return files(__name__).joinpath(*resource_path.split("/")).read_text(encoding="utf-8")
+    return _read_resource(resource_path)
