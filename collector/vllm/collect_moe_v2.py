@@ -462,6 +462,8 @@ def run_moe_torch(
                 )
                 weights, ids = torch.topk(logits, topk, dim=-1)
                 topk_weights = F.softmax(weights, dim=-1)
+                if use_int4_wo:
+                    topk_weights = topk_weights.float()
                 topk_weights_list.append(topk_weights)
                 topk_ids_list.append(ids)
 
@@ -471,6 +473,8 @@ def run_moe_torch(
             actual_logits = balanced_logits(num_tokens, num_experts, topk).bfloat16().to(device)
             topk_weights, topk_ids = torch.topk(actual_logits, topk, dim=-1)
             topk_weights = F.softmax(topk_weights, dim=-1)
+            if use_int4_wo:
+                topk_weights = topk_weights.float()
 
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
@@ -568,7 +572,7 @@ def run_moe_torch(
                         hidden_states[:local_num_tokens],
                         w1,
                         w2,
-                        tw.float() if use_int4_wo else tw,
+                        tw,
                         ti,
                         inplace=False,
                         quant_config=quant_config,
@@ -580,7 +584,7 @@ def run_moe_torch(
                     hidden_states,
                     w1,
                     w2,
-                    topk_weights.float() if use_int4_wo else topk_weights,
+                    topk_weights,
                     topk_ids,
                     inplace=False,
                     quant_config=quant_config,
