@@ -207,6 +207,74 @@ def _generate_uniform_counts(
     return tuple(counts)
 
 
+def _generate_random_rows(
+    *,
+    num_tokens: int,
+    num_experts: int,
+    topk: int,
+    seed: int | None,
+) -> tuple[tuple[int, ...], ...]:
+    if num_tokens <= 0:
+        raise ValueError("num_tokens must be positive")
+    if num_experts <= 0:
+        raise ValueError("num_experts must be positive")
+    if topk <= 0:
+        raise ValueError("topk must be positive")
+    if topk > num_experts:
+        raise ValueError("topk must not exceed num_experts")
+
+    rng = random.Random(seed)
+    return tuple(tuple(rng.sample(range(num_experts), topk)) for _ in range(num_tokens))
+
+
+def _count_expert_rows(
+    token_rows: Sequence[Sequence[int]],
+    *,
+    num_experts: int,
+) -> tuple[int, ...]:
+    counts = [0 for _ in range(num_experts)]
+    for row in token_rows:
+        for expert_id in row:
+            expert_id = int(expert_id)
+            if expert_id < 0 or expert_id >= num_experts:
+                raise ValueError(f"expert_id out of range: {expert_id}")
+            counts[expert_id] += 1
+    return tuple(counts)
+
+
+def _remap_bottleneck_owner_rank_to_rank0(
+    token_rows: Sequence[Sequence[int]],
+    *,
+    num_experts: int,
+    moe_ep_size: int,
+) -> tuple[tuple[tuple[int, ...], ...], int]:
+    if moe_ep_size <= 0:
+        raise ValueError("moe_ep_size must be positive")
+    if num_experts % moe_ep_size != 0:
+        raise ValueError("num_experts must be divisible by moe_ep_size")
+
+    experts_per_rank = num_experts // moe_ep_size
+    counts = _count_expert_rows(token_rows, num_experts=num_experts)
+    rank_loads = [
+        sum(counts[rank * experts_per_rank : (rank + 1) * experts_per_rank])
+        for rank in range(moe_ep_size)
+    ]
+    bottleneck_rank = max(range(moe_ep_size), key=lambda rank: rank_loads[rank])
+    if bottleneck_rank == 0:
+        return tuple(tuple(int(value) for value in row) for row in token_rows), int(bottleneck_rank)
+
+    def remap_expert(expert_id: int) -> int:
+        owner_rank = expert_id // experts_per_rank
+        local_expert_id = expert_id % experts_per_rank
+        if owner_rank == 0:
+            return bottleneck_rank * experts_per_rank + local_expert_id
+        if owner_rank == bottleneck_rank:
+            return local_expert_id
+        return expert_id
+
+    return tuple(tuple(remap_expert(int(value)) for value in row) for row in token_rows), int(bottleneck_rank)
+
+
 def _assign_experts_from_counts(
     expert_counts: Sequence[int],
     *,
@@ -596,6 +664,119 @@ def build_dsv4_uniform_megamoe_workload(
     )
 
 
+def build_dsv4_balanced_megamoe_workload(
+    *,
+    num_tokens_per_rank: int,
+    routed_num_experts: int,
+    routed_topk: int,
+    moe_ep_size: int,
+    num_fused_shared_experts: int = 0,
+    hidden_size: int | None = None,
+    quant_group_size: int = 32,
+) -> Dsv4MegaMoEWorkload:
+    """Build a target-EP balanced workload.
+
+    This is the explicit DSv4 MegaMoE name for the existing ``uniform``
+    count-balanced workload.
+    """
+    return build_dsv4_uniform_megamoe_workload(
+        num_tokens_per_rank=num_tokens_per_rank,
+        routed_num_experts=routed_num_experts,
+        routed_topk=routed_topk,
+        moe_ep_size=moe_ep_size,
+        num_fused_shared_experts=num_fused_shared_experts,
+        hidden_size=hidden_size,
+        quant_group_size=quant_group_size,
+    )
+
+
+def build_dsv4_random_megamoe_workload(
+    *,
+    num_tokens_per_rank: int,
+    routed_num_experts: int,
+    routed_topk: int,
+    moe_ep_size: int,
+    num_fused_shared_experts: int = 0,
+    hidden_size: int | None = None,
+    quant_group_size: int = 32,
+    seed: int | None = 0,
+) -> Dsv4MegaMoEWorkload:
+    """Build a target-EP random DSv4 MegaMoE workload and replay the bottleneck rank."""
+    if num_tokens_per_rank <= 0:
+        raise ValueError("num_tokens_per_rank must be positive")
+    if moe_ep_size <= 0:
+        raise ValueError("moe_ep_size must be positive")
+    if routed_num_experts % moe_ep_size != 0:
+        raise ValueError("routed_num_experts must be divisible by moe_ep_size")
+    if num_fused_shared_experts < 0:
+        raise ValueError("num_fused_shared_experts must be non-negative")
+
+    num_global_tokens = num_tokens_per_rank * moe_ep_size
+    experts_per_rank = routed_num_experts // moe_ep_size
+    routed_rows = _generate_random_rows(
+        num_tokens=num_global_tokens,
+        num_experts=routed_num_experts,
+        topk=routed_topk,
+        seed=seed,
+    )
+    routed_rows, bottleneck_rank = _remap_bottleneck_owner_rank_to_rank0(
+        routed_rows,
+        num_experts=routed_num_experts,
+        moe_ep_size=moe_ep_size,
+    )
+    routed_counts = _count_expert_rows(routed_rows, num_experts=routed_num_experts)
+    routed_rows_by_src_rank = _partition_token_rows_by_source_rank(
+        routed_rows,
+        moe_ep_size=moe_ep_size,
+    )
+    mega_rows_by_src_rank = _append_shared_expert_ids(
+        routed_rows_by_src_rank,
+        routed_num_experts=routed_num_experts,
+        num_fused_shared_experts=num_fused_shared_experts,
+    )
+    routes = build_route_matrix(
+        routed_rows_by_src_rank,
+        num_experts=routed_num_experts,
+        moe_ep_size=moe_ep_size,
+    )
+    rank0_token_indices, rank0_topk_ids, rank0_masked_m = _rank0_local_workload_from_global_assignment(
+        routed_rows_by_src_rank,
+        routed_num_experts=routed_num_experts,
+        moe_ep_size=moe_ep_size,
+        num_fused_shared_experts=num_fused_shared_experts,
+    )
+    rank_loads = tuple(
+        sum(routed_counts[rank * experts_per_rank : (rank + 1) * experts_per_rank])
+        for rank in range(moe_ep_size)
+    )
+    traffic = (
+        estimate_megamoe_traffic(routes, hidden_size=hidden_size, quant_group_size=quant_group_size)
+        if hidden_size is not None
+        else None
+    )
+
+    return Dsv4MegaMoEWorkload(
+        num_tokens_per_rank=int(num_tokens_per_rank),
+        num_global_tokens=int(num_global_tokens),
+        routed_topk=int(routed_topk),
+        mega_topk=int(routed_topk + num_fused_shared_experts),
+        routed_num_experts=int(routed_num_experts),
+        num_fused_shared_experts=int(num_fused_shared_experts),
+        moe_ep_size=int(moe_ep_size),
+        experts_per_rank=int(experts_per_rank),
+        bottleneck_rank_before_remap=int(bottleneck_rank),
+        routed_expert_counts=routed_counts,
+        routed_rank_loads=rank_loads,
+        routed_topk_ids_by_src_rank=routed_rows_by_src_rank,
+        mega_topk_ids_by_src_rank=mega_rows_by_src_rank,
+        route_matrix=routes,
+        rank0_local_token_indices=rank0_token_indices,
+        rank0_local_topk_ids=rank0_topk_ids,
+        rank0_masked_m=rank0_masked_m,
+        traffic=traffic,
+    )
+
+
 def build_dsv4_uniform_megamoe_workload_from_global_tokens(
     *,
     num_global_tokens: int,
@@ -678,3 +859,110 @@ def build_dsv4_uniform_megamoe_workload_from_global_tokens(
         traffic=traffic,
     )
 
+
+def build_dsv4_balanced_megamoe_workload_from_global_tokens(
+    *,
+    num_global_tokens: int,
+    routed_num_experts: int,
+    routed_topk: int,
+    moe_ep_size: int,
+    num_fused_shared_experts: int = 0,
+    hidden_size: int | None = None,
+    quant_group_size: int = 32,
+) -> Dsv4MegaMoEWorkload:
+    """Build a target-EP balanced workload from global token count."""
+    return build_dsv4_uniform_megamoe_workload_from_global_tokens(
+        num_global_tokens=num_global_tokens,
+        routed_num_experts=routed_num_experts,
+        routed_topk=routed_topk,
+        moe_ep_size=moe_ep_size,
+        num_fused_shared_experts=num_fused_shared_experts,
+        hidden_size=hidden_size,
+        quant_group_size=quant_group_size,
+    )
+
+
+def build_dsv4_random_megamoe_workload_from_global_tokens(
+    *,
+    num_global_tokens: int,
+    routed_num_experts: int,
+    routed_topk: int,
+    moe_ep_size: int,
+    num_fused_shared_experts: int = 0,
+    hidden_size: int | None = None,
+    quant_group_size: int = 32,
+    seed: int | None = 0,
+) -> Dsv4MegaMoEWorkload:
+    """Build a target-EP random workload from global token count."""
+    if num_global_tokens <= 0:
+        raise ValueError("num_global_tokens must be positive")
+    if moe_ep_size <= 0:
+        raise ValueError("moe_ep_size must be positive")
+    if routed_num_experts % moe_ep_size != 0:
+        raise ValueError("routed_num_experts must be divisible by moe_ep_size")
+    if num_fused_shared_experts < 0:
+        raise ValueError("num_fused_shared_experts must be non-negative")
+
+    experts_per_rank = routed_num_experts // moe_ep_size
+    routed_rows = _generate_random_rows(
+        num_tokens=num_global_tokens,
+        num_experts=routed_num_experts,
+        topk=routed_topk,
+        seed=seed,
+    )
+    routed_rows, bottleneck_rank = _remap_bottleneck_owner_rank_to_rank0(
+        routed_rows,
+        num_experts=routed_num_experts,
+        moe_ep_size=moe_ep_size,
+    )
+    routed_counts = _count_expert_rows(routed_rows, num_experts=routed_num_experts)
+    routed_rows_by_src_rank = _partition_token_rows_by_source_rank(
+        routed_rows,
+        moe_ep_size=moe_ep_size,
+    )
+    mega_rows_by_src_rank = _append_shared_expert_ids(
+        routed_rows_by_src_rank,
+        routed_num_experts=routed_num_experts,
+        num_fused_shared_experts=num_fused_shared_experts,
+    )
+    routes = build_route_matrix(
+        routed_rows_by_src_rank,
+        num_experts=routed_num_experts,
+        moe_ep_size=moe_ep_size,
+    )
+    rank0_token_indices, rank0_topk_ids, rank0_masked_m = _rank0_local_workload_from_global_assignment(
+        routed_rows_by_src_rank,
+        routed_num_experts=routed_num_experts,
+        moe_ep_size=moe_ep_size,
+        num_fused_shared_experts=num_fused_shared_experts,
+    )
+    rank_loads = tuple(
+        sum(routed_counts[rank * experts_per_rank : (rank + 1) * experts_per_rank])
+        for rank in range(moe_ep_size)
+    )
+    traffic = (
+        estimate_megamoe_traffic(routes, hidden_size=hidden_size, quant_group_size=quant_group_size)
+        if hidden_size is not None
+        else None
+    )
+
+    return Dsv4MegaMoEWorkload(
+        num_tokens_per_rank=math.ceil(num_global_tokens / moe_ep_size),
+        num_global_tokens=int(num_global_tokens),
+        routed_topk=int(routed_topk),
+        mega_topk=int(routed_topk + num_fused_shared_experts),
+        routed_num_experts=int(routed_num_experts),
+        num_fused_shared_experts=int(num_fused_shared_experts),
+        moe_ep_size=int(moe_ep_size),
+        experts_per_rank=int(experts_per_rank),
+        bottleneck_rank_before_remap=int(bottleneck_rank),
+        routed_expert_counts=routed_counts,
+        routed_rank_loads=rank_loads,
+        routed_topk_ids_by_src_rank=routed_rows_by_src_rank,
+        mega_topk_ids_by_src_rank=mega_rows_by_src_rank,
+        route_matrix=routes,
+        rank0_local_token_indices=rank0_token_indices,
+        rank0_local_topk_ids=rank0_topk_ids,
+        rank0_masked_m=rank0_masked_m,
+        traffic=traffic,
+    )

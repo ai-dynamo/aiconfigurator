@@ -57,7 +57,7 @@ def test_get_dsv4_megamoe_compute_test_cases_shape(compute_mod):
     assert {case[0] for case in cases} == {"mxfp4"}
     assert {case[8] for case in cases} == {"deepseek-ai/DeepSeek-V4"}
     assert {case[9] for case in cases} == {"dsv4_megamoe_compute_perf.txt"}
-    assert {case[10] for case in cases} == {"uniform", "power_law"}
+    assert {case[10] for case in cases} == set(compute_mod.DEFAULT_COMPUTE_DISTRIBUTIONS)
     assert {case[11] for case in cases} == {None, compute_mod.DEFAULT_POWER_LAW_ALPHA}
     assert all(case[1] <= compute_mod.DEFAULT_MEGAMOE_TOKEN_CAP for case in cases)
     assert all(case[2:7] == [4096, 2048, 6, 256, 1] for case in cases)
@@ -180,6 +180,16 @@ def test_compute_coerce_rejects_model_router_distribution(compute_mod):
 
 
 @pytest.mark.unit
+def test_compute_coerce_normalizes_balance_alias(compute_mod):
+    case = compute_mod.get_dsv4_megamoe_compute_test_cases()[0]
+    case[10] = "balance"
+
+    task = compute_mod._coerce_compute_task(*case)
+
+    assert task.distribution == "balanced"
+
+
+@pytest.mark.unit
 def test_compute_dry_run_writes_report_without_subprocess(compute_mod, monkeypatch, tmp_path):
     monkeypatch.setenv("AIC_DSV4_MEGAMOE_DRY_RUN", "1")
     monkeypatch.setenv("AIC_DSV4_MEGAMOE_REPORT_DIR", str(tmp_path))
@@ -194,7 +204,7 @@ def test_compute_dry_run_writes_report_without_subprocess(compute_mod, monkeypat
     assert payload["status"] == "dry_run"
     assert payload["device_id"] == 3
     assert payload["task"]["moe_type"] == "mxfp4"
-    assert payload["task"]["distribution"] == "uniform"
+    assert payload["task"]["distribution"] == "balanced"
     assert payload["env"]["SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE"] == "1"
 
 
@@ -234,6 +244,29 @@ def test_compute_build_target_ep_workload_uses_bottleneck_rank(compute_mod):
     assert workload.routed_rank_loads[0] == max(workload.routed_rank_loads)
     assert len(workload.rank0_masked_m) == 64
     assert sum(workload.rank0_masked_m) > 0
+
+
+@pytest.mark.unit
+def test_compute_build_target_ep_workload_accepts_balanced_and_random(compute_mod):
+    case = compute_mod.get_dsv4_megamoe_compute_test_cases()[0]
+    case[1] = 16
+    case[7] = 4
+
+    for distribution in ("balanced", "random", "uniform"):
+        case[10] = distribution
+        case[11] = None
+        task = compute_mod._coerce_compute_task(*case)
+        workload = compute_mod._build_target_ep_workload(
+            task,
+            routed_topk=6,
+            routed_num_experts=256,
+            num_fused_shared_experts=0,
+        )
+
+        assert workload.moe_ep_size == 4
+        assert workload.experts_per_rank == 64
+        assert len(workload.rank0_masked_m) == 64
+        assert sum(workload.rank0_masked_m) > 0
 
 
 @pytest.mark.unit

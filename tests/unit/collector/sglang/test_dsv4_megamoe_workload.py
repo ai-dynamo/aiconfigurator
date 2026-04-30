@@ -2,8 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collector.sglang.dsv4_megamoe_workload import (
+    build_dsv4_balanced_megamoe_workload,
+    build_dsv4_balanced_megamoe_workload_from_global_tokens,
     build_dsv4_power_law_megamoe_workload,
     build_dsv4_power_law_megamoe_workload_from_global_tokens,
+    build_dsv4_random_megamoe_workload,
+    build_dsv4_random_megamoe_workload_from_global_tokens,
     build_dsv4_uniform_megamoe_workload,
     build_dsv4_uniform_megamoe_workload_from_global_tokens,
 )
@@ -46,6 +50,40 @@ def test_uniform_workload_uses_target_ep_and_local_rank0_workload():
     )
 
 
+def test_balanced_workload_matches_uniform_semantics():
+    balanced = build_dsv4_balanced_megamoe_workload(
+        num_tokens_per_rank=8,
+        routed_num_experts=8,
+        routed_topk=2,
+        moe_ep_size=4,
+    )
+    uniform = build_dsv4_uniform_megamoe_workload(
+        num_tokens_per_rank=8,
+        routed_num_experts=8,
+        routed_topk=2,
+        moe_ep_size=4,
+    )
+
+    assert balanced == uniform
+
+
+def test_random_workload_uses_target_ep_and_remaps_bottleneck_to_rank0():
+    workload = build_dsv4_random_megamoe_workload(
+        num_tokens_per_rank=16,
+        routed_num_experts=8,
+        routed_topk=2,
+        moe_ep_size=4,
+        seed=123,
+    )
+
+    assert workload.num_global_tokens == 64
+    assert workload.experts_per_rank == 2
+    assert sum(workload.routed_expert_counts) == workload.num_global_tokens * workload.routed_topk
+    assert workload.routed_rank_loads[0] == max(workload.routed_rank_loads)
+    assert len(workload.routed_topk_ids_by_src_rank) == 4
+    assert all(len(row) == 2 for rank_rows in workload.routed_topk_ids_by_src_rank for row in rank_rows)
+
+
 def test_global_token_power_law_workload_does_not_expand_tokens_by_ep():
     workload = build_dsv4_power_law_megamoe_workload_from_global_tokens(
         num_global_tokens=17,
@@ -75,6 +113,36 @@ def test_global_token_uniform_workload_keeps_global_token_count():
     assert workload.num_tokens_per_rank == 5
     assert sum(len(rank_rows) for rank_rows in workload.routed_topk_ids_by_src_rank) == 17
     assert sum(sum(row) for row in workload.route_matrix) == 17 * 2
+
+
+def test_global_token_balanced_workload_keeps_global_token_count():
+    workload = build_dsv4_balanced_megamoe_workload_from_global_tokens(
+        num_global_tokens=17,
+        routed_num_experts=8,
+        routed_topk=2,
+        moe_ep_size=4,
+    )
+
+    assert workload.num_global_tokens == 17
+    assert workload.num_tokens_per_rank == 5
+    assert sum(len(rank_rows) for rank_rows in workload.routed_topk_ids_by_src_rank) == 17
+    assert sum(sum(row) for row in workload.route_matrix) == 17 * 2
+
+
+def test_global_token_random_workload_keeps_global_token_count():
+    workload = build_dsv4_random_megamoe_workload_from_global_tokens(
+        num_global_tokens=17,
+        routed_num_experts=8,
+        routed_topk=2,
+        moe_ep_size=4,
+        seed=123,
+    )
+
+    assert workload.num_global_tokens == 17
+    assert workload.num_tokens_per_rank == 5
+    assert sum(len(rank_rows) for rank_rows in workload.routed_topk_ids_by_src_rank) == 17
+    assert sum(sum(row) for row in workload.route_matrix) == 17 * 2
+    assert workload.routed_rank_loads[0] == max(workload.routed_rank_loads)
 
 
 def test_power_law_workload_route_matrix_preserves_all_source_rank_assignments():

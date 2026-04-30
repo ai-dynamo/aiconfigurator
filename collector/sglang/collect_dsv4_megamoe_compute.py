@@ -33,7 +33,9 @@ except ModuleNotFoundError:
 try:
     from collector.sglang.dsv4_megamoe_workload import (
         Dsv4MegaMoEWorkload,
+        build_dsv4_balanced_megamoe_workload_from_global_tokens,
         build_dsv4_power_law_megamoe_workload_from_global_tokens,
+        build_dsv4_random_megamoe_workload_from_global_tokens,
         build_dsv4_uniform_megamoe_workload_from_global_tokens,
     )
 except ModuleNotFoundError:
@@ -42,7 +44,9 @@ except ModuleNotFoundError:
     sys.path.append(str(_REPO_ROOT))
     from collector.sglang.dsv4_megamoe_workload import (
         Dsv4MegaMoEWorkload,
+        build_dsv4_balanced_megamoe_workload_from_global_tokens,
         build_dsv4_power_law_megamoe_workload_from_global_tokens,
+        build_dsv4_random_megamoe_workload_from_global_tokens,
         build_dsv4_uniform_megamoe_workload_from_global_tokens,
     )
 
@@ -87,8 +91,16 @@ except ModuleNotFoundError:
 PERF_FILENAME = "dsv4_megamoe_compute_perf.txt"
 REPORT_SCHEMA_VERSION = "aic-dsv4-megamoe-compute-v1"
 DEFAULT_POWER_LAW_ALPHA = 1.01
-SUPPORTED_DISTRIBUTIONS = {"uniform", "power_law"}
+SUPPORTED_DISTRIBUTIONS = {"balance", "balanced", "power_law", "random", "uniform"}
+DEFAULT_COMPUTE_DISTRIBUTIONS = ["balanced", "random", "power_law"]
 DEFAULT_TARGET_EP_LIST = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+
+
+def _normalize_distribution(distribution: str) -> str:
+    normalized = str(distribution)
+    if normalized == "balance":
+        return "balanced"
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -168,9 +180,9 @@ def get_dsv4_megamoe_compute_test_cases() -> list[list[Any]]:
 
     raw_distributions = os.environ.get("AIC_DSV4_MEGAMOE_COMPUTE_DISTRIBUTIONS")
     if raw_distributions:
-        distributions = [item.strip() for item in raw_distributions.split(",") if item.strip()]
+        distributions = [_normalize_distribution(item.strip()) for item in raw_distributions.split(",") if item.strip()]
     else:
-        distributions = ["uniform", "power_law"]
+        distributions = list(DEFAULT_COMPUTE_DISTRIBUTIONS)
 
     raw_ep_list = os.environ.get("AIC_DSV4_MEGAMOE_TARGET_EP_LIST")
     if raw_ep_list:
@@ -232,7 +244,7 @@ def _coerce_compute_task(
         moe_ep_size=int(moe_ep_size),
         model_name=str(model_name),
         perf_filename=str(perf_filename),
-        distribution=str(distribution),
+        distribution=_normalize_distribution(distribution),
         power_law_alpha=None if power_law_alpha is None else float(power_law_alpha),
     )
     if task.moe_type != "mxfp4":
@@ -330,8 +342,26 @@ def _build_target_ep_workload(
     num_fused_shared_experts: int,
     hidden_size: int | None = None,
 ) -> Dsv4MegaMoEWorkload:
-    if task.distribution == "uniform":
+    if task.distribution == "balanced":
+        return build_dsv4_balanced_megamoe_workload_from_global_tokens(
+            num_global_tokens=task.num_tokens,
+            routed_num_experts=routed_num_experts,
+            routed_topk=routed_topk,
+            moe_ep_size=task.moe_ep_size,
+            num_fused_shared_experts=num_fused_shared_experts,
+            hidden_size=hidden_size,
+        )
+    elif task.distribution == "uniform":
         return build_dsv4_uniform_megamoe_workload_from_global_tokens(
+            num_global_tokens=task.num_tokens,
+            routed_num_experts=routed_num_experts,
+            routed_topk=routed_topk,
+            moe_ep_size=task.moe_ep_size,
+            num_fused_shared_experts=num_fused_shared_experts,
+            hidden_size=hidden_size,
+        )
+    elif task.distribution == "random":
+        return build_dsv4_random_megamoe_workload_from_global_tokens(
             num_global_tokens=task.num_tokens,
             routed_num_experts=routed_num_experts,
             routed_topk=routed_topk,
