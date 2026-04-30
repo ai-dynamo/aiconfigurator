@@ -179,7 +179,8 @@ class TestEstimateModelWeightBytesFailsOnMissingModel:
 @pytest.mark.unit
 class TestCalculateMinTp:
     """Verify _calculate_min_tp memory-fit floor, including multi-node sweeps."""
-     # H100: 80 GiB per GPU.  DeepSeek R1 FP8: ~671 GiB of weights.
+
+    # H100: 80 GiB per GPU.  DeepSeek R1 FP8: ~671 GiB of weights.
     _H100_VRAM = 80 * 1024**3
     _R1_FP8_WEIGHTS = 671 * 1024**3
 
@@ -191,8 +192,8 @@ class TestCalculateMinTp:
             gpus_per_node=8,
             total_gpus=32,
         )
-        assert min_gpus == 8          # capped
-        assert tp == 16               # actual requirement
+        assert min_gpus == 8  # capped
+        assert tp == 16  # actual requirement
 
     def test_multi_node_allows_crossing_node_boundary(self):
         """MoE wide-EP: min_tp can span nodes, floored to power-of-2 fit."""
@@ -214,8 +215,8 @@ class TestCalculateMinTp:
             total_gpus=8,
             allow_multi_node=True,
         )
-        assert min_gpus == 8          # capped by total GPUs
-        assert tp == 16               # still required
+        assert min_gpus == 8  # capped by total GPUs
+        assert tp == 16  # still required
 
     def test_small_model_fits_on_one_gpu(self):
         min_gpus, fits, tp = _calculate_min_tp(
@@ -226,6 +227,8 @@ class TestCalculateMinTp:
         )
         assert min_gpus == 1
         assert tp == 1
+
+
 @pytest.mark.unit
 class TestRenderingNameFallback:
     """Verify prepare_template_context uses 'dynamo' fallback for missing name_prefix."""
