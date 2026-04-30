@@ -12,6 +12,7 @@ import math
 import os
 from collections import UserDict, defaultdict
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -26,6 +27,52 @@ databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
+
+
+def _interpolate_log_log_points(points: Iterable[tuple[int, float]], x: int) -> float:
+    if x <= 0:
+        raise ValueError("x must be positive")
+    sorted_points = tuple(sorted((int(point_x), float(point_y)) for point_x, point_y in points))
+    if not sorted_points:
+        raise ValueError("points must be non-empty")
+    if any(point_x <= 0 or point_y <= 0 for point_x, point_y in sorted_points):
+        raise ValueError("log-log interpolation requires positive points")
+
+    if x <= sorted_points[0][0]:
+        return sorted_points[0][1]
+    if x >= sorted_points[-1][0]:
+        return sorted_points[-1][1]
+
+    for (left_x, left_y), (right_x, right_y) in zip(sorted_points, sorted_points[1:]):
+        if left_x <= x <= right_x:
+            if left_x == x:
+                return left_y
+            if right_x == x:
+                return right_y
+            weight = (math.log(x) - math.log(left_x)) / (math.log(right_x) - math.log(left_x))
+            return math.exp(math.log(left_y) + weight * (math.log(right_y) - math.log(left_y)))
+
+    raise AssertionError("interpolation interval not found")
+
+
+@dataclass(frozen=True)
+class MegaMoEEffectiveBandwidthModel:
+    """Token-dependent fused-kernel effective bandwidth model loaded from perf data."""
+
+    name: str
+    ep_size: int
+    bandwidth_points_gbps: tuple[tuple[int, float], ...]
+    bandwidth_scale: float
+    fixed_overlappable_latency_ms: float
+    source: str = ""
+
+    def raw_bandwidth_bps(self, num_tokens_per_rank: int) -> float:
+        return _interpolate_log_log_points(self.bandwidth_points_gbps, int(num_tokens_per_rank)) * 1_000_000_000.0
+
+    def calibrated_bandwidth_bps(self, num_tokens_per_rank: int) -> float:
+        if self.bandwidth_scale <= 0:
+            raise ValueError("bandwidth_scale must be positive")
+        return self.raw_bandwidth_bps(num_tokens_per_rank) * self.bandwidth_scale
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
@@ -2119,6 +2166,111 @@ def load_trtllm_alltoall_data(trtllm_alltoall_file):
     return trtllm_alltoall_data
 
 
+def _parse_optional_float(value: str | None) -> float | None:
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value or value.lower() in {"none", "nan"}:
+        return None
+    return float(value)
+
+
+def _set_nested(data: dict, keys: tuple, value: dict) -> None:
+    current = data
+    for key in keys[:-1]:
+        current = current.setdefault(key, {})
+    current[keys[-1]] = value
+
+
+def load_dsv4_megamoe_effective_nvl_bw_data(dsv4_megamoe_effective_nvl_bw_file):
+    """
+    Load DSv4 DeepGEMM MegaMoE effective NVLink bandwidth calibration data.
+
+    The table stores token-dependent fused-kernel effective bandwidth, not a
+    standalone NCCL/NVLink microbenchmark.  Query code uses the bandwidth curve
+    together with route-derived traffic bytes to build the communication term.
+
+    Structure:
+        [kernel_source][routing_mode][power_law_alpha][hidden_size][inter_size][topk]
+        [num_experts][moe_ep_size][num_tokens_per_rank] -> metric dict
+    """
+    if not os.path.exists(dsv4_megamoe_effective_nvl_bw_file):
+        logger.debug(
+            f"DSv4 MegaMoE effective NVLink BW data file {dsv4_megamoe_effective_nvl_bw_file} not found."
+        )
+        return None
+
+    required_columns = {
+        "kernel_source",
+        "hidden_size",
+        "inter_size",
+        "topk",
+        "num_experts",
+        "moe_ep_size",
+        "routing_mode",
+        "power_law_alpha",
+        "num_tokens_per_rank",
+        "effective_remote_nvl_gbs",
+        "effective_deepgemm_nvl_gbs",
+        "bandwidth_scale",
+        "fixed_overlappable_latency_ms",
+    }
+    data: dict = {}
+
+    with open(dsv4_megamoe_effective_nvl_bw_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        missing = required_columns - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(
+                f"Missing required columns in {dsv4_megamoe_effective_nvl_bw_file}: {sorted(missing)}"
+            )
+
+        for row in reader:
+            kernel_source = row["kernel_source"]
+            routing_mode = row["routing_mode"]
+            alpha = _parse_optional_float(row["power_law_alpha"])
+            hidden_size = int(row["hidden_size"])
+            inter_size = int(row["inter_size"])
+            topk = int(row["topk"])
+            num_experts = int(row["num_experts"])
+            moe_ep_size = int(row["moe_ep_size"])
+            num_tokens = int(row["num_tokens_per_rank"])
+            bandwidth_scale = float(row["bandwidth_scale"])
+            fixed_overlappable_latency_ms = float(row["fixed_overlappable_latency_ms"])
+
+            if bandwidth_scale <= 0:
+                raise ValueError("bandwidth_scale must be positive")
+            if fixed_overlappable_latency_ms < 0:
+                raise ValueError("fixed_overlappable_latency_ms must be non-negative")
+
+            keys = (
+                kernel_source,
+                routing_mode,
+                alpha,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+                num_tokens,
+            )
+            _set_nested(
+                data,
+                keys,
+                {
+                    "effective_remote_nvl_gbs": float(row["effective_remote_nvl_gbs"]),
+                    "effective_deepgemm_nvl_gbs": float(row["effective_deepgemm_nvl_gbs"]),
+                    "bandwidth_scale": bandwidth_scale,
+                    "fixed_overlappable_latency_ms": fixed_overlappable_latency_ms,
+                    "num_samples": int(row.get("num_samples", 0) or 0),
+                    "source": row.get("source", ""),
+                    "calibration_source": row.get("calibration_source", ""),
+                },
+            )
+
+    return data
+
+
 class LoadedOpData(UserDict):
     """
     A dictionary-like object which also keeps track of which file the data was loaded from.
@@ -2259,6 +2411,7 @@ class PerfDatabase:
                 PerfDataFilename.wideep_generation_mla: load_wideep_generation_mla_data,
                 PerfDataFilename.wideep_deepep_normal: load_wideep_deepep_normal_data,
                 PerfDataFilename.wideep_deepep_ll: load_wideep_deepep_ll_data,
+                PerfDataFilename.dsv4_megamoe_effective_nvl_bw: load_dsv4_megamoe_effective_nvl_bw_data,
                 PerfDataFilename.wideep_moe_compute: load_wideep_moe_compute_data,
                 PerfDataFilename.trtllm_alltoall: load_trtllm_alltoall_data,
                 PerfDataFilename.mla_context_module: load_context_mla_module_data,
@@ -2328,6 +2481,9 @@ class PerfDatabase:
             self._wideep_generation_mla_data = _load_op_data(PerfDataFilename.wideep_generation_mla)
             self._wideep_deepep_normal_data = _load_op_data(PerfDataFilename.wideep_deepep_normal)
             self._wideep_deepep_ll_data = _load_op_data(PerfDataFilename.wideep_deepep_ll)
+            self._dsv4_megamoe_effective_nvl_bw_data = _load_op_data(
+                PerfDataFilename.dsv4_megamoe_effective_nvl_bw
+            )
 
         # DSA module-level attention data (DeepSeek Sparse Attention)
         # Uses same dict structure as MLA so interpolation/query can be reused
@@ -6225,6 +6381,90 @@ class PerfDatabase:
                 lat = result["latency"] if isinstance(result, dict) else result
                 energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
             return PerformanceResult(lat / 1000.0, energy=energy / 1000.0)
+
+    @functools.lru_cache(maxsize=32768)
+    def query_dsv4_megamoe_effective_bandwidth_model(
+        self,
+        *,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        moe_ep_size: int,
+        routing_mode: str,
+        power_law_alpha: float | None = None,
+        kernel_source: str = "DeepGEMM_fp8_fp4_mega_moe",
+        database_mode: common.DatabaseMode | None = None,
+    ):
+        """Query DSv4 MegaMoE token-dependent effective bandwidth data.
+
+        There is intentionally no SOL/EMPIRICAL/HYBRID fallback here.  The
+        measured fused-kernel effective bandwidth is a calibration input for
+        the MegaMoE communication model, so missing data must remain visible.
+        """
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode in {
+            common.DatabaseMode.SOL,
+            common.DatabaseMode.SOL_FULL,
+            common.DatabaseMode.EMPIRICAL,
+        }:
+            raise NotImplementedError("DSv4 MegaMoE effective bandwidth has no analytic or empirical fallback")
+
+        try:
+            data_store = self._dsv4_megamoe_effective_nvl_bw_data
+        except AttributeError as exc:
+            raise PerfDataNotAvailableError(
+                "DSv4 MegaMoE effective bandwidth data is only loaded for the SGLang backend."
+            ) from exc
+
+        data_store.raise_if_not_loaded()
+        alpha = _parse_optional_float(str(power_law_alpha) if power_law_alpha is not None else None)
+
+        try:
+            token_data = data_store[kernel_source][routing_mode][alpha][hidden_size][inter_size][topk][num_experts][
+                moe_ep_size
+            ]
+        except KeyError as exc:
+            raise PerfDataNotAvailableError(
+                "DSv4 MegaMoE effective bandwidth perf data is unavailable for "
+                f"{kernel_source=}, {routing_mode=}, {power_law_alpha=}, {hidden_size=}, {inter_size=}, "
+                f"{topk=}, {num_experts=}, {moe_ep_size=}."
+            ) from exc
+
+        points = tuple(
+            sorted(
+                (int(num_tokens), float(metrics["effective_remote_nvl_gbs"]))
+                for num_tokens, metrics in token_data.items()
+            )
+        )
+        if not points:
+            raise PerfDataNotAvailableError("DSv4 MegaMoE effective bandwidth table has no token points.")
+
+        first_row = token_data[points[0][0]]
+        for num_tokens, metrics in token_data.items():
+            if float(metrics["bandwidth_scale"]) != float(first_row["bandwidth_scale"]):
+                raise ValueError(
+                    "DSv4 MegaMoE effective bandwidth rows for one curve must share bandwidth_scale; "
+                    f"mismatch at {num_tokens=}"
+                )
+            if float(metrics["fixed_overlappable_latency_ms"]) != float(first_row["fixed_overlappable_latency_ms"]):
+                raise ValueError(
+                    "DSv4 MegaMoE effective bandwidth rows for one curve must share fixed_overlappable_latency_ms; "
+                    f"mismatch at {num_tokens=}"
+                )
+
+        return MegaMoEEffectiveBandwidthModel(
+            name=(
+                f"dsv4_megamoe_{kernel_source}_{routing_mode}_"
+                f"ep{moe_ep_size}_hidden{hidden_size}_inter{inter_size}_topk{topk}_experts{num_experts}"
+            ),
+            ep_size=moe_ep_size,
+            bandwidth_points_gbps=points,
+            bandwidth_scale=float(first_row["bandwidth_scale"]),
+            fixed_overlappable_latency_ms=float(first_row["fixed_overlappable_latency_ms"]),
+            source=first_row.get("source", ""),
+        )
 
     def _correct_data(self) -> None:
         """

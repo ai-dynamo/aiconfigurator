@@ -23,6 +23,7 @@ from aiconfigurator.sdk.perf_database import (
     load_context_mla_data,
     load_context_mla_module_data,
     load_custom_allreduce_data,
+    load_dsv4_megamoe_effective_nvl_bw_data,
     load_gemm_data,
     load_generation_attention_data,
     load_generation_mla_data,
@@ -216,6 +217,27 @@ def test_load_custom_allreduce_data_nonexistent(tmp_path):
     fake_path = tmp_path / "does_not_exist.csv"
     result = load_custom_allreduce_data(str(fake_path))
     assert result is None
+
+
+def test_load_dsv4_megamoe_effective_nvl_bw_data(tmp_path):
+    perf_file = tmp_path / "dsv4_megamoe_effective_nvl_bw_perf.txt"
+    perf_file.write_text(
+        "framework,version,device,op_name,kernel_source,hidden_size,inter_size,topk,num_experts,"
+        "moe_ep_size,routing_mode,power_law_alpha,num_tokens_per_rank,effective_remote_nvl_gbs,"
+        "effective_deepgemm_nvl_gbs,bandwidth_scale,fixed_overlappable_latency_ms,num_samples,source\n"
+        "SGLang,0.5.9,NVIDIA B200,dsv4_megamoe_effective_nvl_bw,DeepGEMM_fp8_fp4_mega_moe,"
+        "7168,3072,6,384,8,power-law,1.01,16,5.5,6.0,2.5,0.25,5,test-run\n",
+        encoding="utf-8",
+    )
+
+    data = load_dsv4_megamoe_effective_nvl_bw_data(str(perf_file))
+    row = data["DeepGEMM_fp8_fp4_mega_moe"]["power-law"][1.01][7168][3072][6][384][8][16]
+
+    assert row["effective_remote_nvl_gbs"] == 5.5
+    assert row["effective_deepgemm_nvl_gbs"] == 6.0
+    assert row["bandwidth_scale"] == 2.5
+    assert row["fixed_overlappable_latency_ms"] == 0.25
+    assert row["num_samples"] == 5
 
 
 def test_load_custom_allreduce_data_basic(tmp_path):
