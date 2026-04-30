@@ -1644,7 +1644,7 @@ class DeepSeekV4MHCModule(Operation):
         self._weights = 2 * (mix_hc * hc_dim + mix_hc + 3) * quant_mode.value.memory
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        result = database.query_deepseek_v4_mhc_module(
+        result = database.query_mhc_module(
             num_tokens=kwargs.get("x"),
             hidden_size=self._hidden_size,
             hc_mult=self._hc_mult,

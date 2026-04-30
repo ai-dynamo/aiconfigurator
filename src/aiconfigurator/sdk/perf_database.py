@@ -540,10 +540,6 @@ def load_gemm_data(gemm_file):
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds (W·ms)
 
-        # vllm gemm has some awq and gptq data, discard it.
-        if quant_mode in ["awq", "gptq"]:
-            continue
-
         quant_mode = common.GEMMQuantMode[quant_mode]
 
         try:
@@ -1262,10 +1258,46 @@ def load_generation_dsa_module_data(dsa_file: str):
     return dsa_data
 
 
-def load_deepseek_v4_mhc_module_data(mhc_file: str):
-    """Placeholder for future DeepSeek-V4 mHC module-level performance data."""
-    logger.debug(f"DeepSeek-V4 mHC module data file {mhc_file} not loaded.")
-    return None
+def load_mhc_module_data(mhc_file: str):
+    """Load DeepSeek-V4 mHC pre/post module-level performance data.
+
+    CSV columns: framework, version, device, op_name, kernel_source, model,
+    architecture, num_tokens, hc_mult, hidden_size, latency [, power]
+
+    ``op_name`` is ``pre`` or ``post``, matching the ``op`` arg of
+    ``query_mhc_module``.
+
+    Dict structure (matches query_mhc_module silicon path):
+        data[op][hc_mult][hidden_size][num_tokens]
+    """
+    if not os.path.exists(mhc_file):
+        logger.debug(f"mHC module data file {mhc_file} not found.")
+        return None
+
+    mhc_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+
+    with open(mhc_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+
+    for row in rows:
+        op = row["op_name"]
+        hc_mult = int(row["hc_mult"])
+        hidden_size = int(row["hidden_size"])
+        num_tokens = int(row["num_tokens"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+        energy = power * latency
+
+        mhc_data[op][hc_mult][hidden_size][num_tokens] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
+
+    return mhc_data
 
 
 def load_context_deepseek_v4_attention_module_data(attn_file: str):
@@ -2265,7 +2297,7 @@ class PerfDatabase:
                 PerfDataFilename.mla_generation_module: load_generation_mla_module_data,
                 PerfDataFilename.dsa_context_module: load_context_dsa_module_data,
                 PerfDataFilename.dsa_generation_module: load_generation_dsa_module_data,
-                PerfDataFilename.deepseek_v4_mhc_module: load_deepseek_v4_mhc_module_data,
+                PerfDataFilename.mhc_module: load_mhc_module_data,
                 PerfDataFilename.deepseek_v4_context_module: load_context_deepseek_v4_attention_module_data,
                 PerfDataFilename.deepseek_v4_generation_module: load_generation_deepseek_v4_attention_module_data,
             }
@@ -2311,7 +2343,7 @@ class PerfDatabase:
         self._scale_matrix_data = _load_op_data(PerfDataFilename.scale_matrix)
         self._context_dsa_module_data = _load_op_data(PerfDataFilename.dsa_context_module)
         self._generation_dsa_module_data = _load_op_data(PerfDataFilename.dsa_generation_module)
-        self._deepseek_v4_mhc_module_data = _load_op_data(PerfDataFilename.deepseek_v4_mhc_module)
+        self._mhc_module_data = _load_op_data(PerfDataFilename.mhc_module)
         self._context_deepseek_v4_attention_module_data = _load_op_data(PerfDataFilename.deepseek_v4_context_module)
         self._raw_context_deepseek_v4_attention_module_data = copy.deepcopy(
             self._context_deepseek_v4_attention_module_data
@@ -7177,7 +7209,7 @@ class PerfDatabase:
         return batch_size * total
 
     @functools.lru_cache(maxsize=32768)
-    def query_deepseek_v4_mhc_module(
+    def query_mhc_module(
         self,
         num_tokens: int,
         hidden_size: int,
@@ -7236,18 +7268,49 @@ class PerfDatabase:
             return PerformanceResult(get_empirical(), energy=0.0)
 
         def get_silicon():
-            mhc_data = getattr(self, "_deepseek_v4_mhc_module_data", None)
+            mhc_data = getattr(self, "_mhc_module_data", None)
             if not mhc_data:
                 raise PerfDataNotAvailableError(
                     f"DeepSeek-V4 mHC module data not loaded for system='{self.system}', "
                     f"backend='{self.backend}', version='{self.version}'."
                 )
-            mhc_dict = mhc_data[quant_mode][op][hc_mult][hidden_size]
-            left, right = self._nearest_1d_point_helper(num_tokens, list(mhc_dict.keys()), inner_only=False)
-            result = self._interp_1d([left, right], [mhc_dict[left], mhc_dict[right]], num_tokens)
-            latency = result["latency"] if isinstance(result, dict) else result
-            energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
-            return PerformanceResult(latency, energy=energy)
+
+            def _lookup_single(op_name: str) -> PerformanceResult:
+                # Validate bucket presence before chained indexing; mhc_data is
+                # a nested defaultdict, so `mhc_data[op][hc_mult][hidden_size]`
+                # would silently materialize empty dicts and then fall through
+                # to _nearest_1d_point_helper with an empty key list, surfacing
+                # as an opaque AssertionError instead of a structured
+                # PerfDataNotAvailableError.
+                if (
+                    op_name not in mhc_data
+                    or hc_mult not in mhc_data[op_name]
+                    or hidden_size not in mhc_data[op_name][hc_mult]
+                    or not mhc_data[op_name][hc_mult][hidden_size]
+                ):
+                    raise PerfDataNotAvailableError(
+                        f"No mHC silicon data for op='{op_name}', hc_mult={hc_mult}, hidden_size={hidden_size}."
+                    )
+                mhc_dict = mhc_data[op_name][hc_mult][hidden_size]
+                left, right = self._nearest_1d_point_helper(num_tokens, list(mhc_dict.keys()), inner_only=False)
+                result = self._interp_1d([left, right], [mhc_dict[left], mhc_dict[right]], num_tokens)
+                latency = result["latency"] if isinstance(result, dict) else result
+                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+                return PerformanceResult(latency, energy=energy)
+
+            # Silicon tables only store "pre" and "post" rows. For op=="both"
+            # (still a supported input in operations.DeepSeekV4MHCModule),
+            # aggregate the two silicon look-ups so callers don't need to know
+            # about the storage layout.
+            if op == "both":
+                pre_result = _lookup_single("pre")
+                post_result = _lookup_single("post")
+                return PerformanceResult(
+                    float(pre_result) + float(post_result),
+                    energy=pre_result.energy + post_result.energy,
+                )
+
+            return _lookup_single(op)
 
         return self._query_silicon_or_hybrid(
             get_silicon=get_silicon,

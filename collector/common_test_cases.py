@@ -84,6 +84,17 @@ _MLA_MODULE_MODEL_NAMES: list[str] = [
     "zai-org/GLM-5",
 ]
 
+# MHC (DeepSeek-V4 Hash-Compressed attention) module:
+# [hidden_size, hc_mult, model_name]
+# Only AIC-cached model_configs/<id>_config.json are usable; both sgl-project
+# FP8 and deepseek-ai non-FP8 namespaces point at the same pre/post kernels.
+_MHC_MODEL_CONFIGS: list[list] = [
+    [4096, 4, "deepseek-ai/DeepSeek-V4-Flash"],
+    [7168, 4, "deepseek-ai/DeepSeek-V4-Pro"],
+    [4096, 4, "sgl-project/DeepSeek-V4-Flash-FP8"],
+    [7168, 4, "sgl-project/DeepSeek-V4-Pro-FP8"],
+]
+
 # GDN (Gated DeltaNet): [d_model, d_conv, num_k_heads, head_k_dim, num_v_heads, head_v_dim, model_name]
 # Covers all 8 unique dimension sets across the full Qwen3.5 collection.
 # d_conv=4, head_k_dim=128, head_v_dim=128, num_k_heads=16 are constant across all models.
@@ -121,7 +132,9 @@ def get_all_model_names() -> list[str]:
     case objects or call generator functions, so pruning logic in the generators
     cannot accidentally exclude models from the allowlist.
     """
-    all_configs = _MOE_MODEL_CONFIGS + _MLA_MODEL_CONFIGS + _MAMBA2_MODEL_CONFIGS + _GDN_MODEL_CONFIGS
+    all_configs = (
+        _MOE_MODEL_CONFIGS + _MLA_MODEL_CONFIGS + _MAMBA2_MODEL_CONFIGS + _GDN_MODEL_CONFIGS + _MHC_MODEL_CONFIGS
+    )
     return [cfg[-1] for cfg in all_configs] + _MLA_MODULE_MODEL_NAMES
 
 
@@ -533,6 +546,80 @@ class GdnCommonTestCase:
     batch_size_list: Optional[list[int]]
     seq_len_list: Optional[list[int]]  # For context phase; None for generation
     model_name: str
+
+
+# =============================================================================
+# MHC (DeepSeek-V4 Hash-Compressed attention) Test Cases
+# =============================================================================
+
+
+@dataclasses.dataclass
+class MhcCommonTestCase:
+    """Test case configuration for DeepSeek-V4 mHC pre/post kernel benchmarking."""
+
+    phase: str  # "pre" or "post"
+    hidden_size: int
+    hc_mult: int
+    num_tokens_list: list[int]
+    model_name: str
+
+
+def get_common_mhc_test_cases() -> list[MhcCommonTestCase]:
+    """Generate common test cases for mHC (pre/post) kernel benchmarking."""
+    num_tokens_list = [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        48,
+        64,
+        80,
+        96,
+        128,
+        160,
+        192,
+        256,
+        320,
+        384,
+        512,
+        768,
+        1024,
+        1536,
+        2048,
+        3072,
+        4096,
+        6144,
+        8192,
+        12288,
+        16384,
+        20480,
+        32768,
+        49152,
+        65536,
+        98304,
+        131072,
+        262144,
+        524288,
+    ]
+
+    model_config_list = _filter_model_config_list(_MHC_MODEL_CONFIGS)
+
+    test_cases: list[MhcCommonTestCase] = []
+    for model_config in model_config_list:
+        hidden_size, hc_mult, model_name = model_config
+        for phase in ("pre", "post"):
+            test_cases.append(
+                MhcCommonTestCase(
+                    phase=phase,
+                    hidden_size=hidden_size,
+                    hc_mult=hc_mult,
+                    num_tokens_list=num_tokens_list,
+                    model_name=model_name,
+                )
+            )
+    return test_cases
 
 
 def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
