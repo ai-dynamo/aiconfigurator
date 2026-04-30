@@ -58,6 +58,7 @@ decode:
 
   containers:
     - name: vllm
+      # AIC predicted with vllm {{ backend_version | default('latest') }} — pin image tag to match for reproducibility
       image: {{ llmd_config.vllm_image | default('vllm/vllm-openai:latest') }}
       modelCommand: vllmServe
       args:
@@ -114,6 +115,7 @@ decode:
 
   containers:
     - name: vllm
+      # AIC predicted with vllm {{ backend_version | default('latest') }} — pin image tag to match for reproducibility
       image: {{ llmd_config.vllm_image | default('vllm/vllm-openai:latest') }}
       modelCommand: vllmServe
       args:
@@ -162,6 +164,7 @@ prefill:
 
   containers:
     - name: vllm
+      # AIC predicted with vllm {{ backend_version | default('latest') }} — pin image tag to match for reproducibility
       image: {{ llmd_config.vllm_image | default('vllm/vllm-openai:latest') }}
       modelCommand: vllmServe
       args:
