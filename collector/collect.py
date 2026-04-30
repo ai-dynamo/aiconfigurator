@@ -1082,6 +1082,7 @@ def main():
     )
     args = parser.parse_args()
     ops = args.ops
+    _dsv4_auto_expand = False
 
     if args.model_path:
         from collector.common_test_cases import get_all_model_names
@@ -1092,18 +1093,36 @@ def main():
                 f"Model '{args.model_path}' not found. Available models:\n" + "\n".join(f"  - {m}" for m in all_models)
             )
         os.environ["COLLECTOR_MODEL_PATH"] = args.model_path
+
+        # V4-Flash special-case: when the model is V4-Flash and no explicit
+        # ``--ops`` is given, scope to the V4-Flash ops only (skip generic
+        # gemm / attention / mla / ... that aren't consumed by V4's perf
+        # model).  All other models keep the default behaviour: run every
+        # op and let each get_func's ``_filter_model_config_list`` filter
+        # cases at the test-case level.
+        if not ops and args.model_path == "deepseek-ai/DeepSeek-V4-Flash":
+            ops = [name for name in _all_op_names() if name.startswith("dsv4_flash_")]
+            _dsv4_auto_expand = True
     else:
         os.environ.pop("COLLECTOR_MODEL_PATH", None)
 
     # Setup logging - debug flag is handled inside setup_logging
     if logger is None:
-        logger = setup_logging(scope=args.ops if args.ops else ["all"], debug=args.debug)
+        # Use short label when V4-Flash auto-expanded ops to 8 names
+        # (the joined scope would exceed Linux filename length limit).
+        if _dsv4_auto_expand:
+            log_scope = ["dsv4_flash"]
+        else:
+            log_scope = ops if ops else ["all"]
+        logger = setup_logging(scope=log_scope, debug=args.debug)
     elif args.debug:
         # Update log level if debug flag changed
         setup_logging(debug=args.debug)
 
     if args.model_path:
         logger.info(f"Model filter active: collecting only for '{args.model_path}'")
+        if ops and not args.ops:
+            logger.info(f"  expanded to model-specific ops: {ops}")
 
     resume_options = {
         "resume": args.resume,
