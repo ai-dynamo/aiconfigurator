@@ -13,6 +13,23 @@ Do not rely only on the console table when explaining an AIC run. Use
   row.
 - `pareto_frontier.png`: useful for visual comparison, not for exact numbers.
 
+## Logs and Normalized Config
+
+Read the logs and normalized config before trusting the top result:
+
+- Confirm the actual quantization modes AIC used. Do not assume the model name
+  alone implies the precision path.
+- Confirm `nextn` and `nextn_accept_rates`; MTP may be enabled by defaults for
+  some model families or by YAML patch.
+- Confirm `enable_wideep`, `moe_backend`, `attention_backend`, and `enable_eplb`
+  when MoE paths are being compared.
+- Check the enumerated parallel configs in the log. The listed TP/PP/DP and
+  MoE TP/EP candidates should match the intended YAML search space.
+- If the enumeration is empty or much narrower than expected, inspect
+  `num_gpu_per_worker`, `tp_list`, `dp_list`, `moe_tp_list`, and `moe_ep_list`
+  consistency before interpreting performance.
+- Use saved `exp_config.yaml` as the final record of what AIC actually ran.
+
 ## Metrics That Matter
 
 - `tokens/s/gpu_cluster`: throughput normalized to the requested GPU budget.
@@ -47,15 +64,22 @@ Do not rely only on the console table when explaining an AIC run. Use
   `--strict-sla` was not used.
 - If no rows meet SLA, report which constraint filtered the run instead of only
   saying "no result".
+- If result count is very small, report that the search space or SLA is too
+  narrow and explain which one is more likely.
+- If winning rows use very small batch sizes, throughput may be limited by
+  under-filled decode or overly tight latency constraints. Check whether TTFT or
+  TPOT has less headroom before tuning.
 
 ## Useful Summary Shape
 
 When reporting a chosen config, include:
 
 1. Input: model, backend/version, system, total GPUs, ISL/OSL, SLA, database mode.
-2. Winner: agg/disagg, backend, normalized throughput, TTFT, TPOT, request
+2. Effective modeling choices: quantization, MTP, WideEP/DeepEP/EPLB, backend
+   version, and database mode.
+3. Winner: agg/disagg, backend, normalized throughput, TTFT, TPOT, request
    latency, request rate, concurrency.
-3. Deployment shape: replicas, GPUs per replica, workers, TP/PP/DP, MoE TP/EP,
+4. Deployment shape: replicas, GPUs per replica, workers, TP/PP/DP, MoE TP/EP,
    batch sizes.
-4. Caveats: database mode, missing power data, generated config version, and any
-   manually patched YAML fields.
+5. Caveats: result count, small-batch concerns, missing power data, generated
+   config version, and any manually patched YAML fields.

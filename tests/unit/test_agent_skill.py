@@ -37,9 +37,11 @@ def test_usage_reference_text_loads():
 
     assert "after a rough `default` run" in yaml_text
     assert "`tokens/s/gpu_cluster`" in result_text
+    assert "Logs and Normalized Config" in result_text
     assert "--print-per-ops-latency" in sdk_text
     assert "--generated-config-version" in deployment_text
     assert "MTP / `nextn`" in pitfalls_text
+    assert "Multi-Experiment Comparisons" in yaml_text
     assert "database_mode: SILICON" in template_text
     assert "Do not add quantization overrides by default" in template_text
 
