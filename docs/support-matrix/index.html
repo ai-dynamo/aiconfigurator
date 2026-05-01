@@ -747,7 +747,14 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
         // Regression: latest is fail/partial. Prefer the latest fail chip if any,
         // else the latest partial chip — either way that's the version that's
         // currently broken.
-        if (cell.failVersions && cell.failVersions.length) pushFail(cell.failVersions[0]);
+      } else if (cell.status === 'partial') {
+        const brokenVersions = [
+          ...(cell.partialVersions || []).map(v => ({ version: v, kind: 'partial' })),
+          ...(cell.failVersions || []).map(v => ({ version: v, kind: 'fail' })),
+        ].sort((a, b) => compareVersionTuples(versionSortKey(b.version), versionSortKey(a.version)));
+        const latestBroken = brokenVersions[0];
+        if (latestBroken?.kind === 'fail') pushFail(latestBroken.version);
+        else if (latestBroken) pushPartial(latestBroken.version);
         else if (cell.partialVersions && cell.partialVersions.length) pushPartial(cell.partialVersions[0]);
       } else if (cell.status === 'fail') {
         if (cell.failVersions && cell.failVersions.length) pushFail(cell.failVersions[0]);
