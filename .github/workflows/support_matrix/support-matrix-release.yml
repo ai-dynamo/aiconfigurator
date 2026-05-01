@@ -30,7 +30,7 @@ jobs:
   update-support-matrix:
     name: Update Support Matrix (Release)
     needs: resolve-release-branch
-    uses: ./.github/workflows/daily-support-matrix.yml
+    uses: ./.github/workflows/support_matrix/support-matrix-main.yml
     with:
       branch: ${{ needs.resolve-release-branch.outputs.branch }}
     secrets: inherit
