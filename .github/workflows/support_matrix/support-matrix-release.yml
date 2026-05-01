@@ -1,10 +1,8 @@
-name: "Daily Support Matrix Update (Release)"
+name: "Support Matrix Update (Release)"
 
 on:
-  schedule:
-    # Run daily at 7 AM PT - 1h / 10 PM China / 2 PM UTC
-    - cron: "0 14 * * *"
   workflow_dispatch: # Allow manual trigger (with no inputs)
+  workflow_call:
 
 jobs:
   resolve-release-branch:
@@ -32,7 +30,7 @@ jobs:
   update-support-matrix:
     name: Update Support Matrix (Release)
     needs: resolve-release-branch
-    uses: ./.github/workflows/daily-support-matrix.yml
+    uses: ./.github/workflows/support_matrix/support-matrix-main.yml
     with:
       branch: ${{ needs.resolve-release-branch.outputs.branch }}
     secrets: inherit
