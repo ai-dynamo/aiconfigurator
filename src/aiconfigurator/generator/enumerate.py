@@ -357,7 +357,7 @@ def enumerate_profiling_configs(
     k8s_pvc_name: str | None = None,
     k8s_pvc_mount_path: str = "/workspace/model_cache",
     k8s_model_path_in_pvc: str | None = None,
-) -> tuple[list[EnumeratedCandidate], list[EnumeratedCandidate]]:
+) -> tuple[list[EnumeratedCandidate], list[EnumeratedCandidate], bool, int]:
     """Enumerate parallelization candidates and return aggregated DGD configs.
 
     This function is the primary entry point for the Dynamo profiler to obtain
@@ -473,6 +473,14 @@ def enumerate_profiling_configs(
         total_gpus=effective_total_gpus,
         allow_multi_node=is_moe and enable_wideep,
     )
+    if not fits:
+        logger.warning(
+            "Model does not fit in available GPUs: required_tp=%d, available_gpus=%d",
+            required_tp,
+            effective_total_gpus,
+        )
+        return [], [], fits, required_tp
+
     logger.info("Minimum GPUs per engine (memory fit): %d", min_gpus)
 
     # ------------------------------------------------------------------
@@ -702,4 +710,4 @@ def enumerate_profiling_configs(
         len(prefill_candidates),
         len(decode_candidates),
     )
-    return prefill_candidates, decode_candidates
+    return prefill_candidates, decode_candidates, fits, required_tp

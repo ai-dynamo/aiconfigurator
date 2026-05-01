@@ -234,7 +234,7 @@ def _calculate_min_tp(
     Returns:
         selected_tp: selected TP (capped to available GPUs)
         fits: whether model actually fits in memory
-        tp: true TP required for memory fit (before capping)
+        required_tp: true TP required for memory fit (before capping)
     """
     # Required VRAM per model copy
     required_vram = model_weight_bytes * _MEMORY_MULTIPLIER
