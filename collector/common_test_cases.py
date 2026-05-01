@@ -722,7 +722,7 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
 # ═══════════════════════════════════════════════════════════════════════
 # DeepSeek-V4-Flash test cases
 # ═══════════════════════════════════════════════════════════════════════
-# Used by ``collector.sglang.collect_dsv4_flash_attn`` for both full-module
+# Used by ``collector.sglang.collect_csa_hca_module`` for both full-module
 # benches and attention-submodule benches.  The module re-exports the relevant
 # ``get_*`` functions so collect.py can resolve them via getattr.
 
@@ -777,7 +777,7 @@ _DSV4_FLASH_MODULE_SEQ_LENGTHS = [
 ]
 
 # TP sizes — single-process simulation via _tp_load_model_patch in
-# collect_dsv4_flash_attn.  Projection ColumnParallel/RowParallel weights
+# collect_csa_hca_module.  Projection ColumnParallel/RowParallel weights
 # allocate at 1/N shards; FMLA always sees h_q=64 because V4 zero-pads Q.
 _DSV4_FLASH_MODULE_TP_SIZES = [1, 2, 4, 8]
 
@@ -961,6 +961,19 @@ _DSV4_FLASH_SUBMODULE_TP_LIST = [1]
 DSV4_FLASH_SPARSE_KERNELS = ("paged_mqa_logits", "hca_attn")
 
 
+def dsv4_flash_submodule_is_valid_shape(batch_size: int, isl: int, past_kv: int) -> bool:
+    """Return whether a shape is valid for the merged CSA/HCA submodule sweep."""
+    if batch_size <= 0 or isl <= 0 or past_kv < 0:
+        return False
+    return (
+        batch_size * isl <= _DSV4_FLASH_SPARSE_CHUNK_PREFILL_SIZE
+        and batch_size * (isl + past_kv) <= _DSV4_FLASH_SPARSE_MAX_FULL_S
+        # HCA MLA requires full_s >= 64; CSA paged_mqa_logits only requires
+        # >=4, so the merged sweep uses the stricter bound.
+        and isl + past_kv >= 64
+    )
+
+
 def _build_dsv4_flash_attn_submodule_test_cases(
     bs_list=None,
     isl_list=None,
@@ -969,14 +982,17 @@ def _build_dsv4_flash_attn_submodule_test_cases(
 ):
     """Generate grouped ``(bs, isl, past_kv, tp_size, model)`` tuples.
 
-    Filters mirror sglang prefill scheduler:
-      * bs x isl ≤ chunked_prefill_size = 8192   — new-token budget per chunk
-      * bs x (isl + past_kv) ≤ 1M                — model context cap
+    Test case shape (5 elements; ``perf_filename`` is bound by collect.py)::
 
-    For full collection, ``isl`` is set to 0 and the worker sweeps every valid
-    ``isl`` for that fixed ``(bs, past_kv, tp_size)``.  Each worker collects both
-    CSA ``paged_mqa_logits`` and HCA MLA for the same shape, so shapes must be
-    valid for both submodules.
+        [batch_size, isl, past_kv, tp_size, model_path]
+
+    ``isl == 0`` is a reserved sentinel for grouped collection: the worker
+    sweeps every valid ``isl`` for the fixed ``(batch_size, past_kv, tp_size)``.
+
+    Filters mirror sglang prefill scheduler via
+    ``dsv4_flash_submodule_is_valid_shape``.  Each worker collects both CSA
+    ``paged_mqa_logits`` and HCA MLA for the same shape, so shapes must be valid
+    for both submodules.
     """
     bs_list = list(bs_list) if bs_list is not None else list(_DSV4_FLASH_SPARSE_BS_LIST)
     isl_list = list(isl_list) if isl_list is not None else list(_DSV4_FLASH_SPARSE_ISL_LIST)
@@ -989,13 +1005,7 @@ def _build_dsv4_flash_attn_submodule_test_cases(
             for past_kv in past_kv_list:
                 valid_isl = []
                 for isl in isl_list:
-                    if bs * isl > _DSV4_FLASH_SPARSE_CHUNK_PREFILL_SIZE:
-                        continue
-                    if bs * (isl + past_kv) > _DSV4_FLASH_SPARSE_MAX_FULL_S:
-                        continue
-                    # HCA MLA requires full_s >= 64; CSA paged_mqa_logits only
-                    # requires >=4, so the merged sweep uses the stricter bound.
-                    if isl + past_kv < 64:
+                    if not dsv4_flash_submodule_is_valid_shape(bs, isl, past_kv):
                         continue
                     valid_isl.append(isl)
                 if not valid_isl:
@@ -1003,7 +1013,7 @@ def _build_dsv4_flash_attn_submodule_test_cases(
                 cases.append(
                     [
                         bs,
-                        0,  # grouped: worker sweeps all valid isl values
+                        0,  # sentinel: worker sweeps all valid isl values
                         past_kv,
                         tp_size,
                         _DSV4_FLASH_DEFAULT_MODEL,

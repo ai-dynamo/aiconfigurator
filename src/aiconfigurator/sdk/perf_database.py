@@ -1514,7 +1514,7 @@ def _deep_merge_dsv4_dicts(dest, src):
 def load_dsv4_flash_attn_submodule_data(file_path: str):
     """Load merged V4-Flash attention-submodule CSV.
 
-    Emitted by ``collector.sglang.collect_dsv4_flash_attn`` submodule workers.
+    Emitted by ``collector.sglang.collect_csa_hca_module`` submodule workers.
     Used for past_kv Δ correction on top of the chunk-0 module baseline.
 
     Dict structure:
@@ -1545,14 +1545,7 @@ def load_dsv4_flash_attn_submodule_data(file_path: str):
             continue
         kernel = row.get("kernel", "")
         if kernel not in {"paged_mqa_logits", "hca_attn"}:
-            op_name = row.get("op_name", "")
-            kernel_source = row.get("kernel_source", "")
-            if "paged_mqa_logits" in op_name or "paged_mqa_logits" in kernel_source:
-                kernel = "paged_mqa_logits"
-            elif "hca_attn" in op_name or kernel_source == "compressed_flashmla_core":
-                kernel = "hca_attn"
-            else:
-                continue
+            continue
         arch = row.get("architecture", "DeepseekV4ForCausalLM")
         data[kernel][arch][tp_size][past_kv][isl][bs] = {"latency": latency}
 

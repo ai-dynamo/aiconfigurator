@@ -1,25 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""DeepSeek-V4-Flash module-level attention collector for SGLang.
+"""DeepSeek-V4-Flash CSA/HCA attention collector for SGLang.
 
-ONE file containing both:
+This file contains:
 
   1. The bench engine — builds an sglang ``ModelRunner`` for a single
      attn_kind (CSA / HCA) layer and times CUDA-Graph replay of
      ``layer.self_attn(...)`` (Q/KV proj + norm/rope + cache store +
      compressor + C4 indexer/topk for CSA + final FlashMLA).
-  2. The registry-facing entrypoints — ``run_dsv4_flash_attn_worker``
+  2. The module registry entrypoint — ``run_dsv4_flash_attn_worker``
      (per-(kind, tp, gemm, bs) test case) which spawns a subprocess that
      internally sweeps every valid sl for that bs.
+  3. The submodule registry entrypoint — ``run_dsv4_flash_attn_submodule_worker``
+     (per-(bs, past_kv, tp) grouped test case).  It cuts CSA mqa_logits and HCA
+     MLA siblings from live SGLang attention modules and real attention metadata
+     rather than constructing standalone kernel inputs.  CSA and HCA require
+     different patched configs, so one registry task still launches two
+     subprocess/model loads and appends both kernels into one CSV.
 
 Test cases (sweep grids + ``get_*_test_cases`` functions) live in
-``dsv4_flash_test_cases`` and are re-exported below for registry use.
+``collector.common_test_cases`` and are re-exported below for registry use.
 
 Manual CLI use::
 
-    python collect_dsv4_flash_attn.py --mode generation --attn-kind csa
-    python collect_dsv4_flash_attn.py --mode context --attn-kind hca \
+    python collect_csa_hca_module.py --mode generation --attn-kind csa
+    python collect_csa_hca_module.py --mode context --attn-kind hca \
         --batch-sizes 1,4 --seq-lens 128,1024
 """
 
@@ -59,7 +65,7 @@ except ModuleNotFoundError:
 
 
 # Re-export test case generators from common_test_cases so
-# collect.py's registry (``module="collector.sglang.collect_dsv4_flash_attn"``)
+# collect.py's registry (``module="collector.sglang.collect_csa_hca_module"``)
 # can resolve them via getattr.
 try:
     from collector.common_test_cases import (
@@ -72,16 +78,14 @@ try:
         _DSV4_FLASH_MODULE_TP_SIZES as _TP_SIZES,
     )
     from collector.common_test_cases import (
-        _DSV4_FLASH_SPARSE_CHUNK_PREFILL_SIZE as _SPARSE_CHUNK_PREFILL_SIZE,
-    )
-    from collector.common_test_cases import (
         _DSV4_FLASH_SPARSE_ISL_LIST as _SPARSE_ISL_LIST,
     )
     from collector.common_test_cases import (
-        _DSV4_FLASH_SPARSE_MAX_FULL_S as _SPARSE_MAX_FULL_S,
+        DSV4_FLASH_ATTN_KINDS as ATTN_KINDS,
     )
     from collector.common_test_cases import (
-        DSV4_FLASH_ATTN_KINDS as ATTN_KINDS,
+        DSV4_FLASH_SPARSE_KERNELS,
+        dsv4_flash_submodule_is_valid_shape,
     )
     from collector.common_test_cases import (
         _dsv4_flash_module_filter_pairs as _filter_pairs,
@@ -98,17 +102,12 @@ except ModuleNotFoundError:
         _DSV4_FLASH_MODULE_TP_SIZES as _TP_SIZES,
     )
     from common_test_cases import (
-        _DSV4_FLASH_SPARSE_CHUNK_PREFILL_SIZE as _SPARSE_CHUNK_PREFILL_SIZE,
-    )
-    from common_test_cases import (
         _DSV4_FLASH_SPARSE_ISL_LIST as _SPARSE_ISL_LIST,
-    )
-    from common_test_cases import (
-        _DSV4_FLASH_SPARSE_MAX_FULL_S as _SPARSE_MAX_FULL_S,
     )
     from common_test_cases import (
         DSV4_FLASH_ATTN_KINDS as ATTN_KINDS,
     )
+    from common_test_cases import DSV4_FLASH_SPARSE_KERNELS, dsv4_flash_submodule_is_valid_shape
     from common_test_cases import (
         _dsv4_flash_module_filter_pairs as _filter_pairs,
     )
@@ -117,6 +116,11 @@ except ModuleNotFoundError:
 def _expand_grid():
     """Return ``(batch_sizes, seq_lens)`` for the module-level sweep."""
     return list(_BATCH_SIZES), list(_SEQ_LENGTHS)
+
+
+def _expand_seq_lens():
+    """Return the module-level sequence-length grid."""
+    return list(_SEQ_LENGTHS)
 
 
 def get_dsv4_flash_csa_context_test_cases():
@@ -170,6 +174,11 @@ NATIVE_HEADS = 64
 ATTN_KIND_TO_COMPRESS_RATIO = {
     "csa": 4,
     "hca": 128,
+}
+
+_SUB_OP_TO_ATTN_KIND = {
+    "mla": "hca",
+    "mqa_logits": "csa",
 }
 
 
@@ -1003,15 +1012,24 @@ def _make_attention_mla_core_kernel(attention_module, hidden_states, positions, 
 
     attn_backend = forward_batch.attn_backend
 
-    tp_slice, q_padded, q_out = slice(None), None, None
+    q_padded, q_out = None, None
     if attention_module.tp_size > 1:
-        q_padded = hidden_states.new_empty(hidden_states.shape[0], attention_module.n_heads, attention_module.head_dim)
-        rank = attention_module.tp_rank
-        tp_slice = slice(
-            rank * attention_module.n_local_heads,
-            (rank + 1) * attention_module.n_local_heads,
+        # Registry submodule data is collected at tp=1 only.  Keep this branch
+        # for manual CLI runs with --sub-ops mla and --tp-sizes 2/4/etc.
+        q_padded = hidden_states.new_empty(
+            hidden_states.shape[0],
+            attention_module.n_heads,
+            attention_module.head_dim,
         )
-        q_out = q_padded[:, tp_slice, :]
+        rank = attention_module.tp_rank
+        q_out = q_padded[
+            :,
+            slice(
+                rank * attention_module.n_local_heads,
+                (rank + 1) * attention_module.n_local_heads,
+            ),
+            :,
+        ]
 
     q, kv = attention_module._forward_prepare(
         hidden_states,
@@ -1071,6 +1089,10 @@ def _make_csa_mqa_logits_kernel(attention_module, forward_batch, device: str):
     head_dim = int(indexer.head_dim)
     block_kv = int(indexer_metadata.c4_page_size)
 
+    # paged_mqa_logits latency is driven by shape + page-table sparsity.  The
+    # real indexer metadata is reused; synthetic zero tensors avoid digging into
+    # indexer internals for q_fp8/weights without changing the kernel path.
+    # The kernel has no value-based shortcut, so zero-fill is safe for latency.
     q_fp8 = torch.empty(
         (num_queries, 1, num_heads, head_dim),
         dtype=torch.float8_e4m3fn,
@@ -1159,13 +1181,14 @@ def run_dsv4_mla_module(
         raise ValueError(f"tp_size must be a power of 2 in [1, 32]; got {tp_size}")
     sub_ops = tuple(sub_ops)
     sub_ops_set = set(sub_ops)
-    unknown_sub_ops = sub_ops_set - {"module", "mla", "mqa_logits"}
+    valid_sub_ops = {"module", *_SUB_OP_TO_ATTN_KIND}
+    unknown_sub_ops = sub_ops_set - valid_sub_ops
     if unknown_sub_ops:
-        raise ValueError(f"unknown sub_ops={sorted(unknown_sub_ops)}; expected module, mla, and/or mqa_logits")
-    if "mla" in sub_ops_set and attn_kind != "hca":
-        raise ValueError("sub_op='mla' is currently implemented for attn_kind='hca' only")
-    if "mqa_logits" in sub_ops_set and attn_kind != "csa":
-        raise ValueError("sub_op='mqa_logits' is currently implemented for attn_kind='csa' only")
+        raise ValueError(f"unknown sub_ops={sorted(unknown_sub_ops)}; expected {sorted(valid_sub_ops)}")
+    for sub_op in sub_ops_set & _SUB_OP_TO_ATTN_KIND.keys():
+        expected_kind = _SUB_OP_TO_ATTN_KIND[sub_op]
+        if attn_kind != expected_kind:
+            raise ValueError(f"sub_op={sub_op!r} is currently implemented for attn_kind={expected_kind!r} only")
     model_runner = _load_model_runner(
         model_path,
         attn_kind=attn_kind,
@@ -1352,20 +1375,23 @@ def _run_subprocess(
     # subsequent sl within the same subprocess hit in-memory cache.
     env["SGLANG_JIT_DEEPGEMM_PRECOMPILE"] = "0"
 
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    module_stem = os.path.splitext(os.path.basename(__file__))[0]
+    seq_lens_arg = tuple(seq_lens_override) if seq_lens_override is not None else None
     code = (
-        f'import sys; sys.path.insert(0, "{os.path.dirname(os.path.abspath(__file__))}")\n'
-        f"from collect_dsv4_flash_attn import _subprocess_entry\n"
+        f"import sys; sys.path.insert(0, {module_dir!r})\n"
+        f"from {module_stem} import _subprocess_entry\n"
         f"_subprocess_entry(\n"
-        f'    mode="{mode}",\n'
-        f'    attn_kind="{attn_kind}",\n'
-        f'    model_path="{model_path}",\n'
-        f'    kv_cache_dtype="{kv_cache_dtype_sglang}",\n'
+        f"    mode={mode!r},\n"
+        f"    attn_kind={attn_kind!r},\n"
+        f"    model_path={model_path!r},\n"
+        f"    kv_cache_dtype={kv_cache_dtype_sglang!r},\n"
         f"    batch_size={batch_size},\n"
-        f'    output_path="{output_path}",\n'
-        f'    gemm_type="{gemm_type}",\n'
+        f"    output_path={output_path!r},\n"
+        f"    gemm_type={gemm_type!r},\n"
         f"    tp_size={tp_size!r},\n"
         f"    sub_ops={tuple(sub_ops)!r},\n"
-        f"    seq_lens_override={tuple(seq_lens_override) if seq_lens_override is not None else None!r},\n"
+        f"    seq_lens_override={seq_lens_arg!r},\n"
         f"    prefix_len={prefix_len!r},\n"
         f"    perf_filename_override={perf_filename_override!r},\n"
         f"    op_name_override={op_name_override!r},\n"
@@ -1378,7 +1404,7 @@ def _run_subprocess(
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        cwd=os.path.dirname(os.path.abspath(__file__)),
+        cwd=module_dir,
     )
     try:
         stdout, _ = proc.communicate(timeout=3600)  # up to 1 hour per (kind, tp, gemm, bs)
@@ -1416,16 +1442,15 @@ def _subprocess_entry(
     The KV pool is sized for ``(bs, max_sl_for_this_bs)`` so every sl
     forward reuses the same allocator without re-init.
     """
-    bs_grid, sl_grid = _expand_grid()
-    del bs_grid
-    if seq_lens_override is not None:
-        sl_grid = list(seq_lens_override)
+    sl_grid = list(seq_lens_override) if seq_lens_override is not None else _expand_seq_lens()
     pairs = _filter_pairs(mode, [batch_size], sl_grid)
-    if prefix_len:
+    sub_ops_set = set(sub_ops)
+    needs_submodule_shape_filter = prefix_len > 0 or bool(sub_ops_set & _SUB_OP_TO_ATTN_KIND.keys())
+    if needs_submodule_shape_filter:
         pairs = [
             (bs, sl)
             for bs, sl in pairs
-            if sl + prefix_len <= _SPARSE_MAX_FULL_S and bs * (sl + prefix_len) <= _SPARSE_MAX_FULL_S
+            if dsv4_flash_submodule_is_valid_shape(bs, sl, prefix_len)
         ]
     if not pairs:
         print(f"[dsv4-flash] no valid sl values for mode={mode}, bs={batch_size}, prefix_len={prefix_len}")
@@ -1532,35 +1557,37 @@ def run_dsv4_flash_attn_worker(
     )
 
 
-_SPARSE_KERNEL_TO_SUB_OP = {
+_SPARSE_KERNEL_CONFIGS = {
     "paged_mqa_logits": {
-        "attn_kind": "csa",
+        "attn_kind": _SUB_OP_TO_ATTN_KIND["mqa_logits"],
         "sub_op": "mqa_logits",
     },
     "hca_attn": {
-        "attn_kind": "hca",
+        "attn_kind": _SUB_OP_TO_ATTN_KIND["mla"],
         "sub_op": "mla",
     },
 }
 
+# Invariant: every value's extra_log_fields must contribute the same key set
+# (currently just {"kernel"}); CSV header is fixed by the first-written row.
+_SPARSE_KERNEL_TO_SUB_OP = {
+    kernel: _SPARSE_KERNEL_CONFIGS[kernel]
+    for kernel in DSV4_FLASH_SPARSE_KERNELS
+}
+
 
 def _submodule_seq_lens_for_case(batch_size: int, isl: int, past_kv: int) -> list[int]:
+    """Return valid isl values; ``isl == 0`` is the grouped-sweep sentinel."""
     if isl > 0:
         candidates = [isl]
     else:
         candidates = list(_SPARSE_ISL_LIST)
 
-    seq_lens = []
-    for seq_len in candidates:
-        if batch_size * seq_len > _SPARSE_CHUNK_PREFILL_SIZE:
-            continue
-        if batch_size * (seq_len + past_kv) > _SPARSE_MAX_FULL_S:
-            continue
-        full_s = seq_len + past_kv
-        if full_s < 64:
-            continue
-        seq_lens.append(seq_len)
-    return seq_lens
+    return [
+        seq_len
+        for seq_len in candidates
+        if dsv4_flash_submodule_is_valid_shape(batch_size, seq_len, past_kv)
+    ]
 
 
 def run_dsv4_flash_attn_submodule_worker(
@@ -1583,10 +1610,16 @@ def run_dsv4_flash_attn_submodule_worker(
 
     ``isl == 0`` means the test case is grouped and this worker sweeps all
     valid ``isl`` values for the fixed ``(batch_size, past_kv, tp)``.
+
+    CSA and HCA use different patched ``compress_ratio`` configs, so this
+    worker intentionally runs two subprocesses/model loads per task.  The shared
+    benefit is shape grouping plus one merged CSV, not one shared ModelRunner.
     """
 
-    if tp_size not in (1, 2, 4, 8, 16, 32):
-        raise ValueError(f"unsupported tp_size={tp_size}; expected a power of 2 in [1, 32]")
+    if tp_size != 1:
+        raise ValueError(
+            "dsv4 flash submodule data is collected at tp_size=1 only; kernels are TP-invariant"
+        )
 
     seq_lens = _submodule_seq_lens_for_case(batch_size, isl, past_kv)
     if not seq_lens:
@@ -1685,7 +1718,7 @@ def main() -> None:
     if args.seq_lens is not None:
         seq_lens = _parse_int_list(args.seq_lens)
     else:
-        _, seq_lens = _expand_grid()
+        seq_lens = _expand_seq_lens()
 
     pairs = _filter_pairs(args.mode, batch_sizes, seq_lens)
     _bs_grid = sorted({bs for bs, _ in pairs})
