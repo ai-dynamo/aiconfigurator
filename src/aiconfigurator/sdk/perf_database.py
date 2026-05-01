@@ -1511,20 +1511,22 @@ def _deep_merge_dsv4_dicts(dest, src):
     return dest
 
 
-def load_dsv4_flash_sparse_kernel_data(file_path: str):
-    """Load V4-Flash sparse-kernel CSV (paged_mqa_logits or hca_attn).
+def load_dsv4_flash_attn_submodule_data(file_path: str):
+    """Load merged V4-Flash attention-submodule CSV.
 
-    Emitted by ``collector.sglang.deepseekv4_sparse_modules``.  Used for
-    kernel-level past_kv Δ correction on top of the chunk-0 module baseline.
+    Emitted by ``collector.sglang.collect_dsv4_flash_attn`` submodule workers.
+    Used for past_kv Δ correction on top of the chunk-0 module baseline.
 
     Dict structure:
-        data[arch][tp_size][past_kv][isl][bs] = {"latency": ms}
+        data[kernel][arch][tp_size][past_kv][isl][bs] = {"latency": ms}
     """
     if not os.path.exists(file_path):
-        logger.debug(f"DSV4-Flash sparse-kernel data file {file_path} not found.")
+        logger.debug(f"DSV4-Flash attention-submodule data file {file_path} not found.")
         return None
 
-    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    )
 
     with open(file_path, encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
@@ -1541,8 +1543,18 @@ def load_dsv4_flash_sparse_kernel_data(file_path: str):
             latency = float(row["latency"])
         except (TypeError, ValueError):
             continue
+        kernel = row.get("kernel", "")
+        if kernel not in {"paged_mqa_logits", "hca_attn"}:
+            op_name = row.get("op_name", "")
+            kernel_source = row.get("kernel_source", "")
+            if "paged_mqa_logits" in op_name or "paged_mqa_logits" in kernel_source:
+                kernel = "paged_mqa_logits"
+            elif "hca_attn" in op_name or kernel_source == "compressed_flashmla_core":
+                kernel = "hca_attn"
+            else:
+                continue
         arch = row.get("architecture", "DeepseekV4ForCausalLM")
-        data[arch][tp_size][past_kv][isl][bs] = {"latency": latency}
+        data[kernel][arch][tp_size][past_kv][isl][bs] = {"latency": latency}
 
     return data
 
@@ -2539,8 +2551,7 @@ class PerfDatabase:
                 PerfDataFilename.dsv4_flash_hca_context_module: load_context_dsv4_flash_kind_module_data,
                 PerfDataFilename.dsv4_flash_csa_generation_module: load_generation_dsv4_flash_kind_module_data,
                 PerfDataFilename.dsv4_flash_hca_generation_module: load_generation_dsv4_flash_kind_module_data,
-                PerfDataFilename.dsv4_flash_paged_mqa_logits_module: load_dsv4_flash_sparse_kernel_data,
-                PerfDataFilename.dsv4_flash_hca_attn_module: load_dsv4_flash_sparse_kernel_data,
+                PerfDataFilename.dsv4_flash_attn_submodule: load_dsv4_flash_attn_submodule_data,
             }
             perf_data_dir = data_dir
             if op_filename_enum == PerfDataFilename.nccl:
@@ -2621,12 +2632,18 @@ class PerfDatabase:
             PerfDataFilename.deepseek_v4_generation_module
         )
 
-        # V4-Flash sparse-kernel data (kernel-level past_kv Δ correction).
-        # Dict keyed by ``arch -> tp -> past_kv -> isl -> bs``.
-        self._dsv4_flash_sparse_kernel_data = {
-            "paged_mqa_logits": _load_op_data(PerfDataFilename.dsv4_flash_paged_mqa_logits_module),
-            "hca_attn": _load_op_data(PerfDataFilename.dsv4_flash_hca_attn_module),
-        }
+        # V4-Flash attention-submodule data (past_kv Δ correction).
+        # Merged CSV is split here into the shape expected by the lookup path:
+        # ``kernel -> LoadedOpData(arch -> tp -> past_kv -> isl -> bs)``.
+        loaded_submodules = _load_op_data(PerfDataFilename.dsv4_flash_attn_submodule)
+        self._dsv4_flash_sparse_kernel_data = {}
+        for kernel in ("paged_mqa_logits", "hca_attn"):
+            data = loaded_submodules.data.get(kernel) if loaded_submodules and loaded_submodules.data else None
+            self._dsv4_flash_sparse_kernel_data[kernel] = LoadedOpData(
+                data,
+                PerfDataFilename.dsv4_flash_attn_submodule,
+                loaded_submodules.filepath,
+            )
 
         # sglang wideep path
         if backend == "sglang":
@@ -7607,7 +7624,7 @@ class PerfDatabase:
         tp_size: int,
         architecture: str = "DeepseekV4ForCausalLM",
     ) -> Optional[float]:
-        """Look up a sparse-kernel latency at (kernel, bs, isl, past_kv, tp).
+        """Look up an attention-submodule latency at (kernel, bs, isl, past_kv, tp).
 
         Strategy:
           1. Exact (bs, isl, past_kv, tp) hit  → return latency
@@ -7874,7 +7891,7 @@ class PerfDatabase:
             kernel = {4: "paged_mqa_logits", 128: "hca_attn"}.get(compress_ratio) if prefix > 0 else None
             t_with = t_without = None
             if kernel is not None:
-                # Use the recovered tp_size for sparse-kernel lookup.
+                # Use the recovered tp_size for attention-submodule lookup.
                 # paged_mqa_logits is collected only at tp=1 (kernel is replicated)
                 # — ``_lookup_dsv4_flash_sparse_kernel`` falls back to tp=1 when
                 # the requested tp isn't present, so passing ``head_axis`` works

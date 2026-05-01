@@ -124,20 +124,14 @@ REGISTRY: list[OpEntry] = [
         run_func="run_dsv4_flash_attn_worker",
         perf_filename=PerfFile.DSV4_FLASH_HCA_GENERATION_MODULE,
     ),
-    # V4-Flash sparse-kernel data (kernel-level past_kv Δ correction)
+    # V4-Flash attention submodule data (past_kv Δ correction).  One task
+    # collects both CSA paged_mqa_logits and HCA MLA for the same shape.
     OpEntry(
-        op="dsv4_flash_paged_mqa_logits_module",
-        module="collector.sglang.deepseekv4_sparse_modules",
-        get_func="get_dsv4_flash_paged_mqa_logits_test_cases",
-        run_func="run_dsv4_sparse_kernel_worker",
-        perf_filename=PerfFile.DSV4_FLASH_PAGED_MQA_LOGITS_MODULE,
-    ),
-    OpEntry(
-        op="dsv4_flash_hca_attn_module",
-        module="collector.sglang.deepseekv4_sparse_modules",
-        get_func="get_dsv4_flash_hca_attn_test_cases",
-        run_func="run_dsv4_sparse_kernel_worker",
-        perf_filename=PerfFile.DSV4_FLASH_HCA_ATTN_MODULE,
+        op="dsv4_flash_attn_submodule",
+        module="collector.sglang.collect_dsv4_flash_attn",
+        get_func="get_dsv4_flash_attn_submodule_test_cases",
+        run_func="run_dsv4_flash_attn_submodule_worker",
+        perf_filename=PerfFile.DSV4_FLASH_ATTN_SUBMODULE,
     ),
     OpEntry(
         op="wideep_moe",

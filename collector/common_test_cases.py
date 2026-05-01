@@ -722,10 +722,9 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
 # ═══════════════════════════════════════════════════════════════════════
 # DeepSeek-V4-Flash test cases
 # ═══════════════════════════════════════════════════════════════════════
-# Used by ``collector.sglang.collect_dsv4_flash_attn`` (full-module bench)
-# and ``collector.sglang.deepseekv4_sparse_modules`` (sparse kernel bench).
-# Both backends re-export the relevant ``get_*`` functions so collect.py
-# can resolve them via getattr on each per-backend module.
+# Used by ``collector.sglang.collect_dsv4_flash_attn`` for both full-module
+# benches and attention-submodule benches.  The module re-exports the relevant
+# ``get_*`` functions so collect.py can resolve them via getattr.
 
 _DSV4_FLASH_DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
 DSV4_FLASH_ATTN_KINDS = ("csa", "hca")
@@ -895,10 +894,10 @@ def get_dsv4_flash_hca_generation_test_cases():
     return _build_dsv4_flash_module_test_cases("generation", ("hca",))
 
 
-# --- Sparse-kernel sweep (paged_mqa_logits / hca_attn) ---
+# --- Attention-submodule sweep (paged_mqa_logits / hca_attn) ---
 # Strict superset of the module collector's (bs, sl) coverage.  Every
 # (bs, isl) the module collector exercises is included with past_kv=0;
-# on top of that we add past_kv>0 variants for kernel-level Δ correction.
+# on top of that we add past_kv>0 variants for submodule Δ correction.
 _DSV4_FLASH_SPARSE_BS_LIST = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 _DSV4_FLASH_SPARSE_ISL_LIST = [
     1,
@@ -955,76 +954,67 @@ _DSV4_FLASH_SPARSE_MAX_FULL_S = 1048576  # max_position_embeddings
 #                     the bench path → kernel time is identical across TP
 # Module-level ops still sweep all 4 TP values because their projections
 # (q_a/q_b/o_proj) are 1/N sharded by ColumnParallel/RowParallel.
-_DSV4_FLASH_SPARSE_TP_LIST_ATTN = [1]
-_DSV4_FLASH_SPARSE_TP_LIST_INDEXER = [1]
+_DSV4_FLASH_SUBMODULE_TP_LIST = [1]
 
-# Bench-sampled sparse kernels.  topk_512 + csa_attn are modeled analytically
-# in perf_database — see KERNELS comment in deepseekv4_sparse_modules.py.
+# Bench-sampled attention submodules.  topk_512 + csa_attn are modeled
+# analytically in perf_database; no CSV is collected for them.
 DSV4_FLASH_SPARSE_KERNELS = ("paged_mqa_logits", "hca_attn")
 
 
-def _build_dsv4_flash_sparse_test_cases(
-    kernels=DSV4_FLASH_SPARSE_KERNELS,
+def _build_dsv4_flash_attn_submodule_test_cases(
     bs_list=None,
     isl_list=None,
     past_kv_list=None,
-    tp_list_attn=None,
-    tp_list_indexer=None,
+    tp_list=None,
 ):
-    """Generate ``(bs, isl, past_kv, tp_size, kernel, model)`` tuples.
+    """Generate grouped ``(bs, isl, past_kv, tp_size, model)`` tuples.
 
     Filters mirror sglang prefill scheduler:
       * bs x isl ≤ chunked_prefill_size = 8192   — new-token budget per chunk
       * bs x (isl + past_kv) ≤ 1M                — model context cap
+
+    For full collection, ``isl`` is set to 0 and the worker sweeps every valid
+    ``isl`` for that fixed ``(bs, past_kv, tp_size)``.  Each worker collects both
+    CSA ``paged_mqa_logits`` and HCA MLA for the same shape, so shapes must be
+    valid for both submodules.
     """
     bs_list = list(bs_list) if bs_list is not None else list(_DSV4_FLASH_SPARSE_BS_LIST)
     isl_list = list(isl_list) if isl_list is not None else list(_DSV4_FLASH_SPARSE_ISL_LIST)
     past_kv_list = list(past_kv_list) if past_kv_list is not None else list(_DSV4_FLASH_SPARSE_PAST_KV_LIST)
-    tp_list_attn = list(tp_list_attn) if tp_list_attn is not None else list(_DSV4_FLASH_SPARSE_TP_LIST_ATTN)
-    tp_list_indexer = list(tp_list_indexer) if tp_list_indexer is not None else list(_DSV4_FLASH_SPARSE_TP_LIST_INDEXER)
+    tp_list = list(tp_list) if tp_list is not None else list(_DSV4_FLASH_SUBMODULE_TP_LIST)
 
     cases = []
-    for kernel in kernels:
-        tp_list = tp_list_attn if kernel == "hca_attn" else tp_list_indexer
-        for tp_size in tp_list:
-            for bs in bs_list:
+    for tp_size in tp_list:
+        for bs in bs_list:
+            for past_kv in past_kv_list:
+                valid_isl = []
                 for isl in isl_list:
                     if bs * isl > _DSV4_FLASH_SPARSE_CHUNK_PREFILL_SIZE:
                         continue
-                    for past_kv in past_kv_list:
-                        if bs * (isl + past_kv) > _DSV4_FLASH_SPARSE_MAX_FULL_S:
-                            continue
-                        full_s = isl + past_kv
-                        if kernel == "paged_mqa_logits" and full_s < 4:
-                            continue
-                        if kernel == "hca_attn" and full_s < 64:
-                            continue
-                        cases.append(
-                            [
-                                bs,
-                                isl,
-                                past_kv,
-                                tp_size,
-                                kernel,
-                                _DSV4_FLASH_DEFAULT_MODEL,
-                            ]
-                        )
+                    if bs * (isl + past_kv) > _DSV4_FLASH_SPARSE_MAX_FULL_S:
+                        continue
+                    # HCA MLA requires full_s >= 64; CSA paged_mqa_logits only
+                    # requires >=4, so the merged sweep uses the stricter bound.
+                    if isl + past_kv < 64:
+                        continue
+                    valid_isl.append(isl)
+                if not valid_isl:
+                    continue
+                cases.append(
+                    [
+                        bs,
+                        0,  # grouped: worker sweeps all valid isl values
+                        past_kv,
+                        tp_size,
+                        _DSV4_FLASH_DEFAULT_MODEL,
+                    ]
+                )
     return cases
 
 
-def _dsv4_flash_sparse_smoke_or_full(kernel: str):
+def get_dsv4_flash_attn_submodule_test_cases():
     if not _dsv4_flash_active():
         return []
     if "--smoke" in sys.argv:
-        return [[1, 1024, 8192, 1, kernel, _DSV4_FLASH_DEFAULT_MODEL]]
-    return _build_dsv4_flash_sparse_test_cases(kernels=(kernel,))
-
-
-def get_dsv4_flash_paged_mqa_logits_test_cases():
-    """paged_mqa_logits sparse-kernel sweep (CSA indexer scoring)."""
-    return _dsv4_flash_sparse_smoke_or_full("paged_mqa_logits")
-
-
-def get_dsv4_flash_hca_attn_test_cases():
-    """hca_attn sparse-kernel sweep (HCA c128 sparse FMLA)."""
-    return _dsv4_flash_sparse_smoke_or_full("hca_attn")
+        return [[1, 1024, 8192, 1, _DSV4_FLASH_DEFAULT_MODEL]]
+    return _build_dsv4_flash_attn_submodule_test_cases()

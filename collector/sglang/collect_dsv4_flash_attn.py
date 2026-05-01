@@ -58,7 +58,7 @@ except ModuleNotFoundError:
     from helper import benchmark_with_power, log_perf
 
 
-# Re-export test case generators from the dedicated test_cases module so
+# Re-export test case generators from common_test_cases so
 # collect.py's registry (``module="collector.sglang.collect_dsv4_flash_attn"``)
 # can resolve them via getattr.
 try:
@@ -70,6 +70,15 @@ try:
     )
     from collector.common_test_cases import (
         _DSV4_FLASH_MODULE_TP_SIZES as _TP_SIZES,
+    )
+    from collector.common_test_cases import (
+        _DSV4_FLASH_SPARSE_CHUNK_PREFILL_SIZE as _SPARSE_CHUNK_PREFILL_SIZE,
+    )
+    from collector.common_test_cases import (
+        _DSV4_FLASH_SPARSE_ISL_LIST as _SPARSE_ISL_LIST,
+    )
+    from collector.common_test_cases import (
+        _DSV4_FLASH_SPARSE_MAX_FULL_S as _SPARSE_MAX_FULL_S,
     )
     from collector.common_test_cases import (
         DSV4_FLASH_ATTN_KINDS as ATTN_KINDS,
@@ -87,6 +96,15 @@ except ModuleNotFoundError:
     )
     from common_test_cases import (
         _DSV4_FLASH_MODULE_TP_SIZES as _TP_SIZES,
+    )
+    from common_test_cases import (
+        _DSV4_FLASH_SPARSE_CHUNK_PREFILL_SIZE as _SPARSE_CHUNK_PREFILL_SIZE,
+    )
+    from common_test_cases import (
+        _DSV4_FLASH_SPARSE_ISL_LIST as _SPARSE_ISL_LIST,
+    )
+    from common_test_cases import (
+        _DSV4_FLASH_SPARSE_MAX_FULL_S as _SPARSE_MAX_FULL_S,
     )
     from common_test_cases import (
         DSV4_FLASH_ATTN_KINDS as ATTN_KINDS,
@@ -125,16 +143,24 @@ def get_dsv4_flash_hca_generation_test_cases():
     return _impl()
 
 
+def get_dsv4_flash_attn_submodule_test_cases():
+    from collector.common_test_cases import get_dsv4_flash_attn_submodule_test_cases as _impl
+
+    return _impl()
+
+
 __all__ = [
     "ATTN_KINDS",
     "_BATCH_SIZES",
     "_SEQ_LENGTHS",
     "_TP_SIZES",
     "_filter_pairs",
+    "get_dsv4_flash_attn_submodule_test_cases",
     "get_dsv4_flash_csa_context_test_cases",
     "get_dsv4_flash_csa_generation_test_cases",
     "get_dsv4_flash_hca_context_test_cases",
     "get_dsv4_flash_hca_generation_test_cases",
+    "run_dsv4_flash_attn_submodule_worker",
     "run_dsv4_flash_attn_worker",
 ]
 
@@ -537,21 +563,67 @@ def _load_model_runner(
     return model_runner
 
 
-def _make_reqs(batch_size: int, seq_len: int, *, decode: bool):
+def _alloc_prefix_indices(model_runner, batch_size: int, prefix_len: int) -> list[torch.Tensor]:
+    device = getattr(model_runner, "device", "cuda")
+    if prefix_len <= 0:
+        return [torch.empty((0,), dtype=torch.int64, device=device) for _ in range(batch_size)]
+
+    allocator = model_runner.token_to_kv_pool_allocator
+    server_args = getattr(model_runner, "server_args", None)
+    sglang_chunk = getattr(server_args, "chunked_prefill_size", None) if server_args else None
+    chunk_size = (
+        int(sglang_chunk) if isinstance(sglang_chunk, int) and sglang_chunk > 0 else _ALLOC_EXTEND_CHUNK_FALLBACK
+    )
+    alloc_extend = allocator.alloc_extend
+    if batch_size * prefix_len > chunk_size:
+        alloc_extend = _chunked_alloc_extend(alloc_extend, chunk_size=chunk_size)
+
+    prefix_lens_cpu = torch.zeros(batch_size, dtype=torch.int64)
+    seq_lens_cpu = torch.full((batch_size,), prefix_len, dtype=torch.int64)
+    prefix_lens = prefix_lens_cpu.to(device, non_blocking=True)
+    seq_lens = seq_lens_cpu.to(device, non_blocking=True)
+    last_loc = torch.full((batch_size,), -1, dtype=torch.int64, device=device)
+
+    flat = alloc_extend(
+        prefix_lens,
+        prefix_lens_cpu,
+        seq_lens,
+        seq_lens_cpu,
+        last_loc,
+        batch_size * prefix_len,
+    )
+    if flat is None:
+        raise RuntimeError(f"failed to allocate prefix cache: batch_size={batch_size}, prefix_len={prefix_len}")
+    return [flat[i * prefix_len : (i + 1) * prefix_len].contiguous() for i in range(batch_size)]
+
+
+def _make_reqs(
+    batch_size: int,
+    seq_len: int,
+    *,
+    decode: bool,
+    prefix_len: int = 0,
+    prefix_indices: list[torch.Tensor] | None = None,
+):
     from sglang.srt.managers.schedule_batch import Req
     from sglang.srt.sampling.sampling_params import SamplingParams
+
+    if decode and prefix_len:
+        raise ValueError("prefix_len is only supported for context/extend collection")
+    full_len = prefix_len + seq_len
+    prefix_indices = prefix_indices or [torch.empty((0,), dtype=torch.int64, device="cuda") for _ in range(batch_size)]
 
     reqs = []
     for i in range(batch_size):
         req = Req(
             rid=str(i),
             origin_input_text="",
-            origin_input_ids=list(torch.randint(0, 10000, (seq_len,)).tolist()),
+            origin_input_ids=list(torch.randint(0, 10000, (full_len,)).tolist()),
             sampling_params=SamplingParams(temperature=0, max_new_tokens=1),
         )
-        req.prefix_indices = torch.empty((0,), dtype=torch.int64)
+        req.prefix_indices = prefix_indices[i]
         req.fill_ids = req.origin_input_ids
-        req.extend_input_len = len(req.fill_ids)
+        req.extend_input_len = seq_len if prefix_len else len(req.fill_ids)
         req.logprob_start_len = 0
         if decode:
             req.cached_tokens = 0
@@ -658,7 +730,14 @@ def _chunked_alloc_extend(orig_alloc_extend, chunk_size: int = _ALLOC_EXTEND_CHU
     return wrapped
 
 
-def _build_forward_batch(model_runner, batch_size: int, seq_len: int, *, is_prefill: bool):
+def _build_forward_batch(
+    model_runner,
+    batch_size: int,
+    seq_len: int,
+    *,
+    is_prefill: bool,
+    prefix_len: int = 0,
+):
     from sglang.srt.managers.schedule_batch import ScheduleBatch
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
     from sglang.srt.mem_cache.chunk_cache import ChunkCache
@@ -668,7 +747,14 @@ def _build_forward_batch(model_runner, batch_size: int, seq_len: int, *, is_pref
     model_runner.req_to_token_pool.clear()
     model_runner.token_to_kv_pool_allocator.clear()
 
-    reqs = _make_reqs(batch_size, seq_len, decode=not is_prefill)
+    prefix_indices = _alloc_prefix_indices(model_runner, batch_size, prefix_len)
+    reqs = _make_reqs(
+        batch_size,
+        seq_len,
+        decode=not is_prefill,
+        prefix_len=prefix_len,
+        prefix_indices=prefix_indices,
+    )
     cache_params = CacheInitParams(
         disable=True,
         req_to_token_pool=model_runner.req_to_token_pool,
@@ -727,6 +813,7 @@ def _make_inputs(
     seq_len: int,
     is_prefill: bool,
     device: str,
+    prefix_len: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     hidden_size = model_runner.model.config.hidden_size
     # freqs_cis is precomputed at shape [max_position_embeddings, rope_dim/2]
@@ -739,10 +826,20 @@ def _make_inputs(
     # position used.
     max_pos = getattr(model_runner.model_config.hf_config, "max_position_embeddings", None)
     if is_prefill:
-        if max_pos is not None and seq_len > max_pos:
-            raise ValueError(f"context seq_len={seq_len} exceeds max_position_embeddings={max_pos}")
+        full_len = prefix_len + seq_len
+        if max_pos is not None and full_len > max_pos:
+            raise ValueError(
+                f"context full_len={full_len} exceeds max_position_embeddings={max_pos} "
+                f"(seq_len={seq_len}, prefix_len={prefix_len})"
+            )
         n_tokens = batch_size * seq_len
-        positions = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1).contiguous().flatten()
+        positions = (
+            torch.arange(prefix_len, prefix_len + seq_len, device=device)
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+            .contiguous()
+            .flatten()
+        )
     else:
         if max_pos is not None and seq_len >= max_pos:
             raise ValueError(
@@ -828,6 +925,11 @@ def _log_result(
     perf_filename_prefix: str = "dsv4",
     gemm_type: str = "bfloat16",
     tp_size: int = 1,
+    sub_op: str = "module",
+    step: int | None = None,
+    perf_filename_override: str | None = None,
+    op_name_override: str | None = None,
+    extra_fields: dict | None = None,
 ) -> None:
     # V4-Flash output layout: ONE CSV per (attn_kind, mode) — 3 kinds x 2
     # modes = 6 files total, regardless of how many (tp_size, gemm_type)
@@ -837,39 +939,188 @@ def _log_result(
     # subprocesses to the same kind+mode file are safe.
     # Non-V4-Flash callers (legacy ``dsv4`` MLA module) still use the old
     # per-(prefix, kind) filename layout to avoid behavior breaks.
-    if perf_filename_prefix.startswith("dsv4_flash"):
-        consolidated_filename = f"dsv4_flash_{attn_kind}_{mode}_module_perf.txt"
+    if perf_filename_override is not None:
+        perf_filename = _resolve_perf_path(output_path, perf_filename_override)
+        op_name = op_name_override or f"{perf_filename_prefix}_{attn_kind}_{sub_op}_module"
+    elif perf_filename_prefix.startswith("dsv4_flash"):
+        if sub_op == "module":
+            consolidated_filename = f"dsv4_flash_{attn_kind}_{mode}_module_perf.txt"
+            op_name = f"{perf_filename_prefix}_{attn_kind}_{mode}_module"
+        else:
+            consolidated_filename = f"dsv4_flash_{attn_kind}_{sub_op}_{mode}_module_perf.txt"
+            op_name = f"{perf_filename_prefix}_{attn_kind}_{sub_op}_{mode}_module"
+        perf_filename = _resolve_perf_path(output_path, consolidated_filename)
     else:
         consolidated_filename = f"{perf_filename_prefix}_{attn_kind}_{mode}_module_perf.txt"
-    perf_filename = _resolve_perf_path(output_path, consolidated_filename)
+        op_name = f"{perf_filename_prefix}_{attn_kind}_{mode}_module"
+        perf_filename = _resolve_perf_path(output_path, consolidated_filename)
     is_prefill = mode == "context"
+    step_value = step if step is not None else (0 if is_prefill else seq_len)
+    item = {
+        "model": model_path,
+        "architecture": "DeepseekV4ForCausalLM",
+        "mla_dtype": "bfloat16",
+        "kv_cache_dtype": kv_cache_dtype,
+        "gemm_type": gemm_type,
+        "num_heads": NATIVE_HEADS,
+        "batch_size": batch_size,
+        "isl": seq_len if is_prefill else 1,
+        "tp_size": tp_size,
+        "step": step_value,
+        "compress_ratio": compress_ratio,
+        "latency": f"{latency_ms:.4f}",
+    }
+    if extra_fields:
+        item.update(extra_fields)
+
     log_perf(
-        item_list=[
-            {
-                "model": model_path,
-                "architecture": "DeepseekV4ForCausalLM",
-                "mla_dtype": "bfloat16",
-                "kv_cache_dtype": kv_cache_dtype,
-                "gemm_type": gemm_type,
-                "num_heads": NATIVE_HEADS,
-                "batch_size": batch_size,
-                "isl": seq_len if is_prefill else 1,
-                "tp_size": tp_size,
-                "step": 0 if is_prefill else seq_len,
-                "compress_ratio": compress_ratio,
-                "latency": f"{latency_ms:.4f}",
-            }
-        ],
+        item_list=[item],
         framework="SGLang",
         version=version,
         device_name=device_name,
         # op_name still encodes the run config so a single-CSV view can group
         # by op_name when needed (e.g. for plotting per-(kind, tp, gemm)).
-        op_name=f"{perf_filename_prefix}_{attn_kind}_{mode}_module",
-        kernel_source="compressed_flashmla",
+        op_name=op_name,
+        kernel_source={
+            "module": "compressed_flashmla",
+            "mla": "compressed_flashmla_core",
+            "mqa_logits": "deep_gemm.fp8_paged_mqa_logits",
+        }.get(sub_op, f"compressed_{sub_op}"),
         perf_filename=perf_filename,
         power_stats=power_stats,
     )
+
+
+def _make_attention_mla_core_kernel(attention_module, hidden_states, positions, forward_batch):
+    """Prepare Q/KV once, then return a callable for only the MLA core.
+
+    This intentionally reuses the module-level ``ForwardBatch`` and its
+    attention metadata.  The full module path is:
+      prepare(Q/KV/cache/compressor) -> attn_backend.forward -> output proj.
+    The sibling path times only ``attn_backend.forward`` with the prepared
+    tensors and cache state.
+    """
+
+    attn_backend = forward_batch.attn_backend
+
+    tp_slice, q_padded, q_out = slice(None), None, None
+    if attention_module.tp_size > 1:
+        q_padded = hidden_states.new_empty(hidden_states.shape[0], attention_module.n_heads, attention_module.head_dim)
+        rank = attention_module.tp_rank
+        tp_slice = slice(
+            rank * attention_module.n_local_heads,
+            (rank + 1) * attention_module.n_local_heads,
+        )
+        q_out = q_padded[:, tp_slice, :]
+
+    q, kv = attention_module._forward_prepare(
+        hidden_states,
+        positions,
+        forward_batch,
+        attn_backend,
+        freqs_cis=None,
+        q_out=q_out,
+    )
+    q_for_core = q_padded if q_padded is not None else q
+
+    if not attention_module.overlap_store_cache:
+        attn_backend.store_cache(
+            layer_id=attention_module.layer_id,
+            swa_k=kv,
+            forward_batch=forward_batch,
+        )
+
+    def kernel_func():
+        return attn_backend.forward(
+            q=q_for_core,
+            k=kv,
+            v=kv,
+            layer=attention_module.attn_mqa,
+            forward_batch=forward_batch,
+            compress_ratio=attention_module.compress_ratio,
+            attn_sink=attention_module.attn_sink,
+            save_kv_cache=False,
+        )
+
+    return kernel_func
+
+
+def _make_csa_mqa_logits_kernel(attention_module, forward_batch, device: str):
+    """Return a callable for only CSA's DeepGEMM paged_mqa_logits kernel."""
+
+    if attention_module.indexer is None:
+        raise ValueError("CSA mqa_logits sibling requires attention_module.indexer")
+
+    attn_backend = forward_batch.attn_backend
+    if hasattr(attn_backend, "_maybe_upgrade_forward_metadata"):
+        attn_backend._maybe_upgrade_forward_metadata()
+
+    metadata = attn_backend.forward_metadata
+    indexer_metadata = getattr(metadata, "indexer_metadata", None)
+    if indexer_metadata is None:
+        raise ValueError("forward metadata does not contain CSA indexer metadata")
+
+    c4_seq_lens = indexer_metadata.c4_seq_lens
+    context_lens = c4_seq_lens.unsqueeze(-1) if c4_seq_lens.dim() == 1 else c4_seq_lens
+    if context_lens.shape[1] != 1:
+        raise ValueError(f"unsupported paged_mqa_logits next_n={context_lens.shape[1]}; expected 1")
+
+    indexer = attention_module.indexer
+    num_queries = int(context_lens.shape[0])
+    num_heads = int(indexer.n_heads)
+    head_dim = int(indexer.head_dim)
+    block_kv = int(indexer_metadata.c4_page_size)
+
+    q_fp8 = torch.empty(
+        (num_queries, 1, num_heads, head_dim),
+        dtype=torch.float8_e4m3fn,
+        device=device,
+    )
+    weights = torch.empty((num_queries, num_heads), dtype=torch.float32, device=device)
+
+    page_table = indexer_metadata.page_table
+    num_blocks = int(page_table.clamp_min(0).max().item()) + 1
+    num_blocks = max(num_blocks, 1)
+    kv_cache = torch.empty(
+        (num_blocks, block_kv, 1, head_dim + 4),
+        dtype=torch.uint8,
+        device=device,
+    )
+
+    q_fp8.zero_()
+    weights.zero_()
+    kv_cache.zero_()
+
+    from sglang.srt.environ import envs
+
+    if envs.SGLANG_OPT_USE_TILELANG_INDEXER.get():
+        from sglang.srt.layers.attention.nsa.tilelang_kernel import (
+            tilelang_fp8_paged_mqa_logits as fn,
+        )
+    elif envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.get():
+        from sglang.srt.layers.attention.compressed.indexer import (
+            fp8_paged_mqa_logits_torch as fn,
+        )
+    elif envs.SGLANG_OPT_DG_PAGED_MQA_LOGITS_CHUNK_SIZE.get() != -1:
+        from sglang.srt.layers.deep_gemm_wrapper.paged_mqa_logits import (
+            fp8_paged_mqa_logits_chunked as fn,
+        )
+    else:
+        from deep_gemm import fp8_paged_mqa_logits as fn
+
+    def kernel_func():
+        return fn(
+            q_fp8,
+            kv_cache,
+            weights,
+            context_lens,
+            page_table,
+            indexer_metadata.deep_gemm_metadata,
+            indexer_metadata.max_c4_seq_len,
+            False,
+        )
+
+    return kernel_func
 
 
 def run_dsv4_mla_module(
@@ -894,11 +1145,27 @@ def run_dsv4_mla_module(
     perf_filename_prefix: str = "dsv4",
     gemm_type: str = "bfloat16",
     tp_size: int = 1,
+    sub_ops: Iterable[str] = ("module",),
+    prefix_len: int = 0,
+    perf_filename_override: str | None = None,
+    op_name_override: str | None = None,
+    extra_log_fields: dict | None = None,
 ) -> list[dict[str, float]]:
     is_prefill = mode == "context"
+    if prefix_len and not is_prefill:
+        raise ValueError("prefix_len is only supported for context/extend collection")
     compress_ratio = ATTN_KIND_TO_COMPRESS_RATIO[attn_kind]
     if tp_size not in (1, 2, 4, 8, 16, 32):
         raise ValueError(f"tp_size must be a power of 2 in [1, 32]; got {tp_size}")
+    sub_ops = tuple(sub_ops)
+    sub_ops_set = set(sub_ops)
+    unknown_sub_ops = sub_ops_set - {"module", "mla", "mqa_logits"}
+    if unknown_sub_ops:
+        raise ValueError(f"unknown sub_ops={sorted(unknown_sub_ops)}; expected module, mla, and/or mqa_logits")
+    if "mla" in sub_ops_set and attn_kind != "hca":
+        raise ValueError("sub_op='mla' is currently implemented for attn_kind='hca' only")
+    if "mqa_logits" in sub_ops_set and attn_kind != "csa":
+        raise ValueError("sub_op='mqa_logits' is currently implemented for attn_kind='csa' only")
     model_runner = _load_model_runner(
         model_path,
         attn_kind=attn_kind,
@@ -926,62 +1193,109 @@ def run_dsv4_mla_module(
     try:
         for batch_size in batch_sizes:
             for seq_len in seq_lens:
-                print(f"\n{mode}: batch_size={batch_size}, seq_len={seq_len}")
+                print(f"\n{mode}: batch_size={batch_size}, seq_len={seq_len}, prefix_len={prefix_len}")
                 try:
-                    forward_batch = _build_forward_batch(model_runner, batch_size, seq_len, is_prefill=is_prefill)
-                    hidden_states, positions = _make_inputs(
+                    forward_batch = _build_forward_batch(
                         model_runner,
-                        batch_size=batch_size,
-                        seq_len=seq_len,
+                        batch_size,
+                        seq_len,
                         is_prefill=is_prefill,
-                        device=device,
+                        prefix_len=prefix_len,
                     )
-
-                    def kernel_func():
-                        return attention_module(
-                            x=hidden_states,
-                            positions=positions,
-                            forward_batch=forward_batch,
+                    hidden_states, positions = None, None
+                    if {"module", "mla"} & sub_ops_set:
+                        hidden_states, positions = _make_inputs(
+                            model_runner,
+                            batch_size=batch_size,
+                            seq_len=seq_len,
+                            is_prefill=is_prefill,
+                            device=device,
+                            prefix_len=prefix_len,
                         )
 
-                    stats = _bench_cuda_events(
-                        kernel_func,
-                        num_warmup=num_warmup,
-                        num_iterations=num_iterations,
-                        graph_repeat=graph_repeat,
-                        device=device,
-                    )
-                    print(
-                        f"  latency mean={stats['mean_ms']:.4f} ms, "
-                        f"median={stats['median_ms']:.4f} ms, "
-                        f"min={stats['min_ms']:.4f} ms, max={stats['max_ms']:.4f} ms, "
-                        f"std={stats['std_ms']:.4f} ms, n={stats['n']}"
-                    )
-                    _log_result(
-                        output_path=output_path,
-                        model_path=model_path,
-                        mode=mode,
-                        attn_kind=attn_kind,
-                        compress_ratio=compress_ratio,
-                        batch_size=batch_size,
-                        seq_len=seq_len,
-                        kv_cache_dtype=kv_cache_dtype,
-                        latency_ms=stats["mean_ms"],
-                        version=version,
-                        device_name=device_name,
-                        power_stats=stats.get("power_stats"),
-                        perf_filename_prefix=perf_filename_prefix,
-                        gemm_type=gemm_type,
-                        tp_size=tp_size,
-                    )
-                    stats.update(
-                        {
-                            "batch_size": batch_size,
-                            "seq_len": seq_len,
-                            "compress_ratio": compress_ratio,
-                        }
-                    )
-                    results.append(stats)
+                    kernels = []
+                    if "module" in sub_ops:
+                        assert hidden_states is not None and positions is not None
+
+                        def module_kernel_func():
+                            return attention_module(
+                                x=hidden_states,
+                                positions=positions,
+                                forward_batch=forward_batch,
+                            )
+
+                        kernels.append(("module", module_kernel_func))
+                    if "mla" in sub_ops:
+                        assert hidden_states is not None and positions is not None
+                        kernels.append(
+                            (
+                                "mla",
+                                _make_attention_mla_core_kernel(
+                                    attention_module,
+                                    hidden_states,
+                                    positions,
+                                    forward_batch,
+                                ),
+                            )
+                        )
+                    if "mqa_logits" in sub_ops:
+                        kernels.append(
+                            (
+                                "mqa_logits",
+                                _make_csa_mqa_logits_kernel(
+                                    attention_module,
+                                    forward_batch,
+                                    device,
+                                ),
+                            )
+                        )
+
+                    for sub_op, kernel_func in kernels:
+                        stats = _bench_cuda_events(
+                            kernel_func,
+                            num_warmup=num_warmup,
+                            num_iterations=num_iterations,
+                            graph_repeat=graph_repeat,
+                            device=device,
+                        )
+                        print(
+                            f"  {sub_op} latency mean={stats['mean_ms']:.4f} ms, "
+                            f"median={stats['median_ms']:.4f} ms, "
+                            f"min={stats['min_ms']:.4f} ms, max={stats['max_ms']:.4f} ms, "
+                            f"std={stats['std_ms']:.4f} ms, n={stats['n']}"
+                        )
+                        _log_result(
+                            output_path=output_path,
+                            model_path=model_path,
+                            mode=mode,
+                            attn_kind=attn_kind,
+                            compress_ratio=compress_ratio,
+                            batch_size=batch_size,
+                            seq_len=seq_len,
+                            kv_cache_dtype=kv_cache_dtype,
+                            latency_ms=stats["mean_ms"],
+                            version=version,
+                            device_name=device_name,
+                            power_stats=stats.get("power_stats"),
+                            perf_filename_prefix=perf_filename_prefix,
+                            gemm_type=gemm_type,
+                            tp_size=tp_size,
+                            sub_op=sub_op,
+                            step=prefix_len if is_prefill else None,
+                            perf_filename_override=perf_filename_override,
+                            op_name_override=op_name_override,
+                            extra_fields=extra_log_fields,
+                        )
+                        stats.update(
+                            {
+                                "batch_size": batch_size,
+                                "seq_len": seq_len,
+                                "prefix_len": prefix_len,
+                                "compress_ratio": compress_ratio,
+                                "sub_op": sub_op,
+                            }
+                        )
+                        results.append(stats)
                 except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
                     print(f"  OOM: batch_size={batch_size}, seq_len={seq_len}; skipping")
                     torch.cuda.empty_cache()
@@ -1016,6 +1330,12 @@ def _run_subprocess(
     gpu_id: int,
     gemm_type: str = "bfloat16",
     tp_size: int = 1,
+    sub_ops: Iterable[str] = ("module",),
+    seq_lens_override: Iterable[int] | None = None,
+    prefix_len: int = 0,
+    perf_filename_override: str | None = None,
+    op_name_override: str | None = None,
+    extra_log_fields: dict | None = None,
 ):
     """Run one (attn_kind, tp, gemm, bs) subprocess that sweeps all valid sl.
 
@@ -1044,6 +1364,12 @@ def _run_subprocess(
         f'    output_path="{output_path}",\n'
         f'    gemm_type="{gemm_type}",\n'
         f"    tp_size={tp_size!r},\n"
+        f"    sub_ops={tuple(sub_ops)!r},\n"
+        f"    seq_lens_override={tuple(seq_lens_override) if seq_lens_override is not None else None!r},\n"
+        f"    prefix_len={prefix_len!r},\n"
+        f"    perf_filename_override={perf_filename_override!r},\n"
+        f"    op_name_override={op_name_override!r},\n"
+        f"    extra_log_fields={extra_log_fields!r},\n"
         f")\n"
     )
 
@@ -1078,6 +1404,12 @@ def _subprocess_entry(
     output_path: str,
     gemm_type: str = "bfloat16",
     tp_size: int = 1,
+    sub_ops: Iterable[str] = ("module",),
+    seq_lens_override: Iterable[int] | None = None,
+    prefix_len: int = 0,
+    perf_filename_override: str | None = None,
+    op_name_override: str | None = None,
+    extra_log_fields: dict | None = None,
 ):
     """In-subprocess runner: build model once for fixed bs, sweep all valid sl.
 
@@ -1085,9 +1417,18 @@ def _subprocess_entry(
     forward reuses the same allocator without re-init.
     """
     bs_grid, sl_grid = _expand_grid()
+    del bs_grid
+    if seq_lens_override is not None:
+        sl_grid = list(seq_lens_override)
     pairs = _filter_pairs(mode, [batch_size], sl_grid)
+    if prefix_len:
+        pairs = [
+            (bs, sl)
+            for bs, sl in pairs
+            if sl + prefix_len <= _SPARSE_MAX_FULL_S and bs * (sl + prefix_len) <= _SPARSE_MAX_FULL_S
+        ]
     if not pairs:
-        print(f"[dsv4-flash] no valid sl values for mode={mode}, bs={batch_size}")
+        print(f"[dsv4-flash] no valid sl values for mode={mode}, bs={batch_size}, prefix_len={prefix_len}")
         return
     # Sort sl DESCENDING — start from the largest case so:
     #   1. OOM fails fast (don't waste time on small sl before discovering
@@ -1125,6 +1466,11 @@ def _subprocess_entry(
         perf_filename_prefix="dsv4_flash",
         gemm_type=gemm_type,
         tp_size=tp_size,
+        sub_ops=sub_ops,
+        prefix_len=prefix_len,
+        perf_filename_override=perf_filename_override,
+        op_name_override=op_name_override,
+        extra_log_fields=extra_log_fields,
     )
 
 
@@ -1186,6 +1532,100 @@ def run_dsv4_flash_attn_worker(
     )
 
 
+_SPARSE_KERNEL_TO_SUB_OP = {
+    "paged_mqa_logits": {
+        "attn_kind": "csa",
+        "sub_op": "mqa_logits",
+    },
+    "hca_attn": {
+        "attn_kind": "hca",
+        "sub_op": "mla",
+    },
+}
+
+
+def _submodule_seq_lens_for_case(batch_size: int, isl: int, past_kv: int) -> list[int]:
+    if isl > 0:
+        candidates = [isl]
+    else:
+        candidates = list(_SPARSE_ISL_LIST)
+
+    seq_lens = []
+    for seq_len in candidates:
+        if batch_size * seq_len > _SPARSE_CHUNK_PREFILL_SIZE:
+            continue
+        if batch_size * (seq_len + past_kv) > _SPARSE_MAX_FULL_S:
+            continue
+        full_s = seq_len + past_kv
+        if full_s < 64:
+            continue
+        seq_lens.append(seq_len)
+    return seq_lens
+
+
+def run_dsv4_flash_attn_submodule_worker(
+    batch_size: int,
+    isl: int,
+    past_kv: int,
+    tp_size: int,
+    model_path: str,
+    *,
+    perf_filename: str,
+    device: str = "cuda:0",
+):
+    """collect.py-compatible V4-Flash submodule worker.
+
+    This writes one merged CSV.  For each shape, it collects both submodules cut
+    out of the real SGLang attention module:
+
+      * ``paged_mqa_logits`` -> CSA ``mqa_logits`` sibling
+      * ``hca_attn`` -> HCA MLA/FlashMLA sibling
+
+    ``isl == 0`` means the test case is grouped and this worker sweeps all
+    valid ``isl`` values for the fixed ``(batch_size, past_kv, tp)``.
+    """
+
+    if tp_size not in (1, 2, 4, 8, 16, 32):
+        raise ValueError(f"unsupported tp_size={tp_size}; expected a power of 2 in [1, 32]")
+
+    seq_lens = _submodule_seq_lens_for_case(batch_size, isl, past_kv)
+    if not seq_lens:
+        print(
+            f"[dsv4-flash submodule] no valid isl values for "
+            f"bs={batch_size}, isl={isl}, past_kv={past_kv}"
+        )
+        return
+
+    device_str = str(device)
+    gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
+    output_path = os.path.dirname(perf_filename) or os.getcwd()
+
+    print(
+        f"[dsv4-flash submodule] kernels={','.join(_SPARSE_KERNEL_TO_SUB_OP)} "
+        f"tp={tp_size} bs={batch_size} "
+        f"past_kv={past_kv} isl_count={len(seq_lens)} GPU={gpu_id}"
+    )
+
+    for kernel, config in _SPARSE_KERNEL_TO_SUB_OP.items():
+        _run_subprocess(
+            mode="context",
+            attn_kind=config["attn_kind"],
+            model_path=model_path,
+            kv_cache_dtype_sglang=_kv_dtype_db_to_sglang("fp8"),
+            batch_size=batch_size,
+            output_path=output_path,
+            gpu_id=gpu_id,
+            gemm_type="bfloat16",
+            tp_size=tp_size,
+            sub_ops=(config["sub_op"],),
+            seq_lens_override=seq_lens,
+            prefix_len=past_kv,
+            perf_filename_override=os.path.basename(perf_filename),
+            op_name_override="dsv4_flash_attn_submodule",
+            extra_log_fields={"kernel": kernel},
+        )
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # CLI (manual / smoke test)
 # ═══════════════════════════════════════════════════════════════════════
@@ -1227,6 +1667,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "h_q=64 (V4 zero-pads), so any TP power-of-2 in [1, 32] is valid."
         ),
     )
+    parser.add_argument(
+        "--sub-ops",
+        default="module",
+        help="Comma-separated sub-ops to collect: module,mla,mqa_logits. 'mla' is HCA-only; 'mqa_logits' is CSA-only.",
+    )
     return parser
 
 
@@ -1246,6 +1691,7 @@ def main() -> None:
     _bs_grid = sorted({bs for bs, _ in pairs})
     kinds = [args.attn_kind] if args.attn_kind else list(ATTN_KINDS)
     tp_sizes = _parse_int_list(args.tp_sizes)
+    sub_ops = tuple(x.strip() for x in args.sub_ops.split(",") if x.strip())
     for tp_size in tp_sizes:
         if tp_size not in _TP_SIZES and tp_size not in (16, 32):
             raise ValueError(f"tp_size={tp_size} not in supported set; pick from 1/2/4/8/16/32")
@@ -1271,6 +1717,7 @@ def main() -> None:
                         gpu_id=gpu_id,
                         gemm_type=args.gemm_type,
                         tp_size=tp_size,
+                        sub_ops=sub_ops,
                     )
                 except Exception:
                     traceback.print_exc()

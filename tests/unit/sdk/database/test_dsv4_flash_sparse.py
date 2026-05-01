@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for V4-Flash sparse-kernel infrastructure.
+"""Unit tests for V4-Flash attention-submodule infrastructure.
 
 Covers:
   * the per-(attn_kind, mode) module loaders and their split-file merge
-  * the sparse-kernel CSV loader (paged_mqa_logits / hca_attn)
+  * the merged attention-submodule CSV loader (paged_mqa_logits / hca_attn)
   * ``_dsv4_flash_tp_from_num_heads`` reverse derivation
   * ``_lookup_dsv4_flash_sparse_kernel`` (exact + interp + tp fallback)
   * ``_dsv4_flash_robust_3d_lookup`` exact-match short-circuit
@@ -27,7 +27,7 @@ from aiconfigurator.sdk.perf_database import (
     _dsv4_flash_robust_3d_lookup,
     _dsv4_flash_tp_from_num_heads,
     load_context_dsv4_flash_kind_module_data,
-    load_dsv4_flash_sparse_kernel_data,
+    load_dsv4_flash_attn_submodule_data,
     load_generation_dsv4_flash_kind_module_data,
 )
 
@@ -43,7 +43,7 @@ _CTX_HEADER = (
     "mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,"
     "step,compress_ratio,latency"
 )
-_SPARSE_HEADER = _CTX_HEADER  # same column layout
+_SPARSE_HEADER = _CTX_HEADER + ",kernel"
 
 
 def _ctx_row(*, attn_kind: str, cr: int, bs: int, isl: int, tp: int, gemm: str = "fp8_block", lat: float = 1.0) -> str:
@@ -65,10 +65,11 @@ def _gen_row(
 
 
 def _sparse_row(*, kernel: str, bs: int, isl: int, past_kv: int, tp: int, cr: int, lat: float = 0.05) -> str:
+    kernel_source = "deep_gemm.fp8_paged_mqa_logits" if kernel == "paged_mqa_logits" else "compressed_flashmla_core"
     return (
-        f"SGLang,test,NVIDIA H20-3e,dsv4_flash_{kernel}_module,"
-        f"{kernel},deepseek-ai/DeepSeek-V4-Flash,DeepseekV4ForCausalLM,"
-        f"fp8_e4m3,fp8_e4m3,fp8_block,64,{bs},{isl},{tp},{past_kv},{cr},{lat:.4f}"
+        "SGLang,test,NVIDIA H20-3e,dsv4_flash_attn_submodule,"
+        f"{kernel_source},deepseek-ai/DeepSeek-V4-Flash,DeepseekV4ForCausalLM,"
+        f"fp8_e4m3,fp8_e4m3,fp8_block,64,{bs},{isl},{tp},{past_kv},{cr},{lat:.4f},{kernel}"
     )
 
 
@@ -100,27 +101,28 @@ def test_dsv4_flash_tp_from_num_heads_edge_cases():
 
 
 # ───────────────────────────────────────────────────────────────────────
-# Loader: sparse-kernel CSV
+# Loader: merged attention-submodule CSV
 # ───────────────────────────────────────────────────────────────────────
 
 
-def test_load_dsv4_flash_sparse_kernel_data_basic(tmp_path):
+def test_load_dsv4_flash_attn_submodule_data_basic(tmp_path):
     rows = [
         _sparse_row(kernel="paged_mqa_logits", bs=1, isl=1024, past_kv=0, tp=1, cr=4, lat=0.10),
         _sparse_row(kernel="paged_mqa_logits", bs=1, isl=1024, past_kv=8192, tp=1, cr=4, lat=0.30),
         _sparse_row(kernel="paged_mqa_logits", bs=1, isl=8192, past_kv=0, tp=1, cr=4, lat=0.55),
     ]
     path = _write_csv(tmp_path / "paged.txt", _SPARSE_HEADER, rows)
-    data = load_dsv4_flash_sparse_kernel_data(path)
+    data = load_dsv4_flash_attn_submodule_data(path)
     assert data is not None
     arch = "DeepseekV4ForCausalLM"
-    # data[arch][tp][past_kv][isl][bs] = {"latency": ...}
-    assert data[arch][1][0][1024][1]["latency"] == pytest.approx(0.10)
-    assert data[arch][1][8192][1024][1]["latency"] == pytest.approx(0.30)
-    assert data[arch][1][0][8192][1]["latency"] == pytest.approx(0.55)
+    # data[kernel][arch][tp][past_kv][isl][bs] = {"latency": ...}
+    paged = data["paged_mqa_logits"]
+    assert paged[arch][1][0][1024][1]["latency"] == pytest.approx(0.10)
+    assert paged[arch][1][8192][1024][1]["latency"] == pytest.approx(0.30)
+    assert paged[arch][1][0][8192][1]["latency"] == pytest.approx(0.55)
 
 
-def test_load_dsv4_flash_sparse_kernel_data_skips_dup_headers(tmp_path):
+def test_load_dsv4_flash_attn_submodule_data_skips_dup_headers(tmp_path):
     """Loader must skip CSV header lines mistakenly appended on re-runs."""
     rows = [
         _sparse_row(kernel="hca_attn", bs=1, isl=1024, past_kv=0, tp=1, cr=128, lat=0.5),
@@ -128,16 +130,17 @@ def test_load_dsv4_flash_sparse_kernel_data_skips_dup_headers(tmp_path):
         _sparse_row(kernel="hca_attn", bs=1, isl=2048, past_kv=0, tp=1, cr=128, lat=0.7),
     ]
     path = _write_csv(tmp_path / "hca_dup.txt", _SPARSE_HEADER, rows)
-    data = load_dsv4_flash_sparse_kernel_data(path)
+    data = load_dsv4_flash_attn_submodule_data(path)
     assert data is not None
     arch = "DeepseekV4ForCausalLM"
     # Both real rows present, header line silently dropped.
-    assert data[arch][1][0][1024][1]["latency"] == pytest.approx(0.5)
-    assert data[arch][1][0][2048][1]["latency"] == pytest.approx(0.7)
+    hca = data["hca_attn"]
+    assert hca[arch][1][0][1024][1]["latency"] == pytest.approx(0.5)
+    assert hca[arch][1][0][2048][1]["latency"] == pytest.approx(0.7)
 
 
-def test_load_dsv4_flash_sparse_kernel_data_missing_returns_none(tmp_path):
-    assert load_dsv4_flash_sparse_kernel_data(str(tmp_path / "no_such.txt")) is None
+def test_load_dsv4_flash_attn_submodule_data_missing_returns_none(tmp_path):
+    assert load_dsv4_flash_attn_submodule_data(str(tmp_path / "no_such.txt")) is None
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -258,12 +261,12 @@ def _make_sparse_db_with_paged_mqa(tmp_path, *, lat_at_past0: float, lat_at_past
         _sparse_row(kernel="paged_mqa_logits", bs=1, isl=8192, past_kv=8192, tp=1, cr=4, lat=lat_at_past8192),
     ]
     path = _write_csv(tmp_path / "paged.txt", _SPARSE_HEADER, rows)
-    data = load_dsv4_flash_sparse_kernel_data(path)
+    data = load_dsv4_flash_attn_submodule_data(path)
 
     class _DB:
         # mimic the attribute name PerfDatabase uses
         _dsv4_flash_sparse_kernel_data: ClassVar[dict] = {
-            "paged_mqa_logits": LoadedOpData(data, None, path),
+            "paged_mqa_logits": LoadedOpData(data["paged_mqa_logits"], None, path),
         }
 
     return _DB()
@@ -352,28 +355,26 @@ def test_lookup_sparse_kernel_missing_returns_none():
 def test_dsv4_flash_test_cases_active_under_no_filter(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     from collector.common_test_cases import (
+        get_dsv4_flash_attn_submodule_test_cases,
         get_dsv4_flash_csa_context_test_cases,
-        get_dsv4_flash_paged_mqa_logits_test_cases,
     )
 
     assert len(get_dsv4_flash_csa_context_test_cases()) > 0
-    assert len(get_dsv4_flash_paged_mqa_logits_test_cases()) > 0
+    assert len(get_dsv4_flash_attn_submodule_test_cases()) > 0
 
 
 def test_dsv4_flash_test_cases_skipped_under_other_model(monkeypatch):
     """Filter to a non-V4 model → V4 ops emit zero cases (collector skips)."""
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "deepseek-ai/DeepSeek-V3")
     from collector.common_test_cases import (
+        get_dsv4_flash_attn_submodule_test_cases,
         get_dsv4_flash_csa_context_test_cases,
         get_dsv4_flash_csa_generation_test_cases,
-        get_dsv4_flash_hca_attn_test_cases,
-        get_dsv4_flash_paged_mqa_logits_test_cases,
     )
 
     assert get_dsv4_flash_csa_context_test_cases() == []
     assert get_dsv4_flash_csa_generation_test_cases() == []
-    assert get_dsv4_flash_paged_mqa_logits_test_cases() == []
-    assert get_dsv4_flash_hca_attn_test_cases() == []
+    assert get_dsv4_flash_attn_submodule_test_cases() == []
 
 
 def test_dsv4_flash_test_cases_active_under_v4_filter(monkeypatch):
@@ -388,18 +389,13 @@ def test_dsv4_flash_test_cases_active_under_v4_filter(monkeypatch):
     assert {c[7] for c in cases} == {"csa"}
 
 
-def test_dsv4_flash_sparse_test_cases_only_indexer_tp1(monkeypatch):
-    """Sweep is fixed at tp=[1] (kernel is TP-invariant)."""
+def test_dsv4_flash_submodule_test_cases_tp1(monkeypatch):
+    """Merged submodule sweep is fixed at tp=[1] (both submodules are TP-invariant)."""
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "deepseek-ai/DeepSeek-V4-Flash")
-    from collector.common_test_cases import (
-        get_dsv4_flash_hca_attn_test_cases,
-        get_dsv4_flash_paged_mqa_logits_test_cases,
-    )
+    from collector.common_test_cases import get_dsv4_flash_attn_submodule_test_cases
 
-    paged = get_dsv4_flash_paged_mqa_logits_test_cases()
-    hca = get_dsv4_flash_hca_attn_test_cases()
-    assert {c[3] for c in paged} == {1}
-    assert {c[3] for c in hca} == {1}
+    cases = get_dsv4_flash_attn_submodule_test_cases()
+    assert {c[3] for c in cases} == {1}
 
 
 # ───────────────────────────────────────────────────────────────────────
