@@ -381,8 +381,9 @@ function renderTable(system) {
   var html = '<div class="table-wrap"><table class="matrix">';
   html += '<thead><tr>';
   html += '<th data-sort="model" class="' + (state.sortCol === 'model' ? 'sorted' : '') + '">HuggingFace ID ' + arrow('model') + '</th>';
+  var targetVersions = info.target_versions || DATA.target_versions || {};
   backends.forEach(function(b) {
-    var target = DATA.target_versions[b] ? ' <small style="font-weight:400;color:var(--text-muted)">(target: ' + escHtml(DATA.target_versions[b]) + ')</small>' : '';
+    var target = targetVersions[b] ? ' <small style="font-weight:400;color:var(--text-muted)">(target: ' + escHtml(targetVersions[b]) + ')</small>' : '';
     html += '<th data-sort="' + b + '" class="' + (state.sortCol === b ? 'sorted' : '') + '">' + escHtml(b) + target + ' ' + arrow(b) + '</th>';
   });
   html += '</tr></thead><tbody>';

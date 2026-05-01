@@ -44,7 +44,6 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
 // ── Constants ───────────────────────────────────────────────────────
 const REPO = 'ai-dynamo/aiconfigurator';
 const CSV_PATH = 'src/aiconfigurator/systems/support_matrix.csv';
-const TARGET_VERSIONS = { vllm: '0.14.0', sglang: '0.5.9', trtllm: '1.2.0rc6' };
 const PREFERRED_DEFAULT_SYSTEM = 'b200_sxm';
 const SYSTEM_ORDER = ['b200', 'gb200', 'gb300', 'h100', 'h200', '__other__', 'a100', 'l40s'];
 
@@ -118,6 +117,21 @@ function compareVersionTuples(a, b) {
   return 0;
 }
 
+function buildTargetVersions(rows) {
+  const versionsByBackend = {};
+  for (const row of rows) {
+    if (!row.Backend || !row.Version) continue;
+    if (!versionsByBackend[row.Backend]) versionsByBackend[row.Backend] = new Set();
+    versionsByBackend[row.Backend].add(row.Version);
+  }
+  return Object.fromEntries(
+    Object.entries(versionsByBackend).map(([backend, versions]) => [
+      backend,
+      [...versions].sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)))[0],
+    ])
+  );
+}
+
 // ── Error Signature Extraction ──────────────────────────────────────
 function extractErrorSignature(errMsg) {
   if (!errMsg) return 'No error message';
@@ -135,7 +149,7 @@ function extractErrorSignature(errMsg) {
 }
 
 // ── Matrix Building Logic ───────────────────────────────────────────
-function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
+function getLatestSupportedVersion(rows, huggingfaceId, system, backend, targetVersions) {
   const subset = rows.filter(r =>
     r.HuggingFaceID === huggingfaceId && r.System === system && r.Backend === backend
   );
@@ -171,7 +185,7 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
     return { version: null, atTarget: false, error: null };
   }
 
-  const targetVer = TARGET_VERSIONS[backend] || null;
+  const targetVer = targetVersions[backend] || null;
   const atOrAboveTarget = (ver) => targetVer === null || versionGe(ver, targetVer);
 
   if (targetVer !== null) {
@@ -198,7 +212,7 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
   return { version: 'FAIL', atTarget: false, error: allMsgs.length ? allMsgs.join(' | ') : 'No error message available' };
 }
 
-function buildMatrixForMode(rows, systemName, modeFilter) {
+function buildMatrixForMode(rows, systemName, modeFilter, targetVersions) {
   let subset = rows.filter(r => r.System === systemName);
   if (modeFilter !== 'all') subset = subset.filter(r => r.Mode === modeFilter);
   if (!subset.length) return { matrixRows: [], backends: [] };
@@ -209,7 +223,9 @@ function buildMatrixForMode(rows, systemName, modeFilter) {
   const matrixRows = models.map(model => {
     const cells = {};
     for (const backend of backends) {
-      const { version, atTarget, error } = getLatestSupportedVersion(subset, model, systemName, backend);
+      const { version, atTarget, error } = getLatestSupportedVersion(
+        subset, model, systemName, backend, targetVersions
+      );
       let status = 'pass';
       if (version === null || version === 'FAIL') status = 'fail';
 
@@ -218,10 +234,10 @@ function buildMatrixForMode(rows, systemName, modeFilter) {
         const aggRows = subset.filter(r => r.Mode === 'agg');
         const disaggRows = subset.filter(r => r.Mode === 'disagg');
         const aggResult = aggRows.length
-          ? getLatestSupportedVersion(aggRows, model, systemName, backend)
+          ? getLatestSupportedVersion(aggRows, model, systemName, backend, targetVersions)
           : { version: null, atTarget: false, error: null };
         const disaggResult = disaggRows.length
-          ? getLatestSupportedVersion(disaggRows, model, systemName, backend)
+          ? getLatestSupportedVersion(disaggRows, model, systemName, backend, targetVersions)
           : { version: null, atTarget: false, error: null };
         const aggPass = aggResult.version !== null && aggResult.version !== 'FAIL';
         const disaggPass = disaggResult.version !== null && disaggResult.version !== 'FAIL';
@@ -567,7 +583,7 @@ function SortArrow({ col, sortCol, sortAsc }) {
   return <span className="ml-1 text-[0.65rem]">{sortAsc ? '\u25B2' : '\u25BC'}</span>;
 }
 
-function MatrixTable({ matrixRows, backends, searchQuery, sortCol, sortAsc, onSort, onCellClick }) {
+function MatrixTable({ matrixRows, backends, targetVersions, searchQuery, sortCol, sortAsc, onSort, onCellClick }) {
   let filtered = matrixRows;
   if (searchQuery) {
     const q = searchQuery.toLowerCase();
@@ -621,8 +637,8 @@ function MatrixTable({ matrixRows, backends, searchQuery, sortCol, sortAsc, onSo
                     hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors
                     ${sortCol === b ? 'text-indigo-600 dark:text-indigo-400' : ''}`}>
                 {b}
-                {TARGET_VERSIONS[b] && (
-                  <small className="font-normal text-slate-400 ml-1">(target: {TARGET_VERSIONS[b]})</small>
+                {targetVersions[b] && (
+                  <small className="font-normal text-slate-400 ml-1">(target: {targetVersions[b]})</small>
                 )}
                 <SortArrow col={b} sortCol={sortCol} sortAsc={sortAsc} />
               </th>
@@ -815,9 +831,16 @@ function App() {
   const totalPass = useMemo(() => csvRows.filter(r => r.Status === 'PASS').length, [csvRows]);
   const totalFail = useMemo(() => csvRows.filter(r => r.Status === 'FAIL').length, [csvRows]);
 
+  const targetVersions = useMemo(
+    () => activeSystem ? buildTargetVersions(csvRows.filter(r => r.System === activeSystem)) : {},
+    [csvRows, activeSystem]
+  );
+
   const { matrixRows, backends } = useMemo(
-    () => activeSystem ? buildMatrixForMode(csvRows, activeSystem, activeMode) : { matrixRows: [], backends: [] },
-    [csvRows, activeSystem, activeMode]
+    () => activeSystem
+      ? buildMatrixForMode(csvRows, activeSystem, activeMode, targetVersions)
+      : { matrixRows: [], backends: [] },
+    [csvRows, activeSystem, activeMode, targetVersions]
   );
 
   const topErrors = useMemo(
@@ -872,7 +895,7 @@ function App() {
           <div className="p-6 max-w-full">
             <Legend />
             <MatrixTable
-              matrixRows={matrixRows} backends={backends}
+              matrixRows={matrixRows} backends={backends} targetVersions={targetVersions}
               searchQuery={searchQuery} sortCol={sortCol} sortAsc={sortAsc}
               onSort={handleSort}
               onCellClick={(model, backend, err) => setModal({ model, system: activeSystem, backend, error: err })}

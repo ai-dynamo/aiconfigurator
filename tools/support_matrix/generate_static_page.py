@@ -26,13 +26,6 @@ from datetime import datetime, timezone
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-TARGET_VERSIONS = {
-    "vllm": "0.14.0",
-    "sglang": "0.5.9",
-    "trtllm": "1.2.0rc6",
-}
-
-
 _PHASE_ORDER = {"dev": 0, "a": 1, "b": 2, "rc": 3, "release": 4, "post": 5}
 
 
@@ -123,7 +116,23 @@ def load_csv(csv_path):
         return list(csv.DictReader(f))
 
 
-def get_latest_supported_version(rows, huggingface_id, system, backend):
+def build_target_versions(rows):
+    """Return the latest tested version for each backend in the support matrix."""
+    versions_by_backend = {}
+    for row in rows:
+        backend = row.get("Backend")
+        version = row.get("Version")
+        if not backend or not version:
+            continue
+        versions_by_backend.setdefault(backend, set()).add(version)
+
+    return {
+        backend: sorted(versions, key=_version_sort_key, reverse=True)[0]
+        for backend, versions in sorted(versions_by_backend.items())
+    }
+
+
+def get_latest_supported_version(rows, huggingface_id, system, backend, target_versions):
     """
     Determine the latest supported version for a (model, system, backend) tuple.
     Ported from support_matrix_tab.py but operates on plain dicts.
@@ -160,7 +169,7 @@ def get_latest_supported_version(rows, huggingface_id, system, backend):
     if not version_has_fail and not version_has_pass:
         return (None, False, None)
 
-    target_ver = TARGET_VERSIONS.get(backend)
+    target_ver = target_versions.get(backend)
 
     def at_or_above_target(ver_str):
         if target_ver is None:
@@ -186,7 +195,7 @@ def get_latest_supported_version(rows, huggingface_id, system, backend):
     return ("FAIL", False, " | ".join(all_msgs) if all_msgs else "No error message available")
 
 
-def build_matrix_for_mode(rows, system_name, mode_filter):
+def build_matrix_for_mode(rows, system_name, mode_filter, target_versions):
     """
     Build the matrix data for a single (system, mode) combination.
     Returns a list of row dicts and a list of backend names.
@@ -204,7 +213,9 @@ def build_matrix_for_mode(rows, system_name, mode_filter):
     for model in models:
         cells = {}
         for backend in backends:
-            version, at_target, error_msg = get_latest_supported_version(subset, model, system_name, backend)
+            version, at_target, error_msg = get_latest_supported_version(
+                subset, model, system_name, backend, target_versions
+            )
 
             # For "all" mode, determine if support is partial (one mode passes, other fails)
             status = "pass"
@@ -216,12 +227,12 @@ def build_matrix_for_mode(rows, system_name, mode_filter):
                 agg_rows = [r for r in subset if r["Mode"] == "agg"]
                 disagg_rows = [r for r in subset if r["Mode"] == "disagg"]
                 agg_ver, _, agg_err = (
-                    get_latest_supported_version(agg_rows, model, system_name, backend)
+                    get_latest_supported_version(agg_rows, model, system_name, backend, target_versions)
                     if agg_rows
                     else (None, False, None)
                 )
                 disagg_ver, _, disagg_err = (
-                    get_latest_supported_version(disagg_rows, model, system_name, backend)
+                    get_latest_supported_version(disagg_rows, model, system_name, backend, target_versions)
                     if disagg_rows
                     else (None, False, None)
                 )
@@ -262,12 +273,20 @@ def build_full_data(rows):
     """Build the complete data structure for all systems and modes."""
     systems_set = sorted(set(r["System"] for r in rows))
     modes = ["all", "agg", "disagg"]
+    target_versions = build_target_versions(rows)
 
     systems_data = {}
     for system in systems_set:
-        system_entry = {"matrix": {}, "top_errors": {}, "backends": []}
+        system_rows = [r for r in rows if r["System"] == system]
+        system_target_versions = build_target_versions(system_rows)
+        system_entry = {
+            "matrix": {},
+            "top_errors": {},
+            "backends": [],
+            "target_versions": system_target_versions,
+        }
         for mode in modes:
-            matrix_rows, backends = build_matrix_for_mode(rows, system, mode)
+            matrix_rows, backends = build_matrix_for_mode(rows, system, mode, system_target_versions)
             system_entry["matrix"][mode] = matrix_rows
             system_entry["top_errors"][mode] = build_top_errors(rows, system, mode)
             if mode == "all" and backends:
@@ -279,7 +298,7 @@ def build_full_data(rows):
 
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "target_versions": TARGET_VERSIONS,
+        "target_versions": target_versions,
         "summary": {"total_rows": len(rows), "pass": total_pass, "fail": total_fail},
         "systems": systems_data,
     }
