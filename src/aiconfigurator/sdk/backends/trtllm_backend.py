@@ -33,6 +33,33 @@ TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION: float = 0.9
 TRTLLM_DEFAULT_MAX_NUM_TOKENS: int = 8192
 
 
+class _StaticBreakdownSummary:
+    def __init__(self, breakdown: tuple):
+        self._breakdown = breakdown
+
+    def get_context_latency_dict(self) -> dict:
+        return self._breakdown[0]
+
+    def get_context_energy_wms_dict(self) -> dict:
+        return self._breakdown[1]
+
+    def get_generation_latency_dict(self) -> dict:
+        return self._breakdown[2]
+
+    def get_generation_energy_wms_dict(self) -> dict:
+        return self._breakdown[3]
+
+    def get_context_source_dict(self) -> dict:
+        if len(self._breakdown) > 4:
+            return self._breakdown[4]
+        return {}
+
+    def get_generation_source_dict(self) -> dict:
+        if len(self._breakdown) > 5:
+            return self._breakdown[5]
+        return {}
+
+
 class TRTLLMBackend(BaseBackend):
     """
     TRTLLM backend.
@@ -144,19 +171,21 @@ class TRTLLMBackend(BaseBackend):
                 """
                 num_tokens = ctx_tokens + gen_tokens
                 # treat this as a combined single batch inference, extract non-attention latency
-                summary = self.run_static(
-                    model,
-                    database,
-                    # num tokens for gemm needs to be adjusted for prefix, depends on the avg prefix len per request
-                    RuntimeConfig(
-                        batch_size=1,
-                        beam_width=1,
-                        isl=num_tokens,
-                        osl=1,
-                        prefix=prefix * np.floor(ctx_tokens / isl),
-                        seq_imbalance_correction_scale=ctx_seq_imbalance_correction_scale,
-                    ),
-                    mode="static_ctx",
+                summary = _StaticBreakdownSummary(
+                    self._run_static_breakdown(
+                        model,
+                        database,
+                        # num tokens for gemm needs to be adjusted for prefix, depends on the avg prefix len per request
+                        RuntimeConfig(
+                            batch_size=1,
+                            beam_width=1,
+                            isl=num_tokens,
+                            osl=1,
+                            prefix=prefix * np.floor(ctx_tokens / isl),
+                            seq_imbalance_correction_scale=ctx_seq_imbalance_correction_scale,
+                        ),
+                        mode="static_ctx",
+                    )
                 )
                 latency_dict = summary.get_context_latency_dict()
                 energy_wms_dict = summary.get_context_energy_wms_dict()  # CHANGED from get_context_power_dict()
@@ -174,18 +203,20 @@ class TRTLLMBackend(BaseBackend):
                 # average the ctx attn latency with num_steps to get the ctx_attention_latency
                 num_tokens = isl
                 batch_size = np.ceil(ctx_tokens / isl)
-                summary = self.run_static(
-                    model,
-                    database,
-                    RuntimeConfig(
-                        batch_size=batch_size,
-                        beam_width=1,
-                        isl=num_tokens,
-                        osl=1,
-                        prefix=prefix,
-                        seq_imbalance_correction_scale=ctx_seq_imbalance_correction_scale,
-                    ),
-                    mode="static_ctx",
+                summary = _StaticBreakdownSummary(
+                    self._run_static_breakdown(
+                        model,
+                        database,
+                        RuntimeConfig(
+                            batch_size=batch_size,
+                            beam_width=1,
+                            isl=num_tokens,
+                            osl=1,
+                            prefix=prefix,
+                            seq_imbalance_correction_scale=ctx_seq_imbalance_correction_scale,
+                        ),
+                        mode="static_ctx",
+                    )
                 )
                 latency_dict = summary.get_context_latency_dict()
                 energy_wms_dict = summary.get_context_energy_wms_dict()
@@ -198,17 +229,19 @@ class TRTLLMBackend(BaseBackend):
                 gen_attention_energy_wms = 0.0  # RENAMED from gen_attention_power_weighted
                 if gen_tokens > 0:
                     num_tokens = gen_tokens
-                    summary = self.run_static(
-                        model,
-                        database,
-                        RuntimeConfig(
-                            batch_size=num_tokens,
-                            beam_width=1,
-                            isl=isl + osl // 2,
-                            osl=2,
-                            gen_seq_imbalance_correction_scale=gen_seq_imbalance_correction_scale,
-                        ),
-                        mode="static_gen",
+                    summary = _StaticBreakdownSummary(
+                        self._run_static_breakdown(
+                            model,
+                            database,
+                            RuntimeConfig(
+                                batch_size=num_tokens,
+                                beam_width=1,
+                                isl=isl + osl // 2,
+                                osl=2,
+                                gen_seq_imbalance_correction_scale=gen_seq_imbalance_correction_scale,
+                            ),
+                            mode="static_gen",
+                        )
                     )
                     latency_dict = summary.get_generation_latency_dict()
                     energy_wms_dict = summary.get_generation_energy_wms_dict()
@@ -240,17 +273,19 @@ class TRTLLMBackend(BaseBackend):
                 if gen_tokens <= 0:
                     return 0.0, 0.0
                 num_tokens = gen_tokens
-                summary = self.run_static(
-                    model,
-                    database,
-                    RuntimeConfig(
-                        batch_size=num_tokens,
-                        beam_width=1,
-                        isl=isl + osl // 2,
-                        osl=2,
-                        gen_seq_imbalance_correction_scale=gen_seq_imbalance_correction_scale,
-                    ),
-                    mode="static_gen",
+                summary = _StaticBreakdownSummary(
+                    self._run_static_breakdown(
+                        model,
+                        database,
+                        RuntimeConfig(
+                            batch_size=num_tokens,
+                            beam_width=1,
+                            isl=isl + osl // 2,
+                            osl=2,
+                            gen_seq_imbalance_correction_scale=gen_seq_imbalance_correction_scale,
+                        ),
+                        mode="static_gen",
+                    )
                 )
                 latency_dict = summary.get_generation_latency_dict()
                 energy_wms_dict = summary.get_generation_energy_wms_dict()  # CHANGED
