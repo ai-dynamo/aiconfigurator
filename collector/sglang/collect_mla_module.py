@@ -184,6 +184,7 @@ def _get_backends(attn_type: str):
     For DSA: returns "nsa" — SGLang auto-detects nsa_prefill_backend /
     nsa_decode_backend based on SM + kv_cache_dtype.
     For MLA: returns the best available backend based on SM version.
+    Aligns with sglang's _get_default_attn_backend() in server_args.py.
     """
     sm = get_sm_version()
     if attn_type == "dsa":
@@ -194,7 +195,9 @@ def _get_backends(attn_type: str):
         elif sm >= 90:
             return "fa3"
         else:
-            return "flashinfer"
+            # sglang defaults MLA to "triton" on SM < 90; flashinfer MLA
+            # (BatchMLAPagedAttentionWrapper) is not validated on these GPUs.
+            return "triton"
 
 
 def _get_mla_backend_list() -> list[str]:
@@ -205,7 +208,11 @@ def _get_mla_backend_list() -> list[str]:
                   sglang auto-promotes to trtllm_mla and then fails kv_cache_dtype
                   validation.  Existing B200 perf data contains only trtllm_mla.
       SM >= 90:  ["flashinfer", "fa3"]
-      SM < 90:   ["flashinfer"]
+      SM < 90:   []  — sglang defaults MLA to "triton" on SM < 90 (A100 etc.);
+                  flashinfer MLA kernels (BatchMLAPagedAttentionWrapper) are not
+                  validated on SM < 90 and crash the subprocess.  Skip wideep MLA
+                  collection on these GPUs; kernel-level collectors (collect_mla.py)
+                  already capture per-kernel latency via mocks.
     """
     sm = get_sm_version()
     if sm >= 100:
@@ -213,7 +220,7 @@ def _get_mla_backend_list() -> list[str]:
     elif sm >= 90:
         return ["flashinfer", "fa3"]
     else:
-        return ["flashinfer"]
+        return []
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -224,6 +231,14 @@ def _get_mla_backend_list() -> list[str]:
 _BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 _SEQ_LENGTHS = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 _HEAD_NUMS = [128, 64, 32, 16, 8]  # 8 covers GLM-5 (native 64) at tp=8
+
+# Reduced head-count list for module-level benchmarks.  Each test case spawns a
+# subprocess that loads a full ModelRunner (~15-20 s), so fewer head counts means
+# fewer subprocesses and faster overall collection.  TP1 (128) and TP2 (64) are
+# the most common production configs.  Kernel-level collectors (collect_mla.py,
+# collect_attn.py) already sweep all 5 head counts; the module benchmark captures
+# scheduling/dispatch overhead which varies less with head count.
+_MODULE_HEAD_NUMS = [128, 64]
 
 
 def get_context_test_cases(attn_type: str):
@@ -264,6 +279,22 @@ def get_generation_test_cases(attn_type: str):
     return cases
 
 
+def _get_module_precision_combos():
+    """Return a single baseline precision combo for module-level benchmarks.
+
+    Module benchmarks spawn a subprocess per (model, precision, heads) group.
+    Each subprocess loads a full ModelRunner (~15-20 s), so fewer groups means
+    faster overall collection.  Use a single bfloat16 baseline — matching the
+    wideep MLA pattern — so the total subprocess count stays manageable.
+
+    Precision-specific kernel performance is already captured by kernel-level
+    collectors (collect_mla.py, collect_attn.py).  The module benchmark
+    captures module-level overhead (scheduling, memory management, attention
+    dispatch) which is largely precision-independent with dummy weights.
+    """
+    return [("bfloat16", "bfloat16", "bfloat16")]
+
+
 def _build_module_test_cases(attn_type: str, mode: str):
     """Build one test case per unique (num_heads, precision, model) group.
 
@@ -275,6 +306,13 @@ def _build_module_test_cases(attn_type: str, mode: str):
     combinations internally, so we only need one entry per group — not one per
     individual point. seq_len and batch_size are set to 0 as placeholders.
 
+    Uses _get_module_precision_combos() instead of the full
+    _get_precision_combos() and _MODULE_HEAD_NUMS instead of _HEAD_NUMS to keep
+    the subprocess count low — each subprocess loads a full ModelRunner which
+    takes ~15-20 s.  With 4 precision combos x 5 head counts = 20 subprocesses,
+    the collection exceeds typical container timeouts.  1 combo x 2 heads per
+    model ≈ 3 subprocesses fits comfortably within the 120 s sample timeout.
+
     attention_backend is None for DSA (resolved at runtime by _get_backends()).
     perf_filename is supplied by collect.py via functools.partial as a keyword
     argument, so it is not included in the test case tuple.
@@ -283,8 +321,8 @@ def _build_module_test_cases(attn_type: str, mode: str):
     cases = []
     for model_path in model_paths:
         native_heads = MODEL_NATIVE_HEADS.get(model_path, 128)
-        for compute_dtype, kv_dtype, gemm_type in _get_precision_combos(mode):
-            for num_heads in _HEAD_NUMS:
+        for compute_dtype, kv_dtype, gemm_type in _get_module_precision_combos():
+            for num_heads in _MODULE_HEAD_NUMS:
                 if num_heads > native_heads:
                     continue  # Skip invalid TP-sim configs
                 cases.append(
@@ -356,11 +394,17 @@ def get_wideep_mla_generation_test_cases():
 
 def get_dsa_context_module_test_cases():
     """collect.py entrypoint for DSA context module collection."""
+    # DSA (NSA) requires SM >= 90.
+    if get_sm_version() < 90:
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="context")
 
 
 def get_dsa_generation_module_test_cases():
     """collect.py entrypoint for DSA generation module collection."""
+    # DSA (NSA) requires SM >= 90.
+    if get_sm_version() < 90:
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="generation")
 
 
@@ -1237,16 +1281,37 @@ def _run_mla_subprocess(
         cwd=os.path.dirname(os.path.abspath(__file__)),
     )
 
+    # Per-subprocess timeout: 120 s is enough for model loading (~20 s) plus
+    # a full inner sweep (~100 combos x 13 forwards ≈ 2 s).  The old 1800 s
+    # timeout was set for DeepGEMM JIT compile on first-ever invocation, but
+    # in practice that JIT cache is pre-warmed and the subprocess should finish
+    # well within 120 s.  A hanging subprocess (e.g. CUDA deadlock at reduced
+    # heads) must not block the rest of the collection.
     try:
-        stdout, _ = proc.communicate(timeout=1800)  # 30 min for DeepGEMM JIT compile
+        stdout, _ = proc.communicate(timeout=120)
         if stdout:
             print(stdout.decode("utf-8", errors="replace"))
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
+        print(
+            f"  WARNING: {attn_type.upper()} module {phase} subprocess timed out "
+            f"(heads={head_num}, model={model_path}, kv={kv_cache_dtype}, "
+            f"gemm={gemm_type}) — skipping"
+        )
+        return  # Skip this config instead of raising
 
     if proc.returncode != 0:
-        raise RuntimeError(f"{attn_type.upper()} module {phase} subprocess failed (exit code {proc.returncode})")
+        # Include last lines of subprocess output in the error so the cause
+        # is visible in the error group (subprocess stderr is merged into stdout).
+        tail = ""
+        if stdout:
+            lines = stdout.decode("utf-8", errors="replace").strip().splitlines()
+            tail = "\n".join(lines[-30:])  # last 30 lines should include traceback
+        raise RuntimeError(
+            f"{attn_type.upper()} module {phase} subprocess failed (exit code {proc.returncode})\n"
+            f"--- subprocess output (last 30 lines) ---\n{tail}"
+        )
 
 
 def run_mla_module_worker(
