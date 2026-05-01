@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
 from abc import ABC, abstractmethod
 from collections import defaultdict
 
@@ -15,6 +16,8 @@ from aiconfigurator.sdk.models import BaseModel
 from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+
+_USE_LAYERWISE = os.environ.get("AIC_USE_LAYERWISE", "0") == "1"
 
 
 class BaseBackend(ABC):
@@ -43,6 +46,9 @@ class BaseBackend(ABC):
         isl: int,
         prefix: int,
     ) -> tuple[dict[str, float], dict[str, float]]:
+        if _USE_LAYERWISE:
+            return self._run_context_phase_layerwise(model, database, batch_size, isl, prefix)
+
         context_latency_dict = defaultdict(float)
         context_energy_wms_dict = defaultdict(float)
 
@@ -78,6 +84,9 @@ class BaseBackend(ABC):
         osl: int,
         stride: int,
     ) -> tuple[dict[str, float], dict[str, float]]:
+        if _USE_LAYERWISE:
+            return self._run_generation_phase_layerwise(model, database, batch_size, beam_width, isl, osl, stride)
+
         generation_latency_dict = defaultdict(float)
         generation_energy_wms_dict = defaultdict(float)
 
@@ -106,6 +115,75 @@ class BaseBackend(ABC):
                 generation_energy_wms_dict[op] += energy_wms_dict[op] * repeat_count
 
         return generation_latency_dict, generation_energy_wms_dict
+
+    def _run_context_phase_layerwise(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        batch_size: int,
+        isl: int,
+        prefix: int,
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        """Replace per-op context phase with a single layerwise lookup."""
+        effective_isl = isl - prefix
+        if effective_isl <= 0:
+            raise ValueError(f"isl must be greater than 0 after removing prefix, but got {effective_isl}")
+
+        model_name = getattr(model, "model_path", "")
+        tp_size = model.config.tp_size
+        num_layers = model._num_layers // model.config.pp_size
+
+        # Query per-layer latency and multiply by num_layers
+        per_layer_ms = float(
+            database.query_layerwise(
+                model_name,
+                "CTX",
+                tp_size,
+                batch_size,
+                effective_isl,
+            )
+        )
+        total_ms = per_layer_ms * num_layers
+
+        latency_dict = {"context_layerwise": total_ms}
+        energy_dict = {"context_layerwise": 0.0}
+        return latency_dict, energy_dict
+
+    def _run_generation_phase_layerwise(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        batch_size: int,
+        beam_width: int,
+        isl: int,
+        osl: int,
+        stride: int,
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        """Replace per-op generation phase with layerwise lookups."""
+        model_name = getattr(model, "model_path", "")
+        tp_size = model.config.tp_size
+        num_layers = model._num_layers // model.config.pp_size
+        effective_bs = batch_size * beam_width * (model._nextn + 1)
+
+        total_gen_ms = 0.0
+        for i in range(0, osl - 1, stride):
+            kv_len = isl + i + 1
+            per_layer_ms = float(
+                database.query_layerwise(
+                    model_name,
+                    "GEN",
+                    tp_size,
+                    effective_bs,
+                    kv_len,
+                )
+            )
+            step_ms = per_layer_ms * num_layers
+            repeat_count = min(stride, osl - 1 - i)
+            total_gen_ms += step_ms * repeat_count
+
+        latency_dict = {"generation_layerwise": total_gen_ms}
+        energy_dict = {"generation_layerwise": 0.0}
+        return latency_dict, energy_dict
 
     def _run_static_breakdown(
         self,

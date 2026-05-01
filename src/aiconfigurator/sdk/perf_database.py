@@ -2431,6 +2431,44 @@ class LoadedOpData(UserDict):
         return super().__contains__(key)
 
 
+def load_layerwise_data(layerwise_file):
+    """Load layerwise benchmark data.
+
+    CSV columns: framework,version,device,model,phase,tp_size,batch_size,
+                 seq_len_q,seq_len_kv_cache,self_attn_ms,mlp_ms,total_time_us
+
+    Returns nested dict:
+        data[model][phase][tp_size] for CTX: {seq_len_q: {"latency": ms}}
+        data[model][phase][tp_size] for GEN: {batch_size: {seq_len_kv_cache: {"latency": ms}}}
+    """
+    if not os.path.exists(layerwise_file):
+        logger.debug(f"Layerwise data file {layerwise_file} not found.")
+        return None
+
+    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
+
+    with open(layerwise_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            model = row["model"]
+            phase = row["phase"]
+            tp_size = int(row["tp_size"])
+            batch_size = int(row["batch_size"])
+            seq_len_q = int(row["seq_len_q"])
+            seq_len_kv_cache = int(row["seq_len_kv_cache"])
+            total_time_us = float(row["total_time_us"])
+            latency_ms = total_time_us / 1000.0
+
+            entry = {"latency": latency_ms, "power": 0.0, "energy": 0.0}
+
+            if phase == "CTX":
+                data[model][phase][tp_size][seq_len_q] = entry
+            else:  # GEN
+                data[model][phase][tp_size][batch_size][seq_len_kv_cache] = entry
+
+    return data
+
+
 class PerfDatabase:
     """
     The perf database for a given system, backend and version
@@ -2541,6 +2579,7 @@ class PerfDatabase:
                 PerfDataFilename.dsv4_flash_hca_generation_module: load_generation_dsv4_flash_kind_module_data,
                 PerfDataFilename.dsv4_flash_paged_mqa_logits_module: load_dsv4_flash_sparse_kernel_data,
                 PerfDataFilename.dsv4_flash_hca_attn_module: load_dsv4_flash_sparse_kernel_data,
+                PerfDataFilename.layerwise: load_layerwise_data,
             }
             perf_data_dir = data_dir
             if op_filename_enum == PerfDataFilename.nccl:
@@ -2585,6 +2624,9 @@ class PerfDatabase:
         self._context_dsa_module_data = _load_op_data(PerfDataFilename.dsa_context_module)
         self._generation_dsa_module_data = _load_op_data(PerfDataFilename.dsa_generation_module)
         self._mhc_module_data = _load_op_data(PerfDataFilename.mhc_module)
+
+        # Layerwise (full transformer layer) data — optional
+        self._layerwise_data = _load_op_data(PerfDataFilename.layerwise)
 
         # V4-Flash module-level data — collected as 3 split files per mode
         # (csa/hca/swa).  Each loader returns a nested dict scoped to one
@@ -8068,6 +8110,65 @@ class PerfDatabase:
                 f"{num_heads=}, {compress_ratio=}, {architecture=}"
             ),
         )
+
+    def query_layerwise(
+        self,
+        model: str,
+        phase: str,
+        tp_size: int,
+        batch_size: int,
+        seq_len: int,
+    ) -> PerformanceResult:
+        """Query layerwise (full transformer layer) latency.
+
+        Args:
+            model: HF model name (e.g. "qwen/qwen3-8b").
+            phase: "CTX" or "GEN".
+            tp_size: tensor parallelism degree.
+            batch_size: batch size (always 1 for CTX).
+            seq_len: ISL for CTX, KV cache length for GEN.
+
+        Returns:
+            PerformanceResult with latency in ms.
+        """
+        layerwise_data = self._layerwise_data
+        if layerwise_data is None or not layerwise_data.loaded:
+            raise ValueError("Layerwise data not available for this system/backend/version")
+
+        data = layerwise_data.data
+        if model not in data:
+            raise ValueError(f"Model '{model}' not found in layerwise data")
+        if phase not in data[model]:
+            raise ValueError(f"Phase '{phase}' not found in layerwise data for {model}")
+        if tp_size not in data[model][phase]:
+            raise ValueError(f"tp_size={tp_size} not found in layerwise data for {model}/{phase}")
+
+        tp_data = data[model][phase][tp_size]
+
+        if phase == "CTX":
+            # 1D interpolation over seq_len_q
+            sorted_keys = sorted(tp_data.keys())
+            if seq_len in tp_data:
+                result = tp_data[seq_len]
+            elif len(sorted_keys) < 2:
+                raise ValueError(f"Not enough CTX data points for interpolation at tp={tp_size}")
+            else:
+                x_left, x_right = self._nearest_1d_point_helper(seq_len, sorted_keys, inner_only=False)
+                result = self._interp_1d(
+                    [x_left, x_right],
+                    [tp_data[x_left], tp_data[x_right]],
+                    seq_len,
+                )
+        else:
+            # GEN: 2D interpolation over (batch_size, seq_len_kv_cache)
+            if batch_size in tp_data and seq_len in tp_data[batch_size]:
+                result = tp_data[batch_size][seq_len]
+            else:
+                result = self._interp_2d_linear(batch_size, seq_len, tp_data)
+
+        latency = result["latency"] if isinstance(result, dict) else float(result)
+        energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+        return PerformanceResult(latency, energy=energy)
 
 
 if __name__ == "__main__":

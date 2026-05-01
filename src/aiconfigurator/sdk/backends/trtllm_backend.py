@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
 from collections import defaultdict
 
 import numpy as np
@@ -15,6 +16,8 @@ from aiconfigurator.sdk.models import BaseModel
 from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+
+_USE_LAYERWISE = os.environ.get("AIC_USE_LAYERWISE", "0") == "1"
 
 # Fraction of available KV cache memory assumed to be reserved by TRT-LLM
 # for internal block-allocator overhead.  Applied in production to make the
@@ -142,6 +145,27 @@ class TRTLLMBackend(BaseBackend):
                 Returns:
                     tuple: (latency in ms, energy in watt-milliseconds)
                 """
+                if _USE_LAYERWISE:
+                    # Approximate mixed step using layerwise data:
+                    # Use CTX lookup with total tokens (ctx + gen) as ISL.
+                    # This treats all tokens as context tokens through the full layer.
+                    model_name = getattr(model, "model_path", "")
+                    tp_size = model.config.tp_size
+                    num_layers = model._num_layers // model.config.pp_size
+                    total_tokens = ctx_tokens + gen_tokens
+                    per_layer_ms = float(
+                        database.query_layerwise(
+                            model_name,
+                            "CTX",
+                            tp_size,
+                            1,
+                            total_tokens,
+                        )
+                    )
+                    total_ms = per_layer_ms * num_layers
+                    per_ops_data["mix_step"] = {"layerwise": total_ms}
+                    return total_ms, 0.0
+
                 num_tokens = ctx_tokens + gen_tokens
                 # treat this as a combined single batch inference, extract non-attention latency
                 summary = self.run_static(
@@ -239,6 +263,24 @@ class TRTLLMBackend(BaseBackend):
                 """
                 if gen_tokens <= 0:
                     return 0.0, 0.0
+
+                if _USE_LAYERWISE:
+                    model_name = getattr(model, "model_path", "")
+                    tp_size = model.config.tp_size
+                    num_layers = model._num_layers // model.config.pp_size
+                    kv_len = isl + osl // 2
+                    per_layer_ms = float(
+                        database.query_layerwise(
+                            model_name,
+                            "GEN",
+                            tp_size,
+                            gen_tokens,
+                            kv_len,
+                        )
+                    )
+                    total_ms = per_layer_ms * num_layers
+                    per_ops_data["genonly_step"] = {"layerwise": total_ms}
+                    return total_ms, 0.0
                 num_tokens = gen_tokens
                 summary = self.run_static(
                     model,

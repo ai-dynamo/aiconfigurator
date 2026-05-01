@@ -663,6 +663,8 @@ class PerfDataFilename(Enum):
     # topk_512 and csa_attn are modeled analytically — no CSV needed.
     dsv4_flash_paged_mqa_logits_module = "dsv4_flash_paged_mqa_logits_module_perf.txt"
     dsv4_flash_hca_attn_module = "dsv4_flash_hca_attn_module_perf.txt"
+    # Layerwise: full transformer layer latency (all ops composed)
+    layerwise = "layerwise_perf.txt"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])
