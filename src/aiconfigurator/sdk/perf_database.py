@@ -4146,7 +4146,7 @@ class PerfDatabase:
             if database_mode == common.DatabaseMode.HYBRID:
                 debug_msg = error_msg + " Will try empirical mode."
                 logger.debug(debug_msg)
-                return PerformanceResult(get_empirical(), energy=0.0)
+                return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
 
             exception_msg = error_msg + " Consider using HYBRID mode."
             # PerfDataNotAvailableError is a structured signal that callers (e.g.

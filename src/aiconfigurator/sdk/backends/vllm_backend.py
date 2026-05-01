@@ -82,8 +82,9 @@ class VLLMBackend(BaseBackend):
                 num_genonly_tokens = 1
                 num_mix_steps_for_tpot_calc = 0
 
-            # Per-ops latency collection
+            # Per-ops latency collection (and parallel data-source breakdown).
             per_ops_data = {}
+            per_ops_source = {}
 
             # FIXME, fix for DS. DS has different ops for attn in ctx and gen.
             def _get_mix_step_latency(
@@ -119,14 +120,17 @@ class VLLMBackend(BaseBackend):
                 )
                 latency_dict = summary.get_context_latency_dict()
                 energy_wms_dict = summary.get_context_energy_wms_dict()
+                source_dict = summary.get_context_source_dict()
                 non_attention_latency_ms = 0.0
                 non_attention_energy_wms = 0.0
                 mix_non_attn_ops = {}
+                mix_non_attn_sources = {}
                 for layer_name, latency in latency_dict.items():
                     if layer_name != "context_attention":
                         non_attention_latency_ms += latency
                         non_attention_energy_wms += energy_wms_dict.get(layer_name, 0.0)
                         mix_non_attn_ops[layer_name] = latency
+                        mix_non_attn_sources[layer_name] = source_dict.get(layer_name, "silicon")
 
                 # second pass to get ctx attn, split full isl over
                 # num_steps(=np.ceil(isl/ctx_tokens))
@@ -148,6 +152,7 @@ class VLLMBackend(BaseBackend):
                 )
                 latency_dict = summary.get_context_latency_dict()
                 energy_wms_dict = summary.get_context_energy_wms_dict()
+                ctx_attn_source = summary.get_context_source_dict().get("context_attention", "silicon")
                 scale_factor = np.ceil(isl / ctx_tokens)
                 ctx_attention_latency_ms = latency_dict["context_attention"] / scale_factor
                 ctx_attention_energy_wms = energy_wms_dict.get("context_attention", 0.0) / scale_factor
@@ -155,6 +160,7 @@ class VLLMBackend(BaseBackend):
                 # third pass to get generation attn. use isl+osl//2 for avg generation attn latency.
                 gen_attention_latency_ms = 0.0
                 gen_attention_energy_wms = 0.0
+                gen_attn_source = "silicon"
                 if gen_tokens > 0:
                     num_tokens = gen_tokens
                     summary = self.run_static(
@@ -173,12 +179,18 @@ class VLLMBackend(BaseBackend):
                     energy_wms_dict = summary.get_generation_energy_wms_dict()
                     gen_attention_latency_ms = latency_dict["generation_attention"]
                     gen_attention_energy_wms = energy_wms_dict.get("generation_attention", 0.0)
+                    gen_attn_source = summary.get_generation_source_dict().get("generation_attention", "silicon")
 
                 # Collect per-op breakdown for mix step
                 per_ops_data["mix_step"] = {
                     **mix_non_attn_ops,
                     "context_attention (scaled)": ctx_attention_latency_ms,
                     "generation_attention": gen_attention_latency_ms,
+                }
+                per_ops_source["mix_step"] = {
+                    **mix_non_attn_sources,
+                    "context_attention (scaled)": ctx_attn_source,
+                    "generation_attention": gen_attn_source,
                 }
 
                 # Combine all components (simple addition)
@@ -213,15 +225,19 @@ class VLLMBackend(BaseBackend):
                 )
                 latency_dict = summary.get_generation_latency_dict()
                 energy_wms_dict = summary.get_generation_energy_wms_dict()
+                source_dict = summary.get_generation_source_dict()
                 genonly_step_latency_ms = 0.0
                 genonly_step_energy_wms = 0.0
                 genonly_ops = {}
+                genonly_sources = {}
                 for layer_name, latency in latency_dict.items():
                     genonly_step_latency_ms += latency
                     genonly_step_energy_wms += energy_wms_dict.get(layer_name, 0.0)
                     genonly_ops[layer_name] = latency
+                    genonly_sources[layer_name] = source_dict.get(layer_name, "silicon")
 
                 per_ops_data["genonly_step"] = genonly_ops
+                per_ops_source["genonly_step"] = genonly_sources
 
                 return genonly_step_latency_ms, genonly_step_energy_wms
 
@@ -380,7 +396,11 @@ class VLLMBackend(BaseBackend):
                 "mix_step_latency_ms": float(mix_step_latency_ms),
                 "genonly_step_latency_ms": float(genonly_step_latency_ms),
             }
+            # scheduling entries (num_*_steps, *_step_latency_ms) are scheduling math
+            # / aggregate sums, not DB queries -- no per-op source applies. Skip them
+            # in per_ops_source; per_ops_data still carries the values themselves.
             summary.set_per_ops_data(per_ops_data)
+            summary.set_per_ops_source(per_ops_source)
 
             # caching
             self._agg_cache[isl][osl][b][ctx_tokens] = summary
@@ -441,6 +461,7 @@ class VLLMBackend(BaseBackend):
 
         results_df = pd.DataFrame(columns=common.ColumnsAgg)
         results_dict_list = []
+        results_per_ops_source: list[dict | None] = []
         capped_b = []
         all_oom = True
         for b in b_list:
@@ -481,9 +502,12 @@ class VLLMBackend(BaseBackend):
                 result_dict = summary.get_result_dict()
                 if result_dict and result_dict["tpot"] <= tpot and result_dict["ttft"] <= ttft:
                     results_dict_list.append(result_dict)
+                    results_per_ops_source.append(summary.get_per_ops_source())
 
         if results_dict_list:
             results_df = pd.DataFrame(results_dict_list, columns=common.ColumnsAgg).round(3)
+            # Carry per-row per_ops_source as an object column (stripped before CSV write).
+            results_df["_per_ops_source"] = results_per_ops_source
 
         sorted_results_df = results_df.sort_values(by="seq/s", ascending=False).round(3)
         if top_k > 0:

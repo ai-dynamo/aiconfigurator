@@ -445,6 +445,33 @@ class EstimateResult:
     per_ops_data: dict | None = None
     """Per-operation latency breakdown (populated when available)."""
 
+    per_ops_source: dict | None = None
+    """Per-operation data source breakdown, parallel to ``per_ops_data``.
+
+    Same nested shape as ``per_ops_data`` (one entry per op_name in each
+    step), but values are source tags rather than latencies. Example::
+
+        {
+            "mix_step": {
+                "context_attention (scaled)": "mixed",
+                "context_full_moe":           "empirical",
+                "context_qkv_gemm":           "silicon",
+                ...
+            },
+            "genonly_step": {
+                "generation_attention": "empirical",
+                "generation_qkv_gemm":  "silicon",
+                ...
+            },
+        }
+
+    Values are ``"silicon"`` (table data), ``"empirical"`` (HYBRID-mode
+    SOL+empirical fallback), or ``"mixed"`` (a sum of values from both
+    sources). The ``scheduling`` section of ``per_ops_data`` is intentionally
+    omitted here -- those entries are scheduling math / aggregate sums, not
+    DB queries.
+    """
+
     kv_cache_warning: str | None = None
     """Warning message when batch_size exceeds KV cache capacity."""
 
@@ -906,6 +933,7 @@ def _run_agg_estimate(
         raw=result_dict,
         mode="agg",
         per_ops_data=summary.get_per_ops_data(),
+        per_ops_source=summary.get_per_ops_source(),
         kv_cache_warning=kv_warning,
     )
 

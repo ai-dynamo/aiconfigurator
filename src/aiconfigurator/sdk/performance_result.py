@@ -2,16 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-PerformanceResult class for backward-compatible latency+energy tracking.
+PerformanceResult class for backward-compatible latency+energy+source tracking.
 """
 
 
 class PerformanceResult(float):
     """
-    Float-like class that stores both latency and energy.
+    Float-like class that stores latency, energy, and a data-source tag.
 
     Behaves exactly like a float for backward compatibility, but stores energy
-    instead of power internally. Power is derived as energy / latency.
+    instead of power internally. Power is derived as energy / latency. A
+    ``source`` tag records whether the value came from silicon table data or
+    an empirical fallback, and is propagated through arithmetic.
 
     Supports all arithmetic and comparison operations for full float compatibility.
 
@@ -19,43 +21,59 @@ class PerformanceResult(float):
         - latency: milliseconds (ms)
         - energy: watt-milliseconds (W·ms) = millijoules (mJ)
         - power: watts (W) - derived property
+        - source: ``"silicon"`` (table data) | ``"empirical"`` (HYBRID-mode
+          SOL+empirical fallback) | ``"mixed"`` (sum of values from both)
 
     Note: 1 W·ms = 1 mJ. We use W·ms to match latency units (ms).
           To convert to Joules: divide by 1000 (J = W·s = W·ms / 1000)
 
+    Source propagation:
+        - ``__add__``: sources merged (same -> same; mismatch -> ``"mixed"``)
+        - ``__mul__`` / ``__rmul__`` / ``__truediv__``: scalar operand has no
+          provenance, so the left operand's source is preserved unchanged.
+        - ``__abs__``: source preserved.
+
     Example:
-        result = PerformanceResult(10.5, energy=3675.0)  # 10.5ms latency, 3675 W·ms energy
+        result = PerformanceResult(10.5, energy=3675.0, source="silicon")
         print(result)           # 10.5 (acts like float)
         print(result.energy)    # 3675.0 (energy in W·ms = 3.675 J)
         print(result.power)     # 350.0 (derived: 3675.0 / 10.5 = 350W)
+        print(result.source)    # "silicon"
 
         # Comparisons work correctly
         if result > 10.0:  # Uses __gt__
             print("Latency exceeds threshold")
 
-        # Aggregation with sum()
+        # Aggregation with sum() preserves energy and merges sources
         results = [result1, result2, result3]
         total = sum(results)  # __radd__ handles sum() start value
         print(total.energy)   # Energy is preserved
+        print(total.source)   # "silicon" if all were silicon, else "mixed"
 
         # Sorting works based on latency
         sorted_results = sorted(results)
     """
 
     # Note: We don't use __slots__ here because float subclasses cannot define __slots__
+    # TODO: add type hints to the remaining methods of this class. Only the
+    # scalar arithmetic operators (__mul__/__rmul__/__truediv__/__rtruediv__)
+    # are currently annotated.
 
-    def __new__(cls, latency, energy=0.0):
+    def __new__(cls, latency, energy=0.0, source="silicon"):
         """
         Create a new PerformanceResult.
 
         Args:
             latency: The latency value in milliseconds (acts as the float value)
             energy: The energy value in watt-milliseconds (W·ms)
+            source: Where this measurement came from --  "silicon" (table data),
+                "empirical" (SOL+empirical fallback in HYBRID mode), or "mixed"
+                (sum of values from different sources).
         """
         instance = float.__new__(cls, latency)
         return instance
 
-    def __init__(self, latency, energy=0.0):
+    def __init__(self, latency, energy=0.0, source="silicon"):
         """
         Initialize the PerformanceResult.
 
@@ -63,8 +81,10 @@ class PerformanceResult(float):
             latency: The latency value in milliseconds
             energy: The energy value in watt-milliseconds (W·ms)
                    Note: 1 W·ms = 1 millijoule (mJ)
+            source: Data source tag (see __new__).
         """
         self.energy = energy  # W·ms (watt-milliseconds)
+        self.source = source
 
     @property
     def power(self):
@@ -87,14 +107,23 @@ class PerformanceResult(float):
         """String representation showing latency, energy, and derived power."""
         return f"PerformanceResult(latency={float(self)}, energy={self.energy}, power={self.power})"
 
+    @staticmethod
+    def _merge_source(a: str, b: str) -> str:
+        """Combine source tags during arithmetic. Same -> same; mismatch -> 'mixed'."""
+        return a if a == b else "mixed"
+
     def __add__(self, other):
         """Add two PerformanceResults or a PerformanceResult and a number."""
         if isinstance(other, PerformanceResult):
-            # Add latencies and energies (both are additive!)
-            return PerformanceResult(float(self) + float(other), energy=self.energy + other.energy)
+            # Add latencies and energies (both are additive!) and merge sources.
+            return PerformanceResult(
+                float(self) + float(other),
+                energy=self.energy + other.energy,
+                source=self._merge_source(self.source, other.source),
+            )
         else:
-            # Add to latency only, keep same energy
-            return PerformanceResult(float(self) + other, energy=self.energy)
+            # Add to latency only, keep same energy and source.
+            return PerformanceResult(float(self) + other, energy=self.energy, source=self.source)
 
     def __radd__(self, other):
         """Right addition for sum() support.
@@ -107,23 +136,20 @@ class PerformanceResult(float):
             return self
         return self.__add__(other)
 
-    def __mul__(self, other):
-        """Multiply PerformanceResult by a scalar."""
-        # Scale both latency and energy
-        return PerformanceResult(float(self) * other, energy=self.energy * other)
+    def __mul__(self, other: int | float) -> "PerformanceResult":
+        """Multiply PerformanceResult by a scalar; preserve source."""
+        return PerformanceResult(float(self) * other, energy=self.energy * other, source=self.source)
 
-    def __rmul__(self, other):
+    def __rmul__(self, other: int | float) -> "PerformanceResult":
         """Right multiplication."""
         return self.__mul__(other)
 
-    def __truediv__(self, other):
-        """Divide PerformanceResult by a scalar."""
-        # Scale both latency and energy
-        return PerformanceResult(float(self) / other, energy=self.energy / other)
+    def __truediv__(self, other: int | float) -> "PerformanceResult":
+        """Divide PerformanceResult by a scalar; preserve source."""
+        return PerformanceResult(float(self) / other, energy=self.energy / other, source=self.source)
 
-    def __rtruediv__(self, other):
-        """Right division: other / self."""
-        # Return plain float when dividing by PerformanceResult
+    def __rtruediv__(self, other: int | float) -> float:
+        """Right division: other / self. Returns plain float (no source on scalar)."""
         return other / float(self)
 
     # Comparison operators (CRITICAL - Python doesn't auto-infer from float inheritance)
@@ -159,7 +185,7 @@ class PerformanceResult(float):
 
     def __abs__(self):
         """Absolute value of latency and energy."""
-        return PerformanceResult(abs(float(self)), energy=abs(self.energy))
+        return PerformanceResult(abs(float(self)), energy=abs(self.energy), source=self.source)
 
     def __hash__(self):
         """Hash based on latency and energy for use in sets/dicts."""
