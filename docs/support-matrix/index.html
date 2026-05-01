@@ -33,6 +33,41 @@ tailwind.config = {
   .dark ::-webkit-scrollbar-thumb:hover { background: #64748b; }
   .dark ::-webkit-scrollbar-corner { background: transparent; }
   html.dark { color-scheme: dark; }
+  /* Body/backgrounds are full-bleed. Each bar (header / controls / tabs)
+     and the main panel wrap their children in `max-w-[1600px] mx-auto` so
+     content is centered at 1600px while the colored bar extends edge-to-edge. */
+  /* Instant (no-delay) tooltip for table cells. Uses `data-tip` so the
+     browser's native `title` delay does not kick in. */
+  td[data-tip] { position: relative; }
+  /* Orange/red cells use `hover:brightness-95` which creates a CSS filter
+     stacking context. Without lifting the hovered cell itself, the
+     tooltip's z-index is trapped inside that context and gets painted
+     under the next sibling <td>. Promoting the cell on hover escapes that. */
+  td[data-tip]:hover { z-index: 20; }
+  td[data-tip]:hover::after {
+    content: attr(data-tip);
+    position: absolute;
+    left: 50%;
+    top: 100%;
+    transform: translate(-50%, 6px);
+    z-index: 1000;
+    padding: 0.4rem 0.6rem;
+    background: rgb(15 23 42);
+    color: rgb(241 245 249);
+    font-size: 0.72rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    line-height: 1.4;
+    white-space: pre;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.25);
+    pointer-events: none;
+    max-width: 480px;
+  }
+  html.dark td[data-tip]:hover::after {
+    background: rgb(30 41 59);
+    color: rgb(241 245 249);
+    box-shadow: 0 2px 8px rgba(0,0,0,.5);
+  }
 </style>
 </head>
 <body class="bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 min-h-screen font-sans">
@@ -198,53 +233,114 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
   return { version: 'FAIL', atTarget: false, error: allMsgs.length ? allMsgs.join(' | ') : 'No error message available' };
 }
 
+// Aggregate per-version statuses into a single (model, backend) cell. Each
+// cell records which versions pass, partially pass, or fail so the UI can
+// show "pass on v1.0, fail on v1.1" instead of a single PASS/FAIL flag.
+// Overall status:
+//   pass:    every tested version fully passes
+//   fail:    every tested version fully fails
+//   partial: any mix (includes per-version agg/disagg splits)
+//   missing: no rows tested for this (model, backend)
+function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilter) {
+  const passVersions = [];
+  const partialVersions = [];
+  const failVersions = [];
+  const errors = [];
+
+  // Per-version status uses the existing agg-vs-disagg split inside
+  // `getLatestSupportedVersion`, restricted to one version at a time.
+  for (const version of versions) {
+    const verRows = rows.filter(r => r.Version === version);
+    const { version: v, error } = getLatestSupportedVersion(verRows, modelId, system, backend);
+    if (v === null) continue; // missing for this version
+
+    let verStatus = v === 'FAIL' ? 'fail' : 'pass';
+    let verError = v === 'FAIL' ? error : null;
+
+    // Within-version agg/disagg split (only meaningful when viewing "all").
+    if (modeFilter === 'all' && verStatus === 'pass') {
+      const aggRows = verRows.filter(r => r.Mode === 'agg');
+      const disaggRows = verRows.filter(r => r.Mode === 'disagg');
+      const aggResult = aggRows.length
+        ? getLatestSupportedVersion(aggRows, modelId, system, backend)
+        : { version: null, error: null };
+      const disaggResult = disaggRows.length
+        ? getLatestSupportedVersion(disaggRows, modelId, system, backend)
+        : { version: null, error: null };
+      const aggPass = aggResult.version !== null && aggResult.version !== 'FAIL';
+      const disaggPass = disaggResult.version !== null && disaggResult.version !== 'FAIL';
+      if (aggPass !== disaggPass) {
+        verStatus = 'partial';
+        verError = !aggPass
+          ? `[agg FAIL] ${aggResult.error || 'No error message available'}`
+          : `[disagg FAIL] ${disaggResult.error || 'No error message available'}`;
+      }
+    }
+
+    if (verStatus === 'pass') passVersions.push(version);
+    else if (verStatus === 'partial') partialVersions.push(version);
+    else failVersions.push(version);
+
+    if (verError) errors.push(`[${version}] ${verError}`);
+  }
+
+  if (!passVersions.length && !partialVersions.length && !failVersions.length) {
+    return { status: 'missing', passVersions: [], partialVersions: [], failVersions: [], error: null };
+  }
+
+  // Color is driven by the **latest tested version** for this (model, backend):
+  //   - latest is strictly pass               -> green
+  //   - latest is fail/partial but any older  -> orange (regression)
+  //   - everything failed                     -> red
+  const sortDesc = (a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a));
+  const allTested = [...passVersions, ...partialVersions, ...failVersions].sort(sortDesc);
+  const newest = allTested[0];
+  let status;
+  if (passVersions.includes(newest)) status = 'pass';
+  else if (passVersions.length) status = 'partial';
+  else status = 'fail';
+
+  return {
+    status,
+    passVersions: passVersions.slice().sort(sortDesc),
+    partialVersions: partialVersions.slice().sort(sortDesc),
+    failVersions: failVersions.slice().sort(sortDesc),
+    error: errors.length ? errors.join(' | ') : null,
+  };
+}
+
 function buildMatrixForMode(rows, systemName, modeFilter) {
   let subset = rows.filter(r => r.System === systemName);
   if (modeFilter !== 'all') subset = subset.filter(r => r.Mode === modeFilter);
-  if (!subset.length) return { matrixRows: [], backends: [] };
+  if (!subset.length) return { matrixRows: [], columns: [] };
 
   const models = [...new Set(subset.map(r => r.HuggingFaceID))].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-  const backends = [...new Set(subset.map(r => r.Backend))].sort();
+
+  // Columns are one-per-backend; each carries the sorted list of versions
+  // tested for this system/mode. The cell aggregator consults that list.
+  const backendVersionSet = {};
+  for (const r of subset) {
+    if (!backendVersionSet[r.Backend]) backendVersionSet[r.Backend] = new Set();
+    backendVersionSet[r.Backend].add(r.Version);
+  }
+  const sortAsc = (a, b) => compareVersionTuples(versionSortKey(a), versionSortKey(b));
+  const columns = Object.keys(backendVersionSet)
+    .sort()
+    .map(backend => ({
+      key: backend,
+      backend,
+      versions: [...backendVersionSet[backend]].sort(sortAsc),
+    }));
 
   const matrixRows = models.map(model => {
     const cells = {};
-    for (const backend of backends) {
-      const { version, atTarget, error } = getLatestSupportedVersion(subset, model, systemName, backend);
-      let status = 'pass';
-      if (version === null || version === 'FAIL') status = 'fail';
-
-      let partialError = null;
-      if (modeFilter === 'all' && status === 'pass') {
-        const aggRows = subset.filter(r => r.Mode === 'agg');
-        const disaggRows = subset.filter(r => r.Mode === 'disagg');
-        const aggResult = aggRows.length
-          ? getLatestSupportedVersion(aggRows, model, systemName, backend)
-          : { version: null, atTarget: false, error: null };
-        const disaggResult = disaggRows.length
-          ? getLatestSupportedVersion(disaggRows, model, systemName, backend)
-          : { version: null, atTarget: false, error: null };
-        const aggPass = aggResult.version !== null && aggResult.version !== 'FAIL';
-        const disaggPass = disaggResult.version !== null && disaggResult.version !== 'FAIL';
-        if (aggPass !== disaggPass) {
-          status = 'partial';
-          partialError = !aggPass
-            ? `[agg FAIL] ${aggResult.error || 'No error message available'}`
-            : `[disagg FAIL] ${disaggResult.error || 'No error message available'}`;
-        }
-      }
-
-      if (version === null) {
-        cells[backend] = { version: 'FAIL', status: 'fail', error: 'No data available' };
-      } else if (version === 'FAIL') {
-        cells[backend] = { version: 'FAIL', status: 'fail', error };
-      } else {
-        cells[backend] = { version, status, error: partialError };
-      }
+    for (const col of columns) {
+      cells[col.key] = aggregateBackendCell(subset, model, systemName, col.backend, col.versions, modeFilter);
     }
     return { model, cells };
   });
 
-  return { matrixRows, backends };
+  return { matrixRows, columns };
 }
 
 function buildTopErrors(rows, systemName, modeFilter, topN = 10) {
@@ -269,7 +365,7 @@ function csvUrl(branch) {
 }
 
 const HARDCODED_RELEASE_BRANCHES = [
-  'release/0.7.0-post.1',
+  'release/0.8.0',
   'release/0.7.0',
 ];
 const BRANCH_CACHE_KEY = 'sm-release-branches';
@@ -349,32 +445,34 @@ function Header({ activeBranch, onSelectBranch, releaseBranches, branchesLoading
   }, [dark]);
 
   return (
-    <div className="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-6 py-3 flex items-center gap-3 sticky top-0 z-50 shadow-sm flex-wrap">
-      <a href="/aiconfigurator/"><img src="https://avatars.githubusercontent.com/u/201626793" alt="ai-dynamo" width="32" height="32" className="rounded-full" /></a>
-      <div className="min-w-0 mr-auto">
-        <h1 className="text-lg font-bold leading-tight"><a href="/aiconfigurator/">AI Configurator</a>
-        <span className="text-sm text-slate-500 dark:text-slate-400"> - Support Matrix</span></h1>
+    <div className="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 sticky top-0 z-50 shadow-sm">
+      <div className="max-w-[1600px] mx-auto px-6 py-3 flex items-center gap-3 flex-wrap">
+        <a href="/aiconfigurator/"><img src="https://avatars.githubusercontent.com/u/201626793" alt="ai-dynamo" width="32" height="32" className="rounded-full" /></a>
+        <div className="min-w-0 mr-auto">
+          <h1 className="text-lg font-bold leading-tight"><a href="/aiconfigurator/">AI Configurator</a>
+          <span className="text-sm text-slate-500 dark:text-slate-400"> - Support Matrix</span></h1>
+        </div>
+        <BranchSelector
+          activeBranch={activeBranch}
+          onSelectBranch={onSelectBranch}
+          releaseBranches={releaseBranches}
+          branchesLoading={branchesLoading}
+          branchWarning={branchWarning}
+        />
+        <a href="https://github.com/ai-dynamo/aiconfigurator" target="_blank" rel="noopener"
+           title="View on GitHub"
+           className="text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors">
+          <GitHubIcon />
+        </a>
+        <button onClick={() => setDark(d => !d)} title="Toggle dark/light mode"
+          className="border border-slate-200 dark:border-slate-700 rounded px-2 py-1 cursor-pointer
+                     text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors flex items-center justify-center w-8 h-8">
+          {dark
+            ? <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+            : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          }
+        </button>
       </div>
-      <BranchSelector
-        activeBranch={activeBranch}
-        onSelectBranch={onSelectBranch}
-        releaseBranches={releaseBranches}
-        branchesLoading={branchesLoading}
-        branchWarning={branchWarning}
-      />
-      <a href="https://github.com/ai-dynamo/aiconfigurator" target="_blank" rel="noopener"
-         title="View on GitHub"
-         className="text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors">
-        <GitHubIcon />
-      </a>
-      <button onClick={() => setDark(d => !d)} title="Toggle dark/light mode"
-        className="border border-slate-200 dark:border-slate-700 rounded px-2 py-1 cursor-pointer
-                   text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors flex items-center justify-center w-8 h-8">
-        {dark
-          ? <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-          : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-        }
-      </button>
     </div>
   );
 }
@@ -456,10 +554,11 @@ function BranchSelector({ activeBranch, onSelectBranch, releaseBranches, branche
   );
 }
 
-function Controls({ activeMode, onSetMode, searchQuery, onSetSearch, totalPass, totalFail }) {
+function Controls({ activeMode, onSetMode, searchQuery, onSetSearch, totalPass, totalFail, showAllVersions, onToggleShowAllVersions }) {
   const modes = ['all', 'agg', 'disagg'];
   return (
-    <div className="px-6 py-3 flex flex-wrap gap-3 items-center border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
+    <div className="border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
+     <div className="max-w-[1600px] mx-auto px-6 py-3 flex flex-wrap gap-3 items-center">
       <span className="text-sm font-semibold text-slate-500 dark:text-slate-400">Mode:</span>
       <div className="flex border border-slate-200 dark:border-slate-700 rounded overflow-hidden">
         {modes.map(m => (
@@ -481,28 +580,40 @@ function Controls({ activeMode, onSetMode, searchQuery, onSetSearch, totalPass, 
                    bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 focus:outline-none
                    focus:border-indigo-400 transition-colors"
       />
+      <label className="flex items-center gap-1.5 text-sm text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={showAllVersions}
+          onChange={e => onToggleShowAllVersions(e.target.checked)}
+          className="cursor-pointer accent-indigo-500"
+        />
+        Show all versions
+      </label>
       <div className="ml-auto text-xs text-slate-500 dark:text-slate-400 flex gap-2">
         <span className="text-green-700 dark:text-green-400">{totalPass} PASS</span>
         <span className="text-red-600 dark:text-red-400">{totalFail} FAIL</span>
       </div>
+     </div>
     </div>
   );
 }
 
 function SystemTabs({ systems, activeSystem, onSelectSystem }) {
   return (
-    <div className="flex flex-wrap border-b-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-6">
-      {systems.map(s => (
-        <button key={s}
-          onClick={() => onSelectSystem(s)}
-          className={`px-4 py-2.5 text-sm font-medium whitespace-nowrap -mb-[2px] border-b-2 transition-all cursor-pointer
-            ${activeSystem === s
-              ? 'text-indigo-500 dark:text-indigo-400 border-indigo-500 dark:border-indigo-400 font-bold'
-              : 'text-slate-500 dark:text-slate-400 border-transparent hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'}`}
-        >
-          {s}
-        </button>
-      ))}
+    <div className="border-b-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
+      <div className="max-w-[1600px] mx-auto flex flex-wrap px-6">
+        {systems.map(s => (
+          <button key={s}
+            onClick={() => onSelectSystem(s)}
+            className={`px-4 py-2.5 text-sm font-medium whitespace-nowrap -mb-[2px] border-b-2 transition-all cursor-pointer
+              ${activeSystem === s
+                ? 'text-indigo-500 dark:text-indigo-400 border-indigo-500 dark:border-indigo-400 font-bold'
+                : 'text-slate-500 dark:text-slate-400 border-transparent hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'}`}
+          >
+            {s}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -543,15 +654,15 @@ function Legend() {
       <span className="font-semibold">Legend:</span>
       <div className="flex items-center gap-1.5">
         <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-green-100 dark:bg-green-950"></span>
-        Supported
+        Latest version passes
       </div>
       <div className="flex items-center gap-1.5">
         <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-amber-100 dark:bg-amber-950"></span>
-        Partial (agg or disagg only)
+        Regression: latest fails, older passes (<span className="line-through opacity-75 font-mono">struck</span>&nbsp;= fails)
       </div>
       <div className="flex items-center gap-1.5">
         <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-red-100 dark:bg-red-950"></span>
-        FAIL (click for details)
+        All versions fail (click for details)
       </div>
       <a href={buildFileIssueUrl()} target="_blank" rel="noopener"
         className="ml-auto px-3 py-1.5 bg-indigo-500 hover:bg-indigo-600 dark:bg-indigo-400 dark:hover:bg-indigo-500
@@ -567,21 +678,29 @@ function SortArrow({ col, sortCol, sortAsc }) {
   return <span className="ml-1 text-[0.65rem]">{sortAsc ? '\u25B2' : '\u25BC'}</span>;
 }
 
-function MatrixTable({ matrixRows, backends, searchQuery, sortCol, sortAsc, onSort, onCellClick }) {
+function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showAllVersions, onSort, onCellClick }) {
   let filtered = matrixRows;
   if (searchQuery) {
     const q = searchQuery.toLowerCase();
     filtered = matrixRows.filter(r => r.model.toLowerCase().includes(q));
   }
 
+  // Sort by status rank first (pass < partial < fail < missing), then by
+  // the concatenated version lists so rows with the same status cluster by
+  // their supported-version set.
+  const STATUS_RANK = { pass: 0, partial: 1, fail: 2, missing: 3 };
+  const cellSortKey = (c) => {
+    if (!c) return '99|';
+    const versions = (c.passVersions || []).concat(c.partialVersions || [], c.failVersions || []).join(',');
+    return String(STATUS_RANK[c.status] ?? 99) + '|' + versions;
+  };
+
   if (sortCol !== null) {
     filtered = [...filtered].sort((a, b) => {
       let va, vb;
       if (sortCol === 'model') { va = a.model; vb = b.model; }
-      else { va = (a.cells[sortCol] || {}).version || ''; vb = (b.cells[sortCol] || {}).version || ''; }
+      else { va = cellSortKey(a.cells[sortCol]); vb = cellSortKey(b.cells[sortCol]); }
       if (va === vb) return 0;
-      if (va === 'FAIL') return sortAsc ? 1 : -1;
-      if (vb === 'FAIL') return sortAsc ? -1 : 1;
       return sortAsc ? (va < vb ? -1 : 1) : (va > vb ? -1 : 1);
     });
   }
@@ -602,6 +721,41 @@ function MatrixTable({ matrixRows, backends, searchQuery, sortCol, sortAsc, onSo
     }
   };
 
+  // Render the version chips inside a cell.
+  //
+  //   showAllVersions = true  -> every tested version: pass plain, partial
+  //                              with leading `~`, fail with strikethrough.
+  //   showAllVersions = false -> just the latest tested version, styled the
+  //                              same way based on which bucket it came from.
+  const renderChips = (cell) => {
+    const chips = [];
+    const pushPass = (v) => chips.push(<span key={`p-${v}`}>{v}</span>);
+    const pushPartial = (v) => chips.push(<span key={`m-${v}`} title="Partial (agg or disagg only)">~{v}</span>);
+    const pushFail = (v) => chips.push(<span key={`f-${v}`} className="line-through opacity-75">{v}</span>);
+
+    if (showAllVersions) {
+      (cell.passVersions || []).forEach(pushPass);
+      (cell.partialVersions || []).forEach(pushPartial);
+      (cell.failVersions || []).forEach(pushFail);
+    } else {
+      // Each per-status list is already newest-first (sorted in aggregateBackendCell).
+      // Pick whichever bucket the overall status points at.
+      if (cell.status === 'pass' && cell.passVersions && cell.passVersions.length) {
+        pushPass(cell.passVersions[0]);
+      } else if (cell.status === 'partial') {
+        // Regression: latest is fail/partial. Prefer the latest fail chip if any,
+        // else the latest partial chip — either way that's the version that's
+        // currently broken.
+        if (cell.failVersions && cell.failVersions.length) pushFail(cell.failVersions[0]);
+        else if (cell.partialVersions && cell.partialVersions.length) pushPartial(cell.partialVersions[0]);
+      } else if (cell.status === 'fail') {
+        if (cell.failVersions && cell.failVersions.length) pushFail(cell.failVersions[0]);
+        else if (cell.partialVersions && cell.partialVersions.length) pushPartial(cell.partialVersions[0]);
+      }
+    }
+    return <span className="inline-flex flex-wrap gap-x-2 gap-y-0.5 font-mono text-xs">{chips}</span>;
+  };
+
   return (
     <div className="overflow-x-auto mb-6 rounded-lg border border-slate-200 dark:border-slate-700 scrollbar-thin">
       <table className="w-full text-sm border-collapse">
@@ -614,17 +768,17 @@ function MatrixTable({ matrixRows, backends, searchQuery, sortCol, sortAsc, onSo
                   ${sortCol === 'model' ? 'text-indigo-600 dark:text-indigo-400' : ''}`}>
               HuggingFace ID <SortArrow col="model" sortCol={sortCol} sortAsc={sortAsc} />
             </th>
-            {backends.map(b => (
-              <th key={b} onClick={() => onSort(b)}
+            {columns.map(c => (
+              <th key={c.key} onClick={() => onSort(c.key)}
                   className={`bg-slate-50 dark:bg-slate-800 sticky top-0 z-10 px-3 py-2 text-left font-bold
                     border-b-2 border-slate-200 dark:border-slate-600 cursor-pointer select-none whitespace-nowrap
                     hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors
-                    ${sortCol === b ? 'text-indigo-600 dark:text-indigo-400' : ''}`}>
-                {b}
-                {TARGET_VERSIONS[b] && (
-                  <small className="font-normal text-slate-400 ml-1">(target: {TARGET_VERSIONS[b]})</small>
+                    ${sortCol === c.key ? 'text-indigo-600 dark:text-indigo-400' : ''}`}>
+                {c.backend}
+                {c.versions.length > 1 && (
+                  <small className="font-normal text-slate-400 ml-1">({c.versions.join(', ')})</small>
                 )}
-                <SortArrow col={b} sortCol={sortCol} sortAsc={sortAsc} />
+                <SortArrow col={c.key} sortCol={sortCol} sortAsc={sortAsc} />
               </th>
             ))}
           </tr>
@@ -636,15 +790,26 @@ function MatrixTable({ matrixRows, backends, searchQuery, sortCol, sortAsc, onSo
                   title={row.model}>
                 {row.model}
               </td>
-              {backends.map(b => {
-                const cell = row.cells[b];
-                if (!cell) return <td key={b} className="px-3 py-2 border-b border-slate-200 dark:border-slate-700">&mdash;</td>;
+              {columns.map(c => {
+                const cell = row.cells[c.key];
+                if (!cell || cell.status === 'missing') {
+                  return <td key={c.key} data-tip={`${c.backend}: not tested`} className="px-3 py-2 border-b border-slate-200 dark:border-slate-700 text-slate-400">&mdash;</td>;
+                }
                 const clickable = cell.status === 'fail' || cell.status === 'partial';
+                // Native browser tooltip with the full version breakdown so the
+                // user can always inspect all versions regardless of the
+                // "Show all versions" toggle.
+                const tooltipParts = [];
+                if (cell.passVersions && cell.passVersions.length) tooltipParts.push(`Pass: ${cell.passVersions.join(', ')}`);
+                if (cell.partialVersions && cell.partialVersions.length) tooltipParts.push(`Partial: ${cell.partialVersions.join(', ')}`);
+                if (cell.failVersions && cell.failVersions.length) tooltipParts.push(`Fail: ${cell.failVersions.join(', ')}`);
+                const tooltip = `${c.backend}\n${tooltipParts.join('\n')}`;
                 return (
-                  <td key={b}
-                      onClick={clickable ? () => onCellClick(row.model, b, cell.error) : undefined}
-                      className={`px-3 py-2 border-b border-slate-200 dark:border-slate-700 whitespace-nowrap ${cellClass(cell.status)}`}>
-                    {cell.version}
+                  <td key={c.key}
+                      data-tip={tooltip}
+                      onClick={clickable ? () => onCellClick(row.model, c.backend, cell.error) : undefined}
+                      className={`px-3 py-2 border-b border-slate-200 dark:border-slate-700 ${cellClass(cell.status)}`}>
+                    {renderChips(cell)}
                   </td>
                 );
               })}
@@ -772,6 +937,7 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortCol, setSortCol] = useState(null);
   const [sortAsc, setSortAsc] = useState(true);
+  const [showAllVersions, setShowAllVersions] = useState(false);
 
   const [modal, setModal] = useState(null);
 
@@ -815,8 +981,8 @@ function App() {
   const totalPass = useMemo(() => csvRows.filter(r => r.Status === 'PASS').length, [csvRows]);
   const totalFail = useMemo(() => csvRows.filter(r => r.Status === 'FAIL').length, [csvRows]);
 
-  const { matrixRows, backends } = useMemo(
-    () => activeSystem ? buildMatrixForMode(csvRows, activeSystem, activeMode) : { matrixRows: [], backends: [] },
+  const { matrixRows, columns } = useMemo(
+    () => activeSystem ? buildMatrixForMode(csvRows, activeSystem, activeMode) : { matrixRows: [], columns: [] },
     [csvRows, activeSystem, activeMode]
   );
 
@@ -867,13 +1033,15 @@ function App() {
             activeMode={activeMode} onSetMode={(m) => { setActiveMode(m); setSortCol(null); setSortAsc(true); }}
             searchQuery={searchQuery} onSetSearch={setSearchQuery}
             totalPass={totalPass} totalFail={totalFail}
+            showAllVersions={showAllVersions} onToggleShowAllVersions={setShowAllVersions}
           />
           <SystemTabs systems={systems} activeSystem={activeSystem} onSelectSystem={handleSelectSystem} />
-          <div className="p-6 max-w-full">
+          <div className="max-w-[1600px] mx-auto p-6">
             <Legend />
             <MatrixTable
-              matrixRows={matrixRows} backends={backends}
+              matrixRows={matrixRows} columns={columns}
               searchQuery={searchQuery} sortCol={sortCol} sortAsc={sortAsc}
+              showAllVersions={showAllVersions}
               onSort={handleSort}
               onCellClick={(model, backend, err) => setModal({ model, system: activeSystem, backend, error: err })}
             />
