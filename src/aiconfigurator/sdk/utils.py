@@ -637,8 +637,8 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"hca_layers={extra_params.compress_ratios.count(128)}, "
             f"hc_mult={extra_params.hc_mult}"
         )
-    elif architecture in {"Qwen3ForCausalLM", "Qwen3MoeForCausalLM"}:
-        # Qwen3-family attention may include additional Q/K normalization.
+    elif architecture in {"Qwen3ForCausalLM", "Qwen3MoeForCausalLM", "MiniMaxM2ForCausalLM"}:
+        # Qwen3-family and MiniMax-M2 attention include per-layer Q/K normalization.
         extra_params = {"architecture": architecture, "use_qk_norm": True}
     elif architecture in {"Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"}:
         # Qwen3.5 hybrid GDN + full-attention model.
