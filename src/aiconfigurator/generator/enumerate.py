@@ -403,9 +403,12 @@ def enumerate_profiling_configs(
             to load weights.
 
     Returns:
-        ``(prefill_candidates, decode_candidates)`` -- two lists of
-        :class:`EnumeratedCandidate` objects, each bundling an aggregated
-        DGD config dict with its parallelization metadata.
+        ``(prefill_candidates, decode_candidates, fits, required_tp)``.
+        The first two values are lists of :class:`EnumeratedCandidate`
+        objects, each bundling an aggregated DGD config dict with its
+        parallelization metadata. ``fits`` indicates whether the model fits
+        in the available GPU budget, and ``required_tp`` is the uncapped TP
+        required for the memory-fit estimate.
     """
     # ------------------------------------------------------------------
     # 0. Resolve system config

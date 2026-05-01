@@ -192,11 +192,13 @@ class TestCalculateMinTp:
             gpus_per_node=8,
             total_gpus=32,
         )
+
+        assert fits is False  # cannot fit in single node configuration
         assert min_gpus == 8  # capped
-        assert tp == 16  # actual requirement
+        assert tp == 16  # required TP still computed
 
     def test_multi_node_allows_crossing_node_boundary(self):
-        """MoE wide-EP: min_tp can span nodes, floored to power-of-2 fit."""
+        """MoE wide-EP: min_tp can span nodes, floored to power-of-2 fit. Model fits when spanning multiple nodes."""
         min_gpus, fits, tp = _calculate_min_tp(
             model_weight_bytes=self._R1_FP8_WEIGHTS,
             vram_per_gpu=self._H100_VRAM,
@@ -204,10 +206,13 @@ class TestCalculateMinTp:
             total_gpus=32,
             allow_multi_node=True,
         )
+
+        assert fits is True
         assert tp == 16
         assert min_gpus == 16
 
     def test_multi_node_capped_by_total_gpus(self):
+        """Insufficient total GPUs → should not fit."""
         min_gpus, fits, tp = _calculate_min_tp(
             model_weight_bytes=self._R1_FP8_WEIGHTS,
             vram_per_gpu=self._H100_VRAM,
@@ -215,16 +220,21 @@ class TestCalculateMinTp:
             total_gpus=8,
             allow_multi_node=True,
         )
-        assert min_gpus == 8  # capped by total GPUs
-        assert tp == 16  # still required
+
+        assert fits is False
+        assert min_gpus == 8
+        assert tp == 16
 
     def test_small_model_fits_on_one_gpu(self):
+        """Tiny model should trivially fit."""
         min_gpus, fits, tp = _calculate_min_tp(
             model_weight_bytes=10 * 1024**3,
             vram_per_gpu=self._H100_VRAM,
             gpus_per_node=8,
             total_gpus=8,
         )
+
+        assert fits is True
         assert min_gpus == 1
         assert tp == 1
 
