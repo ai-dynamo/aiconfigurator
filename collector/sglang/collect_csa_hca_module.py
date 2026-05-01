@@ -1113,22 +1113,10 @@ def _make_csa_mqa_logits_kernel(attention_module, forward_batch, device: str):
     weights.zero_()
     kv_cache.zero_()
 
-    from sglang.srt.environ import envs
-
-    if envs.SGLANG_OPT_USE_TILELANG_INDEXER.get():
-        from sglang.srt.layers.attention.nsa.tilelang_kernel import (
-            tilelang_fp8_paged_mqa_logits as fn,
-        )
-    elif envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.get():
-        from sglang.srt.layers.attention.compressed.indexer import (
-            fp8_paged_mqa_logits_torch as fn,
-        )
-    elif envs.SGLANG_OPT_DG_PAGED_MQA_LOGITS_CHUNK_SIZE.get() != -1:
-        from sglang.srt.layers.deep_gemm_wrapper.paged_mqa_logits import (
-            fp8_paged_mqa_logits_chunked as fn,
-        )
-    else:
-        from deep_gemm import fp8_paged_mqa_logits as fn
+    # This collector explicitly samples the default DeepGEMM backend.  Do not
+    # follow SGLang's env-driven debug/fallback dispatch here, because the CSV
+    # records this row as deep_gemm.fp8_paged_mqa_logits.
+    from deep_gemm import fp8_paged_mqa_logits as fn
 
     def kernel_func():
         return fn(
