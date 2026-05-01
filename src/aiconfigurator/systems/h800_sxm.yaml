@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# H800 SXM is the China-market variant of H100 SXM.
+# Compute (TFLOPS), HBM capacity, and HBM bandwidth are identical to H100 SXM.
+# The main difference is the NVLink (intra-node) bandwidth, which is approximately
+# halved on H800 (400 GB/s bidirectional vs. 900 GB/s on H100), i.e. 200 GB/s
+# per direction per GPU instead of 450 GB/s.
+# Performance op-data files are reused from h100_sxm (same SM/compute) until
+# H800-specific silicon profiling data is collected.
+data_dir: data/h800_sxm # relative to systems_dir
+gpu:
+  mem_bw: 3350000000000 # 3350GB/s, identical to H100 SXM
+  mem_bw_empirical_scaling_factor: 0.8 # some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_empirical_constant_latency: 0.000003 # 3us some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_capacity: 85899345920 # 80GiB, identical to H100 SXM
+  bfloat16_tc_flops: 989000000000000 # 989TFLOPS, identical to H100 SXM
+  int8_tc_flops: 1978000000000000 # 1978TFLOPS, identical to H100 SXM
+  fp8_tc_flops: 1978000000000000 # 1978TFLOPS, identical to H100 SXM
+  power: 700  # Watt
+  sm_version: 90
+
+node:
+  num_gpus_per_node: 8
+  inter_node_bw: 50000000000  # Byte/s per GPU, single direction, 1:1 CX7 NDR 400Gb/s per node
+  intra_node_bw: 200000000000  # Byte/s per gpu, single direction; H800 NVLink is capped at ~400 GB/s bidirectional (200 GB/s per direction)
+  pcie_bw: 64000000000  # Byte/s, single direction, pcie 5.0
+  p2p_latency: 0.00001  # 10us some nonofficial correction based on observations, you should try to modify based on your own observations
+
+misc:
+  nccl_mem: # some nonofficial correction based on observations, you should try to modify based on your own observations
+    1: 0
+    2: 358612992 # 342MB
+    4: 411041792 # 392MB
+    8: 411041792 # 392MB
+  other_mem: 3758096384 # increase from 551MB to 3.5GB for safer deployment, this will cover part of the inaccurate mem calc.
+  nccl_version: '2.27.3'
