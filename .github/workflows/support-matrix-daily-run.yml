@@ -5,18 +5,20 @@ on:
     # Run release daily at 7 AM PT - 1h / 10 PM China / 2 PM UTC
     - cron: "0 14 * * *"
 
-permissions:
-  contents: write
-  pull-requests: write
-
 jobs:
   update-support-matrix-release:
     name: Run Release Support Matrix Update
+    permissions:
+      contents: write
+      pull-requests: write
     uses: ./.github/workflows/daily-support-matrix-release.yml
     secrets: inherit
 
   update-support-matrix-main:
     name: Run Main Support Matrix Update
+    permissions:
+      contents: write
+      pull-requests: write
     uses: ./.github/workflows/daily-support-matrix.yml
     with:
       branch: ${{ github.event.repository.default_branch }}
@@ -27,6 +29,7 @@ jobs:
     needs:
       - update-support-matrix-release
       - update-support-matrix-main
+    permissions: {}
     runs-on: ubuntu-latest
     steps:
       - name: Trigger support matrix autofix workflow
