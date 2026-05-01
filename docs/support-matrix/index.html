@@ -297,6 +297,7 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
   const newest = allTested[0];
   let status;
   if (passVersions.includes(newest)) status = 'pass';
+  else if (partialVersions.includes(newest)) status = 'partial';
   else if (passVersions.length) status = 'partial';
   else status = 'fail';
 
