@@ -118,12 +118,16 @@ def get_moe_test_cases():
                 and common_moe_testcase.inter_size == 2688
                 and common_moe_testcase.topk == 22
                 and common_moe_testcase.num_experts == 512
-                and common_moe_testcase.tp == 2
-                and num_tokens >= 768
+                and (
+                    (common_moe_testcase.tp == 2 and num_tokens >= 768)
+                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 2 and num_tokens >= 320)
+                    or (common_moe_testcase.tp == 4 and num_tokens >= 768)
+                )
             ):
                 # SGLang 0.5.9 falls back to the default Triton fp8 block MoE
-                # config for Nemotron-3 Super on SM120. That config requires
-                # 144 KiB shared memory, above the runtime's 99 KiB limit.
+                # config for Nemotron-3 Super on SM120 for these TP/EP slices.
+                # That config requires 144 KiB shared memory, above the 99 KiB
+                # runtime limit.
                 continue
             if (
                 moe_type == "fp8_block"
