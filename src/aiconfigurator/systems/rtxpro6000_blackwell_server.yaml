@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# RTX PRO 6000 Blackwell Server Edition on this node reports 2430 MHz max SM clock,
+# 97887 MiB VRAM, 600 W power limit, and compute capability 12.0.
+# Memory bandwidth and Tensor Core ratios are based on NVIDIA RTX PRO 6000
+# Blackwell architecture specs, scaled conservatively to the observed max SM clock.
+
+data_dir: data/rtxpro6000_blackwell_server # relative to systems_dir
+gpu:
+  mem_bw: 1792000000000 # 1.792 TB/s GDDR7
+  mem_bw_empirical_scaling_factor: 0.8 # some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_empirical_constant_latency: 0.000003 # 3us some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_capacity: 102641958912 # 97887 MiB reported by nvidia-smi
+  bfloat16_tc_flops: 467800534963698 # 467.8 TFLOPS dense, scaled to 2430 MHz
+  int8_tc_flops: 935601069927397 # 935.6 TFLOPS dense, scaled to 2430 MHz
+  fp8_tc_flops: 935601069927397 # 935.6 TFLOPS dense, scaled to 2430 MHz
+  fp4_tc_flops: 1871202139854795 # 1871.2 TFLOPS dense, scaled to 2430 MHz
+  power: 600  # Watt
+  sm_version: 120
+
+node:
+  num_gpus_per_node: 2
+  inter_node_bw: 50000000000  # Byte/s per GPU, single direction, conservative 400Gb/s placeholder
+  intra_node_bw: 64000000000  # Byte/s per GPU, single direction, PCIe Gen5 x16
+  pcie_bw: 64000000000  # Byte/s, single direction, PCIe Gen5 x16
+  p2p_latency: 0.00001  # 10us some nonofficial correction based on observations, you should try to modify based on your own observations
+
+misc:
+  nccl_mem: # some nonofficial correction based on observations, you should try to modify based on your own observations
+    1: 0
+    2: 358612992 # 342MB
+  other_mem: 3758096384 # increase from 551MB to 3.5GB for safer deployment, this will cover part of the inaccurate mem calc.
+  nccl_version: '2.28.9'

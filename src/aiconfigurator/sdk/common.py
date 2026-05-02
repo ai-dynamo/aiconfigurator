@@ -386,6 +386,7 @@ SupportedSystems = {
     "a100_sxm",
     "l40s",
     "b60",
+    "rtxpro6000_blackwell_server",
 }
 
 """
