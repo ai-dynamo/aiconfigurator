@@ -162,6 +162,14 @@ def get_moe_test_cases():
                 or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 256 != 0
             ):
                 continue
+            if moe_type == "int4_wo" and common_moe_testcase.topk > (
+                common_moe_testcase.num_experts // common_moe_testcase.ep
+            ):
+                # The SGLang int4 MoE path benchmarks the rank-0 local expert
+                # slice. Cases where global top-k exceeds local experts fail
+                # routing before kernel timing and are not valid single-rank
+                # collector inputs.
+                continue
 
             test_cases.append(
                 [
