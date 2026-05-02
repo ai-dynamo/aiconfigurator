@@ -577,6 +577,10 @@ def get_wideep_moe_compute_all_test_cases():
                 # Skip if num_slots is not divisible by ep_size
                 if num_slots % ep_size != 0:
                     continue
+                if moe_type == "nvfp4" and get_sm_version() >= 120 and num_slots // ep_size < common_moe_testcase.topk:
+                    # TRT-LLM 1.3.0rc5 SM120 nvfp4 crashes when a WideEP rank owns
+                    # fewer slots than top-k routed experts.
+                    continue
 
                 test_cases.append(
                     [
@@ -1035,8 +1039,9 @@ def run_wideep_moe_compute(
         torch.cuda.empty_cache()
     AutoTuner.get().clear_cache()
 
-    # Exit the worker process to ensure complete resource cleanup
-    sys.exit(EXIT_CODE_RESTART)
+    if os.getenv("TRTLLM_WIDEEP_MOE_RESTART_WORKER", "1") != "0":
+        # Exit the worker process to ensure complete resource cleanup.
+        sys.exit(EXIT_CODE_RESTART)
 
 
 # =============================================================================

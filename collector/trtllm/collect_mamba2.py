@@ -806,10 +806,9 @@ def run_mamba2_torch(
     else:
         raise ValueError(f"Unknown phase: {phase}")
 
-    # Exit worker process to ensure clean GPU state
-    import sys
-
-    sys.exit(EXIT_CODE_RESTART)
+    if os.getenv("TRTLLM_MAMBA2_RESTART_WORKER", "1") != "0":
+        # Exit worker process to ensure clean GPU state.
+        sys.exit(EXIT_CODE_RESTART)
 
 
 if __name__ == "__main__":
