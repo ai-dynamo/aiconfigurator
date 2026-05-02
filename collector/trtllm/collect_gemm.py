@@ -47,10 +47,11 @@ def _skip_trtllm_130rc5_sm120_fp8_gemm(gemm_type: str, m: int, n: int, k: int) -
         and get_sm_version() >= 120
         and gemm_type == "fp8"
         # The rc5 SM120 FP8 small-M kernel hits an illegal memory access for
-        # the largest Qwen3-235B-style projection shapes and poisons the CUDA
+        # Qwen3-235B-style large projection shapes and poisons the CUDA
         # context. Filter the verified crash region before execution.
         and 6 <= m <= 8
-        and ((n == 65536 and k == 51200) or (n == 51200 and k == 65536))
+        and n >= 51200
+        and k >= 51200
     )
 
 
