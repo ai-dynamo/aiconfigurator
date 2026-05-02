@@ -89,8 +89,12 @@ def get_moe_test_cases():
         moe_list = ["bfloat16", "int4_wo"]
     elif sm_version < 100:
         moe_list = ["bfloat16", "fp8_block", "int4_wo"]
-    else:
+    elif sm_version in (100, 103):
         moe_list = ["bfloat16", "fp8_block", "nvfp4", "int4_wo"]
+    else:
+        # SGLang 0.5.9 routes nvfp4 MoE through FlashInfer CuteDSL, whose
+        # runtime check only accepts sm_100/sm_103 and fails all sm_120 cases.
+        moe_list = ["bfloat16", "fp8_block", "int4_wo"]
 
     test_cases = []
 
