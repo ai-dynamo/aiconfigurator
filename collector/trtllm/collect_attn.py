@@ -38,8 +38,8 @@ def _skip_trtllm_130rc5_sm120_fp8_context_fmha(
         # MHA h=128 max-token cases crash with an illegal memory access in
         # the SM120 FP8 context FMHA kernel.
         (num_heads == num_key_value_heads == 96 and head_dim == 128 and num_tokens == 65536)
-        # h=256 n=96 cases fail in the qkv_256 SM120 FP8 FMHA kernel.
-        or (num_heads == 96 and head_dim == 256)
+        # h=256 cases fail in the qkv_256 SM120 FP8 FMHA kernel.
+        or head_dim == 256
     )
 
 
