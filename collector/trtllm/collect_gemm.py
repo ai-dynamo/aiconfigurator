@@ -41,14 +41,16 @@ def _compute_fp8_block_weight_scales(weight: torch.Tensor, group_size: int) -> t
 _weight_cache: dict = {}
 
 
-def _skip_trtllm_130rc5_sm120_fp8_gemm(gemm_type: str, m: int) -> bool:
+def _skip_trtllm_130rc5_sm120_fp8_gemm(gemm_type: str, m: int, n: int, k: int) -> bool:
     return (
         tensorrt_llm.__version__.startswith("1.3.0rc5")
         and get_sm_version() >= 120
         and gemm_type == "fp8"
         # The rc5 SM120 FP8 small-M kernel hits an illegal memory access for
-        # m=7 and poisons the CUDA context.
-        and m == 7
+        # the largest Qwen3-235B-style projection shapes and poisons the CUDA
+        # context. Filter the verified crash region before execution.
+        and 6 <= m <= 8
+        and ((n == 65536 and k == 51200) or (n == 51200 and k == 65536))
     )
 
 
@@ -133,7 +135,7 @@ def get_gemm_test_cases():
             for x in x_list:
                 if x * n >= 2**31 or x * k >= 2**31:
                     continue
-                if _skip_trtllm_130rc5_sm120_fp8_gemm(gemm_type, x):
+                if _skip_trtllm_130rc5_sm120_fp8_gemm(gemm_type, x, n, k):
                     continue
                 test_cases.append([gemm_type, x, n, k])
 
