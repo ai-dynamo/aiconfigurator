@@ -30,12 +30,16 @@ def _skip_trtllm_130rc5_sm120_fp8_context_fmha(
     num_key_value_heads: int,
     head_dim: int,
 ) -> bool:
+    if not (tensorrt_llm.__version__.startswith("1.3.0rc5") and get_sm_version() >= 120):
+        return False
+
+    num_tokens = batch_size * input_len
     return (
-        tensorrt_llm.__version__.startswith("1.3.0rc5")
-        and get_sm_version() >= 120
-        and num_heads == num_key_value_heads == 96
-        and head_dim == 128
-        and batch_size * input_len == 65536
+        # MHA h=128 max-token cases crash with an illegal memory access in
+        # the SM120 FP8 context FMHA kernel.
+        (num_heads == num_key_value_heads == 96 and head_dim == 128 and num_tokens == 65536)
+        # GQA h=256 max-token cases fail in the qkv_256 SM120 FP8 FMHA kernel.
+        or (num_heads == 96 and num_key_value_heads != num_heads and head_dim == 256 and num_tokens == 131072)
     )
 
 
