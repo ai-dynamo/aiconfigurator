@@ -125,6 +125,10 @@ SUPPORTED_MODELS: dict[str, str] = {
 }
 
 
+def _is_trtllm_130rc5_sm120_dsa_unsupported() -> bool:
+    return tensorrt_llm.__version__.startswith("1.3.0rc5") and get_sm_version() >= 120
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Test Cases
 # ═══════════════════════════════════════════════════════════════════════
@@ -239,11 +243,20 @@ def get_mla_generation_module_test_cases():
 
 def get_dsa_context_module_test_cases():
     """collect.py entrypoint for DSA context module collection."""
+    if _is_trtllm_130rc5_sm120_dsa_unsupported():
+        # TRT-LLM 1.3.0rc5.post1 aborts on RTX PRO 6000 Blackwell Server
+        # (SM120) DSA context metadata creation with:
+        # "SEPARATE_Q_K_V requires valid K and V pointers."
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="context")
 
 
 def get_dsa_generation_module_test_cases():
     """collect.py entrypoint for DSA generation module collection."""
+    if _is_trtllm_130rc5_sm120_dsa_unsupported():
+        # The same runtime rejects DSA generation in the sparse DeepGEMM path
+        # with "Unsupported architecture" on SM120.
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="generation")
 
 
