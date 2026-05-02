@@ -111,6 +111,20 @@ def get_moe_test_cases():
                 common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0
             ):
                 continue
+            if (
+                moe_type == "fp8_block"
+                and sm_version >= 120
+                and common_moe_testcase.hidden_size == 4096
+                and common_moe_testcase.inter_size == 2688
+                and common_moe_testcase.topk == 22
+                and common_moe_testcase.num_experts == 512
+                and common_moe_testcase.tp == 2
+                and num_tokens >= 768
+            ):
+                # SGLang 0.5.9 falls back to the default Triton fp8 block MoE
+                # config for Nemotron-3 Super on SM120. That config requires
+                # 144 KiB shared memory, above the runtime's 99 KiB limit.
+                continue
 
             if moe_type == "nvfp4":
                 shard_k = common_moe_testcase.inter_size // common_moe_testcase.tp
