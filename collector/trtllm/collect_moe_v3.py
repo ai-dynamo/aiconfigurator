@@ -41,6 +41,11 @@ from collector.helper import (
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
 moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_tuned_cache_path")
+_TRTLLM_VERSION = tensorrt_llm.__version__
+
+
+def _is_trtllm_130rc5_runtime():
+    return _TRTLLM_VERSION.startswith("1.3.0rc5")
 
 
 def _patch_moe_runners_for_tuple_tactics():
@@ -170,12 +175,20 @@ def get_moe_test_cases():
             if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
                 if moe_type not in _GPTOSS_MOE_TYPES:
                     continue
+                if sm_version >= 120 and _is_trtllm_130rc5_runtime():
+                    # TRTLLMGenFusedMoE in 1.3.0rc5 rejects SM120+.
+                    continue
             else:
                 if moe_type in _GPTOSS_MOE_TYPES:
                     continue
 
             # w4afp8 requires k shape to be multiple of 128
             if moe_type == "w4afp8" and inter_s // moe_tp % 128 != 0:
+                continue
+
+            if moe_type == "fp8_block" and sm_version >= 120 and _is_trtllm_130rc5_runtime():
+                # DeepGEMM in TRT-LLM 1.3.0rc5 rejects these SM120 MoE shapes with
+                # "Unknown recipe" before any supported row can be collected.
                 continue
 
             # fp8_block requires hidden_size divisible by block group_size (128)
@@ -203,6 +216,16 @@ def get_moe_test_cases():
             if (inter_s // moe_tp) % (256 // weight_bits) != 0:
                 continue
 
+            if (
+                moe_type == "nvfp4"
+                and sm_version >= 120
+                and _is_trtllm_130rc5_runtime()
+                and common_moe_testcase.num_experts // common_moe_testcase.ep < common_moe_testcase.topk
+            ):
+                # These standalone EP shapes crash the 1.3.0rc5 SM120 nvfp4 dry-run
+                # kernel. WideEP collectors cover the large-EP MoE path separately.
+                continue
+
             min_latency_mode_options = [False]
 
             if moe_type == "nvfp4" and get_sm_version() == 100 and common_moe_testcase.num_experts <= 256:
@@ -213,10 +236,13 @@ def get_moe_test_cases():
                 min_latency_mode_options.append(True)
 
             for min_latency_mode in min_latency_mode_options:
+                num_tokens_list = common_moe_testcase.num_tokens_list
+                if not num_tokens_list:
+                    continue
                 test_cases.append(
                     [
                         moe_type,
-                        common_moe_testcase.num_tokens_list,
+                        num_tokens_list,
                         common_moe_testcase.hidden_size,
                         common_moe_testcase.inter_size,
                         common_moe_testcase.topk,
@@ -413,28 +439,33 @@ def run_moe_torch(
     if moe_type == "fp8_block" and sm_version >= 100:
         from tensorrt_llm.quantization.utils.fp8_utils import transform_sf_into_required_layout
 
+        moe_backend = getattr(moe, "backend", moe)
+        quant_scales = getattr(moe, "quant_scales", None)
+        if quant_scales is None:
+            quant_scales = moe_backend.quant_scales
+
         # Transform w3_w1 weight scales: float32 [G, N/128, K/128] -> int32 UE8M0 [G, N, sf_k_tma]
         transformed_w3w1 = transform_sf_into_required_layout(
-            moe.quant_scales[0],
-            mn=moe.w3_w1_weight.shape[1],
-            k=moe.w3_w1_weight.shape[2],
+            quant_scales[0],
+            mn=moe_backend.w3_w1_weight.shape[1],
+            k=moe_backend.w3_w1_weight.shape[2],
             recipe=(1, 128, 128),
-            num_groups=moe.w3_w1_weight.shape[0],
+            num_groups=moe_backend.w3_w1_weight.shape[0],
             is_sfa=False,
         )
-        moe.w3_w1_weight_scaling_factor = torch.nn.Parameter(transformed_w3w1, requires_grad=False)
+        moe_backend.w3_w1_weight_scaling_factor = torch.nn.Parameter(transformed_w3w1, requires_grad=False)
         # Transform w2 weight scales
         transformed_w2 = transform_sf_into_required_layout(
-            moe.quant_scales[1],
-            mn=moe.w2_weight.shape[1],
-            k=moe.w2_weight.shape[2],
+            quant_scales[1],
+            mn=moe_backend.w2_weight.shape[1],
+            k=moe_backend.w2_weight.shape[2],
             recipe=(1, 128, 128),
-            num_groups=moe.w2_weight.shape[0],
+            num_groups=moe_backend.w2_weight.shape[0],
             is_sfa=False,
         )
-        moe.w2_weight_scaling_factor = torch.nn.Parameter(transformed_w2, requires_grad=False)
+        moe_backend.w2_weight_scaling_factor = torch.nn.Parameter(transformed_w2, requires_grad=False)
         # Rebuild quant_scales tuple with the transformed tensors
-        moe.quant_method.setup_quant_scales(moe)
+        moe_backend.quant_method.setup_quant_scales(moe_backend)
         if aic_debug == 1:
             print("[SM100 fix] Converted weight scales to int32 UE8M0 format")
 
@@ -500,6 +531,8 @@ def run_moe_torch(
                 print(f"Successfully dry run for {max_tokens} tokens")
             break
         except Exception as e:
+            if isinstance(e, torch.AcceleratorError):
+                raise
             if i == len(num_tokens_lists) - 1:
                 raise RuntimeError(f"dry run failed for {max_tokens} tokens: {e}") from e
             else:
@@ -664,9 +697,10 @@ def run_moe_torch(
                 pass
             torch.cuda.empty_cache()
 
-    # Exit the worker process after completing MOE task to ensure complete resource cleanup
-    # This forces OS to reclaim all GPU memory, CUDA context, and other resources
-    sys.exit(EXIT_CODE_RESTART)
+    if os.getenv("TRTLLM_MOE_RESTART_WORKER", "1") != "0":
+        # Exit the worker process after completing MOE task to ensure complete resource cleanup.
+        # This forces OS to reclaim all GPU memory, CUDA context, and other resources.
+        sys.exit(EXIT_CODE_RESTART)
 
 
 if __name__ == "__main__":
