@@ -572,6 +572,8 @@ def get_wideep_moe_compute_all_test_cases():
 
         for moe_type in moe_list:
             for use_eplb, num_slots in eplb_configs:
+                if moe_type == "nvfp4" and use_eplb and get_sm_version() == 120:
+                    continue
                 # Skip if num_slots is not divisible by ep_size
                 if num_slots % ep_size != 0:
                     continue

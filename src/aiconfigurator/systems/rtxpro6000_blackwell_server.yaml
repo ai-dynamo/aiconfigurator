@@ -30,5 +30,7 @@ misc:
   nccl_mem: # some nonofficial correction based on observations, you should try to modify based on your own observations
     1: 0
     2: 358612992 # 342MB
+    4: 411041792 # 392MB
+    8: 411041792 # 392MB
   other_mem: 3758096384 # increase from 551MB to 3.5GB for safer deployment, this will cover part of the inaccurate mem calc.
   nccl_version: '2.28.9'

@@ -117,7 +117,11 @@ def get_gemm_test_cases():
         for gemm_type in gemm_list:
             if (gemm_type == "nvfp4" or gemm_type == "fp8_block") and (n < 128 or k < 128):
                 continue
+            if gemm_type == "fp8_block" and n * k >= 2**31:
+                continue
             for x in x_list:
+                if x * n >= 2**31 or x * k >= 2**31:
+                    continue
                 test_cases.append([gemm_type, x, n, k])
 
     return test_cases
@@ -169,6 +173,8 @@ def run_gemm(gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
 
         gemm = Linear(k, n, bias=False, dtype=dtype, quant_config=qc)
         gemm.load_weights([weights])
+        if gemm_type == "fp8_block" and callable(getattr(gemm, "post_load_weights", None)):
+            gemm.post_load_weights()
         gemm.to(torch.device(device))
         gemm.forward(x)  # dry run to init
         op_list.append(gemm)
@@ -179,6 +185,8 @@ def run_gemm(gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
             weights = _build_weights(gemm_type, n, k, device, dtype, group_size, x)
             gemm = Linear(k, n, bias=False, dtype=dtype, quant_config=qc)
             gemm.load_weights([weights])
+            if gemm_type == "fp8_block" and callable(getattr(gemm, "post_load_weights", None)):
+                gemm.post_load_weights()
             gemm.to(torch.device(device))
             gemm.forward(x)  # dry run to init
             op_list.append(gemm)

@@ -153,7 +153,10 @@ def _get_precision_combos(phase: str, attn_type: str):
     is_dsa = attn_type == "dsa"
 
     gemm_types = ["bfloat16"]
-    if sm >= 89:
+    # TRT-LLM 1.3.0rc5.post1 can allocate bf16 dummy weights for some MLA
+    # projection paths while still attaching FP8 block scales, then asserts in
+    # post_load_weights() when resmoothing expects float8 weights.
+    if sm >= 89 and not (attn_type == "mla" and tensorrt_llm.__version__ == "1.3.0rc5.post1"):
         gemm_types.append("fp8_block")
     if sm >= 100:
         gemm_types.append("nvfp4")
@@ -282,14 +285,15 @@ def _apply_gemm_type_quant(model_config, gemm_type: str, use_fp8_kv_cache: bool)
     kv_algo = QuantAlgo.FP8 if use_fp8_kv_cache else None
 
     if gemm_type == "bfloat16":
-        if use_fp8_kv_cache:
-            _set_quant_config(
-                model_config,
-                _replace_quant_config(
-                    model_config.quant_config,
-                    kv_cache_quant_algo=kv_algo,
-                ),
-            )
+        _set_quant_config(
+            model_config,
+            _replace_quant_config(
+                model_config.quant_config,
+                quant_algo=None,
+                kv_cache_quant_algo=kv_algo,
+                exclude_modules=None,
+            ),
+        )
     elif gemm_type == "fp8_block":
         _set_quant_config(
             model_config,
