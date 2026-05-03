@@ -178,6 +178,7 @@ def get_moe_test_cases():
                     or (common_moe_testcase.ep == 4 and num_tokens >= 48)
                     or (common_moe_testcase.ep == 8 and num_tokens >= 32)
                     or (common_moe_testcase.ep == 16 and num_tokens >= 16)
+                    or (common_moe_testcase.ep == 32 and num_tokens >= 8)
                 )
             ):
                 # SGLang 0.5.9 also uses the default Triton fp8 block MoE config
@@ -284,6 +285,7 @@ def get_moe_test_cases():
                 and (
                     num_tokens >= 320
                     or (common_moe_testcase.ep == 2 and num_tokens >= 160)
+                    or (common_moe_testcase.ep == 4 and num_tokens >= 80)
                 )
             ):
                 # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
