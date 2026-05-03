@@ -75,9 +75,9 @@ def run_attention_torch(
     head_dim,
     use_fp8_kv_cache,
     is_context_phase,
+    window_size=0,
     *,
     perf_filename,
-    window_size=0,
     device="cuda:0",
 ):
     torch.cuda.set_device(device)
