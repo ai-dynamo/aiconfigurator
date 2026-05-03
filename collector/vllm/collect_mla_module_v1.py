@@ -35,6 +35,7 @@ Usage:
 
 import argparse
 import gc
+import json
 import math
 import os
 import tempfile
@@ -95,9 +96,15 @@ def _resolve_model_path(model_name: str) -> str:
         return model_name
 
     # Create a temp directory with config.json so vLLM's ModelConfig
-    # loads from disk instead of downloading from HuggingFace Hub.
+    # loads from disk instead of downloading from HuggingFace Hub.  Some
+    # cached configs include auto_map entries that point to remote-code files;
+    # drop them because the vLLM config registry already provides these types.
     tmp_dir = tempfile.mkdtemp(prefix=f"aic_model_{model_name.replace('/', '_')}_")
-    os.symlink(config_file, os.path.join(tmp_dir, "config.json"))
+    with open(config_file) as f:
+        config_data = json.load(f)
+    config_data.pop("auto_map", None)
+    with open(os.path.join(tmp_dir, "config.json"), "w") as f:
+        json.dump(config_data, f)
 
     # Also symlink hf_quant_config.json if present (used by quantized models).
     quant_file = _MODEL_CONFIGS_DIR / f"{model_name.replace('/', '--')}_hf_quant_config.json"
@@ -225,11 +232,19 @@ def get_mla_generation_module_test_cases():
 
 def get_dsa_context_module_test_cases():
     """collect.py entrypoint for DSA context module collection."""
+    # vLLM 0.16.0 has no valid sparse MLA backend for these DSA module
+    # shapes on SM120, so every DSA case fails backend selection.
+    if vllm_version <= "0.16.0":
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="context")
 
 
 def get_dsa_generation_module_test_cases():
     """collect.py entrypoint for DSA generation module collection."""
+    # vLLM 0.16.0 has no valid sparse MLA backend for these DSA module
+    # shapes on SM120, so every DSA case fails backend selection.
+    if vllm_version <= "0.16.0":
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="generation")
 
 
