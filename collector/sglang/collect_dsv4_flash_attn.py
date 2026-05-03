@@ -29,6 +29,7 @@ import argparse
 import contextlib
 import copy
 import gc
+import importlib.util
 import json
 import os
 import random
@@ -101,25 +102,43 @@ def _expand_grid():
     return list(_BATCH_SIZES), list(_SEQ_LENGTHS)
 
 
+def _dsv4_flash_module_supported() -> bool:
+    """Return True when the active SGLang runtime can load DeepSeek-V4 modules."""
+    if os.environ.get("COLLECTOR_FORCE_DSV4_FLASH_MODULES") == "1":
+        return True
+    try:
+        return importlib.util.find_spec("sglang.srt.models.deepseek_v4") is not None
+    except ModuleNotFoundError:
+        return False
+
+
 def get_dsv4_flash_csa_context_test_cases():
+    if not _dsv4_flash_module_supported():
+        return []
     from collector.common_test_cases import get_dsv4_flash_csa_context_test_cases as _impl
 
     return _impl()
 
 
 def get_dsv4_flash_csa_generation_test_cases():
+    if not _dsv4_flash_module_supported():
+        return []
     from collector.common_test_cases import get_dsv4_flash_csa_generation_test_cases as _impl
 
     return _impl()
 
 
 def get_dsv4_flash_hca_context_test_cases():
+    if not _dsv4_flash_module_supported():
+        return []
     from collector.common_test_cases import get_dsv4_flash_hca_context_test_cases as _impl
 
     return _impl()
 
 
 def get_dsv4_flash_hca_generation_test_cases():
+    if not _dsv4_flash_module_supported():
+        return []
     from collector.common_test_cases import get_dsv4_flash_hca_generation_test_cases as _impl
 
     return _impl()

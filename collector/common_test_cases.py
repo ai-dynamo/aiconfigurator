@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import dataclasses
-import importlib.util
 import itertools
 import os
 import sys
@@ -743,13 +742,6 @@ def _dsv4_flash_active() -> bool:
     return filt is None or filt == _DSV4_FLASH_DEFAULT_MODEL
 
 
-def _dsv4_flash_module_supported() -> bool:
-    """Return True when the active SGLang runtime can load DeepSeek-V4 modules."""
-    if os.environ.get("COLLECTOR_FORCE_DSV4_FLASH_MODULES") == "1":
-        return True
-    return importlib.util.find_spec("sglang.srt.models.deepseek_v4") is not None
-
-
 # --- Module-level (full self_attn) sweep ---
 _DSV4_FLASH_MODULE_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 
@@ -880,25 +872,25 @@ def _build_dsv4_flash_module_test_cases(mode: str, attn_kinds=DSV4_FLASH_ATTN_KI
 
 
 def get_dsv4_flash_csa_context_test_cases():
-    if not _dsv4_flash_active() or not _dsv4_flash_module_supported():
+    if not _dsv4_flash_active():
         return []
     return _build_dsv4_flash_module_test_cases("context", ("csa",))
 
 
 def get_dsv4_flash_hca_context_test_cases():
-    if not _dsv4_flash_active() or not _dsv4_flash_module_supported():
+    if not _dsv4_flash_active():
         return []
     return _build_dsv4_flash_module_test_cases("context", ("hca",))
 
 
 def get_dsv4_flash_csa_generation_test_cases():
-    if not _dsv4_flash_active() or not _dsv4_flash_module_supported():
+    if not _dsv4_flash_active():
         return []
     return _build_dsv4_flash_module_test_cases("generation", ("csa",))
 
 
 def get_dsv4_flash_hca_generation_test_cases():
-    if not _dsv4_flash_active() or not _dsv4_flash_module_supported():
+    if not _dsv4_flash_active():
         return []
     return _build_dsv4_flash_module_test_cases("generation", ("hca",))
 
