@@ -206,6 +206,7 @@ def _dsv4_sparse_kernel_supported(kernel: str) -> bool:
         return True
     raise ValueError(f"unknown DSV4 sparse kernel: {kernel}")
 
+
 # ═══════════════════════════════════════════════════════════════════════
 # Bench helper
 # ═══════════════════════════════════════════════════════════════════════
