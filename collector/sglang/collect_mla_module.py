@@ -279,6 +279,8 @@ def _build_module_test_cases(attn_type: str, mode: str):
     perf_filename is supplied by collect.py via functools.partial as a keyword
     argument, so it is not included in the test case tuple.
     """
+    if attn_type == "dsa" and _skip_sm120_deepgemm_attention_modules():
+        return []
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
     cases = []
     for model_path in model_paths:
@@ -328,6 +330,8 @@ def _build_wideep_mla_test_cases(mode: str):
     perf_filename is supplied by collect.py via functools.partial as a keyword
     argument, so it is not included in the test case tuple.
     """
+    if _skip_sm120_deepgemm_attention_modules():
+        return []
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == "mla"]
     backends = _get_mla_backend_list()
     cases = []
@@ -352,6 +356,11 @@ def _build_wideep_mla_test_cases(mode: str):
                     ]
                 )
     return cases
+
+
+def _skip_sm120_deepgemm_attention_modules() -> bool:
+    """Return True when SGLang's DeepGEMM-backed module path is unsupported."""
+    return os.environ.get("COLLECTOR_FORCE_DEEPGEMM_ATTENTION_MODULES") != "1" and get_sm_version() >= 120
 
 
 def get_wideep_mla_context_test_cases():
@@ -665,53 +674,59 @@ def run_attention_torch(
     model_runner.req_to_token_pool.clear()
     model_runner.token_to_kv_pool_allocator.clear()
 
+    logged_count = 0
     for test_case in test_cases:
         batch_size, seq_length, is_prefill = test_case
 
         if is_prefill:
-            _run_prefill(
-                model_runner=model_runner,
-                attention_module=attention_module,
-                batch_size=batch_size,
-                seq_length=seq_length,
-                head_num=head_num,
-                num_warmup=num_warmup,
-                num_iterations=num_iterations,
-                device=device,
-                output_path=output_path,
-                dummy_qkv_latent_func=dummy_qkv_latent_func,
-                attn_type=attn_type,
-                model_path=model_path,
-                architecture=architecture,
-                backend_name=backend_name,
-                version=version,
-                device_name=device_name,
-                log_mla_dtype=log_mla_dtype,
-                log_kv_dtype=log_kv_dtype,
-                log_gemm_type=log_gemm_type,
+            logged_count += int(
+                _run_prefill(
+                    model_runner=model_runner,
+                    attention_module=attention_module,
+                    batch_size=batch_size,
+                    seq_length=seq_length,
+                    head_num=head_num,
+                    num_warmup=num_warmup,
+                    num_iterations=num_iterations,
+                    device=device,
+                    output_path=output_path,
+                    dummy_qkv_latent_func=dummy_qkv_latent_func,
+                    attn_type=attn_type,
+                    model_path=model_path,
+                    architecture=architecture,
+                    backend_name=backend_name,
+                    version=version,
+                    device_name=device_name,
+                    log_mla_dtype=log_mla_dtype,
+                    log_kv_dtype=log_kv_dtype,
+                    log_gemm_type=log_gemm_type,
+                )
             )
         else:
-            _run_decode(
-                model_runner=model_runner,
-                attention_module=attention_module,
-                batch_size=batch_size,
-                seq_length=seq_length,
-                head_num=head_num,
-                num_warmup=num_warmup,
-                num_iterations=num_iterations,
-                device=device,
-                output_path=output_path,
-                dummy_qkv_latent_func=dummy_qkv_latent_func,
-                attn_type=attn_type,
-                model_path=model_path,
-                architecture=architecture,
-                backend_name=backend_name,
-                version=version,
-                device_name=device_name,
-                log_mla_dtype=log_mla_dtype,
-                log_kv_dtype=log_kv_dtype,
-                log_gemm_type=log_gemm_type,
+            logged_count += int(
+                _run_decode(
+                    model_runner=model_runner,
+                    attention_module=attention_module,
+                    batch_size=batch_size,
+                    seq_length=seq_length,
+                    head_num=head_num,
+                    num_warmup=num_warmup,
+                    num_iterations=num_iterations,
+                    device=device,
+                    output_path=output_path,
+                    dummy_qkv_latent_func=dummy_qkv_latent_func,
+                    attn_type=attn_type,
+                    model_path=model_path,
+                    architecture=architecture,
+                    backend_name=backend_name,
+                    version=version,
+                    device_name=device_name,
+                    log_mla_dtype=log_mla_dtype,
+                    log_kv_dtype=log_kv_dtype,
+                    log_gemm_type=log_gemm_type,
+                )
             )
+    return logged_count
 
 
 def _run_prefill(
@@ -866,29 +881,31 @@ def _run_prefill(
             )
         except Exception as e:
             print(f"  Warning: failed to log prefill metrics: {e}")
+            return False
 
         print(
             f"  Prefill: {avg_time_ms:.3f} ms "
             f"(min: {np.min(cuda_times):.3f}, max: {np.max(cuda_times):.3f}, "
             f"std: {np.std(cuda_times):.3f})"
         )
+        return True
 
     except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
         print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
         torch.cuda.empty_cache()
-        return
+        return False
     except Exception as e:
         traceback.print_exc()
         error_str = str(e).lower()
         if "out of memory" in error_str:
             print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
             torch.cuda.empty_cache()
-            return
+            return False
         if "cuda" in error_str and "illegal" in error_str:
             print("  CUDA illegal access detected — stopping to prevent cascading failures")
             raise
         print("  Skipping this configuration...")
-        return
+        return False
     finally:
         model_runner.req_to_token_pool.clear()
         model_runner.token_to_kv_pool_allocator.clear()
@@ -1066,25 +1083,27 @@ def _run_decode(
             )
         except Exception as e:
             print(f"  Warning: failed to log decode metrics: {e}")
+            return False
 
         print(f"  Decode: {avg_time_ms:.3f} ms")
+        return True
 
     except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
         print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
         torch.cuda.empty_cache()
-        return
+        return False
     except Exception as e:
         traceback.print_exc()
         error_str = str(e).lower()
         if "out of memory" in error_str:
             print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
             torch.cuda.empty_cache()
-            return
+            return False
         if "cuda" in error_str and "illegal" in error_str:
             print("  CUDA illegal access detected — stopping to prevent cascading failures")
             raise
         print("  Skipping this configuration...")
-        return
+        return False
     finally:
         model_runner.req_to_token_pool.clear()
         model_runner.token_to_kv_pool_allocator.clear()
@@ -1192,7 +1211,7 @@ def run_mla_module(
             gemm_type=gemm_type,
         )
 
-        run_attention_torch(
+        logged_count = run_attention_torch(
             model_runner=model_runner,
             test_cases=cases,
             head_num=head_num,
@@ -1207,6 +1226,11 @@ def run_mla_module(
             compute_dtype=compute_dtype,
             gemm_type=gemm_type,
         )
+        if cases and logged_count == 0:
+            raise RuntimeError(
+                f"{attn_type.upper()} module {phase_name.lower()} produced no perf rows "
+                f"for model={model_path}, heads={head_num}, kv={kv_cache_dtype}, gemm={gemm_type}"
+            )
     finally:
         cleanup_distributed()
         torch.cuda.empty_cache()
