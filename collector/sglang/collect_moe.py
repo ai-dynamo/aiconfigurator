@@ -125,6 +125,7 @@ def get_moe_test_cases():
                     or (common_moe_testcase.tp == 4 and common_moe_testcase.ep == 2 and num_tokens >= 320)
                     or (common_moe_testcase.tp == 4 and num_tokens >= 768)
                     or (common_moe_testcase.tp == 8 and num_tokens >= 768)
+                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 8 and num_tokens >= 80)
                 )
             ):
                 # SGLang 0.5.9 falls back to the default Triton fp8 block MoE
@@ -195,8 +196,11 @@ def get_moe_test_cases():
                 and common_moe_testcase.inter_size == 1536
                 and common_moe_testcase.topk == 8
                 and common_moe_testcase.num_experts == 256
-                and common_moe_testcase.tp == 8
-                and num_tokens >= 320
+                and (
+                    common_moe_testcase.tp == 16
+                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 2 and num_tokens >= 160)
+                    or (common_moe_testcase.tp == 8 and num_tokens >= 320)
+                )
             ):
                 # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
                 # MiniMax-M2.5 on SM120. For these token counts that config
