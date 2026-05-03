@@ -201,6 +201,7 @@ def get_generation_attention_test_cases():
     # FP8 attention requires SM90+ (Hopper)
     sm_version = get_sm_version()
     skip_fp8 = sm_version < 90
+    skip_sm120_fp8_mha_decode = sm_version >= 120
 
     # generation
     b_list = [1, 2, 4, 64, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
@@ -240,8 +241,10 @@ def get_generation_attention_test_cases():
                 for s in target_s_list:
                     # BF16 attention - works on all GPUs
                     test_cases.append([b, s, n, n, head_dim, False, False, False])
-                    # FP8 attention - requires SM90+ (Hopper)
-                    if not skip_fp8:
+                    # SGLang 0.5.9 routes SM120 decode through Triton.  Its
+                    # MHA FP8 KV-cache path fails during Triton LLIR lowering
+                    # with "PassManager::run failed".
+                    if not skip_fp8 and not skip_sm120_fp8_mha_decode:
                         test_cases.append([b, s, n, n, head_dim, True, False, False])
 
     # XQA
