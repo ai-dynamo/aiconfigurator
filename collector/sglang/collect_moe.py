@@ -156,6 +156,7 @@ def get_moe_test_cases():
                     or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 16 and num_tokens >= 48)
                     or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 32 and num_tokens >= 32)
                     or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 64)
+                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 128)
                     or (common_moe_testcase.tp == 16 and num_tokens >= 768)
                     or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 2 and num_tokens >= 320)
                     or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 4 and num_tokens >= 160)
