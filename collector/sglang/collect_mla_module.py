@@ -284,6 +284,16 @@ def _build_module_test_cases(attn_type: str, mode: str):
     for model_path in model_paths:
         native_heads = MODEL_NATIVE_HEADS.get(model_path, 128)
         for compute_dtype, kv_dtype, gemm_type in _get_precision_combos(mode):
+            if (
+                attn_type == "dsa"
+                and get_sm_version() >= 120
+                and model_path == "zai-org/GLM-5"
+                and kv_dtype == "bfloat16"
+                and gemm_type == "bfloat16"
+            ):
+                # SGLang 0.5.9's GLM-5 all-bf16 DSA/NSA kernel rejects
+                # SM120 at runtime ("Only SM90 and SM100 are supported").
+                continue
             for num_heads in _HEAD_NUMS:
                 if num_heads > native_heads:
                     continue  # Skip invalid TP-sim configs
