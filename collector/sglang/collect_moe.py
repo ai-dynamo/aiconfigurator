@@ -176,8 +176,13 @@ def get_moe_test_cases():
                 and common_moe_testcase.inter_size == 2560
                 and common_moe_testcase.topk == 8
                 and common_moe_testcase.num_experts == 160
-                and common_moe_testcase.tp == 8
-                and num_tokens >= 192
+                and (
+                    (
+                        common_moe_testcase.tp == 8
+                        and (num_tokens >= 192 or (common_moe_testcase.ep == 2 and num_tokens >= 96))
+                    )
+                    or (common_moe_testcase.tp == 16 and num_tokens >= 192)
+                )
             ):
                 # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
                 # Qwen3-Coder-480B-A35B on SM120. For these token counts that
