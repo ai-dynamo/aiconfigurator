@@ -177,6 +177,12 @@ def get_context_attention_test_cases():
                                 continue
                         if b * s * num_kv_heads * head_dim * 2 >= 2147483647:
                             continue
+                        # SGLang's SM120 Triton context attention path uses
+                        # 32-bit indexing for large Q/O tensors.  Shapes at or
+                        # above this element boundary crash with an illegal
+                        # memory access and poison the worker CUDA context.
+                        if sm_version >= 120 and b * s * n * head_dim >= 2147483647:
+                            continue
 
                         # BF16 attention - works on all GPUs
                         test_cases.append([b, s, n, num_kv_heads, head_dim, False, False, True])
