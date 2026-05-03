@@ -270,7 +270,10 @@ def get_moe_test_cases():
                 and common_moe_testcase.topk == 8
                 and common_moe_testcase.num_experts == 256
                 and common_moe_testcase.tp == 32
-                and num_tokens >= 320
+                and (
+                    num_tokens >= 320
+                    or (common_moe_testcase.ep == 2 and num_tokens >= 160)
+                )
             ):
                 # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
                 # DeepSeek-V3 on SM120 at this TP slice. For these token counts
