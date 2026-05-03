@@ -128,7 +128,9 @@ def get_moe_test_cases():
     # cannot compile the SM100 module in this container.
     if get_sm_version() >= 100 and _nvfp4_available and vllm_version > "0.16.0":
         moe_list += ["nvfp4"]
-    if _mxfp4_available:
+    # vLLM 0.16.0 MXFP4 FusedMoE requires engine ForwardContext in forward(),
+    # which is not available in this standalone microbenchmark collector.
+    if _mxfp4_available and vllm_version > "0.16.0":
         moe_list += ["w4a16_mxfp4"]
     if _int4_wo_available:
         moe_list += ["int4_wo"]
@@ -181,11 +183,16 @@ def get_moe_test_cases():
 
             # int4_wo (W4A16): Marlin kernel requires K and N divisible by group_size (128).
             # K=hidden_size for w1; K=inter_size//tp (local) for w2.
-            if moe_type == "int4_wo" and (
-                common_moe_testcase.hidden_size % 128 != 0
-                or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 128 != 0
-            ):
-                continue
+            if moe_type == "int4_wo":
+                if (
+                    common_moe_testcase.hidden_size % 128 != 0
+                    or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 128 != 0
+                ):
+                    continue
+                # vLLM 0.16.0 Marlin MoE trips illegal memory access for
+                # synthetic expert-parallel int4_wo cases in this collector.
+                if common_moe_testcase.ep > 1:
+                    continue
 
             test_cases.append(
                 [
@@ -284,6 +291,7 @@ def run_moe_torch(
                 tp_size=moe_tp_size,
                 dp_size=1,
                 ep_size=moe_ep_size,
+                pcp_size=1,
                 prefix="",
                 has_bias=True,  # GPT-OSS uses bias
                 activation="swigluoai",  # GPT-OSS activation
