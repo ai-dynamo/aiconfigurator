@@ -151,18 +151,19 @@ def _get_precision_combos(phase: str):
     sm = get_sm_version()
 
     gemm_types = ["bfloat16"]
-    if sm >= 89:
+    if sm >= 89 and vllm_version > "0.16.0":
         gemm_types.append("fp8_block")
     if sm >= 100:
         gemm_types.append("nvfp4")
 
     attn_combos = [("bfloat16", "bfloat16")]
-    if phase == "context":
-        if sm >= 100:
-            attn_combos.append(("fp8", "fp8"))
-    else:
-        if sm >= 90:
-            attn_combos.append(("bfloat16", "fp8"))
+    if vllm_version > "0.16.0":
+        if phase == "context":
+            if sm >= 100:
+                attn_combos.append(("fp8", "fp8"))
+        else:
+            if sm >= 90:
+                attn_combos.append(("bfloat16", "fp8"))
 
     return [(c, kv, g) for g in gemm_types for c, kv in attn_combos]
 
@@ -200,6 +201,8 @@ def get_generation_test_cases(attn_type: str):
             for b in b_list:
                 for s in s_list:
                     if b * s > 1024 * 4096 * 2 * 2 * 2:
+                        continue
+                    if vllm_version <= "0.16.0" and b * s >= 4 * 1024 * 1024:
                         continue
                     cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
@@ -804,7 +807,7 @@ def run_mla_module(
         print(f"  Dry run failed: {e}")
         traceback.print_exc()
         _cleanup()
-        return None
+        raise RuntimeError("MLA module dry run failed") from e
 
     # 5. Benchmark
     def kernel_func():
