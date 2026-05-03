@@ -224,6 +224,21 @@ def get_moe_test_cases():
             if (
                 moe_type == "fp8_block"
                 and sm_version >= 120
+                and common_moe_testcase.hidden_size == 7168
+                and common_moe_testcase.inter_size == 2048
+                and common_moe_testcase.topk == 8
+                and common_moe_testcase.num_experts == 256
+                and common_moe_testcase.tp == 32
+                and num_tokens >= 320
+            ):
+                # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
+                # DeepSeek-V3 on SM120 at this TP slice. For these token counts
+                # that config requires 144 KiB shared memory, above the 99 KiB
+                # limit.
+                continue
+            if (
+                moe_type == "fp8_block"
+                and sm_version >= 120
                 and common_moe_testcase.hidden_size == 3072
                 and common_moe_testcase.inter_size == 1536
                 and common_moe_testcase.topk == 8
