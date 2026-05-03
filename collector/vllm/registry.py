@@ -93,7 +93,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_gdn_test_cases",
         run_func="run_gdn_torch",
         perf_filename=PerfFile.GDN,
-        versions=(VersionRoute("0.17.0", "collector.vllm.collect_gdn"),),
+        versions=(VersionRoute("0.17.0", "collector.vllm.collect_gdn_v1"),),
     ),
 ]
 
