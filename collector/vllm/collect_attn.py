@@ -412,9 +412,10 @@ def get_context_attention_test_cases(if_unit_test=False):
         n_kv_list = [0]
         head_dim_list = [128]
 
+    # vLLM 0.16.0 FlashInfer context attention rejects FP8 query tensors
+    # while its metadata still expects bfloat16 queries. Generation attention
+    # uses a separate decode path and is filtered independently below.
     kv_cache_dtype_list = [False]
-    if get_sm_version() > 86:
-        kv_cache_dtype_list.append(True)
 
     # DEBUG
     # print(f"b_list: {b_list}, s_list: {s_list}, n_list: {n_list}, n_kv_list: {n_kv_list}")
