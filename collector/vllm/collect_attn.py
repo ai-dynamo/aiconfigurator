@@ -521,6 +521,13 @@ def get_generation_attention_test_cases():
                     if get_sm_version() >= 100 and n // n_kv > 16:
                         continue
                     for s in target_s_list:
+                        # vLLM 0.16.0 FlashInfer decode trips an illegal
+                        # memory access for these two Blackwell shapes.
+                        if get_sm_version() >= 100 and (b, s, n, n_kv, head_dim) in (
+                            (128, 63, 24, 8, 128),
+                            (128, 63, 48, 8, 128),
+                        ):
+                            continue
                         for is_fp8_kv_cache in kv_cache_dtype_list:
                             test_cases.append(
                                 [

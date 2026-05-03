@@ -38,6 +38,7 @@ _nvfp4_available = False
 # scaled_fp4_quant dropped is_sf_swizzled_layout in vLLM >= 0.16.0.
 # Probe the signature once at import time so _run_nvfp4_once doesn't branch per call.
 _scaled_fp4_quant_accepts_swizzled: bool = False
+_trtllm_fp4_accepts_tile_tokens_dim: bool = False
 try:
     import inspect
 
@@ -50,6 +51,9 @@ try:
 
     _scaled_fp4_quant_accepts_swizzled = (
         "is_sf_swizzled_layout" in inspect.signature(_vllm_ops.scaled_fp4_quant).parameters
+    )
+    _trtllm_fp4_accepts_tile_tokens_dim = (
+        "tile_tokens_dim" in inspect.signature(trtllm_fp4_block_scale_routed_moe).parameters
     )
     _nvfp4_available = True
 except Exception:
@@ -80,7 +84,10 @@ _int4_wo_available = False
 _fused_marlin_moe_fn = None
 _gptq_marlin_moe_repack_fn = None
 _int4_wo_quant_type_id: int | None = None
+_fused_marlin_moe_accepts_gating_output: bool = False
 try:
+    import inspect
+
     # gptq_marlin_moe_repack: try vllm._custom_ops first, then torch.ops.vllm
     import vllm._custom_ops as _vllm_custom_ops  # type: ignore[import]
     from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
@@ -89,6 +96,9 @@ try:
     from vllm.scalar_type import scalar_types as _scalar_types  # type: ignore[import]
 
     _int4_wo_quant_type_id = _scalar_types.uint4b8.id
+    _fused_marlin_moe_accepts_gating_output = (
+        "gating_output" in inspect.signature(_fused_marlin_moe_fn).parameters
+    )
 
     _gptq_marlin_moe_repack_fn = getattr(_vllm_custom_ops, "gptq_marlin_moe_repack", None)
     if _gptq_marlin_moe_repack_fn is None:
@@ -114,7 +124,9 @@ def get_moe_test_cases():
         moe_list += ["fp8"]
     if get_sm_version() >= 90 and per_block_cast_to_fp8 is not None:
         moe_list += ["fp8_block"]
-    if get_sm_version() >= 100 and _nvfp4_available:
+    # The vLLM 0.16.0 runtime imports FlashInfer FP4 MoE, but its JIT build
+    # cannot compile the SM100 module in this container.
+    if get_sm_version() >= 100 and _nvfp4_available and vllm_version > "0.16.0":
         moe_list += ["nvfp4"]
     if _mxfp4_available:
         moe_list += ["w4a16_mxfp4"]
@@ -529,7 +541,12 @@ def run_moe_torch(
 
         def _run_int4_wo_once(hs, tw, ti):
             """Run a single int4_wo (W4A16) MoE iteration via vLLM Marlin GPTQ kernel."""
-            _fused_marlin_moe_fn(
+            common_kwargs = {
+                "w1_zeros": None,
+                "w2_zeros": None,
+                "is_k_full": True,
+            }
+            common_args = [
                 hs,
                 w1_marlin,
                 w2_marlin,
@@ -537,13 +554,15 @@ def run_moe_torch(
                 None,  # bias2
                 w1_int4_scale,
                 w2_int4_scale,
-                None,  # gating_output (unused when topk_weights/ids provided)
+            ]
+            if _fused_marlin_moe_accepts_gating_output:
+                common_args.append(None)
+            _fused_marlin_moe_fn(
+                *common_args,
                 tw.float(),  # fused_marlin_moe asserts float32
                 ti,
                 _int4_wo_quant_type_id,
-                w1_zeros=None,
-                w2_zeros=None,
-                is_k_full=True,
+                **common_kwargs,
             )
 
         def _run_nvfp4_once(hs, tw, ti):
@@ -576,35 +595,39 @@ def run_moe_torch(
             # clamped to [8, 64]. Controls GEMM tiling in the FlashInfer kernel.
             avg_tok = max(1, (num_tok * topk) // num_experts)
             tile_tokens_dim = min(max(1 << (avg_tok - 1).bit_length(), 8), 64)
-            trtllm_fp4_block_scale_routed_moe(
-                topk_ids=packed,
-                routing_bias=None,
-                hidden_states=x_fp4,
-                hidden_states_scale=x_scale.view(num_tok, scale_cols).to(torch.float8_e4m3fn),
-                gemm1_weights=nvfp4_data["w1"],
-                gemm1_weights_scale=nvfp4_data["w1_scale"].view(torch.float8_e4m3fn),
-                gemm1_bias=None,
-                gemm1_alpha=None,
-                gemm1_beta=None,
-                gemm1_clamp_limit=None,
-                gemm2_weights=nvfp4_data["w2"],
-                gemm2_weights_scale=nvfp4_data["w2_scale"].view(torch.float8_e4m3fn),
-                gemm2_bias=None,
-                output1_scale_scalar=nvfp4_data["g1_scale_c"],
-                output1_scale_gate_scalar=nvfp4_data["g1_alphas"],
-                output2_scale_scalar=nvfp4_data["g2_alphas"],
-                num_experts=num_experts,
-                top_k=topk,
-                n_group=0,
-                topk_group=0,
-                intermediate_size=local_inter_size,
-                local_expert_offset=0,
-                local_num_experts=local_num_experts,
-                routed_scaling_factor=None,
-                routing_method_type=1,  # Renormalize
-                do_finalize=True,
-                tile_tokens_dim=tile_tokens_dim,
-            )
+            moe_kwargs = {
+                "topk_ids": packed,
+                "routing_bias": None,
+                "hidden_states": x_fp4,
+                "hidden_states_scale": x_scale.view(num_tok, scale_cols).to(torch.float8_e4m3fn),
+                "gemm1_weights": nvfp4_data["w1"],
+                "gemm1_weights_scale": nvfp4_data["w1_scale"].view(torch.float8_e4m3fn),
+                "gemm1_bias": None,
+                "gemm1_alpha": None,
+                "gemm1_beta": None,
+                "gemm1_clamp_limit": None,
+                "gemm2_weights": nvfp4_data["w2"],
+                "gemm2_weights_scale": nvfp4_data["w2_scale"].view(torch.float8_e4m3fn),
+                "gemm2_bias": None,
+                "output1_scale_scalar": nvfp4_data["g1_scale_c"],
+                "output1_scale_gate_scalar": nvfp4_data["g1_alphas"],
+                "output2_scale_scalar": nvfp4_data["g2_alphas"],
+                "num_experts": num_experts,
+                "top_k": topk,
+                "n_group": 0,
+                "topk_group": 0,
+                "intermediate_size": local_inter_size,
+                "local_expert_offset": 0,
+                "local_num_experts": local_num_experts,
+                "routed_scaling_factor": None,
+                "routing_method_type": 1,  # Renormalize
+                "do_finalize": True,
+            }
+            if _trtllm_fp4_accepts_tile_tokens_dim:
+                moe_kwargs["tile_tokens_dim"] = tile_tokens_dim
+            else:
+                moe_kwargs["tune_max_num_tokens"] = max(num_tok, 8192)
+            trtllm_fp4_block_scale_routed_moe(**moe_kwargs)
 
         def run_single_iteration():
             if use_mxfp4:
