@@ -208,6 +208,7 @@ def get_moe_test_cases():
                             or (common_moe_testcase.ep == 4 and num_tokens >= 48)
                             or (common_moe_testcase.ep == 8 and num_tokens >= 32)
                             or (common_moe_testcase.ep == 16 and num_tokens >= 16)
+                            or (common_moe_testcase.ep == 32 and num_tokens >= 8)
                         )
                     )
                     or (
@@ -217,6 +218,7 @@ def get_moe_test_cases():
                             or (common_moe_testcase.ep == 2 and num_tokens >= 80)
                             or (common_moe_testcase.ep == 4 and num_tokens >= 48)
                             or (common_moe_testcase.ep == 8 and num_tokens >= 32)
+                            or (common_moe_testcase.ep == 16 and num_tokens >= 16)
                         )
                     )
                     or (
@@ -225,6 +227,7 @@ def get_moe_test_cases():
                             num_tokens >= 160
                             or (common_moe_testcase.ep == 2 and num_tokens >= 80)
                             or (common_moe_testcase.ep == 4 and num_tokens >= 48)
+                            or (common_moe_testcase.ep == 8 and num_tokens >= 32)
                         )
                     )
                 )
@@ -249,6 +252,7 @@ def get_moe_test_cases():
                             or (common_moe_testcase.ep == 4 and num_tokens >= 48)
                             or (common_moe_testcase.ep == 8 and num_tokens >= 32)
                             or (common_moe_testcase.ep == 16 and num_tokens >= 16)
+                            or (common_moe_testcase.ep == 32 and num_tokens >= 8)
                         )
                     )
                     or (
@@ -258,6 +262,7 @@ def get_moe_test_cases():
                             or (common_moe_testcase.ep == 2 and num_tokens >= 96)
                             or (common_moe_testcase.ep == 4 and num_tokens >= 48)
                             or (common_moe_testcase.ep == 8 and num_tokens >= 32)
+                            or (common_moe_testcase.ep == 16 and num_tokens >= 16)
                         )
                     )
                     or (
@@ -266,6 +271,7 @@ def get_moe_test_cases():
                             num_tokens >= 192
                             or (common_moe_testcase.ep == 2 and num_tokens >= 96)
                             or (common_moe_testcase.ep == 4 and num_tokens >= 48)
+                            or (common_moe_testcase.ep == 8 and num_tokens >= 32)
                         )
                     )
                 )
