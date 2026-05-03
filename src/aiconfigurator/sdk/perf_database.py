@@ -20,6 +20,7 @@ from scipy import interpolate
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.common import PerfDataFilename
+from aiconfigurator.sdk.dsv4_sparse_predictor import Dsv4SparseKernelPredictor
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
@@ -2630,6 +2631,7 @@ class PerfDatabase:
         # ``kernel -> LoadedOpData(arch -> tp -> past_kv -> isl -> bs)``.
         loaded_submodules = _load_op_data(PerfDataFilename.dsv4_flash_attn_submodule)
         self._dsv4_flash_sparse_kernel_data = {}
+        self._dsv4_flash_sparse_kernel_predictors = {}
         for kernel in ("paged_mqa_logits", "hca_attn"):
             data = loaded_submodules.data.get(kernel) if loaded_submodules and loaded_submodules.data else None
             self._dsv4_flash_sparse_kernel_data[kernel] = LoadedOpData(
@@ -2637,6 +2639,7 @@ class PerfDatabase:
                 PerfDataFilename.dsv4_flash_attn_submodule,
                 loaded_submodules.filepath,
             )
+            self._dsv4_flash_sparse_kernel_predictors[kernel] = Dsv4SparseKernelPredictor(kernel, data)
 
         # sglang wideep path
         if backend == "sglang":
@@ -7661,6 +7664,18 @@ class PerfDatabase:
         direct = _at_past(past_kv)
         if direct is not None:
             return direct
+
+        predictor = getattr(self, "_dsv4_flash_sparse_kernel_predictors", {}).get(kernel)
+        if predictor is not None:
+            predicted = predictor.predict(
+                bs=bs,
+                isl=isl,
+                past_kv=past_kv,
+                tp_size=tp_size,
+                architecture=architecture,
+            )
+            if predicted is not None:
+                return predicted
 
         past_keys = sorted(per_tp_dict.keys())
         if not past_keys:

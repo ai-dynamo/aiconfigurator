@@ -20,6 +20,7 @@ from typing import ClassVar
 import pytest
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.dsv4_sparse_predictor import Dsv4SparseKernelPredictor, dsv4_sparse_effective_work
 from aiconfigurator.sdk.perf_database import (
     DSV4_FLASH_NATIVE_HEADS,
     LoadedOpData,
@@ -345,6 +346,76 @@ def test_lookup_sparse_kernel_missing_returns_none():
         tp_size=1,
     )
     assert val is None
+
+
+def _linear_sparse_latency(kernel: str, *, bs: int, isl: int, past_kv: int) -> float:
+    m = bs * isl
+    work = dsv4_sparse_effective_work(kernel, bs, isl, past_kv)
+    return 0.05 + 1e-7 * work + 1e-4 * m
+
+
+def _make_sparse_predictor_raw(kernel: str) -> dict:
+    arch = "DeepseekV4ForCausalLM"
+    raw = {arch: {1: {}}}
+    for past_kv in (1024, 2048):
+        raw[arch][1][past_kv] = {}
+        for isl in (256, 512):
+            raw[arch][1][past_kv][isl] = {
+                1: {"latency": _linear_sparse_latency(kernel, bs=1, isl=isl, past_kv=past_kv)}
+            }
+    return raw
+
+
+def test_dsv4_sparse_predictor_predicts_mqa_from_raw_data():
+    kernel = "paged_mqa_logits"
+    predictor = Dsv4SparseKernelPredictor(kernel, _make_sparse_predictor_raw(kernel), min_cell_samples=99)
+    val = predictor.predict(
+        bs=1,
+        isl=384,
+        past_kv=1536,
+        tp_size=1,
+        architecture="DeepseekV4ForCausalLM",
+    )
+    assert val == pytest.approx(_linear_sparse_latency(kernel, bs=1, isl=384, past_kv=1536), rel=1e-10)
+
+
+def test_dsv4_sparse_predictor_small_m_returns_none():
+    kernel = "hca_attn"
+    predictor = Dsv4SparseKernelPredictor(kernel, _make_sparse_predictor_raw(kernel), min_cell_samples=99)
+    assert (
+        predictor.predict(
+            bs=1,
+            isl=128,
+            past_kv=1536,
+            tp_size=1,
+            architecture="DeepseekV4ForCausalLM",
+        )
+        is None
+    )
+
+
+def test_lookup_sparse_kernel_uses_predictor_on_all_miss():
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+
+    kernel = "paged_mqa_logits"
+    raw = _make_sparse_predictor_raw(kernel)
+    predictor = Dsv4SparseKernelPredictor(kernel, raw, min_cell_samples=99)
+
+    class _DB:
+        _dsv4_flash_sparse_kernel_data: ClassVar[dict] = {
+            kernel: LoadedOpData(raw, None, "memory"),
+        }
+        _dsv4_flash_sparse_kernel_predictors: ClassVar[dict] = {kernel: predictor}
+
+    val = PerfDatabase._lookup_dsv4_flash_sparse_kernel(
+        _DB(),
+        kernel=kernel,
+        bs=1,
+        isl=384,
+        past_kv=1536,
+        tp_size=1,
+    )
+    assert val == pytest.approx(_linear_sparse_latency(kernel, bs=1, isl=384, past_kv=1536), rel=1e-10)
 
 
 # ───────────────────────────────────────────────────────────────────────
