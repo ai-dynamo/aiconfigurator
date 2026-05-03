@@ -115,6 +115,20 @@ def get_moe_test_cases():
                 moe_type == "fp8_block"
                 and sm_version >= 120
                 and common_moe_testcase.hidden_size == 4096
+                and common_moe_testcase.inter_size == 14336
+                and common_moe_testcase.topk == 2
+                and common_moe_testcase.num_experts == 8
+                and common_moe_testcase.tp == 32
+                and num_tokens >= 16
+            ):
+                # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
+                # Mixtral on SM120 at this TP slice. From 16 tokens upward that
+                # config requires 144 KiB shared memory, above the 99 KiB limit.
+                continue
+            if (
+                moe_type == "fp8_block"
+                and sm_version >= 120
+                and common_moe_testcase.hidden_size == 4096
                 and common_moe_testcase.inter_size == 2688
                 and common_moe_testcase.topk == 22
                 and common_moe_testcase.num_experts == 512
@@ -191,6 +205,21 @@ def get_moe_test_cases():
                 # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
                 # Qwen3-Coder-480B-A35B on SM120. For these token counts that
                 # config requires 144 KiB shared memory, above the 99 KiB limit.
+                continue
+            if (
+                moe_type == "fp8_block"
+                and sm_version >= 120
+                and common_moe_testcase.hidden_size == 4096
+                and common_moe_testcase.inter_size == 1024
+                and common_moe_testcase.topk == 10
+                and common_moe_testcase.num_experts == 512
+                and common_moe_testcase.tp == 16
+                and num_tokens >= 768
+            ):
+                # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
+                # Qwen3.5-397B-A17B on SM120 at this TP slice. For these token
+                # counts that config requires 144 KiB shared memory, above the
+                # 99 KiB limit.
                 continue
             if (
                 moe_type == "fp8_block"
