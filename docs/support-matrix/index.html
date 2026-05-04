@@ -298,7 +298,7 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
   let status;
   if (passVersions.includes(newest)) status = 'pass';
   else if (partialVersions.includes(newest)) status = 'partial';
-  else if (passVersions.length) status = 'partial';
+  else if (passVersions.length || partialVersions.length) status = 'partial';
   else status = 'fail';
 
   return {
@@ -659,7 +659,7 @@ function Legend() {
       </div>
       <div className="flex items-center gap-1.5">
         <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-amber-100 dark:bg-amber-950"></span>
-        Regression: latest fails, older passes (<span className="line-through opacity-75 font-mono">struck</span>&nbsp;= fails)
+        Regression (latest fails, older passes) or partial coverage in latest version (agg or disagg only) (<span className="line-through opacity-75 font-mono">struck</span>&nbsp;= fails)
       </div>
       <div className="flex items-center gap-1.5">
         <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-red-100 dark:bg-red-950"></span>
@@ -735,18 +735,21 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
     const pushFail = (v) => chips.push(<span key={`f-${v}`} className="line-through opacity-75">{v}</span>);
 
     if (showAllVersions) {
-      (cell.passVersions || []).forEach(pushPass);
-      (cell.partialVersions || []).forEach(pushPartial);
-      (cell.failVersions || []).forEach(pushFail);
+      const all = [
+        ...(cell.passVersions || []).map(v => ({ version: v, status: 'pass' })),
+        ...(cell.partialVersions || []).map(v => ({ version: v, status: 'partial' })),
+        ...(cell.failVersions || []).map(v => ({ version: v, status: 'fail' })),
+      ].sort((a, b) => compareVersionTuples(versionSortKey(a.version), versionSortKey(b.version)));
+      all.forEach(({ version, status }) => {
+        if (status === 'pass') pushPass(version);
+        else if (status === 'partial') pushPartial(version);
+        else pushFail(version);
+      });
     } else {
       // Each per-status list is already newest-first (sorted in aggregateBackendCell).
       // Pick whichever bucket the overall status points at.
       if (cell.status === 'pass' && cell.passVersions && cell.passVersions.length) {
         pushPass(cell.passVersions[0]);
-      } else if (cell.status === 'partial') {
-        // Regression: latest is fail/partial. Prefer the latest fail chip if any,
-        // else the latest partial chip — either way that's the version that's
-        // currently broken.
       } else if (cell.status === 'partial') {
         const brokenVersions = [
           ...(cell.partialVersions || []).map(v => ({ version: v, kind: 'partial' })),
