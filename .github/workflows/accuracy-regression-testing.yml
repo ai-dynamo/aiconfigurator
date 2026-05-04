@@ -1,4 +1,4 @@
-name: "Prediction Accuracy Regression Test"
+name: "Accuracy Regression Testing"
 
 on:
   pull_request:
@@ -14,8 +14,8 @@ on:
         type: string
 
 jobs:
-  prediction-regression:
-    name: AIC Prediction Regression
+  accuracy-regression-testing:
+    name: AIC Accuracy Regression Testing
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -59,59 +59,59 @@ jobs:
 
       - name: Generate new predictions
         run: |
-          mkdir -p tools/regression_testing/results
-          PYTHONPATH=src python tools/regression_testing/predict_silicon_sample.py \
+          mkdir -p tools/accuracy_regression_testing/results
+          PYTHONPATH=src python tools/accuracy_regression_testing/predict_silicon_sample.py \
             --aic-output-prefix new \
-            > tools/regression_testing/results/silicon_result_new.csv \
-            2> tools/regression_testing/results/new_predictions.log
+            > tools/accuracy_regression_testing/results/silicon_result_new.csv \
+            2> tools/accuracy_regression_testing/results/new_predictions.log
 
       - name: Generate old predictions
         run: |
           PYTHONPATH="${{ github.workspace }}/../aiconfigurator-old/src" \
-            python tools/regression_testing/predict_silicon_sample.py \
-              tools/regression_testing/results/silicon_result_new.csv \
+            python tools/accuracy_regression_testing/predict_silicon_sample.py \
+              tools/accuracy_regression_testing/results/silicon_result_new.csv \
               --aic-output-prefix old \
-              > tools/regression_testing/results/silicon_result.csv \
-              2> tools/regression_testing/results/old_predictions.log
+              > tools/accuracy_regression_testing/results/silicon_result.csv \
+              2> tools/accuracy_regression_testing/results/old_predictions.log
 
       - name: Compare predictions
         run: |
-          python tools/regression_testing/compare_silicon_predictions.py \
-            tools/regression_testing/results/silicon_result.csv \
-            --output tools/regression_testing/results/comparison_summary.csv \
-            --plot-output tools/regression_testing/results/comparison_plot.png
+          python tools/accuracy_regression_testing/compare_silicon_predictions.py \
+            tools/accuracy_regression_testing/results/silicon_result.csv \
+            --output tools/accuracy_regression_testing/results/comparison_summary.csv \
+            --plot-output tools/accuracy_regression_testing/results/comparison_plot.png
 
       - name: Run regression gate
         run: |
-          python -m pytest tools/regression_testing/test_regression_thresholds.py -q
+          python -m pytest tools/accuracy_regression_testing/test_regression_thresholds.py -q
 
       - name: Upload regression artifacts
         id: upload-regression-artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: prediction-regression-results
+          name: accuracy-regression-testing-results
           path: |
-            tools/regression_testing/results/silicon_result_new.csv
-            tools/regression_testing/results/silicon_result.csv
-            tools/regression_testing/results/comparison_summary.csv
-            tools/regression_testing/results/comparison_plot.png
-            tools/regression_testing/results/new_predictions.log
-            tools/regression_testing/results/old_predictions.log
+            tools/accuracy_regression_testing/results/silicon_result_new.csv
+            tools/accuracy_regression_testing/results/silicon_result.csv
+            tools/accuracy_regression_testing/results/comparison_summary.csv
+            tools/accuracy_regression_testing/results/comparison_plot.png
+            tools/accuracy_regression_testing/results/new_predictions.log
+            tools/accuracy_regression_testing/results/old_predictions.log
           if-no-files-found: ignore
 
       - name: Add summary
         if: always()
         run: |
-          echo "## AIC Prediction Regression" >> "$GITHUB_STEP_SUMMARY"
+          echo "## AIC Accuracy Regression Testing" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Old revision: \`${{ steps.old-ref.outputs.old_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "Incoming revision: \`$(git rev-parse HEAD)\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f tools/regression_testing/results/comparison_summary.csv ]; then
+          if [ -f tools/accuracy_regression_testing/results/comparison_summary.csv ]; then
             echo "### Comparison Summary" >> "$GITHUB_STEP_SUMMARY"
             echo '```csv' >> "$GITHUB_STEP_SUMMARY"
-            cat tools/regression_testing/results/comparison_summary.csv >> "$GITHUB_STEP_SUMMARY"
+            cat tools/accuracy_regression_testing/results/comparison_summary.csv >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Comparison summary was not generated." >> "$GITHUB_STEP_SUMMARY"
@@ -121,18 +121,18 @@ jobs:
         id: publish-plot
         if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         env:
-          ARTIFACT_BRANCH: prediction-regression-artifacts
+          ARTIFACT_BRANCH: accuracy-regression-testing-artifacts
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
 
-          if [ ! -f tools/regression_testing/results/comparison_plot.png ]; then
+          if [ ! -f tools/accuracy_regression_testing/results/comparison_plot.png ]; then
             echo "plot_url=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           ARTIFACT_DIR="$(mktemp -d)"
-          ARTIFACT_PATH="prediction-regression/pr-${PR_NUMBER}/run-${GITHUB_RUN_ID}"
+          ARTIFACT_PATH="accuracy-regression-testing/pr-${PR_NUMBER}/run-${GITHUB_RUN_ID}"
 
           if git ls-remote --exit-code --heads origin "${ARTIFACT_BRANCH}" >/dev/null 2>&1; then
             git fetch origin "${ARTIFACT_BRANCH}:${ARTIFACT_BRANCH}"
@@ -144,7 +144,7 @@ jobs:
           fi
 
           mkdir -p "${ARTIFACT_DIR}/${ARTIFACT_PATH}"
-          cp tools/regression_testing/results/comparison_plot.png "${ARTIFACT_DIR}/${ARTIFACT_PATH}/comparison_plot.png"
+          cp tools/accuracy_regression_testing/results/comparison_plot.png "${ARTIFACT_DIR}/${ARTIFACT_PATH}/comparison_plot.png"
 
           git -C "${ARTIFACT_DIR}" config user.name "github-actions[bot]"
           git -C "${ARTIFACT_DIR}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -155,7 +155,7 @@ jobs:
           if git -C "${ARTIFACT_DIR}" diff --cached --quiet; then
             echo "No plot changes to publish."
           else
-            git -C "${ARTIFACT_DIR}" commit -m "chore: publish prediction regression plot for PR ${PR_NUMBER}"
+            git -C "${ARTIFACT_DIR}" commit -m "chore: publish accuracy regression testing plot for PR ${PR_NUMBER}"
             git -C "${ARTIFACT_DIR}" push origin "${ARTIFACT_BRANCH}"
           fi
 
@@ -174,15 +174,15 @@ jobs:
           import os
           from pathlib import Path
 
-          summary_path = Path("tools/regression_testing/results/comparison_summary.csv")
+          summary_path = Path("tools/accuracy_regression_testing/results/comparison_summary.csv")
           artifact_url = os.environ.get("ARTIFACT_URL", "")
           plot_url = os.environ.get("PLOT_URL", "")
           old_ref = os.environ.get("OLD_REF", "")
-          marker = "<!-- aic-prediction-regression -->"
+          marker = "<!-- aic-accuracy-regression-testing -->"
 
           lines = [
               marker,
-              "## AIC Prediction Regression",
+              "## AIC Accuracy Regression Testing",
               "",
               f"Old revision: `{old_ref}`",
               "",
@@ -223,11 +223,11 @@ jobs:
           ])
           if plot_url:
               lines.extend([
-                  f"<img src=\"{plot_url}\" alt=\"AIC prediction regression comparison plot\">",
+                  f"<img src=\"{plot_url}\" alt=\"AIC accuracy regression testing comparison plot\">",
                   "",
               ])
           lines.extend([
-              f"Artifact bundle: [prediction-regression-results]({artifact_url})",
+              f"Artifact bundle: [accuracy-regression-testing-results]({artifact_url})",
               "",
               "</details>",
               "",
@@ -242,7 +242,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          MARKER="<!-- aic-prediction-regression -->"
+          MARKER="<!-- aic-accuracy-regression-testing -->"
           COMMENT_ID="$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
             --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" | head -n 1)"
           if [ -n "${COMMENT_ID}" ]; then

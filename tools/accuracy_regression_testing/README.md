@@ -1,4 +1,4 @@
-# Regression Testing
+# Accuracy Regression Testing
 
 A workflow for comparing AIC TTFT/TPOT predictions between two revisions.
 
@@ -9,15 +9,15 @@ column names.
 
 ```bash
 # From the incoming/current branch
-PYTHONPATH=src python tools/regression_testing/predict_silicon_sample.py \
+PYTHONPATH=src python tools/accuracy_regression_testing/predict_silicon_sample.py \
   --aic-output-prefix new \
-  > tools/regression_testing/results/silicon_result_new.csv
+  > tools/accuracy_regression_testing/results/silicon_result_new.csv
 
 # From an old checkout/worktree, append old_* columns to the same CSV
-PYTHONPATH=/path/to/old/aiconfigurator/src python tools/regression_testing/predict_silicon_sample.py \
-  tools/regression_testing/results/silicon_result_new.csv \
+PYTHONPATH=/path/to/old/aiconfigurator/src python tools/accuracy_regression_testing/predict_silicon_sample.py \
+  tools/accuracy_regression_testing/results/silicon_result_new.csv \
   --aic-output-prefix old \
-  > tools/regression_testing/results/silicon_result.csv
+  > tools/accuracy_regression_testing/results/silicon_result.csv
 ```
 
 The final `silicon_result.csv` should contain both `old_predicted_*` and
@@ -26,10 +26,10 @@ The final `silicon_result.csv` should contain both `old_predicted_*` and
 ## 2. Compare predictions
 
 ```bash
-python tools/regression_testing/compare_silicon_predictions.py \
-  tools/regression_testing/results/silicon_result.csv \
-  --output tools/regression_testing/results/comparison_summary.csv \
-  --plot-output tools/regression_testing/results/comparison_plot.png
+python tools/accuracy_regression_testing/compare_silicon_predictions.py \
+  tools/accuracy_regression_testing/results/silicon_result.csv \
+  --output tools/accuracy_regression_testing/results/comparison_summary.csv \
+  --plot-output tools/accuracy_regression_testing/results/comparison_plot.png
 ```
 
 This writes a CSV summary and a plot. Positive MAPE improvement means the new
@@ -39,7 +39,7 @@ coverage change: new successful predictions minus old successful predictions.
 ## 3. Gate a PR
 
 ```bash
-python -m pytest tools/regression_testing/test_regression_thresholds.py
+python -m pytest tools/accuracy_regression_testing/test_regression_thresholds.py
 ```
 
 Optional path overrides:
@@ -47,7 +47,7 @@ Optional path overrides:
 ```bash
 AIC_COMPARISON_SUMMARY=/path/to/comparison_summary.csv \
 AIC_SILICON_RESULT=/path/to/silicon_result.csv \
-python -m pytest tools/regression_testing/test_regression_thresholds.py
+python -m pytest tools/accuracy_regression_testing/test_regression_thresholds.py
 ```
 
 The pytest checks:
