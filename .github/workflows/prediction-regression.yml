@@ -1,0 +1,189 @@
+name: "Prediction Regression"
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+  workflow_dispatch:
+    inputs:
+      old-ref:
+        description: "Old revision to compare against"
+        required: false
+        default: "main"
+        type: string
+
+jobs:
+  prediction-regression:
+    name: AIC Prediction Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Checkout incoming revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Git LFS Pull
+        run: git lfs pull
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Resolve old revision
+        id: old-ref
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            OLD_REF="${{ github.event.pull_request.base.sha }}"
+          else
+            OLD_REF="${{ inputs.old-ref }}"
+          fi
+          echo "old_ref=${OLD_REF}" >> "$GITHUB_OUTPUT"
+          echo "Comparing old revision ${OLD_REF} against incoming revision $(git rev-parse HEAD)"
+
+      - name: Create old revision worktree
+        run: |
+          git worktree add --detach ../aiconfigurator-old "${{ steps.old-ref.outputs.old_ref }}"
+
+      - name: Generate new predictions
+        run: |
+          mkdir -p tools/regression_testing/results
+          PYTHONPATH=src python tools/regression_testing/predict_silicon_sample.py \
+            --aic-output-prefix new \
+            > tools/regression_testing/results/silicon_result_new.csv \
+            2> tools/regression_testing/results/new_predictions.log
+
+      - name: Generate old predictions
+        run: |
+          PYTHONPATH="${{ github.workspace }}/../aiconfigurator-old/src" \
+            python tools/regression_testing/predict_silicon_sample.py \
+              tools/regression_testing/results/silicon_result_new.csv \
+              --aic-output-prefix old \
+              > tools/regression_testing/results/silicon_result.csv \
+              2> tools/regression_testing/results/old_predictions.log
+
+      - name: Compare predictions
+        run: |
+          python tools/regression_testing/compare_silicon_predictions.py \
+            tools/regression_testing/results/silicon_result.csv \
+            --output tools/regression_testing/results/comparison_summary.csv \
+            --plot-output tools/regression_testing/results/comparison_plot.png
+
+      - name: Run regression gate
+        run: |
+          python -m pytest tools/regression_testing/test_regression_thresholds.py -q
+
+      - name: Upload regression artifacts
+        id: upload-regression-artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prediction-regression-results
+          path: |
+            tools/regression_testing/results/silicon_result_new.csv
+            tools/regression_testing/results/silicon_result.csv
+            tools/regression_testing/results/comparison_summary.csv
+            tools/regression_testing/results/comparison_plot.png
+            tools/regression_testing/results/new_predictions.log
+            tools/regression_testing/results/old_predictions.log
+          if-no-files-found: ignore
+
+      - name: Add summary
+        if: always()
+        run: |
+          echo "## AIC Prediction Regression" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Old revision: \`${{ steps.old-ref.outputs.old_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Incoming revision: \`$(git rev-parse HEAD)\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f tools/regression_testing/results/comparison_summary.csv ]; then
+            echo "### Comparison Summary" >> "$GITHUB_STEP_SUMMARY"
+            echo '```csv' >> "$GITHUB_STEP_SUMMARY"
+            cat tools/regression_testing/results/comparison_summary.csv >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Comparison summary was not generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Build PR comment
+        if: always() && github.event_name == 'pull_request'
+        env:
+          ARTIFACT_URL: ${{ steps.upload-regression-artifacts.outputs.artifact-url }}
+          OLD_REF: ${{ steps.old-ref.outputs.old_ref }}
+        run: |
+          python - <<'PY'
+          import csv
+          import os
+          from pathlib import Path
+
+          summary_path = Path("tools/regression_testing/results/comparison_summary.csv")
+          artifact_url = os.environ.get("ARTIFACT_URL", "")
+          old_ref = os.environ.get("OLD_REF", "")
+          marker = "<!-- aic-prediction-regression -->"
+
+          lines = [
+              marker,
+              "## AIC Prediction Regression",
+              "",
+              f"Old revision: `{old_ref}`",
+              "",
+          ]
+          if summary_path.exists():
+              with summary_path.open(newline="") as f:
+                  rows = list(csv.DictReader(f))
+              headers = rows[0].keys() if rows else []
+              lines.append("### Comparison Summary")
+              lines.append("")
+              lines.append("| " + " | ".join(headers) + " |")
+              lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+              for row in rows:
+                  lines.append("| " + " | ".join(row[h] for h in headers) + " |")
+              lines.append("")
+          else:
+              lines.append("_Comparison summary was not generated._")
+              lines.append("")
+
+          lines.extend([
+              "<details>",
+              "<summary>Comparison plot</summary>",
+              "",
+              "The plot is available in the workflow artifact:",
+              f"[prediction-regression-results]({artifact_url})",
+              "",
+              "> GitHub Actions artifacts are not direct image URLs, so download the artifact to view `comparison_plot.png`.",
+              "",
+              "</details>",
+              "",
+          ])
+          Path("pr_comment.md").write_text("\n".join(lines))
+          PY
+
+      - name: Comment on PR
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          MARKER="<!-- aic-prediction-regression -->"
+          COMMENT_ID="$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" | head -n 1)"
+          if [ -n "${COMMENT_ID}" ]; then
+            gh api "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
+              --method PATCH \
+              --field body="$(cat pr_comment.md)"
+          else
+            gh pr comment "${PR_NUMBER}" --body-file pr_comment.md
+          fi
