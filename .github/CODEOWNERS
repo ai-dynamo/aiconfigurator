@@ -11,6 +11,9 @@
 # Default ownership for repository files.
 * @ai-dynamo/contributors-aiconfigurator
 
+# Ownership policy changes should require infra and maintainer review.
+/.github/CODEOWNERS @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
+
 # Runtime, SDK, backends, systems, model configs, and UI
 /src/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 /src/aiconfigurator/sdk/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
