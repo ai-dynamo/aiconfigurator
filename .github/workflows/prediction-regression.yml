@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
-      contents: read
+      contents: write
       issues: write
       pull-requests: write
     steps:
@@ -117,10 +117,56 @@ jobs:
             echo "Comparison summary was not generated." >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Publish comparison plot
+        id: publish-plot
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          ARTIFACT_BRANCH: prediction-regression-artifacts
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -f tools/regression_testing/results/comparison_plot.png ]; then
+            echo "plot_url=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          ARTIFACT_DIR="$(mktemp -d)"
+          ARTIFACT_PATH="prediction-regression/pr-${PR_NUMBER}/run-${GITHUB_RUN_ID}"
+
+          if git ls-remote --exit-code --heads origin "${ARTIFACT_BRANCH}" >/dev/null 2>&1; then
+            git fetch origin "${ARTIFACT_BRANCH}:${ARTIFACT_BRANCH}"
+            git worktree add "${ARTIFACT_DIR}" "${ARTIFACT_BRANCH}"
+          else
+            git worktree add --detach "${ARTIFACT_DIR}"
+            git -C "${ARTIFACT_DIR}" checkout --orphan "${ARTIFACT_BRANCH}"
+            git -C "${ARTIFACT_DIR}" rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          mkdir -p "${ARTIFACT_DIR}/${ARTIFACT_PATH}"
+          cp tools/regression_testing/results/comparison_plot.png "${ARTIFACT_DIR}/${ARTIFACT_PATH}/comparison_plot.png"
+
+          git -C "${ARTIFACT_DIR}" config user.name "github-actions[bot]"
+          git -C "${ARTIFACT_DIR}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "${ARTIFACT_DIR}" lfs install --local
+          git -C "${ARTIFACT_DIR}" lfs track "*.png"
+          git -C "${ARTIFACT_DIR}" add .gitattributes "${ARTIFACT_PATH}/comparison_plot.png"
+
+          if git -C "${ARTIFACT_DIR}" diff --cached --quiet; then
+            echo "No plot changes to publish."
+          else
+            git -C "${ARTIFACT_DIR}" commit -m "chore: publish prediction regression plot for PR ${PR_NUMBER}"
+            git -C "${ARTIFACT_DIR}" push origin "${ARTIFACT_BRANCH}"
+          fi
+
+          PLOT_URL="https://media.githubusercontent.com/media/${GITHUB_REPOSITORY}/${ARTIFACT_BRANCH}/${ARTIFACT_PATH}/comparison_plot.png"
+          echo "plot_url=${PLOT_URL}" >> "$GITHUB_OUTPUT"
+
       - name: Build PR comment
         if: always() && github.event_name == 'pull_request'
         env:
           ARTIFACT_URL: ${{ steps.upload-regression-artifacts.outputs.artifact-url }}
+          PLOT_URL: ${{ steps.publish-plot.outputs.plot_url }}
           OLD_REF: ${{ steps.old-ref.outputs.old_ref }}
         run: |
           python - <<'PY'
@@ -130,6 +176,7 @@ jobs:
 
           summary_path = Path("tools/regression_testing/results/comparison_summary.csv")
           artifact_url = os.environ.get("ARTIFACT_URL", "")
+          plot_url = os.environ.get("PLOT_URL", "")
           old_ref = os.environ.get("OLD_REF", "")
           marker = "<!-- aic-prediction-regression -->"
 
@@ -144,12 +191,26 @@ jobs:
               with summary_path.open(newline="") as f:
                   rows = list(csv.DictReader(f))
               headers = rows[0].keys() if rows else []
-              lines.append("### Comparison Summary")
+              all_row = next((row for row in rows if row.get("partition") == "all"), {})
+              lines.append("### Summary")
               lines.append("")
-              lines.append("| " + " | ".join(headers) + " |")
-              lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
-              for row in rows:
-                  lines.append("| " + " | ".join(row[h] for h in headers) + " |")
+              lines.append(f"- \\# samples added: {all_row.get('num_samples_added', 'N/A')}")
+              lines.append(f"- ttft_mape_improvement_%: {all_row.get('ttft_mape_improvement_%', 'N/A')}")
+              lines.append(f"- tpot_mape_improvement_%: {all_row.get('tpot_mape_improvement_%', 'N/A')}")
+              lines.append("")
+              lines.append("<details>")
+              lines.append("<summary>Comparison summary table</summary>")
+              lines.append("")
+              if rows:
+                  lines.append("| " + " | ".join(headers) + " |")
+                  lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+                  for row in rows:
+                      lines.append("| " + " | ".join(row[h] for h in headers) + " |")
+                  lines.append("")
+              else:
+                  lines.append("_Comparison summary is empty._")
+                  lines.append("")
+              lines.append("</details>")
               lines.append("")
           else:
               lines.append("_Comparison summary was not generated._")
@@ -159,10 +220,14 @@ jobs:
               "<details>",
               "<summary>Comparison plot</summary>",
               "",
-              "The plot is available in the workflow artifact:",
-              f"[prediction-regression-results]({artifact_url})",
-              "",
-              "> GitHub Actions artifacts are not direct image URLs, so download the artifact to view `comparison_plot.png`.",
+          ])
+          if plot_url:
+              lines.extend([
+                  f"<img src=\"{plot_url}\" alt=\"AIC prediction regression comparison plot\">",
+                  "",
+              ])
+          lines.extend([
+              f"Artifact bundle: [prediction-regression-results]({artifact_url})",
               "",
               "</details>",
               "",
