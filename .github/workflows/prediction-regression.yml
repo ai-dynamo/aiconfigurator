@@ -1,4 +1,4 @@
-name: "Prediction Regression"
+name: "Prediction Accuracy Regression Test"
 
 on:
   pull_request:
