@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import copy
 import gc
+import importlib.util
 import json
 import os
 import random
@@ -92,6 +93,12 @@ def get_mhc_module_test_cases() -> list[dict]:
     Loading the one-layer runner is expensive, so we pay it once per op
     (pre/post) instead of per (op, num_tokens) combo.
     """
+    if os.environ.get("COLLECTOR_FORCE_MHC_MODULES") != "1":
+        try:
+            if importlib.util.find_spec("sglang.srt.models.deepseek_v4") is None:
+                return []
+        except ModuleNotFoundError:
+            return []
     return [{"id": f"mhc_{op}_all", "params": [op]} for op in ("pre", "post")]
 
 

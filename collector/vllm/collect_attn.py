@@ -412,9 +412,9 @@ def get_context_attention_test_cases(if_unit_test=False):
         n_kv_list = [0]
         head_dim_list = [128]
 
+    # vLLM 0.16.0 FlashInfer attention rejects FP8 query tensors while its
+    # metadata still expects bfloat16 queries.
     kv_cache_dtype_list = [False]
-    if get_sm_version() > 86:
-        kv_cache_dtype_list.append(True)
 
     # DEBUG
     # print(f"b_list: {b_list}, s_list: {s_list}, n_list: {n_list}, n_kv_list: {n_kv_list}")
@@ -483,9 +483,9 @@ def get_generation_attention_test_cases():
     n_kv_list = [1, 2, 4, 8]
     head_dim_list = [128, 256]
 
+    # vLLM 0.16.0 FlashInfer attention rejects FP8 query tensors while its
+    # metadata still expects bfloat16 queries.
     kv_cache_dtype_list = [False]
-    if get_sm_version() > 86:
-        kv_cache_dtype_list.append(True)
 
     max_bsn = 8192 * 1024
     for head_dim in head_dim_list:
@@ -521,6 +521,13 @@ def get_generation_attention_test_cases():
                     if get_sm_version() >= 100 and n // n_kv > 16:
                         continue
                     for s in target_s_list:
+                        # vLLM 0.16.0 FlashInfer decode trips an illegal
+                        # memory access for these two Blackwell shapes.
+                        if get_sm_version() >= 100 and (b, s, n, n_kv, head_dim) in (
+                            (128, 63, 24, 8, 128),
+                            (128, 63, 48, 8, 128),
+                        ):
+                            continue
                         for is_fp8_kv_cache in kv_cache_dtype_list:
                             test_cases.append(
                                 [

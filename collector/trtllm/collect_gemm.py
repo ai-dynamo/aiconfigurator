@@ -41,6 +41,20 @@ def _compute_fp8_block_weight_scales(weight: torch.Tensor, group_size: int) -> t
 _weight_cache: dict = {}
 
 
+def _skip_trtllm_130rc5_sm120_fp8_gemm(gemm_type: str, m: int, n: int, k: int) -> bool:
+    return (
+        tensorrt_llm.__version__.startswith("1.3.0rc5")
+        and get_sm_version() >= 120
+        and gemm_type == "fp8"
+        # The rc5 SM120 FP8 small-M kernel hits an illegal memory access for
+        # Qwen3-235B-style large projection shapes and poisons the CUDA
+        # context. Filter the verified crash region before execution.
+        and 6 <= m <= 8
+        and n >= 51200
+        and k >= 51200
+    )
+
+
 def _get_l2_cache_bytes(device_id: int = 0) -> int:
     """Query the GPU L2 cache size via the CUDA runtime API."""
     cuda_dev_attr_l2_cache_size = 38
@@ -117,7 +131,13 @@ def get_gemm_test_cases():
         for gemm_type in gemm_list:
             if (gemm_type == "nvfp4" or gemm_type == "fp8_block") and (n < 128 or k < 128):
                 continue
+            if gemm_type == "fp8_block" and n * k >= 2**31:
+                continue
             for x in x_list:
+                if x * n >= 2**31 or x * k >= 2**31:
+                    continue
+                if _skip_trtllm_130rc5_sm120_fp8_gemm(gemm_type, x, n, k):
+                    continue
                 test_cases.append([gemm_type, x, n, k])
 
     return test_cases
@@ -169,6 +189,8 @@ def run_gemm(gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
 
         gemm = Linear(k, n, bias=False, dtype=dtype, quant_config=qc)
         gemm.load_weights([weights])
+        if gemm_type == "fp8_block" and callable(getattr(gemm, "post_load_weights", None)):
+            gemm.post_load_weights()
         gemm.to(torch.device(device))
         gemm.forward(x)  # dry run to init
         op_list.append(gemm)
@@ -179,6 +201,8 @@ def run_gemm(gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
             weights = _build_weights(gemm_type, n, k, device, dtype, group_size, x)
             gemm = Linear(k, n, bias=False, dtype=dtype, quant_config=qc)
             gemm.load_weights([weights])
+            if gemm_type == "fp8_block" and callable(getattr(gemm, "post_load_weights", None)):
+                gemm.post_load_weights()
             gemm.to(torch.device(device))
             gemm.forward(x)  # dry run to init
             op_list.append(gemm)

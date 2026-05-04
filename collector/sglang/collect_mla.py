@@ -181,6 +181,11 @@ def get_context_mla_test_cases():
     sm_version = get_sm_version()
     if sm_version < 90:
         return []
+    if sm_version >= 120:
+        # SGLang 0.5.9 routes Blackwell MLA prefill through FlashInfer's
+        # TllmGenFmhaRunner, which is not compiled for SM120 in the runtime
+        # container and fails every shape with "Unsupported architecture".
+        return []
 
     dtype_list = [torch.bfloat16, torch.float8_e4m3fn]
     test_cases = []

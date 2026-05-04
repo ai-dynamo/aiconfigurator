@@ -89,8 +89,12 @@ def get_moe_test_cases():
         moe_list = ["bfloat16", "int4_wo"]
     elif sm_version < 100:
         moe_list = ["bfloat16", "fp8_block", "int4_wo"]
-    else:
+    elif sm_version in (100, 103):
         moe_list = ["bfloat16", "fp8_block", "nvfp4", "int4_wo"]
+    else:
+        # SGLang 0.5.9 routes nvfp4 MoE through FlashInfer CuteDSL, whose
+        # runtime check only accepts sm_100/sm_103 and fails all sm_120 cases.
+        moe_list = ["bfloat16", "fp8_block", "int4_wo"]
 
     test_cases = []
 
@@ -106,6 +110,286 @@ def get_moe_test_cases():
             if moe_type == "fp8_block" and (
                 common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0
             ):
+                continue
+            if (
+                moe_type == "fp8_block"
+                and sm_version >= 120
+                and common_moe_testcase.hidden_size == 4096
+                and common_moe_testcase.inter_size == 14336
+                and common_moe_testcase.topk == 2
+                and common_moe_testcase.num_experts == 8
+                and common_moe_testcase.tp == 32
+                and (
+                    num_tokens >= 16
+                    or (common_moe_testcase.ep == 2 and num_tokens >= 8)
+                    or (common_moe_testcase.ep == 4 and num_tokens >= 4)
+                    or (common_moe_testcase.ep == 8 and num_tokens >= 2)
+                )
+            ):
+                # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
+                # Mixtral on SM120 at this TP slice. These token counts require
+                # 144 KiB shared memory, above the 99 KiB runtime limit.
+                continue
+            if (
+                moe_type == "fp8_block"
+                and sm_version >= 120
+                and common_moe_testcase.hidden_size == 4096
+                and common_moe_testcase.inter_size == 2688
+                and common_moe_testcase.topk == 22
+                and common_moe_testcase.num_experts == 512
+                and (
+                    (common_moe_testcase.tp == 2 and num_tokens >= 768)
+                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 2 and num_tokens >= 320)
+                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 4 and num_tokens >= 160)
+                    or (common_moe_testcase.tp == 4 and common_moe_testcase.ep == 2 and num_tokens >= 320)
+                    or (common_moe_testcase.tp == 4 and common_moe_testcase.ep == 4 and num_tokens >= 160)
+                    or (common_moe_testcase.tp == 4 and common_moe_testcase.ep == 8 and num_tokens >= 80)
+                    or (common_moe_testcase.tp == 4 and common_moe_testcase.ep == 16 and num_tokens >= 48)
+                    or (common_moe_testcase.tp == 4 and common_moe_testcase.ep == 32 and num_tokens >= 32)
+                    or (common_moe_testcase.tp == 4 and common_moe_testcase.ep == 64 and num_tokens >= 16)
+                    or (common_moe_testcase.tp == 4 and num_tokens >= 768)
+                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 2 and num_tokens >= 320)
+                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 4 and num_tokens >= 160)
+                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 8 and num_tokens >= 80)
+                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 16 and num_tokens >= 48)
+                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 32 and num_tokens >= 32)
+                    or (common_moe_testcase.tp == 8 and num_tokens >= 768)
+                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 8 and num_tokens >= 80)
+                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 16 and num_tokens >= 48)
+                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 32 and num_tokens >= 32)
+                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 64)
+                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 128)
+                    or (common_moe_testcase.tp == 16 and num_tokens >= 768)
+                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 2 and num_tokens >= 320)
+                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 4 and num_tokens >= 160)
+                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 8 and num_tokens >= 80)
+                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 16 and num_tokens >= 48)
+                    or (common_moe_testcase.tp == 32 and num_tokens >= 768)
+                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 2 and num_tokens >= 320)
+                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 4 and num_tokens >= 160)
+                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 8 and num_tokens >= 80)
+                )
+            ):
+                # SGLang 0.5.9 falls back to the default Triton fp8 block MoE
+                # config for Nemotron-3 Super on SM120 for these TP/EP slices.
+                # That config requires 144 KiB shared memory, above the 99 KiB
+                # runtime limit.
+                continue
+            if (
+                moe_type == "fp8_block"
+                and sm_version >= 120
+                and common_moe_testcase.hidden_size == 2048
+                and common_moe_testcase.inter_size == 768
+                and common_moe_testcase.topk == 8
+                and common_moe_testcase.num_experts == 128
+                and common_moe_testcase.tp == 4
+                and (
+                    num_tokens >= 160
+                    or (common_moe_testcase.ep == 2 and num_tokens >= 80)
+                    or (common_moe_testcase.ep == 4 and num_tokens >= 48)
+                    or (common_moe_testcase.ep == 8 and num_tokens >= 32)
+                    or (common_moe_testcase.ep == 16 and num_tokens >= 16)
+                    or (common_moe_testcase.ep == 32 and num_tokens >= 8)
+                    or (common_moe_testcase.ep == 64 and num_tokens >= 8)
+                )
+            ):
+                # SGLang 0.5.9 also uses the default Triton fp8 block MoE config
+                # for Qwen3-30B-A3B on SM120. For these larger token counts that
+                # config requires 144 KiB shared memory, above the 99 KiB limit.
+                continue
+            if (
+                moe_type == "fp8_block"
+                and sm_version >= 120
+                and common_moe_testcase.hidden_size == 4096
+                and common_moe_testcase.inter_size == 1536
+                and common_moe_testcase.topk == 8
+                and common_moe_testcase.num_experts == 128
+                and (
+                    (
+                        common_moe_testcase.tp == 8
+                        and (
+                            num_tokens >= 160
+                            or (common_moe_testcase.ep == 2 and num_tokens >= 80)
+                            or (common_moe_testcase.ep == 4 and num_tokens >= 48)
+                            or (common_moe_testcase.ep == 8 and num_tokens >= 32)
+                            or (common_moe_testcase.ep == 16 and num_tokens >= 16)
+                            or (common_moe_testcase.ep == 32 and num_tokens >= 8)
+                        )
+                    )
+                    or (
+                        common_moe_testcase.tp == 16
+                        and (
+                            num_tokens >= 160
+                            or (common_moe_testcase.ep == 2 and num_tokens >= 80)
+                            or (common_moe_testcase.ep == 4 and num_tokens >= 48)
+                            or (common_moe_testcase.ep == 8 and num_tokens >= 32)
+                            or (common_moe_testcase.ep == 16 and num_tokens >= 16)
+                        )
+                    )
+                    or (
+                        common_moe_testcase.tp == 32
+                        and (
+                            num_tokens >= 160
+                            or (common_moe_testcase.ep == 2 and num_tokens >= 80)
+                            or (common_moe_testcase.ep == 4 and num_tokens >= 48)
+                            or (common_moe_testcase.ep == 8 and num_tokens >= 32)
+                        )
+                    )
+                )
+            ):
+                # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
+                # Qwen3-235B-A22B on SM120. For these token counts that config
+                # requires 144 KiB shared memory, above the 99 KiB limit.
+                continue
+            if (
+                moe_type == "fp8_block"
+                and sm_version >= 120
+                and common_moe_testcase.hidden_size == 6144
+                and common_moe_testcase.inter_size == 2560
+                and common_moe_testcase.topk == 8
+                and common_moe_testcase.num_experts == 160
+                and (
+                    (
+                        common_moe_testcase.tp == 8
+                        and (
+                            num_tokens >= 192
+                            or (common_moe_testcase.ep == 2 and num_tokens >= 96)
+                            or (common_moe_testcase.ep == 4 and num_tokens >= 48)
+                            or (common_moe_testcase.ep == 8 and num_tokens >= 32)
+                            or (common_moe_testcase.ep == 16 and num_tokens >= 16)
+                            or (common_moe_testcase.ep == 32 and num_tokens >= 8)
+                        )
+                    )
+                    or (
+                        common_moe_testcase.tp == 16
+                        and (
+                            num_tokens >= 192
+                            or (common_moe_testcase.ep == 2 and num_tokens >= 96)
+                            or (common_moe_testcase.ep == 4 and num_tokens >= 48)
+                            or (common_moe_testcase.ep == 8 and num_tokens >= 32)
+                            or (common_moe_testcase.ep == 16 and num_tokens >= 16)
+                        )
+                    )
+                    or (
+                        common_moe_testcase.tp == 32
+                        and (
+                            num_tokens >= 192
+                            or (common_moe_testcase.ep == 2 and num_tokens >= 96)
+                            or (common_moe_testcase.ep == 4 and num_tokens >= 48)
+                            or (common_moe_testcase.ep == 8 and num_tokens >= 32)
+                        )
+                    )
+                )
+            ):
+                # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
+                # Qwen3-Coder-480B-A35B on SM120. For these token counts that
+                # config requires 144 KiB shared memory, above the 99 KiB limit.
+                continue
+            if (
+                moe_type == "fp8_block"
+                and sm_version >= 120
+                and common_moe_testcase.hidden_size == 4096
+                and common_moe_testcase.inter_size == 1024
+                and common_moe_testcase.topk == 10
+                and common_moe_testcase.num_experts == 512
+                and (
+                    (common_moe_testcase.tp == 16 and num_tokens >= 768)
+                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 2 and num_tokens >= 320)
+                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 4 and num_tokens >= 160)
+                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 8 and num_tokens >= 80)
+                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 16 and num_tokens >= 48)
+                    or (common_moe_testcase.tp == 32 and num_tokens >= 768)
+                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 2 and num_tokens >= 320)
+                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 4 and num_tokens >= 160)
+                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 8 and num_tokens >= 80)
+                )
+            ):
+                # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
+                # Qwen3.5-397B-A17B on SM120. For these token counts that config
+                # requires 144 KiB shared memory, above the 99 KiB limit.
+                continue
+            if (
+                moe_type == "fp8_block"
+                and sm_version >= 120
+                and common_moe_testcase.hidden_size == 6144
+                and common_moe_testcase.inter_size == 2048
+                and common_moe_testcase.topk == 8
+                and common_moe_testcase.num_experts == 256
+                and common_moe_testcase.tp == 32
+                and (
+                    num_tokens >= 320
+                    or (common_moe_testcase.ep == 2 and num_tokens >= 160)
+                    or (common_moe_testcase.ep == 4 and num_tokens >= 80)
+                    or (common_moe_testcase.ep == 8 and num_tokens >= 48)
+                )
+            ):
+                # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
+                # GLM-5 on SM120 at this TP slice. For these token counts that
+                # config requires 144 KiB shared memory, above the 99 KiB limit.
+                continue
+            if (
+                moe_type == "fp8_block"
+                and sm_version >= 120
+                and common_moe_testcase.hidden_size == 7168
+                and common_moe_testcase.inter_size == 2048
+                and common_moe_testcase.topk == 8
+                and common_moe_testcase.num_experts == 256
+                and common_moe_testcase.tp == 32
+                and (
+                    num_tokens >= 320
+                    or (common_moe_testcase.ep == 2 and num_tokens >= 160)
+                    or (common_moe_testcase.ep == 4 and num_tokens >= 80)
+                    or (common_moe_testcase.ep == 8 and num_tokens >= 48)
+                )
+            ):
+                # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
+                # DeepSeek-V3 on SM120 at this TP slice. For these token counts
+                # that config requires 144 KiB shared memory, above the 99 KiB
+                # limit.
+                continue
+            if (
+                moe_type == "fp8_block"
+                and sm_version >= 120
+                and common_moe_testcase.hidden_size == 7168
+                and common_moe_testcase.inter_size == 2048
+                and common_moe_testcase.topk == 8
+                and common_moe_testcase.num_experts == 384
+                and common_moe_testcase.tp == 32
+                and (
+                    num_tokens >= 512
+                    or (common_moe_testcase.ep == 2 and num_tokens >= 256)
+                    or (common_moe_testcase.ep == 4 and num_tokens >= 128)
+                    or (common_moe_testcase.ep == 8 and num_tokens >= 64)
+                )
+            ):
+                # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
+                # Kimi-K2 on SM120 at this TP slice. For these token counts that
+                # config requires 144 KiB shared memory, above the 99 KiB limit.
+                continue
+            if (
+                moe_type == "fp8_block"
+                and sm_version >= 120
+                and common_moe_testcase.hidden_size == 3072
+                and common_moe_testcase.inter_size == 1536
+                and common_moe_testcase.topk == 8
+                and common_moe_testcase.num_experts == 256
+                and (
+                    common_moe_testcase.tp == 16
+                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 2 and num_tokens >= 160)
+                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 4 and num_tokens >= 80)
+                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 8 and num_tokens >= 48)
+                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 16 and num_tokens >= 32)
+                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 32 and num_tokens >= 16)
+                    or (common_moe_testcase.tp == 8 and num_tokens >= 320)
+                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 2 and num_tokens >= 160)
+                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 4 and num_tokens >= 80)
+                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 8 and num_tokens >= 48)
+                    or (common_moe_testcase.tp == 32 and num_tokens >= 320)
+                )
+            ):
+                # SGLang 0.5.9 uses the default Triton fp8 block MoE config for
+                # MiniMax-M2.5 on SM120. For these token counts that config
+                # requires 144 KiB shared memory, above the 99 KiB limit.
                 continue
 
             if moe_type == "nvfp4":
@@ -125,6 +409,14 @@ def get_moe_test_cases():
                 common_moe_testcase.hidden_size % 256 != 0
                 or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 256 != 0
             ):
+                continue
+            if moe_type == "int4_wo" and common_moe_testcase.topk > (
+                common_moe_testcase.num_experts // common_moe_testcase.ep
+            ):
+                # The SGLang int4 MoE path benchmarks the rank-0 local expert
+                # slice. Cases where global top-k exceeds local experts fail
+                # routing before kernel timing and are not valid single-rank
+                # collector inputs.
                 continue
 
             test_cases.append(
