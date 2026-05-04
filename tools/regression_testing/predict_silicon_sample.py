@@ -29,9 +29,24 @@ def _estimate(row: dict[str, str]) -> tuple[float, float]:
         moe_quant_mode=row["moe_quant_mode"] or None,
         **{field: int(row[field]) for field in fields if row.get(field)},
     )
-    with redirect_stdout(sys.stderr):
-        result = cli_estimate(**args)
-    return result.ttft, result.tpot
+
+    def run_estimate() -> tuple[float, float]:
+        with redirect_stdout(sys.stderr):
+            result = cli_estimate(**args)
+        return result.ttft, result.tpot
+
+    try:
+        return run_estimate()
+    except ValueError as e:
+        if args["backend_version"] is None or "Failed to load perf database" not in str(e):
+            raise
+        print(
+            f"{row.get('id', '<unknown>')}: missing database version {args['backend_version']}; "
+            "retrying with AIC default database version",
+            file=sys.stderr,
+        )
+        args["backend_version"] = None
+        return run_estimate()
 
 
 def main() -> None:
