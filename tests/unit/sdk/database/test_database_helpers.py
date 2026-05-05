@@ -240,3 +240,42 @@ def test_get_latest_database_version_major_version_rc_is_newer(temp_systems_dir:
         assert latest == "1.0.0rc3"
     finally:
         perf_database.get_supported_databases = original
+
+
+def test_get_latest_database_version_preserves_suffix_order(perf_database):
+    mock_supported = {"h100": {"trtllm": ["v0.20_fix0719", "v0.20_fix0720"]}}
+
+    original = perf_database.get_supported_databases
+    try:
+        perf_database.get_supported_databases = lambda: mock_supported
+        latest = perf_database.get_latest_database_version("h100", "trtllm")
+        assert latest == "v0.20_fix0720"
+    finally:
+        perf_database.get_supported_databases = original
+
+
+def test_get_database_prefers_measured_later_path_over_estimate_fallback(tmp_path: Path, perf_database, monkeypatch):
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    for root in (first_root, second_root):
+        root.mkdir()
+        (root / "data_sys").mkdir()
+        (root / "sys.yaml").write_text(yaml.safe_dump({"data_dir": "data_sys"}), encoding="utf-8")
+    (second_root / "data_sys" / "trtllm" / "1.0.0").mkdir(parents=True)
+
+    class FakePerfDatabase:
+        def __init__(self, system, backend, version, systems_root):
+            self.systems_root = systems_root
+
+    monkeypatch.setattr(perf_database, "PerfDatabase", FakePerfDatabase)
+    perf_database.databases_cache.clear()
+
+    db = perf_database.get_database(
+        "sys",
+        "trtllm",
+        "1.0.0",
+        systems_paths=[str(first_root), str(second_root)],
+        allow_missing_data=True,
+    )
+
+    assert db.systems_root == str(second_root)

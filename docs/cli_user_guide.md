@@ -42,7 +42,7 @@ The `generate` mode calculates the smallest tensor parallel (TP) size that fits 
 **Required arguments:**
 - `--model-path` (alias `--model`): HuggingFace model path (e.g., `Qwen/Qwen3-32B-FP8`) or local path containing `config.json`
 - `--total-gpus`: Total GPUs for deployment
-- `--system`: System name (`h200_sxm`, `h100_sxm`, `h100_pcie`, `gb200`, `b200_sxm`, `a100_sxm`, `a100_pcie`, `l40s`, `l4`, `a30`)
+- `--system`: System name (`h200_sxm`, `h100_sxm`, `h100_pcie`, `gb200`, `b200_sxm`, `a100_sxm`, `a100_pcie`, `l40s`, `l4`, `a30`, `gb300`)
 
 **Optional arguments:**
 - `--backend`: Backend name (`trtllm`, `vllm`, `sglang`). Default: `trtllm`
@@ -195,7 +195,7 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 
 **Required arguments:**
 - `--model-path` (alias `--model`): HuggingFace model path (e.g., `Qwen/Qwen3-32B-FP8`) or local path containing `config.json`
-- `--system`: System name (`h200_sxm`, `gb200`, `b200_sxm`, `h100_sxm`, `h100_pcie`, `a100_sxm`, `a100_pcie`, `l40s`, `l4`, `a30`)
+- `--system`: System name (`h200_sxm`, `gb200`, `b200_sxm`, `h100_sxm`, `h100_pcie`, `a100_sxm`, `a100_pcie`, `l40s`, `l4`, `a30`, `gb300`)
 
 **Optional arguments:**
 - `--backend`: Filter by specific backend (`trtllm`, `vllm`, `sglang`). Defaults to `trtllm`.

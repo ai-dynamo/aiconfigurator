@@ -167,6 +167,11 @@ def get_latest_database_version(
         # Handle different version formats
         version_str = version_str.lower()
 
+        def suffix_number(start: int) -> int:
+            suffix = version_str[start:]
+            suffix_match = re.search(r"(\d+)(?!.*\d)", suffix)
+            return int(suffix_match.group(1)) if suffix_match else 0
+
         # Extract numeric version pattern (e.g., "1.2.3" from "v1.2.3rc4" or "1.2.3_suffix")
         version_match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
         if version_match:
@@ -187,13 +192,14 @@ def get_latest_database_version(
                 version_parts.append(1)  # Stable release (higher priority than RC)
                 version_parts.append(0)  # No RC number
 
+            version_parts.append(suffix_number(version_match.end()))
             return tuple(version_parts)
 
         # Try to extract version from other patterns (e.g., "v0.20_fix0719")
         version_match = re.search(r"v?(\d+)\.(\d+)", version_str)
         if version_match:
             major, minor = map(int, version_match.groups())
-            version_parts = [major, minor, 0, 1, 0]  # Assume stable release
+            version_parts = [major, minor, 0, 1, 0, suffix_number(version_match.end())]  # Assume stable release
             return tuple(version_parts)
 
         # For completely non-standard versions, try to extract any numbers
@@ -203,11 +209,11 @@ def get_latest_database_version(
             version_parts = [int(x) for x in numbers[:3]]
             while len(version_parts) < 3:
                 version_parts.append(0)
-            version_parts.extend([0, 0])  # Add RC indicators
+            version_parts.extend([0, 0, 0])  # Add RC and suffix indicators
             return tuple(version_parts)
 
         # If no numbers found, return a very low priority tuple
-        return (0, 0, 0, -1, 0)
+        return (0, 0, 0, -1, 0, 0)
 
     # Convert version strings to comparable tuples
     versions_ids = []
@@ -225,8 +231,8 @@ def get_latest_database_version(
         return None
 
     # Find the latest version by comparing version tuples.
-    # The tuple format (major, minor, patch, is_stable, rc_num) ensures
-    # correct sorting across stable and RC releases.
+    # The tuple format (major, minor, patch, is_stable, rc_num, suffix_num)
+    # ensures correct sorting across stable, RC, and suffixed releases.
     latest_version = max(versions_ids, key=lambda x: x[0])
 
     logger.debug(f"Latest version for {system}/{backend}: {latest_version[1]} (parsed as {latest_version[0]})")
@@ -264,25 +270,27 @@ def get_database(
         logger.error(f"No database version available for {system=}, {backend=}")
         return None
 
+    missing_data_candidate = None
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
         if not os.path.isfile(system_yaml_path):
             continue
         cache_key = (systems_root, system)
         try:
-            database = databases_cache[cache_key][backend][version]
-            return database
-        except KeyError:
-            logger.info(f"Loading database for {system=}, {backend=}, {version=}")
+            with open(system_yaml_path) as f:
+                system_spec = yaml.load(f, Loader=yaml.SafeLoader)
+            data_dir = system_spec["data_dir"]
+        except Exception:
+            logger.warning(f"failed to read system spec at {system_yaml_path}, continuing searching")
+            continue
+
+        data_path = os.path.join(systems_root, data_dir, backend, version)
+        if os.path.exists(data_path):
             try:
-                with open(system_yaml_path) as f:
-                    system_spec = yaml.load(f, Loader=yaml.SafeLoader)
-                data_dir = system_spec["data_dir"]
-            except Exception:
-                logger.warning(f"failed to read system spec at {system_yaml_path}, continuing searching")
-                continue
-            data_path = os.path.join(systems_root, data_dir, backend, version)
-            if os.path.exists(data_path) or allow_missing_data:
+                database = databases_cache[cache_key][backend][version]
+                return database
+            except KeyError:
+                logger.info(f"Loading database for {system=}, {backend=}, {version=}")
                 try:
                     database = PerfDatabase(system, backend, version, systems_root)
                     databases_cache[cache_key][backend][version] = database
@@ -292,8 +300,28 @@ def get_database(
                         f"failed to load {system=}, {backend=}, {version=}, continuing searching",
                         exc_info=True,
                     )
-            else:
-                logger.warning(f"data path {data_path} not found, continuing searching")
+        elif allow_missing_data:
+            if missing_data_candidate is None:
+                missing_data_candidate = (systems_root, cache_key)
+        else:
+            logger.warning(f"data path {data_path} not found, continuing searching")
+
+    if missing_data_candidate is not None:
+        systems_root, cache_key = missing_data_candidate
+        try:
+            database = databases_cache[cache_key][backend][version]
+            return database
+        except KeyError:
+            logger.info(f"Loading estimate-only database for {system=}, {backend=}, {version=}")
+            try:
+                database = PerfDatabase(system, backend, version, systems_root)
+                databases_cache[cache_key][backend][version] = database
+                return database
+            except Exception:
+                logger.warning(
+                    f"failed to load estimate-only {system=}, {backend=}, {version=}",
+                    exc_info=True,
+                )
 
     logger.error(f"failed to get {system=}, {backend=}, {version=}")
     return None

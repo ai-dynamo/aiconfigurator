@@ -73,6 +73,12 @@ def post_sla(
         runtime_config = RuntimeConfig(batch_size=1, isl=isl, osl=osl, ttft=ttft, tpot=tpot)
 
         database = get_database(system, backend, version)
+        if database is None:
+            database = get_database(system, backend, "estimate", allow_missing_data=True)
+            if database is not None:
+                database.set_default_database_mode(common.DatabaseMode.SOL)
+        if database is None:
+            raise ValueError(f"Failed to load database for system={system}, backend={backend}, version={version}")
         backend_instance = get_backend(backend)
 
         # dense model
