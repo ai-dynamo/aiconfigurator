@@ -286,7 +286,7 @@ def get_database(
 
         data_path = os.path.join(systems_root, data_dir, backend, version)
         is_incomplete = os.path.isfile(os.path.join(data_path, "INCOMPLETE.txt"))
-        if os.path.isdir(data_path) and not is_incomplete:
+        if os.path.exists(data_path) and not is_incomplete:
             try:
                 database = databases_cache[cache_key][backend][version]
                 return database
