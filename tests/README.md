@@ -67,6 +67,29 @@ python3 -m pytest -m "unit or build"
 
 > Note: if encoutering error `NotImplementedError: Implement enable_gui in a subclass`, please add `MPLBACKEND=agg` to your command
 
+### Rust Engine Step Opt-In
+
+The Python SDK keeps using the existing Python latency path by default. To run Python tests through the experimental Rust engine-step path, build the Rust core shared library first or let pytest build it on demand:
+
+```bash
+# Build manually, then run any pytest target with the Rust path enabled
+cargo build --manifest-path rust/aiconfigurator-core/Cargo.toml
+python3 -m pytest tests/unit/sdk/test_rust_engine_step.py --aic-engine-step-backend=rust
+
+# Or let the test harness build the shared library when needed
+python3 -m pytest tests/unit/sdk/test_rust_engine_step.py \
+  --aic-engine-step-backend=rust \
+  --aic-rust-core-autobuild
+```
+
+The same flag works with E2E and support-matrix tests, for example:
+
+```bash
+TEST_SUPPORT_MATRIX=true python3 -m pytest tests/e2e/support_matrix \
+  --aic-engine-step-backend=rust \
+  --aic-rust-core-autobuild
+```
+
 ### Where tests live
 
 - **Unit**
@@ -83,5 +106,4 @@ If `pytest-xdist` is installed:
 ```bash
 python3 -m pytest -n 4 -m "unit or build"
 ```
-
 

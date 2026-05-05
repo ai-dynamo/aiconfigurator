@@ -13,6 +13,10 @@ from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.inference_summary import InferenceSummary
 from aiconfigurator.sdk.models import BaseModel
 from aiconfigurator.sdk.perf_database import PerfDatabase
+from aiconfigurator.sdk.rust_engine_step import (
+    estimate_static_latency_breakdown_with_rust,
+    should_use_rust_engine_step,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +156,31 @@ class BaseBackend(ABC):
 
         context_latency_dict, context_energy_wms_dict, context_source_dict = {}, {}, {}
         generation_latency_dict, generation_energy_wms_dict, generation_source_dict = {}, {}, {}
+
+        if should_use_rust_engine_step(runtime_config):
+            (
+                context_latency_dict,
+                generation_latency_dict,
+                context_source_dict,
+                generation_source_dict,
+            ) = estimate_static_latency_breakdown_with_rust(
+                model,
+                database,
+                runtime_config,
+                mode,
+                stride,
+                latency_correction_scale,
+            )
+            context_energy_wms_dict = dict.fromkeys(context_latency_dict, 0.0)
+            generation_energy_wms_dict = dict.fromkeys(generation_latency_dict, 0.0)
+            return (
+                context_latency_dict,
+                context_energy_wms_dict,
+                generation_latency_dict,
+                generation_energy_wms_dict,
+                context_source_dict,
+                generation_source_dict,
+            )
 
         if mode == "static_ctx":
             context_latency_dict, context_energy_wms_dict, context_source_dict = self._run_context_phase(

@@ -54,3 +54,6 @@ class RuntimeConfig:
     seq_imbalance_correction_scale: float = 1.0
     # Separate correction scale for generation/decoding stage (do NOT reuse ctx scale).
     gen_seq_imbalance_correction_scale: float = 1.0
+    # Optional experimental static-latency backend. "python" preserves existing behavior;
+    # "rust" routes static step estimates through the Rust FPM estimator.
+    engine_step_backend: str | None = None
