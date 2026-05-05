@@ -163,7 +163,7 @@ jobs:
           echo "plot_url=${PLOT_URL}" >> "$GITHUB_OUTPUT"
 
       - name: Build PR comment
-        if: always() && github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         env:
           ARTIFACT_URL: ${{ steps.upload-regression-artifacts.outputs.artifact-url }}
           PLOT_URL: ${{ steps.publish-plot.outputs.plot_url }}
@@ -236,7 +236,7 @@ jobs:
           PY
 
       - name: Comment on PR
-        if: always() && github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
