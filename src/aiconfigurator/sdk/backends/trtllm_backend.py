@@ -290,17 +290,32 @@ class TRTLLMBackend(BaseBackend):
                 model, database, num_genonly_tokens, isl, osl
             )
 
-            # Calculate timing (unchanged)
-            ttft = mix_step_latency_ms * np.ceil(isl / ctx_tokens)
-            # correction for ttft in trtllm agg mode, assume we have requests 10x of concurrency
-            # (batch size here) to mitigate the impact of first round latency
-            # assume we need to increase x of requests when concurrency gets larger.
-            # thus capped to 4 to make it reasonable.
-            correction_factor = min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)
-            ttft *= correction_factor
+            # TTFT is determined by the number of mix and gen only steps.
+            # Under TRTLLM overlap mode, an additional step is needed for each request
+            # We are approximating P50 TTFT, so the number of steps may contain decimals
+            # TODO: If one step cannot finish all ISL
+            # we should use np.ceil(isl / ctx_tokens) and consider the queue in the remaining steps.
+            # But when TRTLLM enabled chunked prefill, the modeling shall consider other ISLs in the same step.
+            if b == 1:
+                num_mix_steps_for_ttft = 1
+                num_gen_only_steps_for_ttft = 0
+            elif b == 2:
+                num_mix_steps_for_ttft = 1.5
+                num_gen_only_steps_for_ttft = 0.5
+            elif b == 3:
+                num_mix_steps_for_ttft = 2
+                num_gen_only_steps_for_ttft = 1
+            elif b == 4:
+                num_mix_steps_for_ttft = 2.5
+                num_gen_only_steps_for_ttft = 0.5
+            else:
+                num_mix_steps_for_ttft = 3
+                num_gen_only_steps_for_ttft = 0
+
+            ttft = num_gen_only_steps_for_ttft * genonly_step_latency_ms + num_mix_steps_for_ttft * mix_step_latency_ms
             logger.debug(
-                f"ttft correction factor: {2 + (steps_to_finish_ctx - 3) / 2 / 10} capped to "
-                f"{correction_factor} when b: {b}, ctx_tokens: {ctx_tokens} isl {isl}"
+                f"ttft: {ttft} ms, num_gen_only_steps_for_ttft: {num_gen_only_steps_for_ttft}, "
+                "num_mix_steps_for_ttft: {num_mix_steps_for_ttft}"
             )
 
             tpot = (mix_step_latency_ms * num_mix_steps_for_tpot_calc + genonly_step_latency_ms * num_genonly_steps) / (
