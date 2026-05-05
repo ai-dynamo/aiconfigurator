@@ -65,6 +65,10 @@ def _backend_mode(row: dict[str, str]) -> str:
     return f"{row['backend']}-{row['mode']}"
 
 
+def _exact_config(row: dict[str, str]) -> str:
+    return f"{_model_name(row)}|{row['system']}|{row['backend']}|{row['mode']}"
+
+
 GROUP_SPECS: tuple[GroupSpec, ...] = (
     ("model", _model_name),
     ("hardware", lambda row: row["system"]),
@@ -73,6 +77,7 @@ GROUP_SPECS: tuple[GroupSpec, ...] = (
 SUMMARY_GROUP_SPECS: tuple[GroupSpec, ...] = (
     ("mode", lambda row: row["mode"]),
     *GROUP_SPECS,
+    ("model-hardware-backend-mode", _exact_config),
 )
 
 
