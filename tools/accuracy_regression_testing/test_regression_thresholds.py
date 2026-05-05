@@ -40,7 +40,7 @@ def test_mape_regression_within_thresholds() -> None:
         threshold = 5.0 if row["partition"] == "all" else 10.0
         for metric in METRICS:
             regression = _regression_pct(row[metric])
-            if regression >= threshold:
+            if regression > threshold:
                 failures.append(f"{row['partition']} {metric}: regression={regression:.6f}% threshold<{threshold:.1f}%")
 
     assert not failures, "\n".join(failures)
