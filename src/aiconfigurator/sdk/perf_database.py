@@ -150,13 +150,17 @@ def get_supported_databases(
 def get_latest_database_version(
     system: str,
     backend: str,
+    systems_paths: str | list[str] | None = None,
 ) -> str | None:
     """
     Get the latest database version for a given system and backend
     """
     import re
 
-    supported_databases = get_supported_databases()
+    if systems_paths is None:
+        supported_databases = get_supported_databases()
+    else:
+        supported_databases = get_supported_databases(systems_paths=systems_paths)
     database_versions = supported_databases.get(system, {}).get(backend, [])
     if not database_versions:
         logger.info("database not found for %s, %s", system, backend)
@@ -172,26 +176,20 @@ def get_latest_database_version(
             suffix_match = re.search(r"(\d+)(?!.*\d)", suffix)
             return int(suffix_match.group(1)) if suffix_match else 0
 
+        def prerelease_parts() -> list[int]:
+            rc_match = re.search(r"rc(\d+)", version_str)
+            if rc_match:
+                return [0, int(rc_match.group(1))]
+            if "rc" in version_str:
+                return [0, 0]
+            return [1, 0]
+
         # Extract numeric version pattern (e.g., "1.2.3" from "v1.2.3rc4" or "1.2.3_suffix")
         version_match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
         if version_match:
             major, minor, patch = map(int, version_match.groups())
             version_parts = [major, minor, patch]
-
-            # Handle release candidates (lower priority than stable releases)
-            if "rc" in version_str:
-                rc_match = re.search(r"rc(\d+)", version_str)
-                if rc_match:
-                    rc_num = int(rc_match.group(1))
-                    version_parts.append(0)  # Stable release indicator
-                    version_parts.append(rc_num)  # RC number
-                else:
-                    version_parts.append(0)  # Stable release indicator
-                    version_parts.append(0)  # No RC number
-            else:
-                version_parts.append(1)  # Stable release (higher priority than RC)
-                version_parts.append(0)  # No RC number
-
+            version_parts.extend(prerelease_parts())
             version_parts.append(suffix_number(version_match.end()))
             return tuple(version_parts)
 
@@ -199,7 +197,9 @@ def get_latest_database_version(
         version_match = re.search(r"v?(\d+)\.(\d+)", version_str)
         if version_match:
             major, minor = map(int, version_match.groups())
-            version_parts = [major, minor, 0, 1, 0, suffix_number(version_match.end())]  # Assume stable release
+            version_parts = [major, minor, 0]
+            version_parts.extend(prerelease_parts())
+            version_parts.append(suffix_number(version_match.end()))
             return tuple(version_parts)
 
         # For completely non-standard versions, try to extract any numbers
@@ -285,7 +285,8 @@ def get_database(
             continue
 
         data_path = os.path.join(systems_root, data_dir, backend, version)
-        if os.path.exists(data_path):
+        is_incomplete = os.path.isfile(os.path.join(data_path, "INCOMPLETE.txt"))
+        if os.path.isdir(data_path) and not is_incomplete:
             try:
                 database = databases_cache[cache_key][backend][version]
                 return database
@@ -304,7 +305,10 @@ def get_database(
             if missing_data_candidate is None:
                 missing_data_candidate = (systems_root, cache_key)
         else:
-            logger.warning(f"data path {data_path} not found, continuing searching")
+            if is_incomplete:
+                logger.warning(f"data path {data_path} is marked incomplete, continuing searching")
+            else:
+                logger.warning(f"data path {data_path} not found, continuing searching")
 
     if missing_data_candidate is not None:
         systems_root, cache_key = missing_data_candidate

@@ -728,16 +728,30 @@ def cli_estimate(
     from aiconfigurator.sdk.perf_database import (
         get_database,
         get_latest_database_version,
+        get_systems_paths,
         set_systems_paths,
     )
 
+    active_systems_paths = None
     if systems_paths is not None:
-        set_systems_paths(systems_paths)
+        previous_systems_paths = get_systems_paths()
+        try:
+            set_systems_paths(systems_paths)
+            active_systems_paths = get_systems_paths()
+        finally:
+            set_systems_paths(previous_systems_paths)
 
     def _resolve_version_for(sys_name: str) -> str:
         resolved_version = backend_version
         if resolved_version is None:
-            resolved_version = get_latest_database_version(system=sys_name, backend=backend_name)
+            if active_systems_paths is None:
+                resolved_version = get_latest_database_version(system=sys_name, backend=backend_name)
+            else:
+                resolved_version = get_latest_database_version(
+                    system=sys_name,
+                    backend=backend_name,
+                    systems_paths=active_systems_paths,
+                )
         if resolved_version is None:
             if database_mode == "SILICON":
                 raise ValueError(
@@ -749,11 +763,14 @@ def cli_estimate(
 
     def _load_database(sys_name: str):
         resolved_version = _resolve_version_for(sys_name)
+        database_kwargs = {"allow_missing_data": database_mode != "SILICON"}
+        if active_systems_paths is not None:
+            database_kwargs["systems_paths"] = active_systems_paths
         db = get_database(
             sys_name,
             backend_name,
             resolved_version,
-            allow_missing_data=database_mode != "SILICON",
+            **database_kwargs,
         )
         if db is None:
             raise ValueError(
