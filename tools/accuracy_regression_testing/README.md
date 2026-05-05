@@ -13,7 +13,8 @@ PYTHONPATH=src python tools/accuracy_regression_testing/predict_silicon_sample.p
   --aic-output-prefix new \
   > tools/accuracy_regression_testing/results/silicon_result_new.csv
 
-# From an old checkout/worktree, append old_* columns to the same CSV
+# Still run from this incoming/current checkout. Only PYTHONPATH points to the old src.
+# The script and CSV paths below are relative to the current worktree, not the old checkout.
 PYTHONPATH=/path/to/old/aiconfigurator/src python tools/accuracy_regression_testing/predict_silicon_sample.py \
   tools/accuracy_regression_testing/results/silicon_result_new.csv \
   --aic-output-prefix old \
