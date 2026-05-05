@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -99,6 +100,7 @@ class TaskContext:
     enable_chunked_prefill: bool
     moe_backend: str | None
     total_gpus: int | None
+    database_mode: str | None = None
     free_gpu_memory_fraction: float | None = None
     max_seq_len: int | None = None
     profiles: list[str] = field(default_factory=list)
@@ -112,7 +114,12 @@ class TaskContext:
     def resolved_backend_version_for(self, system_name: str) -> str:
         if self.backend_version is not None:
             return self.backend_version
-        return get_latest_database_version(system=system_name, backend=self.backend_name)
+        latest = get_latest_database_version(system=system_name, backend=self.backend_name)
+        if latest is not None:
+            return latest
+        if self.database_mode is not None and self.database_mode != common.DatabaseMode.SILICON.name:
+            return "estimate"
+        return latest
 
 
 def _deep_merge(target: dict, source: Mapping, *, allow_new: bool = True) -> dict:
@@ -134,6 +141,24 @@ def _ensure_munch(obj: dict | DefaultMunch | Munch) -> DefaultMunch:
     if isinstance(obj, (DefaultMunch, Munch)):
         return DefaultMunch.fromDict(obj.toDict(), DefaultMunch)
     return DefaultMunch.fromDict(obj, DefaultMunch)
+
+
+def _get_database_with_optional_missing_data(
+    *, system: str, backend: str, version: str, allow_missing_data: bool = False
+):
+    """Call get_database while tolerating legacy test doubles without allow_missing_data."""
+    kwargs = {"system": system, "backend": backend, "version": version}
+    if allow_missing_data:
+        try:
+            signature = inspect.signature(get_database)
+            accepts_allow_missing_data = "allow_missing_data" in signature.parameters or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+            )
+        except (TypeError, ValueError):
+            accepts_allow_missing_data = True
+        if accepts_allow_missing_data:
+            kwargs["allow_missing_data"] = True
+    return get_database(**kwargs)
 
 
 def build_disagg_parallel_lists(
@@ -788,6 +813,7 @@ class TaskConfig:
             enable_chunked_prefill=enable_chunked_prefill,
             moe_backend=moe_backend,
             total_gpus=total_gpus,
+            database_mode=database_mode,
             profiles=effective_profiles,
             yaml_patch=yaml_patch,
             yaml_mode=yaml_mode,
@@ -881,7 +907,14 @@ class TaskConfig:
         # Validate requested quant modes against available perf data early, to avoid
         # late interpolation/assert failures and to provide actionable guidance.
         try:
-            database = get_database(system=self.system_name, backend=self.backend_name, version=self.backend_version)
+            database_mode = getattr(self.config, "database_mode", None)
+            allow_missing_data = database_mode is not None and database_mode != common.DatabaseMode.SILICON.name
+            database = _get_database_with_optional_missing_data(
+                system=self.system_name,
+                backend=self.backend_name,
+                version=self.backend_version,
+                allow_missing_data=allow_missing_data,
+            )
         except Exception:
             # If database can't be loaded at all, let downstream handle/report it.
             return
@@ -1157,7 +1190,15 @@ class TaskRunner:
         query-cache state. If the requested mode already matches, reuse the
         cached instance directly.
         """
-        db = get_database(system=system, backend=backend, version=version)
+        allow_missing_data = database_mode is not None and database_mode != common.DatabaseMode.SILICON.name
+        db = _get_database_with_optional_missing_data(
+            system=system,
+            backend=backend,
+            version=version,
+            allow_missing_data=allow_missing_data,
+        )
+        if db is None:
+            raise RuntimeError(f"Failed to load database for {system=}, {backend=}, {version=}")
         if database_mode is not None:
             mode = common.DatabaseMode[database_mode]
             if mode != db.get_default_database_mode():

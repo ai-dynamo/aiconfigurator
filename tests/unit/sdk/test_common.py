@@ -64,6 +64,10 @@ class TestSupportedSystems:
             "SupportedSystems set does not match data folders in systems/data directory.\n"
         )
 
+    def test_pcie_estimate_only_systems_are_registered(self):
+        """Cloud/colo PCIe systems should be available for naive and SOL-style estimates."""
+        assert {"h100_pcie", "a100_pcie", "l4", "a30"}.issubset(common.SupportedSystems)
+
 
 class TestSupportMatrix:
     """Test support matrix functionality."""

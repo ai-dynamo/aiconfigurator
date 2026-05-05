@@ -36,7 +36,7 @@ def parse(args):
         "--system",
         type=str,
         default="h200_sxm",
-        choices=["h100_sxm", "h200_sxm", "b200_sxm", "gb200", "a100_sxm"],
+        choices=["h100_sxm", "h100_pcie", "h200_sxm", "b200_sxm", "gb200", "a100_sxm", "a100_pcie", "l4", "a30"],
         help="GPU+system Type",
     )
     parser.add_argument(

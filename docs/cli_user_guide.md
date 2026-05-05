@@ -42,7 +42,7 @@ The `generate` mode calculates the smallest tensor parallel (TP) size that fits 
 **Required arguments:**
 - `--model-path` (alias `--model`): HuggingFace model path (e.g., `Qwen/Qwen3-32B-FP8`) or local path containing `config.json`
 - `--total-gpus`: Total GPUs for deployment
-- `--system`: System name (`h200_sxm`, `gb200`, `b200_sxm`)
+- `--system`: System name (`h200_sxm`, `h100_sxm`, `h100_pcie`, `gb200`, `b200_sxm`, `a100_sxm`, `a100_pcie`, `l40s`, `l4`, `a30`)
 
 **Optional arguments:**
 - `--backend`: Backend name (`trtllm`, `vllm`, `sglang`). Default: `trtllm`
@@ -90,7 +90,7 @@ aiconfigurator cli estimate --model-path Qwen/Qwen3-32B --system h200_sxm --tp-s
 
 **Required arguments:**
 - `--model-path` (alias `--model`): HuggingFace model path (e.g., `Qwen/Qwen3-32B`) or local path containing `config.json`
-- `--system`: System name (`h200_sxm`, `h100_sxm`, `b200_sxm`, `gb200`, `a100_sxm`, `l40s`, `gb300`)
+- `--system`: System name (`h200_sxm`, `h100_sxm`, `h100_pcie`, `b200_sxm`, `gb200`, `a100_sxm`, `a100_pcie`, `l40s`, `l4`, `a30`, `gb300`)
 
 **Optional arguments (shared):**
 - `--estimate-mode`: `agg` (default) or `disagg`
@@ -195,7 +195,7 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 
 **Required arguments:**
 - `--model-path` (alias `--model`): HuggingFace model path (e.g., `Qwen/Qwen3-32B-FP8`) or local path containing `config.json`
-- `--system`: System name (`h200_sxm`, `gb200`, `b200_sxm`, `h100_sxm`, `a100_sxm`, `l40s`)
+- `--system`: System name (`h200_sxm`, `gb200`, `b200_sxm`, `h100_sxm`, `h100_pcie`, `a100_sxm`, `a100_pcie`, `l40s`, `l4`, `a30`)
 
 **Optional arguments:**
 - `--backend`: Filter by specific backend (`trtllm`, `vllm`, `sglang`). Defaults to `trtllm`.
@@ -615,6 +615,8 @@ The `--database-mode` argument controls how performance is estimated:
 | `EMPIRICAL` | Uses Speed-of-Light (SOL) + empirical correction factors for all estimations. Useful for rough estimates without relying on collected data. |
 | `SOL` | Provides theoretical Speed-of-Light time only. Useful for understanding theoretical limits. |
 
+PCIe systems such as `h100_pcie`, `a100_pcie`, `l4`, and `a30` are estimate-only unless you provide measured data with `--systems-paths`. They work with `generate` and with non-SILICON modes (`SOL`, `EMPIRICAL`, `HYBRID`); `SILICON` mode still requires a collected performance database.
+
 Example using hybrid mode:
 ```bash
 aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --database-mode HYBRID
@@ -969,4 +971,3 @@ kubectl apply -f results/.../disagg/top1/k8s_bench.yaml
 ```
 
 Compare the measured TTFT, TPOT, and tokens/s/gpu against the AIConfigurator estimates printed in Step 2. See [Benchmark Artifacts](#benchmark-artifacts) for details on the generated scripts.
-

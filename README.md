@@ -429,9 +429,11 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 | b200_sxm | TRTLLM(1.0.0rc3, 1.2.0rc5), SGLang(0.5.6.post2) | ✅ |
 | gb200 | TRTLLM(1.0.0rc3, 1.2.0rc5) | ✅ |
 | a100_sxm | TRTLLM(1.0.0), vLLM(0.12.0) | ✅ |
+| h100_pcie, a100_pcie, l4, a30 | Estimate-only system specs for `generate` and non-SILICON database modes (`SOL`, `EMPIRICAL`, `HYBRID`) | ⚠️ |
 (last updated: 2026/02/02)
 
 > **Note**: b200 and gb200 are under dev. Results are to be aligned. For preview now.
+> `h100_pcie`, `a100_pcie`, `l4`, and `a30` do not include built-in silicon performance databases yet. Use them for naive sizing or rough SOL/EMPIRICAL estimates, and use `--systems-paths` to provide measured data for production-quality predictions.
 
 #### Detailed Support Matrix
 

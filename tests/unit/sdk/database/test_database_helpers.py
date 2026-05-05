@@ -163,6 +163,18 @@ def test_set_systems_paths_invalid_entry_raises(temp_systems_dir: Path, perf_dat
         perf_database.set_systems_paths(str(missing_path))
 
 
+def test_estimate_only_database_can_load_without_perf_files(perf_database):
+    """SOL/EMPIRICAL modes can instantiate from system specs without silicon files."""
+    from aiconfigurator.sdk import common
+
+    db = perf_database.get_database("h100_pcie", "trtllm", "estimate", allow_missing_data=True)
+
+    assert db is not None
+    db.set_default_database_mode(common.DatabaseMode.SOL)
+    result = db.query_mem_op(1024)
+    assert float(result) > 0
+
+
 # ----------------------------- get_latest_database_version -----------------------------
 
 

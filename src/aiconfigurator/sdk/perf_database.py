@@ -157,10 +157,9 @@ def get_latest_database_version(
     import re
 
     supported_databases = get_supported_databases()
-    try:
-        database_versions = supported_databases[system][backend]
-    except KeyError:
-        logger.exception(f"database not found for {system=}, {backend=}")
+    database_versions = supported_databases.get(system, {}).get(backend, [])
+    if not database_versions:
+        logger.info("database not found for %s, %s", system, backend)
         return None
 
     def parse_version(version_str):
@@ -222,7 +221,7 @@ def get_latest_database_version(
             continue
 
     if not versions_ids:
-        logger.error(f"no valid versions parsed for {system=}, {backend=}")
+        logger.info("no valid versions parsed for %s, %s", system, backend)
         return None
 
     # Find the latest version by comparing version tuples.
@@ -239,6 +238,7 @@ def get_database(
     backend: str,
     version: str,
     systems_paths: str | list[str] | None = None,
+    allow_missing_data: bool = False,
 ) -> PerfDatabase | None:
     """
     Get the database for a given system, backend and version
@@ -248,6 +248,9 @@ def get_database(
         backend (str): the backend name
         version (str): the version name
         systems_paths (str | list[str] | None): the systems search paths
+        allow_missing_data (bool): instantiate a database from system specs even when
+            backend/version data files are absent. This is intended for SOL/EMPIRICAL
+            estimate-only modes, not SILICON mode.
 
     Returns:
         PerfDatabase: the database for the given system, backend and version
@@ -279,7 +282,7 @@ def get_database(
                 logger.warning(f"failed to read system spec at {system_yaml_path}, continuing searching")
                 continue
             data_path = os.path.join(systems_root, data_dir, backend, version)
-            if os.path.exists(data_path):
+            if os.path.exists(data_path) or allow_missing_data:
                 try:
                     database = PerfDatabase(system, backend, version, systems_root)
                     databases_cache[cache_key][backend][version] = database

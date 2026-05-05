@@ -739,13 +739,20 @@ def cli_estimate(
     if resolved_version is None:
         resolved_version = get_latest_database_version(system=system_name, backend=backend_name)
         if resolved_version is None:
-            raise ValueError(
-                f"No database found for system={system_name}, backend={backend_name}. "
-                "Check --systems-paths or available databases."
-            )
+            if database_mode == "SILICON":
+                raise ValueError(
+                    f"No database found for system={system_name}, backend={backend_name}. "
+                    "Check --systems-paths or available databases."
+                )
+            resolved_version = "estimate"
 
     def _load_database(sys_name: str):
-        db = get_database(sys_name, backend_name, resolved_version)
+        db = get_database(
+            sys_name,
+            backend_name,
+            resolved_version,
+            allow_missing_data=database_mode != "SILICON",
+        )
         if db is None:
             raise ValueError(
                 f"Failed to load perf database for system={sys_name}, "

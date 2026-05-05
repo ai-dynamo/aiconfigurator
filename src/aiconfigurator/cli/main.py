@@ -123,7 +123,10 @@ def _add_default_mode_arguments(parser):
         "--system",
         type=str,
         required=True,
-        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,b300_sxm,gb200,a100_sxm,l40s,gb300.",
+        help=(
+            "System name (GPU type). Example: "
+            "h200_sxm,h100_sxm,h100_pcie,b200_sxm,b300_sxm,gb200,a100_sxm,a100_pcie,l40s,l4,a30,gb300."
+        ),
     )
     parser.add_argument(
         "--decode-system",
@@ -271,7 +274,10 @@ def _add_generate_mode_arguments(parser):
         "--system",
         type=str,
         required=True,
-        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,b300_sxm,gb200,a100_sxm,l40s,gb300.",
+        help=(
+            "System name (GPU type). Example: "
+            "h200_sxm,h100_sxm,h100_pcie,b200_sxm,b300_sxm,gb200,a100_sxm,a100_pcie,l40s,l4,a30,gb300."
+        ),
     )
     parser.add_argument(
         "--backend",
@@ -304,7 +310,10 @@ def _add_estimate_mode_arguments(parser):
         "--system",
         type=str,
         required=True,
-        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,b300_sxm,gb200,a100_sxm,l40s,gb300.",
+        help=(
+            "System name (GPU type). Example: "
+            "h200_sxm,h100_sxm,h100_pcie,b200_sxm,b300_sxm,gb200,a100_sxm,a100_pcie,l40s,l4,a30,gb300."
+        ),
     )
     parser.add_argument(
         "--decode-system",
@@ -490,7 +499,7 @@ def _add_support_mode_arguments(parser):
         type=str,
         required=True,
         help="System name (GPU type) or 'all' for a matrix view across every system. "
-        "Example: h200_sxm, h100_sxm, b200_sxm, b300_sxm, gb200, a100_sxm, l40s, gb300.",
+        "Example: h200_sxm, h100_sxm, h100_pcie, b200_sxm, b300_sxm, gb200, a100_sxm, a100_pcie, l40s, l4, a30, gb300.",
     )
     parser.add_argument(
         "--backend",
@@ -732,6 +741,31 @@ def build_default_task_configs(
         for backend_name in backends_to_sweep:
             sys_backends = supported.get(system, {})
             decode_backends = supported.get(decode_system, {}) if decode_system != system else sys_backends
+            if database_mode != common.DatabaseMode.SILICON.name:
+                sys_versions = sys_backends.get(backend_name, [])
+                decode_versions = decode_backends.get(backend_name, [])
+                if not sys_versions or (decode_system != system and not decode_versions):
+                    logger.warning(
+                        "No measured database for backend %s on system=%s%s; including it for %s estimates.",
+                        backend_name,
+                        system,
+                        f", decode_system={decode_system}" if decode_system != system else "",
+                        database_mode,
+                    )
+                elif backend_version is not None and (
+                    backend_version not in sys_versions
+                    or (decode_system != system and backend_version not in decode_versions)
+                ):
+                    logger.warning(
+                        "No measured database version %s for backend %s on system=%s%s; including it for %s estimates.",
+                        backend_version,
+                        backend_name,
+                        system,
+                        f", decode_system={decode_system}" if decode_system != system else "",
+                        database_mode,
+                    )
+                available.append(backend_name)
+                continue
             if backend_name not in sys_backends:
                 logger.warning("Skipping backend %s: not supported for system %s.", backend_name, system)
                 continue
@@ -764,10 +798,31 @@ def build_default_task_configs(
             )
             raise SystemExit(1)
         backends_to_sweep = available
-    else:
+    elif database_mode == common.DatabaseMode.SILICON.name:
         _ensure_backend_version_available(system, backend, backend_version)
         if decode_system != system:
             _ensure_backend_version_available(decode_system, backend, backend_version)
+    else:
+        supported = perf_database.get_supported_databases()
+        for role, sys_name in (("prefill", system), ("decode", decode_system)):
+            versions = supported.get(sys_name, {}).get(backend, [])
+            if backend_version is not None and versions and backend_version not in versions:
+                logger.warning(
+                    "No measured database version %s for %s system=%s backend=%s; using %s estimates.",
+                    backend_version,
+                    role,
+                    sys_name,
+                    backend,
+                    database_mode,
+                )
+            elif not versions:
+                logger.warning(
+                    "No measured database for %s system=%s backend=%s; using estimate-only version with %s mode.",
+                    role,
+                    sys_name,
+                    backend,
+                    database_mode,
+                )
 
     common_kwargs: dict[str, Any] = {
         "model_path": model_path,
