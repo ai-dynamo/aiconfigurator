@@ -29,18 +29,12 @@ METRICS: tuple[Metric, ...] = (
 SMALL_DELTA_LINE_THRESHOLD = 0.1
 
 
-def _mean_ape(rows: list[dict[str, str]], actual: str, predicted: str) -> float:
+def _mape(rows: list[dict[str, str]], actual: str, predicted: str) -> float:
     return sum(_ape(row, actual, predicted) for row in rows) / len(rows)
 
 
 def _mape_improvement(rows: list[dict[str, str]], actual: str, old: str, new: str) -> float:
-    old_mape = _mape(rows, actual, old)
-    new_mape = _mape(rows, actual, new)
-    return old_mape - new_mape
-
-
-def _mape(rows: list[dict[str, str]], actual: str, predicted: str) -> float:
-    return _mean_ape(rows, actual, predicted)
+    return _mape(rows, actual, old) - _mape(rows, actual, new)
 
 
 def _ape(row: dict[str, str], actual: str, predicted: str) -> float:
