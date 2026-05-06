@@ -859,6 +859,7 @@ _EXPERIMENT_RESERVED_KEYS = {
     "profiles",
     "isl",
     "osl",
+    "prefix",
     "ttft",
     "tpot",
     "request_latency",
