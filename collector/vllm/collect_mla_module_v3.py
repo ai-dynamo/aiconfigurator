@@ -369,13 +369,23 @@ def _create_attention_module(
 
     # Override just the layer-local dimensions we sweep in the collector.
     hf_config = vllm_config.model_config.hf_config
-    # Preserve the original head_dim before overriding num_attention_heads.
-    # Without an explicit head_dim, get_head_size() falls back to
-    # hidden_size // num_attention_heads. Changing num_attention_heads then
-    # inflates the return value (e.g. 7168/1 = 7168 instead of 56), which
-    # causes FA3's scheduler_metadata to be sized for the wrong head_size.
-    if not hasattr(hf_config, 'head_dim'):
-        hf_config.head_dim = hf_config.hidden_size // hf_config.num_attention_heads
+
+    # For MLA models: the FA3 builder internally uses
+    # model_config.get_head_size() to compute scheduler_metadata.
+    # get_head_size() is cached during ModelConfig.__init__() and returns
+    # hidden_size // num_attention_heads (= 56 for DeepSeek-V3). But MLA
+    # attention operates on the latent KV dimension (kv_lora_rank +
+    # qk_rope_head_dim = 576). Without this override, the FA3 kernel rejects
+    # the scheduler_metadata shape at runtime.
+    if hasattr(hf_config, 'kv_lora_rank') and hasattr(hf_config, 'qk_rope_head_dim'):
+        _mla_head_dim = hf_config.kv_lora_rank + hf_config.qk_rope_head_dim
+    else:
+        _mla_head_dim = hf_config.hidden_size // hf_config.num_attention_heads
+    hf_config.head_dim = _mla_head_dim
+    # Also override the cached get_head_size() — post-init hf_config changes
+    # don't affect the value cached during ModelConfig.__init__().
+    vllm_config.model_config.get_head_size = lambda: _mla_head_dim
+
     hf_config.num_hidden_layers = 1
     hf_config.num_attention_heads = num_heads
     hf_config.num_key_value_heads = num_heads
