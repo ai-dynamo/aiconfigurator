@@ -819,9 +819,15 @@ def build_default_task_configs(
         if backend_name == "sglang" and not enable_wideep and is_moe_model:
             deepep_kwargs = dict(agg_kwargs)
             deepep_kwargs["moe_backend"] = "deepep_moe"
-            deepep_task = TaskConfig(serving_mode="agg", **deepep_kwargs)
-            deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
-            task_configs[deepep_name] = deepep_task
+            try:
+                deepep_task = TaskConfig(serving_mode="agg", **deepep_kwargs)
+            except ValueError as exc:
+                if "Unsupported wideep_" not in str(exc):
+                    raise
+                logger.info("Skipping SGLang DeepEP agg sweep: %s", exc)
+            else:
+                deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
+                task_configs[deepep_name] = deepep_task
 
         if total_gpus < 2:
             logger.warning("Skipping disagg since it requires at least 2 GPUs.")
@@ -841,10 +847,15 @@ def build_default_task_configs(
         if backend_name == "sglang" and not enable_wideep and is_moe_model:
             deepep_disagg_kwargs = dict(disagg_kwargs)
             deepep_disagg_kwargs["moe_backend"] = "deepep_moe"
-            deepep_disagg_task = TaskConfig(serving_mode="disagg", **deepep_disagg_kwargs)
-            deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
-            task_configs[deepep_name] = deepep_disagg_task
-
+            try:
+                deepep_disagg_task = TaskConfig(serving_mode="disagg", **deepep_disagg_kwargs)
+            except ValueError as exc:
+                if "Unsupported wideep_" not in str(exc):
+                    raise
+                logger.info("Skipping SGLang DeepEP disagg sweep: %s", exc)
+            else:
+                deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
+                task_configs[deepep_name] = deepep_disagg_task
     return task_configs
 
 
