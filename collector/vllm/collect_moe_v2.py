@@ -76,7 +76,7 @@ try:
 except Exception:
     pass
 
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 
 from collector.common_test_cases import get_common_moe_test_cases
 from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
@@ -551,14 +551,23 @@ def run_moe_torch(
                 ),
             )
 
+        def _mxfp4_forward(hs, rl):
+            # vLLM's custom MoE op increments a per-context layer index on
+            # each forward call.  We only register one layer, so reset the
+            # counter before every call to avoid an index-out-of-range error.
+            fwd_ctx = get_forward_context()
+            if hasattr(fwd_ctx, "moe_layer_index"):
+                fwd_ctx.moe_layer_index = 0
+            moe_module.forward(hs, rl)
+
         def run_single_iteration():
             if use_mxfp4:
                 # FusedMoE.forward(hidden_states, router_logits) does routing internally.
                 if distributed == "power_law":
                     for logits in actual_logits_list:
-                        moe_module.forward(hidden_states[: logits.shape[0]], logits[: logits.shape[0]])
+                        _mxfp4_forward(hidden_states[: logits.shape[0]], logits[: logits.shape[0]])
                 else:
-                    moe_module.forward(hidden_states, actual_logits)
+                    _mxfp4_forward(hidden_states, actual_logits)
             elif use_nvfp4:
                 if distributed == "power_law":
                     for tw, ti in zip(topk_weights_list, topk_ids_list, strict=True):
