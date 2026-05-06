@@ -183,7 +183,7 @@ def run_attention_torch(
     else:
         backend_name = backend_name_str
 
-    kv_cache_spec = create_standard_kv_cache_spec(vllm_config, use_fp8_kv_cache)
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config, use_fp8_kv_cache, head_size=head_dim)
 
     # Ensure the KV cache has enough blocks for all sequences.
     required_blocks = 1 + sum((s_len + block_size - 1) // block_size for s_len in batch_spec.seq_lens)

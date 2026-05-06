@@ -212,15 +212,23 @@ def get_attention_backend(backend_name: AttentionBackendEnum):
     raise ValueError(f"Unsupported backend type: {backend_name}")
 
 
-def create_standard_kv_cache_spec(vllm_config: VllmConfig, use_fp8_kv_cache: bool = False) -> FullAttentionSpec:
+def create_standard_kv_cache_spec(
+    vllm_config: VllmConfig,
+    use_fp8_kv_cache: bool = False,
+    head_size: Optional[int] = None,
+) -> FullAttentionSpec:
     """Create a FullAttentionSpec from ModelParams only."""
     # Always use model dtype for the spec. vLLM >=0.20.0 FlashInfer backend
     # asserts kv_cache_spec.dtype == model_config.dtype. FP8 KV cache is
     # handled via cache_config.cache_dtype and the impl's kv_cache_dtype arg.
+    #
+    # head_size override: ModelConfig.get_head_size() caches head_size during
+    # __init__. When hf_config is patched post-init (e.g. to sweep head_dim),
+    # the cached value is stale. Pass head_size explicitly in those cases.
     return FullAttentionSpec(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config),
-        head_size=vllm_config.model_config.get_head_size(),
+        head_size=head_size if head_size is not None else vllm_config.model_config.get_head_size(),
         dtype=vllm_config.model_config.dtype,
         sliding_window=vllm_config.model_config.get_sliding_window(),
     )
@@ -243,7 +251,10 @@ def create_vllm_config(
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
 
-    model_config = ModelConfig(
+    # Pass hf_config_override during ModelConfig init via hf_overrides
+    # (vLLM >=0.17.0). This ensures cached properties like get_head_size()
+    # reflect the overrides. Fall back to post-init update for older versions.
+    _mc_kwargs = dict(
         model=model_name,
         tokenizer=model_name,
         trust_remote_code=trust_remote_code,
@@ -251,6 +262,14 @@ def create_vllm_config(
         seed=0,
         max_model_len=max_model_len,
     )
+    if hf_config_override:
+        try:
+            model_config = ModelConfig(**_mc_kwargs, hf_overrides=hf_config_override)
+        except TypeError:
+            model_config = ModelConfig(**_mc_kwargs)
+            model_config.hf_config.update(hf_config_override)
+    else:
+        model_config = ModelConfig(**_mc_kwargs)
 
     try:
         cache_config = CacheConfig(
@@ -298,9 +317,6 @@ def create_vllm_config(
         model_config.get_sm_scale_for_layer = types.MethodType(
             lambda self, i: 1.0 / model_config.get_head_size() ** 0.5, model_config
         )
-
-    if hf_config_override:
-        model_config.hf_config.update(hf_config_override)
 
     return VllmConfig(
         model_config=model_config,
