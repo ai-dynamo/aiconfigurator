@@ -64,6 +64,7 @@ from collector.vllm.utils import (
     create_and_prepopulate_kv_cache_mla,
     create_common_attn_metadata,
     create_vllm_config,
+    populate_builder_from_common_metadata,
     setup_distributed,
     with_exit_stack,
 )
@@ -241,11 +242,17 @@ def get_mla_generation_module_test_cases():
 
 def get_dsa_context_module_test_cases():
     """collect.py entrypoint for DSA context module collection."""
+    # DSA (sparse MLA) requires Hopper or newer (SM >= 90).
+    if get_sm_version() < 90:
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="context")
 
 
 def get_dsa_generation_module_test_cases():
     """collect.py entrypoint for DSA generation module collection."""
+    # DSA (sparse MLA) requires Hopper or newer (SM >= 90).
+    if get_sm_version() < 90:
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="generation")
 
 
@@ -363,6 +370,23 @@ def _create_attention_module(
 
     # Override just the layer-local dimensions we sweep in the collector.
     hf_config = vllm_config.model_config.hf_config
+
+    # For MLA models: the FA3 builder internally uses
+    # model_config.get_head_size() to compute scheduler_metadata.
+    # get_head_size() is cached during ModelConfig.__init__() and returns
+    # hidden_size // num_attention_heads (= 56 for DeepSeek-V3). But MLA
+    # attention operates on the latent KV dimension (kv_lora_rank +
+    # qk_rope_head_dim = 576). Without this override, the FA3 kernel rejects
+    # the scheduler_metadata shape at runtime.
+    if hasattr(hf_config, 'kv_lora_rank') and hasattr(hf_config, 'qk_rope_head_dim'):
+        _mla_head_dim = hf_config.kv_lora_rank + hf_config.qk_rope_head_dim
+    else:
+        _mla_head_dim = hf_config.hidden_size // hf_config.num_attention_heads
+    hf_config.head_dim = _mla_head_dim
+    # Also override the cached get_head_size() — post-init hf_config changes
+    # don't affect the value cached during ModelConfig.__init__().
+    vllm_config.model_config.get_head_size = lambda: _mla_head_dim
+
     hf_config.num_hidden_layers = 1
     hf_config.num_attention_heads = num_heads
     hf_config.num_key_value_heads = num_heads
@@ -621,6 +645,7 @@ def _create_kv_cache_and_metadata(
     attn_layer_name = "model.layers.0.self_attn.attn"
     layer_names = [attn_layer_name]
     builder = builder_cls(kv_cache_spec, layer_names, vllm_config, torch.device(device))
+    populate_builder_from_common_metadata(builder, common_attn_metadata)
     attn_metadata = builder.build(
         common_prefix_len=0,
         common_attn_metadata=common_attn_metadata,
@@ -654,6 +679,7 @@ def _create_kv_cache_and_metadata(
         )
         indexer_builder_cls = DeepseekV32IndexerBackend.get_builder_cls()
         indexer_builder = indexer_builder_cls(indexer_spec, [indexer_layer_name], vllm_config, torch.device(device))
+        populate_builder_from_common_metadata(indexer_builder, common_attn_metadata)
         indexer_metadata = indexer_builder.build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,

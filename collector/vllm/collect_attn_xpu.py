@@ -178,7 +178,13 @@ def run_attention_torch(
     except AttributeError:
         current_platform.seed_everything(42)
 
-    hf_override = {"sliding_window": window_size} if window_size > 0 else None
+    hf_override = {
+        "head_dim": head_dim,
+        "num_attention_heads": num_heads,
+        "num_key_value_heads": num_kv_heads,
+    }
+    if window_size > 0:
+        hf_override["sliding_window"] = window_size
     vllm_config = create_vllm_config(
         model_name=model,
         max_model_len=max(batch_spec.seq_lens),
@@ -189,7 +195,7 @@ def run_attention_torch(
         hf_config_override=hf_override,
     )
 
-    kv_cache_spec = create_standard_kv_cache_spec(vllm_config, use_fp8_kv_cache)
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config, use_fp8_kv_cache, head_size=head_dim)
 
     # Ensure the KV cache has enough blocks for all sequences.
     required_blocks = 1 + sum((s_len + block_size - 1) // block_size for s_len in batch_spec.seq_lens)
@@ -327,7 +333,11 @@ def run_attention_torch(
     # to be bfloat16 even if the KV Cache is FP8.
     # TODO: Remove the code if FP8 support will not be in the roadmap.
     if "xpu" not in str(device) and use_fp8_kv_cache and backend_name_str in ("FLASH_ATTN", "FLASHINFER"):
-        query_vllm = query_vllm.to(current_platform.fp8_dtype())
+        # vLLM >=0.20.0 FlashInfer asserts query dtype matches attn_metadata.q_data_type
+        # (set from model dtype during build). Only cast query when metadata expects fp8.
+        expected_q_dtype = getattr(attn_metadata, 'q_data_type', None)
+        if expected_q_dtype is None or expected_q_dtype == current_platform.fp8_dtype():
+            query_vllm = query_vllm.to(current_platform.fp8_dtype())
         output = output.to(torch.bfloat16)
 
     def run():

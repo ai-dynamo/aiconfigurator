@@ -68,10 +68,15 @@ except Exception:
 # This lets vLLM handle backend selection (FlashInfer/Triton/Marlin) and
 # weight swizzle internally, so one code path works on all GPUs.
 _mxfp4_available = False
+# vLLM 0.20.0 removed `reduce_results` from FusedMoE.__init__().
+_fused_moe_accepts_reduce_results: bool = False
 try:
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
 
+    _fused_moe_accepts_reduce_results = (
+        "reduce_results" in inspect.signature(FusedMoE.__init__).parameters
+    )
     _mxfp4_available = True
 except Exception:
     pass
@@ -191,6 +196,14 @@ def run_moe_torch(
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
+    # vLLM >= 0.20.0: modular MoE kernels allocate scratch buffers via WorkspaceManager.
+    try:
+        from vllm.v1.worker.workspace import init_workspace_manager
+
+        init_workspace_manager(torch.device(device))
+    except (ImportError, RuntimeWarning):
+        pass
+
     # Configure quantization parameters
     dtype = torch.bfloat16
     quant_config = None
@@ -276,23 +289,25 @@ def run_moe_torch(
         # (vllm-project/vllm#32344); without it, __init__ calls get_pcp_group()
         # which requires distributed init.
         mxfp4_vllm_cfg = VllmConfig()
+        fused_moe_kwargs = dict(
+            num_experts=num_experts,
+            top_k=topk,
+            hidden_size=hidden_size,
+            intermediate_size=inter_size,
+            renormalize=True,
+            quant_config=mxfp4_quant_config,
+            tp_size=moe_tp_size,
+            dp_size=1,
+            ep_size=moe_ep_size,
+            prefix="",
+            has_bias=True,  # GPT-OSS uses bias
+            activation="swigluoai",  # GPT-OSS activation
+            pcp_size=1,
+        )
+        if _fused_moe_accepts_reduce_results:
+            fused_moe_kwargs["reduce_results"] = False
         with set_current_vllm_config(mxfp4_vllm_cfg):
-            moe_module = FusedMoE(
-                num_experts=num_experts,
-                top_k=topk,
-                hidden_size=hidden_size,
-                intermediate_size=inter_size,
-                reduce_results=False,
-                renormalize=True,
-                quant_config=mxfp4_quant_config,
-                tp_size=moe_tp_size,
-                dp_size=1,
-                ep_size=moe_ep_size,
-                prefix="",
-                has_bias=True,  # GPT-OSS uses bias
-                activation="swigluoai",  # GPT-OSS activation
-                pcp_size=1,
-            )
+            moe_module = FusedMoE(**fused_moe_kwargs)
         moe_module.to(device)
         moe_module.eval()
         moe_module.requires_grad_(False)

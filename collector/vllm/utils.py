@@ -130,56 +130,71 @@ def create_common_attn_metadata(
     # Calculate max query length
     max_query_len = max(batch_spec.query_lens)
 
-    try:
-        # Newer API uses underscored CPU copies.
-        return CommonAttentionMetadata(
-            query_start_loc=query_start_loc,
-            query_start_loc_cpu=query_start_loc_cpu,
-            seq_lens=seq_lens,
-            _seq_lens_cpu=seq_lens_cpu,
-            _num_computed_tokens_cpu=num_computed_tokens_cpu,
-            num_reqs=batch_spec.batch_size,
-            num_actual_tokens=num_tokens,
-            max_query_len=max_query_len,
-            max_seq_len=max_seq_len,
-            block_table_tensor=block_table_tensor,
-            slot_mapping=slot_mapping,
-            causal=True,
-        )
-    except TypeError:
-        # Older API expects explicit CPU tensors without underscores.
+    # Common kwargs shared across all API variants.
+    _base = dict(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens,
+        num_reqs=batch_spec.batch_size,
+        num_actual_tokens=num_tokens,
+        max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
+        block_table_tensor=block_table_tensor,
+        slot_mapping=slot_mapping,
+        causal=True,
+    )
+
+    # Try constructor variants from newest to oldest API.
+    _variants = [
+        {**_base, '_seq_lens_cpu': seq_lens_cpu, '_num_computed_tokens_cpu': num_computed_tokens_cpu},
+        {**_base, 'seq_lens_cpu': seq_lens_cpu, 'num_computed_tokens_cpu': num_computed_tokens_cpu},
+        {**_base, 'seq_lens_cpu': seq_lens_cpu, 'num_computed_tokens_cpu': num_computed_tokens_cpu,
+         'seq_start_loc_cpu': None, 'seq_start_loc': None},
+    ]
+
+    for kwargs in _variants:
         try:
-            return CommonAttentionMetadata(
-                query_start_loc=query_start_loc,
-                query_start_loc_cpu=query_start_loc_cpu,
-                seq_lens=seq_lens,
-                seq_lens_cpu=seq_lens_cpu,
-                num_computed_tokens_cpu=num_computed_tokens_cpu,
-                num_reqs=batch_spec.batch_size,
-                num_actual_tokens=num_tokens,
-                max_query_len=max_query_len,
-                max_seq_len=max_seq_len,
-                block_table_tensor=block_table_tensor,
-                slot_mapping=slot_mapping,
-                causal=True,
-            )
+            result = CommonAttentionMetadata(**kwargs)
+            # vLLM >=0.20.0: MLA indexer asserts seq_lens_cpu_upper_bound is not None.
+            # This attribute is not a constructor parameter; set it post-construction.
+            if getattr(result, 'seq_lens_cpu_upper_bound', None) is None:
+                try:
+                    result._seq_lens_cpu_upper_bound = seq_lens_cpu
+                except AttributeError:
+                    pass
+            return result
         except TypeError:
-            return CommonAttentionMetadata(
-                query_start_loc=query_start_loc,
-                query_start_loc_cpu=query_start_loc_cpu,
-                seq_lens=seq_lens,
-                seq_lens_cpu=seq_lens_cpu,
-                seq_start_loc_cpu=None,
-                seq_start_loc=None,
-                num_computed_tokens_cpu=num_computed_tokens_cpu,
-                num_reqs=batch_spec.batch_size,
-                num_actual_tokens=num_tokens,
-                max_query_len=max_query_len,
-                max_seq_len=max_seq_len,
-                block_table_tensor=block_table_tensor,
-                slot_mapping=slot_mapping,
-                causal=True,
-            )
+            continue
+
+    raise RuntimeError("Failed to create CommonAttentionMetadata — no compatible API found")
+
+
+def populate_builder_from_common_metadata(builder, common_attn_metadata):
+    """Populate an attention builder's internal state from CommonAttentionMetadata.
+
+    vLLM >=0.20.0 MLA builders (FlashMLA Sparse, MLA Attention, etc.)
+    expect attributes like ``seq_lens_cpu`` to be populated via
+    ``reqs_added()`` during the normal scheduling lifecycle. The
+    collector bypasses that lifecycle by calling ``builder.build()``
+    directly, so we seed the builder's state from our hand-crafted
+    CommonAttentionMetadata.  Silently skips attributes that don't
+    exist on the builder (older vLLM or non-MLA backends).
+    """
+    _fields = [
+        ('seq_lens_cpu', 'seq_lens_cpu'),
+        ('_seq_lens_cpu', 'seq_lens_cpu'),
+        ('num_computed_tokens_cpu', 'num_computed_tokens_cpu'),
+        ('_num_computed_tokens_cpu', 'num_computed_tokens_cpu'),
+        ('query_start_loc_cpu', 'query_start_loc_cpu'),
+        ('_query_start_loc_cpu', 'query_start_loc_cpu'),
+    ]
+    for builder_attr, cam_attr in _fields:
+        try:
+            cam_val = getattr(common_attn_metadata, cam_attr, None)
+            if cam_val is not None and getattr(builder, builder_attr, None) is None:
+                setattr(builder, builder_attr, cam_val)
+        except (AttributeError, TypeError):
+            pass
 
 
 def get_attention_backend(backend_name: AttentionBackendEnum):
@@ -225,13 +240,24 @@ def get_attention_backend(backend_name: AttentionBackendEnum):
     raise ValueError(f"Unsupported backend type: {backend_name}")
 
 
-def create_standard_kv_cache_spec(vllm_config: VllmConfig, use_fp8_kv_cache: bool = False) -> FullAttentionSpec:
+def create_standard_kv_cache_spec(
+    vllm_config: VllmConfig,
+    use_fp8_kv_cache: bool = False,
+    head_size: Optional[int] = None,
+) -> FullAttentionSpec:
     """Create a FullAttentionSpec from ModelParams only."""
+    # Always use model dtype for the spec. vLLM >=0.20.0 FlashInfer backend
+    # asserts kv_cache_spec.dtype == model_config.dtype. FP8 KV cache is
+    # handled via cache_config.cache_dtype and the impl's kv_cache_dtype arg.
+    #
+    # head_size override: ModelConfig.get_head_size() caches head_size during
+    # __init__. When hf_config is patched post-init (e.g. to sweep head_dim),
+    # the cached value is stale. Pass head_size explicitly in those cases.
     return FullAttentionSpec(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config),
-        head_size=vllm_config.model_config.get_head_size(),
-        dtype=current_platform.fp8_dtype() if use_fp8_kv_cache else vllm_config.model_config.dtype,
+        head_size=head_size if head_size is not None else vllm_config.model_config.get_head_size(),
+        dtype=vllm_config.model_config.dtype,
         sliding_window=vllm_config.model_config.get_sliding_window(),
     )
 
@@ -253,7 +279,10 @@ def create_vllm_config(
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
 
-    model_config = ModelConfig(
+    # Pass hf_config_override during ModelConfig init via hf_overrides
+    # (vLLM >=0.17.0). This ensures cached properties like get_head_size()
+    # reflect the overrides. Fall back to post-init update for older versions.
+    _mc_kwargs = dict(
         model=model_name,
         tokenizer=model_name,
         trust_remote_code=trust_remote_code,
@@ -261,6 +290,14 @@ def create_vllm_config(
         seed=0,
         max_model_len=max_model_len,
     )
+    if hf_config_override:
+        try:
+            model_config = ModelConfig(**_mc_kwargs, hf_overrides=hf_config_override)
+        except TypeError:
+            model_config = ModelConfig(**_mc_kwargs)
+            model_config.hf_config.update(hf_config_override)
+    else:
+        model_config = ModelConfig(**_mc_kwargs)
 
     try:
         cache_config = CacheConfig(
@@ -308,9 +345,6 @@ def create_vllm_config(
         model_config.get_sm_scale_for_layer = types.MethodType(
             lambda self, i: 1.0 / model_config.get_head_size() ** 0.5, model_config
         )
-
-    if hf_config_override:
-        model_config.hf_config.update(hf_config_override)
 
     return VllmConfig(
         model_config=model_config,
