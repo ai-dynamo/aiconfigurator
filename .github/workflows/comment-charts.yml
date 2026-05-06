@@ -97,6 +97,14 @@ jobs:
               comment = comment.replace(placeholderRe, '');
             }
 
+            // Cap generated markdown so a malicious or buggy artifact cannot
+            // flood the PR with an oversized comment body.
+            const MAX_COMMENT_LENGTH = 65536;
+            const TRUNCATED_SUFFIX = '\n\n*(comment truncated to fit GitHub comment limit)*';
+            if (comment.length > MAX_COMMENT_LENGTH) {
+              comment = comment.slice(0, MAX_COMMENT_LENGTH - TRUNCATED_SUFFIX.length) + TRUNCATED_SUFFIX;
+            }
+
             // Find existing bot comment so subsequent runs update it in place.
             // Paginate so the lookup still works on PRs with >30 comments —
             // listComments paginates at 30 by default and we'd otherwise miss
