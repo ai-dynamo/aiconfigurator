@@ -3,7 +3,7 @@
   "backend": "vllm",
   "module": "vllm.dsa_generation_module",
   "run_func": "run_mla_module_worker",
-  "updated_at": "2026-05-06T02:30:03.836122",
+  "updated_at": "2026-05-06T22:52:36.963193",
   "done": [
     "vllm.dsa_generation_module:run_mla_module_worker:[1024, 1, 16, 'fp8', 'bfloat16', 'bfloat16', 'deepseek-ai/DeepSeek-V3.2', 'dsa']",
     "vllm.dsa_generation_module:run_mla_module_worker:[1024, 256, 128, 'fp8', 'bfloat16', 'fp8_block', 'zai-org/GLM-5', 'dsa']",
