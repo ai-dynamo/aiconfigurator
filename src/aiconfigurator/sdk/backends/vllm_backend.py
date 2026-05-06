@@ -10,11 +10,27 @@ import pandas as pd
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.config import RuntimeConfig
+from aiconfigurator.sdk.empirical_correction import EmpiricalCorrectionResolver
 from aiconfigurator.sdk.inference_summary import InferenceSummary
 from aiconfigurator.sdk.models import BaseModel
 from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+
+
+# Default expressions for vLLM AGG empirical corrections. These are used when
+# no system-specific override is found in empirical_correction.yaml.
+_DEFAULT_EMPIRICAL_CORRECTIONS = {
+    "tpot_num_mix_steps_for_tpot_calc": "max(1, num_mix_steps - 3)",
+    "ttft_correction_factor": "min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)",
+}
+
+# Per-formula variable allowlist for safe expression evaluation.
+# YAML overrides can change expressions, but only these symbols are readable.
+_EMPIRICAL_CORRECTION_ALLOWED_VARS = {
+    "tpot_num_mix_steps_for_tpot_calc": {"num_mix_steps"},
+    "ttft_correction_factor": {"steps_to_finish_ctx"},
+}
 
 
 class VLLMBackend(BaseBackend):
@@ -27,6 +43,10 @@ class VLLMBackend(BaseBackend):
     ):
         super().__init__()
         self._agg_cache = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+        self._empirical_correction_resolver = EmpiricalCorrectionResolver(
+            default_expressions=_DEFAULT_EMPIRICAL_CORRECTIONS,
+            allowed_vars=_EMPIRICAL_CORRECTION_ALLOWED_VARS,
+        )
         self.name = common.BackendName.vllm
 
     def run_agg(
@@ -72,7 +92,11 @@ class VLLMBackend(BaseBackend):
                     )
                     num_genonly_steps = osl - num_mix_steps
                     num_genonly_tokens = b
-                    num_mix_steps_for_tpot_calc = max(1, num_mix_steps - 3)
+                    num_mix_steps_for_tpot_calc = self._empirical_correction_resolver.evaluate(
+                        name="tpot_num_mix_steps_for_tpot_calc",
+                        database=database,
+                        variables={"num_mix_steps": num_mix_steps},
+                    )
             elif b == 1:
                 # special case for b=1
                 num_mix_steps = 1
@@ -251,15 +275,22 @@ class VLLMBackend(BaseBackend):
 
             # Calculate timing (unchanged)
             ttft = mix_step_latency_ms * np.ceil(isl / ctx_tokens)
-            # correction for ttft in trtllm agg mode, assume we have requests 10x of concurrency
+            # correction for ttft in vllm agg mode, assume we have requests 10x of concurrency
             # (batch size here) to mitigate the impact of first round latency
             # assume we need to increase x of requests when concurrency gets larger.
             # thus capped to 4 to make it reasonable.
-            correction_factor = min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)
+            correction_factor = self._empirical_correction_resolver.evaluate(
+                name="ttft_correction_factor",
+                database=database,
+                variables={"steps_to_finish_ctx": steps_to_finish_ctx},
+            )
             ttft *= correction_factor
             logger.debug(
-                f"ttft correction factor: {2 + (steps_to_finish_ctx - 3) / 2 / 10} capped to "
-                f"{correction_factor} when b: {b}, ctx_tokens: {ctx_tokens} isl {isl}"
+                "ttft correction factor evaluated to %s when b=%s, ctx_tokens=%s, isl=%s",
+                correction_factor,
+                b,
+                ctx_tokens,
+                isl,
             )
 
             tpot = (mix_step_latency_ms * num_mix_steps_for_tpot_calc + genonly_step_latency_ms * num_genonly_steps) / (
