@@ -108,6 +108,11 @@ def run_attention_torch(
         num_gpu_blocks=8192,
         max_num_seqs=batch_size,
         use_fp8_kv_cache=use_fp8_kv_cache,
+        hf_config_override={
+            "head_dim": head_dim,
+            "num_attention_heads": num_heads,
+            "num_key_value_heads": num_kv_heads,
+        },
     )
 
     # vLLM >=0.19.0 requires an active config context for backend selection
