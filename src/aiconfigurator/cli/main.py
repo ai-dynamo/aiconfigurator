@@ -11,7 +11,6 @@ from typing import Any
 
 import pandas as pd
 import yaml
-from packaging.version import InvalidVersion, Version
 
 from aiconfigurator import __version__
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
@@ -28,44 +27,6 @@ from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_support_matrix_version(version: str | None) -> Version | None:
-    """Parse backend versions so 0.5.10 sorts after 0.5.9."""
-    if not version:
-        return None
-    try:
-        return Version(version)
-    except InvalidVersion:
-        return None
-
-
-def _latest_support_matrix_version(
-    matrix: list[dict[str, str]],
-    system: str,
-    backend: str,
-    model: str | None = None,
-    architecture: str | None = None,
-) -> str | None:
-    rows = [row for row in matrix if row["System"] == system and row["Backend"] == backend]
-
-    if model:
-        exact_rows = [row for row in rows if row["HuggingFaceID"].lower() == model.lower()]
-        if exact_rows:
-            rows = exact_rows
-        elif architecture:
-            architecture_rows = [row for row in rows if row["Architecture"] == architecture]
-            if architecture_rows:
-                rows = architecture_rows
-
-    versions = [
-        (version, parsed)
-        for version in {row["Version"] for row in rows}
-        if (parsed := _parse_support_matrix_version(version))
-    ]
-    if not versions:
-        return None
-    return max(versions, key=lambda version: version[1])[0]
 
 
 def _build_common_cli_parser() -> argparse.ArgumentParser:
@@ -1276,10 +1237,14 @@ def _run_support_matrix_mode(args):
             if version_filter:
                 version = version_filter
             else:
-                version = _latest_support_matrix_version(matrix, system, be, model=model, architecture=architecture)
-                if version is None:
+                versions = sorted(
+                    {r["Version"] for r in matrix if r["System"] == system and r["Backend"] == be},
+                    reverse=True,
+                )
+                if not versions:
                     results[(system, be)] = None
                     continue
+                version = versions[0]
 
             result = common.check_support(
                 model=model, system=system, backend=be, version=version, architecture=architecture
@@ -1347,19 +1312,21 @@ def _run_support_mode(args):
     backend = args.backend
     version = args.backend_version
 
+    # If no version specified, find the latest version in the support matrix
+    if not version:
+        matrix = common.get_support_matrix()
+        versions_for_combo = [row["Version"] for row in matrix if row["System"] == system and row["Backend"] == backend]
+        if versions_for_combo:
+            version = sorted(set(versions_for_combo), reverse=True)[0]
+
+    logger.info("Checking support for model=%s, system=%s, backend=%s, version=%s", model, system, backend, version)
+
     # Resolve architecture for better check
     try:
         model_info = get_model_config_from_model_path(model)
         architecture = model_info["architecture"]
     except Exception:
         architecture = None
-
-    # If no version specified, find the latest model-relevant version in the support matrix
-    if not version:
-        matrix = common.get_support_matrix()
-        version = _latest_support_matrix_version(matrix, system, backend, model=model, architecture=architecture)
-
-    logger.info("Checking support for model=%s, system=%s, backend=%s, version=%s", model, system, backend, version)
 
     result = common.check_support(
         model=model, system=system, backend=backend, version=version, architecture=architecture
