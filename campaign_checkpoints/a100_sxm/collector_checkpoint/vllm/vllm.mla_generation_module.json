@@ -3,7 +3,7 @@
   "backend": "vllm",
   "module": "vllm.mla_generation_module",
   "run_func": "run_mla_module_worker",
-  "updated_at": "2026-05-06T02:31:37.839524",
+  "updated_at": "2026-05-06T20:08:40.009683",
   "done": [
     "vllm.mla_generation_module:run_mla_module_worker:[1024, 1, 8, 'bfloat16', 'bfloat16', 'bfloat16', 'deepseek-ai/DeepSeek-V3', 'mla']",
     "vllm.mla_generation_module:run_mla_module_worker:[1024, 4, 8, 'bfloat16', 'bfloat16', 'bfloat16', 'deepseek-ai/DeepSeek-V3', 'mla']",
