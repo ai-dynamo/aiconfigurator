@@ -130,56 +130,38 @@ def create_common_attn_metadata(
     # Calculate max query length
     max_query_len = max(batch_spec.query_lens)
 
-    try:
-        # Newer API uses underscored CPU copies.
-        return CommonAttentionMetadata(
-            query_start_loc=query_start_loc,
-            query_start_loc_cpu=query_start_loc_cpu,
-            seq_lens=seq_lens,
-            _seq_lens_cpu=seq_lens_cpu,
-            _num_computed_tokens_cpu=num_computed_tokens_cpu,
-            num_reqs=batch_spec.batch_size,
-            num_actual_tokens=num_tokens,
-            max_query_len=max_query_len,
-            max_seq_len=max_seq_len,
-            block_table_tensor=block_table_tensor,
-            slot_mapping=slot_mapping,
-            causal=True,
-        )
-    except TypeError:
-        # Older API expects explicit CPU tensors without underscores.
+    # Common kwargs shared across all API variants.
+    _base = dict(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens,
+        num_reqs=batch_spec.batch_size,
+        num_actual_tokens=num_tokens,
+        max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
+        block_table_tensor=block_table_tensor,
+        slot_mapping=slot_mapping,
+        causal=True,
+    )
+
+    # Try constructor variants from newest to oldest API.
+    # vLLM >=0.20.0 adds _seq_lens_cpu_upper_bound (MLA indexer asserts it).
+    _variants = [
+        {**_base, '_seq_lens_cpu': seq_lens_cpu, '_num_computed_tokens_cpu': num_computed_tokens_cpu,
+         '_seq_lens_cpu_upper_bound': seq_lens_cpu},
+        {**_base, '_seq_lens_cpu': seq_lens_cpu, '_num_computed_tokens_cpu': num_computed_tokens_cpu},
+        {**_base, 'seq_lens_cpu': seq_lens_cpu, 'num_computed_tokens_cpu': num_computed_tokens_cpu},
+        {**_base, 'seq_lens_cpu': seq_lens_cpu, 'num_computed_tokens_cpu': num_computed_tokens_cpu,
+         'seq_start_loc_cpu': None, 'seq_start_loc': None},
+    ]
+
+    for kwargs in _variants:
         try:
-            return CommonAttentionMetadata(
-                query_start_loc=query_start_loc,
-                query_start_loc_cpu=query_start_loc_cpu,
-                seq_lens=seq_lens,
-                seq_lens_cpu=seq_lens_cpu,
-                num_computed_tokens_cpu=num_computed_tokens_cpu,
-                num_reqs=batch_spec.batch_size,
-                num_actual_tokens=num_tokens,
-                max_query_len=max_query_len,
-                max_seq_len=max_seq_len,
-                block_table_tensor=block_table_tensor,
-                slot_mapping=slot_mapping,
-                causal=True,
-            )
+            return CommonAttentionMetadata(**kwargs)
         except TypeError:
-            return CommonAttentionMetadata(
-                query_start_loc=query_start_loc,
-                query_start_loc_cpu=query_start_loc_cpu,
-                seq_lens=seq_lens,
-                seq_lens_cpu=seq_lens_cpu,
-                seq_start_loc_cpu=None,
-                seq_start_loc=None,
-                num_computed_tokens_cpu=num_computed_tokens_cpu,
-                num_reqs=batch_spec.batch_size,
-                num_actual_tokens=num_tokens,
-                max_query_len=max_query_len,
-                max_seq_len=max_seq_len,
-                block_table_tensor=block_table_tensor,
-                slot_mapping=slot_mapping,
-                causal=True,
-            )
+            continue
+
+    raise RuntimeError("Failed to create CommonAttentionMetadata — no compatible API found")
 
 
 def get_attention_backend(backend_name: AttentionBackendEnum):
