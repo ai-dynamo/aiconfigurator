@@ -645,6 +645,7 @@ def _create_kv_cache_and_metadata(
         )
         indexer_builder_cls = DeepseekV32IndexerBackend.get_builder_cls()
         indexer_builder = indexer_builder_cls(indexer_spec, [indexer_layer_name], vllm_config, torch.device(device))
+        populate_builder_from_common_metadata(indexer_builder, common_attn_metadata)
         indexer_metadata = indexer_builder.build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
