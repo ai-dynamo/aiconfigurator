@@ -158,34 +158,21 @@ def benchmark_trtllm_allreduce(
         input_shape = get_input_shape_and_comm_size(size)
         input_tensor = torch.ones(input_shape, dtype=torch_dtype, device="cuda")
 
-        # Create a dummy compute tensor for interleaving between allreduce ops.
-        # This keeps the GPU busy between allreduce calls, preventing measurement
-        # overhead (Python replay gaps, Lamport barrier stalls) from inflating
-        # the per-op latency.  The compute cost is subtracted out below.
-        dummy_tensor = torch.ones(256, 256, dtype=torch_dtype, device="cuda")
+        # Use a large number of allreduce ops inside a single CUDA graph
+        # to amortize the graph replay overhead across many operations.
+        graph_ops = repeat_n * num_runs  # e.g., 5 * 20 = 100 ops in one graph
 
         op_list = []
-        for i in range(repeat_n):
+        for i in range(graph_ops):
             allreduce = trtllm_mods["AllReduce"](mapping=mapping).cuda()
             allreduce(input_tensor, all_reduce_params=all_reduce_params)  # dry run to init
             op_list.append(allreduce)
 
-        # Dry-run compute ops so CUDA graph capture sees them
-        for i in range(repeat_n):
-            torch.mm(dummy_tensor, dummy_tensor)
-
-        # Capture graph with allreduce + interleaved dummy compute
+        # Capture CUDA Graph with all ops
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             for op in op_list:
                 op(input_tensor, all_reduce_params=all_reduce_params)
-                torch.mm(dummy_tensor, dummy_tensor)
-
-        # Capture graph with only dummy compute (for subtraction)
-        g_compute_only = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g_compute_only):
-            for _ in range(repeat_n):
-                torch.mm(dummy_tensor, dummy_tensor)
 
         # Adaptive num_runs calculation for power measurement
         actual_num_runs = num_runs
@@ -196,23 +183,27 @@ def benchmark_trtllm_allreduce(
                 end_warmup = torch.cuda.Event(enable_timing=True)
 
                 torch.cuda.synchronize()
-                start_warmup.record()
                 for i in range(num_warmups):
                     g.replay()
-                    g_compute_only.replay()
-                end_warmup.record()
                 torch.cuda.synchronize()
-
-                single_iter_time = start_warmup.elapsed_time(end_warmup) / num_warmups / 1000.0  # seconds
-                actual_num_runs = max(num_runs, int(power_min_duration / (single_iter_time * repeat_n)) + 1)
-                actual_num_runs = min(actual_num_runs, 1000)  # Cap at 1000 to avoid excessive runtime
             else:
                 # Other ranks do warmup but don't calculate
                 torch.cuda.synchronize()
                 for i in range(num_warmups):
                     g.replay()
-                    g_compute_only.replay()
                 torch.cuda.synchronize()
+
+            # Power measurement: estimate num_runs based on single graph time
+            start_warmup = torch.cuda.Event(enable_timing=True)
+            end_warmup = torch.cuda.Event(enable_timing=True)
+            if rank == 0:
+                start_warmup.record()
+                g.replay()
+                end_warmup.record()
+                torch.cuda.synchronize()
+                single_iter_time = start_warmup.elapsed_time(end_warmup) / 1000.0  # seconds
+                actual_num_runs = max(num_runs, int(power_min_duration / single_iter_time) + 1)
+                actual_num_runs = min(actual_num_runs, 1000)
 
             # Broadcast actual_num_runs from rank 0 to all ranks
             actual_num_runs = mpi_comm.bcast(actual_num_runs, root=0)
@@ -221,7 +212,6 @@ def benchmark_trtllm_allreduce(
             torch.cuda.synchronize()
             for i in range(num_warmups):
                 g.replay()
-                g_compute_only.replay()
             torch.cuda.synchronize()
 
         # Initialize power monitoring
@@ -232,35 +222,24 @@ def benchmark_trtllm_allreduce(
             if not power_monitor.start_sampling():
                 power_monitor = None  # Failed to start
 
-        # Timing: measure allreduce+compute graph
+        # Timing: single graph replay containing all ops
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
 
-        start_event.record()
-        for i in range(actual_num_runs):
+        # Replay a few times and take the best to reduce noise
+        best_latency = float("inf")
+        for _ in range(3):
+            start_event.record()
             g.replay()
-        end_event.record()
-        torch.cuda.synchronize()
-
-        total_ms = start_event.elapsed_time(end_event)
-
-        # Timing: measure compute-only graph and subtract
-        start_compute = torch.cuda.Event(enable_timing=True)
-        end_compute = torch.cuda.Event(enable_timing=True)
-
-        start_compute.record()
-        for i in range(actual_num_runs):
-            g_compute_only.replay()
-        end_compute.record()
-        torch.cuda.synchronize()
-
-        compute_ms = start_compute.elapsed_time(end_compute)
+            end_event.record()
+            torch.cuda.synchronize()
+            best_latency = min(best_latency, start_event.elapsed_time(end_event) / graph_ops)
 
         # Stop power monitoring
         if power_monitor:
             power_stats = power_monitor.stop_sampling()
 
-        latency = max(total_ms - compute_ms, 0.0) / actual_num_runs / repeat_n
+        latency = best_latency
 
         if rank == 0 and local_rank == 0:
             print(f"[TensorRT-LLM] Size: {size}, Latency: {latency:.4f} ms")
