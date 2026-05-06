@@ -169,6 +169,34 @@ def create_common_attn_metadata(
     raise RuntimeError("Failed to create CommonAttentionMetadata — no compatible API found")
 
 
+def populate_builder_from_common_metadata(builder, common_attn_metadata):
+    """Populate an attention builder's internal state from CommonAttentionMetadata.
+
+    vLLM >=0.20.0 MLA builders (FlashMLA Sparse, MLA Attention, etc.)
+    expect attributes like ``seq_lens_cpu`` to be populated via
+    ``reqs_added()`` during the normal scheduling lifecycle. The
+    collector bypasses that lifecycle by calling ``builder.build()``
+    directly, so we seed the builder's state from our hand-crafted
+    CommonAttentionMetadata.  Silently skips attributes that don't
+    exist on the builder (older vLLM or non-MLA backends).
+    """
+    _fields = [
+        ('seq_lens_cpu', 'seq_lens_cpu'),
+        ('_seq_lens_cpu', 'seq_lens_cpu'),
+        ('num_computed_tokens_cpu', 'num_computed_tokens_cpu'),
+        ('_num_computed_tokens_cpu', 'num_computed_tokens_cpu'),
+        ('query_start_loc_cpu', 'query_start_loc_cpu'),
+        ('_query_start_loc_cpu', 'query_start_loc_cpu'),
+    ]
+    for builder_attr, cam_attr in _fields:
+        try:
+            cam_val = getattr(common_attn_metadata, cam_attr, None)
+            if cam_val is not None and getattr(builder, builder_attr, None) is None:
+                setattr(builder, builder_attr, cam_val)
+        except (AttributeError, TypeError):
+            pass
+
+
 def get_attention_backend(backend_name: AttentionBackendEnum):
     """Set up attention backend classes for testing (new and legacy)."""
     # Newer API: AttentionBackendEnum with get_class()

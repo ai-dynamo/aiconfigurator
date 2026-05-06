@@ -333,7 +333,11 @@ def run_attention_torch(
     # to be bfloat16 even if the KV Cache is FP8.
     # TODO: Remove the code if FP8 support will not be in the roadmap.
     if "xpu" not in str(device) and use_fp8_kv_cache and backend_name_str in ("FLASH_ATTN", "FLASHINFER"):
-        query_vllm = query_vllm.to(current_platform.fp8_dtype())
+        # vLLM >=0.20.0 FlashInfer asserts query dtype matches attn_metadata.q_data_type
+        # (set from model dtype during build). Only cast query when metadata expects fp8.
+        expected_q_dtype = getattr(attn_metadata, 'q_data_type', None)
+        if expected_q_dtype is None or expected_q_dtype == current_platform.fp8_dtype():
+            query_vllm = query_vllm.to(current_platform.fp8_dtype())
         output = output.to(torch.bfloat16)
 
     def run():

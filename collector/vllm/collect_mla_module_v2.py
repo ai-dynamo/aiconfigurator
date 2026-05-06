@@ -64,6 +64,7 @@ from collector.vllm.utils import (
     create_and_prepopulate_kv_cache_mla,
     create_common_attn_metadata,
     create_vllm_config,
+    populate_builder_from_common_metadata,
     setup_distributed,
     with_exit_stack,
 )
@@ -610,6 +611,7 @@ def _create_kv_cache_and_metadata(
     attn_layer_name = "model.layers.0.self_attn.attn"
     layer_names = [attn_layer_name]
     builder = builder_cls(kv_cache_spec, layer_names, vllm_config, torch.device(device))
+    populate_builder_from_common_metadata(builder, common_attn_metadata)
     attn_metadata = builder.build(
         common_prefix_len=0,
         common_attn_metadata=common_attn_metadata,
