@@ -149,9 +149,7 @@ def benchmark_trtllm_allreduce(
     )
 
     # Benchmark parameters
-    repeat_n = 5
     num_warmups = 3
-    num_runs = 20
 
     size = min_size
     while size < max_size:
@@ -163,7 +161,7 @@ def benchmark_trtllm_allreduce(
         # preventing Lamport barrier stalls.  A separate compute-only graph
         # is measured and subtracted.  Putting everything in one graph (instead
         # of replaying from a Python loop) eliminates Python dispatch overhead.
-        graph_ops = repeat_n * num_runs  # e.g., 5 * 20 = 100 ops in one graph
+        graph_ops = 500  # large count to amortize overhead and reduce subtraction noise
         dummy_tensor = torch.ones(256, 256, dtype=torch_dtype, device="cuda")
 
         op_list = []
@@ -189,32 +187,12 @@ def benchmark_trtllm_allreduce(
             for _ in range(graph_ops):
                 torch.mm(dummy_tensor, dummy_tensor)
 
-        # Adaptive num_runs calculation for power measurement
-        actual_num_runs = num_runs
-        if measure_power:
-            # Estimate single iteration time (only on rank 0)
-            if rank == 0:
-                torch.cuda.synchronize()
-                for i in range(num_warmups):
-                    g.replay()
-                    g_compute_only.replay()
-                torch.cuda.synchronize()
-            else:
-                torch.cuda.synchronize()
-                for i in range(num_warmups):
-                    g.replay()
-                    g_compute_only.replay()
-                torch.cuda.synchronize()
-
-            # Broadcast actual_num_runs from rank 0 to all ranks
-            actual_num_runs = mpi_comm.bcast(actual_num_runs, root=0)
-        else:
-            # Normal warmup
-            torch.cuda.synchronize()
-            for i in range(num_warmups):
-                g.replay()
-                g_compute_only.replay()
-            torch.cuda.synchronize()
+        # Warmup
+        torch.cuda.synchronize()
+        for _ in range(num_warmups):
+            g.replay()
+            g_compute_only.replay()
+        torch.cuda.synchronize()
 
         # Initialize power monitoring
         power_monitor = None
