@@ -241,12 +241,9 @@ class BaseBackend(ABC):
                 pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
                     runtime_config.image_width // enc_cfg.patch_size
                 )
-            elif runtime_config.num_image_tokens > 0:
-                tokens_per_image = runtime_config.num_image_tokens
-                pre_merge_per_image = runtime_config.num_image_tokens  # no merge info, use as-is
             else:
-                tokens_per_image = isl
-                pre_merge_per_image = isl
+                # No image dimensions specified. skip encoder modeling
+                return encoder_latency_dict, encoder_energy_wms_dict, 0
 
             n_img_post = tokens_per_image * num_images  # post-merge: injected into LLM context
             n_img_pre = pre_merge_per_image * num_images  # pre-merge: processed by ViT transformer

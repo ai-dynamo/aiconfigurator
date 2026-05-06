@@ -66,6 +66,9 @@ class TaskContext:
     total_gpus: int | None
     free_gpu_memory_fraction: float | None = None
     max_seq_len: int | None = None
+    image_height: int = 0
+    image_width: int = 0
+    num_images_per_request: int = 1
     profiles: list[str] = field(default_factory=list)
     yaml_patch: dict = field(default_factory=dict)
     yaml_mode: Literal["patch", "replace"] = "patch"
@@ -366,6 +369,9 @@ class TaskConfigFactory:
             "runtime_config": {
                 "isl": ctx.isl,
                 "osl": ctx.osl,
+                "image_height": ctx.image_height,
+                "image_width": ctx.image_width,
+                "num_images_per_request": ctx.num_images_per_request,
                 "prefix": ctx.prefix,
                 "ttft": ctx.ttft,
                 "tpot": ctx.tpot,
@@ -655,6 +661,9 @@ class TaskConfig:
         backend_version: str | None = None,
         isl: int = 4000,
         osl: int = 1000,
+        image_height: int = 0,
+        image_width: int = 0,
+        num_images_per_request: int = 1,
         prefix: int = 0,
         ttft: float = 1000,
         tpot: float = 50,
@@ -739,6 +748,9 @@ class TaskConfig:
             backend_version=backend_version,
             isl=isl,
             osl=osl,
+            image_height=image_height,
+            image_width=image_width,
+            num_images_per_request=num_images_per_request,
             prefix=prefix,
             ttft=ttft,
             tpot=tpot,
@@ -1116,6 +1128,9 @@ class TaskRunner:
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
             osl=task_config.runtime_config.osl,
+            image_height=getattr(task_config.runtime_config, "image_height", 0),
+            image_width=getattr(task_config.runtime_config, "image_width", 0),
+            num_images_per_request=getattr(task_config.runtime_config, "num_images_per_request", 1),
             prefix=task_config.runtime_config.prefix,
             ttft=task_config.runtime_config.ttft,
             tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
@@ -1206,6 +1221,9 @@ class TaskRunner:
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
             osl=task_config.runtime_config.osl,
+            image_height=getattr(task_config.runtime_config, "image_height", 0),
+            image_width=getattr(task_config.runtime_config, "image_width", 0),
+            num_images_per_request=getattr(task_config.runtime_config, "num_images_per_request", 1),
             prefix=task_config.runtime_config.prefix,
             ttft=task_config.runtime_config.ttft,
             tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
