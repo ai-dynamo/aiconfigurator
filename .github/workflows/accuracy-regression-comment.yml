@@ -21,6 +21,12 @@ jobs:
       pull-requests: write
 
     steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
       - name: Download PR comment inputs
         id: download
         uses: actions/download-artifact@v4
@@ -60,14 +66,6 @@ jobs:
 
           echo "input_dir=${INPUT_DIR}" >> "$GITHUB_OUTPUT"
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout default branch
-        if: steps.metadata.outputs.pr_number != ''
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          lfs: true
-          clean: false
 
       - name: Publish comparison plot
         id: publish-plot
