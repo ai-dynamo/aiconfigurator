@@ -9,9 +9,12 @@ import torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    maybe_post_process_fp8_weight_block,
-)
+try:
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        maybe_post_process_fp8_weight_block,
+    )
+except ImportError:
+    maybe_post_process_fp8_weight_block = None
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.version import __version__ as vllm_version
 
@@ -164,12 +167,12 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
                     if not hasattr(gemm, "weight_scale"):
                         gemm.weight_scale = gemm.weight_scale_inv
 
-                # Support both old (layer-only) and new (layer, cutlass_supported)
-                # signatures for maybe_post_process_fp8_weight_block.
-                try:
-                    maybe_post_process_fp8_weight_block(gemm)
-                except TypeError:
-                    maybe_post_process_fp8_weight_block(gemm, cutlass_block_fp8_supported=True)
+                # Post-process block FP8 weights if the helper is available.
+                if maybe_post_process_fp8_weight_block is not None:
+                    try:
+                        maybe_post_process_fp8_weight_block(gemm)
+                    except TypeError:
+                        maybe_post_process_fp8_weight_block(gemm, cutlass_block_fp8_supported=True)
 
                 # Dynamic activation scheme does not create input_scale;
                 # the forward path still reads it, so set it explicitly.
