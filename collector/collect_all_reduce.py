@@ -156,12 +156,11 @@ def benchmark_trtllm_allreduce(
         input_shape = get_input_shape_and_comm_size(size)
         input_tensor = torch.ones(input_shape, dtype=torch_dtype, device="cuda")
 
-        # Interleave allreduce with dummy compute inside a single large CUDA
-        # graph.  The compute keeps the GPU busy between allreduce calls,
-        # preventing Lamport barrier stalls.  A separate compute-only graph
-        # is measured and subtracted.  Putting everything in one graph (instead
-        # of replaying from a Python loop) eliminates Python dispatch overhead.
-        graph_ops = 500  # large count to amortize overhead and reduce subtraction noise
+        # Interleave allreduce with dummy compute that touches the same
+        # input_tensor, warming it in L2 cache (mimicking real inference where
+        # a GEMM writes to the allreduce buffer right before it).  A separate
+        # compute-only graph is measured and subtracted.
+        graph_ops = 500
         dummy_tensor = torch.ones(256, 256, dtype=torch_dtype, device="cuda")
 
         op_list = []
@@ -171,7 +170,8 @@ def benchmark_trtllm_allreduce(
             op_list.append(allreduce)
 
         # Dry-run compute ops
-        for i in range(graph_ops):
+        for _ in range(graph_ops):
+            input_tensor.mul_(1.0)
             torch.mm(dummy_tensor, dummy_tensor)
 
         # Capture graph: allreduce + compute interleaved
@@ -179,12 +179,14 @@ def benchmark_trtllm_allreduce(
         with torch.cuda.graph(g):
             for op in op_list:
                 op(input_tensor, all_reduce_params=all_reduce_params)
-                torch.mm(dummy_tensor, dummy_tensor)
+                input_tensor.mul_(1.0)  # touch allreduce buffer to warm cache
+                torch.mm(dummy_tensor, dummy_tensor)  # keep GPU busy
 
         # Capture graph: compute only (for subtraction)
         g_compute_only = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g_compute_only):
             for _ in range(graph_ops):
+                input_tensor.mul_(1.0)
                 torch.mm(dummy_tensor, dummy_tensor)
 
         # Warmup
