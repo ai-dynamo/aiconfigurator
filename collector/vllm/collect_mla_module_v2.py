@@ -241,11 +241,17 @@ def get_mla_generation_module_test_cases():
 
 def get_dsa_context_module_test_cases():
     """collect.py entrypoint for DSA context module collection."""
+    # DSA (sparse MLA) requires Hopper or newer (SM >= 90).
+    if get_sm_version() < 90:
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="context")
 
 
 def get_dsa_generation_module_test_cases():
     """collect.py entrypoint for DSA generation module collection."""
+    # DSA (sparse MLA) requires Hopper or newer (SM >= 90).
+    if get_sm_version() < 90:
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="generation")
 
 

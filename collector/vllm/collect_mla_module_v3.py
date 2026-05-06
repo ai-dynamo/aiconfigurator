@@ -241,11 +241,17 @@ def get_mla_generation_module_test_cases():
 
 def get_dsa_context_module_test_cases():
     """collect.py entrypoint for DSA context module collection."""
+    # DSA (sparse MLA) requires Hopper or newer (SM >= 90).
+    if get_sm_version() < 90:
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="context")
 
 
 def get_dsa_generation_module_test_cases():
     """collect.py entrypoint for DSA generation module collection."""
+    # DSA (sparse MLA) requires Hopper or newer (SM >= 90).
+    if get_sm_version() < 90:
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="generation")
 
 
@@ -363,6 +369,13 @@ def _create_attention_module(
 
     # Override just the layer-local dimensions we sweep in the collector.
     hf_config = vllm_config.model_config.hf_config
+    # Preserve the original head_dim before overriding num_attention_heads.
+    # Without an explicit head_dim, get_head_size() falls back to
+    # hidden_size // num_attention_heads. Changing num_attention_heads then
+    # inflates the return value (e.g. 7168/1 = 7168 instead of 56), which
+    # causes FA3's scheduler_metadata to be sized for the wrong head_size.
+    if not hasattr(hf_config, 'head_dim'):
+        hf_config.head_dim = hf_config.hidden_size // hf_config.num_attention_heads
     hf_config.num_hidden_layers = 1
     hf_config.num_attention_heads = num_heads
     hf_config.num_key_value_heads = num_heads
