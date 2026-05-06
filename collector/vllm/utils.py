@@ -227,11 +227,14 @@ def get_attention_backend(backend_name: AttentionBackendEnum):
 
 def create_standard_kv_cache_spec(vllm_config: VllmConfig, use_fp8_kv_cache: bool = False) -> FullAttentionSpec:
     """Create a FullAttentionSpec from ModelParams only."""
+    # Always use model dtype for the spec. vLLM >=0.20.0 FlashInfer backend
+    # asserts kv_cache_spec.dtype == model_config.dtype. FP8 KV cache is
+    # handled via cache_config.cache_dtype and the impl's kv_cache_dtype arg.
     return FullAttentionSpec(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config),
         head_size=vllm_config.model_config.get_head_size(),
-        dtype=current_platform.fp8_dtype() if use_fp8_kv_cache else vllm_config.model_config.dtype,
+        dtype=vllm_config.model_config.dtype,
         sliding_window=vllm_config.model_config.get_sliding_window(),
     )
 
