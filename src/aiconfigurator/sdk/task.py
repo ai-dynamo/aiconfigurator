@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE = 1.1
 DEFAULT_DECODE_LATENCY_CORRECTION_SCALE = 1.08
 
+
+class UnsupportedWideepConfigError(ValueError):
+    """Raised when a requested WideEP configuration is not supported by perf data."""
+
+
 _DEEPSEEK_V4_NATIVE_FP4_TO_FP8_MODEL = {
     "deepseek-ai/DeepSeek-V4-Flash": "sgl-project/DeepSeek-V4-Flash-FP8",
     "deepseek-ai/DeepSeek-V4-Pro": "sgl-project/DeepSeek-V4-Pro-FP8",
@@ -907,7 +912,8 @@ class TaskConfig:
                 return
             supported_modes = supported.get(op, []) or []
             if supported_modes and mode_name not in supported_modes:
-                raise ValueError(
+                exc_type = UnsupportedWideepConfigError if op.startswith("wideep_") else ValueError
+                raise exc_type(
                     f"Unsupported {op} quant mode '{mode_name}' for system='{self.system_name}', "
                     f"backend='{self.backend_name}', version='{self.backend_version}'. "
                     f"Supported {op} modes: {sorted(supported_modes)}"

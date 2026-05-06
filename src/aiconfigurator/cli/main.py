@@ -23,7 +23,7 @@ from aiconfigurator.generator.api import (
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.models import check_is_moe
-from aiconfigurator.sdk.task import TaskConfig, TaskRunner
+from aiconfigurator.sdk.task import TaskConfig, TaskRunner, UnsupportedWideepConfigError
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -821,9 +821,7 @@ def build_default_task_configs(
             deepep_kwargs["moe_backend"] = "deepep_moe"
             try:
                 deepep_task = TaskConfig(serving_mode="agg", **deepep_kwargs)
-            except ValueError as exc:
-                if "Unsupported wideep_" not in str(exc):
-                    raise
+            except UnsupportedWideepConfigError as exc:
                 logger.info("Skipping SGLang DeepEP agg sweep: %s", exc)
             else:
                 deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
@@ -849,9 +847,7 @@ def build_default_task_configs(
             deepep_disagg_kwargs["moe_backend"] = "deepep_moe"
             try:
                 deepep_disagg_task = TaskConfig(serving_mode="disagg", **deepep_disagg_kwargs)
-            except ValueError as exc:
-                if "Unsupported wideep_" not in str(exc):
-                    raise
+            except UnsupportedWideepConfigError as exc:
                 logger.info("Skipping SGLang DeepEP disagg sweep: %s", exc)
             else:
                 deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
