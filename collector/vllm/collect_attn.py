@@ -435,6 +435,11 @@ def get_context_attention_test_cases(if_unit_test=False):
                         if n_kv != 0 and (n_kv > n or n % n_kv != 0):
                             continue
                         num_kv_heads = n_kv if n_kv != 0 else n
+                        # On SM100 (Blackwell), vLLM uses FlashInfer which routes
+                        # single-token context to trtllm_batch_decode_with_kv_cache.
+                        # That kernel only supports GQA ratios up to 16.
+                        if get_sm_version() >= 100 and n // num_kv_heads > 16:
+                            continue
                         # Only keep self-attention case
                         # if n != num_kv_heads:
                         #    continue
