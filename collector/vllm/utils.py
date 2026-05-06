@@ -145,10 +145,7 @@ def create_common_attn_metadata(
     )
 
     # Try constructor variants from newest to oldest API.
-    # vLLM >=0.20.0 adds _seq_lens_cpu_upper_bound (MLA indexer asserts it).
     _variants = [
-        {**_base, '_seq_lens_cpu': seq_lens_cpu, '_num_computed_tokens_cpu': num_computed_tokens_cpu,
-         '_seq_lens_cpu_upper_bound': seq_lens_cpu},
         {**_base, '_seq_lens_cpu': seq_lens_cpu, '_num_computed_tokens_cpu': num_computed_tokens_cpu},
         {**_base, 'seq_lens_cpu': seq_lens_cpu, 'num_computed_tokens_cpu': num_computed_tokens_cpu},
         {**_base, 'seq_lens_cpu': seq_lens_cpu, 'num_computed_tokens_cpu': num_computed_tokens_cpu,
@@ -157,7 +154,15 @@ def create_common_attn_metadata(
 
     for kwargs in _variants:
         try:
-            return CommonAttentionMetadata(**kwargs)
+            result = CommonAttentionMetadata(**kwargs)
+            # vLLM >=0.20.0: MLA indexer asserts seq_lens_cpu_upper_bound is not None.
+            # This attribute is not a constructor parameter; set it post-construction.
+            if getattr(result, 'seq_lens_cpu_upper_bound', None) is None:
+                try:
+                    result._seq_lens_cpu_upper_bound = seq_lens_cpu
+                except AttributeError:
+                    pass
+            return result
         except TypeError:
             continue
 
