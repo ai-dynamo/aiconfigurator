@@ -26,26 +26,34 @@ def _row(
 
 
 @pytest.mark.parametrize(
-    ("matrix", "kwargs", "expected"),
+    ("versions", "expected_version"),
     [
         pytest.param(
-            [_row(version="0.5.9"), _row(version="0.5.10")],
-            {},
+            ["0.5.9", "0.5.10"],
             "0.5.10",
             id="semantic-version-sort",
         ),
         pytest.param(
-            [_row(version=""), _row(version="bad-version"), _row(version="0.5.10")],
-            {},
+            ["", "bad-version", "0.5.10"],
             "0.5.10",
             id="ignore-invalid-versions",
         ),
         pytest.param(
-            [_row(version=""), _row(version="bad-version")],
-            {},
+            ["", "bad-version"],
             None,
             id="no-valid-versions",
         ),
+    ],
+)
+def test_latest_support_matrix_version_selects_latest_valid_version(versions, expected_version):
+    matrix = [_row(version=version) for version in versions]
+
+    assert _latest_support_matrix_version(matrix, "b200_sxm", "sglang", model="model") == expected_version
+
+
+@pytest.mark.parametrize(
+    ("matrix", "system", "model", "architecture", "expected_version"),
+    [
         pytest.param(
             [
                 _row(
@@ -61,11 +69,9 @@ def _row(
                     version="0.5.10",
                 ),
             ],
-            {
-                "system": "b300_sxm",
-                "model": "Qwen/Qwen3-32B",
-                "architecture": "Qwen3ForCausalLM",
-            },
+            "b300_sxm",
+            "Qwen/Qwen3-32B",
+            "Qwen3ForCausalLM",
             "0.5.9",
             id="prefer-exact-model",
         ),
@@ -82,13 +88,28 @@ def _row(
                     version="0.5.10",
                 ),
             ],
-            {"model": "local-glm5-variant", "architecture": "GlmMoeDsaForCausalLM"},
+            "b200_sxm",
+            "local-glm5-variant",
+            "GlmMoeDsaForCausalLM",
             "0.5.10",
             id="architecture-fallback",
         ),
     ],
 )
-def test_latest_support_matrix_version(matrix, kwargs, expected):
-    options = {"system": "b200_sxm", "backend": "sglang", "model": "model"} | kwargs
-
-    assert _latest_support_matrix_version(matrix, **options) == expected
+def test_latest_support_matrix_version_scopes_rows_by_model_or_architecture(
+    matrix,
+    system,
+    model,
+    architecture,
+    expected_version,
+):
+    assert (
+        _latest_support_matrix_version(
+            matrix,
+            system,
+            "sglang",
+            model=model,
+            architecture=architecture,
+        )
+        == expected_version
+    )
