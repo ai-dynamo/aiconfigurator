@@ -19,9 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
-      contents: write
-      issues: write
-      pull-requests: write
+      contents: read
     steps:
       - name: Checkout incoming revision
         uses: actions/checkout@v4
@@ -117,138 +115,26 @@ jobs:
             echo "Comparison summary was not generated." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Publish comparison plot
-        id: publish-plot
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          ARTIFACT_BRANCH: accuracy-regression-testing-artifacts
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-
-          if [ ! -f tools/accuracy_regression_testing/results/comparison_plot.png ]; then
-            echo "plot_url=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          ARTIFACT_DIR="$(mktemp -d)"
-          ARTIFACT_PATH="accuracy-regression-testing/pr-${PR_NUMBER}/run-${GITHUB_RUN_ID}"
-
-          if git ls-remote --exit-code --heads origin "${ARTIFACT_BRANCH}" >/dev/null 2>&1; then
-            git fetch origin "${ARTIFACT_BRANCH}:${ARTIFACT_BRANCH}"
-            git worktree add "${ARTIFACT_DIR}" "${ARTIFACT_BRANCH}"
-          else
-            git worktree add --detach "${ARTIFACT_DIR}"
-            git -C "${ARTIFACT_DIR}" checkout --orphan "${ARTIFACT_BRANCH}"
-            git -C "${ARTIFACT_DIR}" rm -rf . >/dev/null 2>&1 || true
-          fi
-
-          mkdir -p "${ARTIFACT_DIR}/${ARTIFACT_PATH}"
-          cp tools/accuracy_regression_testing/results/comparison_plot.png "${ARTIFACT_DIR}/${ARTIFACT_PATH}/comparison_plot.png"
-
-          git -C "${ARTIFACT_DIR}" config user.name "github-actions[bot]"
-          git -C "${ARTIFACT_DIR}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C "${ARTIFACT_DIR}" lfs install --local
-          git -C "${ARTIFACT_DIR}" lfs track "*.png"
-          git -C "${ARTIFACT_DIR}" add .gitattributes "${ARTIFACT_PATH}/comparison_plot.png"
-
-          if git -C "${ARTIFACT_DIR}" diff --cached --quiet; then
-            echo "No plot changes to publish."
-          else
-            git -C "${ARTIFACT_DIR}" commit -m "chore: publish accuracy regression testing plot for PR ${PR_NUMBER}"
-            git -C "${ARTIFACT_DIR}" push origin "${ARTIFACT_BRANCH}"
-          fi
-
-          PLOT_URL="https://media.githubusercontent.com/media/${GITHUB_REPOSITORY}/${ARTIFACT_BRANCH}/${ARTIFACT_PATH}/comparison_plot.png"
-          echo "plot_url=${PLOT_URL}" >> "$GITHUB_OUTPUT"
-
-      - name: Build PR comment
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+      - name: Prepare PR comment inputs
+        if: always() && github.event_name == 'pull_request'
         env:
           ARTIFACT_URL: ${{ steps.upload-regression-artifacts.outputs.artifact-url }}
-          PLOT_URL: ${{ steps.publish-plot.outputs.plot_url }}
           OLD_REF: ${{ steps.old-ref.outputs.old_ref }}
-        run: |
-          python - <<'PY'
-          import csv
-          import os
-          from pathlib import Path
-
-          summary_path = Path("tools/accuracy_regression_testing/results/comparison_summary.csv")
-          artifact_url = os.environ.get("ARTIFACT_URL", "")
-          plot_url = os.environ.get("PLOT_URL", "")
-          old_ref = os.environ.get("OLD_REF", "")
-          marker = "<!-- aic-accuracy-regression-testing -->"
-
-          lines = [
-              marker,
-              "## AIC Accuracy Regression Testing",
-              "",
-              f"Old revision: `{old_ref}`",
-              "",
-          ]
-          if summary_path.exists():
-              with summary_path.open(newline="") as f:
-                  rows = list(csv.DictReader(f))
-              headers = rows[0].keys() if rows else []
-              all_row = next((row for row in rows if row.get("partition") == "all"), {})
-              lines.append("### Summary")
-              lines.append("")
-              lines.append(f"- \\# samples added: {all_row.get('num_samples_added', 'N/A')}")
-              lines.append(f"- ttft_mape_improvement_%: {all_row.get('ttft_mape_improvement_%', 'N/A')}")
-              lines.append(f"- tpot_mape_improvement_%: {all_row.get('tpot_mape_improvement_%', 'N/A')}")
-              lines.append("")
-              lines.append("<details>")
-              lines.append("<summary>Comparison summary table</summary>")
-              lines.append("")
-              if rows:
-                  lines.append("| " + " | ".join(headers) + " |")
-                  lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
-                  for row in rows:
-                      lines.append("| " + " | ".join(row[h] for h in headers) + " |")
-                  lines.append("")
-              else:
-                  lines.append("_Comparison summary is empty._")
-                  lines.append("")
-              lines.append("</details>")
-              lines.append("")
-          else:
-              lines.append("_Comparison summary was not generated._")
-              lines.append("")
-
-          lines.extend([
-              "<details>",
-              "<summary>Comparison plot</summary>",
-              "",
-          ])
-          if plot_url:
-              lines.extend([
-                  f"<img src=\"{plot_url}\" alt=\"AIC accuracy regression testing comparison plot\">",
-                  "",
-              ])
-          lines.extend([
-              f"Artifact bundle: [accuracy-regression-testing-results]({artifact_url})",
-              "",
-              "</details>",
-              "",
-          ])
-          Path("pr_comment.md").write_text("\n".join(lines))
-          PY
-
-      - name: Comment on PR
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          MARKER="<!-- aic-accuracy-regression-testing -->"
-          COMMENT_ID="$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
-            --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" | head -n 1)"
-          if [ -n "${COMMENT_ID}" ]; then
-            gh api "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
-              --method PATCH \
-              --field body="$(cat pr_comment.md)"
-          else
-            gh pr comment "${PR_NUMBER}" --body-file pr_comment.md
-          fi
+          rm -rf accuracy-regression-comment-inputs
+          mkdir -p accuracy-regression-comment-inputs
+          printf '%s\n' "${PR_NUMBER}" > accuracy-regression-comment-inputs/pr-number.txt
+          printf '%s\n' "${OLD_REF}" > accuracy-regression-comment-inputs/old-ref.txt
+          printf '%s\n' "${ARTIFACT_URL}" > accuracy-regression-comment-inputs/artifact-url.txt
+          cp tools/accuracy_regression_testing/results/comparison_summary.csv accuracy-regression-comment-inputs/ 2>/dev/null || true
+          cp tools/accuracy_regression_testing/results/comparison_plot.png accuracy-regression-comment-inputs/ 2>/dev/null || true
+
+      - name: Upload PR comment inputs
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: accuracy-regression-comment-inputs
+          path: accuracy-regression-comment-inputs/**
+          retention-days: 30
