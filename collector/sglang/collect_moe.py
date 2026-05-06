@@ -26,6 +26,7 @@ from sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_config import (
     get_default_config,
     get_moe_configs,
 )
+from sglang.srt.layers.moe.moe_runner.base import MoeRunnerConfig
 from sglang.srt.layers.moe.topk import StandardTopKOutput, TopKConfig, select_experts
 from sglang.srt.utils import is_hip
 
@@ -149,6 +150,11 @@ def get_moe_test_cases():
             ):
                 continue
 
+            swiglu_limit = None
+            # DeepSeek-V4 uses swiglu_limit=10
+            if "DeepSeek-V4" in common_moe_testcase.model_name:
+                swiglu_limit = 10
+
             test_cases.append(
                 [
                     moe_type,
@@ -162,6 +168,7 @@ def get_moe_test_cases():
                     common_moe_testcase.model_name,
                     common_moe_testcase.token_expert_distribution,
                     common_moe_testcase.power_law_alpha,
+                    swiglu_limit,
                 ]
             )
 
@@ -195,6 +202,7 @@ def benchmark_config(
     distributed: str = "power_law",
     power_law_alpha: float = 0,
     workloads: list["Rank0Workload"] | None = None,
+    swiglu_limit: float | None = None,
 ) -> float:
     device = torch.device("cuda")
     if workloads is not None:
@@ -508,11 +516,15 @@ def benchmark_config(
                 )
 
             with override_config(config):
+                moe_runner_config = MoeRunnerConfig(
+                    swiglu_limit=swiglu_limit,
+                )
                 fused_moe(
                     current_hidden_states,
                     w1,
                     w2,
                     current_topk_output,
+                    moe_runner_config=moe_runner_config,
                     use_fp8_w8a8=use_fp8_w8a8,
                     use_int8_w8a8=use_int8_w8a8,
                     use_int8_w8a16=use_int8_w8a16,
@@ -563,6 +575,7 @@ def benchmark(
     distributed: str = "power_law",
     power_law_alpha: float = 0,
     workloads: list["Rank0Workload"] | None = None,
+    swiglu_limit: float | None = None,
 ) -> tuple[dict[str, int], float]:
     torch.cuda.manual_seed_all(0)
     benchmark_num_tokens = (
@@ -589,6 +602,7 @@ def benchmark(
             distributed=distributed,
             power_law_alpha=power_law_alpha,
             workloads=workloads,
+            swiglu_limit=swiglu_limit,
         )
         return kernel_time, power_stats
 
@@ -633,6 +647,7 @@ def benchmark(
         distributed=distributed,
         power_law_alpha=power_law_alpha,
         workloads=workloads,
+        swiglu_limit=swiglu_limit,
     )
     return kernel_time, power_stats
 
@@ -712,6 +727,7 @@ def run_moe_torch(
     model_name,
     distributed="power_law",
     power_law_alpha=0,
+    swiglu_limit=None,
     *,
     perf_filename,
     device="cuda:0",
@@ -770,6 +786,7 @@ def run_moe_torch(
             distributed=distributed,
             power_law_alpha=power_law_alpha,
             workloads=rank0_workloads,
+            swiglu_limit=swiglu_limit,
         )
     else:
         latency, power_stats = benchmark(
@@ -787,6 +804,7 @@ def run_moe_torch(
             block_shape=block_shape,
             distributed=distributed,
             power_law_alpha=power_law_alpha,
+            swiglu_limit=swiglu_limit,
         )
 
     log_perf(

@@ -31,6 +31,10 @@ def _filter_model_config_list(model_config_list: list[list]) -> list[list]:
 _WIDEEP_MOE_MODEL_NAMES: set[str] = {
     "deepseek-ai/DeepSeek-V3",
     "deepseek-ai/DeepSeek-V3.2",
+    "deepseek-ai/DeepSeek-V4-Flash",
+    "deepseek-ai/DeepSeek-V4-Pro",
+    "sgl-project/DeepSeek-V4-Flash-FP8",
+    "sgl-project/DeepSeek-V4-Pro-FP8",
     "zai-org/GLM-5",
     "MiniMaxAI/MiniMax-M2.5",
     "moonshotai/Kimi-K2-Instruct",
@@ -52,6 +56,10 @@ _MOE_MODEL_CONFIGS: list[list] = [
     [4096, 14336, 2, 8, "mistralai/Mixtral-8x7B-v0.1"],  # mixtral_8x7b
     [6144, 16384, 2, 8, "mistralai/Mixtral-8x22B-v0.1"],  # mixtral_8x22b
     [7168, 2048, 8, 256, "deepseek-ai/DeepSeek-V3"],  # deepseekv3, will have 1 shared expert, dsv32
+    [4096, 2048, 6, 256, "deepseek-ai/DeepSeek-V4-Flash"],  # deepseekv4, 1 shared expert
+    [7168, 3072, 6, 384, "deepseek-ai/DeepSeek-V4-Pro"],  # deepseekv4, 1 shared expert
+    [4096, 2048, 6, 256, "sgl-project/DeepSeek-V4-Flash-FP8"],  # deepseekv4, 1 shared expert
+    [7168, 3072, 6, 384, "sgl-project/DeepSeek-V4-Pro-FP8"],  # deepseekv4, 1 shared expert
     [6144, 2048, 8, 256, "zai-org/GLM-5"],  # glm-5 (DEEPSEEKV32 family, different hidden_size)
     [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B"],  # qwen3-moe, 30b-a3b
     [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B"],  # qwen3-moe, 235b-a22b
