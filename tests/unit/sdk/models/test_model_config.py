@@ -41,6 +41,7 @@ class TestSupportedModels:
             "sgl-project/DeepSeek-V4-Flash-FP8",
             "sgl-project/DeepSeek-V4-Pro-FP8",
             "zai-org/GLM-5-FP8",
+            "nvidia/GLM-5-NVFP4",
         ],
     )
     def test_specific_models_are_in_default_list(self, hf_id):
@@ -76,6 +77,7 @@ class TestSupportedModels:
             ("sgl-project/DeepSeek-V4-Pro-FP8", True),
             ("zai-org/GLM-5", True),
             ("zai-org/GLM-5-FP8", True),
+            ("nvidia/GLM-5-NVFP4", True),
             ("Qwen/Qwen3-30B-A3B", True),
             # NemotronH: check hybrid_override_pattern for 'E' (MoE layers)
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' in pattern
@@ -117,6 +119,7 @@ class TestHFModelSupport:
             ("sgl-project/DeepSeek-V4-Pro-FP8", "DEEPSEEKV4"),
             ("zai-org/GLM-5", "DEEPSEEKV32"),
             ("zai-org/GLM-5-FP8", "DEEPSEEKV32"),
+            ("nvidia/GLM-5-NVFP4", "DEEPSEEKV32"),
             ("Qwen/Qwen3-30B-A3B", "MOE"),
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "NEMOTRONH"),
             ("nvidia/Nemotron-H-56B-Base-8K", "NEMOTRONH"),
@@ -140,6 +143,7 @@ class TestHFModelSupport:
             ("sgl-project/DeepSeek-V4-Pro-FP8", True),
             ("zai-org/GLM-5", True),
             ("zai-org/GLM-5-FP8", True),
+            ("nvidia/GLM-5-NVFP4", True),
             ("Qwen/Qwen3-30B-A3B", True),
             # NemotronH: is_moe depends on 'E' in hybrid_override_pattern
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' (MoE layers)
@@ -331,16 +335,28 @@ class TestHFModelSupport:
         assert model.get_kvcache_bytes_per_sequence(seq_len) == expected
         assert expected > old_without_indexer
 
-    def test_glm5_fp8_cached_config_uses_deepseek_v32_family(self):
-        model_info = get_model_config_from_model_path("zai-org/GLM-5-FP8")
+    @pytest.mark.parametrize(
+        "hf_id,expected_gemm_quant,expected_moe_quant",
+        [
+            ("zai-org/GLM-5-FP8", common.GEMMQuantMode.fp8_block, common.MoEQuantMode.fp8_block),
+            ("nvidia/GLM-5-NVFP4", common.GEMMQuantMode.nvfp4, common.MoEQuantMode.nvfp4),
+        ],
+    )
+    def test_glm5_quantized_cached_config_uses_deepseek_v32_family(
+        self,
+        hf_id,
+        expected_gemm_quant,
+        expected_moe_quant,
+    ):
+        model_info = get_model_config_from_model_path(hf_id)
         assert model_info["architecture"] == "GlmMoeDsaForCausalLM"
 
         model_config = config.ModelConfig(tp_size=1, moe_tp_size=1, moe_ep_size=1)
-        model = get_model("zai-org/GLM-5-FP8", model_config, backend_name="sglang")
+        model = get_model(hf_id, model_config, backend_name="sglang")
 
         assert model.model_family == "DEEPSEEKV32"
-        assert model_config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
-        assert model_config.moe_quant_mode == common.MoEQuantMode.fp8_block
+        assert model_config.gemm_quant_mode == expected_gemm_quant
+        assert model_config.moe_quant_mode == expected_moe_quant
         assert model_config.fmha_quant_mode == common.FMHAQuantMode.bfloat16
 
     @pytest.mark.parametrize(

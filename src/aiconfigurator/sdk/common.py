@@ -336,6 +336,7 @@ DefaultHFModels = {
     "deepseek-ai/DeepSeek-V3.2",
     "zai-org/GLM-5",
     "zai-org/GLM-5-FP8",
+    "nvidia/GLM-5-NVFP4",
     # DeepSeek V4
     *DEEPSEEK_V4_HF_MODELS,
     # Qwen 3 Models
