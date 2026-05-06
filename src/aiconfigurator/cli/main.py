@@ -991,7 +991,7 @@ def build_experiment_task_configs(
             task_kwargs["decode_system_name"] = inferred_decode_system or system_name
 
         # Per-experiment overrides for runtime numeric parameters if provided at top level
-        for numeric_key in ("isl", "osl", "ttft", "tpot", "request_latency"):
+        for numeric_key in ("isl", "osl", "prefix", "ttft", "tpot", "request_latency"):
             if numeric_key in exp_config:
                 task_kwargs[numeric_key] = exp_config[numeric_key]
 
