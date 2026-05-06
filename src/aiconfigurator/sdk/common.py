@@ -381,6 +381,7 @@ Supported systems (GPU types)
 SupportedSystems = {
     "h100_sxm",
     "h200_sxm",
+    "h800_sxm",
     "b200_sxm",
     "b300_sxm",
     "gb200",
