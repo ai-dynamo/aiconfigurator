@@ -120,12 +120,10 @@ jobs:
         env:
           ARTIFACT_URL: ${{ steps.upload-regression-artifacts.outputs.artifact-url }}
           OLD_REF: ${{ steps.old-ref.outputs.old_ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           rm -rf accuracy-regression-comment-inputs
           mkdir -p accuracy-regression-comment-inputs
-          printf '%s\n' "${PR_NUMBER}" > accuracy-regression-comment-inputs/pr-number.txt
           printf '%s\n' "${OLD_REF}" > accuracy-regression-comment-inputs/old-ref.txt
           printf '%s\n' "${ARTIFACT_URL}" > accuracy-regression-comment-inputs/artifact-url.txt
           cp tools/accuracy_regression_testing/results/comparison_summary.csv accuracy-regression-comment-inputs/ 2>/dev/null || true
