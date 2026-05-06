@@ -85,25 +85,33 @@ jobs:
               ? fs.readdirSync(chartsDir).filter(f => f.endsWith('.png'))
               : [];
             const triggeringRunId = context.payload.workflow_run.id;
+            // Use a global regex so every placeholder is handled and the
+            // optional trailing newline (LF or CRLF) is consumed when removing,
+            // even if comment.md doesn't terminate the placeholder line.
+            const placeholderRe = /download_link_placeholder\r?\n?/g;
             if (pngFiles.length > 0) {
               const workflowRunUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${triggeringRunId}`;
               const downloadLink = `📥 [Download all sanity charts from workflow artifacts](${workflowRunUrl})`;
-              comment = comment.replace('download_link_placeholder', downloadLink);
+              comment = comment.replace(placeholderRe, `${downloadLink}\n`);
             } else {
-              comment = comment.replace('download_link_placeholder\n', '');
+              comment = comment.replace(placeholderRe, '');
             }
 
             // Find existing bot comment so subsequent runs update it in place.
-            const comments = await github.rest.issues.listComments({
+            // Paginate so the lookup still works on PRs with >30 comments —
+            // listComments paginates at 30 by default and we'd otherwise miss
+            // the existing comment and post a duplicate.
+            const allComments = await github.paginate(github.rest.issues.listComments, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: prNumber,
+              per_page: 100,
             });
 
             // Match on the hidden marker first; fall back to the legacy title
             // string so we update (not duplicate) any existing comment that
             // pre-dates this marker.
-            const botComment = comments.data.find(
+            const botComment = allComments.find(
               c => c.user.type === 'Bot' && (
                 c.body.includes(COMMENT_MARKER) ||
                 c.body.includes('Sanity Check Chart Generation Report')
