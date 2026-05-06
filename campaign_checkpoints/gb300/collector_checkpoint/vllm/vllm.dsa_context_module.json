@@ -3,7 +3,7 @@
   "backend": "vllm",
   "module": "vllm.dsa_context_module",
   "run_func": "run_mla_module_worker",
-  "updated_at": "2026-05-06T04:38:06.757631",
+  "updated_at": "2026-05-06T20:54:44.076748",
   "done": [
     "vllm.dsa_context_module:run_mla_module_worker:[1, 1, 64, 'fp8', 'bfloat16', 'nvfp4', 'zai-org/GLM-5', 'dsa']",
     "vllm.dsa_context_module:run_mla_module_worker:[1, 1, 8, 'bfloat16', 'bfloat16', 'bfloat16', 'zai-org/GLM-5', 'dsa']",
