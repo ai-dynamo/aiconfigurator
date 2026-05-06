@@ -196,6 +196,14 @@ def run_moe_torch(
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
+    # vLLM >= 0.20.0: modular MoE kernels allocate scratch buffers via WorkspaceManager.
+    try:
+        from vllm.v1.worker.workspace import init_workspace_manager
+
+        init_workspace_manager(torch.device(device))
+    except (ImportError, RuntimeWarning):
+        pass
+
     # Configure quantization parameters
     dtype = torch.bfloat16
     quant_config = None
