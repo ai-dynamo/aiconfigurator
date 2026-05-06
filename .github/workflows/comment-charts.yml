@@ -58,13 +58,25 @@ jobs:
               return;
             }
 
-            const prNumber = parseInt(fs.readFileSync(prNumberFile, 'utf8').trim(), 10);
-            if (!Number.isInteger(prNumber) || prNumber <= 0) {
-              console.log(`Invalid PR number in artifact: ${prNumber}`);
+            const prNumberRaw = fs.readFileSync(prNumberFile, 'utf8').trim();
+            if (!/^[0-9]+$/.test(prNumberRaw)) {
+              console.log(`Invalid PR number in artifact: ${JSON.stringify(prNumberRaw)}`);
+              return;
+            }
+            const prNumber = parseInt(prNumberRaw, 10);
+            if (prNumber <= 0) {
+              console.log(`PR number must be positive: ${prNumber}`);
               return;
             }
 
+            // Hidden marker so subsequent runs reliably find their own comment
+            // even if other bots post comments containing similar text.
+            const COMMENT_MARKER = '<!-- charts-bot-comment -->';
+
             let comment = fs.readFileSync(commentFile, 'utf8');
+            if (!comment.includes(COMMENT_MARKER)) {
+              comment = `${COMMENT_MARKER}\n${comment}`;
+            }
 
             // Replace download link placeholder with a link to the upstream
             // workflow run that produced the artifact (not this one).
@@ -88,8 +100,14 @@ jobs:
               issue_number: prNumber,
             });
 
+            // Match on the hidden marker first; fall back to the legacy title
+            // string so we update (not duplicate) any existing comment that
+            // pre-dates this marker.
             const botComment = comments.data.find(
-              c => c.user.type === 'Bot' && c.body.includes('Sanity Check Chart Generation Report')
+              c => c.user.type === 'Bot' && (
+                c.body.includes(COMMENT_MARKER) ||
+                c.body.includes('Sanity Check Chart Generation Report')
+              )
             );
 
             if (botComment) {
