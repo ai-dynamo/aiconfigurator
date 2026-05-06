@@ -30,14 +30,14 @@ from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model
 logger = logging.getLogger(__name__)
 
 
-def _parse_support_matrix_version(version: str | None) -> Version:
+def _parse_support_matrix_version(version: str | None) -> Version | None:
     """Parse backend versions so 0.5.10 sorts after 0.5.9."""
     if not version:
-        return Version("0")
+        return None
     try:
         return Version(version)
     except InvalidVersion:
-        return Version("0")
+        return None
 
 
 def _latest_support_matrix_version(
@@ -58,10 +58,14 @@ def _latest_support_matrix_version(
             if architecture_rows:
                 rows = architecture_rows
 
-    versions = {row["Version"] for row in rows}
+    versions = [
+        (version, parsed)
+        for version in {row["Version"] for row in rows}
+        if (parsed := _parse_support_matrix_version(version))
+    ]
     if not versions:
         return None
-    return max(versions, key=_parse_support_matrix_version)
+    return max(versions, key=lambda version: version[1])[0]
 
 
 def _build_common_cli_parser() -> argparse.ArgumentParser:

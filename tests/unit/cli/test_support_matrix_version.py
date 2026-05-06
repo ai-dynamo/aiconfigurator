@@ -29,6 +29,55 @@ def test_latest_support_matrix_version_uses_semantic_sorting():
     assert _latest_support_matrix_version(matrix, "b200_sxm", "sglang", model="model") == "0.5.10"
 
 
+def test_latest_support_matrix_version_ignores_invalid_versions():
+    matrix = [
+        {
+            "HuggingFaceID": "model",
+            "Architecture": "Arch",
+            "System": "b200_sxm",
+            "Backend": "sglang",
+            "Version": "",
+        },
+        {
+            "HuggingFaceID": "model",
+            "Architecture": "Arch",
+            "System": "b200_sxm",
+            "Backend": "sglang",
+            "Version": "bad-version",
+        },
+        {
+            "HuggingFaceID": "model",
+            "Architecture": "Arch",
+            "System": "b200_sxm",
+            "Backend": "sglang",
+            "Version": "0.5.10",
+        },
+    ]
+
+    assert _latest_support_matrix_version(matrix, "b200_sxm", "sglang", model="model") == "0.5.10"
+
+
+def test_latest_support_matrix_version_returns_none_without_valid_versions():
+    matrix = [
+        {
+            "HuggingFaceID": "model",
+            "Architecture": "Arch",
+            "System": "b200_sxm",
+            "Backend": "sglang",
+            "Version": "",
+        },
+        {
+            "HuggingFaceID": "model",
+            "Architecture": "Arch",
+            "System": "b200_sxm",
+            "Backend": "sglang",
+            "Version": "bad-version",
+        },
+    ]
+
+    assert _latest_support_matrix_version(matrix, "b200_sxm", "sglang", model="model") is None
+
+
 def test_latest_support_matrix_version_prefers_exact_model_rows():
     matrix = [
         {
