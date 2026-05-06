@@ -1,0 +1,251 @@
+name: "Comment Accuracy Regression Testing"
+
+# Posts the accuracy-regression PR comment from a trusted workflow_run context.
+# The pull_request workflow runs untrusted PR code with read-only permissions and
+# uploads static comment inputs; this workflow targets the PR from trusted
+# workflow_run metadata and consumes those inputs without checking out or
+# executing the PR branch.
+
+on:
+  workflow_run:
+    workflows: ["Accuracy Regression Testing"]
+    types: [completed]
+
+jobs:
+  post-comment:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Download PR comment inputs
+        id: download
+        uses: actions/download-artifact@v4
+        with:
+          name: accuracy-regression-comment-inputs
+          path: ./comment-inputs
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Read PR metadata
+        id: metadata
+        if: steps.download.outcome == 'success'
+        env:
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$(find comment-inputs -type l -print -quit)" ]; then
+            echo "Artifact contains symlinks, skipping comment."
+            exit 0
+          fi
+
+          INPUT_DIR="comment-inputs"
+          if [ -d comment-inputs/accuracy-regression-comment-inputs ]; then
+            INPUT_DIR="comment-inputs/accuracy-regression-comment-inputs"
+          fi
+
+          : "${PR_NUMBER:?workflow_run payload did not include a PR number}"
+
+          echo "input_dir=${INPUT_DIR}" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish comparison plot
+        id: publish-plot
+        if: steps.metadata.outputs.pr_number != ''
+        continue-on-error: true
+        env:
+          ARTIFACT_BRANCH: accuracy-regression-testing-artifacts
+          COMMENT_INPUT_DIR: ${{ steps.metadata.outputs.input_dir }}
+          PR_NUMBER: ${{ steps.metadata.outputs.pr_number }}
+          TRIGGERING_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+
+          PLOT_FILE="${COMMENT_INPUT_DIR}/comparison_plot.png"
+          if [ ! -f "${PLOT_FILE}" ]; then
+            echo "plot_url=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          plot = Path(os.environ["COMMENT_INPUT_DIR"]) / "comparison_plot.png"
+          if plot.stat().st_size > 10 * 1024 * 1024:
+              raise SystemExit("comparison_plot.png is too large")
+          if plot.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":
+              raise SystemExit("comparison_plot.png is not a PNG")
+          PY
+
+          ARTIFACT_DIR="$(mktemp -d)"
+          ARTIFACT_PATH="accuracy-regression-testing/pr-${PR_NUMBER}/run-${TRIGGERING_RUN_ID}"
+
+          if git ls-remote --exit-code --heads origin "${ARTIFACT_BRANCH}" >/dev/null 2>&1; then
+            git fetch origin "${ARTIFACT_BRANCH}:${ARTIFACT_BRANCH}"
+            git worktree add "${ARTIFACT_DIR}" "${ARTIFACT_BRANCH}"
+          else
+            git worktree add --detach "${ARTIFACT_DIR}"
+            git -C "${ARTIFACT_DIR}" checkout --orphan "${ARTIFACT_BRANCH}"
+            git -C "${ARTIFACT_DIR}" rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          mkdir -p "${ARTIFACT_DIR}/${ARTIFACT_PATH}"
+          cp "${PLOT_FILE}" "${ARTIFACT_DIR}/${ARTIFACT_PATH}/comparison_plot.png"
+
+          git -C "${ARTIFACT_DIR}" config user.name "github-actions[bot]"
+          git -C "${ARTIFACT_DIR}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "${ARTIFACT_DIR}" lfs install --local
+          git -C "${ARTIFACT_DIR}" lfs track "*.png"
+          git -C "${ARTIFACT_DIR}" add .gitattributes "${ARTIFACT_PATH}/comparison_plot.png"
+
+          if git -C "${ARTIFACT_DIR}" diff --cached --quiet; then
+            echo "No plot changes to publish."
+          else
+            git -C "${ARTIFACT_DIR}" commit -m "chore: publish accuracy regression testing plot for PR ${PR_NUMBER}"
+            git -C "${ARTIFACT_DIR}" push origin "${ARTIFACT_BRANCH}"
+          fi
+
+          PLOT_URL="https://media.githubusercontent.com/media/${GITHUB_REPOSITORY}/${ARTIFACT_BRANCH}/${ARTIFACT_PATH}/comparison_plot.png"
+          echo "plot_url=${PLOT_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Build PR comment
+        if: always() && steps.metadata.outputs.pr_number != ''
+        env:
+          ARTIFACT_URL_FILE: ${{ steps.metadata.outputs.input_dir }}/artifact-url.txt
+          COMMENT_INPUT_DIR: ${{ steps.metadata.outputs.input_dir }}
+          OLD_REF_FILE: ${{ steps.metadata.outputs.input_dir }}/old-ref.txt
+          PLOT_URL: ${{ steps.publish-plot.outputs.plot_url }}
+          WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          TRIGGERING_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          python - <<'PY'
+          import csv
+          import os
+          from pathlib import Path
+
+          input_dir = Path(os.environ["COMMENT_INPUT_DIR"])
+          summary_path = input_dir / "comparison_summary.csv"
+          artifact_url = Path(os.environ["ARTIFACT_URL_FILE"]).read_text().strip() if Path(os.environ["ARTIFACT_URL_FILE"]).exists() else ""
+          old_ref = Path(os.environ["OLD_REF_FILE"]).read_text().strip() if Path(os.environ["OLD_REF_FILE"]).exists() else ""
+          plot_url = os.environ.get("PLOT_URL", "")
+          workflow_conclusion = os.environ.get("WORKFLOW_CONCLUSION", "unknown")
+          workflow_run_url = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['TRIGGERING_RUN_ID']}"
+          marker = "<!-- aic-accuracy-regression-testing -->"
+
+          def md_cell(value):
+              return str(value).replace("|", "\\|").replace("\n", "<br>")
+
+          lines = [
+              marker,
+              "## AIC Accuracy Regression Testing",
+              "",
+              f"Workflow result: `{workflow_conclusion}`",
+              "",
+              f"Old revision: `{old_ref}`",
+              "",
+          ]
+          if summary_path.exists() and summary_path.stat().st_size <= 1024 * 1024:
+              with summary_path.open(newline="") as f:
+                  rows = list(csv.DictReader(f))
+              headers = list(rows[0].keys()) if rows else []
+              all_row = next((row for row in rows if row.get("partition") == "all"), {})
+              lines.append("### Summary")
+              lines.append("")
+              lines.append(f"- \\# samples added: {md_cell(all_row.get('num_samples_added', 'N/A'))}")
+              lines.append(f"- ttft_mape_improvement_%: {md_cell(all_row.get('ttft_mape_improvement_%', 'N/A'))}")
+              lines.append(f"- tpot_mape_improvement_%: {md_cell(all_row.get('tpot_mape_improvement_%', 'N/A'))}")
+              lines.append("")
+              lines.append("<details>")
+              lines.append("<summary>Comparison summary table</summary>")
+              lines.append("")
+              if rows:
+                  lines.append("| " + " | ".join(md_cell(h) for h in headers) + " |")
+                  lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+                  for row in rows:
+                      lines.append("| " + " | ".join(md_cell(row[h]) for h in headers) + " |")
+                  lines.append("")
+              else:
+                  lines.append("_Comparison summary is empty._")
+                  lines.append("")
+              lines.append("</details>")
+              lines.append("")
+          elif summary_path.exists():
+              lines.append("_Comparison summary was too large to include in the PR comment._")
+              lines.append("")
+          else:
+              lines.append("_Comparison summary was not generated._")
+              lines.append("")
+
+          lines.extend([
+              "<details>",
+              "<summary>Comparison plot</summary>",
+              "",
+          ])
+          if plot_url:
+              lines.extend([
+                  f"<img src=\"{plot_url}\" alt=\"AIC accuracy regression testing comparison plot\">",
+                  "",
+              ])
+          lines.extend([
+              f"Artifact bundle: [accuracy-regression-testing-results]({artifact_url or workflow_run_url})",
+              "",
+              "</details>",
+              "",
+          ])
+          Path("pr_comment.md").write_text("\n".join(lines))
+          PY
+
+      - name: Comment on PR
+        if: always() && steps.metadata.outputs.pr_number != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+
+            const marker = '<!-- aic-accuracy-regression-testing -->';
+            const prNumber = Number('${{ steps.metadata.outputs.pr_number }}');
+            let body = fs.readFileSync('pr_comment.md', 'utf8');
+            if (body.length > 65536) {
+              body = `${body.slice(0, 65000)}\n\n_Comment truncated; see workflow artifacts for full results._`;
+            }
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+
+            const existingComment = comments.find(
+              comment => comment.user.type === 'Bot' && comment.body.includes(marker)
+            );
+
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }
