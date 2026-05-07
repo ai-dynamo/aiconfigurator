@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# H800 SXM is the China-market variant of H100 SXM.
+# Compute (TFLOPS), HBM capacity, and HBM bandwidth are identical to H100 SXM.
+# The main difference is the NVLink (intra-node) bandwidth, which is approximately
+# halved on H800 (400 GB/s bidirectional vs. 900 GB/s on H100), i.e. 200 GB/s
+# per direction per GPU instead of 450 GB/s.
+#
+# Compute-bound op-data (gemm/attention/moe/...) is reused from h100_sxm because
+# H800 shares the same SM90 silicon and HBM, so per-kernel compute latency
+# tracks H100 closely.
+#
+# IMPORTANT: communication-bound op-data (custom_allreduce_perf.txt, nccl_perf.txt)
+# is intentionally NOT shipped here. Reusing the H100 collective tables would
+# silently return H100 latencies in SILICON/HYBRID mode for in-node GPU counts
+# and ignore the halved NVLink bandwidth above. By omitting these files, the
+# database query layer falls back to the bandwidth-based analytical model
+# (see PerfDatabase.query_nccl / query_custom_allreduce) which correctly
+# consumes `intra_node_bw` below.
+#
+# As a result, this initial H800 system definition is meant to be used with
+# `--database-mode HYBRID` (or SOL/EMPIRICAL); pure SILICON mode for collectives
+# will raise PerfDataNotAvailableError until real H800 silicon profiling data is
+# collected and added to data/h800_sxm/.
+data_dir: data/h800_sxm # relative to systems_dir
+gpu:
+  mem_bw: 3350000000000 # 3350GB/s, identical to H100 SXM
+  mem_bw_empirical_scaling_factor: 0.8 # some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_empirical_constant_latency: 0.000003 # 3us some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_capacity: 85899345920 # 80GiB, identical to H100 SXM
+  bfloat16_tc_flops: 989000000000000 # 989TFLOPS, identical to H100 SXM
+  int8_tc_flops: 1978000000000000 # 1978TFLOPS, identical to H100 SXM
+  fp8_tc_flops: 1978000000000000 # 1978TFLOPS, identical to H100 SXM
+  power: 700  # Watt
+  sm_version: 90
+
+node:
+  num_gpus_per_node: 8
+  inter_node_bw: 50000000000  # Byte/s per GPU, single direction, 1:1 CX7 NDR 400Gb/s per node
+  intra_node_bw: 200000000000  # Byte/s per gpu, single direction; H800 NVLink is capped at ~400 GB/s bidirectional (200 GB/s per direction)
+  pcie_bw: 64000000000  # Byte/s, single direction, pcie 5.0
+  p2p_latency: 0.00001  # 10us some nonofficial correction based on observations, you should try to modify based on your own observations
+
+misc:
+  nccl_mem: # some nonofficial correction based on observations, you should try to modify based on your own observations
+    1: 0
+    2: 358612992 # 342MB
+    4: 411041792 # 392MB
+    8: 411041792 # 392MB
+  other_mem: 3758096384 # increase from 551MB to 3.5GB for safer deployment, this will cover part of the inaccurate mem calc.
+  # nccl_version is kept for schema compatibility; the corresponding
+  # data/h800_sxm/nccl/<version>/nccl_perf.txt is intentionally absent so that
+  # collective queries fall back to the bandwidth-based analytical model that
+  # consumes `intra_node_bw` (see header comment).
+  nccl_version: '2.27.3'
