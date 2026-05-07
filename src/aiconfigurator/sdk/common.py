@@ -660,11 +660,10 @@ class PerfDataFilename(Enum):
     dsv4_flash_hca_context_module = "dsv4_flash_hca_context_module_perf.txt"
     dsv4_flash_csa_generation_module = "dsv4_flash_csa_generation_module_perf.txt"
     dsv4_flash_hca_generation_module = "dsv4_flash_hca_generation_module_perf.txt"
-    # V4-Flash sparse-kernel data (kernel-level past_kv Δ correction).
-    # Indexed by ``arch -> tp -> past_kv -> isl -> bs``.
+    # V4-Flash merged attention-submodule data (past_kv Δ correction).
+    # Indexed by ``kernel -> arch -> tp -> past_kv -> isl -> bs``.
     # topk_512 and csa_attn are modeled analytically — no CSV needed.
-    dsv4_flash_paged_mqa_logits_module = "dsv4_flash_paged_mqa_logits_module_perf.txt"
-    dsv4_flash_hca_attn_module = "dsv4_flash_hca_attn_module_perf.txt"
+    dsv4_flash_attn_submodule = "dsv4_flash_attn_submodule_perf.txt"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])
