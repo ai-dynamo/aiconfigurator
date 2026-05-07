@@ -35,6 +35,7 @@ PR_MODELS: list[str] = [
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "Qwen/Qwen3-235B-A22B",
     "openai/gpt-oss-20b",
+    "zai-org/GLM-5-FP8",
 ]
 
 PR_SYSTEMS: list[str] = ["h100_sxm", "b200_sxm"]

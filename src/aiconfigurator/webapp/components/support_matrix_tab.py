@@ -48,7 +48,7 @@ SUPPORT_MATRIX_LEGEND = (
 # Hard-coded target version per backend (used for "target" check and as minimum for green)
 TARGET_VERSIONS = {
     "vllm": "0.14.0",
-    "sglang": "0.5.9",
+    "sglang": "0.5.10",
     "trtllm": "1.2.0rc6",
 }
 
