@@ -338,9 +338,19 @@ def get_pareto_front(
         maximize_x: Treat larger values on x axis as better if True, else minimize.
         maximize_y: Treat larger values on y axis as better if True, else minimize.
     """
-    if df is None or df.empty:
+    if df is None:
         return pd.DataFrame()
-    df = df.sort_values(by=x_col)
+    if df.empty:
+        return df.iloc[0:0].copy()
+    if x_col not in df.columns or y_col not in df.columns:
+        return pd.DataFrame(columns=[x_col, y_col])
+
+    working = df[[x_col, y_col]].replace([np.inf, -np.inf], np.nan)
+    valid_mask = working.notna().all(axis=1)
+    if not valid_mask.any():
+        return df.iloc[0:0].copy()
+
+    df = df.loc[valid_mask].sort_values(by=x_col)
 
     def is_pareto(costs: np.ndarray) -> np.ndarray:
         is_better = np.ones(costs.shape[0], dtype=bool)
@@ -545,8 +555,24 @@ def _get_best_configs_under_constraint(
         * candidate_configs["num_total_gpus"]
         / total_gpus
     )
+    candidate_configs.replace([np.inf, -np.inf], np.nan, inplace=True)
+    finite_value_cols = [constraint_col, "tokens/s/gpu_cluster"]
+    invalid_value_mask = candidate_configs[finite_value_cols].isna().any(axis=1)
+    if invalid_value_mask.any():
+        logger.info(
+            "Dropping %d Pareto configs with non-finite %s or tokens/s/gpu_cluster values.",
+            int(invalid_value_mask.sum()),
+            constraint_col,
+        )
+        candidate_configs = candidate_configs.loc[~invalid_value_mask].copy()
+
+    if candidate_configs.empty:
+        return pd.DataFrame()
+
     if group_by is not None and group_by in candidate_configs.columns:
-        top_indexes = candidate_configs.groupby(group_by)["tokens/s/gpu_cluster"].idxmax()
+        top_indexes = candidate_configs.groupby(group_by)["tokens/s/gpu_cluster"].idxmax().dropna()
+        if top_indexes.empty:
+            return pd.DataFrame()
         candidate_configs = candidate_configs.loc[top_indexes]
 
     if candidate_configs["_sla_exceeded"].all():
