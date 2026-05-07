@@ -3735,7 +3735,10 @@ class PerfDatabase:
         """
         Validate the value
         """
-        if value < 0.0:
+        value_array = np.asarray(value)
+        if not np.all(np.isfinite(value_array)):
+            raise ValueError(f"Non-finite value detected {value}")
+        if np.any(value_array < 0.0):
             logger.debug(f"Negative value detected {value}, pass")
         return value
 
