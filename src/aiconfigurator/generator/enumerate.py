@@ -29,7 +29,10 @@ from aiconfigurator.generator.rendering.engine import render_backend_templates
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task import build_disagg_parallel_lists
-from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config_from_model_path
+from aiconfigurator.sdk.utils import (
+    enumerate_parallel_config,
+    get_model_config_from_model_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -354,7 +357,7 @@ def enumerate_profiling_configs(
     k8s_pvc_name: str | None = None,
     k8s_pvc_mount_path: str = "/workspace/model_cache",
     k8s_model_path_in_pvc: str | None = None,
-) -> tuple[list[EnumeratedCandidate], list[EnumeratedCandidate]]:
+) -> tuple[list[EnumeratedCandidate], list[EnumeratedCandidate], bool, int]:
     """Enumerate parallelization candidates and return aggregated DGD configs.
 
     This function is the primary entry point for the Dynamo profiler to obtain
@@ -400,9 +403,12 @@ def enumerate_profiling_configs(
             to load weights.
 
     Returns:
-        ``(prefill_candidates, decode_candidates)`` -- two lists of
-        :class:`EnumeratedCandidate` objects, each bundling an aggregated
-        DGD config dict with its parallelization metadata.
+        ``(prefill_candidates, decode_candidates, fits, required_tp)``.
+        The first two values are lists of :class:`EnumeratedCandidate`
+        objects, each bundling an aggregated DGD config dict with its
+        parallelization metadata. ``fits`` indicates whether the model fits
+        in the available GPU budget, and ``required_tp`` is the uncapped TP
+        required for the memory-fit estimate.
     """
     # ------------------------------------------------------------------
     # 0. Resolve system config
@@ -463,13 +469,21 @@ def enumerate_profiling_configs(
     # across all GPUs), so the memory-fit floor is not capped at a single node.
     # Otherwise (dense, or MoE intra-node) the floor stays within a node.
     effective_total_gpus = total_gpus if total_gpus is not None else num_gpus_per_node
-    min_gpus = _calculate_min_tp(
+    min_gpus, fits, required_tp = _calculate_min_tp(
         model_weight_bytes=model_weight_bytes,
         vram_per_gpu=vram_per_gpu,
         gpus_per_node=num_gpus_per_node,
         total_gpus=effective_total_gpus,
         allow_multi_node=is_moe and enable_wideep,
     )
+    if not fits:
+        logger.warning(
+            "Model does not fit in available GPUs: required_tp=%d, available_gpus=%d",
+            required_tp,
+            effective_total_gpus,
+        )
+        return [], [], fits, required_tp
+
     logger.info("Minimum GPUs per engine (memory fit): %d", min_gpus)
 
     # ------------------------------------------------------------------
@@ -699,4 +713,4 @@ def enumerate_profiling_configs(
         len(prefill_candidates),
         len(decode_candidates),
     )
-    return prefill_candidates, decode_candidates
+    return prefill_candidates, decode_candidates, fits, required_tp

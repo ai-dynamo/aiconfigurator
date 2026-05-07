@@ -56,7 +56,11 @@ class CustomAllReduce(Operation):
         size = kwargs.get("x") * self._h
 
         result = database.query_custom_allreduce(common.CommQuantMode.half, self._tp_size, size)
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -84,7 +88,11 @@ class P2P(Operation):
         p2p_bytes = size * 2
 
         result = database.query_p2p(p2p_bytes)
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -116,7 +124,11 @@ class NCCL(Operation):
         message_size = kwargs.get("x") * self._num_elements_per_token
 
         result = database.query_nccl(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size)
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -167,16 +179,23 @@ class GEMM(Operation):
         result = database.query_gemm(x, self._n, self._k, quant_mode)
         latency = float(result)
         energy = result.energy
+        source = getattr(result, "source", "silicon")
 
         # Adjust for fp8_static: subtract compute_scale overhead, only fix for trtllm now
         if is_fp8_static:
             compute_scale_result = database.query_compute_scale(x, self._k, quant_mode)
             latency -= float(compute_scale_result)
             energy -= compute_scale_result.energy
+            sub_src = getattr(compute_scale_result, "source", "silicon")
+            if sub_src != source:
+                source = "mixed"
             if self._low_precision_input:
                 scale_matrix_result = database.query_scale_matrix(x, self._k, quant_mode)
                 latency -= float(scale_matrix_result)
                 energy -= scale_matrix_result.energy
+                sub_src = getattr(scale_matrix_result, "source", "silicon")
+                if sub_src != source:
+                    source = "mixed"
 
         # Ensure non-negative latency and energy
         latency_clamped = max(0.0, latency)
@@ -201,6 +220,7 @@ class GEMM(Operation):
         return PerformanceResult(
             latency=latency * self._scale_factor,
             energy=energy * self._scale_factor,
+            source=source,
         )
 
     def get_weights(self, **kwargs):
@@ -317,7 +337,11 @@ class TrtLLMWideEPMoE(Operation):
             workload_distribution=self._workload_distribution,
         )
 
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         """Get the weight memory size for this MoE layer."""
@@ -522,7 +546,11 @@ class MoE(Operation):
             enable_eplb=self._enable_eplb,
         )
 
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -901,7 +929,11 @@ class ContextAttention(Operation):
         if seq_imbalance_correction_scale != 1.0:
             result = result * seq_imbalance_correction_scale
 
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -960,7 +992,11 @@ class GenerationAttention(Operation):
         )
         if gen_seq_imbalance_correction_scale != 1.0:
             result = result * gen_seq_imbalance_correction_scale
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -1001,7 +1037,11 @@ class ContextMLA(Operation):
             kvcache_quant_mode=self._kvcache_quant_mode,
             fmha_quant_mode=self._fmha_quant_mode,
         )
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -1035,7 +1075,11 @@ class GenerationMLA(Operation):
         s = kwargs.get("s")
 
         result = database.query_generation_mla(batch_size, s, self._num_heads, self._kv_cache_dtype)
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -1069,7 +1113,11 @@ class MLABmm(Operation):
         batch_size = kwargs.get("batch_size")
 
         result = database.query_mla_bmm(batch_size, self._num_heads, self._quant_mode, self._if_pre)
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -1102,7 +1150,11 @@ class Embedding(Operation):
         d2d_bytes = x * self._column_size * 2
 
         result = database.query_mem_op(d2d_bytes)
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -1139,7 +1191,11 @@ class ElementWise(Operation):
         write_bytes = x * self._dim_out * 2
 
         result = database.query_mem_op(read_bytes + write_bytes)
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -1180,7 +1236,11 @@ class WideEPGenerationMLA(Operation):
             self._fmha_quant_mode,
             self._attn_backend,
         )
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -1223,7 +1283,11 @@ class WideEPContextMLA(Operation):
             fmha_quant_mode=self._fmha_quant_mode,
             attention_backend=self._attn_backend,
         )
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

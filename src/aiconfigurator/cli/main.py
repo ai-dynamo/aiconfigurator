@@ -23,10 +23,63 @@ from aiconfigurator.generator.api import (
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.models import check_is_moe
-from aiconfigurator.sdk.task import TaskConfig, TaskRunner
+from aiconfigurator.sdk.task import TaskConfig, TaskRunner, UnsupportedWideepConfigError
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
+
+
+def _latest_support_matrix_version(
+    matrix: list[dict[str, str]],
+    system: str,
+    backend: str,
+    model: str | None = None,
+    architecture: str | None = None,
+) -> str | None:
+    """Pick the highest PEP 440 version for the relevant support-matrix rows.
+
+    Matches system and backend case-insensitively. When a model is provided,
+    exact-model rows win, then architecture rows. If neither model nor
+    architecture matches, return None instead of selecting an unrelated row.
+    """
+    rows = [
+        row for row in matrix if row["System"].lower() == system.lower() and row["Backend"].lower() == backend.lower()
+    ]
+
+    if model:
+        exact_rows = [row for row in rows if row["HuggingFaceID"].lower() == model.lower()]
+        if exact_rows:
+            rows = exact_rows
+        elif architecture:
+            architecture_rows = [row for row in rows if row["Architecture"] == architecture]
+            if architecture_rows:
+                rows = architecture_rows
+            else:
+                logger.debug(
+                    "No support-matrix rows match model=%s or architecture=%s for system=%s backend=%s",
+                    model,
+                    architecture,
+                    system,
+                    backend,
+                )
+                return None
+        else:
+            logger.debug(
+                "No exact support-matrix rows match model=%s for system=%s backend=%s and no architecture was provided",
+                model,
+                system,
+                backend,
+            )
+            return None
+
+    versions = [
+        (version, parsed)
+        for version in {row["Version"] for row in rows}
+        if (parsed := common.parse_support_matrix_version(version))
+    ]
+    if not versions:
+        return None
+    return max(versions, key=lambda version: version[1])[0]
 
 
 def _build_common_cli_parser() -> argparse.ArgumentParser:
@@ -819,9 +872,13 @@ def build_default_task_configs(
         if backend_name == "sglang" and not enable_wideep and is_moe_model:
             deepep_kwargs = dict(agg_kwargs)
             deepep_kwargs["moe_backend"] = "deepep_moe"
-            deepep_task = TaskConfig(serving_mode="agg", **deepep_kwargs)
-            deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
-            task_configs[deepep_name] = deepep_task
+            try:
+                deepep_task = TaskConfig(serving_mode="agg", **deepep_kwargs)
+            except UnsupportedWideepConfigError as exc:
+                logger.info("Skipping SGLang DeepEP agg sweep: %s", exc)
+            else:
+                deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
+                task_configs[deepep_name] = deepep_task
 
         if total_gpus < 2:
             logger.warning("Skipping disagg since it requires at least 2 GPUs.")
@@ -841,10 +898,13 @@ def build_default_task_configs(
         if backend_name == "sglang" and not enable_wideep and is_moe_model:
             deepep_disagg_kwargs = dict(disagg_kwargs)
             deepep_disagg_kwargs["moe_backend"] = "deepep_moe"
-            deepep_disagg_task = TaskConfig(serving_mode="disagg", **deepep_disagg_kwargs)
-            deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
-            task_configs[deepep_name] = deepep_disagg_task
-
+            try:
+                deepep_disagg_task = TaskConfig(serving_mode="disagg", **deepep_disagg_kwargs)
+            except UnsupportedWideepConfigError as exc:
+                logger.info("Skipping SGLang DeepEP disagg sweep: %s", exc)
+            else:
+                deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
+                task_configs[deepep_name] = deepep_disagg_task
     return task_configs
 
 
@@ -859,6 +919,7 @@ _EXPERIMENT_RESERVED_KEYS = {
     "profiles",
     "isl",
     "osl",
+    "prefix",
     "ttft",
     "tpot",
     "request_latency",
@@ -991,7 +1052,7 @@ def build_experiment_task_configs(
             task_kwargs["decode_system_name"] = inferred_decode_system or system_name
 
         # Per-experiment overrides for runtime numeric parameters if provided at top level
-        for numeric_key in ("isl", "osl", "ttft", "tpot", "request_latency"):
+        for numeric_key in ("isl", "osl", "prefix", "ttft", "tpot", "request_latency"):
             if numeric_key in exp_config:
                 task_kwargs[numeric_key] = exp_config[numeric_key]
 
@@ -1223,28 +1284,24 @@ def _run_support_matrix_mode(args):
     matrix = common.get_support_matrix()
     systems = sorted(common.SupportedSystems) if args.system == "all" else [args.system]
     backends = [b.value for b in common.BackendName] if args.backend == "all" else [args.backend]
-    existing_combos = {(row["System"], row["Backend"]) for row in matrix}
+    existing_combos = {(row["System"].lower(), row["Backend"].lower()) for row in matrix}
 
     results: dict[tuple[str, str], common.SupportResult | None] = {}
     has_inferred = False
 
     for system in systems:
         for be in backends:
-            if (system, be) not in existing_combos:
+            if (system.lower(), be.lower()) not in existing_combos:
                 results[(system, be)] = None
                 continue
 
             if version_filter:
                 version = version_filter
             else:
-                versions = sorted(
-                    {r["Version"] for r in matrix if r["System"] == system and r["Backend"] == be},
-                    reverse=True,
-                )
-                if not versions:
+                version = _latest_support_matrix_version(matrix, system, be, model=model, architecture=architecture)
+                if version is None:
                     results[(system, be)] = None
                     continue
-                version = versions[0]
 
             result = common.check_support(
                 model=model, system=system, backend=be, version=version, architecture=architecture
@@ -1312,21 +1369,28 @@ def _run_support_mode(args):
     backend = args.backend
     version = args.backend_version
 
-    # If no version specified, find the latest version in the support matrix
-    if not version:
-        matrix = common.get_support_matrix()
-        versions_for_combo = [row["Version"] for row in matrix if row["System"] == system and row["Backend"] == backend]
-        if versions_for_combo:
-            version = sorted(set(versions_for_combo), reverse=True)[0]
-
-    logger.info("Checking support for model=%s, system=%s, backend=%s, version=%s", model, system, backend, version)
-
     # Resolve architecture for better check
     try:
         model_info = get_model_config_from_model_path(model)
         architecture = model_info["architecture"]
     except Exception:
         architecture = None
+
+    # If no version specified, find the latest model-relevant version in the support matrix
+    if not version:
+        matrix = common.get_support_matrix()
+        version = _latest_support_matrix_version(matrix, system, backend, model=model, architecture=architecture)
+        if version is None:
+            logger.info(
+                "No valid support-matrix backend version found for model=%s system=%s backend=%s",
+                model,
+                system,
+                backend,
+            )
+            print("\nNo valid support-matrix backend version found for this model/system/backend combination.\n")
+            return
+
+    logger.info("Checking support for model=%s, system=%s, backend=%s, version=%s", model, system, backend, version)
 
     result = common.check_support(
         model=model, system=system, backend=backend, version=version, architecture=architecture

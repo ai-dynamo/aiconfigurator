@@ -151,7 +151,10 @@ def agg_pareto(
             continue
 
     if not results_df.empty:
-        results_df = results_df.drop_duplicates(ignore_index=True)
+        # Dedupe on numeric/identifier columns only; _per_ops_source holds dicts
+        # which are unhashable and would break drop_duplicates with default subset.
+        dedupe_cols = [c for c in results_df.columns if c != "_per_ops_source"]
+        results_df = results_df.drop_duplicates(subset=dedupe_cols, ignore_index=True)
         results_df = results_df.sort_values(by="tokens/s/gpu", ascending=False).reset_index(drop=True)
     else:
         if exceptions:

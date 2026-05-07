@@ -1,9 +1,6 @@
-name: "Daily Support Matrix Update (Main)"
+name: "Support Matrix Update (Main)"
 
 on:
-  schedule:
-    # Run daily at 7 AM PT / 11 PM China / 3 PM UTC
-    - cron: "0 15 * * *"
   workflow_dispatch: # Allow manual trigger (with no inputs)
   workflow_call:
     inputs:
@@ -116,6 +113,8 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           signoff: true
+          author: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+          committer: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
           commit-message: "fix: update support matrix"
           title: "fix: update support matrix [${{ env.TARGET_BRANCH }}]"
           body-path: pr_body.md

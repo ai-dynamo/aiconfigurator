@@ -193,6 +193,9 @@ inputs:
     default: "'simple'"
 
   # LlmdConfig - llm-d specific configuration
+  - key: LlmdConfig.hf_token_secret
+    required: false
+    default: ""
   - key: LlmdConfig.vllm_image
     required: false
     default: "vllm/vllm-openai:latest"

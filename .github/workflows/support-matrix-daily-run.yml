@@ -1,0 +1,41 @@
+name: "Support Matrix Daily Run"
+
+on:
+  schedule:
+    # Run release daily at 7 AM PT - 1h / 10 PM China / 2 PM UTC
+    - cron: "0 14 * * *"
+
+jobs:
+  update-support-matrix-release:
+    name: Run Release Support Matrix Update
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/support-matrix-release.yml
+    secrets: inherit
+
+  update-support-matrix-main:
+    name: Run Main Support Matrix Update
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/support-matrix-main.yml
+    with:
+      branch: ${{ github.event.repository.default_branch }}
+    secrets: inherit
+  
+  trigger-support-matrix-autofix:
+    name: Trigger Support Matrix Autofix
+    needs:
+      - update-support-matrix-release
+      - update-support-matrix-main
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger support matrix autofix workflow
+        env:
+          GH_TOKEN: ${{ secrets.SUPPORT_MATRIX_AUTOFIX_TOKEN }}
+          AUTO_FIX_REPO: ${{ vars.AUTO_FIX_REPO }}
+        run: |
+          gh workflow run support-matrix-autofix.yml \
+            --repo "$AUTO_FIX_REPO"

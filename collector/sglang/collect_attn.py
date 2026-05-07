@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-__compat__ = "sglang>=0.5.5"
+__compat__ = "sglang>=0.5.10"
 
 import math
 import os
@@ -22,9 +22,10 @@ dp_attention.get_local_attention_dp_rank = lambda: 0
 dp_attention.is_dp_attention_enabled = lambda: False
 dp_attention._ENABLE_DP_ATTENTION_FLAG = False
 
-# Also set the private variables to be safe
-dp_attention._ATTN_TP_SIZE = 1
-dp_attention._ATTN_TP_RANK = 0
+# Also set the private variables if they exist
+if hasattr(dp_attention, "_ATTN_TP_SIZE"):
+    dp_attention._ATTN_TP_SIZE = 1
+    dp_attention._ATTN_TP_RANK = 0
 dp_attention._ATTN_DP_SIZE = 1
 dp_attention._ATTN_DP_RANK = 0
 dp_attention._LOCAL_ATTN_DP_SIZE = 1
@@ -35,7 +36,7 @@ from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
-from helper import benchmark_with_power, get_sm_version, log_perf
+from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
 

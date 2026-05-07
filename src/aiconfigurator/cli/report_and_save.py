@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 import os
 import random
@@ -598,13 +599,20 @@ def save_results(
             safe_mkdir(exp_dir, exist_ok=True)
 
             # 1. Save best config dataframe
+            #    Strip the object-typed _per_ops_source column before CSV write; it is
+            #    saved as one per_ops_source.json per topN/ subdir below.
             best_config_df = best_configs.get(exp_name)  # top n configs
+            best_config_per_ops_source: list[dict | None] = []
             if best_config_df is not None:
+                if "_per_ops_source" in best_config_df.columns:
+                    best_config_per_ops_source = best_config_df["_per_ops_source"].tolist()
+                    best_config_df = best_config_df.drop(columns=["_per_ops_source"])
                 best_config_df.to_csv(os.path.join(exp_dir, "best_config_topn.csv"), index=False)
 
-            # 2. Save all pareto dataframe
+            # 2. Save all pareto dataframe (also stripped of _per_ops_source)
             if pareto_df is not None:
-                pareto_df.to_csv(os.path.join(exp_dir, "pareto.csv"), index=False)
+                pareto_csv_df = pareto_df.drop(columns=["_per_ops_source"], errors="ignore")
+                pareto_csv_df.to_csv(os.path.join(exp_dir, "pareto.csv"), index=False)
 
             # 3. Save the config for this experiment
             if backend != "auto":
@@ -748,6 +756,14 @@ def save_results(
                     safe_mkdir(top_config_dir, exist_ok=True)
                     with open(os.path.join(top_config_dir, "generator_config.yaml"), "w") as f:
                         yaml.safe_dump(cfg, f, sort_keys=False)
+
+                    # Per-op data source breakdown (silicon / empirical / mixed),
+                    # pulled from PerformanceResult.source via the InferenceSummary.
+                    # Same nested shape as per_ops_data, populated only when the row
+                    # carried it through the pareto search.
+                    if i < len(best_config_per_ops_source) and best_config_per_ops_source[i] is not None:
+                        with open(os.path.join(top_config_dir, "per_ops_source.json"), "w") as f:
+                            json.dump(best_config_per_ops_source[i], f, indent=2, sort_keys=True)
 
                     try:
                         deployment_target = getattr(args, "deployment_target", "dynamo-j2")
