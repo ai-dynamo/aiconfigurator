@@ -99,3 +99,42 @@ class TestSupportMatrix:
         agg, disagg = common.check_support(model, system, backend, version, architecture)
         assert agg is expected_agg
         assert disagg is expected_disagg
+
+    def test_check_support_matches_architecture_fallback_case_insensitively(self, monkeypatch):
+        """Test system/backend case normalization for architecture-based fallback."""
+        monkeypatch.setattr(
+            common,
+            "get_support_matrix",
+            lambda: [
+                {
+                    "HuggingFaceID": "Qwen/Qwen3-32B",
+                    "Architecture": "Qwen3ForCausalLM",
+                    "System": "b200_sxm",
+                    "Backend": "sglang",
+                    "Version": "0.5.10",
+                    "Mode": "agg",
+                    "Status": "PASS",
+                },
+                {
+                    "HuggingFaceID": "Qwen/Qwen3-32B",
+                    "Architecture": "Qwen3ForCausalLM",
+                    "System": "b200_sxm",
+                    "Backend": "sglang",
+                    "Version": "0.5.10",
+                    "Mode": "disagg",
+                    "Status": "PASS",
+                },
+            ],
+        )
+
+        result = common.check_support(
+            "local-qwen-variant",
+            "B200_SXM",
+            backend="SGLang",
+            version="0.5.10",
+            architecture="Qwen3ForCausalLM",
+        )
+
+        assert result.agg_supported is True
+        assert result.disagg_supported is True
+        assert result.exact_match is False
