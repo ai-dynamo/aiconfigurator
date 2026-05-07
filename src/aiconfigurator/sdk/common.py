@@ -8,6 +8,18 @@ from enum import Enum
 from functools import cache
 from importlib import resources as pkg_resources
 
+from packaging.version import InvalidVersion, Version
+
+
+def parse_support_matrix_version(version: str | None) -> Version | None:
+    """Parse a support-matrix backend version as PEP 440, or return None."""
+    if not version:
+        return None
+    try:
+        return Version(version)
+    except InvalidVersion:
+        return None
+
 
 @dataclass(frozen=True)
 class BlockConfig:
@@ -226,7 +238,7 @@ def check_support(
     matrix = get_support_matrix()
 
     def _matches_filters(row: dict, backend: str | None, version: str | None) -> bool:
-        if backend and row["Backend"] != backend:
+        if backend and row["Backend"].lower() != backend.lower():
             return False
         return not (version and row["Version"] != version)
 
@@ -240,7 +252,7 @@ def check_support(
     ]
 
     # Resolve architecture from matrix if model is found anywhere
-    matrix_arch = next((row["Architecture"] for row in matrix if row["HuggingFaceID"] == model), None)
+    matrix_arch = next((row["Architecture"] for row in matrix if row["HuggingFaceID"].lower() == model.lower()), None)
 
     if exact_matches:
         return SupportResult(
@@ -258,7 +270,9 @@ def check_support(
     arch_matches = [
         row
         for row in matrix
-        if row["Architecture"] == architecture and row["System"] == system and _matches_filters(row, backend, version)
+        if row["Architecture"] == architecture
+        and row["System"].lower() == system.lower()
+        and _matches_filters(row, backend, version)
     ]
 
     agg_results = [row["Status"] == "PASS" for row in arch_matches if row["Mode"] == "agg"]
