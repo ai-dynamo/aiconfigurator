@@ -9,15 +9,18 @@ import torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    maybe_post_process_fp8_weight_block,
-)
+try:
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        maybe_post_process_fp8_weight_block,
+    )
+except ImportError:
+    maybe_post_process_fp8_weight_block = None
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.version import __version__ as vllm_version
 
 from collector.common_test_cases import get_gemm_common_test_cases
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
-from collector.vllm.utils import setup_distributed, with_exit_stack
+from collector.vllm.utils import create_vllm_config, setup_distributed, with_exit_stack
 
 FP8_BLOCK_SHAPE = (128, 128)
 
@@ -164,12 +167,12 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
                     if not hasattr(gemm, "weight_scale"):
                         gemm.weight_scale = gemm.weight_scale_inv
 
-                # Support both old (layer-only) and new (layer, cutlass_supported)
-                # signatures for maybe_post_process_fp8_weight_block.
-                try:
-                    maybe_post_process_fp8_weight_block(gemm)
-                except TypeError:
-                    maybe_post_process_fp8_weight_block(gemm, cutlass_block_fp8_supported=True)
+                # Post-process block FP8 weights if the helper is available.
+                if maybe_post_process_fp8_weight_block is not None:
+                    try:
+                        maybe_post_process_fp8_weight_block(gemm)
+                    except TypeError:
+                        maybe_post_process_fp8_weight_block(gemm, cutlass_block_fp8_supported=True)
 
                 # Dynamic activation scheme does not create input_scale;
                 # the forward path still reads it, so set it explicitly.
@@ -196,7 +199,11 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
 
         return gemm
 
-    exit_stack.enter_context(set_current_vllm_config(VllmConfig()))
+    # vLLM >=0.20.0: Fp8LinearMethod.__init__ reads model_config.dtype from the
+    # current VllmConfig.  A bare VllmConfig() has model_config=None, so we must
+    # provide a fully-populated config via create_vllm_config().
+    vllm_config = create_vllm_config(dtype=dtype)
+    exit_stack.enter_context(set_current_vllm_config(vllm_config))
 
     outside_loop_count = 6
     op_list = []

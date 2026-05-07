@@ -1,0 +1,13 @@
+framework,version,device,op_name,kernel_source,model,architecture,mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,step,latency
+VLLM,0.20.0,NVIDIA A100-SXM4-80GB,mla_context_module,default,deepseek-ai/DeepSeek-V3,DeepseekV3ForCausalLM,bfloat16,bfloat16,bfloat16,32,8,1,1,0,0.1883
+VLLM,0.20.0,NVIDIA A100-SXM4-80GB,mla_context_module,default,deepseek-ai/DeepSeek-V3,DeepseekV3ForCausalLM,bfloat16,bfloat16,bfloat16,4,8,1,1,0,0.1418
+VLLM,0.20.0,NVIDIA A100-SXM4-80GB,mla_context_module,default,deepseek-ai/DeepSeek-V3,DeepseekV3ForCausalLM,bfloat16,bfloat16,bfloat16,4,64,1,1,0,0.1548
+VLLM,0.20.0,NVIDIA A100-SXM4-80GB,mla_context_module,default,deepseek-ai/DeepSeek-V3,DeepseekV3ForCausalLM,bfloat16,bfloat16,bfloat16,128,32,1,1,0,0.4174
+VLLM,0.20.0,NVIDIA A100-SXM4-80GB,mla_context_module,default,deepseek-ai/DeepSeek-V3,DeepseekV3ForCausalLM,bfloat16,bfloat16,bfloat16,1,16,1,1,0,0.1548
+VLLM,0.20.0,NVIDIA A100-SXM4-80GB,mla_context_module,default,deepseek-ai/DeepSeek-V3,DeepseekV3ForCausalLM,bfloat16,bfloat16,bfloat16,4,128,1,1,0,0.1760
+VLLM,0.20.0,NVIDIA A100-SXM4-80GB,mla_context_module,default,deepseek-ai/DeepSeek-V3,DeepseekV3ForCausalLM,bfloat16,bfloat16,bfloat16,128,2,1,1,0,0.3387
+VLLM,0.20.0,NVIDIA A100-SXM4-80GB,mla_context_module,default,deepseek-ai/DeepSeek-V3,DeepseekV3ForCausalLM,bfloat16,bfloat16,bfloat16,1,8,1,1,0,0.1443
+VLLM,0.20.0,NVIDIA A100-SXM4-80GB,mla_context_module,default,deepseek-ai/DeepSeek-V3,DeepseekV3ForCausalLM,bfloat16,bfloat16,bfloat16,1,2,1,1,0,0.1382
+VLLM,0.20.0,NVIDIA A100-SXM4-80GB,mla_context_module,default,deepseek-ai/DeepSeek-V3,DeepseekV3ForCausalLM,bfloat16,bfloat16,bfloat16,8,8,1,1,0,0.1472
+VLLM,0.20.0,NVIDIA A100-SXM4-80GB,mla_context_module,default,deepseek-ai/DeepSeek-V3,DeepseekV3ForCausalLM,bfloat16,bfloat16,bfloat16,2,1,1,1,0,0.1115
+VLLM,0.20.0,NVIDIA A100-SXM4-80GB,mla_context_module,default,deepseek-ai/DeepSeek-V3,DeepseekV3ForCausalLM,bfloat16,bfloat16,bfloat16,1,32,1,1,0,0.1613

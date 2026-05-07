@@ -64,6 +64,7 @@ from collector.vllm.utils import (
     create_and_prepopulate_kv_cache_mla,
     create_common_attn_metadata,
     create_vllm_config,
+    populate_builder_from_common_metadata,
     setup_distributed,
     with_exit_stack,
 )
@@ -241,11 +242,17 @@ def get_mla_generation_module_test_cases():
 
 def get_dsa_context_module_test_cases():
     """collect.py entrypoint for DSA context module collection."""
+    # DSA (sparse MLA) requires Hopper or newer (SM >= 90).
+    if get_sm_version() < 90:
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="context")
 
 
 def get_dsa_generation_module_test_cases():
     """collect.py entrypoint for DSA generation module collection."""
+    # DSA (sparse MLA) requires Hopper or newer (SM >= 90).
+    if get_sm_version() < 90:
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="generation")
 
 
@@ -604,6 +611,7 @@ def _create_kv_cache_and_metadata(
     attn_layer_name = "model.layers.0.self_attn.attn"
     layer_names = [attn_layer_name]
     builder = builder_cls(kv_cache_spec, layer_names, vllm_config, torch.device(device))
+    populate_builder_from_common_metadata(builder, common_attn_metadata)
     attn_metadata = builder.build(
         common_prefix_len=0,
         common_attn_metadata=common_attn_metadata,
@@ -637,6 +645,7 @@ def _create_kv_cache_and_metadata(
         )
         indexer_builder_cls = DeepseekV32IndexerBackend.get_builder_cls()
         indexer_builder = indexer_builder_cls(indexer_spec, [indexer_layer_name], vllm_config, torch.device(device))
+        populate_builder_from_common_metadata(indexer_builder, common_attn_metadata)
         indexer_metadata = indexer_builder.build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,

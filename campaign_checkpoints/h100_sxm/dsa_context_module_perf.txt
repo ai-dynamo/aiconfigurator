@@ -1,0 +1,14 @@
+framework,version,device,op_name,kernel_source,model,architecture,mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,step,latency
+VLLM,0.20.0,NVIDIA H100 80GB HBM3,dsa_context_module,default,deepseek-ai/DeepSeek-V3.2,DeepseekV32ForCausalLM,bfloat16,fp8,bfloat16,8,2,1,1,0,1.2869
+VLLM,0.20.0,NVIDIA H100 80GB HBM3,dsa_context_module,default,deepseek-ai/DeepSeek-V3.2,DeepseekV32ForCausalLM,bfloat16,fp8,bfloat16,128,1,1,1,0,1.2661
+VLLM,0.20.0,NVIDIA H100 80GB HBM3,dsa_context_module,default,deepseek-ai/DeepSeek-V3.2,DeepseekV32ForCausalLM,bfloat16,fp8,bfloat16,4,2,1,1,0,1.3245
+VLLM,0.20.0,NVIDIA H100 80GB HBM3,dsa_context_module,default,deepseek-ai/DeepSeek-V3.2,DeepseekV32ForCausalLM,bfloat16,bfloat16,bfloat16,2,8,1,1,0,1.2727
+VLLM,0.20.0,NVIDIA H100 80GB HBM3,dsa_context_module,default,deepseek-ai/DeepSeek-V3.2,DeepseekV32ForCausalLM,bfloat16,bfloat16,bfloat16,128,32,1,1,0,1.2738
+VLLM,0.20.0,NVIDIA H100 80GB HBM3,dsa_context_module,default,deepseek-ai/DeepSeek-V3.2,DeepseekV32ForCausalLM,bfloat16,fp8,fp8_block,8,16,1,1,0,1.5159
+VLLM,0.20.0,NVIDIA H100 80GB HBM3,dsa_context_module,default,deepseek-ai/DeepSeek-V3.2,DeepseekV32ForCausalLM,bfloat16,fp8,fp8_block,32,4,1,1,0,1.4989
+VLLM,0.20.0,NVIDIA H100 80GB HBM3,dsa_context_module,default,deepseek-ai/DeepSeek-V3.2,DeepseekV32ForCausalLM,bfloat16,fp8,bfloat16,64,128,1,1,0,1.2779
+VLLM,0.20.0,NVIDIA H100 80GB HBM3,dsa_context_module,default,deepseek-ai/DeepSeek-V3.2,DeepseekV32ForCausalLM,bfloat16,fp8,fp8_block,64,2,1,1,0,1.4518
+VLLM,0.20.0,NVIDIA H100 80GB HBM3,dsa_context_module,default,zai-org/GLM-5,GlmMoeDsaForCausalLM,bfloat16,bfloat16,fp8_block,16,8,1,1,0,1.5324
+VLLM,0.20.0,NVIDIA H100 80GB HBM3,dsa_context_module,default,zai-org/GLM-5,GlmMoeDsaForCausalLM,bfloat16,fp8,fp8_block,64,16,1,1,0,1.5313
+VLLM,0.20.0,NVIDIA H100 80GB HBM3,dsa_context_module,default,zai-org/GLM-5,GlmMoeDsaForCausalLM,bfloat16,fp8,fp8_block,1,256,1,1,0,1.7067
+VLLM,0.20.0,NVIDIA H100 80GB HBM3,dsa_context_module,default,zai-org/GLM-5,GlmMoeDsaForCausalLM,bfloat16,fp8,fp8_block,32,256,1,1,0,1.6601
