@@ -11,7 +11,6 @@ from typing import Any
 
 import pandas as pd
 import yaml
-from packaging.version import InvalidVersion, Version
 
 from aiconfigurator import __version__
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
@@ -30,16 +29,6 @@ from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model
 logger = logging.getLogger(__name__)
 
 
-def _parse_support_matrix_version(version: str | None) -> Version | None:
-    """Parse backend versions so 0.5.10 sorts after 0.5.9."""
-    if not version:
-        return None
-    try:
-        return Version(version)
-    except InvalidVersion:
-        return None
-
-
 def _latest_support_matrix_version(
     matrix: list[dict[str, str]],
     system: str,
@@ -47,7 +36,15 @@ def _latest_support_matrix_version(
     model: str | None = None,
     architecture: str | None = None,
 ) -> str | None:
-    rows = [row for row in matrix if row["System"] == system and row["Backend"] == backend]
+    """Pick the highest PEP 440 version for the relevant support-matrix rows.
+
+    Matches system and backend case-insensitively. When a model is provided,
+    exact-model rows win, then architecture rows. If neither model nor
+    architecture matches, return None instead of selecting an unrelated row.
+    """
+    rows = [
+        row for row in matrix if row["System"].lower() == system.lower() and row["Backend"].lower() == backend.lower()
+    ]
 
     if model:
         exact_rows = [row for row in rows if row["HuggingFaceID"].lower() == model.lower()]
@@ -57,11 +54,28 @@ def _latest_support_matrix_version(
             architecture_rows = [row for row in rows if row["Architecture"] == architecture]
             if architecture_rows:
                 rows = architecture_rows
+            else:
+                logger.debug(
+                    "No support-matrix rows match model=%s or architecture=%s for system=%s backend=%s",
+                    model,
+                    architecture,
+                    system,
+                    backend,
+                )
+                return None
+        else:
+            logger.debug(
+                "No exact support-matrix rows match model=%s for system=%s backend=%s and no architecture was provided",
+                model,
+                system,
+                backend,
+            )
+            return None
 
     versions = [
         (version, parsed)
         for version in {row["Version"] for row in rows}
-        if (parsed := _parse_support_matrix_version(version))
+        if (parsed := common.parse_support_matrix_version(version))
     ]
     if not versions:
         return None
@@ -1262,14 +1276,14 @@ def _run_support_matrix_mode(args):
     matrix = common.get_support_matrix()
     systems = sorted(common.SupportedSystems) if args.system == "all" else [args.system]
     backends = [b.value for b in common.BackendName] if args.backend == "all" else [args.backend]
-    existing_combos = {(row["System"], row["Backend"]) for row in matrix}
+    existing_combos = {(row["System"].lower(), row["Backend"].lower()) for row in matrix}
 
     results: dict[tuple[str, str], common.SupportResult | None] = {}
     has_inferred = False
 
     for system in systems:
         for be in backends:
-            if (system, be) not in existing_combos:
+            if (system.lower(), be.lower()) not in existing_combos:
                 results[(system, be)] = None
                 continue
 
@@ -1358,6 +1372,15 @@ def _run_support_mode(args):
     if not version:
         matrix = common.get_support_matrix()
         version = _latest_support_matrix_version(matrix, system, backend, model=model, architecture=architecture)
+        if version is None:
+            logger.info(
+                "No valid support-matrix backend version found for model=%s system=%s backend=%s",
+                model,
+                system,
+                backend,
+            )
+            print("\nNo valid support-matrix backend version found for this model/system/backend combination.\n")
+            return
 
     logger.info("Checking support for model=%s, system=%s, backend=%s, version=%s", model, system, backend, version)
 

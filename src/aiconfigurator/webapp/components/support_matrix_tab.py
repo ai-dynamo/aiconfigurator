@@ -6,7 +6,7 @@ import re
 
 import gradio as gr
 import pandas as pd
-from packaging.version import InvalidVersion, Version
+from packaging.version import Version
 
 from aiconfigurator.sdk import common
 
@@ -16,12 +16,7 @@ def parse_version(ver_str):
     Parse version string into comparable Version (PEP 440).
     Invalid or empty strings return Version("0.0.0") so they sort first.
     """
-    if not ver_str:
-        return Version("0.0.0")
-    try:
-        return Version(ver_str)
-    except InvalidVersion:
-        return Version("0.0.0")
+    return common.parse_support_matrix_version(ver_str) or Version("0.0.0")
 
 
 # Cell colors for support matrix (used in styling and legend)
