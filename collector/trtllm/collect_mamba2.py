@@ -34,6 +34,7 @@ Output:
 
 import gc
 import os
+import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
