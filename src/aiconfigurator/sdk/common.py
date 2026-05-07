@@ -380,12 +380,16 @@ Supported systems (GPU types)
 """
 SupportedSystems = {
     "h100_sxm",
+    "h100_pcie",
     "h200_sxm",
     "b200_sxm",
     "b300_sxm",
     "gb200",
     "gb300",
     "a100_sxm",
+    "a100_pcie",
+    "a30",
+    "l4",
     "l40s",
     "b60",
 }

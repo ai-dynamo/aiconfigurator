@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -104,6 +105,7 @@ class TaskContext:
     enable_chunked_prefill: bool
     moe_backend: str | None
     total_gpus: int | None
+    database_mode: str | None = None
     free_gpu_memory_fraction: float | None = None
     max_seq_len: int | None = None
     profiles: list[str] = field(default_factory=list)
@@ -117,7 +119,12 @@ class TaskContext:
     def resolved_backend_version_for(self, system_name: str) -> str:
         if self.backend_version is not None:
             return self.backend_version
-        return get_latest_database_version(system=system_name, backend=self.backend_name)
+        latest = get_latest_database_version(system=system_name, backend=self.backend_name)
+        if latest is not None:
+            return latest
+        if self.database_mode is not None and self.database_mode != common.DatabaseMode.SILICON.name:
+            return "estimate"
+        return latest
 
 
 def _deep_merge(target: dict, source: Mapping, *, allow_new: bool = True) -> dict:
@@ -139,6 +146,24 @@ def _ensure_munch(obj: dict | DefaultMunch | Munch) -> DefaultMunch:
     if isinstance(obj, (DefaultMunch, Munch)):
         return DefaultMunch.fromDict(obj.toDict(), DefaultMunch)
     return DefaultMunch.fromDict(obj, DefaultMunch)
+
+
+def _get_database_with_optional_missing_data(
+    *, system: str, backend: str, version: str, allow_missing_data: bool = False
+):
+    """Call get_database while tolerating legacy test doubles without allow_missing_data."""
+    kwargs = {"system": system, "backend": backend, "version": version}
+    if allow_missing_data:
+        try:
+            signature = inspect.signature(get_database)
+            accepts_allow_missing_data = "allow_missing_data" in signature.parameters or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+            )
+        except (TypeError, ValueError):
+            accepts_allow_missing_data = True
+        if accepts_allow_missing_data:
+            kwargs["allow_missing_data"] = True
+    return get_database(**kwargs)
 
 
 def build_disagg_parallel_lists(
@@ -793,6 +818,7 @@ class TaskConfig:
             enable_chunked_prefill=enable_chunked_prefill,
             moe_backend=moe_backend,
             total_gpus=total_gpus,
+            database_mode=database_mode,
             profiles=effective_profiles,
             yaml_patch=yaml_patch,
             yaml_mode=yaml_mode,
@@ -883,16 +909,11 @@ class TaskConfig:
             _validate_fp8_static(self.config.prefill_worker_config, "prefill_worker_config")
             _validate_fp8_static(self.config.decode_worker_config, "decode_worker_config")
 
-        # Validate requested quant modes against available perf data early, to avoid
-        # late interpolation/assert failures and to provide actionable guidance.
-        try:
-            database = get_database(system=self.system_name, backend=self.backend_name, version=self.backend_version)
-        except Exception:
-            # If database can't be loaded at all, let downstream handle/report it.
-            return
-
-        supported = getattr(database, "supported_quant_mode", {}) or {}
         database_mode_for_validation = getattr(self.config, "database_mode", None)
+        allow_missing_data = (
+            database_mode_for_validation is not None
+            and database_mode_for_validation != common.DatabaseMode.SILICON.name
+        )
 
         model_family = get_model_family(self.model_path)
         is_deepseek_fam = model_family in ("DEEPSEEK", "KIMIK25")
@@ -905,20 +926,6 @@ class TaskConfig:
             "HYBRID",
         }
 
-        def _supported_or_raise(op: str, mode_name: str | None) -> None:
-            if mode_name is None:
-                return
-            if allow_deepseek_v4_synthetic_mode:
-                return
-            supported_modes = supported.get(op, []) or []
-            if supported_modes and mode_name not in supported_modes:
-                exc_type = UnsupportedWideepConfigError if op.startswith("wideep_") else ValueError
-                raise exc_type(
-                    f"Unsupported {op} quant mode '{mode_name}' for system='{self.system_name}', "
-                    f"backend='{self.backend_name}', version='{self.backend_version}'. "
-                    f"Supported {op} modes: {sorted(supported_modes)}"
-                )
-
         def _to_name(value: object) -> str | None:
             if value is None:
                 return None
@@ -928,6 +935,41 @@ class TaskConfig:
             if isinstance(cfg, Mapping):
                 return cfg.get(key, None)
             return getattr(cfg, key, None)
+
+        def _load_worker_supported_quant_modes(worker_cfg: object) -> tuple[dict, str, str]:
+            system_name = _get_cfg_value(worker_cfg, "system_name") or self.system_name
+            backend_version = _get_cfg_value(worker_cfg, "backend_version") or self.backend_version
+            try:
+                database = _get_database_with_optional_missing_data(
+                    system=system_name,
+                    backend=self.backend_name,
+                    version=backend_version,
+                    allow_missing_data=allow_missing_data,
+                )
+            except Exception:
+                # If database can't be loaded at all, let downstream handle/report it.
+                return {}, system_name, backend_version
+            return getattr(database, "supported_quant_mode", {}) or {}, system_name, backend_version
+
+        def _supported_or_raise(
+            op: str,
+            mode_name: str | None,
+            supported: dict,
+            system_name: str,
+            backend_version: str,
+        ) -> None:
+            if mode_name is None:
+                return
+            if allow_deepseek_v4_synthetic_mode:
+                return
+            supported_modes = supported.get(op, []) or []
+            if supported_modes and mode_name not in supported_modes:
+                exc_type = UnsupportedWideepConfigError if op.startswith("wideep_") else ValueError
+                raise exc_type(
+                    f"Unsupported {op} quant mode '{mode_name}' for system='{system_name}', "
+                    f"backend='{self.backend_name}', version='{backend_version}'. "
+                    f"Supported {op} modes: {sorted(supported_modes)}"
+                )
 
         model_info = {}
         try:
@@ -992,26 +1034,27 @@ class TaskConfig:
             wc: object, *, validate_context: bool, validate_generation: bool, worker_name: str
         ) -> None:
             _resolve_model_quant_modes(wc, worker_name)
+            supported, system_name, backend_version = _load_worker_supported_quant_modes(wc)
             gemm_mode = _to_name(_get_cfg_value(wc, "gemm_quant_mode"))
-            _supported_or_raise("gemm", gemm_mode)
+            _supported_or_raise("gemm", gemm_mode, supported, system_name, backend_version)
 
             moe_mode = _to_name(_get_cfg_value(wc, "moe_quant_mode"))
             wc_moe_backend = getattr(wc, "moe_backend", None) or moe_backend
             if self.backend_name == "sglang" and wc_moe_backend == "deepep_moe":
                 if validate_context:
-                    _supported_or_raise("wideep_context_moe", moe_mode)
+                    _supported_or_raise("wideep_context_moe", moe_mode, supported, system_name, backend_version)
                 if validate_generation:
-                    _supported_or_raise("wideep_generation_moe", moe_mode)
+                    _supported_or_raise("wideep_generation_moe", moe_mode, supported, system_name, backend_version)
             else:
-                _supported_or_raise("moe", moe_mode)
+                _supported_or_raise("moe", moe_mode, supported, system_name, backend_version)
 
             if validate_context:
                 fmha_mode = _to_name(_get_cfg_value(wc, "fmha_quant_mode"))
-                _supported_or_raise(context_attn_key, fmha_mode)
+                _supported_or_raise(context_attn_key, fmha_mode, supported, system_name, backend_version)
 
             if validate_generation:
                 kvcache_mode = _to_name(_get_cfg_value(wc, "kvcache_quant_mode"))
-                _supported_or_raise(generation_attn_key, kvcache_mode)
+                _supported_or_raise(generation_attn_key, kvcache_mode, supported, system_name, backend_version)
 
         # agg/disagg worker configs use the same field names
         if self.config.serving_mode == "agg":
@@ -1163,7 +1206,15 @@ class TaskRunner:
         query-cache state. If the requested mode already matches, reuse the
         cached instance directly.
         """
-        db = get_database(system=system, backend=backend, version=version)
+        allow_missing_data = database_mode is not None and database_mode != common.DatabaseMode.SILICON.name
+        db = _get_database_with_optional_missing_data(
+            system=system,
+            backend=backend,
+            version=version,
+            allow_missing_data=allow_missing_data,
+        )
+        if db is None:
+            raise RuntimeError(f"Failed to load database for {system=}, {backend=}, {version=}")
         if database_mode is not None:
             mode = common.DatabaseMode[database_mode]
             if mode != db.get_default_database_mode():

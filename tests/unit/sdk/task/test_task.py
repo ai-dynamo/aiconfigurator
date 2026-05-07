@@ -105,6 +105,39 @@ def test_taskconfig_disagg_default():
     assert "disagg-defaults" in cfg.applied_layers
 
 
+def test_taskconfig_disagg_validation_uses_worker_backend_versions(monkeypatch):
+    calls = []
+
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 90}}
+            self.supported_quant_mode = {}
+
+    versions = {"h200_sxm": "prefill-version", "b200_sxm": "decode-version"}
+
+    def fake_latest_version(system, backend):
+        return versions[system]
+
+    def fake_get_database(system, backend, version):
+        calls.append((system, backend, version))
+        return FakeDatabase()
+
+    monkeypatch.setattr(task_module, "get_latest_database_version", fake_latest_version)
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+
+    task = TaskConfig(
+        serving_mode="disagg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        decode_system_name="b200_sxm",
+    )
+
+    assert task.backend_version == "prefill-version-decode-version"
+    assert ("h200_sxm", "trtllm", "prefill-version") in calls
+    assert ("b200_sxm", "trtllm", "decode-version") in calls
+    assert ("h200_sxm", "trtllm", task.backend_version) not in calls
+
+
 def test_taskconfig_profile_application():
     task = TaskConfig(
         serving_mode="agg",

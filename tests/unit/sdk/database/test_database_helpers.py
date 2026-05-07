@@ -163,6 +163,18 @@ def test_set_systems_paths_invalid_entry_raises(temp_systems_dir: Path, perf_dat
         perf_database.set_systems_paths(str(missing_path))
 
 
+def test_estimate_only_database_can_load_without_perf_files(perf_database):
+    """SOL/EMPIRICAL modes can instantiate from system specs without silicon files."""
+    from aiconfigurator.sdk import common
+
+    db = perf_database.get_database("h100_pcie", "trtllm", "estimate", allow_missing_data=True)
+
+    assert db is not None
+    db.set_default_database_mode(common.DatabaseMode.SOL)
+    result = db.query_mem_op(1024)
+    assert float(result) > 0
+
+
 # ----------------------------- get_latest_database_version -----------------------------
 
 
@@ -228,3 +240,93 @@ def test_get_latest_database_version_major_version_rc_is_newer(temp_systems_dir:
         assert latest == "1.0.0rc3"
     finally:
         perf_database.get_supported_databases = original
+
+
+def test_get_latest_database_version_preserves_suffix_order(perf_database):
+    mock_supported = {"h100": {"trtllm": ["v0.20_fix0719", "v0.20_fix0720"]}}
+
+    original = perf_database.get_supported_databases
+    try:
+        perf_database.get_supported_databases = lambda: mock_supported
+        latest = perf_database.get_latest_database_version("h100", "trtllm")
+        assert latest == "v0.20_fix0720"
+    finally:
+        perf_database.get_supported_databases = original
+
+
+def test_get_latest_database_version_two_part_rc_does_not_outrank_stable(perf_database):
+    mock_supported = {"h100": {"trtllm": ["1.2.0", "1.2rc1"]}}
+
+    original = perf_database.get_supported_databases
+    try:
+        perf_database.get_supported_databases = lambda systems_paths=None: mock_supported
+        latest = perf_database.get_latest_database_version("h100", "trtllm")
+        assert latest == "1.2.0"
+    finally:
+        perf_database.get_supported_databases = original
+
+
+def test_get_database_prefers_measured_later_path_over_estimate_fallback(tmp_path: Path, perf_database, monkeypatch):
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    for root in (first_root, second_root):
+        root.mkdir()
+        (root / "data_sys").mkdir()
+        (root / "sys.yaml").write_text(yaml.safe_dump({"data_dir": "data_sys"}), encoding="utf-8")
+    (second_root / "data_sys" / "trtllm" / "1.0.0").mkdir(parents=True)
+
+    class FakePerfDatabase:
+        def __init__(self, system, backend, version, systems_root):
+            self.systems_root = systems_root
+
+    monkeypatch.setattr(perf_database, "PerfDatabase", FakePerfDatabase)
+    cache_snapshot = dict(perf_database.databases_cache)
+    try:
+        perf_database.databases_cache.clear()
+
+        db = perf_database.get_database(
+            "sys",
+            "trtllm",
+            "1.0.0",
+            systems_paths=[str(first_root), str(second_root)],
+            allow_missing_data=True,
+        )
+
+        assert db.systems_root == str(second_root)
+    finally:
+        perf_database.databases_cache.clear()
+        perf_database.databases_cache.update(cache_snapshot)
+
+
+def test_get_database_skips_incomplete_version_directory(tmp_path: Path, perf_database, monkeypatch):
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    for root in (first_root, second_root):
+        root.mkdir()
+        (root / "data_sys").mkdir()
+        (root / "sys.yaml").write_text(yaml.safe_dump({"data_dir": "data_sys"}), encoding="utf-8")
+    incomplete_path = first_root / "data_sys" / "trtllm" / "1.0.0"
+    incomplete_path.mkdir(parents=True)
+    (incomplete_path / "INCOMPLETE.txt").write_text("collection did not finish", encoding="utf-8")
+    (second_root / "data_sys" / "trtllm" / "1.0.0").mkdir(parents=True)
+
+    class FakePerfDatabase:
+        def __init__(self, system, backend, version, systems_root):
+            self.systems_root = systems_root
+
+    monkeypatch.setattr(perf_database, "PerfDatabase", FakePerfDatabase)
+    cache_snapshot = dict(perf_database.databases_cache)
+    try:
+        perf_database.databases_cache.clear()
+
+        db = perf_database.get_database(
+            "sys",
+            "trtllm",
+            "1.0.0",
+            systems_paths=[str(first_root), str(second_root)],
+        )
+
+        assert db.systems_root == str(second_root)
+    finally:
+        perf_database.databases_cache.clear()
+        perf_database.databases_cache.update(cache_snapshot)

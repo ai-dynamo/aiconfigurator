@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Estimate-only system spec for SOL/EMPIRICAL/HYBRID exploration.
+# No built-in silicon performance database is provided for this PCIe SKU.
+
+data_dir: data/h100_pcie # relative to systems_dir
+gpu:
+  mem_bw: 2000000000000 # 2TB/s
+  mem_bw_empirical_scaling_factor: 0.8 # nonofficial correction based on observations
+  mem_empirical_constant_latency: 0.000003 # 3us nonofficial correction based on observations
+  mem_capacity: 85899345920 # 80GiB
+  bfloat16_tc_flops: 756500000000000 # 756.5TFLOPS (dense; NVIDIA specs list 1513TFLOPS with sparsity)
+  int8_tc_flops: 1513000000000000 # 1513TOPS (dense; NVIDIA specs list 3026TOPS with sparsity)
+  fp8_tc_flops: 1513000000000000 # 1513TFLOPS (dense; NVIDIA specs list 3026TFLOPS with sparsity)
+  power: 350 # Watt
+  sm_version: 90
+
+node:
+  num_gpus_per_node: 8
+  inter_node_bw: 50000000000 # Byte/s per GPU, single direction, assumes 1:1 400Gb/s fabric
+  intra_node_bw: 64000000000 # Byte/s per GPU, single direction, PCIe Gen5 x16 without NVLink
+  pcie_bw: 64000000000 # Byte/s, single direction, PCIe Gen5 x16
+  p2p_latency: 0.00001 # 10us nonofficial correction based on observations
+
+misc:
+  nccl_mem:
+    1: 0
+    2: 358612992 # 342MB
+    4: 411041792 # 392MB
+    8: 411041792 # 392MB
+  other_mem: 3758096384 # 3.5GB safety reserve
+  nccl_version: '2.27.3'
