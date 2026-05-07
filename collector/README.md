@@ -190,13 +190,18 @@ python3 collect.py --backend trtllm --measure_power --power_test_duration_sec 2.
 
 ### Output
 When power monitoring is enabled, performance CSV files will include additional columns:
-- `power`: Average power consumption during kernel execution (Watts)
+- `power`: Time-weighted average power consumption during kernel execution (Watts)
 - `power_limit`: GPU power management limit (Watts)
+- `power_min`: Minimum observed power sample (Watts)
+- `power_max`: Maximum observed power sample (Watts)
+- `power_energy_j`: Integrated GPU energy over the measured sample window (Joules)
+- `power_duration_s`: Sample window duration (seconds)
+- `power_sample_count`: Number of NVML power samples captured
 
 **Example output:**
 ```csv
-framework,version,device,op_name,kernel_source,gemm_dtype,m,n,k,latency,power,power_limit
-TRTLLM,1.2.0,NVIDIA H200 SXM,gemm,torch_flow,bfloat16,1024,4096,4096,0.234,523.4,700.0
+framework,version,device,op_name,kernel_source,gemm_dtype,m,n,k,latency,power,power_limit,power_min,power_max,power_energy_j,power_duration_s,power_sample_count
+TRTLLM,1.2.0,NVIDIA H200 SXM,gemm,torch_flow,bfloat16,1024,4096,4096,0.234,523.4,700.0,498.1,548.8,523.4,1.0,11
 ```
 
 ### Requirements
