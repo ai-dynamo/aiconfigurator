@@ -22,12 +22,8 @@ modelArtifacts:
     llm-d.ai/model: {{ served_name | replace('-', '_') | replace('/', '_') }}
   uri: {{ model_uri }}
   size: {{ llmd_config.model_cache_size | default('100Gi') }}
-  # hf_token should be the name of a K8s Secret containing the HF token
-  {% if service_config.hf_token -%}
-  authSecretName: {{ service_config.hf_token }}
-  {% else -%}
-  authSecretName: ""
-  {% endif -%}
+  # Name of a K8s Secret containing HF_TOKEN. Set via --generator-set LlmdConfig.hf_token_secret=<secret-name>
+  authSecretName: {{ llmd_config.hf_token_secret | default('') }}
   mountPath: {{ llmd_config.model_mount_path | default('/model-cache') }}
 
 # Accelerator configuration
@@ -69,9 +65,9 @@ decode:
         - {{ model_name }}
         - --served-model-name
         - {{ served_name }}
-        {%- for arg in agg_cli_args_list | default([]) %}
+        {% for arg in agg_cli_args_list | default([]) %}
         - {{ arg | tojson }}
-        {%- endfor %}
+        {% endfor %}
       env: []
       ports:
         - containerPort: 8200
@@ -125,9 +121,9 @@ decode:
         - {{ model_name }}
         - --served-model-name
         - {{ served_name }}
-        {%- for arg in decode_cli_args_list | default([]) %}
+        {% for arg in decode_cli_args_list | default([]) %}
         - {{ arg | tojson }}
-        {%- endfor %}
+        {% endfor %}
       env: []
       ports:
         - containerPort: 8200
@@ -173,9 +169,9 @@ prefill:
         - {{ model_name }}
         - --served-model-name
         - {{ served_name }}
-        {%- for arg in prefill_cli_args_list | default([]) %}
+        {% for arg in prefill_cli_args_list | default([]) %}
         - {{ arg | tojson }}
-        {%- endfor %}
+        {% endfor %}
       env: []
       ports:
         - containerPort: 8000
