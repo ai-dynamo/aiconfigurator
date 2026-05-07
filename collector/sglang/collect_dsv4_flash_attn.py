@@ -104,6 +104,8 @@ def _expand_grid():
 
 def _dsv4_flash_module_supported() -> bool:
     """Return True when the active SGLang runtime can load DeepSeek-V4 modules."""
+    if os.environ.get("COLLECTOR_FORCE_DSV4_FLASH_MODULES") == "1":
+        return True
     try:
         return importlib.util.find_spec("sglang.srt.models.deepseek_v4") is not None
     except ModuleNotFoundError:
