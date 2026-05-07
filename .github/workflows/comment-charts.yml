@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Comment Sanity Check Charts
+
+# Triggered after Create Sanity Check Charts completes. Because workflow_run
+# events execute in the base-repo context (not the PR's fork), GITHUB_TOKEN
+# is granted real write permissions, allowing this job to post or update the
+# PR comment for fork PRs as well as same-repo PRs. No PR code is executed
+# here — we only consume static artifacts produced by the upstream workflow.
+
+on:
+  workflow_run:
+    workflows: ["Create Sanity Check Charts"]
+    types: [completed]
+
+jobs:
+  post-comment:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Download chart artifact bundle
+        id: download
+        uses: actions/download-artifact@v4
+        with:
+          name: sanity-check-charts
+          path: ./artifact
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Post comment with charts
+        if: steps.download.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const artifactDir = './artifact';
+            const prNumberFile = path.join(artifactDir, 'pr-number.txt');
+            const commentFile = path.join(artifactDir, 'comment.md');
+
+            if (!fs.existsSync(prNumberFile)) {
+              console.log('No pr-number.txt in artifact, skipping comment.');
+              return;
+            }
+            if (!fs.existsSync(commentFile)) {
+              console.log('No comment.md in artifact, skipping comment.');
+              return;
+            }
+
+            const prNumberRaw = fs.readFileSync(prNumberFile, 'utf8').trim();
+            if (!/^[0-9]+$/.test(prNumberRaw)) {
+              console.log(`Invalid PR number in artifact: ${JSON.stringify(prNumberRaw)}`);
+              return;
+            }
+            const prNumber = parseInt(prNumberRaw, 10);
+            if (prNumber <= 0) {
+              console.log(`PR number must be positive: ${prNumber}`);
+              return;
+            }
+
+            // Hidden marker so subsequent runs reliably find their own comment
+            // even if other bots post comments containing similar text.
+            const COMMENT_MARKER = '<!-- charts-bot-comment -->';
+
+            let comment = fs.readFileSync(commentFile, 'utf8');
+            if (!comment.includes(COMMENT_MARKER)) {
+              comment = `${COMMENT_MARKER}\n${comment}`;
+            }
+
+            // Replace download link placeholder with a link to the upstream
+            // workflow run that produced the artifact (not this one).
+            const chartsDir = path.join(artifactDir, 'charts_output');
+            const pngFiles = fs.existsSync(chartsDir)
+              ? fs.readdirSync(chartsDir).filter(f => f.endsWith('.png'))
+              : [];
+            const triggeringRunId = context.payload.workflow_run.id;
+            // Use a global regex so every placeholder is handled and the
+            // optional trailing newline (LF or CRLF) is consumed when removing,
+            // even if comment.md doesn't terminate the placeholder line.
+            const placeholderRe = /download_link_placeholder\r?\n?/g;
+            if (pngFiles.length > 0) {
+              const workflowRunUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${triggeringRunId}`;
+              const downloadLink = `📥 [Download all sanity charts from workflow artifacts](${workflowRunUrl})`;
+              comment = comment.replace(placeholderRe, `${downloadLink}\n`);
+            } else {
+              comment = comment.replace(placeholderRe, '');
+            }
+
+            // Cap generated markdown so a malicious or buggy artifact cannot
+            // flood the PR with an oversized comment body.
+            const MAX_COMMENT_LENGTH = 65536;
+            const TRUNCATED_SUFFIX = '\n\n*(comment truncated to fit GitHub comment limit)*';
+            if (comment.length > MAX_COMMENT_LENGTH) {
+              comment = comment.slice(0, MAX_COMMENT_LENGTH - TRUNCATED_SUFFIX.length) + TRUNCATED_SUFFIX;
+            }
+
+            // Find existing bot comment so subsequent runs update it in place.
+            // Paginate so the lookup still works on PRs with >30 comments —
+            // listComments paginates at 30 by default and we'd otherwise miss
+            // the existing comment and post a duplicate.
+            const allComments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+
+            // Match on the hidden marker first; fall back to the legacy title
+            // string so we update (not duplicate) any existing comment that
+            // pre-dates this marker.
+            const botComment = allComments.find(
+              c => c.user.type === 'Bot' && (
+                c.body.includes(COMMENT_MARKER) ||
+                c.body.includes('Sanity Check Chart Generation Report')
+              )
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment,
+              });
+              console.log('Updated existing comment');
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: comment,
+              });
+              console.log('Created new comment');
+            }

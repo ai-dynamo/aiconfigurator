@@ -26,11 +26,27 @@ from sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_config import (
     get_default_config,
     get_moe_configs,
 )
+from sglang.srt.layers.moe.moe_runner.base import MoeRunnerConfig
 from sglang.srt.layers.moe.topk import StandardTopKOutput, TopKConfig, select_experts
 from sglang.srt.utils import is_hip
 
+# sglang >=0.5.10: fused_experts_impl uses @torch.compile on moe_sum_reduce_torch_compile
+# for tokens_in_chunk <= 32 and topk > 2.  torch.compile's JIT compilation can hang
+# during CUDA graph capture or in headless benchmark contexts.  Replace the compiled
+# function with an eager equivalent so benchmarks don't stall.
 try:
-    from flashinfer import fp4_quantize
+    import sglang.srt.layers.moe.fused_moe_triton.fused_moe as _fmoe_mod
+
+    def _eager_moe_sum_reduce(x, out, routed_scaling_factor):
+        torch.sum(x, dim=1, out=out)
+        out.mul_(routed_scaling_factor)
+
+    if hasattr(_fmoe_mod, "moe_sum_reduce_torch_compile"):
+        _fmoe_mod.moe_sum_reduce_torch_compile = _eager_moe_sum_reduce
+except Exception:
+    pass
+
+try:
     from sglang.srt.layers.moe.flashinfer_cutedsl_moe import (
         flashinfer_cutedsl_moe_masked,
     )
@@ -38,6 +54,13 @@ try:
     HAS_FLASHINFER_CUTE = True
 except ImportError:
     HAS_FLASHINFER_CUTE = False
+
+try:
+    from sglang.jit_kernel.nvfp4 import scaled_fp4_quant as _scaled_fp4_quant
+
+    _HAS_SCALED_FP4_QUANT = True
+except ImportError:
+    _HAS_SCALED_FP4_QUANT = False
 
 # Marlin int4 MoE kernel (W4A16) — much faster than the Triton GPTQ/AWQ path.
 _HAS_MARLIN_MOE = False
@@ -127,6 +150,11 @@ def get_moe_test_cases():
             ):
                 continue
 
+            swiglu_limit = None
+            # DeepSeek-V4 uses swiglu_limit=10
+            if "DeepSeek-V4" in common_moe_testcase.model_name:
+                swiglu_limit = 10
+
             test_cases.append(
                 [
                     moe_type,
@@ -140,6 +168,7 @@ def get_moe_test_cases():
                     common_moe_testcase.model_name,
                     common_moe_testcase.token_expert_distribution,
                     common_moe_testcase.power_law_alpha,
+                    swiglu_limit,
                 ]
             )
 
@@ -173,6 +202,7 @@ def benchmark_config(
     distributed: str = "power_law",
     power_law_alpha: float = 0,
     workloads: list["Rank0Workload"] | None = None,
+    swiglu_limit: float | None = None,
 ) -> float:
     device = torch.device("cuda")
     if workloads is not None:
@@ -251,39 +281,75 @@ def benchmark_config(
         w1_scale = marlin_moe_permute_scales(w1_scale, hidden_size, shard_intermediate_size, group_size)
         w2_scale = marlin_moe_permute_scales(w2_scale, shard_intermediate_size // 2, hidden_size, group_size)
 
-        x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+        x = None if workloads is not None else torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
 
-        if distributed == "power_law":
-            gating_list = [
-                power_law_logits_v3(num_tokens, num_experts, topk, 1, power_law_alpha).to(device)
-                for _ in range(num_iters)
-            ]
-        elif distributed == "balanced":
-            gating_list = [balanced_logits(num_tokens, num_experts, topk).to(device) for _ in range(num_iters)]
-        else:
-            gating_list = [
-                torch.randn(num_tokens, num_experts, dtype=torch.float32, device=device) for _ in range(num_iters)
-            ]
+        if workloads is None:
+            if distributed == "power_law":
+                gating_list = [
+                    power_law_logits_v3(num_tokens, num_experts, topk, 1, power_law_alpha).to(device)
+                    for _ in range(num_iters)
+                ]
+            elif distributed == "balanced":
+                gating_list = [balanced_logits(num_tokens, num_experts, topk).to(device) for _ in range(num_iters)]
+            else:
+                gating_list = [
+                    torch.randn(num_tokens, num_experts, dtype=torch.float32, device=device) for _ in range(num_iters)
+                ]
 
         def run_op(i):
-            gating = gating_list[i % num_iters]
-            new_topk = select_experts(x, gating, TopKConfig(top_k=topk))
-            fused_marlin_moe(
-                x,
-                w1_marlin,
-                w2_marlin,
-                w1_scale,
-                w2_scale,
-                gating,
-                new_topk.topk_weights,
-                new_topk.topk_ids,
-                num_bits=num_bits,
-                is_k_full=True,
-            )
+            if workloads is not None:
+                current_hidden_states = workloads[i % num_iters]["hidden_states"]
+                current_topk = workloads[i % num_iters]["topk_output"]
+                # fused_marlin_moe asserts gating_output.shape[0] == hidden_states.shape[0],
+                # but only uses topk_weights/topk_ids for routing. Provide a dummy.
+                dummy_gating = torch.zeros(
+                    current_hidden_states.shape[0],
+                    num_experts,
+                    device=current_hidden_states.device,
+                    dtype=torch.float32,
+                )
+                # build_rank0_local_workload sets remote expert IDs to -1
+                # and their weights to 0.  The Marlin CUDA kernel
+                # (moe_wna16_marlin_gemm) indexes weight tensors by expert
+                # ID without masking, so -1 causes illegal memory access.
+                # Clamp to 0; the zero weight ensures no contribution.
+                safe_topk_ids = current_topk.topk_ids.clamp(min=0)
+                fused_marlin_moe(
+                    current_hidden_states,
+                    w1_marlin,
+                    w2_marlin,
+                    w1_scale,
+                    w2_scale,
+                    dummy_gating,
+                    current_topk.topk_weights,
+                    safe_topk_ids,
+                    num_bits=num_bits,
+                    is_k_full=True,
+                )
+            else:
+                gating = gating_list[i % num_iters]
+                new_topk = select_experts(x, gating, TopKConfig(top_k=topk))
+                fused_marlin_moe(
+                    x,
+                    w1_marlin,
+                    w2_marlin,
+                    w1_scale,
+                    w2_scale,
+                    gating,
+                    new_topk.topk_weights,
+                    new_topk.topk_ids,
+                    num_bits=num_bits,
+                    is_k_full=True,
+                )
 
     elif use_nvfp4:
         if not HAS_FLASHINFER_CUTE:
             raise ImportError("FlashInfer CuteDSL not available")
+        if not _HAS_SCALED_FP4_QUANT:
+            raise ImportError(
+                "scaled_fp4_quant not available (sglang.jit_kernel.nvfp4); "
+                "NVFP4 MoE benchmarking requires this for correct weight layout"
+            )
 
         # Global scales and Alpha
         input_gs = torch.ones(num_experts, device=device, dtype=torch.float32)
@@ -297,18 +363,23 @@ def benchmark_config(
         w1_bf16 = torch.randn(num_experts, shard_intermediate_size, hidden_size, device=device, dtype=dtype)
         w2_bf16 = torch.randn(num_experts, hidden_size, shard_intermediate_size // 2, device=device, dtype=dtype)
 
-        w1_gs_exp = w1_gs.repeat_interleave(shard_intermediate_size).view(-1, 1)
-        w2_gs_exp = w2_gs.repeat_interleave(hidden_size).view(-1, 1)
+        # Quantize weights per-expert using scaled_fp4_quant which produces
+        # swizzled blockscales and maintains (num_experts, N, K//2) layout.
+        w1_list_q, w1_list_bs = [], []
+        for e in range(num_experts):
+            q, bs = _scaled_fp4_quant(w1_bf16[e], w1_gs[e])
+            w1_list_q.append(q)
+            w1_list_bs.append(bs)
+        w1 = torch.stack(w1_list_q)
+        w1_bs = torch.stack(w1_list_bs)
 
-        w1_fp4, w1_sf = fp4_quantize(w1_bf16.reshape(-1, hidden_size), w1_gs_exp, is_sf_swizzled_layout=False)
-        w2_fp4, w2_sf = fp4_quantize(
-            w2_bf16.reshape(-1, shard_intermediate_size // 2), w2_gs_exp, is_sf_swizzled_layout=False
-        )
-
-        w1 = w1_fp4.reshape(num_experts, shard_intermediate_size, hidden_size // 2)
-        w1_bs = w1_sf.view(torch.float8_e4m3fn).reshape(num_experts, shard_intermediate_size, -1).contiguous()
-        w2 = w2_fp4.reshape(num_experts, hidden_size, shard_intermediate_size // 4)
-        w2_bs = w2_sf.view(torch.float8_e4m3fn).reshape(num_experts, hidden_size, -1).contiguous()
+        w2_list_q, w2_list_bs = [], []
+        for e in range(num_experts):
+            q, bs = _scaled_fp4_quant(w2_bf16[e], w2_gs[e])
+            w2_list_q.append(q)
+            w2_list_bs.append(bs)
+        w2 = torch.stack(w2_list_q)
+        w2_bs = torch.stack(w2_list_bs)
 
         def get_masked_m(logits):
             _, topk_idx = torch.topk(torch.softmax(logits, dim=1), topk, dim=-1)
@@ -433,13 +504,27 @@ def benchmark_config(
             else:
                 current_hidden_states = workloads[i % num_iters]["hidden_states"]
                 current_topk_output = workloads[i % num_iters]["topk_output"]
+                # build_rank0_local_workload sets remote expert IDs to -1
+                # and their weights to 0.  The Triton fused_moe kernel
+                # indexes weight tensors by expert ID without masking,
+                # so -1 causes illegal memory access.
+                # Clamp to 0; the zero weight ensures no contribution.
+                current_topk_output = StandardTopKOutput(
+                    topk_weights=current_topk_output.topk_weights,
+                    topk_ids=current_topk_output.topk_ids.clamp(min=0),
+                    router_logits=current_topk_output.router_logits,
+                )
 
             with override_config(config):
+                moe_runner_config = MoeRunnerConfig(
+                    swiglu_limit=swiglu_limit,
+                )
                 fused_moe(
                     current_hidden_states,
                     w1,
                     w2,
                     current_topk_output,
+                    moe_runner_config=moe_runner_config,
                     use_fp8_w8a8=use_fp8_w8a8,
                     use_int8_w8a8=use_int8_w8a8,
                     use_int8_w8a16=use_int8_w8a16,
@@ -464,6 +549,10 @@ def benchmark_config(
         num_warmups=5,
         num_runs=num_iters,
         repeat_n=1,
+        # sglang >=0.5.10 adds @torch.compile paths inside fused_experts_impl
+        # (moe_sum_reduce_torch_compile) that can hang during CUDA graph capture.
+        # allow_graph_fail gracefully falls back to eager execution.
+        allow_graph_fail=True,
     ) as results:
         pass
 
@@ -486,6 +575,7 @@ def benchmark(
     distributed: str = "power_law",
     power_law_alpha: float = 0,
     workloads: list["Rank0Workload"] | None = None,
+    swiglu_limit: float | None = None,
 ) -> tuple[dict[str, int], float]:
     torch.cuda.manual_seed_all(0)
     benchmark_num_tokens = (
@@ -512,6 +602,7 @@ def benchmark(
             distributed=distributed,
             power_law_alpha=power_law_alpha,
             workloads=workloads,
+            swiglu_limit=swiglu_limit,
         )
         return kernel_time, power_stats
 
@@ -556,6 +647,7 @@ def benchmark(
         distributed=distributed,
         power_law_alpha=power_law_alpha,
         workloads=workloads,
+        swiglu_limit=swiglu_limit,
     )
     return kernel_time, power_stats
 
@@ -635,6 +727,7 @@ def run_moe_torch(
     model_name,
     distributed="power_law",
     power_law_alpha=0,
+    swiglu_limit=None,
     *,
     perf_filename,
     device="cuda:0",
@@ -693,6 +786,7 @@ def run_moe_torch(
             distributed=distributed,
             power_law_alpha=power_law_alpha,
             workloads=rank0_workloads,
+            swiglu_limit=swiglu_limit,
         )
     else:
         latency, power_stats = benchmark(
@@ -710,6 +804,7 @@ def run_moe_torch(
             block_shape=block_shape,
             distributed=distributed,
             power_law_alpha=power_law_alpha,
+            swiglu_limit=swiglu_limit,
         )
 
     log_perf(

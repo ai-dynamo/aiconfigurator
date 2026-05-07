@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-__compat__ = "sglang>=0.5.5"
+__compat__ = "sglang>=0.5.10"
 
 import math
 import os
@@ -23,8 +23,12 @@ from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.registry_types import PerfFile
 
 # Mocking for standalone collector script
-sglang.srt.layers.dp_attention._ATTN_TP_SIZE = 1
-sglang.srt.layers.dp_attention._ATTN_TP_RANK = 0
+# sglang >=0.5.10 removed _ATTN_TP_SIZE/_ATTN_TP_RANK/_ATTN_TP_GROUP from dp_attention;
+# get_attention_tp_size() now delegates to sglang.srt.distributed. Set the remaining
+# private variables for older versions and always override the public functions.
+if hasattr(sglang.srt.layers.dp_attention, "_ATTN_TP_SIZE"):
+    sglang.srt.layers.dp_attention._ATTN_TP_SIZE = 1
+    sglang.srt.layers.dp_attention._ATTN_TP_RANK = 0
 sglang.srt.layers.dp_attention._ATTN_DP_SIZE = 1
 sglang.srt.layers.dp_attention._ATTN_DP_RANK = 0
 sglang.srt.layers.dp_attention._LOCAL_ATTN_DP_SIZE = 1
@@ -106,8 +110,8 @@ class MockServerArgs:
         self.disable_chunked_prefix_cache = True
         self.disaggregation_mode = None
         self.flashinfer_mla_disable_ragged = False
-        self.disaggregation_mode = None
-        self.flashinfer_mla_disable_ragged = False
+        # sglang >=0.5.10: FlashAttentionBackend.__init__ reads disable_cuda_graph
+        self.disable_cuda_graph = True
 
 
 class MockModelRunner:

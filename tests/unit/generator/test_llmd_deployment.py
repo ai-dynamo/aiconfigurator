@@ -255,6 +255,54 @@ def test_llmd_sglang_default_image():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_llmd_hf_token_secret(backend):
+    """Test that hf_token_secret renders as authSecretName for both backends."""
+    params = {
+        "ServiceConfig": {
+            "model_path": "meta-llama/Llama-3.1-8B",
+            "served_model_name": "llama-3.1-8b",
+            "port": 8000,
+        },
+        "DynConfig": {"mode": "agg"},
+        "LlmdConfig": {"hf_token_secret": "my-hf-secret"},
+        "WorkerConfig": {"agg_workers": 1, "agg_gpus_per_worker": 1},
+        "params": {"agg": {"gpus_per_worker": 1}},
+        "agg_tensor_parallel_size": 1,
+        "agg_data_parallel_size": 1,
+        "agg_cli_args_list": [],
+    }
+
+    artifacts = render_backend_templates(param_values=params, backend=backend, deployment_target="llm-d")
+    values_content = artifacts["llm-d-values.yaml"]
+    assert "authSecretName: my-hf-secret" in values_content
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_llmd_hf_token_secret_default_empty(backend):
+    """Test that authSecretName defaults to empty when hf_token_secret is not set."""
+    params = {
+        "ServiceConfig": {
+            "model_path": "meta-llama/Llama-3.1-8B",
+            "port": 8000,
+        },
+        "DynConfig": {"mode": "agg"},
+        "LlmdConfig": {},
+        "WorkerConfig": {"agg_workers": 1, "agg_gpus_per_worker": 1},
+        "params": {"agg": {"gpus_per_worker": 1}},
+        "agg_tensor_parallel_size": 1,
+        "agg_data_parallel_size": 1,
+        "agg_cli_args_list": [],
+    }
+
+    artifacts = render_backend_templates(param_values=params, backend=backend, deployment_target="llm-d")
+    values_content = artifacts["llm-d-values.yaml"]
+    assert "authSecretName:" in values_content
+    assert "authSecretName: my-hf-secret" not in values_content
+
+
+@pytest.mark.unit
 def test_dynamo_deployment_still_works():
     """Test that Dynamo deployment target still works (default behavior)."""
     params = {
