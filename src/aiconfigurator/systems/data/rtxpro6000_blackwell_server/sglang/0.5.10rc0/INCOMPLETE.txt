@@ -1,0 +1,1 @@
+Module-only DeepSeek-V4 MHC data from the SGLang 0.5.10rc0 Blackwell container. Exclude this version from automatic latest database discovery.

@@ -406,6 +406,7 @@ SupportedSystems = {
     "l4",
     "l40s",
     "b60",
+    "rtxpro6000_blackwell_server",
 }
 
 """

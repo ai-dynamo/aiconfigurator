@@ -660,6 +660,9 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             # all tasks are dispatched, otherwise the new worker blocks
             # forever on queue.get().
             for i, p in enumerate(processes):
+                if p is None:
+                    continue
+
                 if not p.is_alive():
                     exit_code = p.exitcode
                     active_task_id = current_task_ids.get(i)
@@ -695,17 +698,18 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
 
                     if process_stats[i]["restarts"] > 8192:
                         logger.error(f"Process {i} exceeded restart limit, not restarting")
+                        processes[i] = None
+                        continue
+
+                    if consumed_sentinel.get(i, False):
+                        processes[i] = None
                         continue
 
                     remaining = len(task_infos) - progress_value.value
                     if remaining > 0:
-                        need_sentinel = consumed_sentinel.get(i, False)
-                        consumed_sentinel[i] = False
                         processes[i] = start_process(i)
-                        if need_sentinel:
-                            queue.put(None)
                     else:
-                        processes[i] = p  # keep dead process ref, skip restart
+                        processes[i] = None
 
             current = progress_value.value
             if current > pbar.n:
@@ -723,6 +727,8 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
 
     # Wait for processes
     for p in processes:
+        if p is None:
+            continue
         p.join(timeout=42)
         if p.is_alive():
             logger.warning(f"Process {p.pid} did not terminate, forcing...")
