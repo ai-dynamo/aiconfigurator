@@ -126,7 +126,7 @@ def get_moe_test_cases():
     elif sm_version in (100, 103):
         moe_list = ["bfloat16", "fp8_block", "nvfp4", "int4_wo"]
     else:
-        # SGLang 0.5.9/0.5.10 route nvfp4 MoE through FlashInfer CuteDSL, whose
+        # SGLang 0.5.10 routes nvfp4 MoE through FlashInfer CuteDSL, whose
         # runtime check only accepts sm_100/sm_103 and fails all sm_120 cases.
         moe_list = ["bfloat16", "fp8_block", "int4_wo"]
 
@@ -160,7 +160,7 @@ def get_moe_test_cases():
                     or (common_moe_testcase.ep == 8 and num_tokens >= 2)
                 )
             ):
-                # SGLang 0.5.9/0.5.10 use the default Triton fp8 block MoE config for
+                # SGLang 0.5.10 uses the default Triton fp8 block MoE config for
                 # Mixtral on SM120 at this TP slice. These token counts require
                 # 144 KiB shared memory, above the 99 KiB runtime limit.
                 continue
@@ -204,7 +204,7 @@ def get_moe_test_cases():
                     or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 8 and num_tokens >= 80)
                 )
             ):
-                # SGLang 0.5.9/0.5.10 fall back to the default Triton fp8 block MoE
+                # SGLang 0.5.10 falls back to the default Triton fp8 block MoE
                 # config for Nemotron-3 Super on SM120 for these TP/EP slices.
                 # That config requires 144 KiB shared memory, above the 99 KiB
                 # runtime limit.
@@ -227,7 +227,7 @@ def get_moe_test_cases():
                     or (common_moe_testcase.ep == 64 and num_tokens >= 8)
                 )
             ):
-                # SGLang 0.5.9/0.5.10 also use the default Triton fp8 block MoE config
+                # SGLang 0.5.10 also uses the default Triton fp8 block MoE config
                 # for Qwen3-30B-A3B on SM120. For these larger token counts that
                 # config requires 144 KiB shared memory, above the 99 KiB limit.
                 continue
@@ -271,7 +271,7 @@ def get_moe_test_cases():
                     )
                 )
             ):
-                # SGLang 0.5.9/0.5.10 use the default Triton fp8 block MoE config for
+                # SGLang 0.5.10 uses the default Triton fp8 block MoE config for
                 # Qwen3-235B-A22B on SM120. For these token counts that config
                 # requires 144 KiB shared memory, above the 99 KiB limit.
                 continue
@@ -315,7 +315,7 @@ def get_moe_test_cases():
                     )
                 )
             ):
-                # SGLang 0.5.9/0.5.10 use the default Triton fp8 block MoE config for
+                # SGLang 0.5.10 uses the default Triton fp8 block MoE config for
                 # Qwen3-Coder-480B-A35B on SM120. For these token counts that
                 # config requires 144 KiB shared memory, above the 99 KiB limit.
                 continue
@@ -338,7 +338,7 @@ def get_moe_test_cases():
                     or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 8 and num_tokens >= 80)
                 )
             ):
-                # SGLang 0.5.9/0.5.10 use the default Triton fp8 block MoE config for
+                # SGLang 0.5.10 uses the default Triton fp8 block MoE config for
                 # Qwen3.5-397B-A17B on SM120. For these token counts that config
                 # requires 144 KiB shared memory, above the 99 KiB limit.
                 continue
@@ -357,7 +357,7 @@ def get_moe_test_cases():
                     or (common_moe_testcase.ep == 8 and num_tokens >= 48)
                 )
             ):
-                # SGLang 0.5.9/0.5.10 use the default Triton fp8 block MoE config for
+                # SGLang 0.5.10 uses the default Triton fp8 block MoE config for
                 # GLM-5 on SM120 at this TP slice. For these token counts that
                 # config requires 144 KiB shared memory, above the 99 KiB limit.
                 continue
@@ -376,7 +376,7 @@ def get_moe_test_cases():
                     or (common_moe_testcase.ep == 8 and num_tokens >= 48)
                 )
             ):
-                # SGLang 0.5.9/0.5.10 use the default Triton fp8 block MoE config for
+                # SGLang 0.5.10 uses the default Triton fp8 block MoE config for
                 # DeepSeek-V3 on SM120 at this TP slice. For these token counts
                 # that config requires 144 KiB shared memory, above the 99 KiB
                 # limit.
@@ -441,7 +441,7 @@ def get_moe_test_cases():
                     or (common_moe_testcase.ep == 8 and num_tokens >= 64)
                 )
             ):
-                # SGLang 0.5.9/0.5.10 use the default Triton fp8 block MoE config for
+                # SGLang 0.5.10 uses the default Triton fp8 block MoE config for
                 # Kimi-K2 on SM120 at this TP slice. For these token counts that
                 # config requires 144 KiB shared memory, above the 99 KiB limit.
                 continue
@@ -466,7 +466,7 @@ def get_moe_test_cases():
                     or (common_moe_testcase.tp == 32 and num_tokens >= 320)
                 )
             ):
-                # SGLang 0.5.9/0.5.10 use the default Triton fp8 block MoE config for
+                # SGLang 0.5.10 uses the default Triton fp8 block MoE config for
                 # MiniMax-M2.5 on SM120. For these token counts that config
                 # requires 144 KiB shared memory, above the 99 KiB limit.
                 continue

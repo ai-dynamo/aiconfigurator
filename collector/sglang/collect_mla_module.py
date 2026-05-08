@@ -387,7 +387,21 @@ def _build_wideep_mla_test_cases(mode: str):
 
 
 def _skip_sm120_deepgemm_attention_modules() -> bool:
-    """Return True when SGLang's DeepGEMM-backed module path is unsupported."""
+    """Return True when SGLang's DeepGEMM-backed module path is unsupported.
+
+    On SM120 with the SGLang 0.5.10 runtime container, forcing these module
+    collectors produced no usable rows:
+    - WideEP MLA context/generation subprocesses failed after every shape was
+      skipped, ending with "MLA module ... produced no perf rows".
+    - DSA context/generation failed the same way, and the underlying DeepGEMM
+      calls reported unsupported Blackwell paths, e.g.
+      attention.hpp:136 and gemm.hpp:376 "Unsupported architecture".
+
+    Keep the skip as the default for this collector/runtime combo so the RTX
+    PRO 6000 collection reflects runnable SGLang 0.5.10 paths. Developers can
+    set COLLECTOR_FORCE_DEEPGEMM_ATTENTION_MODULES=1 to repro or validate a
+    newer runtime.
+    """
     return os.environ.get("COLLECTOR_FORCE_DEEPGEMM_ATTENTION_MODULES") != "1" and get_sm_version() >= 120
 
 
