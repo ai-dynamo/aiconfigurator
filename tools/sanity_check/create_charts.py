@@ -22,6 +22,8 @@ from aiconfigurator.sdk.perf_database import get_database
 os.environ["MPLBACKEND"] = "agg"
 import matplotlib.pyplot as plt
 
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
 # Import validate_database.ipynb jupyter notebook
 old_cwd = os.getcwd()
 os.chdir(os.path.abspath(os.path.dirname(__file__)))
@@ -29,6 +31,13 @@ import import_ipynb  # noqa: F401
 import validate_database
 
 os.chdir(old_cwd)
+
+
+CLI_SMOKE_REQUIRED_PERF_FILES = (
+    "gemm_perf.txt",
+    "context_attention_perf.txt",
+    "generation_attention_perf.txt",
+)
 
 
 class SkippedSiliconPoints:
@@ -123,11 +132,36 @@ def run_cli_smoke_test(system: str, backend: str, backend_version: str) -> tuple
         return (cmd, False, "", str(e))
 
 
+def should_run_cli_smoke_test(system: str, backend: str, backend_version: str) -> tuple[bool, str]:
+    """Return whether the default Qwen CLI smoke test has enough data to be meaningful."""
+    data_dir = os.path.join(
+        REPO_ROOT,
+        "src",
+        "aiconfigurator",
+        "systems",
+        "data",
+        system,
+        backend,
+        backend_version,
+    )
+    missing_files = [
+        perf_file
+        for perf_file in CLI_SMOKE_REQUIRED_PERF_FILES
+        if not os.path.exists(os.path.join(data_dir, perf_file))
+    ]
+    if missing_files:
+        return (
+            False,
+            f"required default-model perf files are not present for this backend version: {', '.join(missing_files)}",
+        )
+    return True, ""
+
+
 def get_changed_files(base_ref: str, head_ref: str) -> list[str]:
     """Get list of files changed between base and head refs."""
     try:
         result = subprocess.run(
-            ["git", "diff", "--name-only", base_ref, head_ref],
+            ["git", "diff", "--name-only", f"{base_ref}...{head_ref}"],
             capture_output=True,
             text=True,
             check=True,
@@ -242,9 +276,15 @@ def create_charts(
                 else:
                     f.write(f"- `{chart_op_name}` ✅\n")
 
+    _max_output_len = 4000
+    run_smoke, skip_reason = should_run_cli_smoke_test(system, backend, backend_version)
+    with open(output_md_file, "a") as f:
+        if not run_smoke:
+            f.write(f"- CLI smoke test Skipped ⚠️: {skip_reason}\n")
+            return
+
     # Smoke test: run aiconfigurator cli default for this system/backend/version
     smoke_cmd, smoke_ok, smoke_stdout, smoke_stderr = run_cli_smoke_test(system, backend, backend_version)
-    _max_output_len = 4000
     with open(output_md_file, "a") as f:
         if smoke_ok:
             f.write("- CLI smoke test ✅\n")
@@ -313,6 +353,8 @@ def main():
                 continue
 
             perf_file = parts[4]
+            if perf_file == "INCOMPLETE.txt":
+                continue
             system_backend_version_to_changed_files[(system, backend, backend_version)].append(perf_file)
 
         else:
