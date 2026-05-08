@@ -276,7 +276,7 @@ def log_final_summary(
     chosen_exp: str,
     best_throughputs: dict[str, float],
     best_configs: dict[str, pd.DataFrame],
-    pareto_fronts: dict[str, pd.DataFrame],
+    pareto_fronts: dict[str, pd.DataFrame | None],
     task_configs: dict[str, TaskConfig],
     mode: str,
     pareto_x_axis: dict[str, str] | None = None,
@@ -464,7 +464,7 @@ def log_final_summary(
 def save_results(
     args,
     best_configs: dict[str, pd.DataFrame],
-    pareto_fronts: dict[str, pd.DataFrame],
+    pareto_fronts: dict[str, pd.DataFrame | None],
     task_configs: dict[str, TaskConfig],
     save_dir: str,
     generated_backend_version: str | None = None,
@@ -546,9 +546,9 @@ def save_results(
         color_idx = 0
 
         for exp_name, pareto_df in pareto_fronts.items():
-            if pareto_axis.get(exp_name, global_x_axis) != global_x_axis:
+            if pareto_df is None or pareto_df.empty:
                 continue
-            if pareto_df.empty:
+            if pareto_axis.get(exp_name, global_x_axis) != global_x_axis:
                 continue
 
             # Check if this is multi-backend mode (pareto_df has "backend" column)
