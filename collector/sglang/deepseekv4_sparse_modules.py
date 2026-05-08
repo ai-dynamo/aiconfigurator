@@ -27,6 +27,10 @@ shared): ``isl`` carries M, ``step`` carries past_kv, ``compress_ratio``
 distinguishes CSA(=4) / HCA(=128).
 """
 
+# Requires an SGLang build with DeepSeek-V4 support. Stock lmsysorg/sglang:v*
+# images may not include the required deepseek_v4 modules; use a
+# deepseek-v4-blackwell/deepseek-v4-grace-blackwell image or matching Dynamo
+# sglang-runtime:*deepseek-v4* image.
 from __future__ import annotations
 
 import argparse
