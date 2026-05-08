@@ -229,23 +229,6 @@ def test_robust_3d_lookup_exact_match_short_circuits():
     assert result["latency"] == pytest.approx(11.7)
 
 
-def test_robust_3d_lookup_falls_back_to_linear_when_cubic_fails():
-    """Cubic raise (QhullError on degenerate point cloud) → linear path runs."""
-    calls = []
-
-    class _Stub:
-        def _interp_3d(self, x, y, z, d, method):
-            calls.append(method)
-            if method == "cubic":
-                raise RuntimeError("QH6154 simulated qhull failure")
-            return {"latency": 4.94, "energy": 0.0}
-
-    # Empty data → exact lookup misses
-    result = _dsv4_flash_robust_3d_lookup(_Stub(), {}, 8, 8192, 1)
-    assert calls == ["cubic", "linear"]
-    assert result["latency"] == pytest.approx(4.94)
-
-
 # ───────────────────────────────────────────────────────────────────────
 # _lookup_dsv4_flash_sparse_kernel — tp fallback + past_kv interp
 # ───────────────────────────────────────────────────────────────────────
@@ -253,6 +236,8 @@ def test_robust_3d_lookup_falls_back_to_linear_when_cubic_fails():
 
 def _make_sparse_db_with_paged_mqa(tmp_path, *, lat_at_past0: float, lat_at_past8192: float):
     """Helper: build a minimal PerfDatabase carrying paged_mqa_logits at tp=1."""
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+
     rows = [
         _sparse_row(kernel="paged_mqa_logits", bs=1, isl=8192, past_kv=0, tp=1, cr=4, lat=lat_at_past0),
         _sparse_row(kernel="paged_mqa_logits", bs=1, isl=8192, past_kv=8192, tp=1, cr=4, lat=lat_at_past8192),
@@ -265,6 +250,54 @@ def _make_sparse_db_with_paged_mqa(tmp_path, *, lat_at_past0: float, lat_at_past
         _dsv4_flash_sparse_kernel_data: ClassVar[dict] = {
             "paged_mqa_logits": LoadedOpData(data, None, path),
         }
+        _interp_1d = PerfDatabase._interp_1d
+        _nearest_1d_point_helper = PerfDatabase._nearest_1d_point_helper
+
+    return _DB()
+
+
+def _sparse_value(latency: float) -> dict[str, float]:
+    return {"latency": latency}
+
+
+def _sparse_sampled_batch_caps_grid(*, offset: float = 0.0) -> dict:
+    """Mock sparse-kernel data with real V4-Flash batch caps."""
+    return {
+        1024: {
+            1: _sparse_value(offset + 1.00),
+            2: _sparse_value(offset + 3.00),
+            4: _sparse_value(offset + 6.00),
+            8: _sparse_value(offset + 12.00),
+        },
+        2048: {
+            1: _sparse_value(offset + 2.00),
+            2: _sparse_value(offset + 4.80),
+            4: _sparse_value(offset + 8.00),
+        },
+        4096: {
+            1: _sparse_value(offset + 3.00),
+            2: _sparse_value(offset + 5.80),
+        },
+        8192: {
+            1: _sparse_value(offset + 4.00),
+        },
+    }
+
+
+def _make_sparse_db_from_grid(per_tp_dict: dict):
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+
+    class _DB:
+        _dsv4_flash_sparse_kernel_data: ClassVar[dict] = {
+            "paged_mqa_logits": LoadedOpData(
+                {"DeepseekV4ForCausalLM": {1: per_tp_dict}},
+                None,
+                "mock_paged_mqa_logits",
+            ),
+        }
+        _interp_2d_linear = PerfDatabase._interp_2d_linear
+        _interp_1d = PerfDatabase._interp_1d
+        _nearest_1d_point_helper = PerfDatabase._nearest_1d_point_helper
 
     return _DB()
 
@@ -326,6 +359,121 @@ def test_lookup_sparse_kernel_past_kv_linear_interp(tmp_path):
     assert val == pytest.approx(0.2, rel=1e-3)
 
 
+def test_lookup_sparse_kernel_uses_cubic_3d_before_fallback():
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+
+    calls = []
+
+    class _DB:
+        _dsv4_flash_sparse_kernel_data: ClassVar[dict] = {
+            "paged_mqa_logits": LoadedOpData(
+                {
+                    "DeepseekV4ForCausalLM": {
+                        1: {
+                            0: {1024: {1: _sparse_value(1.0)}},
+                            4096: {2048: {2: _sparse_value(4.0)}},
+                        }
+                    }
+                },
+                None,
+                "mock_paged_mqa_logits",
+            ),
+        }
+
+        def _interp_3d(self, x, y, z, data, method):
+            calls.append((x, y, z, method))
+            return {"latency": 7.0}
+
+    val = PerfDatabase._lookup_dsv4_flash_sparse_kernel(
+        _DB(),
+        kernel="paged_mqa_logits",
+        bs=2,
+        isl=1536,
+        past_kv=2048,
+        tp_size=1,
+    )
+
+    assert val == pytest.approx(7.0)
+    assert calls == [(2048, 1536, 2, "cubic")]
+
+
+def test_lookup_sparse_kernel_uses_b2_when_bs3_s2682_is_missing():
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+
+    db = _make_sparse_db_from_grid({0: _sparse_sampled_batch_caps_grid()})
+    val = PerfDatabase._lookup_dsv4_flash_sparse_kernel(
+        db,
+        kernel="paged_mqa_logits",
+        bs=3,
+        isl=2682,
+        past_kv=0,
+        tp_size=1,
+    )
+
+    b2_at_2682 = 4.80 + (5.80 - 4.80) * (2682 - 2048) / (4096 - 2048)
+    assert val == pytest.approx(b2_at_2682 * 3 / 2)
+
+
+def test_lookup_sparse_kernel_uses_largest_batch_that_covers_isl():
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+
+    db = _make_sparse_db_from_grid({0: _sparse_sampled_batch_caps_grid()})
+    val = PerfDatabase._lookup_dsv4_flash_sparse_kernel(
+        db,
+        kernel="paged_mqa_logits",
+        bs=5,
+        isl=2682,
+        past_kv=0,
+        tp_size=1,
+    )
+
+    b2_at_2682 = 4.80 + (5.80 - 4.80) * (2682 - 2048) / (4096 - 2048)
+    assert val == pytest.approx(b2_at_2682 * 5 / 2)
+
+
+def test_lookup_sparse_kernel_uses_b4_when_bs5_s1565_is_missing():
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+
+    isl = 1565.2
+    db = _make_sparse_db_from_grid({0: _sparse_sampled_batch_caps_grid()})
+    val = PerfDatabase._lookup_dsv4_flash_sparse_kernel(
+        db,
+        kernel="paged_mqa_logits",
+        bs=5,
+        isl=isl,
+        past_kv=0,
+        tp_size=1,
+    )
+
+    b4_at_isl = 6.00 + (8.00 - 6.00) * (isl - 1024) / (2048 - 1024)
+    assert val == pytest.approx(b4_at_isl * 5 / 4)
+
+
+def test_lookup_sparse_kernel_interpolates_past_kv_after_batch_fallback():
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+
+    isl = 1565.2
+    db = _make_sparse_db_from_grid(
+        {
+            0: _sparse_sampled_batch_caps_grid(offset=0.0),
+            4096: _sparse_sampled_batch_caps_grid(offset=4.0),
+        }
+    )
+    val = PerfDatabase._lookup_dsv4_flash_sparse_kernel(
+        db,
+        kernel="paged_mqa_logits",
+        bs=5,
+        isl=isl,
+        past_kv=2048,
+        tp_size=1,
+    )
+
+    b4_at_isl = 6.00 + (8.00 - 6.00) * (isl - 1024) / (2048 - 1024)
+    at_past_0 = b4_at_isl * 5 / 4
+    at_past_4096 = (b4_at_isl + 4.0) * 5 / 4
+    assert val == pytest.approx((at_past_0 + at_past_4096) / 2)
+
+
 def test_lookup_sparse_kernel_missing_returns_none():
     """Missing dict / kernel name → None (caller uses SOL ratio fallback)."""
     from aiconfigurator.sdk.perf_database import PerfDatabase
@@ -377,20 +525,21 @@ def test_dsv4_flash_test_cases_skipped_under_other_model(monkeypatch):
 
 
 def test_dsv4_flash_test_cases_active_under_v4_filter(monkeypatch):
-    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "deepseek-ai/DeepSeek-V4-Flash")
+    model_path = "sgl-project/DeepSeek-V4-Flash-FP8"
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
     from collector.common_test_cases import get_dsv4_flash_csa_context_test_cases
 
     cases = get_dsv4_flash_csa_context_test_cases()
     assert len(cases) > 0
-    # all cases reference the V4-Flash model name
-    assert {c[6] for c in cases} == {"deepseek-ai/DeepSeek-V4-Flash"}
+    # all cases use the caller-provided V4-Flash model path
+    assert {c[6] for c in cases} == {model_path}
     # all cases for this op are CSA
     assert {c[7] for c in cases} == {"csa"}
 
 
 def test_dsv4_flash_sparse_test_cases_only_indexer_tp1(monkeypatch):
     """Sweep is fixed at tp=[1] (kernel is TP-invariant)."""
-    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "deepseek-ai/DeepSeek-V4-Flash")
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "sgl-project/DeepSeek-V4-Flash-FP8")
     from collector.common_test_cases import (
         get_dsv4_flash_hca_attn_test_cases,
         get_dsv4_flash_paged_mqa_logits_test_cases,

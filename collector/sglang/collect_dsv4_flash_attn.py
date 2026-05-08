@@ -35,7 +35,6 @@ import copy
 import gc
 import json
 import os
-import random
 import shutil
 import socket
 import subprocess
@@ -155,6 +154,29 @@ CLI_DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
 _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
 
 
+_PORTS_PER_GPU = 1000
+_DSV4_FLASH_PORT_RETRIES = 5
+
+
+def _port_is_available(port: int) -> bool:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        # TCPStore may listen on any local interface; check the same address
+        # family instead of only 127.0.0.1.
+        s.bind(("0.0.0.0", port))
+        s.listen(1)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _nccl_port_for_attempt(gpu_id: int, attempt: int) -> int:
+    """Use a deterministic, GPU-scoped TCPStore port."""
+    return 40000 + gpu_id * _PORTS_PER_GPU + attempt
+
+
 def _pick_free_port(gpu_id: int) -> int:
     """Return a free TCP port from a ``gpu_id``-scoped 1000-port range.
 
@@ -162,23 +184,15 @@ def _pick_free_port(gpu_id: int) -> int:
     rendezvous.  Up to 8 collector workers run in parallel, each pinned
     to one GPU.  Partitioning the port space by ``gpu_id`` makes
     cross-worker collision impossible: worker N's candidate set is
-    [40000 + N*1000, 40000 + N*1000 + 999], disjoint from every other
-    worker's.  The bind / close / subprocess re-bind window inside one
-    worker is harmless because no peer worker can race for the same
-    port (unrelated system services landing on our specific freed port
-    in <1ms is negligibly rare).
+    [40000 + N*1000, 40000 + N*1000 + 999].  Kept as a fallback for
+    direct/manual use; normal collect.py entrypoints pass
+    ``AIC_DSV4_FLASH_NCCL_PORT`` explicitly.
     """
-    base = 40000 + gpu_id * 1000
-    for _ in range(100):
-        port = random.randint(base, base + 999)
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            s.bind(("127.0.0.1", port))
-        except OSError:
-            s.close()
-            continue
-        s.close()
-        return port
+    base = _nccl_port_for_attempt(gpu_id, 0)
+    for offset in range(_PORTS_PER_GPU):
+        port = _nccl_port_for_attempt(gpu_id, offset)
+        if _port_is_available(port):
+            return port
     raise RuntimeError(f"no free port in [{base}, {base + 999}] for gpu_id={gpu_id}")
 
 
@@ -464,6 +478,10 @@ def _load_model_runner(
         gemm_type=gemm_type,
     )
     gpu_id = int(device.split(":")[-1]) if ":" in device else 0
+    # CUDA_VISIBLE_DEVICES remaps every child to cuda:0; keep the physical GPU
+    # id for NCCL port sharding so parallel workers do not collide.
+    port_shard = int(os.environ.get("AIC_DSV4_FLASH_PORT_SHARD", gpu_id))
+    nccl_port = int(os.environ.get("AIC_DSV4_FLASH_NCCL_PORT") or _pick_free_port(port_shard))
 
     server_args = ServerArgs(
         model_path=local_model_path,
@@ -501,7 +519,7 @@ def _load_model_runner(
         f"attn_kind={attn_kind}, backend=compressed, kv_cache_dtype={kv_cache_dtype}, "
         f"max_total_tokens={max_total_tokens}, shrink_unused_moe={shrink_unused_moe}, "
         f"disable_weight_quant={disable_weight_quant}, gemm_type={gemm_type}, "
-        f"quantization={server_args.quantization}, tp_size={tp_size}"
+        f"quantization={server_args.quantization}, tp_size={tp_size}, nccl_port={nccl_port}"
     )
 
     _set_envs_and_config(server_args)
@@ -517,7 +535,7 @@ def _load_model_runner(
             pp_size=1,
             moe_ep_rank=0,
             moe_ep_size=1,
-            nccl_port=_pick_free_port(gpu_id),
+            nccl_port=nccl_port,
             server_args=server_args,
         )
     allocator = model_runner.token_to_kv_pool_allocator
@@ -1029,6 +1047,7 @@ def _run_subprocess(
     """
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    env["AIC_DSV4_FLASH_PORT_SHARD"] = str(gpu_id)
     env.setdefault("SGLANG_APPLY_CONFIG_BACKUP", "none")
     env.setdefault("SGLANG_LOAD_FORMAT", "dummy")
     # Hard-disable DeepGEMM bulk pre-compile.  First sl in this sweep
@@ -1051,24 +1070,63 @@ def _run_subprocess(
         f")\n"
     )
 
-    proc = subprocess.Popen(
-        [sys.executable, "-c", code],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        cwd=os.path.dirname(os.path.abspath(__file__)),
+    # Persist subprocess output to a per-task log so we can inspect failures
+    # even when the child dies before stdout is streamed (e.g. OOM kill).
+    log_dir = os.path.join(tempfile.gettempdir(), "dsv4_flash_subproc_logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(
+        log_dir,
+        f"{attn_kind}_{mode}_bs{batch_size}_tp{tp_size}_{gemm_type}_gpu{gpu_id}.log",
     )
-    try:
-        stdout, _ = proc.communicate(timeout=3600)  # up to 1 hour per (kind, tp, gemm, bs)
-        if stdout:
-            print(stdout.decode("utf-8", errors="replace"))
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-    if proc.returncode != 0:
+
+    def _run_once(nccl_port: int) -> tuple[int, str]:
+        attempt_env = env.copy()
+        attempt_env["AIC_DSV4_FLASH_NCCL_PORT"] = str(nccl_port)
+        with open(log_path, "wb") as logf:
+            proc = subprocess.Popen(
+                [sys.executable, "-c", code],
+                env=attempt_env,
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+            )
+            try:
+                proc.wait(timeout=3600)  # up to 1 hour per (kind, tp, gemm, bs)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as logf:
+                log_text = logf.read()
+        except OSError:
+            log_text = ""
+
+        # Echo the log so it shows up in the parent's collector log.
+        if log_text:
+            print(log_text)
+        return proc.returncode, log_text
+
+    max_attempts = _DSV4_FLASH_PORT_RETRIES
+    for attempt in range(max_attempts):
+        nccl_port = _nccl_port_for_attempt(gpu_id, attempt)
+        returncode, log_text = _run_once(nccl_port)
+
+        if returncode == 0:
+            return
+
+        is_port_race = "EADDRINUSE" in log_text or "address already in use" in log_text
+        if is_port_race and attempt + 1 < max_attempts:
+            print(
+                f"[dsv4-collector] retrying after NCCL/TCPStore port collision "
+                f"on nccl_port={nccl_port} ({attempt + 1}/{max_attempts}); log: {log_path}"
+            )
+            continue
+
         raise RuntimeError(
             f"dsv4_flash_{attn_kind}_{mode} subprocess failed for "
-            f"(bs={batch_size}, tp={tp_size}, gemm={gemm_type}); exit={proc.returncode}"
+            f"(bs={batch_size}, tp={tp_size}, gemm={gemm_type}); "
+            f"exit={returncode}; log: {log_path}"
         )
 
 
