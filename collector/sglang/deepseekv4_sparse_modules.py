@@ -30,6 +30,7 @@ distinguishes CSA(=4) / HCA(=128).
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import sys
 import traceback
@@ -95,12 +96,16 @@ except ModuleNotFoundError:
 def get_dsv4_flash_paged_mqa_logits_test_cases():
     from collector.common_test_cases import get_dsv4_flash_paged_mqa_logits_test_cases as _impl
 
+    if not _dsv4_sparse_kernel_supported("paged_mqa_logits"):
+        return []
     return _impl()
 
 
 def get_dsv4_flash_hca_attn_test_cases():
     from collector.common_test_cases import get_dsv4_flash_hca_attn_test_cases as _impl
 
+    if not _dsv4_sparse_kernel_supported("hca_attn"):
+        return []
     return _impl()
 
 
@@ -183,6 +188,24 @@ KERNEL_TO_DEFAULT_FILENAME = {
     "paged_mqa_logits": "dsv4_flash_paged_mqa_logits_module_perf.txt",
     "hca_attn": "dsv4_flash_hca_attn_module_perf.txt",
 }
+
+
+def _dsv4_sparse_kernel_supported(kernel: str) -> bool:
+    """Return True when the active runtime can execute a DSV4 sparse kernel."""
+    if os.environ.get("COLLECTOR_FORCE_DSV4_FLASH_SPARSE") == "1":
+        return True
+    if kernel == "hca_attn":
+        return importlib.util.find_spec("flash_mla") is not None
+    if kernel == "paged_mqa_logits":
+        if importlib.util.find_spec("deep_gemm") is None:
+            return False
+        if torch.cuda.is_available():
+            major, _minor = torch.cuda.get_device_capability()
+            if major >= 12:
+                return False
+        return True
+    raise ValueError(f"unknown DSV4 sparse kernel: {kernel}")
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Bench helper
@@ -654,9 +677,9 @@ def run_dsv4_sparse_kernel_worker(
         return
     except Exception:
         traceback.print_exc()
-        print(f"  failed at bs={bs} isl={isl} past_kv={past_kv}; skipping")
+        print(f"  failed at bs={bs} isl={isl} past_kv={past_kv}")
         torch.cuda.empty_cache()
-        return
+        raise
 
     latency_ms = float(bench_result["latency_ms"])
     power_stats = bench_result.get("power_stats")

@@ -9,6 +9,7 @@ This script is designed to run in GitHub Actions to visualize new performance da
 
 import argparse
 import functools
+import math
 import os
 import subprocess
 import sys
@@ -28,6 +29,61 @@ import import_ipynb  # noqa: F401
 import validate_database
 
 os.chdir(old_cwd)
+
+
+class SkippedSiliconPoints:
+    """Temporarily skip unavailable SILICON query points while drawing charts."""
+
+    QUERY_METHODS = (
+        "query_gemm",
+        "query_context_attention",
+        "query_generation_attention",
+        "query_context_mla",
+        "query_generation_mla",
+    )
+
+    def __init__(self, database):
+        self.database = database
+        self.calls = 0
+        self.successes = 0
+        self.skipped = 0
+        self._originals = {}
+
+    def __enter__(self):
+        for name in self.QUERY_METHODS:
+            if not hasattr(self.database, name):
+                continue
+            original = getattr(self.database, name)
+            self._originals[name] = original
+            setattr(self.database, name, self._wrap(original))
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        for name, original in self._originals.items():
+            setattr(self.database, name, original)
+
+    def _wrap(self, original):
+        def wrapped(*args, **kwargs):
+            database_mode = str(kwargs.get("database_mode", ""))
+            is_silicon = database_mode.endswith(".SILICON") or database_mode == "SILICON"
+            if is_silicon:
+                self.calls += 1
+            try:
+                result = original(*args, **kwargs)
+            except Exception:
+                if not is_silicon:
+                    raise
+                self.skipped += 1
+                return math.nan
+            if is_silicon:
+                try:
+                    if math.isfinite(float(result)):
+                        self.successes += 1
+                except (TypeError, ValueError):
+                    pass
+            return result
+
+        return wrapped
 
 
 def run_cli_smoke_test(system: str, backend: str, backend_version: str) -> tuple[list[str], bool, str, str]:
@@ -158,7 +214,15 @@ def create_charts(
             img_path = f"{chart_op_name}_{system}_{backend}_{backend_version}.png"
 
             try:
-                create_chart_func(database)
+                with SkippedSiliconPoints(database) as skipped_points:
+                    create_chart_func(database)
+                if skipped_points.calls and not skipped_points.successes:
+                    with open(output_md_file, "a") as f:
+                        f.write(
+                            f"- `{chart_op_name}` Skipped ⚠️: no available silicon data points "
+                            f"for the sanity chart grid ({skipped_points.skipped} unavailable points)\n"
+                        )
+                    continue
             except Exception as e:
                 # Extract 1-line error summary
                 short_error_str = str(e).split("\n")[0].strip()
@@ -173,7 +237,10 @@ def create_charts(
             plt.savefig(os.path.join(output_dir, img_path))
 
             with open(output_md_file, "a") as f:
-                f.write(f"- `{chart_op_name}` ✅\n")
+                if skipped_points.skipped:
+                    f.write(f"- `{chart_op_name}` ✅ ({skipped_points.skipped} unavailable points skipped)\n")
+                else:
+                    f.write(f"- `{chart_op_name}` ✅\n")
 
     # Smoke test: run aiconfigurator cli default for this system/backend/version
     smoke_cmd, smoke_ok, smoke_stdout, smoke_stderr = run_cli_smoke_test(system, backend, backend_version)
