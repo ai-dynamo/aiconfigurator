@@ -63,6 +63,18 @@ def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict) -> dict:
     }
 
 
+def _generation_deepseek_v4_data(compress_ratio: int, attn_dict: dict) -> dict:
+    return {
+        common.KVCacheQuantMode.fp8: {
+            common.GEMMQuantMode.fp8_block: {
+                "DeepseekV4ForCausalLM": {
+                    compress_ratio: attn_dict,
+                },
+            },
+        },
+    }
+
+
 def _dsv4_flash_sampled_batch_caps_grid() -> dict:
     """Mock the real V4-Flash sampled shape: b=1/2/4/8 with shrinking max s."""
     return {
@@ -84,6 +96,22 @@ def _dsv4_flash_sampled_batch_caps_grid() -> dict:
             },
             8192: {
                 1: _deepseek_v4_value(4.00),
+            },
+        }
+    }
+
+
+def _dsv4_flash_generation_sampled_grid() -> dict:
+    """Generation shape is [tp][b][s_total]; collector's minimum s_total is 2."""
+    return {
+        8: {
+            1: {
+                2: _deepseek_v4_value(0.20),
+                5: _deepseek_v4_value(0.50),
+            },
+            2: {
+                2: _deepseek_v4_value(0.40),
+                5: _deepseek_v4_value(1.00),
             },
         }
     }
@@ -216,6 +244,43 @@ class TestDeepSeekV4AttentionModule:
         )
 
         assert next_step[1] > current[1]
+
+    def test_generation_robust_lookup_extrapolates_query_below_min_sampled_s_total(self, mutable_comprehensive_perf_db):
+        """Regression: query s_total=1 is below the collector's sampled s_total=2."""
+        db = mutable_comprehensive_perf_db
+        mock_grid = _dsv4_flash_generation_sampled_grid()
+
+        result = _dsv4_flash_robust_3d_lookup(db, mock_grid, 8, 1, 1, batch_axis="y")
+
+        expected = 0.20 + (0.50 - 0.20) * (1 - 2) / (5 - 2)
+        assert math.isclose(result["latency"], expected, rel_tol=1e-6)
+        assert math.isclose(result["energy"], expected * 10.0, rel_tol=1e-6)
+
+    def test_generation_silicon_extrapolates_query_below_min_sampled_s_total(self, mutable_comprehensive_perf_db):
+        """Full-query regression for generated query b=1, s_total=1, tp=8."""
+        db = mutable_comprehensive_perf_db
+        mock_grid = _dsv4_flash_generation_sampled_grid()
+        db._generation_deepseek_v4_attention_module_data = LoadedOpData(
+            _generation_deepseek_v4_data(4, mock_grid),
+            common.PerfDataFilename.deepseek_v4_generation_module,
+            "mock_dsv4_flash_generation_module_tp8",
+        )
+        kwargs = _deepseek_v4_attn_kwargs(4)
+        kwargs.pop("prefix")
+
+        result = db.query_generation_deepseek_v4_attention_module(
+            **{
+                **kwargs,
+                "b": 1,
+                "s": 1,
+                "num_heads": 8,
+            },
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        expected = 0.20 + (0.50 - 0.20) * (1 - 2) / (5 - 2)
+        assert float(result) == pytest.approx(expected)
+        assert result.energy == pytest.approx(expected * 10.0)
 
     def test_csa_topk_changes_attention_workload(self, comprehensive_perf_db):
         base = _deepseek_v4_attn_kwargs(4)
@@ -363,6 +428,7 @@ class TestDeepSeekV4AttentionModule:
         b4_at_avg_isl = 6.00 + (8.00 - 6.00) * (avg_isl - 1024) / (2048 - 1024)
         expected = b4_at_avg_isl * 5 / 4
         assert math.isclose(result["latency"], expected, rel_tol=1e-6)
+        assert math.isclose(result["energy"], expected * 10.0, rel_tol=1e-6)
 
     def test_robust_3d_lookup_uses_b1_for_bs1_short_single_attn_shape(self, mutable_comprehensive_perf_db):
         """Regression: bs=1 has no smaller batch, so use b=1 along the s axis."""

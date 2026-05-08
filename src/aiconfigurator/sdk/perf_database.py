@@ -1350,7 +1350,7 @@ def _dsv4_flash_tp_from_num_heads(num_heads: int) -> int:
     return max(1, DSV4_FLASH_NATIVE_HEADS // max(num_heads, 1))
 
 
-def _dsv4_flash_robust_3d_lookup(self, dict_, x, y, z):
+def _dsv4_flash_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
     """V4-Flash-only 3D lookup: exact, cubic, then sampled-batch fallback.
 
     Generic ``_interp_3d`` raises ``QhullError`` when the point cloud has
@@ -1362,10 +1362,14 @@ def _dsv4_flash_robust_3d_lookup(self, dict_, x, y, z):
       2. Try the existing cubic interpolation path.
       3. If interpolation fails, use the largest sampled batch no larger than
          the query batch, interpolate/extrapolate along sequence length, and
-         scale by batch.
+         scale by batch. ``batch_axis`` selects whether fallback treats ``y``
+         or ``z`` as the batch axis.
 
     Caller swallows lower-level exceptions if all paths fail.
     """
+    if batch_axis not in ("y", "z"):
+        raise ValueError(f"unsupported V4-Flash fallback {batch_axis=}; expected 'y' or 'z'")
+
     # Use .get() chain instead of [] indexing: dict_ may be a (nested)
     # defaultdict, so [] reads would create spurious empty branches that
     # later poison _interp_3d's grid traversal.
@@ -1393,31 +1397,64 @@ def _dsv4_flash_robust_3d_lookup(self, dict_, x, y, z):
     # (interpolation along s). Only extrapolate along s if none covers it.
     sub = dict_.get(x) if isinstance(dict_, dict) else None
     if isinstance(sub, dict):
-        batch_points = sorted({b for sd in sub.values() if isinstance(sd, dict) for b in sd if b <= z}, reverse=True)
+        query_s, query_b = (z, y) if batch_axis == "y" else (y, z)
+
+        def _batch_points():
+            if batch_axis == "y":
+                return sorted(
+                    (bp for bp, sd in sub.items() if isinstance(sd, dict) and bp <= query_b),
+                    reverse=True,
+                )
+            return sorted(
+                {bp for sd in sub.values() if isinstance(sd, dict) for bp in sd if bp <= query_b},
+                reverse=True,
+            )
+
+        def _leaf_at(s, b):
+            first_key, second_key = (b, s) if batch_axis == "y" else (s, b)
+            level = sub.get(first_key)
+            return level.get(second_key) if isinstance(level, dict) else None
+
+        def _seq_points_at_batch(b):
+            if batch_axis == "y":
+                level = sub.get(b)
+                return sorted(level.keys()) if isinstance(level, dict) else []
+            return sorted(s for s, sd in sub.items() if isinstance(sd, dict) and b in sd)
 
         def _lookup_at_batch(bp, *, allow_extrapolate: bool):
-            if y in sub and bp in sub[y]:
-                return sub[y][bp]
-            ss = sorted(s for s, sd in sub.items() if isinstance(sd, dict) and bp in sd)
+            exact_at_batch = _leaf_at(query_s, bp)
+            if exact_at_batch is not None:
+                return exact_at_batch
+            ss = _seq_points_at_batch(bp)
             if len(ss) < 2:
                 return None
-            if not allow_extrapolate and not (ss[0] <= y <= ss[-1]):
+            if not allow_extrapolate and not (ss[0] <= query_s <= ss[-1]):
                 return None
-            sl, sr = self._nearest_1d_point_helper(y, ss, inner_only=not allow_extrapolate)
-            return self._interp_1d([sl, sr], [sub[sl][bp], sub[sr][bp]], y)
+            sl, sr = self._nearest_1d_point_helper(query_s, ss, inner_only=not allow_extrapolate)
+            left = _leaf_at(sl, bp)
+            right = _leaf_at(sr, bp)
+            if not isinstance(left, dict) or not isinstance(right, dict):
+                return None
+            return {
+                field: self._interp_1d([sl, sr], [left.get(field, 0.0), right.get(field, 0.0)], query_s)
+                for field in ("latency", "power", "energy")
+            }
 
+        batch_points = _batch_points()
         for allow_extrapolate in (False, True):
             for bp in batch_points:
                 try:
                     leaf = _lookup_at_batch(bp, allow_extrapolate=allow_extrapolate)
                     if leaf is None:
                         continue
-                    result = {f: leaf.get(f, 0.0) * z / bp for f in ("latency", "power", "energy")}
+                    result = {f: leaf.get(f, 0.0) * query_b / bp for f in ("latency", "power", "energy")}
                     if _finite_result(result):
                         return result
                 except Exception:
                     continue
 
+    if batch_axis == "y":
+        raise ValueError(f"V4-Flash robust lookup failed (tp={x}, b={y}, s={z})")
     raise ValueError(f"V4-Flash robust lookup failed (tp={x}, s={y}, b={z})")
 
 
@@ -1486,16 +1523,16 @@ def load_generation_dsv4_flash_kind_module_data(file_path: str):
     Generation lookup uses absolute KV length ``s_total = isl + step`` (decode
     is q_len=1 with past_kv = step).  Dict shape:
         data[kv_quant][gemm_quant][arch][compress_ratio]
-            [local_heads][s_total][b]
+            [tp_size][b][s_total]
 
-    ``local_heads = NATIVE_HEADS // tp_size`` matches the post-TP head count
-    the model layer passes as ``num_heads`` (see context loader docstring).
+    ``tp_size`` is the data axis; query side recovers it from the model layer's
+    local-head ``num_heads`` value (see top-of-file V4-Flash note).
     """
     if not os.path.exists(file_path):
         logger.debug(f"DSV4-Flash module data file {file_path} not found.")
         return None
 
-    # 7-level nesting: kv → gemm → arch → cr → local_heads → s_total → b
+    # 7-level nesting: kv → gemm → arch → cr → tp_size → b → s_total
     def _make_nested(depth: int):
         if depth == 0:
             return defaultdict()
@@ -8144,10 +8181,9 @@ class PerfDatabase:
             head_axis = (
                 _dsv4_flash_tp_from_num_heads(num_heads) if architecture == "DeepseekV4ForCausalLM" else num_heads
             )
-            # V4-Flash robust lookup (exact -> cubic -> sampled-batch
-            # fallback); generic ``_interp_3d`` left untouched for others.
+            # V4-Flash generation data is keyed as [tp_size][batch][s_total].
             result = (
-                _dsv4_flash_robust_3d_lookup(self, deepseek_v4_dict, head_axis, b, s)
+                _dsv4_flash_robust_3d_lookup(self, deepseek_v4_dict, head_axis, b, s, batch_axis="y")
                 if architecture == "DeepseekV4ForCausalLM"
                 else self._interp_3d(head_axis, b, s, deepseek_v4_dict, "cubic")
             )
