@@ -313,10 +313,8 @@ def run_attention_torch(
     test_ite = 6
     warm_up = 3
 
-    if use_fp8_kv_cache and backend_name_str in ("FLASH_ATTN", "FLASHINFER"):
-        query_vllm = query_vllm.to(current_platform.fp8_dtype())
-        output = output.to(torch.bfloat16)
-
+    # vLLM's FP8 KV cache path keeps Q/K/V tensors in BF16; only the paged
+    # KV cache storage uses FP8.
     def run():
         impl.forward(
             mock_layer,
