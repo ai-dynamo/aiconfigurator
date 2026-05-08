@@ -84,6 +84,64 @@ def test_static_latency_breakdown_maps_runtime_config_to_fpm(monkeypatch) -> Non
     }
 
 
+def test_mixed_and_decode_helpers_map_to_fpm(monkeypatch) -> None:
+    calls = []
+
+    class _FakeEstimator:
+        def forward_pass_time_ms(self, metrics):
+            calls.append(metrics)
+            return 7.5 + len(calls)
+
+    monkeypatch.setattr(rust_engine_step, "_cached_estimator", lambda _: _FakeEstimator())
+
+    model = SimpleNamespace(
+        model_path="Test/Dense",
+        architecture="LlamaForCausalLM",
+        _context_length=4096,
+        config=ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        ),
+    )
+    database = SimpleNamespace(system="test_sxm", backend="vllm", version="1.0.0")
+
+    mixed_ms = rust_engine_step.estimate_mixed_step_latency_with_rust(
+        model,
+        database,
+        ctx_tokens=384,
+        gen_tokens=7,
+        isl=256,
+        osl=256,
+        prefix=128,
+    )
+    decode_ms = rust_engine_step.estimate_decode_step_latency_with_rust(
+        model,
+        database,
+        gen_tokens=7,
+        isl=256,
+        osl=256,
+    )
+
+    assert mixed_ms == 8.5
+    assert decode_ms == 9.5
+    assert calls[0]["scheduled_requests"] == {
+        "num_prefill_requests": 2,
+        "sum_prefill_tokens": 384,
+        "sum_prefill_kv_tokens": 256,
+        "num_decode_requests": 7,
+        "sum_decode_kv_tokens": 2688,
+    }
+    assert calls[1]["scheduled_requests"] == {
+        "num_decode_requests": 7,
+        "sum_decode_kv_tokens": 2688,
+    }
+
+
 @pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo is required to build the Rust core shared library")
 def test_ctypes_wrapper_calls_real_rust_core(tmp_path, monkeypatch) -> None:
     systems_root = tmp_path / "systems"

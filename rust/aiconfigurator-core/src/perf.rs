@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use csv::StringRecord;
 
@@ -17,6 +18,17 @@ pub(crate) struct PerfDatabase {
     moe: Vec<MoePoint>,
     context_mla: Vec<ContextMlaPoint>,
     generation_mla: Vec<GenerationMlaPoint>,
+    query_cache: Arc<Mutex<QueryCache>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct QueryCache {
+    gemm: HashMap<(String, u32, u32, u32), f64>,
+    context_attention: HashMap<(String, String, u32, u32, u32, u32, u32, u32), f64>,
+    generation_attention: HashMap<(String, u32, u32, u32, u32, u32), f64>,
+    moe: HashMap<(String, u32, u32, u32, u32, u32, u32, u32, String), Option<f64>>,
+    context_mla: HashMap<(String, String, u32, u32, u32), Option<f64>>,
+    generation_mla: HashMap<(String, u32, u32, u32), Option<f64>>,
 }
 
 impl PerfDatabase {
@@ -45,10 +57,18 @@ impl PerfDatabase {
             moe: load_optional_moe_points(&moe_path)?,
             context_mla: load_optional_context_mla_points(&context_mla_path)?,
             generation_mla: load_optional_generation_mla_points(&generation_mla_path)?,
+            query_cache: Arc::new(Mutex::new(QueryCache::default())),
         })
     }
 
     pub(crate) fn query_gemm(&self, quant: &str, m: u32, n: u32, k: u32) -> Result<f64, AicError> {
+        let key = (quant.to_string(), m, n, k);
+        if let Ok(cache) = self.query_cache.lock() {
+            if let Some(latency) = cache.gemm.get(&key) {
+                return Ok(*latency);
+            }
+        }
+
         let mut best: Option<(f64, f64)> = None;
         for point in self.gemm.iter().filter(|point| point.quant == quant) {
             let score = relative_distance(point.m, m)
@@ -58,11 +78,15 @@ impl PerfDatabase {
                 best = Some((score, point.latency_ms));
             }
         }
-        best.map(|(_, latency)| latency).ok_or_else(|| {
+        let latency = best.map(|(_, latency)| latency).ok_or_else(|| {
             AicError::PerfDatabase(format!(
                 "no GEMM perf point for quant={quant}, m={m}, n={n}, k={k}"
             ))
-        })
+        })?;
+        if let Ok(mut cache) = self.query_cache.lock() {
+            cache.gemm.insert(key, latency);
+        }
+        Ok(latency)
     }
 
     pub(crate) fn query_context_attention(
@@ -76,6 +100,22 @@ impl PerfDatabase {
         num_kv_heads: u32,
         head_dim: u32,
     ) -> Result<f64, AicError> {
+        let key = (
+            fmha_quant.to_string(),
+            kv_cache_quant.to_string(),
+            batch_size,
+            sequence_tokens,
+            prefix_tokens,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+        );
+        if let Ok(cache) = self.query_cache.lock() {
+            if let Some(latency) = cache.context_attention.get(&key) {
+                return Ok(*latency);
+            }
+        }
+
         let full_sequence_tokens = sequence_tokens + prefix_tokens;
         let query_kv_heads = normalized_kv_heads(num_heads, num_kv_heads);
         let mut best: Option<(f64, f64)> = None;
@@ -105,7 +145,11 @@ impl PerfDatabase {
             return Ok(0.0);
         }
         let numerator = denominator.saturating_sub(prefix_tokens.saturating_mul(prefix_tokens));
-        Ok(latency * f64::from(numerator) / f64::from(denominator))
+        let latency = latency * f64::from(numerator) / f64::from(denominator);
+        if let Ok(mut cache) = self.query_cache.lock() {
+            cache.context_attention.insert(key, latency);
+        }
+        Ok(latency)
     }
 
     pub(crate) fn query_generation_attention(
@@ -117,6 +161,20 @@ impl PerfDatabase {
         num_kv_heads: u32,
         head_dim: u32,
     ) -> Result<f64, AicError> {
+        let key = (
+            kv_cache_quant.to_string(),
+            batch_size,
+            sequence_tokens,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+        );
+        if let Ok(cache) = self.query_cache.lock() {
+            if let Some(latency) = cache.generation_attention.get(&key) {
+                return Ok(*latency);
+            }
+        }
+
         let query_kv_heads = normalized_kv_heads(num_heads, num_kv_heads);
         let mut best: Option<(f64, f64)> = None;
 
@@ -134,11 +192,15 @@ impl PerfDatabase {
             }
         }
 
-        best.map(|(_, latency)| latency).ok_or_else(|| {
+        let latency = best.map(|(_, latency)| latency).ok_or_else(|| {
             AicError::PerfDatabase(format!(
                 "no generation-attention perf point for kv_cache_quant={kv_cache_quant}, b={batch_size}, s={sequence_tokens}, n={num_heads}, n_kv={num_kv_heads}, head_dim={head_dim}"
             ))
-        })
+        })?;
+        if let Ok(mut cache) = self.query_cache.lock() {
+            cache.generation_attention.insert(key, latency);
+        }
+        Ok(latency)
     }
 
     pub(crate) fn query_moe(
@@ -153,6 +215,23 @@ impl PerfDatabase {
         moe_ep_size: u32,
         distribution: &str,
     ) -> Option<f64> {
+        let key = (
+            quant.to_string(),
+            num_tokens,
+            hidden_size,
+            inter_size,
+            top_k,
+            num_experts,
+            moe_tp_size,
+            moe_ep_size,
+            distribution.to_string(),
+        );
+        if let Ok(cache) = self.query_cache.lock() {
+            if let Some(latency) = cache.moe.get(&key) {
+                return *latency;
+            }
+        }
+
         let mut best: Option<(f64, f64)> = None;
         for point in self.moe.iter().filter(|point| point.quant == quant) {
             let distribution_penalty = if point.distribution == distribution {
@@ -174,7 +253,11 @@ impl PerfDatabase {
                 best = Some((score, point.latency_ms));
             }
         }
-        best.map(|(_, latency)| latency)
+        let latency = best.map(|(_, latency)| latency);
+        if let Ok(mut cache) = self.query_cache.lock() {
+            cache.moe.insert(key, latency);
+        }
+        latency
     }
 
     pub(crate) fn query_context_mla(
@@ -185,6 +268,19 @@ impl PerfDatabase {
         sequence_tokens: u32,
         num_heads: u32,
     ) -> Option<f64> {
+        let key = (
+            fmha_quant.to_string(),
+            kv_cache_quant.to_string(),
+            batch_size,
+            sequence_tokens,
+            num_heads,
+        );
+        if let Ok(cache) = self.query_cache.lock() {
+            if let Some(latency) = cache.context_mla.get(&key) {
+                return *latency;
+            }
+        }
+
         let mut best: Option<(f64, f64)> = None;
         for point in self.context_mla.iter().filter(|point| {
             point.fmha_quant == fmha_quant && point.kv_cache_quant == kv_cache_quant
@@ -196,7 +292,11 @@ impl PerfDatabase {
                 best = Some((score, point.latency_ms));
             }
         }
-        best.map(|(_, latency)| latency)
+        let latency = best.map(|(_, latency)| latency);
+        if let Ok(mut cache) = self.query_cache.lock() {
+            cache.context_mla.insert(key, latency);
+        }
+        latency
     }
 
     pub(crate) fn query_generation_mla(
@@ -206,6 +306,18 @@ impl PerfDatabase {
         sequence_tokens: u32,
         num_heads: u32,
     ) -> Option<f64> {
+        let key = (
+            kv_cache_quant.to_string(),
+            batch_size,
+            sequence_tokens,
+            num_heads,
+        );
+        if let Ok(cache) = self.query_cache.lock() {
+            if let Some(latency) = cache.generation_mla.get(&key) {
+                return *latency;
+            }
+        }
+
         let mut best: Option<(f64, f64)> = None;
         for point in self
             .generation_mla
@@ -219,7 +331,11 @@ impl PerfDatabase {
                 best = Some((score, point.latency_ms));
             }
         }
-        best.map(|(_, latency)| latency)
+        let latency = best.map(|(_, latency)| latency);
+        if let Ok(mut cache) = self.query_cache.lock() {
+            cache.generation_mla.insert(key, latency);
+        }
+        latency
     }
 }
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import math
 import os
 import platform
 import shutil
@@ -115,6 +116,64 @@ def estimate_static_latency_breakdown_with_rust(
     return context_latency, generation_latency, context_source, generation_source
 
 
+def estimate_mixed_step_latency_with_rust(
+    model: Any,
+    database: Any,
+    *,
+    ctx_tokens: int,
+    gen_tokens: int,
+    isl: int,
+    osl: int,
+    prefix: int,
+) -> float:
+    """Estimate one mixed prefill/decode engine step through the Rust FPM API."""
+    estimator = _cached_estimator(_engine_config_json(model, database))
+    ctx_tokens = max(int(ctx_tokens), 0)
+    gen_tokens = max(int(gen_tokens), 0)
+    isl = max(int(isl), 1)
+    osl = max(int(osl), 1)
+    prefix = max(int(prefix or 0), 0)
+
+    scheduled_requests: dict[str, Any] = {}
+    if ctx_tokens > 0:
+        num_prefill_requests = max(math.ceil(ctx_tokens / isl), 1)
+        scheduled_requests.update(
+            {
+                "num_prefill_requests": num_prefill_requests,
+                "sum_prefill_tokens": ctx_tokens,
+                "sum_prefill_kv_tokens": prefix * num_prefill_requests,
+            }
+        )
+    if gen_tokens > 0:
+        scheduled_requests.update(
+            {
+                "num_decode_requests": gen_tokens,
+                "sum_decode_kv_tokens": gen_tokens * (isl + osl // 2),
+            }
+        )
+
+    if not scheduled_requests:
+        return 0.0
+    return estimator.forward_pass_time_ms({"version": 1, "scheduled_requests": scheduled_requests})
+
+
+def estimate_decode_step_latency_with_rust(
+    model: Any,
+    database: Any,
+    *,
+    gen_tokens: int,
+    isl: int,
+    osl: int,
+) -> float:
+    """Estimate one decode-only engine step through the Rust FPM API."""
+    estimator = _cached_estimator(_engine_config_json(model, database))
+    gen_tokens = max(int(gen_tokens), 0)
+    if gen_tokens == 0:
+        return 0.0
+    context_length = max(int(isl), 1) + max(int(osl), 1) // 2
+    return estimator.forward_pass_time_ms(_decode_metrics(batch_size=gen_tokens, context_length=context_length))
+
+
 def is_rust_core_available(*, autobuild: bool = False) -> bool:
     try:
         _load_library(autobuild)
@@ -216,8 +275,8 @@ def _find_library() -> Path | None:
         return None
     lib_name = _library_name()
     candidates = [
-        crate_root / "target" / "debug" / lib_name,
         crate_root / "target" / "release" / lib_name,
+        crate_root / "target" / "debug" / lib_name,
     ]
     return next((path for path in candidates if path.is_file()), None)
 
