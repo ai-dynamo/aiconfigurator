@@ -38,11 +38,12 @@ pytestmark = pytest.mark.unit
 
 
 class DummyPerfDatabase:
-    def __init__(self, system, backend, version, systems_root_arg):
+    def __init__(self, system, backend, version, systems_root_arg, database_mode=None):
         self.system = system
         self.backend = backend
         self.version = version
         self.systems_root = systems_root_arg
+        self.database_mode = database_mode
 
 
 def test_get_database_with_yaml_and_data_path(tmp_path, monkeypatch):

@@ -1,0 +1,64 @@
+name: Op Kernel Source Manifest Drift Check
+
+# Runs on PR open / sync (so authors see drift before merge) and on push to
+# main / release/* (so a stale main can't slip through). Path-filtered to the
+# data tree, the audit script, the manifest itself, and this workflow.
+#
+# Action on drift: fail the job. The PR author is responsible for regenerating
+# the manifest locally and committing the result to their branch — see the
+# error message printed by the failing step for the exact command.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "src/aiconfigurator/systems/data/**"
+      - "src/aiconfigurator/systems/op_kernel_source_manifest.yaml"
+      - "tools/perf_database/audit_kernel_source.py"
+      - ".github/workflows/op-kernel-source-manifest-check.yml"
+  push:
+    branches:
+      - main
+      - "release/*"
+    paths:
+      - "src/aiconfigurator/systems/data/**"
+      - "src/aiconfigurator/systems/op_kernel_source_manifest.yaml"
+      - "tools/perf_database/audit_kernel_source.py"
+      - ".github/workflows/op-kernel-source-manifest-check.yml"
+
+jobs:
+  check-drift:
+    name: Check op_kernel_source_manifest.yaml is in sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Git LFS Pull
+        run: git lfs pull
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Regenerate manifest
+        run: |
+          python3 tools/perf_database/audit_kernel_source.py \
+            --data-root src/aiconfigurator/systems/data \
+            --out-manifest src/aiconfigurator/systems/op_kernel_source_manifest.yaml
+
+      - name: Fail if drift
+        run: |
+          if ! git diff --exit-code src/aiconfigurator/systems/op_kernel_source_manifest.yaml; then
+            echo ""
+            echo "::error::op_kernel_source_manifest.yaml is out of sync with the perf data tree."
+            echo "Regenerate it locally and commit the result to this branch:"
+            echo ""
+            echo "  python3 tools/perf_database/audit_kernel_source.py \\"
+            echo "    --data-root src/aiconfigurator/systems/data \\"
+            echo "    --out-manifest src/aiconfigurator/systems/op_kernel_source_manifest.yaml"
+            exit 1
+          fi
