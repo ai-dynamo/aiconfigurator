@@ -49,7 +49,7 @@ def _skip_trtllm_sm120_fp8_context_fmha(
     return (
         # TRT-LLM 1.3.0rc10 SM120 qkv_256 FP8 context FMHA crashes with
         # cudaErrorIllegalAddress for these verified high-token regions.
-        (num_heads == 96 and num_key_value_heads == 8 and num_tokens >= 98304)
+        (num_heads == 96 and num_key_value_heads == 8 and num_tokens >= 81920)
         or (num_heads == 48 and num_key_value_heads == 8 and num_tokens >= 131072)
         or (num_heads == num_key_value_heads == 96 and batch_size >= 2 and input_len >= 16384)
     )
