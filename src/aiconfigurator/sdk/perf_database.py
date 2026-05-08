@@ -1351,20 +1351,20 @@ def _dsv4_flash_tp_from_num_heads(num_heads: int) -> int:
 
 
 def _dsv4_flash_robust_3d_lookup(self, dict_, x, y, z):
-    """V4-Flash-only 3D lookup: try exact, then cubic, then linear.
+    """V4-Flash-only 3D lookup: exact, cubic, then sampled-batch fallback.
 
     Generic ``_interp_3d`` raises ``QhullError`` when the point cloud has
     a degenerate axis (e.g. our V4-Flash sweep caps b=1 at s=8192, so the
-    b axis is flat near that query point).  Cubic crashes instead of
-    gracefully degrading.  This helper:
+    b axis is flat near that query point).  This helper:
 
       1. Try an exact ``dict[x][y][z]`` lookup — handles the common case
          of querying at a measured bench point.
-      2. Fall back to cubic 3D interp.
-      3. Fall back to linear 3D interp (different qhull tolerances; less
-         likely to fail on near-degenerate inputs).
+      2. Try the existing cubic interpolation path.
+      3. If interpolation fails, use the largest sampled batch no larger than
+         the query batch, interpolate/extrapolate along sequence length, and
+         scale by batch.
 
-    Caller swallows lower-level exceptions if all three paths fail.
+    Caller swallows lower-level exceptions if all paths fail.
     """
     # Use .get() chain instead of [] indexing: dict_ may be a (nested)
     # defaultdict, so [] reads would create spurious empty branches that
@@ -1374,10 +1374,51 @@ def _dsv4_flash_robust_3d_lookup(self, dict_, x, y, z):
     exact = level2.get(z) if isinstance(level2, dict) else None
     if isinstance(exact, dict) and "latency" in exact:
         return exact
+
+    def _finite_result(result):
+        if not isinstance(result, dict):
+            return False
+        value = result.get("latency")
+        return value is not None and bool(np.all(np.isfinite(np.asarray(value))))
+
     try:
-        return self._interp_3d(x, y, z, dict_, "cubic")
+        result = self._interp_3d(x, y, z, dict_, "cubic")
+        if _finite_result(result):
+            return result
     except Exception:
-        return self._interp_3d(x, y, z, dict_, "linear")
+        pass
+
+    # Fallback: real V4-Flash data is sampled at batches like 1/2/4/8.
+    # Prefer the largest batch <= query batch that covers the sequence length
+    # (interpolation along s). Only extrapolate along s if none covers it.
+    sub = dict_.get(x) if isinstance(dict_, dict) else None
+    if isinstance(sub, dict):
+        batch_points = sorted({b for sd in sub.values() if isinstance(sd, dict) for b in sd if b <= z}, reverse=True)
+
+        def _lookup_at_batch(bp, *, allow_extrapolate: bool):
+            if y in sub and bp in sub[y]:
+                return sub[y][bp]
+            ss = sorted(s for s, sd in sub.items() if isinstance(sd, dict) and bp in sd)
+            if len(ss) < 2:
+                return None
+            if not allow_extrapolate and not (ss[0] <= y <= ss[-1]):
+                return None
+            sl, sr = self._nearest_1d_point_helper(y, ss, inner_only=not allow_extrapolate)
+            return self._interp_1d([sl, sr], [sub[sl][bp], sub[sr][bp]], y)
+
+        for allow_extrapolate in (False, True):
+            for bp in batch_points:
+                try:
+                    leaf = _lookup_at_batch(bp, allow_extrapolate=allow_extrapolate)
+                    if leaf is None:
+                        continue
+                    result = {f: leaf.get(f, 0.0) * z / bp for f in ("latency", "power", "energy")}
+                    if _finite_result(result):
+                        return result
+                except Exception:
+                    continue
+
+    raise ValueError(f"V4-Flash robust lookup failed (tp={x}, s={y}, b={z})")
 
 
 def load_context_dsv4_flash_kind_module_data(file_path: str):
@@ -7615,6 +7656,7 @@ class PerfDatabase:
         Strategy:
           1. Exact (bs, isl, past_kv, tp) hit  → return latency
           2. (bs, isl) miss but past_kv hit    → 2D interp on (isl, bs)
+             with sampled-batch fallback if 2D interp fails
           3. past_kv miss                       → linear interp along past_kv,
              with (isl, bs) interpolated at each bracketing past_kv
         Returns None if the kernel CSV is not loaded.
@@ -7645,11 +7687,55 @@ class PerfDatabase:
                 return None
             isl_dict = per_tp_dict[past_val]
             if isl in isl_dict and bs in isl_dict[isl]:
-                return isl_dict[isl][bs]["latency"]
+                latency = isl_dict[isl][bs]["latency"]
+                if latency is not None and bool(np.all(np.isfinite(np.asarray(latency)))):
+                    return latency
             try:
-                return self._interp_2d_linear(isl, bs, isl_dict)["latency"]
+                latency = self._interp_2d_linear(isl, bs, isl_dict)["latency"]
+                if latency is not None and bool(np.all(np.isfinite(np.asarray(latency)))):
+                    return latency
             except Exception:
-                return None
+                pass
+
+            # Sparse kernels are sampled on the same batch grid as module data.
+            # If 2D interpolation fails because a larger batch lacks this isl
+            # range, fall back to the largest batch <= query batch, interpolate
+            # along isl, and scale by batch.
+            batch_points = sorted(
+                {b for isl_data in isl_dict.values() if isinstance(isl_data, dict) for b in isl_data if b <= bs},
+                reverse=True,
+            )
+
+            def _lookup_at_batch(bp, *, allow_extrapolate: bool):
+                if isl in isl_dict and bp in isl_dict[isl]:
+                    return isl_dict[isl][bp]
+                isl_points = sorted(
+                    s for s, isl_data in isl_dict.items() if isinstance(isl_data, dict) and bp in isl_data
+                )
+                if len(isl_points) < 2:
+                    return None
+                if not allow_extrapolate and not (isl_points[0] <= isl <= isl_points[-1]):
+                    return None
+                left, right = self._nearest_1d_point_helper(isl, isl_points, inner_only=not allow_extrapolate)
+                latency = self._interp_1d(
+                    [left, right],
+                    [isl_dict[left][bp].get("latency"), isl_dict[right][bp].get("latency")],
+                    isl,
+                )
+                return {"latency": latency}
+
+            for allow_extrapolate in (False, True):
+                for bp in batch_points:
+                    try:
+                        leaf = _lookup_at_batch(bp, allow_extrapolate=allow_extrapolate)
+                        if leaf is None:
+                            continue
+                        latency = leaf.get("latency") * bs / bp
+                        if latency is not None and bool(np.all(np.isfinite(np.asarray(latency)))):
+                            return latency
+                    except Exception:
+                        continue
+            return None
 
         direct = _at_past(past_kv)
         if direct is not None:
@@ -7898,7 +7984,13 @@ class PerfDatabase:
                     tp_size=head_axis,
                     architecture=architecture,
                 )
-            use_kernel_delta = t_with is not None and t_without is not None
+                if t_with is None or t_without is None:
+                    raise PerfDataNotAvailableError(
+                        f"DeepSeek-V4 {kernel} sparse-kernel correction data not available for "
+                        f"{b=}, {s=}, {prefix=}, {head_axis=}, {architecture=}. "
+                        "Cannot query prefix context attention in SILICON mode without kernel delta."
+                    )
+            use_kernel_delta = kernel is not None
             lookup_s = s if use_kernel_delta else s + prefix
 
             result = None
@@ -7916,9 +8008,10 @@ class PerfDatabase:
                     head_axis, lookup_s, b, raw_dict, index_topk * compress_ratio
                 )
             if result is None:
-                # V4-Flash uses a robust lookup (exact → cubic → linear) to
-                # avoid qhull crashes on the caps-driven flat b axis.  Generic
-                # ``_interp_3d`` is left untouched for other architectures.
+                # V4-Flash uses a robust lookup (exact -> cubic ->
+                # sampled-batch fallback) to avoid qhull crashes on the
+                # caps-driven flat b axis. Generic ``_interp_3d`` is left
+                # untouched for other architectures.
                 result = (
                     _dsv4_flash_robust_3d_lookup(self, deepseek_v4_dict, head_axis, lookup_s, b)
                     if architecture == "DeepseekV4ForCausalLM"
@@ -8051,8 +8144,8 @@ class PerfDatabase:
             head_axis = (
                 _dsv4_flash_tp_from_num_heads(num_heads) if architecture == "DeepseekV4ForCausalLM" else num_heads
             )
-            # V4-Flash robust lookup (exact → cubic → linear) — see helper
-            # docstring; generic ``_interp_3d`` left untouched for others.
+            # V4-Flash robust lookup (exact -> cubic -> sampled-batch
+            # fallback); generic ``_interp_3d`` left untouched for others.
             result = (
                 _dsv4_flash_robust_3d_lookup(self, deepseek_v4_dict, head_axis, b, s)
                 if architecture == "DeepseekV4ForCausalLM"
