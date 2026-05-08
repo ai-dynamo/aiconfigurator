@@ -111,6 +111,8 @@ def run_attention_torch(
         use_fp8_kv_cache=use_fp8_kv_cache,
         sliding_window=window_size if window_size > 0 else None,
         head_dim=head_dim,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
     )
 
     # vLLM >=0.19.0 requires an active config context for backend selection
