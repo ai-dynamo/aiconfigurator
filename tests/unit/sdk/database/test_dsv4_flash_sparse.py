@@ -236,6 +236,8 @@ def test_robust_3d_lookup_exact_match_short_circuits():
 
 def _make_sparse_db_with_paged_mqa(tmp_path, *, lat_at_past0: float, lat_at_past8192: float):
     """Helper: build a minimal PerfDatabase carrying paged_mqa_logits at tp=1."""
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+
     rows = [
         _sparse_row(kernel="paged_mqa_logits", bs=1, isl=8192, past_kv=0, tp=1, cr=4, lat=lat_at_past0),
         _sparse_row(kernel="paged_mqa_logits", bs=1, isl=8192, past_kv=8192, tp=1, cr=4, lat=lat_at_past8192),
@@ -248,6 +250,8 @@ def _make_sparse_db_with_paged_mqa(tmp_path, *, lat_at_past0: float, lat_at_past
         _dsv4_flash_sparse_kernel_data: ClassVar[dict] = {
             "paged_mqa_logits": LoadedOpData(data, None, path),
         }
+        _interp_1d = PerfDatabase._interp_1d
+        _nearest_1d_point_helper = PerfDatabase._nearest_1d_point_helper
 
     return _DB()
 
@@ -355,6 +359,44 @@ def test_lookup_sparse_kernel_past_kv_linear_interp(tmp_path):
     assert val == pytest.approx(0.2, rel=1e-3)
 
 
+def test_lookup_sparse_kernel_uses_cubic_3d_before_fallback():
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+
+    calls = []
+
+    class _DB:
+        _dsv4_flash_sparse_kernel_data: ClassVar[dict] = {
+            "paged_mqa_logits": LoadedOpData(
+                {
+                    "DeepseekV4ForCausalLM": {
+                        1: {
+                            0: {1024: {1: _sparse_value(1.0)}},
+                            4096: {2048: {2: _sparse_value(4.0)}},
+                        }
+                    }
+                },
+                None,
+                "mock_paged_mqa_logits",
+            ),
+        }
+
+        def _interp_3d(self, x, y, z, data, method):
+            calls.append((x, y, z, method))
+            return {"latency": 7.0}
+
+    val = PerfDatabase._lookup_dsv4_flash_sparse_kernel(
+        _DB(),
+        kernel="paged_mqa_logits",
+        bs=2,
+        isl=1536,
+        past_kv=2048,
+        tp_size=1,
+    )
+
+    assert val == pytest.approx(7.0)
+    assert calls == [(2048, 1536, 2, "cubic")]
+
+
 def test_lookup_sparse_kernel_uses_b2_when_bs3_s2682_is_missing():
     from aiconfigurator.sdk.perf_database import PerfDatabase
 
@@ -370,6 +412,23 @@ def test_lookup_sparse_kernel_uses_b2_when_bs3_s2682_is_missing():
 
     b2_at_2682 = 4.80 + (5.80 - 4.80) * (2682 - 2048) / (4096 - 2048)
     assert val == pytest.approx(b2_at_2682 * 3 / 2)
+
+
+def test_lookup_sparse_kernel_uses_largest_batch_that_covers_isl():
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+
+    db = _make_sparse_db_from_grid({0: _sparse_sampled_batch_caps_grid()})
+    val = PerfDatabase._lookup_dsv4_flash_sparse_kernel(
+        db,
+        kernel="paged_mqa_logits",
+        bs=5,
+        isl=2682,
+        past_kv=0,
+        tp_size=1,
+    )
+
+    b2_at_2682 = 4.80 + (5.80 - 4.80) * (2682 - 2048) / (4096 - 2048)
+    assert val == pytest.approx(b2_at_2682 * 5 / 2)
 
 
 def test_lookup_sparse_kernel_uses_b4_when_bs5_s1565_is_missing():

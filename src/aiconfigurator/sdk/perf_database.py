@@ -7692,10 +7692,9 @@ class PerfDatabase:
 
         Strategy:
           1. Exact (bs, isl, past_kv, tp) hit  → return latency
-          2. (bs, isl) miss but past_kv hit    → 2D interp on (isl, bs)
-             with sampled-batch fallback if 2D interp fails
-          3. past_kv miss                       → linear interp along past_kv,
-             with (isl, bs) interpolated at each bracketing past_kv
+          2. Cubic 3D interpolation on (past_kv, isl, bs) within the fixed tp slice
+          3. If cubic fails, use the largest sampled batch no larger than the query
+             batch that covers isl, interpolate on (past_kv, isl), then scale by batch.
         Returns None if the kernel CSV is not loaded.
         """
         all_data = getattr(self, "_dsv4_flash_sparse_kernel_data", None)
@@ -7719,36 +7718,61 @@ class PerfDatabase:
         if not per_tp_dict:
             return None
 
-        def _at_past(past_val):
-            if past_val not in per_tp_dict:
+        def _finite_latency(value):
+            return value is not None and bool(np.all(np.isfinite(np.asarray(value))))
+
+        if past_kv in per_tp_dict and isl in per_tp_dict[past_kv] and bs in per_tp_dict[past_kv][isl]:
+            latency = per_tp_dict[past_kv][isl][bs]["latency"]
+            if _finite_latency(latency):
+                return float(np.asarray(latency))
+
+        try:
+            result = self._interp_3d(past_kv, isl, bs, per_tp_dict, "cubic")
+            latency = result.get("latency") if isinstance(result, dict) else None
+            if _finite_latency(latency):
+                return float(np.asarray(latency))
+        except Exception:
+            pass
+
+        batch_points = sorted(
+            {
+                sampled_b
+                for isl_dict in per_tp_dict.values()
+                if isinstance(isl_dict, dict)
+                for isl_data in isl_dict.values()
+                if isinstance(isl_data, dict)
+                for sampled_b in isl_data
+                if sampled_b <= bs
+            },
+            reverse=True,
+        )
+
+        def _lookup_at_batch(bp, *, allow_extrapolate: bool):
+            batch_slice = defaultdict(dict)
+            for sampled_past, isl_dict in per_tp_dict.items():
+                if not isinstance(isl_dict, dict):
+                    continue
+                for sampled_isl, isl_data in isl_dict.items():
+                    if isinstance(isl_data, dict) and bp in isl_data:
+                        batch_slice[sampled_past][sampled_isl] = isl_data[bp]
+
+            if not batch_slice:
                 return None
-            isl_dict = per_tp_dict[past_val]
-            if isl in isl_dict and bs in isl_dict[isl]:
-                latency = isl_dict[isl][bs]["latency"]
-                if latency is not None and bool(np.all(np.isfinite(np.asarray(latency)))):
-                    return latency
+
             try:
-                latency = self._interp_2d_linear(isl, bs, isl_dict)["latency"]
-                if latency is not None and bool(np.all(np.isfinite(np.asarray(latency)))):
+                latency = self._interp_2d_linear(past_kv, isl, batch_slice)["latency"]
+                if _finite_latency(latency):
                     return latency
             except Exception:
                 pass
 
-            # Sparse kernels are sampled on the same batch grid as module data.
-            # If 2D interpolation fails because a larger batch lacks this isl
-            # range, fall back to the largest batch <= query batch, interpolate
-            # along isl, and scale by batch.
-            batch_points = sorted(
-                {b for isl_data in isl_dict.values() if isinstance(isl_data, dict) for b in isl_data if b <= bs},
-                reverse=True,
-            )
-
-            def _lookup_at_batch(bp, *, allow_extrapolate: bool):
-                if isl in isl_dict and bp in isl_dict[isl]:
-                    return isl_dict[isl][bp]
-                isl_points = sorted(
-                    s for s, isl_data in isl_dict.items() if isinstance(isl_data, dict) and bp in isl_data
-                )
+            def _lookup_isl_at_past(sampled_past):
+                isl_dict = batch_slice.get(sampled_past)
+                if not isinstance(isl_dict, dict):
+                    return None
+                if isl in isl_dict:
+                    return isl_dict[isl].get("latency")
+                isl_points = sorted(s for s, leaf in isl_dict.items() if isinstance(leaf, dict) and "latency" in leaf)
                 if len(isl_points) < 2:
                     return None
                 if not allow_extrapolate and not (isl_points[0] <= isl <= isl_points[-1]):
@@ -7756,44 +7780,39 @@ class PerfDatabase:
                 left, right = self._nearest_1d_point_helper(isl, isl_points, inner_only=not allow_extrapolate)
                 latency = self._interp_1d(
                     [left, right],
-                    [isl_dict[left][bp].get("latency"), isl_dict[right][bp].get("latency")],
+                    [isl_dict[left].get("latency"), isl_dict[right].get("latency")],
                     isl,
                 )
-                return {"latency": latency}
+                return latency
 
-            for allow_extrapolate in (False, True):
-                for bp in batch_points:
-                    try:
-                        leaf = _lookup_at_batch(bp, allow_extrapolate=allow_extrapolate)
-                        if leaf is None:
-                            continue
-                        latency = leaf.get("latency") * bs / bp
-                        if latency is not None and bool(np.all(np.isfinite(np.asarray(latency)))):
-                            return latency
-                    except Exception:
+            if past_kv in batch_slice:
+                return _lookup_isl_at_past(past_kv)
+
+            past_points = sorted(
+                sampled_past for sampled_past in batch_slice if _lookup_isl_at_past(sampled_past) is not None
+            )
+            if len(past_points) < 2:
+                return None
+            if not allow_extrapolate and not (past_points[0] <= past_kv <= past_points[-1]):
+                return None
+            left, right = self._nearest_1d_point_helper(past_kv, past_points, inner_only=not allow_extrapolate)
+            left_latency = _lookup_isl_at_past(left)
+            right_latency = _lookup_isl_at_past(right)
+            if left_latency is None or right_latency is None:
+                return None
+            return self._interp_1d([left, right], [left_latency, right_latency], past_kv)
+
+        for allow_extrapolate in (False, True):
+            for bp in batch_points:
+                try:
+                    latency = _lookup_at_batch(bp, allow_extrapolate=allow_extrapolate)
+                    if latency is None:
                         continue
-            return None
-
-        direct = _at_past(past_kv)
-        if direct is not None:
-            return direct
-
-        past_keys = sorted(per_tp_dict.keys())
-        if not past_keys:
-            return None
-        if past_kv <= past_keys[0]:
-            return _at_past(past_keys[0])
-        if past_kv >= past_keys[-1]:
-            return _at_past(past_keys[-1])
-        for i in range(len(past_keys) - 1):
-            lo, hi = past_keys[i], past_keys[i + 1]
-            if lo <= past_kv <= hi:
-                lat_lo = _at_past(lo)
-                lat_hi = _at_past(hi)
-                if lat_lo is None or lat_hi is None:
-                    return None
-                t = (past_kv - lo) / max(1, hi - lo)
-                return lat_lo + t * (lat_hi - lat_lo)
+                    latency = latency * bs / bp
+                    if _finite_latency(latency):
+                        return latency
+                except Exception:
+                    continue
         return None
 
     def _deepseek_v4_attention_sol(
