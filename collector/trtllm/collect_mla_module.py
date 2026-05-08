@@ -132,16 +132,14 @@ def _is_sm120_or_newer() -> bool:
 def _is_trtllm_sm120_dsa_module_unsupported() -> bool:
     """Return True for TRT-LLM builds whose DSA module path rejects SM120."""
     return _is_sm120_or_newer() and (
-        tensorrt_llm.__version__.startswith("1.3.0rc5")
-        or tensorrt_llm.__version__.startswith("1.3.0rc10")
+        tensorrt_llm.__version__.startswith("1.3.0rc5") or tensorrt_llm.__version__.startswith("1.3.0rc10")
     )
 
 
 def _is_trtllm_sm120_mla_module_fp8_block_unsupported() -> bool:
     """Return True when dummy FP8-block MLA module weights assert in TRT-LLM."""
     return _is_sm120_or_newer() and (
-        tensorrt_llm.__version__ == "1.3.0rc5.post1"
-        or tensorrt_llm.__version__.startswith("1.3.0rc10")
+        tensorrt_llm.__version__ == "1.3.0rc5.post1" or tensorrt_llm.__version__.startswith("1.3.0rc10")
     )
 
 
