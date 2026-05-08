@@ -125,6 +125,24 @@ SUPPORTED_MODELS: dict[str, str] = {
 }
 
 
+def _is_sm120_or_newer() -> bool:
+    return get_sm_version() >= 120
+
+
+def _is_trtllm_sm120_dsa_module_unsupported() -> bool:
+    """Return True for TRT-LLM builds whose DSA module path rejects SM120."""
+    return _is_sm120_or_newer() and (
+        tensorrt_llm.__version__.startswith("1.3.0rc5") or tensorrt_llm.__version__.startswith("1.3.0rc10")
+    )
+
+
+def _is_trtllm_sm120_mla_module_fp8_block_unsupported() -> bool:
+    """Return True when dummy FP8-block MLA module weights assert in TRT-LLM."""
+    return _is_sm120_or_newer() and (
+        tensorrt_llm.__version__ == "1.3.0rc5.post1" or tensorrt_llm.__version__.startswith("1.3.0rc10")
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Test Cases
 # ═══════════════════════════════════════════════════════════════════════
@@ -153,7 +171,10 @@ def _get_precision_combos(phase: str, attn_type: str):
     is_dsa = attn_type == "dsa"
 
     gemm_types = ["bfloat16"]
-    if sm >= 89:
+    # Some SM120 TRT-LLM builds allocate bf16 dummy weights for MLA projection
+    # paths while attaching FP8-block scales, then assert in post_load_weights()
+    # when resmoothing expects float8 weights.
+    if sm >= 89 and not (attn_type == "mla" and _is_trtllm_sm120_mla_module_fp8_block_unsupported()):
         gemm_types.append("fp8_block")
     if sm >= 100:
         gemm_types.append("nvfp4")
@@ -236,11 +257,21 @@ def get_mla_generation_module_test_cases():
 
 def get_dsa_context_module_test_cases():
     """collect.py entrypoint for DSA context module collection."""
+    if _is_trtllm_sm120_dsa_module_unsupported():
+        # TRT-LLM rc5/rc10 abort or assert on RTX PRO 6000 Blackwell Server
+        # (SM120) DSA context paths, including:
+        # - "SEPARATE_Q_K_V requires valid K and V pointers"
+        # - DeepGEMM "Unsupported architecture"
+        # - FP8-block scale-layout assertions during post_load_weights().
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="context")
 
 
 def get_dsa_generation_module_test_cases():
     """collect.py entrypoint for DSA generation module collection."""
+    if _is_trtllm_sm120_dsa_module_unsupported():
+        # The same SM120 TRT-LLM runtime path rejects DSA generation.
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="generation")
 
 
@@ -282,14 +313,15 @@ def _apply_gemm_type_quant(model_config, gemm_type: str, use_fp8_kv_cache: bool)
     kv_algo = QuantAlgo.FP8 if use_fp8_kv_cache else None
 
     if gemm_type == "bfloat16":
-        if use_fp8_kv_cache:
-            _set_quant_config(
-                model_config,
-                _replace_quant_config(
-                    model_config.quant_config,
-                    kv_cache_quant_algo=kv_algo,
-                ),
-            )
+        _set_quant_config(
+            model_config,
+            _replace_quant_config(
+                model_config.quant_config,
+                quant_algo=None,
+                kv_cache_quant_algo=kv_algo,
+                exclude_modules=None,
+            ),
+        )
     elif gemm_type == "fp8_block":
         _set_quant_config(
             model_config,
