@@ -15,7 +15,9 @@ import pandas as pd
 import pytest
 
 from aiconfigurator.sdk.pareto_analysis import (
+    get_best_configs_under_request_latency_constraint,
     get_best_configs_under_tpot_constraint,
+    get_pareto_front,
 )
 from aiconfigurator.sdk.picking import pick_default
 
@@ -107,6 +109,70 @@ class TestTpotConstraintFiltering:
         # Should return something (fallback), sorted by closest to target
         assert not result.empty
         assert result.iloc[0]["tpot"] == 20.0, "Fallback should return the config closest to the SLA target"
+
+    def test_grouped_selection_drops_all_nan_throughput_groups(self):
+        """Grouped idxmax must not crash when all candidate throughputs are NaN."""
+        df = _make_pareto_df(
+            [
+                {
+                    "request_latency": 1000.0,
+                    "tokens/s/gpu": float("nan"),
+                    "num_total_gpus": 1,
+                    "parallel": "tp1_pp1_dp1",
+                },
+                {
+                    "request_latency": 900.0,
+                    "tokens/s/gpu": float("nan"),
+                    "num_total_gpus": 2,
+                    "parallel": "tp2_pp1_dp1",
+                },
+            ]
+        )
+
+        result = get_best_configs_under_request_latency_constraint(
+            total_gpus=8,
+            pareto_df=df,
+            target_request_latency=1200.0,
+            top_n=5,
+            group_by="parallel",
+        )
+
+        assert result.empty
+
+
+class TestParetoFrontFiltering:
+    """Invalid metric rows should not participate in Pareto ranking."""
+
+    def test_get_pareto_front_ignores_non_finite_points(self):
+        """NaN and infinity rows are filtered before Pareto ranking."""
+        df = _make_pareto_df(
+            [
+                {"tokens/s/user": float("nan"), "tokens/s/gpu": 1000.0},
+                {"tokens/s/user": 100.0, "tokens/s/gpu": float("nan")},
+                {"tokens/s/user": float("inf"), "tokens/s/gpu": 900.0},
+                {"tokens/s/user": 150.0, "tokens/s/gpu": float("-inf")},
+                {"tokens/s/user": 200.0, "tokens/s/gpu": 800.0},
+            ]
+        )
+
+        result = get_pareto_front(df, "tokens/s/user", "tokens/s/gpu")
+
+        assert len(result) == 1
+        assert result.iloc[0]["tokens/s/user"] == 200.0
+
+    def test_get_pareto_front_preserves_schema_when_all_points_are_invalid(self):
+        """All-invalid inputs return empty results with the original schema."""
+        df = _make_pareto_df(
+            [
+                {"tokens/s/user": float("nan"), "tokens/s/gpu": 1000.0},
+                {"tokens/s/user": 100.0, "tokens/s/gpu": float("inf")},
+            ]
+        )
+
+        result = get_pareto_front(df, "tokens/s/user", "tokens/s/gpu")
+
+        assert result.empty
+        assert list(result.columns) == list(df.columns)
 
 
 class TestStrictSlaFiltering:

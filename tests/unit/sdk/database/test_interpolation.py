@@ -77,6 +77,12 @@ class TestInterpolationMethods:
             assert result == -5.0
             assert "Negative value detected" in caplog.text
 
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_validate_rejects_non_finite_values(self, comprehensive_perf_db, value):
+        """Non-finite interpolation results should fail instead of propagating."""
+        with pytest.raises(ValueError, match="Non-finite value detected"):
+            comprehensive_perf_db._validate(value)
+
     def test_interp_1d(self, comprehensive_perf_db):
         """Test 1D interpolation."""
         # Linear interpolation
