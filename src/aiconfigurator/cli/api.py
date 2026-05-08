@@ -728,24 +728,50 @@ def cli_estimate(
     from aiconfigurator.sdk.perf_database import (
         get_database,
         get_latest_database_version,
+        get_systems_paths,
         set_systems_paths,
     )
 
+    active_systems_paths = None
     if systems_paths is not None:
-        set_systems_paths(systems_paths)
+        previous_systems_paths = get_systems_paths()
+        try:
+            set_systems_paths(systems_paths)
+            active_systems_paths = get_systems_paths()
+        finally:
+            set_systems_paths(previous_systems_paths)
 
-    # Resolve backend version
-    resolved_version = backend_version
-    if resolved_version is None:
-        resolved_version = get_latest_database_version(system=system_name, backend=backend_name)
+    def _resolve_version_for(sys_name: str) -> str:
+        resolved_version = backend_version
         if resolved_version is None:
-            raise ValueError(
-                f"No database found for system={system_name}, backend={backend_name}. "
-                "Check --systems-paths or available databases."
-            )
+            if active_systems_paths is None:
+                resolved_version = get_latest_database_version(system=sys_name, backend=backend_name)
+            else:
+                resolved_version = get_latest_database_version(
+                    system=sys_name,
+                    backend=backend_name,
+                    systems_paths=active_systems_paths,
+                )
+        if resolved_version is None:
+            if database_mode == "SILICON":
+                raise ValueError(
+                    f"No database found for system={sys_name}, backend={backend_name}. "
+                    "Check --systems-paths or available databases."
+                )
+            resolved_version = "estimate"
+        return resolved_version
 
     def _load_database(sys_name: str):
-        db = get_database(sys_name, backend_name, resolved_version)
+        resolved_version = _resolve_version_for(sys_name)
+        database_kwargs = {"allow_missing_data": database_mode != "SILICON"}
+        if active_systems_paths is not None:
+            database_kwargs["systems_paths"] = active_systems_paths
+        db = get_database(
+            sys_name,
+            backend_name,
+            resolved_version,
+            **database_kwargs,
+        )
         if db is None:
             raise ValueError(
                 f"Failed to load perf database for system={sys_name}, "
@@ -758,6 +784,7 @@ def cli_estimate(
         return db
 
     if mode == "agg":
+        resolved_version = _resolve_version_for(system_name)
         return _run_agg_estimate(
             model_path=model_path,
             system_name=system_name,
@@ -784,6 +811,14 @@ def cli_estimate(
             max_seq_len=max_seq_len,
         )
     elif mode == "disagg":
+        prefill_resolved_version = _resolve_version_for(system_name)
+        decode_system = decode_system_name or system_name
+        decode_resolved_version = _resolve_version_for(decode_system)
+        resolved_version = (
+            prefill_resolved_version
+            if prefill_resolved_version == decode_resolved_version
+            else f"{prefill_resolved_version}-{decode_resolved_version}"
+        )
         # Validate required disagg params
         for name, val in [
             ("prefill_batch_size", prefill_batch_size),
@@ -797,7 +832,7 @@ def cli_estimate(
         return _run_disagg_estimate(
             model_path=model_path,
             system_name=system_name,
-            decode_system_name=decode_system_name or system_name,
+            decode_system_name=decode_system,
             backend_name=backend_name,
             resolved_version=resolved_version,
             isl=isl,
