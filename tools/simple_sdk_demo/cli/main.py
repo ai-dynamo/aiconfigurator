@@ -13,6 +13,8 @@ from aiconfigurator.sdk.perf_database import get_database
 
 def parse(args):
     parser = argparse.ArgumentParser()
+    system_choices = sorted(common.SupportedSystems)
+    default_system = "h200_sxm" if "h200_sxm" in system_choices else system_choices[0]
     parser.add_argument("--batch_size", type=int, help="batch_size")
     parser.add_argument("--isl", type=int, help="input sequence length, max 256k")
     parser.add_argument("--osl", type=int, help="output sequence length")
@@ -35,8 +37,8 @@ def parse(args):
     parser.add_argument(
         "--system",
         type=str,
-        default="h200_sxm",
-        choices=["h100_sxm", "h200_sxm", "b200_sxm", "gb200", "a100_sxm"],
+        default=default_system,
+        choices=system_choices,
         help="GPU+system Type",
     )
     parser.add_argument(

@@ -15,6 +15,99 @@ from aiconfigurator.cli import CLIResult, cli_exp, cli_generate
 pytestmark = pytest.mark.unit
 
 
+class TestCLIEstimateUnit:
+    """Unit tests for cli_estimate API internals."""
+
+    def test_systems_paths_are_scoped_to_call(self, tmp_path, monkeypatch):
+        import aiconfigurator.cli.api as api
+        import aiconfigurator.sdk.perf_database as perf_database
+
+        custom_systems = tmp_path / "systems"
+        custom_systems.mkdir()
+        previous_paths = perf_database.get_systems_paths()
+        latest_calls = []
+        database_calls = []
+
+        class FakeDatabase:
+            def set_default_database_mode(self, mode):
+                self.mode = mode
+
+        def fake_latest_version(system, backend, systems_paths=None):
+            latest_calls.append((system, backend, systems_paths))
+            return "estimate"
+
+        def fake_get_database(system, backend, version, systems_paths=None, allow_missing_data=False):
+            database_calls.append((system, backend, version, systems_paths, allow_missing_data))
+            return FakeDatabase()
+
+        def fake_run_agg_estimate(**kwargs):
+            kwargs["load_database"](kwargs["system_name"])
+            return kwargs["resolved_version"]
+
+        monkeypatch.setattr(perf_database, "get_latest_database_version", fake_latest_version)
+        monkeypatch.setattr(perf_database, "get_database", fake_get_database)
+        monkeypatch.setattr(api, "_run_agg_estimate", fake_run_agg_estimate)
+
+        result = api.cli_estimate(
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            mode="agg",
+            database_mode="SOL",
+            batch_size=1,
+            systems_paths=str(custom_systems),
+        )
+
+        assert result == "estimate"
+        assert perf_database.get_systems_paths() == previous_paths
+        assert latest_calls == [
+            ("h200_sxm", "trtllm", [str(custom_systems)]),
+            ("h200_sxm", "trtllm", [str(custom_systems)]),
+        ]
+        assert database_calls == [("h200_sxm", "trtllm", "estimate", [str(custom_systems)], True)]
+
+    def test_disagg_resolves_backend_version_per_system(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+        import aiconfigurator.sdk.perf_database as perf_database
+
+        database_calls = []
+
+        class FakeDatabase:
+            def set_default_database_mode(self, mode):
+                self.mode = mode
+
+        def fake_latest_version(system, backend):
+            return {"h200_sxm": "prefill-version", "h100_pcie": None}[system]
+
+        def fake_get_database(system, backend, version, allow_missing_data=False):
+            database_calls.append((system, backend, version, allow_missing_data))
+            return FakeDatabase()
+
+        def fake_run_disagg_estimate(**kwargs):
+            kwargs["load_database"](kwargs["system_name"])
+            kwargs["load_database"](kwargs["decode_system_name"])
+            return kwargs["resolved_version"]
+
+        monkeypatch.setattr(perf_database, "get_latest_database_version", fake_latest_version)
+        monkeypatch.setattr(perf_database, "get_database", fake_get_database)
+        monkeypatch.setattr(api, "_run_disagg_estimate", fake_run_disagg_estimate)
+
+        result = api.cli_estimate(
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            decode_system_name="h100_pcie",
+            mode="disagg",
+            database_mode="SOL",
+            prefill_batch_size=1,
+            prefill_num_workers=1,
+            decode_batch_size=1,
+            decode_num_workers=1,
+        )
+
+        assert result == "prefill-version-estimate"
+        assert ("h200_sxm", "trtllm", "prefill-version", True) in database_calls
+        assert ("h100_pcie", "trtllm", "estimate", True) in database_calls
+
+
 class TestCLIExpUnit:
     """Unit tests for cli_exp API (mocked)."""
 

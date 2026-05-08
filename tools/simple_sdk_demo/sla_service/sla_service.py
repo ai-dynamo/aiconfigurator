@@ -48,7 +48,10 @@ def list_supported_models():
 
 @app.post("/sla")
 def post_sla(
-    system: str = Body("h200_sxm", description="hardware name, h200_sxm, h100_sxm, b200_sxm, gb200, a100_sxm"),
+    system: str = Body(
+        "h200_sxm",
+        description="hardware name, h200_sxm, h100_sxm, h100_pcie, b200_sxm, gb200, a100_sxm, a100_pcie, l4, a30",
+    ),
     backend: str = Body("trtllm", description="backend name, trtllm, sglang, vllm"),
     version: str = Body("0.20.0", description="trtllm version, 0.20.0"),
     model_path: str = Body("QWEN3_32B", description="model name"),
@@ -70,6 +73,12 @@ def post_sla(
         runtime_config = RuntimeConfig(batch_size=1, isl=isl, osl=osl, ttft=ttft, tpot=tpot)
 
         database = get_database(system, backend, version)
+        if database is None:
+            database = get_database(system, backend, "estimate", allow_missing_data=True)
+            if database is not None:
+                database.set_default_database_mode(common.DatabaseMode.SOL)
+        if database is None:
+            raise ValueError(f"Failed to load database for system={system}, backend={backend}, version={version}")
         backend_instance = get_backend(backend)
 
         # dense model
