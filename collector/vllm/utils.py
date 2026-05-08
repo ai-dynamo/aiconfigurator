@@ -250,6 +250,8 @@ def create_vllm_config(
     hf_config_override: dict | None = None,
     use_fp8_kv_cache: bool = False,
     trust_remote_code: bool = False,
+    sliding_window: int | None = None,
+    head_dim: int | None = None,
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
 
@@ -303,14 +305,21 @@ def create_vllm_config(
         import types
 
         model_config.get_num_layers = types.MethodType(lambda self: 1, model_config)
-        model_config.get_sliding_window_for_layer = types.MethodType(lambda self, i: None, model_config)
+        _sw = sliding_window
+        model_config.get_sliding_window_for_layer = types.MethodType(lambda self, i: _sw, model_config)
         model_config.get_logits_soft_cap_for_layer = types.MethodType(lambda self, i: 0.0, model_config)
         model_config.get_sm_scale_for_layer = types.MethodType(
             lambda self, i: 1.0 / model_config.get_head_size() ** 0.5, model_config
         )
 
+    if sliding_window is not None:
+        model_config.hf_text_config.sliding_window = sliding_window
+
     if hf_config_override:
         model_config.hf_config.update(hf_config_override)
+    if head_dim is not None:
+        model_config.hf_config.head_dim = head_dim
+        model_config.model_arch_config.head_size = head_dim
 
     return VllmConfig(
         model_config=model_config,
