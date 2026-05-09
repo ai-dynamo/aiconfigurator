@@ -9,11 +9,11 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 
 ## Headline numbers
 
-- Total rows scanned: **8,602,022**
-- Within-framework cross-version dedup-able rows: **2,836** (~0.0%)
+- Total rows scanned: **8,925,338**
+- Within-framework cross-version dedup-able rows: **2,955** (~0.0%)
 - Tier distribution (groups / rows):
-  - `shared`: 331 groups · 8,284,855 rows
-  - `shared_fallback`: 46 groups · 317,167 rows
+  - `shared`: 344 groups · 8,607,323 rows
+  - `shared_fallback`: 47 groups · 318,015 rows
 
 
 ## `computescale_perf.txt`
@@ -53,11 +53,12 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h100_sxm | `vllm_flash_attn` | shared | vllm | vllm:10914 | 0 / 10098 | 0 | — | — | — |
 | h200_sxm | `flash_attention` | shared | sglang | sglang:50643 | 0 / 16881 | 1 | — | — | — |
 | h200_sxm | `torch_flow` | shared | trtllm | trtllm:97283 | 0 / 50578 | 10 | — | — | — |
-| h200_sxm | `vllm_flash_attn` | shared | vllm | vllm:21034 | 0 / 10098 | 1 | — | — | — |
+| h200_sxm | `vllm_flash_attn` | shared | vllm | vllm:60866 | 0 / 47530 | 49 | — | — | — |
 | l40s | `flash_attention` | shared | sglang | sglang:11254 | 0 / 5627 | 12 | — | — | — |
 | l40s | `torch_flow` | shared | trtllm | trtllm:29323 | 0 / 29323 | 0 | — | — | — |
 | l40s | `vllm_flash_attn` | shared | vllm | vllm:5457 | 0 / 5049 | 0 | — | — | — |
 | l40s | `vllm_flashinfer` | shared | vllm | vllm:5457 | 0 / 5049 | 0 | — | — | — |
+| rtxpro6000_blackwell_server | `triton` | shared | sglang | sglang:33522 | 0 / 33522 | 0 | — | — | — |
 
 ## `context_mla_perf.txt`
 
@@ -83,6 +84,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h200_sxm | `vllm_flashmla` | shared | vllm | vllm:1515 | 0 / 1515 | 0 | — | — | — |
 | l40s | `default` | shared_fallback | trtllm | trtllm:2436 | 0 / 2436 | 0 | — | — | — |
 | l40s | `vllm_triton_mla` | shared | vllm | vllm:880 | 0 / 880 | 0 | — | — | — |
+| rtxpro6000_blackwell_server | `triton` | shared | sglang | sglang:1540 | 0 / 1540 | 0 | — | — | — |
 
 ## `custom_allreduce_perf.txt`
 
@@ -129,6 +131,8 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | l40s | `TRTLLM` | shared | trtllm | trtllm:138 | 0 / 69 | 0 | — | — | — |
 | l40s | `vLLM_custom_eager` | shared | vllm | vllm:69 | 0 / 69 | 0 | — | — | — |
 | l40s | `vLLM_custom_graph` | shared | vllm | vllm:69 | 0 / 69 | 0 | — | — | — |
+| rtxpro6000_blackwell_server | `SGLang_CustomAllReduce_eager` | shared | sglang | sglang:23 | 0 / 23 | 0 | — | — | — |
+| rtxpro6000_blackwell_server | `SGLang_CustomAllReduce_graph` | shared | sglang | sglang:23 | 0 / 23 | 0 | — | — | — |
 
 ## `dsa_context_module_perf.txt`
 
@@ -196,6 +200,9 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | l40s | `causal_conv1d_fn` | shared | sglang | sglang:786 | 0 / 786 | 0 | — | — | — |
 | l40s | `causal_conv1d_update` | shared | sglang | sglang:88 | 0 / 88 | 0 | — | — | — |
 | l40s | `fused_recurrent_gated_delta_rule` | shared | sglang | sglang:86 | 0 / 86 | 0 | — | — | — |
+| rtxpro6000_blackwell_server | `causal_conv1d_fn` | shared | sglang | sglang:824 | 0 / 824 | 0 | — | — | — |
+| rtxpro6000_blackwell_server | `causal_conv1d_update` | shared | sglang | sglang:88 | 0 / 88 | 0 | — | — | — |
+| rtxpro6000_blackwell_server | `fused_recurrent_gated_delta_rule` | shared | sglang | sglang:86 | 0 / 86 | 0 | — | — | — |
 
 ## `gemm_perf.txt`
 
@@ -236,6 +243,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | l40s | `trt_flow_/smooth_quant_gemm_L96/PLUGIN_V2_SmoothQuantGemm_0` | shared | trtllm | trtllm:6048 | 0 / 6048 | 0 | — | — | — |
 | l40s | `trt_flow_/weight_only_quant_matmul_L257/PLUGIN_V2_WeightOnlyQuantMatmul_0` | shared | trtllm | trtllm:12096 | 0 / 12096 | 0 | — | — | — |
 | l40s | `vllm_default` | shared | vllm | vllm:18480 | 0 / 18480 | 0 | — | — | — |
+| rtxpro6000_blackwell_server | `sglang` | shared | sglang | sglang:101010 | 0 / 101010 | 0 | — | — | — |
 
 ## `generation_attention_perf.txt`
 
@@ -262,11 +270,12 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h100_sxm | `vllm_flash_attn` | shared | vllm | vllm:10870 | 0 / 10870 | 0 | — | — | — |
 | h200_sxm | `flash_attention` | shared | sglang | sglang:30558 | 0 / 10186 | 0 | — | — | — |
 | h200_sxm | `torch_flow` | shared | trtllm | trtllm:54168 | 0 / 29730 | 49 | — | — | — |
-| h200_sxm | `vllm_flash_attn` | shared | vllm | vllm:21740 | 0 / 10870 | 1 | — | — | — |
+| h200_sxm | `vllm_flash_attn` | shared | vllm | vllm:65217 | 0 / 54348 | 72 | — | — | — |
 | l40s | `flash_attention` | shared | sglang | sglang:10186 | 0 / 5093 | 21 | — | — | — |
 | l40s | `torch_flow` | shared | trtllm | trtllm:20104 | 0 / 20104 | 0 | — | — | — |
 | l40s | `vllm_flash_attn` | shared | vllm | vllm:5432 | 0 / 5432 | 0 | — | — | — |
 | l40s | `vllm_flashinfer` | shared | vllm | vllm:5435 | 0 / 5435 | 0 | — | — | — |
+| rtxpro6000_blackwell_server | `triton` | shared | sglang | sglang:19484 | 0 / 19484 | 0 | — | — | — |
 
 ## `generation_mla_perf.txt`
 
@@ -292,6 +301,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h200_sxm | `vllm_flashmla` | shared | vllm | vllm:2715 | 0 / 2715 | 0 | — | — | — |
 | l40s | `default` | shared_fallback | trtllm | trtllm:5068 | 0 / 5068 | 0 | — | — | — |
 | l40s | `vllm_triton_mla` | shared | vllm | vllm:1401 | 0 / 1401 | 0 | — | — | — |
+| rtxpro6000_blackwell_server | `triton` | shared | sglang | sglang:2324 | 0 / 2324 | 0 | — | — | — |
 
 ## `mamba2_perf.txt`
 
@@ -310,6 +320,12 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h200_sxm | `causal_conv1d_fn` | shared | trtllm | trtllm:425 | 0 / 425 | 0 | — | — | — |
 | h200_sxm | `causal_conv1d_update` | shared | trtllm | trtllm:44 | 0 / 44 | 0 | — | — | — |
 
+## `mhc_module_perf.txt`
+
+| system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
+|---|---|---|---|---|---|---|---|---|---|
+| rtxpro6000_blackwell_server | `sglang_mhc` | shared | sglang | sglang:139 | 0 / 70 | 0 | — | — | — |
+
 ## `mla_bmm_perf.txt`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
@@ -322,6 +338,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h100_sxm | `default` | shared_fallback | sglang, trtllm | sglang:2544, trtllm:1696 | 448 / 448 | 8 | 5.3 | 25.0 | 34.8 |
 | h200_sxm | `default` | shared_fallback | sglang, trtllm | sglang:2544, trtllm:1696 | 448 / 448 | 4 | 4.1 | 22.4 | 35.0 |
 | l40s | `default` | shared_fallback | sglang, trtllm | sglang:1696, trtllm:848 | 448 / 448 | 4 | 10.6 | 52.7 | 81.9 |
+| rtxpro6000_blackwell_server | `default` | shared_fallback | sglang | sglang:848 | 0 / 448 | 0 | — | — | — |
 
 ## `mla_context_module_perf.txt`
 
@@ -411,11 +428,13 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h200_sxm | `vllm_fused_moe` | shared | vllm | vllm:69336 | 0 / 33210 | 3 | — | — | — |
 | h200_sxm | `vllm_marlin_int4_moe` | shared | vllm | vllm:10206 | 0 / 9234 | 0 | — | — | — |
 | h200_sxm | `vllm_marlin_moe` | shared | vllm | vllm:4709 | 0 / 4124 | 0 | — | — | — |
+| h200_sxm | `vllm_mxfp4_moe` | shared | vllm | vllm:1701 | 0 / 1296 | 0 | — | — | — |
 | l40s | `moe_torch_flow` | shared | trtllm | trtllm:1960 | 0 / 1960 | 0 | — | — | — |
 | l40s | `sglang_fused_moe_triton` | shared | sglang | sglang:39374 | 0 / 33552 | 1 | — | — | — |
 | l40s | `sglang_marlin_moe` | shared | sglang | sglang:19035 | 0 / 16686 | 0 | — | — | — |
 | l40s | `vllm_fused_moe` | shared | vllm | vllm:12718 | 0 / 12718 | 0 | — | — | — |
-| rtxpro6000_blackwell_server | `sglang_fused_moe_triton` | shared | sglang | sglang:4248 | 0 / 4248 | 0 | — | — | — |
+| rtxpro6000_blackwell_server | `sglang_fused_moe_triton` | shared | sglang | sglang:67982 | 0 / 57792 | 0 | — | — | — |
+| rtxpro6000_blackwell_server | `sglang_marlin_moe` | shared | sglang | sglang:14661 | 0 / 12717 | 0 | — | — | — |
 | rtxpro6000_blackwell_server | `vllm_fused_moe` | shared | vllm | vllm:17766 | 0 / 17766 | 0 | — | — | — |
 
 ## `nccl_perf.txt`
@@ -528,12 +547,12 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 Each row is one distinct `kernel_source` value seen in the corpus, with the union of frameworks, op files, and systems it appears in. Tier is determined by the kernel_source name alone, so a single kernel_source has one tier across the whole corpus.
 
 
-### `shared` (45 kernel sources)
+### `shared` (48 kernel sources)
 
 | kernel_source | frameworks | op files | systems | rows |
 |---|---|---|---|---|
-| `causal_conv1d_fn` | sglang, trtllm | gdn_perf.txt, mamba2_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 17,387 |
-| `causal_conv1d_update` | sglang, trtllm, vllm | gdn_perf.txt, mamba2_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 2,244 |
+| `causal_conv1d_fn` | sglang, trtllm | gdn_perf.txt, mamba2_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server | 18,211 |
+| `causal_conv1d_update` | sglang, trtllm, vllm | gdn_perf.txt, mamba2_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server | 2,332 |
 | `chunk_gated_delta_rule` | trtllm | gdn_perf.txt | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 4,849 |
 | `deepep` | sglang | wideep_deepep_ll_perf.txt | h100_sxm, h200_sxm | 190 |
 | `deepepmoe` | sglang | wideep_context_moe_perf.txt, wideep_generation_moe_perf.txt | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 6,333 |
@@ -543,7 +562,7 @@ Each row is one distinct `kernel_source` value seen in the corpus, with the unio
 | `fa3` | sglang | wideep_context_mla_perf.txt, wideep_generation_mla_perf.txt | h100_sxm, h200_sxm | 5,248 |
 | `flash_attention` | sglang | context_attention_perf.txt, context_mla_perf.txt, generation_attention_perf.txt, generation_mla_perf.txt | a100_sxm, h100_sxm, h200_sxm, l40s | 249,719 |
 | `flashinfer` | sglang | wideep_context_mla_perf.txt, wideep_generation_mla_perf.txt | h100_sxm, h200_sxm | 5,325 |
-| `fused_recurrent_gated_delta_rule` | sglang, trtllm | gdn_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 1,421 |
+| `fused_recurrent_gated_delta_rule` | sglang, trtllm | gdn_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server | 1,507 |
 | `moe_torch_flow` | trtllm | moe_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 91,612 |
 | `moe_torch_flow_cutlass` | trtllm | moe_perf.txt | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 596,454 |
 | `moe_torch_flow_min_latency` | trtllm | moe_perf.txt | b200_sxm, gb200 | 50,157 |
@@ -551,14 +570,16 @@ Each row is one distinct `kernel_source` value seen in the corpus, with the unio
 | `NCCL` | trtllm | nccl_perf.txt | b300_sxm | 1,512 |
 | `NVLinkOneSided` | trtllm | trtllm_alltoall_perf.txt | gb200 | 296 |
 | `NVLinkTwoSided` | trtllm | trtllm_alltoall_perf.txt | gb200 | 1,800 |
-| `sglang` | sglang | gemm_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 1,644,471 |
-| `SGLang_CustomAllReduce_eager` | sglang | custom_allreduce_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 1,035 |
-| `SGLang_CustomAllReduce_graph` | sglang | custom_allreduce_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 1,035 |
+| `sglang` | sglang | gemm_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server | 1,745,481 |
+| `SGLang_CustomAllReduce_eager` | sglang | custom_allreduce_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server | 1,058 |
+| `SGLang_CustomAllReduce_graph` | sglang | custom_allreduce_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server | 1,058 |
 | `sglang_flashinfer_cutedsl_moe` | sglang | moe_perf.txt | b200_sxm, b300_sxm, gb200, gb300 | 236,422 |
-| `sglang_fused_moe_triton` | sglang | moe_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server | 872,352 |
-| `sglang_marlin_moe` | sglang | moe_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 213,782 |
+| `sglang_fused_moe_triton` | sglang | moe_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server | 936,086 |
+| `sglang_marlin_moe` | sglang | moe_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server | 228,443 |
+| `sglang_mhc` | sglang | mhc_module_perf.txt | rtxpro6000_blackwell_server | 139 |
 | `torch_flow` | trtllm | context_attention_perf.txt, gemm_perf.txt, generation_attention_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 1,719,114 |
 | `torch_ops` | trtllm | computescale_perf.txt, scale_matrix_perf.txt | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 23,061 |
+| `triton` | sglang | context_attention_perf.txt, context_mla_perf.txt, generation_attention_perf.txt, generation_mla_perf.txt | rtxpro6000_blackwell_server | 56,870 |
 | `trt_flow_/smooth_quant_gemm_L96/PLUGIN_V2_SmoothQuantGemm_0` | trtllm | gemm_perf.txt | a100_sxm, h200_sxm, l40s | 21,336 |
 | `trt_flow_/weight_only_quant_matmul_L257/PLUGIN_V2_WeightOnlyQuantMatmul_0` | trtllm | gemm_perf.txt | a100_sxm, h200_sxm, l40s | 42,672 |
 | `TRTLLM` | trtllm | custom_allreduce_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 1,656 |
@@ -567,7 +588,7 @@ Each row is one distinct `kernel_source` value seen in the corpus, with the unio
 | `vLLM_custom_eager` | vllm | custom_allreduce_perf.txt | a100_sxm, b200_sxm, b300_sxm, b60, gb200, gb300, h100_sxm, h200_sxm, l40s | 805 |
 | `vLLM_custom_graph` | vllm | custom_allreduce_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 736 |
 | `vllm_default` | vllm | gemm_perf.txt | a100_sxm, b200_sxm, b300_sxm, b60, gb200, gb300, h100_sxm, h200_sxm, l40s | 948,633 |
-| `vllm_flash_attn` | vllm | context_attention_perf.txt, generation_attention_perf.txt | a100_sxm, b60, h100_sxm, h200_sxm, l40s | 104,105 |
+| `vllm_flash_attn` | vllm | context_attention_perf.txt, generation_attention_perf.txt | a100_sxm, b60, h100_sxm, h200_sxm, l40s | 187,414 |
 | `vllm_flash_attn_mla` | vllm | context_mla_perf.txt, generation_mla_perf.txt | h100_sxm, h200_sxm | 8,730 |
 | `vllm_flashinfer` | vllm | context_attention_perf.txt, generation_attention_perf.txt | b200_sxm, b300_sxm, gb200, gb300, l40s | 194,796 |
 | `vllm_flashinfer_trtllm_moe_fp4` | vllm | moe_perf.txt | b200_sxm, b300_sxm, gb200, gb300 | 59,616 |
@@ -575,6 +596,7 @@ Each row is one distinct `kernel_source` value seen in the corpus, with the unio
 | `vllm_fused_moe` | vllm | moe_perf.txt | a100_sxm, b200_sxm, b300_sxm, b60, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server | 367,818 |
 | `vllm_marlin_int4_moe` | vllm | moe_perf.txt | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 61,236 |
 | `vllm_marlin_moe` | vllm | moe_perf.txt | gb200, gb300, h100_sxm, h200_sxm | 18,863 |
+| `vllm_mxfp4_moe` | vllm | moe_perf.txt | h200_sxm | 1,701 |
 | `vllm_triton_mla` | vllm | context_mla_perf.txt, generation_mla_perf.txt | a100_sxm, l40s | 4,526 |
 | `wideep_compute_cutlass` | trtllm | wideep_moe_perf.txt | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 24,948 |
 
@@ -582,4 +604,4 @@ Each row is one distinct `kernel_source` value seen in the corpus, with the unio
 
 | kernel_source | frameworks | op files | systems | rows |
 |---|---|---|---|---|
-| `default` | sglang, trtllm, vllm | context_mla_perf.txt, dsa_context_module_perf.txt, dsa_generation_module_perf.txt, generation_mla_perf.txt, mla_bmm_perf.txt, mla_context_module_perf.txt, mla_generation_module_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 317,167 |
+| `default` | sglang, trtllm, vllm | context_mla_perf.txt, dsa_context_module_perf.txt, dsa_generation_module_perf.txt, generation_mla_perf.txt, mla_bmm_perf.txt, mla_context_module_perf.txt, mla_generation_module_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server | 318,015 |

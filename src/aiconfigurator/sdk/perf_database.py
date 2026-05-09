@@ -3463,11 +3463,11 @@ class PerfDatabase:
         op_filename_enum: PerfDataFilename,
         primary_path: str,
         system_data_root: str,
-    ) -> list[tuple[str, str, Optional[set[str]]]]:
+    ) -> list[tuple[str, Optional[set[str]]]]:
         """Build the priority-ordered list of source files for one op.
 
-        Returns a list of `(file_path, label, kernel_source_filter)` tuples to
-        be loaded in order. The first source whose file actually contains rows
+        Returns a list of `(file_path, kernel_source_filter)` tuples to be
+        loaded in order. The first source whose file actually contains rows
         for a shape becomes the source of truth for that shape — later sources
         only fill in shapes the earlier ones lacked. Ordering, in priority:
 

@@ -46,8 +46,11 @@ import logging
 import statistics
 from collections import defaultdict
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -204,56 +207,106 @@ def _iter_data_files(data_root: Path) -> Iterable[tuple[str, str, str, Path]]:
                     yield system_dir.name, backend_dir.name, version_dir.name, path
 
 
+@dataclass
+class _FileAuditResult:
+    """Per-file output of `_audit_one_file`. Records are flat so the merge
+    step is just a loop over `record_row` calls — same as the serial path."""
+
+    # (system, op_file, kernel_source, framework, version, shape_key, latency)
+    records: list[tuple[str, str, str, str, str, tuple, float]] = field(default_factory=list)
+    rows_scanned: int = 0
+    rows_skipped: int = 0
+    rows_unnamed_kernel_source: int = 0
+    unnamed_examples: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _audit_one_file(system: str, backend: str, version: str, path: Path) -> _FileAuditResult:
+    """Parse one CSV and emit the records it contributes. Pure-ish: only the
+    `logger.warning` for missing latency columns escapes."""
+    out = _FileAuditResult()
+    with path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        header = reader.fieldnames or []
+        latency_col = _pick_latency_column(header)
+        if latency_col is None:
+            logger.warning("No latency column found in %s; skipping", path)
+            return out
+
+        for row in reader:
+            out.rows_scanned += 1
+            framework = (row.get("framework") or backend).lower()
+            row_version = row.get("version") or version
+            raw_ks = row.get("kernel_source")
+            kernel_source = (raw_ks or "").strip()
+            if not kernel_source:
+                out.rows_unnamed_kernel_source += 1
+                if len(out.unnamed_examples) < 5:
+                    out.unnamed_examples.append((str(path), repr(raw_ks)))
+                continue
+            latency_raw = row.get(latency_col)
+            try:
+                latency = float(latency_raw) if latency_raw not in (None, "") else None
+            except ValueError:
+                latency = None
+            if latency is None or latency <= 0:
+                out.rows_skipped += 1
+                continue
+
+            shape_key = _build_shape_key(row, header, latency_col)
+            out.records.append((system, path.name, kernel_source, framework, row_version, shape_key, latency))
+    return out
+
+
+_AUDIT_THREADS = 4
+
+
 def audit(data_root: Path) -> dict[tuple[str, str, str], GroupStats]:
-    """Walk the data tree and accumulate per-group stats."""
+    """Walk the data tree and accumulate per-group stats.
+
+    Files are parsed in a `_AUDIT_THREADS`-wide thread pool (CSV reads release
+    the GIL during I/O); the merge into `groups` runs serially on the main
+    thread, which is cheap enough not to need locks.
+    """
     groups: dict[tuple[str, str, str], GroupStats] = {}
-    files_scanned = 0
     rows_scanned = 0
     rows_skipped = 0
     rows_unnamed_kernel_source = 0
     unnamed_examples: list[tuple[str, str]] = []  # (path, kernel_source-as-seen)
 
-    for system, backend, version, path in _iter_data_files(data_root):
-        files_scanned += 1
-        with path.open(newline="") as f:
-            reader = csv.DictReader(f)
-            header = reader.fieldnames or []
-            latency_col = _pick_latency_column(header)
-            if latency_col is None:
-                logger.warning("No latency column found in %s; skipping", path)
-                continue
+    # Materialize the file list up front so the progress bar can show a total
+    # and the walk doesn't appear stuck on slow disks. The list is small
+    # (~hundreds).
+    file_list = list(_iter_data_files(data_root))
+    total_files = len(file_list)
 
-            for row in reader:
-                rows_scanned += 1
-                framework = (row.get("framework") or backend).lower()
-                row_version = row.get("version") or version
-                raw_ks = row.get("kernel_source")
-                kernel_source = (raw_ks or "").strip()
-                if not kernel_source:
-                    rows_unnamed_kernel_source += 1
-                    if len(unnamed_examples) < 5:
-                        unnamed_examples.append((str(path), repr(raw_ks)))
-                    continue
-                latency_raw = row.get(latency_col)
-                try:
-                    latency = float(latency_raw) if latency_raw not in (None, "") else None
-                except ValueError:
-                    latency = None
-                if latency is None or latency <= 0:
-                    rows_skipped += 1
-                    continue
-
-                shape_key = _build_shape_key(row, header, latency_col)
-                key = (system, path.name, kernel_source)
+    with ThreadPoolExecutor(max_workers=_AUDIT_THREADS) as pool:
+        futures = [pool.submit(_audit_one_file, *args) for args in file_list]
+        pbar = tqdm(
+            as_completed(futures),
+            desc=f"audit {data_root}",
+            unit="file",
+            total=total_files,
+        )
+        for fut in pbar:
+            res = fut.result()
+            rows_scanned += res.rows_scanned
+            rows_skipped += res.rows_skipped
+            rows_unnamed_kernel_source += res.rows_unnamed_kernel_source
+            for path_str, raw_ks in res.unnamed_examples:
+                if len(unnamed_examples) < 5:
+                    unnamed_examples.append((path_str, raw_ks))
+            for system, op_file, kernel_source, framework, row_version, shape_key, latency in res.records:
+                key = (system, op_file, kernel_source)
                 group = groups.get(key)
                 if group is None:
-                    group = GroupStats(system=system, op_file=path.name, kernel_source=kernel_source)
+                    group = GroupStats(system=system, op_file=op_file, kernel_source=kernel_source)
                     groups[key] = group
                 group.record_row(framework, row_version, shape_key, latency)
+            pbar.set_postfix(rows=rows_scanned, groups=len(groups))
 
     logger.info(
         "audit: %d files, %d rows, %d skipped, %d groups",
-        files_scanned,
+        total_files,
         rows_scanned,
         rows_skipped,
         len(groups),
