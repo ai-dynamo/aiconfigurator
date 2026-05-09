@@ -8,7 +8,6 @@ import csv
 import functools
 import importlib.resources as pkg_resources
 import logging
-import math
 import os
 from collections import UserDict, defaultdict
 from collections.abc import Callable, Iterable
@@ -16,11 +15,11 @@ from typing import Optional
 
 import numpy as np
 import yaml
-from scipy import interpolate
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.common import PerfDataFilename
 from aiconfigurator.sdk.performance_result import PerformanceResult
+from aiconfigurator.sdk.system_spec import SystemSpec
 
 databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
@@ -2597,7 +2596,7 @@ class PerfDatabase:
         self.version = version
         self.systems_root = systems_root
         with open(os.path.join(systems_root, system + ".yaml")) as f:
-            self.system_spec = yaml.load(f, Loader=yaml.SafeLoader)
+            self.system_spec = SystemSpec(yaml.load(f, Loader=yaml.SafeLoader))
         self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
 
         # Cache for extracted metric data to avoid repeated extraction in _interp_3d
@@ -3570,96 +3569,16 @@ class PerfDatabase:
         return preferred
 
     def _get_value(self, data_value, metric: str = "latency"):
-        """
-        Extract a metric from a data value (handles both dict and float formats).
-
-        Args:
-            data_value: Either a dict {"latency": float, "power": float} or a float (legacy)
-            metric: Which metric to extract ("latency" or "power")
-
-        Returns:
-            float: The requested metric value
-        """
-        if isinstance(data_value, dict):
-            return data_value.get(metric, 0.0)
-        else:
-            # Legacy format: raw float is latency, power is 0
-            return data_value if metric == "latency" else 0.0
-
-    def _extract_metric_data_3d(self, data: dict, metric: str) -> dict:
-        """
-        Extract a specific metric from 3D dict-based data structure.
-
-        Converts {k1: {k2: {k3: {"latency": l, "power": p}}}}
-        to      {k1: {k2: {k3: l}}} or {k1: {k2: {k3: p}}}
-
-        Args:
-            data: Nested 3-level dict where leaf values are dicts or floats
-            metric: Which metric to extract ("latency" or "power")
-
-        Returns:
-            dict: Same structure but with scalar leaf values
-        """
-        result = {}
-        for k1, v1 in data.items():
-            result[k1] = {}
-            for k2, v2 in v1.items():
-                result[k1][k2] = {}
-                for k3, v3 in v2.items():
-                    result[k1][k2][k3] = self._get_value(v3, metric)
-        return result
+        """Thin wrapper — delegates to ``interpolation.get_value``."""
+        return interpolation.get_value(data_value, metric)
 
     def _extract_latency_and_energy_2d(self, data: dict) -> tuple[dict, dict]:
-        """
-        Extract both latency and energy from 2D dict-based data structure in a single pass.
-
-        Args:
-            data: Nested 2-level dict where leaf values are dicts {"latency": l, "power": p, "energy": e}
-
-        Returns:
-            tuple: (latency_data, energy_data) - two dicts with same structure but scalar values
-        """
-        latency_result = {}
-        energy_result = {}
-
-        for k1, v1 in data.items():
-            latency_result[k1] = {}
-            energy_result[k1] = {}
-
-            for k2, v2 in v1.items():
-                latency_result[k1][k2] = self._get_value(v2, "latency")
-                energy_result[k1][k2] = self._get_value(v2, "energy")
-
-        return latency_result, energy_result
+        """Thin wrapper — delegates to ``interpolation.extract_latency_and_energy_2d``."""
+        return interpolation.extract_latency_and_energy_2d(data)
 
     def _extract_latency_and_energy_3d(self, data: dict) -> tuple[dict, dict]:
-        """
-        Extract both latency and energy from 3D dict-based data structure in a single pass.
-
-        This is more efficient than calling _extract_metric_data_3d twice.
-
-        Args:
-            data: Nested 3-level dict where leaf values are dicts {"latency": l, "power": p, "energy": e}
-
-        Returns:
-            tuple: (latency_data, energy_data) - two dicts with same structure but scalar values
-        """
-        latency_result = {}
-        energy_result = {}
-
-        for k1, v1 in data.items():
-            latency_result[k1] = {}
-            energy_result[k1] = {}
-
-            for k2, v2 in v1.items():
-                latency_result[k1][k2] = {}
-                energy_result[k1][k2] = {}
-
-                for k3, v3 in v2.items():
-                    latency_result[k1][k2][k3] = self._get_value(v3, "latency")
-                    energy_result[k1][k2][k3] = self._get_value(v3, "energy")
-
-        return latency_result, energy_result
+        """Thin wrapper — delegates to ``interpolation.extract_latency_and_energy_3d``."""
+        return interpolation.extract_latency_and_energy_3d(data)
 
     def _extrapolate_data_grid(
         self,
@@ -3669,310 +3588,30 @@ class PerfDatabase:
         target_z_list: list[int],
         sqrt_y_value: bool = False,
     ) -> None:
-        """
-        Extrapolate the data grid, we extrapolate the data grid at the initialization stage.
-        Future query will based on interpolation.
-        """
-        x_list = sorted(data_dict.keys())
-        for x in x_list:
-            # z_direction
-            for y in sorted(data_dict[x].keys()):
-                z_dict = data_dict[x][y]
-                if len(z_dict) <= 1:
-                    logger.warning(
-                        f"only one data point for a given xy, might trigger error. "
-                        f"Please revisit data collection. {x=}, {y=}, {z_dict=}"
-                    )
-                    continue
-                for z in target_z_list:
-                    if z not in z_dict:
-                        z_left, z_right = self._nearest_1d_point_helper(z, list(z_dict.keys()), False)
-                        # Check if both left and right boundaries exist
-                        if z_left not in z_dict or z_right not in z_dict:
-                            logger.warning(
-                                f"Skipping interpolation for z={z} as boundaries z_left={z_left} "
-                                f"or z_right={z_right} do not exist in z_dict for x={x}, y={y}"
-                            )
-                            continue
-                        value = self._interp_1d(
-                            [z_left, z_right],
-                            [data_dict[x][y][z_left], data_dict[x][y][z_right]],
-                            z,
-                        )
-                        z_dict[z] = value
-
-            # y_direction
-            for y in target_y_list:
-                if y not in data_dict[x]:
-                    y_keys = list(data_dict[x].keys())
-                    if len(y_keys) < 2:
-                        logger.warning(
-                            f"Skipping y-direction interpolation for x={x}: "
-                            f"only {len(y_keys)} y-value(s), need at least 2"
-                        )
-                        break
-                    y_left, y_right = self._nearest_1d_point_helper(y, y_keys, False)
-                    # Check if both left and right boundaries exist
-                    if y_left not in data_dict[x] or y_right not in data_dict[x]:
-                        logger.warning(
-                            f"Skipping interpolation for y={y} as boundaries y_left={y_left} "
-                            f"or y_right={y_right} do not exist in data_dict[{x}]"
-                        )
-                        continue
-
-                    z_list = sorted(data_dict[x][y_left].keys())
-                    for z in z_list:
-                        # Check if z exists in both y_left and y_right
-                        if z not in data_dict[x][y_left] or z not in data_dict[x][y_right]:
-                            logger.warning(
-                                f"Skipping interpolation for z={z} as it does not exist in both "
-                                f"y_left={y_left} and y_right={y_right}"
-                            )
-                            continue
-
-                        y_left_value = data_dict[x][y_left][z]
-                        y_right_value = data_dict[x][y_right][z]
-                        assert y_right_value is not None, "y_right_value cannot be None"
-                        if sqrt_y_value:
-                            if isinstance(y_left_value, dict):
-                                # Handle dict format: apply sqrt to both latency and power
-                                y_left_value = {
-                                    "latency": math.sqrt(y_left_value["latency"]),
-                                    "power": math.sqrt(y_left_value["power"]) if y_left_value["power"] > 0 else 0.0,
-                                }
-                                y_right_value = {
-                                    "latency": math.sqrt(y_right_value["latency"]),
-                                    "power": math.sqrt(y_right_value["power"]) if y_right_value["power"] > 0 else 0.0,
-                                }
-                            else:
-                                # Handle legacy float format
-                                y_left_value = math.sqrt(y_left_value)
-                                y_right_value = math.sqrt(y_right_value)
-                        value = self._interp_1d([y_left, y_right], [y_left_value, y_right_value], y)
-                        if sqrt_y_value:
-                            if isinstance(value, dict):
-                                # Square both latency and power
-                                value = {
-                                    "latency": value["latency"] * value["latency"],
-                                    "power": value["power"] * value["power"],
-                                }
-                            else:
-                                value = value * value
-
-                        if y not in data_dict[x]:
-                            data_dict[x][y] = {z: value}
-                        else:
-                            data_dict[x][y][z] = value
-
-        x_keys = list(data_dict.keys())
-        for x in target_x_list:
-            if x not in data_dict:
-                if len(x_keys) < 2:
-                    logger.warning(
-                        f"Skipping x-direction interpolation: only {len(x_keys)} x-value(s), need at least 2"
-                    )
-                    break
-                x_left, x_right = self._nearest_1d_point_helper(x, x_keys, False)
-                # Check if both left and right boundaries exist
-                if x_left not in data_dict or x_right not in data_dict:
-                    logger.warning(
-                        f"Skipping interpolation for x={x} as boundaries x_left={x_left} "
-                        f"or x_right={x_right} do not exist in data_dict"
-                    )
-                    continue
-
-                for y in sorted(data_dict[x_left].keys()):
-                    # Check if y exists in both x_left and x_right
-                    if y not in data_dict[x_left] or y not in data_dict[x_right]:
-                        logger.warning(
-                            f"Skipping interpolation for y={y} as it does not exist in both "
-                            f"x_left={x_left} and x_right={x_right}"
-                        )
-                        continue
-
-                    for z in sorted(data_dict[x_left][y].keys()):
-                        # Check if z exists in both x_left and x_right for the given y
-                        if z not in data_dict[x_left][y] or z not in data_dict[x_right][y]:
-                            logger.warning(
-                                f"Skipping interpolation for z={z} as it does not exist in both "
-                                f"x_left={x_left} and x_right={x_right} for y={y}"
-                            )
-                            continue
-
-                        x_left_value = data_dict[x_left][y][z]
-                        x_right_value = data_dict[x_right][y][z]
-                        assert x_right_value is not None, "x_right_value cannot be None"
-                        value = self._interp_1d([x_left, x_right], [x_left_value, x_right_value], x)
-                        if x not in data_dict:
-                            data_dict[x] = {y: {z: value}}
-                        elif y not in data_dict[x]:
-                            data_dict[x][y] = {z: value}
-                        else:
-                            data_dict[x][y][z] = value
-
-    def _nearest_1d_point_helper(self, x: int, values: list[int], inner_only: bool = True) -> tuple[int, int]:
-        """
-        Find the nearest 1d point
-        """
-        assert values is not None and len(values) >= 1, "values is None or empty"
-        if len(values) == 1:
-            if inner_only and x != values[0]:
-                raise ValueError(f"x is not equal to the only value in the list. {x=}, {values=}")
-            return values[0], values[0]
-
-        sorted_values = sorted(values)
-
-        if x < sorted_values[0]:
-            if inner_only:
-                raise ValueError(f"x is less than the smallest value in the list. {x=}, {sorted_values=}")
-            else:
-                return sorted_values[0], sorted_values[1]
-        elif x > sorted_values[-1]:
-            if inner_only:
-                raise ValueError(f"x is greater than the largest value in the list. {x=}, {sorted_values=}")
-            else:
-                return sorted_values[-2], sorted_values[-1]
-
-        for i, value in enumerate(sorted_values):
-            if x >= value and i != len(sorted_values) - 1:
-                continue
-            else:
-                end = value
-                start = sorted_values[i - 1]
-                break
-        if start is None or end is None:
-            raise ValueError(f"start or end is None. {x=}, {sorted_values=}, start={start=}, end={end=}")
-        return start, end
-
-    def _validate(self, value: float) -> float:
-        """
-        Validate the value
-        """
-        value_array = np.asarray(value)
-        if not np.all(np.isfinite(value_array)):
-            raise ValueError(f"Non-finite value detected {value}")
-        if np.any(value_array < 0.0):
-            logger.debug(f"Negative value detected {value}, pass")
-        return value
-
-    def _interp_3d_linear(self, x: int, y: int, z: int, data: dict) -> float:
-        """
-        Interpolate the 3d data using linear interpolation
-        """
-        points_list = []
-        values_list = []
-        x_left, x_right = self._nearest_1d_point_helper(x, list(data.keys()))
-        for i in [x_left, x_right]:
-            y_left, y_right = self._nearest_1d_point_helper(y, list(data[i].keys()))
-            for j in [y_left, y_right]:
-                z_left, z_right = self._nearest_1d_point_helper(z, list(data[i][j].keys()))
-                points_list.append([i, j, z_left])
-                points_list.append([i, j, z_right])
-                values_list.append(data[i][j][z_left])
-                values_list.append(data[i][j][z_right])
-
-        return self._validate(
-            interpolate.griddata(np.array(points_list), np.array(values_list), (x, y, z), method="linear")
+        """Thin wrapper — delegates to ``interpolation.extrapolate_data_grid``."""
+        return interpolation.extrapolate_data_grid(
+            data_dict, target_x_list, target_y_list, target_z_list, sqrt_y_value=sqrt_y_value
         )
 
+    def _nearest_1d_point_helper(self, x: int, values: list[int], inner_only: bool = True) -> tuple[int, int]:
+        """Thin wrapper — delegates to ``interpolation.nearest_1d_point_helper``."""
+        return interpolation.nearest_1d_point_helper(x, values, inner_only)
+
+    def _validate(self, value):
+        """Thin wrapper — delegates to ``interpolation.validate_interpolation_result``."""
+        return interpolation.validate_interpolation_result(value)
+
+    def _interp_3d_linear(self, x: int, y: int, z: int, data: dict) -> float:
+        """Thin wrapper — delegates to ``interpolation.interp_3d_linear``."""
+        return interpolation.interp_3d_linear(x, y, z, data)
+
     def _interp_2d_linear(self, x: int, y: int, data: dict) -> dict:
-        """
-        Interpolate the 2D data using linear interpolation.
-
-        Returns:
-            dict: {"latency": float, "power": float, "energy": float} - interpolated values for all metrics
-        """
-        # Check if data uses new dict format by sampling a leaf value
-        sample_value = self._get_sample_leaf_value(data)
-
-        if isinstance(sample_value, dict):
-            # New format: interpolate latency and energy separately
-            data_id = id(data)
-            if data_id not in self._extracted_metrics_cache:
-                self._extracted_metrics_cache[data_id] = self._extract_latency_and_energy_2d(data)
-
-            latency_data, energy_data = self._extracted_metrics_cache[data_id]
-
-            # Interpolate latency
-            points_list = []
-            latency_values = []
-            x_left, x_right = self._nearest_1d_point_helper(x, list(latency_data.keys()))
-            for i in [x_left, x_right]:
-                y_left, y_right = self._nearest_1d_point_helper(y, list(latency_data[i].keys()))
-                for j in [y_left, y_right]:
-                    points_list.append([i, j])
-                    latency_values.append(latency_data[i][j])
-
-            latency = self._validate(
-                interpolate.griddata(np.array(points_list), np.array(latency_values), (x, y), method="linear")
-            )
-
-            # Interpolate energy using same points
-            energy_values = []
-            for i in [x_left, x_right]:
-                y_left, y_right = self._nearest_1d_point_helper(y, list(energy_data[i].keys()))
-                for j in [y_left, y_right]:
-                    energy_values.append(energy_data[i][j])
-
-            energy = self._validate(
-                interpolate.griddata(np.array(points_list), np.array(energy_values), (x, y), method="linear")
-            )
-
-            return {"latency": latency, "power": 0.0, "energy": energy}
-        else:
-            # Legacy format: data values are floats
-            points_list = []
-            values_list = []
-            x_left, x_right = self._nearest_1d_point_helper(x, list(data.keys()))
-            for i in [x_left, x_right]:
-                y_left, y_right = self._nearest_1d_point_helper(y, list(data[i].keys()))
-                for j in [y_left, y_right]:
-                    points_list.append([i, j])
-                    values_list.append(data[i][j])
-
-            latency = self._validate(
-                interpolate.griddata(np.array(points_list), np.array(values_list), (x, y), method="linear")
-            )
-
-            return {"latency": latency, "power": 0.0, "energy": 0.0}
+        """Thin wrapper — delegates to ``interpolation.interp_2d_linear``."""
+        return interpolation.interp_2d_linear(x, y, data, self._extracted_metrics_cache)
 
     def _interp_3d(self, x: int, y: int, z: int, data: dict, method: str) -> dict:
-        """
-        Interpolate the 3d data using the given method.
-
-        Returns:
-            dict: {"latency": float, "power": float, "energy": float} - interpolated values for all metrics
-            Note: power is always 0.0 as it's not currently used by callers (only latency and energy are used)
-        """
-        # Check if data uses new dict format by sampling a leaf value
-        sample_value = self._get_sample_leaf_value(data)
-
-        if isinstance(sample_value, dict):
-            # New format: interpolate latency and energy only (power is not used by callers)
-            # Use cache to avoid repeated extraction of the same data dictionary
-            data_id = id(data)
-            if data_id not in self._extracted_metrics_cache:
-                # Extract both metrics in a single pass for maximum efficiency
-                self._extracted_metrics_cache[data_id] = self._extract_latency_and_energy_3d(data)
-
-            latency_data, energy_data = self._extracted_metrics_cache[data_id]
-
-            if method == "linear":
-                latency = self._interp_3d_linear(x, y, z, latency_data)
-                energy = self._interp_3d_linear(x, y, z, energy_data)
-            else:
-                latency = self._interp_2d_1d(x, y, z, latency_data, method)
-                energy = self._interp_2d_1d(x, y, z, energy_data, method)
-
-            return {"latency": latency, "power": 0.0, "energy": energy}
-        else:
-            # Legacy format: data values are floats
-            if method == "linear":
-                latency = self._interp_3d_linear(x, y, z, data)
-            else:
-                latency = self._interp_2d_1d(x, y, z, data, method)
-
-            return {"latency": latency, "power": 0.0, "energy": 0.0}
+        """Thin wrapper — delegates to ``interpolation.interp_3d``."""
+        return interpolation.interp_3d(x, y, z, data, method, self._extracted_metrics_cache)
 
     def _interp_context_topk_piecewise_from_raw(
         self,
@@ -3982,63 +3621,8 @@ class PerfDatabase:
         raw_dict: dict | None,
         boundary_seq_len: int | None,
     ) -> dict | None:
-        """
-        Interpolate raw context module data without crossing a top-k regime boundary.
-
-        DSA and DeepSeek-V4 CSA use different kernel paths before and after the
-        top-k selected cache saturates. A smooth interpolation across that
-        boundary can underestimate points just above it. This helper only
-        applies when the exact raw (num_heads, batch) curve has at least two
-        same-regime anchors.
-        """
-        if boundary_seq_len is None or raw_dict is None or num_heads not in raw_dict:
-            return None
-
-        exact_head_data = raw_dict[num_heads]
-        curve = {
-            seq_len: batch_dict[b]
-            for seq_len, batch_dict in exact_head_data.items()
-            if isinstance(batch_dict, dict) and b in batch_dict
-        }
-        if full_s in curve:
-            value = curve[full_s]
-            if isinstance(value, dict):
-                return {
-                    "latency": self._get_value(value, "latency"),
-                    "power": self._get_value(value, "power"),
-                    "energy": self._get_value(value, "energy"),
-                }
-            return {"latency": float(value), "power": 0.0, "energy": 0.0}
-
-        if full_s <= boundary_seq_len:
-            same_regime_keys = sorted(seq_len for seq_len in curve if seq_len <= boundary_seq_len)
-        else:
-            same_regime_keys = sorted(seq_len for seq_len in curve if seq_len > boundary_seq_len)
-
-        if len(same_regime_keys) < 2:
-            return None
-
-        if full_s < same_regime_keys[0]:
-            if full_s <= boundary_seq_len:
-                return None
-            left, right = same_regime_keys[0], same_regime_keys[1]
-        elif full_s > same_regime_keys[-1]:
-            return None
-        else:
-            left, right = self._nearest_1d_point_helper(full_s, same_regime_keys)
-        left_value = curve[left]
-        right_value = curve[right]
-
-        def _interp_metric(metric: str) -> float:
-            left_metric = self._get_value(left_value, metric)
-            right_metric = self._get_value(right_value, metric)
-            return self._interp_1d([left, right], [left_metric, right_metric], full_s)
-
-        return {
-            "latency": _interp_metric("latency"),
-            "power": _interp_metric("power"),
-            "energy": _interp_metric("energy"),
-        }
+        """Thin wrapper — delegates to ``interpolation.interp_context_topk_piecewise_from_raw``."""
+        return interpolation.interp_context_topk_piecewise_from_raw(num_heads, full_s, b, raw_dict, boundary_seq_len)
 
     def _interp_dsa_context_topk_piecewise_from_raw(
         self,
@@ -4048,171 +3632,28 @@ class PerfDatabase:
         dsa_dict: dict | None,
         index_topk: int | None,
     ) -> dict | None:
-        """
-        Interpolate raw DSA context data without crossing the index_topk regime boundary.
-
-        DSA context uses a different kernel path when kv_len crosses index_topk:
-        <= topk can skip indexer logits/topk, while > topk enables that path.
-        """
-        return self._interp_context_topk_piecewise_from_raw(num_heads, full_s, b, dsa_dict, index_topk)
+        """Thin wrapper — delegates to ``interpolation.interp_dsa_context_topk_piecewise_from_raw``."""
+        return interpolation.interp_dsa_context_topk_piecewise_from_raw(num_heads, full_s, b, dsa_dict, index_topk)
 
     def _get_sample_leaf_value(self, data: dict):
-        """Get a sample leaf value from nested dict to determine format."""
-        current = data
-        max_depth = 20  # Safety limit to prevent infinite loops
-        depth = 0
-        visited = set()  # Track visited dict ids to detect cycles
-
-        while isinstance(current, dict) and current and depth < max_depth:
-            dict_id = id(current)
-            if dict_id in visited:
-                # Circular reference detected
-                logger.warning("Circular reference detected in _get_sample_leaf_value")
-                break
-            visited.add(dict_id)
-
-            # Check if this is a leaf dict with latency/power keys
-            if "latency" in current or "power" in current:
-                return current
-
-            try:
-                key = next(iter(current))
-                current = current[key]
-                depth += 1
-            except (StopIteration, KeyError, TypeError):
-                # Handle edge cases: empty dict, missing key, or non-dict value
-                break
-
-        if depth >= max_depth:
-            logger.warning(f"Maximum depth ({max_depth}) exceeded in _get_sample_leaf_value")
-
-        return current
+        """Thin wrapper — delegates to ``interpolation.get_sample_leaf_value``."""
+        return interpolation.get_sample_leaf_value(data)
 
     def _get_p2p_bandwidth(self, num_gpus: int) -> float:
-        """
-        Get the appropriate point-to-point bandwidth based on the number of GPUs.
-
-        Three-tier bandwidth selection:
-        - num_gpus <= num_gpus_per_node: intra_node_bw (NVLink within node)
-        - num_gpus <= num_gpus_per_rack: inter_node_bw (NVLink via NVSwitch within rack)
-        - num_gpus > num_gpus_per_rack: inter_rack_bw (InfiniBand between racks)
-
-        Args:
-            num_gpus: Number of GPUs involved in the communication
-
-        Returns:
-            Bandwidth in Bytes/s
-        """
-        node_spec = self.system_spec["node"]
-        num_gpus_per_node = node_spec["num_gpus_per_node"]
-        num_gpus_per_rack = node_spec.get("num_gpus_per_rack", float("inf"))
-
-        if num_gpus <= num_gpus_per_node:
-            return node_spec["intra_node_bw"]
-        elif num_gpus <= num_gpus_per_rack:
-            return node_spec["inter_node_bw"]
-        else:
-            # Inter-rack communication, fallback to inter_node_bw if inter_rack_bw not defined
-            return node_spec.get("inter_rack_bw", node_spec["inter_node_bw"])
+        """Thin wrapper — delegates to ``SystemSpec.get_p2p_bandwidth``."""
+        return self.system_spec.get_p2p_bandwidth(num_gpus)
 
     def _bilinear_interpolation(self, x_list: list[int], y_list: list[int], x: int, y: int, data: dict) -> float:
-        """
-        Interpolate the 2d data using bilinear interpolation
-        """
-        x1, x2 = x_list
-        # assure xy has a rectengle grid
-        y1, y2 = y_list
-        # Calculate the weights for the corners
-        Q11, Q12, Q21, Q22 = data[x1][y1], data[x1][y2], data[x2][y1], data[x2][y2]  # noqa: N806
+        """Thin wrapper — delegates to ``interpolation.bilinear_interpolation``."""
+        return interpolation.bilinear_interpolation(x_list, y_list, x, y, data)
 
-        f_x1_y1 = Q11 * (x2 - x) * (y2 - y)
-        f_x1_y2 = Q12 * (x2 - x) * (y - y1)
-        f_x2_y1 = Q21 * (x - x1) * (y2 - y)
-        f_x2_y2 = Q22 * (x - x1) * (y - y1)
-        # Calculate the total weight
-        total_weight = (x2 - x1) * (y2 - y1)
-        # Calculate the interpolated value
-        interpolated_value = (f_x1_y1 + f_x1_y2 + f_x2_y1 + f_x2_y2) / total_weight
-        return interpolated_value
-
-    def _interp_2d_1d(self, x: int, y: int, z: int, data: dict, method="bilinear") -> float:
-        """
-        Interpolate the 3d data using the given method, 2d after 1d.
-        """
-        x_values = []
-        x_left, x_right = self._nearest_1d_point_helper(x, list(data.keys()))
-
-        for i in [x_left, x_right]:
-            points_list = []
-            values_list = []
-            y_left, y_right = self._nearest_1d_point_helper(y, list(data[i].keys()))
-            for j in [y_left, y_right]:
-                z_left, z_right = self._nearest_1d_point_helper(z, list(data[i][j].keys()))
-                points_list.append([j, z_left])
-                points_list.append([j, z_right])
-                values_list.append(data[i][j][z_left])
-                values_list.append(data[i][j][z_right])
-            if method == "cubic":
-                x_values.append(
-                    self._validate(
-                        interpolate.griddata(np.array(points_list), np.array(values_list), (y, z), method="cubic")
-                    )
-                )
-            elif method == "bilinear":
-                x_values.append(
-                    self._validate(self._bilinear_interpolation([y_left, y_right], [z_left, z_right], y, z, data[i]))
-                )
-            else:
-                raise NotImplementedError
-
-        return self._validate(self._interp_1d([x_left, x_right], x_values, x))
+    def _interp_2d_1d(self, x: int, y: int, z: int, data: dict, method: str = "bilinear") -> float:
+        """Thin wrapper — delegates to ``interpolation.interp_2d_1d``."""
+        return interpolation.interp_2d_1d(x, y, z, data, method)
 
     def _interp_1d(self, x: list[int], y: list, value: int):
-        """
-        Interpolate the 1d data using linear interpolation.
-        Handles both float and dict values.
-
-        Args:
-            x: list of x coordinates
-            y: list of y values (can be floats or dicts)
-            value: target x value
-
-        Returns:
-            float or dict: Interpolated result (dict if input was dict, float otherwise)
-        """
-        x0, x1 = x
-        y0, y1 = y
-
-        # Check if values are dicts (new format) or floats (legacy)
-        if isinstance(y0, dict) and isinstance(y1, dict):
-            # New format: interpolate latency and power separately
-            lat0, lat1 = y0["latency"], y1["latency"]
-            pow0, pow1 = y0["power"], y1["power"]
-
-            # Apply interpolation logic for latency
-            if (x0 - x1) * (lat0 - lat1) < 0 and (value - x0) * (value - x1) > 0:
-                lat1 = lat0
-            if lat0 == lat1:
-                lat_result = lat0
-            else:
-                lat_result = lat0 + (lat1 - lat0) / (x1 - x0) * (value - x0)
-
-            # Apply interpolation logic for power
-            if (x0 - x1) * (pow0 - pow1) < 0 and (value - x0) * (value - x1) > 0:
-                pow1 = pow0
-            if pow0 == pow1:
-                pow_result = pow0
-            else:
-                pow_result = pow0 + (pow1 - pow0) / (x1 - x0) * (value - x0)
-
-            return {"latency": lat_result, "power": pow_result}
-        else:
-            # Legacy format: y values are floats
-            if (x0 - x1) * (y0 - y1) < 0 and (value - x0) * (value - x1) > 0:
-                y1 = y0
-            if y0 == y1:
-                return y0
-            return y0 + (y1 - y0) / (x1 - x0) * (value - x0)
+        """Thin wrapper — delegates to ``interpolation.interp_1d``."""
+        return interpolation.interp_1d(x, y, value)
 
     def set_default_database_mode(self, mode: common.DatabaseMode) -> None:
         """
@@ -6234,46 +5675,18 @@ class PerfDatabase:
     def query_mem_op(
         self, mem_bytes: int, database_mode: common.DatabaseMode | None = None
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query memory operation latency and energy.
-
-        Args:
-            mem_bytes: Number of bytes to transfer
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+        """Query memory-operation latency analytically (no CSV data).
 
         Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
+            PerformanceResult acting as float (latency in ms); energy via ``.energy``.
+            For SOL_FULL, returns a ``(sol_time, 0, sol_time)`` tuple.
         """
-
-        def get_sol(mem_bytes: int) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            sol_time = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            return sol_time, 0, sol_time
-
-        def get_empirical(mem_bytes: int) -> float:
-            """
-            Get the empirical time
-            """
-            return (
-                mem_bytes
-                / (self.system_spec["gpu"]["mem_bw"] * self.system_spec["gpu"]["mem_bw_empirical_scaling_factor"])
-                + self.system_spec["gpu"]["mem_empirical_constant_latency"]
-            ) * 1000
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(mem_bytes)[0], energy=0.0)
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(mem_bytes)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(mem_bytes), energy=0.0)
-        else:
-            # hybrid and silicon modes have same logic
-            return PerformanceResult(get_empirical(mem_bytes), energy=0.0)
+        return interpolation.estimate_mem_op(
+            mem_bytes,
+            self.system_spec["gpu"],
+            database_mode=database_mode,
+            default_database_mode=self._default_database_mode,
+        )
 
     def query_mamba2(
         self,
