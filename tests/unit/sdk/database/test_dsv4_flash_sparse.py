@@ -22,6 +22,7 @@ import pytest
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.perf_database import (
     DSV4_FLASH_NATIVE_HEADS,
+    DSV4_PRO_NATIVE_HEADS,
     LoadedOpData,
     _deep_merge_dsv4_dicts,
     _dsv4_flash_robust_3d_lookup,
@@ -46,21 +47,42 @@ _CTX_HEADER = (
 _SPARSE_HEADER = _CTX_HEADER  # same column layout
 
 
-def _ctx_row(*, attn_kind: str, cr: int, bs: int, isl: int, tp: int, gemm: str = "fp8_block", lat: float = 1.0) -> str:
+def _ctx_row(
+    *,
+    attn_kind: str,
+    cr: int,
+    bs: int,
+    isl: int,
+    tp: int,
+    gemm: str = "fp8_block",
+    lat: float = 1.0,
+    model: str = "deepseek-ai/DeepSeek-V4-Flash",
+    native_heads: int = DSV4_FLASH_NATIVE_HEADS,
+) -> str:
     return (
         f"SGLang,test,NVIDIA H20-3e,dsv4_flash_{attn_kind}_context_module,"
-        "compressed_flashmla,deepseek-ai/DeepSeek-V4-Flash,DeepseekV4ForCausalLM,"
-        f"bfloat16,fp8_e4m3,{gemm},64,{bs},{isl},{tp},0,{cr},{lat:.4f}"
+        f"compressed_flashmla,{model},DeepseekV4ForCausalLM,"
+        f"bfloat16,fp8_e4m3,{gemm},{native_heads},{bs},{isl},{tp},0,{cr},{lat:.4f}"
     )
 
 
 def _gen_row(
-    *, attn_kind: str, cr: int, bs: int, isl: int, step: int, tp: int, gemm: str = "fp8_block", lat: float = 0.1
+    *,
+    attn_kind: str,
+    cr: int,
+    bs: int,
+    isl: int,
+    step: int,
+    tp: int,
+    gemm: str = "fp8_block",
+    lat: float = 0.1,
+    model: str = "deepseek-ai/DeepSeek-V4-Flash",
+    native_heads: int = DSV4_FLASH_NATIVE_HEADS,
 ) -> str:
     return (
         f"SGLang,test,NVIDIA H20-3e,dsv4_flash_{attn_kind}_generation_module,"
-        "compressed_flashmla,deepseek-ai/DeepSeek-V4-Flash,DeepseekV4ForCausalLM,"
-        f"bfloat16,fp8_e4m3,{gemm},64,{bs},{isl},{tp},{step},{cr},{lat:.4f}"
+        f"compressed_flashmla,{model},DeepseekV4ForCausalLM,"
+        f"bfloat16,fp8_e4m3,{gemm},{native_heads},{bs},{isl},{tp},{step},{cr},{lat:.4f}"
     )
 
 
@@ -153,22 +175,36 @@ def test_load_dsv4_flash_sparse_kernel_data_missing_returns_none(tmp_path):
 # ───────────────────────────────────────────────────────────────────────
 
 
-def test_load_context_dsv4_flash_kind_module_data_keys_by_tp(tmp_path):
-    """Context loader must key the inner cube by ``tp_size``, not ``num_heads``."""
+def test_load_context_dsv4_flash_kind_module_data_keys_by_native_heads_and_tp(tmp_path):
+    """Context loader must separate model size before keying by tp_size."""
     rows = [
         _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=1, lat=18.0),
         _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=2, lat=14.0),
         _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=4, lat=11.5),
         _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=8, lat=10.5),
+        _ctx_row(
+            attn_kind="csa",
+            cr=4,
+            bs=1,
+            isl=8192,
+            tp=1,
+            lat=6.0,
+            model="deepseek-ai/DeepSeek-V4-Pro",
+            native_heads=DSV4_PRO_NATIVE_HEADS,
+        ),
     ]
     path = _write_csv(tmp_path / "csa_ctx.txt", _CTX_HEADER, rows)
     data = load_context_dsv4_flash_kind_module_data(path)
     arch = "DeepseekV4ForCausalLM"
-    sub = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][arch][4]
+    by_native_heads = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][
+        common.GEMMQuantMode.fp8_block
+    ][arch]
+    sub = by_native_heads[DSV4_FLASH_NATIVE_HEADS][4]
     # keys at the 6th level are tp_size {1, 2, 4, 8}
     assert set(sub.keys()) == {1, 2, 4, 8}
     # axis order continues [tp][s][b]
     assert sub[8][8192][1]["latency"] == pytest.approx(10.5)
+    assert by_native_heads[DSV4_PRO_NATIVE_HEADS][4][1][8192][1]["latency"] == pytest.approx(6.0)
     # TP variation must be preserved (smaller TP slower; projections 1/N sharded)
     assert sub[1][8192][1]["latency"] > sub[8][8192][1]["latency"]
 
@@ -188,7 +224,7 @@ def test_load_generation_dsv4_flash_kind_module_data_b_before_s(tmp_path):
     path = _write_csv(tmp_path / "csa_gen.txt", _CTX_HEADER, rows)
     data = load_generation_dsv4_flash_kind_module_data(path)
     arch = "DeepseekV4ForCausalLM"
-    sub = data[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][arch][4]
+    sub = data[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][arch][DSV4_FLASH_NATIVE_HEADS][4]
     # axis order [tp][b][s_total] — b comes before s_total
     s_total_short = 1 + 1023  # isl + step
     s_total_long = 1 + 8191

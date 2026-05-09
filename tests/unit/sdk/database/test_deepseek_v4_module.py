@@ -13,6 +13,8 @@ from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.inference_summary import InferenceSummary
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import (
+    DSV4_FLASH_NATIVE_HEADS,
+    DSV4_PRO_NATIVE_HEADS,
     LoadedOpData,
     PerfDataNotAvailableError,
     _dsv4_flash_robust_3d_lookup,
@@ -51,13 +53,17 @@ def _deepseek_v4_value(latency: float) -> dict[str, float]:
     return {"latency": latency, "power": 10.0, "energy": latency * 10.0}
 
 
-def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict) -> dict:
+def _context_deepseek_v4_data(
+    compress_ratio: int, attn_dict: dict, native_heads: int = DSV4_FLASH_NATIVE_HEADS
+) -> dict:
     return {
         common.FMHAQuantMode.bfloat16: {
             common.KVCacheQuantMode.fp8: {
                 common.GEMMQuantMode.fp8_block: {
                     "DeepseekV4ForCausalLM": {
-                        compress_ratio: attn_dict,
+                        native_heads: {
+                            compress_ratio: attn_dict,
+                        },
                     },
                 },
             },
@@ -65,12 +71,16 @@ def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict) -> dict:
     }
 
 
-def _generation_deepseek_v4_data(compress_ratio: int, attn_dict: dict) -> dict:
+def _generation_deepseek_v4_data(
+    compress_ratio: int, attn_dict: dict, native_heads: int = DSV4_FLASH_NATIVE_HEADS
+) -> dict:
     return {
         common.KVCacheQuantMode.fp8: {
             common.GEMMQuantMode.fp8_block: {
                 "DeepseekV4ForCausalLM": {
-                    compress_ratio: attn_dict,
+                    native_heads: {
+                        compress_ratio: attn_dict,
+                    },
                 },
             },
         },
@@ -283,6 +293,93 @@ class TestDeepSeekV4AttentionModule:
         expected = 0.20 + (0.50 - 0.20) * (1 - 2) / (5 - 2)
         assert float(result) == pytest.approx(expected)
         assert result.energy == pytest.approx(expected * 10.0)
+
+    def test_context_silicon_does_not_reuse_pro_module_rows_for_flash(self, mutable_comprehensive_perf_db):
+        db = mutable_comprehensive_perf_db
+        pro_grid = {
+            1: {
+                8192: {
+                    1: _deepseek_v4_value(6.0),
+                },
+            },
+        }
+        db._context_deepseek_v4_attention_module_data = LoadedOpData(
+            _context_deepseek_v4_data(4, pro_grid, native_heads=DSV4_PRO_NATIVE_HEADS),
+            common.PerfDataFilename.deepseek_v4_context_module,
+            "mock_dsv4_pro_context_module_tp1",
+        )
+        db._raw_context_deepseek_v4_attention_module_data = LoadedOpData(
+            _context_deepseek_v4_data(4, pro_grid, native_heads=DSV4_PRO_NATIVE_HEADS),
+            common.PerfDataFilename.deepseek_v4_context_module,
+            "mock_raw_dsv4_pro_context_module_tp1",
+        )
+
+        pro_result = db.query_context_deepseek_v4_attention_module(
+            **{
+                **_deepseek_v4_attn_kwargs(4),
+                "b": 1,
+                "s": 8192,
+                "num_heads": DSV4_PRO_NATIVE_HEADS,
+                "hidden_size": 7168,
+            },
+            database_mode=common.DatabaseMode.SILICON,
+        )
+        assert float(pro_result) == pytest.approx(6.0)
+
+        with pytest.raises(PerfDataNotAvailableError):
+            db.query_context_deepseek_v4_attention_module(
+                **{
+                    **_deepseek_v4_attn_kwargs(4),
+                    "b": 1,
+                    "s": 8192,
+                    "num_heads": DSV4_FLASH_NATIVE_HEADS,
+                    "hidden_size": 4096,
+                },
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
+    def test_generation_silicon_does_not_reuse_pro_module_rows_for_flash(self, mutable_comprehensive_perf_db):
+        db = mutable_comprehensive_perf_db
+        pro_grid = {
+            1: {
+                1: {
+                    8192: _deepseek_v4_value(0.7),
+                },
+            },
+        }
+        db._generation_deepseek_v4_attention_module_data = LoadedOpData(
+            _generation_deepseek_v4_data(4, pro_grid, native_heads=DSV4_PRO_NATIVE_HEADS),
+            common.PerfDataFilename.deepseek_v4_generation_module,
+            "mock_dsv4_pro_generation_module_tp1",
+        )
+
+        pro_kwargs = _deepseek_v4_attn_kwargs(4)
+        pro_kwargs.pop("prefix")
+        pro_result = db.query_generation_deepseek_v4_attention_module(
+            **{
+                **pro_kwargs,
+                "b": 1,
+                "s": 8192,
+                "num_heads": DSV4_PRO_NATIVE_HEADS,
+                "hidden_size": 7168,
+            },
+            database_mode=common.DatabaseMode.SILICON,
+        )
+        assert float(pro_result) == pytest.approx(0.7)
+
+        flash_kwargs = _deepseek_v4_attn_kwargs(4)
+        flash_kwargs.pop("prefix")
+        with pytest.raises(PerfDataNotAvailableError):
+            db.query_generation_deepseek_v4_attention_module(
+                **{
+                    **flash_kwargs,
+                    "b": 1,
+                    "s": 8192,
+                    "num_heads": DSV4_FLASH_NATIVE_HEADS,
+                    "hidden_size": 4096,
+                },
+                database_mode=common.DatabaseMode.SILICON,
+            )
 
     def test_csa_topk_changes_attention_workload(self, comprehensive_perf_db):
         base = _deepseek_v4_attn_kwargs(4)
