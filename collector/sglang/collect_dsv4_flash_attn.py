@@ -1200,9 +1200,7 @@ def _subprocess_entry(
     if seq_lens is not None:
         sl_grid = list(seq_lens)
     pairs = (
-        [(batch_size, sl) for sl in sl_grid]
-        if allow_unfiltered_shapes
-        else _filter_pairs(mode, [batch_size], sl_grid)
+        [(batch_size, sl) for sl in sl_grid] if allow_unfiltered_shapes else _filter_pairs(mode, [batch_size], sl_grid)
     )
     if not pairs:
         print(f"[dsv4-flash] no valid sl values for mode={mode}, bs={batch_size}")
