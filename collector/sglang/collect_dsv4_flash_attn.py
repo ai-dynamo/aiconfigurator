@@ -152,6 +152,12 @@ ATTN_KIND_TO_COMPRESS_RATIO = {
 
 CLI_DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
 _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
+_AIC_MODEL_CONFIG_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "src",
+    "aiconfigurator",
+    "model_configs",
+)
 
 
 _PORTS_PER_GPU = 1000
@@ -199,6 +205,27 @@ def _pick_free_port(gpu_id: int) -> int:
 def _kv_dtype_db_to_sglang(kv_dtype_db: str) -> str:
     """Map perf-database kv dtype string to SGLang's ServerArgs value."""
     return {"bfloat16": "bfloat16", "fp8": "fp8_e4m3"}[kv_dtype_db]
+
+
+def _cfg_get(cfg, key: str):
+    if cfg is None:
+        return None
+    if isinstance(cfg, dict):
+        return cfg.get(key)
+    return getattr(cfg, key, None)
+
+
+def _native_num_attention_heads(model_runner, attention_module) -> int:
+    for cfg in (
+        _cfg_get(model_runner, "model_config"),
+        _cfg_get(_cfg_get(model_runner, "model_config"), "hf_config"),
+        _cfg_get(_cfg_get(model_runner, "model"), "config"),
+        _cfg_get(attention_module, "config"),
+    ):
+        value = _cfg_get(cfg, "num_attention_heads")
+        if value is not None:
+            return int(value)
+    return NATIVE_HEADS
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -271,6 +298,15 @@ def _download_non_weight_model_files(model_id: str) -> tuple[str, dict]:
     return os.path.dirname(config_file), config
 
 
+def _read_packaged_model_config(model_id: str) -> dict:
+    cfg_fname = model_id.replace("/", "--") + "_config.json"
+    config_file = os.path.join(_AIC_MODEL_CONFIG_DIR, cfg_fname)
+    if not os.path.isfile(config_file):
+        raise FileNotFoundError(f"AIC packaged config not found for model_id={model_id!r}: expected {config_file}")
+    with open(config_file) as f:
+        return json.load(f)
+
+
 def _resolve_model_path(
     model_path: str,
     *,
@@ -306,6 +342,9 @@ def _resolve_model_path(
         src_dir = model_path
         with open(os.path.join(src_dir, "config.json")) as f:
             config = json.load(f)
+    elif os.environ.get("SGLANG_LOAD_FORMAT", "dummy") == "dummy":
+        src_dir = None
+        config = _read_packaged_model_config(model_path)
     else:
         src_dir, config = _download_non_weight_model_files(model_path)
 
@@ -365,7 +404,8 @@ def _resolve_model_path(
         f"aic_dsv4_{attn_kind}_{model_path.replace('/', '_')}_{os.getpid()}",
     )
     os.makedirs(tmp_dir, exist_ok=True)
-    _copy_non_weight_files(src_dir, tmp_dir)
+    if src_dir is not None:
+        _copy_non_weight_files(src_dir, tmp_dir)
     with open(os.path.join(tmp_dir, "config.json"), "w") as f:
         json.dump(config, f)
     return tmp_dir
@@ -850,6 +890,7 @@ def _log_result(
     perf_filename_prefix: str = "dsv4",
     gemm_type: str = "bfloat16",
     tp_size: int = 1,
+    num_heads: int = NATIVE_HEADS,
 ) -> None:
     # V4-Flash output layout: ONE CSV per (attn_kind, mode) — 3 kinds x 2
     # modes = 6 files total, regardless of how many (tp_size, gemm_type)
@@ -873,7 +914,7 @@ def _log_result(
                 "mla_dtype": "bfloat16",
                 "kv_cache_dtype": kv_cache_dtype,
                 "gemm_type": gemm_type,
-                "num_heads": NATIVE_HEADS,
+                "num_heads": num_heads,
                 "batch_size": batch_size,
                 "isl": seq_len if is_prefill else 1,
                 "tp_size": tp_size,
@@ -936,6 +977,7 @@ def run_dsv4_mla_module(
     )
 
     attention_module = model_runner.model.model.layers[layer_id].self_attn
+    native_num_heads = _native_num_attention_heads(model_runner, attention_module)
     actual_ratio = getattr(attention_module, "compress_ratio", None)
     if actual_ratio != compress_ratio:
         raise RuntimeError(f"target layer compress_ratio mismatch: expected {compress_ratio}, got {actual_ratio}")
@@ -995,6 +1037,7 @@ def run_dsv4_mla_module(
                         perf_filename_prefix=perf_filename_prefix,
                         gemm_type=gemm_type,
                         tp_size=tp_size,
+                        num_heads=native_num_heads,
                     )
                     stats.update(
                         {
@@ -1036,6 +1079,8 @@ def _run_subprocess(
     batch_size: int,
     output_path: str,
     gpu_id: int,
+    seq_lens: Iterable[int] | None = None,
+    allow_unfiltered_shapes: bool = False,
     gemm_type: str = "bfloat16",
     tp_size: int = 1,
 ):
@@ -1064,6 +1109,8 @@ def _run_subprocess(
         f'    model_path="{model_path}",\n'
         f'    kv_cache_dtype="{kv_cache_dtype_sglang}",\n'
         f"    batch_size={batch_size},\n"
+        f"    seq_lens={list(seq_lens) if seq_lens is not None else None!r},\n"
+        f"    allow_unfiltered_shapes={allow_unfiltered_shapes!r},\n"
         f'    output_path="{output_path}",\n'
         f'    gemm_type="{gemm_type}",\n'
         f"    tp_size={tp_size!r},\n"
@@ -1137,6 +1184,8 @@ def _subprocess_entry(
     model_path: str,
     kv_cache_dtype: str,
     batch_size: int,
+    seq_lens: Iterable[int] | None = None,
+    allow_unfiltered_shapes: bool = False,
     output_path: str,
     gemm_type: str = "bfloat16",
     tp_size: int = 1,
@@ -1147,7 +1196,14 @@ def _subprocess_entry(
     forward reuses the same allocator without re-init.
     """
     bs_grid, sl_grid = _expand_grid()
-    pairs = _filter_pairs(mode, [batch_size], sl_grid)
+    del bs_grid
+    if seq_lens is not None:
+        sl_grid = list(seq_lens)
+    pairs = (
+        [(batch_size, sl) for sl in sl_grid]
+        if allow_unfiltered_shapes
+        else _filter_pairs(mode, [batch_size], sl_grid)
+    )
     if not pairs:
         print(f"[dsv4-flash] no valid sl values for mode={mode}, bs={batch_size}")
         return
@@ -1289,6 +1345,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "h_q=64 (V4 zero-pads), so any TP power-of-2 in [1, 32] is valid."
         ),
     )
+    parser.add_argument(
+        "--allow-unfiltered-shapes",
+        action="store_true",
+        help=(
+            "Run the explicitly provided --batch-sizes/--seq-lens without the default safety cap. "
+            "Intended only for targeted boundary backfill after validating the shape."
+        ),
+    )
     return parser
 
 
@@ -1304,7 +1368,11 @@ def main() -> None:
     else:
         _, seq_lens = _expand_grid()
 
-    pairs = _filter_pairs(args.mode, batch_sizes, seq_lens)
+    pairs = (
+        [(bs, sl) for bs in batch_sizes for sl in seq_lens]
+        if args.allow_unfiltered_shapes
+        else _filter_pairs(args.mode, batch_sizes, seq_lens)
+    )
     _bs_grid = sorted({bs for bs, _ in pairs})
     kinds = [args.attn_kind] if args.attn_kind else list(ATTN_KINDS)
     tp_sizes = _parse_int_list(args.tp_sizes)
@@ -1331,6 +1399,8 @@ def main() -> None:
                         batch_size=bs,
                         output_path=output_path,
                         gpu_id=gpu_id,
+                        seq_lens=seq_lens,
+                        allow_unfiltered_shapes=args.allow_unfiltered_shapes,
                         gemm_type=args.gemm_type,
                         tp_size=tp_size,
                     )

@@ -1378,11 +1378,17 @@ def _dsv4_normalize_dtype(name: str) -> str:
 # When sglang eventually adds real V4 head sharding, drop this special-case
 # and the generic ``local_heads`` axis will work directly.
 DSV4_FLASH_NATIVE_HEADS = 64
+DSV4_PRO_NATIVE_HEADS = 128
+DSV4_NATIVE_HEADS_BY_HIDDEN_SIZE = {
+    4096: DSV4_FLASH_NATIVE_HEADS,
+    7168: DSV4_PRO_NATIVE_HEADS,
+}
 
 
-def _dsv4_flash_tp_from_num_heads(num_heads: int) -> int:
+def _dsv4_flash_tp_from_num_heads(num_heads: int, hidden_size: int | None = None) -> int:
     """Recover ``tp_size`` from the model layer's ``local_heads`` value."""
-    return max(1, DSV4_FLASH_NATIVE_HEADS // max(num_heads, 1))
+    native_heads = DSV4_NATIVE_HEADS_BY_HIDDEN_SIZE.get(int(hidden_size or 0), DSV4_FLASH_NATIVE_HEADS)
+    return max(1, native_heads // max(num_heads, 1))
 
 
 def _dsv4_flash_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
@@ -8045,7 +8051,9 @@ class PerfDatabase:
             # the actual tp_size for the lookup).  Other architectures are
             # unaffected; this branch only fires for DeepseekV4ForCausalLM.
             head_axis = (
-                _dsv4_flash_tp_from_num_heads(num_heads) if architecture == "DeepseekV4ForCausalLM" else num_heads
+                _dsv4_flash_tp_from_num_heads(num_heads, hidden_size=hidden_size)
+                if architecture == "DeepseekV4ForCausalLM"
+                else num_heads
             )
 
             # Pick correction strategy up-front because it changes the lookup
@@ -8233,7 +8241,9 @@ class PerfDatabase:
             # V4-Flash special-case: data keyed by ``tp_size`` (heads aren't
             # actually sharded — see note at top of file).
             head_axis = (
-                _dsv4_flash_tp_from_num_heads(num_heads) if architecture == "DeepseekV4ForCausalLM" else num_heads
+                _dsv4_flash_tp_from_num_heads(num_heads, hidden_size=hidden_size)
+                if architecture == "DeepseekV4ForCausalLM"
+                else num_heads
             )
             # V4-Flash generation data is keyed as [tp_size][batch][s_total].
             result = (

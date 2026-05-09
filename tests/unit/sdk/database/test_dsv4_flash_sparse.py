@@ -99,6 +99,14 @@ def test_dsv4_flash_tp_from_num_heads_edge_cases():
     assert DSV4_FLASH_NATIVE_HEADS == 64
 
 
+@pytest.mark.parametrize(
+    "num_heads,expected_tp",
+    [(128, 1), (64, 2), (32, 4), (16, 8)],
+)
+def test_dsv4_pro_tp_from_num_heads_uses_pro_hidden_size(num_heads, expected_tp):
+    assert _dsv4_flash_tp_from_num_heads(num_heads, hidden_size=7168) == expected_tp
+
+
 # ───────────────────────────────────────────────────────────────────────
 # Loader: sparse-kernel CSV
 # ───────────────────────────────────────────────────────────────────────
@@ -535,6 +543,19 @@ def test_dsv4_flash_test_cases_active_under_v4_filter(monkeypatch):
     assert {c[6] for c in cases} == {model_path}
     # all cases for this op are CSA
     assert {c[7] for c in cases} == {"csa"}
+
+
+def test_dsv4_module_test_cases_active_under_v4_pro_filter(monkeypatch):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "deepseek-ai/DeepSeek-V4-Pro")
+    from collector.common_test_cases import (
+        get_dsv4_flash_csa_context_test_cases,
+        get_dsv4_flash_paged_mqa_logits_test_cases,
+    )
+
+    cases = get_dsv4_flash_csa_context_test_cases()
+    assert len(cases) > 0
+    assert {c[6] for c in cases} == {"deepseek-ai/DeepSeek-V4-Pro"}
+    assert get_dsv4_flash_paged_mqa_logits_test_cases() == []
 
 
 def test_dsv4_flash_sparse_test_cases_only_indexer_tp1(monkeypatch):
