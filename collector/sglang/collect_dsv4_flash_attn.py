@@ -1011,14 +1011,30 @@ def run_dsv4_mla_module(
                     traceback.print_exc()
                     print("  failed; skipping this shape")
                 finally:
-                    model_runner.req_to_token_pool.clear()
-                    model_runner.token_to_kv_pool_allocator.clear()
-                    torch.cuda.empty_cache()
-                    gc.collect()
+                    # When a kernel raises CUBLAS_STATUS_EXECUTION_FAILED or similar
+                    # the CUDA context can be poisoned. Subsequent allocator/empty_cache
+                    # calls then fail with cudaErrorIllegalAddress, which would propagate
+                    # out of the worker subprocess (exit=1) and discard data already
+                    # collected from earlier shapes in this same (bs, gemm, tp) sweep.
+                    # Swallow cleanup-time CUDA errors so the worker exits cleanly with
+                    # whatever shapes it already finished.
+                    for _cleanup_step in (
+                        lambda: model_runner.req_to_token_pool.clear(),
+                        lambda: model_runner.token_to_kv_pool_allocator.clear(),
+                        lambda: torch.cuda.empty_cache(),
+                        lambda: gc.collect(),
+                    ):
+                        try:
+                            _cleanup_step()
+                        except Exception:
+                            pass
     finally:
-        del model_runner
-        torch.cuda.empty_cache()
-        gc.collect()
+        try:
+            del model_runner
+            torch.cuda.empty_cache()
+            gc.collect()
+        except Exception:
+            pass
     return results
 
 
