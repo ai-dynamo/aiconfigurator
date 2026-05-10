@@ -152,8 +152,13 @@ FMLA_NUM_TILES = 7
 PAGE_SIZE_C4 = 64  # paged_mqa_logits block_kv
 PAGE_SIZE_FULL = 64  # FlashMLA paged block_size
 
-NUM_SMS_H20 = 78
 DEFAULT_ARCHITECTURE = "DeepseekV4ForCausalLM"
+
+
+def _device_num_sms(device: str | torch.device) -> int:
+    """Return the actual SM count of ``device`` (the kernel sizes
+    ``schedule_meta`` from this and asserts ``_schedule_meta_size == num_sms + 1``)."""
+    return torch.cuda.get_device_properties(device).multi_processor_count
 
 
 # Two kernels are benched at the kernel level:
@@ -381,7 +386,7 @@ def _bench_paged_mqa_logits(M: int, past_kv: int, *, batch_size: int = 1, device
     block_table = torch.arange(blocks_per_req, dtype=torch.int32, device=device)
     block_table = block_table.unsqueeze(0).expand(b, blocks_per_req).contiguous()
 
-    schedule_meta = get_paged_mqa_logits_metadata(context_lens, block_kv, NUM_SMS_H20)
+    schedule_meta = get_paged_mqa_logits_metadata(context_lens, block_kv, _device_num_sms(device))
 
     def kernel_fn():
         return fp8_paged_mqa_logits(q, kv_in, weights, context_lens, block_table, schedule_meta, int(full_c4), False)
