@@ -1010,10 +1010,7 @@ def run_dsv4_mla_module(
                     )
                     results.append(stats)
                 except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
-                    print(
-                        f"[WARN] dsv4-flash {sweep_label} bs={batch_size} sl={seq_len}: "
-                        "OOM; skipping this shape"
-                    )
+                    print(f"[WARN] dsv4-flash {sweep_label} bs={batch_size} sl={seq_len}: OOM; skipping this shape")
                     skipped_shapes.append((batch_size, seq_len, "OOM"))
                     try:
                         torch.cuda.empty_cache()
@@ -1036,10 +1033,10 @@ def run_dsv4_mla_module(
                     # whatever shapes it already finished. Cleanup failures are logged
                     # as a [WARN] line so the user knows the context is degraded.
                     for _cleanup_label, _cleanup_step in (
-                        ("req_to_token_pool.clear", lambda: model_runner.req_to_token_pool.clear()),
-                        ("token_to_kv_pool_allocator.clear", lambda: model_runner.token_to_kv_pool_allocator.clear()),
-                        ("torch.cuda.empty_cache", lambda: torch.cuda.empty_cache()),
-                        ("gc.collect", lambda: gc.collect()),
+                        ("req_to_token_pool.clear", model_runner.req_to_token_pool.clear),
+                        ("token_to_kv_pool_allocator.clear", model_runner.token_to_kv_pool_allocator.clear),
+                        ("torch.cuda.empty_cache", torch.cuda.empty_cache),
+                        ("gc.collect", gc.collect),
                     ):
                         try:
                             _cleanup_step()
