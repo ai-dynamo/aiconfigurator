@@ -945,6 +945,11 @@ def run_dsv4_mla_module(
     version = get_version("sglang")
     device_name = torch.cuda.get_device_name(device)
     results = []
+    # Per-shape failures are surfaced both inline (one [WARN] line per failure)
+    # and as a single [WARN] summary at the end of the worker, so partial-coverage
+    # gaps are visible to the user without having to dig through tracebacks.
+    skipped_shapes: list[tuple[int, int, str]] = []
+    sweep_label = f"kind={attn_kind} mode={mode} tp={tp_size} gemm={gemm_type}"
     try:
         for batch_size in batch_sizes:
             for seq_len in seq_lens:
@@ -1005,11 +1010,22 @@ def run_dsv4_mla_module(
                     )
                     results.append(stats)
                 except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
-                    print(f"  OOM: batch_size={batch_size}, seq_len={seq_len}; skipping")
-                    torch.cuda.empty_cache()
-                except Exception:
+                    print(
+                        f"[WARN] dsv4-flash {sweep_label} bs={batch_size} sl={seq_len}: "
+                        "OOM; skipping this shape"
+                    )
+                    skipped_shapes.append((batch_size, seq_len, "OOM"))
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                except Exception as exc:
                     traceback.print_exc()
-                    print("  failed; skipping this shape")
+                    print(
+                        f"[WARN] dsv4-flash {sweep_label} bs={batch_size} sl={seq_len}: "
+                        f"{type(exc).__name__}; skipping this shape"
+                    )
+                    skipped_shapes.append((batch_size, seq_len, type(exc).__name__))
                 finally:
                     # When a kernel raises CUBLAS_STATUS_EXECUTION_FAILED or similar
                     # the CUDA context can be poisoned. Subsequent allocator/empty_cache
@@ -1017,17 +1033,23 @@ def run_dsv4_mla_module(
                     # out of the worker subprocess (exit=1) and discard data already
                     # collected from earlier shapes in this same (bs, gemm, tp) sweep.
                     # Swallow cleanup-time CUDA errors so the worker exits cleanly with
-                    # whatever shapes it already finished.
-                    for _cleanup_step in (
-                        lambda: model_runner.req_to_token_pool.clear(),
-                        lambda: model_runner.token_to_kv_pool_allocator.clear(),
-                        lambda: torch.cuda.empty_cache(),
-                        lambda: gc.collect(),
+                    # whatever shapes it already finished. Cleanup failures are logged
+                    # as a [WARN] line so the user knows the context is degraded.
+                    for _cleanup_label, _cleanup_step in (
+                        ("req_to_token_pool.clear", lambda: model_runner.req_to_token_pool.clear()),
+                        ("token_to_kv_pool_allocator.clear", lambda: model_runner.token_to_kv_pool_allocator.clear()),
+                        ("torch.cuda.empty_cache", lambda: torch.cuda.empty_cache()),
+                        ("gc.collect", lambda: gc.collect()),
                     ):
                         try:
                             _cleanup_step()
-                        except Exception:
-                            pass
+                        except Exception as _cleanup_exc:
+                            print(
+                                f"[WARN] dsv4-flash {sweep_label} bs={batch_size} sl={seq_len}: "
+                                f"cleanup step '{_cleanup_label}' failed with "
+                                f"{type(_cleanup_exc).__name__}; CUDA context likely poisoned, "
+                                "remaining shapes in this sweep may be unreliable"
+                            )
     finally:
         try:
             del model_runner
@@ -1035,6 +1057,12 @@ def run_dsv4_mla_module(
             gc.collect()
         except Exception:
             pass
+    if skipped_shapes:
+        skipped_str = ", ".join(f"(bs={b},sl={s},reason={r})" for b, s, r in skipped_shapes)
+        print(
+            f"[WARN] dsv4-flash {sweep_label}: SWEEP SUMMARY — {len(skipped_shapes)} of "
+            f"{len(skipped_shapes) + len(results)} shapes failed: {skipped_str}"
+        )
     return results
 
 
