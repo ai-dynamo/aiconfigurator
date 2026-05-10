@@ -52,7 +52,7 @@ except ModuleNotFoundError:
 # module so collect.py's registry can resolve them via getattr on this module.
 try:
     from collector.common_test_cases import (
-        _DSV4_FLASH_DEFAULT_MODEL as DEFAULT_MODEL,
+        _DSV4_FLASH_MODEL_PATH as DEFAULT_MODEL,
     )
     from collector.common_test_cases import (
         _DSV4_FLASH_SPARSE_BS_LIST as DEFAULT_BS_LIST,
@@ -75,7 +75,7 @@ try:
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import (
-        _DSV4_FLASH_DEFAULT_MODEL as DEFAULT_MODEL,
+        _DSV4_FLASH_MODEL_PATH as DEFAULT_MODEL,
     )
     from common_test_cases import (
         _DSV4_FLASH_SPARSE_BS_LIST as DEFAULT_BS_LIST,
