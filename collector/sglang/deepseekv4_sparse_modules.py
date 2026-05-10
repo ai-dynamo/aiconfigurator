@@ -331,8 +331,19 @@ def _quantize_k_cache_model1(k_bf16: torch.Tensor) -> torch.Tensor:
         scale_inv = scale_inv.unsqueeze(-1)
         nope[:, :, s:e] = (k[..., s:e].float() / scale_inv.float()).to(torch.float8_e4m3fn)
 
-    # Reshape sliced (unpadded) view to (num_blocks, block_size, 1, bytes_per_token)
-    return out_view.view(num_blocks, block_size, 1, bytes_per_token)
+    # Return a view whose stride(0) is the padded per-block size — FlashMLA's
+    # MODEL1 path asserts ``k_cache.stride(0) % TMA_K_STRIDE == 0`` (with
+    # TMA_K_STRIDE = D_NOPE + 2*D_ROPE = 576), and ``bytes_per_token * block_size``
+    # = 37376 is *not* a multiple of 576, so we need the per-block padding to be
+    # visible in the tensor's stride. ``.view`` collapses stride(0) to the
+    # contiguous value when num_blocks == 1, breaking the assertion for small
+    # shapes; ``as_strided`` lets us pin stride(0) to size_per_block_padded for
+    # any num_blocks.
+    return out.as_strided(
+        size=(num_blocks, block_size, 1, bytes_per_token),
+        stride=(size_per_block_padded, bytes_per_token, bytes_per_token, 1),
+        storage_offset=0,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════
