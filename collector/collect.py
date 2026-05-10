@@ -5,6 +5,50 @@ import functools
 import os
 import warnings
 
+
+def _maybe_override_triton_ptxas() -> None:
+    """Point Triton at a system ptxas on sm_103+ devices.
+
+    The Triton wheel ships a pinned ptxas that does not yet codegen for
+    ``sm_103a`` (B300 / GB300), failing every Triton-backed kernel with
+    ``triton.runtime.errors.PTXASError``. Recent CUDA toolkits (≥13) do
+    support sm_103a, and Triton honors ``TRITON_PTXAS_PATH`` to override
+    the bundled binary. Only override on sm_103+ so that H20/H100/A100/B200
+    keep their proven bundled toolchain.
+    """
+    if os.environ.get("TRITON_PTXAS_PATH"):
+        return
+    import shutil
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader,nounits", "--id=0"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return
+        cap_str = result.stdout.strip().splitlines()[0]
+        major, minor = (int(p) for p in cap_str.split("."))
+    except Exception:
+        return
+    if (major, minor) < (10, 3):
+        return
+    candidates = [
+        os.path.join(os.environ.get("CUDA_HOME", ""), "bin", "ptxas") if os.environ.get("CUDA_HOME") else None,
+        "/usr/local/cuda/bin/ptxas",
+        "/usr/local/cuda-13.0/bin/ptxas",
+        shutil.which("ptxas"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            os.environ["TRITON_PTXAS_PATH"] = path
+            print(f"[collector] sm_{major}{minor}a detected; TRITON_PTXAS_PATH={path} (overriding bundled Triton ptxas)")
+            return
+
+
+_maybe_override_triton_ptxas()
+
+
 from helper import get_device_module, get_device_str
 
 
