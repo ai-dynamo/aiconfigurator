@@ -513,6 +513,22 @@ def _load_model_runner(
     server_args.quantization = "fp8" if gemm_type == "fp8_block" else None
     server_args.enable_piecewise_cuda_graph = False
     server_args.attention_backend = "compressed"
+    # DSv4 ships FP4 routed experts that require a native FP4 MoE runtime.
+    # On Blackwell (sm_100+) the default auto-selection picks the native FP4
+    # path. On Hopper (sm_90) there is no native FP4 path, so model load
+    # raises ``NotImplementedError: DeepSeekV4 FP4 experts now require a
+    # native FP4 MoE backend. Use --moe-runner-backend marlin on Hopper``.
+    # Force the marlin runner on Hopper so fp8_block sweeps load cleanly.
+    # bfloat16 sweeps don't trigger the FP4 path, so the override is gated
+    # on both arch and ``quantization="fp8"``.
+    if server_args.quantization == "fp8":
+        try:
+            major, _ = torch.cuda.get_device_capability(device)
+        except Exception:
+            major = None
+        if major is not None and major < 10 and not getattr(server_args, "moe_runner_backend", None):
+            server_args.moe_runner_backend = "marlin"
+            print(f"[dsv4-collector] Hopper detected (sm_{major}*); setting moe_runner_backend=marlin")
 
     print(
         f"[dsv4-collector] model_path {model_path} -> {local_model_path}; "
