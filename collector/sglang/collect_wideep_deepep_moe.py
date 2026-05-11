@@ -791,8 +791,11 @@ def run_moe(
         moe_layer = None
         for attr in ("mlp", "block_sparse_moe"):
             candidate = getattr(decoder_layer, attr, None)
-            # Skip non-MoE MLP layers (DeepSeek's first few layers are dense).
-            if candidate is not None and (hasattr(candidate, "experts") or hasattr(candidate, "n_routed_experts")):
+            # Require an `experts` submodule whose `run_moe_core` is callable: this
+            # is what the benchmark actually invokes below, and it filters out
+            # non-MoE MLP layers (e.g. DeepSeek's leading dense layers).
+            experts = getattr(candidate, "experts", None) if candidate is not None else None
+            if experts is not None and callable(getattr(experts, "run_moe_core", None)):
                 moe_layer = candidate
                 break
         if moe_layer is None:
