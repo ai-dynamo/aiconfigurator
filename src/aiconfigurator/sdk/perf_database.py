@@ -28,6 +28,35 @@ logger = logging.getLogger(__name__)
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
 
 
+def _read_perf_rows(perf_file: str) -> list[dict[str, object]]:
+    if perf_file.lower().endswith(".parquet"):
+        try:
+            import pyarrow.parquet as pq
+        except ImportError as exc:
+            raise RuntimeError(
+                "Loading parquet perf data requires the 'pyarrow' package. "
+                "Install aiconfigurator with its declared runtime dependencies."
+            ) from exc
+        return [
+            {key: "" if value is None else value for key, value in row.items()}
+            for row in pq.read_table(perf_file).to_pylist()
+        ]
+
+    with open(perf_file, encoding="utf-8", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def _resolve_perf_data_path(perf_file: str) -> str:
+    if os.path.exists(perf_file):
+        return perf_file
+    stem, suffix = os.path.splitext(perf_file)
+    if suffix.lower() == ".parquet":
+        legacy_file = f"{stem}.txt"
+        if os.path.exists(legacy_file):
+            return legacy_file
+    return perf_file
+
+
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
     default_path = os.fspath(pkg_resources.files("aiconfigurator") / "systems")
     if raw_paths is None:
@@ -111,12 +140,14 @@ def _load_op_kernel_source_manifest_entries(systems_root: str) -> dict[str, tupl
         op_file = entry.get("op_file")
         if not op_file:
             continue
+        if op_file.endswith(".txt"):
+            op_file = f"{os.path.splitext(op_file)[0]}.parquet"
         accum[op_file].append(entry)
     return {key: tuple(value) for key, value in accum.items()}
 
 
 def _read_filtered_rows(file_or_sources):
-    """Read CSV rows from one or more sources.
+    """Read perf rows from one or more sources.
 
     Accepts:
       - A single path string: yields all rows. Returns `None` if the file is missing,
@@ -133,21 +164,21 @@ def _read_filtered_rows(file_or_sources):
     a separate merge step.
     """
     if isinstance(file_or_sources, str):
-        if not os.path.exists(file_or_sources):
+        path = _resolve_perf_data_path(file_or_sources)
+        if not os.path.exists(path):
             return None
-        with open(file_or_sources, encoding="utf-8") as f:
-            return list(csv.DictReader(f))
+        return _read_perf_rows(path)
 
     rows: list[dict] = []
     any_exists = False
     for path, ks_filter in file_or_sources:
+        path = _resolve_perf_data_path(path)
         if not os.path.exists(path):
             continue
         any_exists = True
-        with open(path, encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                if ks_filter is None or row.get("kernel_source") in ks_filter:
-                    rows.append(row)
+        for row in _read_perf_rows(path):
+            if ks_filter is None or row.get("kernel_source") in ks_filter:
+                rows.append(row)
     return rows if any_exists else None
 
 
@@ -2672,7 +2703,7 @@ class PerfDatabase:
             elif op_filename_enum == PerfDataFilename.oneccl:
                 perf_data_dir = oneccl_data_dir if oneccl_data_dir else data_dir
 
-            data_filepath = os.path.join(perf_data_dir, op_filename_enum.value)
+            data_filepath = _resolve_perf_data_path(os.path.join(perf_data_dir, op_filename_enum.value))
             load_fn = func_map[op_filename_enum]
 
             # `sources` is a list of `(path, kernel_source_filter | None)` tuples in
@@ -3550,7 +3581,7 @@ class PerfDatabase:
             for sibling_version in fw_versions:
                 if framework == backend_lower and sibling_version == self.version:
                     continue  # Active source already added as the primary.
-                sibling_path = os.path.join(fw_dir, sibling_version, op_file_basename)
+                sibling_path = _resolve_perf_data_path(os.path.join(fw_dir, sibling_version, op_file_basename))
                 if not os.path.isfile(sibling_path):
                     continue
                 sources.append((sibling_path, ks_filter))

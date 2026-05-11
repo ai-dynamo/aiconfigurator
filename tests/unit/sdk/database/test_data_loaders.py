@@ -3,6 +3,8 @@
 
 from itertools import product
 
+import pyarrow.csv as pc
+import pyarrow.parquet as pq
 import pytest
 import yaml
 
@@ -15,6 +17,7 @@ from aiconfigurator.sdk.common import (
     MoEQuantMode,
 )
 from aiconfigurator.sdk.perf_database import (
+    _resolve_perf_data_path,
     databases_cache,
     get_all_databases,
     get_database,
@@ -345,6 +348,26 @@ def test_load_gemm_data_basic(tmp_path):
     assert 256 in data[key_mode][128]
     assert 512 in data[key_mode][128][256]
     assert data[key_mode][128][256][512]["latency"] == pytest.approx(0.789)
+
+
+def test_load_gemm_data_parquet(tmp_path):
+    csv_file = tmp_path / "gemm.csv"
+    parquet_file = tmp_path / "gemm.parquet"
+    csv_file.write_text(
+        "framework,version,device,op_name,gemm_dtype,m,n,k,latency\ntrt,1.0,hwX,opX,bfloat16,128,256,512,0.789\n"
+    )
+    pq.write_table(pc.read_csv(csv_file), parquet_file, compression="zstd")
+
+    data = load_gemm_data(str(parquet_file))
+
+    assert data[GEMMQuantMode.bfloat16][128][256][512]["latency"] == pytest.approx(0.789)
+
+
+def test_resolve_perf_data_path_falls_back_to_legacy_txt(tmp_path):
+    legacy_file = tmp_path / "gemm_perf.txt"
+    legacy_file.write_text("framework,version,device,op_name,gemm_dtype,m,n,k,latency\n")
+
+    assert _resolve_perf_data_path(str(tmp_path / "gemm_perf.parquet")) == str(legacy_file)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

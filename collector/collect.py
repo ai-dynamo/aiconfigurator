@@ -65,7 +65,14 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, setup_logging, setup_signal_handlers
+from helper import (
+    EXIT_CODE_RESTART,
+    create_test_case_id,
+    finalize_perf_outputs,
+    save_error_report,
+    setup_logging,
+    setup_signal_handlers,
+)
 
 logger = None
 RESUME_SCHEMA_VERSION = "collector-resume-v1"
@@ -1086,6 +1093,11 @@ def main():
         action="store_true",
         help="Profile the collector run and save output ",
     )
+    parser.add_argument(
+        "--keep-csv",
+        action="store_true",
+        help="Keep collector CSV staging files instead of finalizing *_perf.txt outputs to parquet.",
+    )
     args = parser.parse_args()
     ops = args.ops
     _dsv4_auto_expand = False
@@ -1194,6 +1206,13 @@ def main():
             collect_sglang(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
         elif args.backend == "vllm":
             collect_vllm(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
+
+    if args.keep_csv:
+        logger.info("Keeping collector CSV staging files because --keep-csv was passed")
+    else:
+        converted = finalize_perf_outputs(".")
+        if converted:
+            logger.info(f"Finalized {len(converted)} collector perf files as parquet")
 
 
 if __name__ == "__main__":
