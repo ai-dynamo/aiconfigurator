@@ -533,10 +533,7 @@ def _load_model_runner(
             major = 10
         if major < 10:
             server_args.moe_runner_backend = "marlin"
-            print(
-                f"[dsv4-collector] Hopper detected (sm_{major}*); "
-                f"setting moe_runner_backend=marlin (was {prior!r})"
-            )
+            print(f"[dsv4-collector] Hopper detected (sm_{major}*); setting moe_runner_backend=marlin (was {prior!r})")
 
     print(
         f"[dsv4-collector] model_path {model_path} -> {local_model_path}; "
