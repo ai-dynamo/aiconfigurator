@@ -684,6 +684,9 @@ class PerfDataFilename(Enum):
     # topk_512 and csa_attn are modeled analytically — no CSV needed.
     dsv4_flash_paged_mqa_logits_module = "dsv4_flash_paged_mqa_logits_module_perf.txt"
     dsv4_flash_hca_attn_module = "dsv4_flash_hca_attn_module_perf.txt"
+    dsv4_megamoe_module = "dsv4_megamoe_module_perf.txt"
+    dsv4_megamoe_context_module = "dsv4_megamoe_context_module_perf.txt"
+    dsv4_megamoe_generation_module = "dsv4_megamoe_generation_module_perf.txt"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])

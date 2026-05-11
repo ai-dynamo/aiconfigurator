@@ -463,6 +463,7 @@ def get_model(
             context,
             model_config,
             extra_params,
+            backend_name=backend_name,
         )
     elif model_family == "NEMOTRONNAS":
         model = NemotronNas(
@@ -2027,7 +2028,7 @@ class DeepSeekV4Model(BaseModel):
 
     _SUPPORTED_COMPRESS_RATIOS: ClassVar[set[int]] = {0, 4, 128}
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
         super().__init__(*args)
 
         if not isinstance(self.extra_params, common.DeepSeekV4Config):
@@ -2064,6 +2065,15 @@ class DeepSeekV4Model(BaseModel):
         moe_ep_size = self.config.moe_ep_size
         attention_dp_size = self.config.attention_dp_size
         pp_size = self.config.pp_size
+        moe_backend = self.config.moe_backend
+        use_megamoe = backend_name == common.BackendName.sglang.value and moe_backend == "megamoe"
+        if moe_backend == "megamoe" and backend_name != common.BackendName.sglang.value:
+            raise ValueError("DeepSeek-V4 MegaMoE modeling is only supported with the SGLang backend.")
+        if use_megamoe:
+            if moe_tp_size != 1:
+                raise ValueError(f"DeepSeek-V4 MegaMoE requires moe_tp_size=1, got {moe_tp_size}.")
+            if moe_ep_size <= 1:
+                raise ValueError(f"DeepSeek-V4 MegaMoE requires moe_ep_size > 1, got {moe_ep_size}.")
 
         gemm_quant_mode = self.config.gemm_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
@@ -2077,6 +2087,7 @@ class DeepSeekV4Model(BaseModel):
         local_heads = self._num_heads // tp_size
         local_o_groups = max(1, deepseek_v4_cfg.o_groups // tp_size)
         local_moe_inter_size = self._moe_inter_size // tp_size
+        megamoe_distribution = "balanced" if workload_distribution == "uniform" else workload_distribution
 
         def _attention_ops(is_context: bool, scale_factor: float):
             ratio_counts = Counter(self._compress_ratios)
@@ -2112,6 +2123,64 @@ class DeepSeekV4Model(BaseModel):
                 for ratio, count in ratio_counts.items()
                 if count > 0
             ]
+
+        context_moe_ops = (
+            [
+                ops.DeepSeekV4MegaMoEModule(
+                    "context_megamoe",
+                    self._num_layers,
+                    h,
+                    self._moe_inter_size,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    moe_quant_mode,
+                    megamoe_distribution,
+                    is_context=True,
+                )
+            ]
+            if use_megamoe
+            else [
+                ops.MoEDispatch(
+                    "context_moe_pre_dispatch",
+                    self._num_layers,
+                    h,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    attention_dp_size,
+                    True,
+                    quant_mode=moe_quant_mode,
+                ),
+                ops.MoE(
+                    "context_moe",
+                    self._num_layers,
+                    h,
+                    self._moe_inter_size,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    moe_quant_mode,
+                    workload_distribution,
+                    attention_dp_size,
+                ),
+                ops.MoEDispatch(
+                    "context_moe_post_dispatch",
+                    self._num_layers,
+                    h,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    attention_dp_size,
+                    False,
+                    quant_mode=moe_quant_mode,
+                ),
+            ]
+        )
 
         self.context_ops.extend(
             [
@@ -2153,43 +2222,7 @@ class DeepSeekV4Model(BaseModel):
                 ),
                 ops.GEMM("context_shared_ffn2_gemm", self._num_layers, h, local_moe_inter_size, gemm_quant_mode),
                 ops.GEMM("context_router_gemm", self._num_layers, self._num_experts, h, common.GEMMQuantMode.bfloat16),
-                ops.MoEDispatch(
-                    "context_moe_pre_dispatch",
-                    self._num_layers,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    True,
-                    quant_mode=moe_quant_mode,
-                ),
-                ops.MoE(
-                    "context_moe",
-                    self._num_layers,
-                    h,
-                    self._moe_inter_size,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    moe_quant_mode,
-                    workload_distribution,
-                    attention_dp_size,
-                ),
-                ops.MoEDispatch(
-                    "context_moe_post_dispatch",
-                    self._num_layers,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    False,
-                    quant_mode=moe_quant_mode,
-                ),
+                *context_moe_ops,
                 ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp_size, h, common.GEMMQuantMode.bfloat16),
             ]
         )
@@ -2244,6 +2277,63 @@ class DeepSeekV4Model(BaseModel):
                 gemm_quant_mode,
             ),
         ]
+        generation_moe_ops = (
+            [
+                ops.DeepSeekV4MegaMoEModule(
+                    "generation_megamoe",
+                    self._num_layers * self._mtp_scale_factor,
+                    h,
+                    self._moe_inter_size,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    moe_quant_mode,
+                    megamoe_distribution,
+                    is_context=False,
+                )
+            ]
+            if use_megamoe
+            else [
+                ops.MoEDispatch(
+                    "generation_moe_pre_dispatch",
+                    self._num_layers * self._mtp_scale_factor,
+                    h,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    attention_dp_size,
+                    True,
+                    quant_mode=moe_quant_mode,
+                ),
+                ops.MoE(
+                    "generation_moe",
+                    self._num_layers * self._mtp_scale_factor,
+                    h,
+                    self._moe_inter_size,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    moe_quant_mode,
+                    workload_distribution,
+                    attention_dp_size,
+                ),
+                ops.MoEDispatch(
+                    "generation_moe_post_dispatch",
+                    self._num_layers * self._mtp_scale_factor,
+                    h,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    attention_dp_size,
+                    False,
+                    quant_mode=moe_quant_mode,
+                ),
+            ]
+        )
         gen_routed_ops = [
             ops.GEMM(
                 "generation_router_gemm",
@@ -2252,43 +2342,7 @@ class DeepSeekV4Model(BaseModel):
                 h,
                 common.GEMMQuantMode.bfloat16,
             ),
-            ops.MoEDispatch(
-                "generation_moe_pre_dispatch",
-                self._num_layers * self._mtp_scale_factor,
-                h,
-                self._topk,
-                self._num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                attention_dp_size,
-                True,
-                quant_mode=moe_quant_mode,
-            ),
-            ops.MoE(
-                "generation_moe",
-                self._num_layers * self._mtp_scale_factor,
-                h,
-                self._moe_inter_size,
-                self._topk,
-                self._num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                moe_quant_mode,
-                workload_distribution,
-                attention_dp_size,
-            ),
-            ops.MoEDispatch(
-                "generation_moe_post_dispatch",
-                self._num_layers * self._mtp_scale_factor,
-                h,
-                self._topk,
-                self._num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                attention_dp_size,
-                False,
-                quant_mode=moe_quant_mode,
-            ),
+            *generation_moe_ops,
         ]
         self.generation_ops.append(
             ops.OverlapOp("generation_moe_overlap", group_a=gen_routed_ops, group_b=gen_shared_ops)
