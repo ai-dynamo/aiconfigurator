@@ -499,6 +499,11 @@ def load_custom_allreduce_data(custom_allreduce_file):
     if not has_power:
         logger.debug("Legacy database format detected (custom_allreduce) - power will default to 0.0")
 
+    if isinstance(custom_allreduce_file, str):
+        is_b60 = "b60" in custom_allreduce_file
+    else:
+        is_b60 = any("b60" in path for path, _ in custom_allreduce_file)
+
     for row in rows:
         # Check kernel_source to filter graph vs eager mode (for vLLM/SGLang)
         kernel_source = row.get("kernel_source", "")
@@ -507,8 +512,7 @@ def load_custom_allreduce_data(custom_allreduce_file):
         # For vLLM/SGLang format: only keep graph mode data (skip eager mode)
         # kernel_source patterns: "vLLM_custom_graph", "SGLang_CustomAllReduce_graph", etc.
         # backend patterns: "vllm_graph", "sglang_graph", etc.
-        # For b60 xpu, we force eager custom allreduce data for now
-        if (kernel_source.endswith("_eager") or backend.endswith("_eager")) and "b60" not in custom_allreduce_file:
+        if (kernel_source.endswith("_eager") or backend.endswith("_eager")) and not is_b60:
             continue  # Skip eager mode, use graph mode only
 
         dtype, tp_size, message_size, latency = (
