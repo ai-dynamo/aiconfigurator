@@ -418,6 +418,17 @@ def _create_attention_module(
         max_num_batched_tokens=max(max_batch_size * max_seq_len, 131072) if is_context else max_batch_size,
         use_fp8_kv_cache=use_fp8_kv_cache,
         trust_remote_code=True,
+        # Forward the test sweep's per-case head counts so that
+        # ModelConfig.model_arch_config (built once at __init__ from hf_config) stays in
+        # sync. Without this, the V1 FA3 builder reads the model's natural head count
+        # via get_num_attention_heads(), the AOT scheduler precomputes
+        # scheduler_metadata for that shape, and impl.forward then runs with the test's
+        # actual head count — _vllm_fa3_C.fwd's shape check rejects the mismatch.
+        # MLA collapses KV to 1 head via get_num_kv_heads (use_mla=True), so the
+        # num_kv_heads override is a no-op in that path; we pass it for parity with
+        # the attention collector.
+        num_heads=num_heads,
+        num_kv_heads=num_heads,
     )
 
     # Override quant_config to control linear-layer GEMM precision.
