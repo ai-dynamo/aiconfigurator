@@ -513,6 +513,38 @@ def _load_model_runner(
     server_args.quantization = "fp8" if gemm_type == "fp8_block" else None
     server_args.enable_piecewise_cuda_graph = False
     server_args.attention_backend = "compressed"
+    # The ``gemm_type`` parameter is a misnomer — setting it to ``fp8_block``
+    # flips ``server_args.quantization="fp8"``, which is a *model-wide* mode.
+    # sglang's Fp8 quant method then applies to BOTH the attention projections
+    # (what we actually want to bench) AND the MoE routed experts. The latter
+    # triggers an FP4 weight-load path that requires native FP4 tensor cores
+    # (Blackwell sm_100+); on Hopper sm_90 the load fails with
+    # ``NotImplementedError: DeepSeekV4 FP4 experts now require a native FP4
+    # MoE backend``. Surgically decouple the two by adding "experts" to
+    # ``SGLANG_FP8_IGNORED_LAYERS`` on pre-Blackwell devices: sglang then
+    # substitutes ``UnquantizedFusedMoEMethod`` for FusedMoE layers (whose
+    # prefix ends in ``.experts``, per ``DeepseekV2MoE.__init__`` in sglang),
+    # while ``Fp8LinearMethod`` continues to handle the projections we
+    # actually time. On Blackwell the env var is left unset so the native
+    # FP4 expert path runs unchanged — matching production deployment.
+    if server_args.quantization == "fp8":
+        try:
+            _major = torch.cuda.get_device_capability(device)[0]
+        except Exception as _exc:
+            print(f"[dsv4-collector] could not query device capability for {device}: {_exc!r}; skipping MoE bypass")
+            _major = 10
+        if _major < 10:
+            prior_env = os.environ.get("SGLANG_FP8_IGNORED_LAYERS", "")
+            tokens = [t.strip() for t in prior_env.split(",") if t.strip()]
+            if "experts" not in tokens:
+                tokens.append("experts")
+            os.environ["SGLANG_FP8_IGNORED_LAYERS"] = ",".join(tokens)
+            print(
+                f"[dsv4-collector] pre-Blackwell sm_{_major}* + quantization=fp8 detected; "
+                f"SGLANG_FP8_IGNORED_LAYERS={os.environ['SGLANG_FP8_IGNORED_LAYERS']!r} "
+                "(routes MoE to UnquantizedFusedMoEMethod so the attention bench can run "
+                "without native FP4 hardware)"
+            )
 
     print(
         f"[dsv4-collector] model_path {model_path} -> {local_model_path}; "
