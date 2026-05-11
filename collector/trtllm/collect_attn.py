@@ -23,6 +23,38 @@ from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.registry_types import PerfFile
 
 
+def _skip_trtllm_sm120_fp8_context_fmha(
+    batch_size: int,
+    input_len: int,
+    num_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+) -> bool:
+    if not (tensorrt_llm.__version__.startswith(("1.3.0rc5", "1.3.0rc10")) and get_sm_version() >= 120):
+        return False
+
+    num_tokens = batch_size * input_len
+    if tensorrt_llm.__version__.startswith("1.3.0rc5"):
+        return (
+            # MHA h=128 max-token cases crash with an illegal memory access in
+            # the SM120 FP8 context FMHA kernel.
+            (num_heads == num_key_value_heads == 96 and head_dim == 128 and num_tokens == 65536)
+            # h=256 cases fail in the qkv_256 SM120 FP8 FMHA kernel.
+            or head_dim == 256
+        )
+
+    if head_dim != 256:
+        return False
+
+    return (
+        # TRT-LLM 1.3.0rc10 SM120 qkv_256 FP8 context FMHA crashes with
+        # cudaErrorIllegalAddress for these verified high-token regions.
+        (num_heads == 96 and num_key_value_heads == 8 and num_tokens >= 81920)
+        or (num_heads == 48 and num_key_value_heads == 8 and num_tokens >= 131072)
+        or (num_heads == num_key_value_heads == 96 and batch_size >= 2 and input_len >= 16384)
+    )
+
+
 def run_attention_torch(
     batch_size,
     input_len,
@@ -336,6 +368,13 @@ def get_context_attention_test_cases():
                         # int8 kvcache is not supported yet.
                         #
                         # bfloat16 kv cache, bfloat16 context fmha, is_context_phase
+                        skip_fp8_context_fmha = _skip_trtllm_sm120_fp8_context_fmha(
+                            b,
+                            s,
+                            n,
+                            num_kv_heads,
+                            h,
+                        )
                         if h == 64:
                             test_cases.append(
                                 [
@@ -377,19 +416,20 @@ def get_context_attention_test_cases():
                                         True,
                                     ]
                                 )
-                                test_cases.append(
-                                    [
-                                        b,
-                                        s,
-                                        n,
-                                        num_kv_heads,
-                                        h,
-                                        128,
-                                        True,
-                                        True,
-                                        True,
-                                    ]
-                                )
+                                if not skip_fp8_context_fmha:
+                                    test_cases.append(
+                                        [
+                                            b,
+                                            s,
+                                            n,
+                                            num_kv_heads,
+                                            h,
+                                            128,
+                                            True,
+                                            True,
+                                            True,
+                                        ]
+                                    )
                                 test_cases.append(
                                     [
                                         b,
@@ -403,19 +443,20 @@ def get_context_attention_test_cases():
                                         True,
                                     ]
                                 )
-                                test_cases.append(
-                                    [
-                                        b,
-                                        s,
-                                        n,
-                                        num_kv_heads,
-                                        h,
-                                        0,
-                                        True,
-                                        True,
-                                        True,
-                                    ]
-                                )
+                                if not skip_fp8_context_fmha:
+                                    test_cases.append(
+                                        [
+                                            b,
+                                            s,
+                                            n,
+                                            num_kv_heads,
+                                            h,
+                                            0,
+                                            True,
+                                            True,
+                                            True,
+                                        ]
+                                    )
                         else:
                             test_cases.append(
                                 [
@@ -444,19 +485,20 @@ def get_context_attention_test_cases():
                                         True,
                                     ]
                                 )
-                                test_cases.append(
-                                    [
-                                        b,
-                                        s,
-                                        n,
-                                        num_kv_heads,
-                                        h,
-                                        0,
-                                        True,
-                                        True,
-                                        True,
-                                    ]
-                                )
+                                if not skip_fp8_context_fmha:
+                                    test_cases.append(
+                                        [
+                                            b,
+                                            s,
+                                            n,
+                                            num_kv_heads,
+                                            h,
+                                            0,
+                                            True,
+                                            True,
+                                            True,
+                                        ]
+                                    )
 
     return test_cases
 
