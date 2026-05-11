@@ -520,15 +520,23 @@ def _load_model_runner(
     # native FP4 MoE backend. Use --moe-runner-backend marlin on Hopper``.
     # Force the marlin runner on Hopper so fp8_block sweeps load cleanly.
     # bfloat16 sweeps don't trigger the FP4 path, so the override is gated
-    # on both arch and ``quantization="fp8"``.
+    # on ``quantization="fp8"``. We unconditionally overwrite any default
+    # value of ``moe_runner_backend`` because sglang's ServerArgs sometimes
+    # defaults it to a sentinel (e.g. ``"auto"``) that would otherwise
+    # block the override.
     if server_args.quantization == "fp8":
+        prior = getattr(server_args, "moe_runner_backend", None)
         try:
-            major, _ = torch.cuda.get_device_capability(device)
-        except Exception:
-            major = None
-        if major is not None and major < 10 and not getattr(server_args, "moe_runner_backend", None):
+            major = torch.cuda.get_device_capability(device)[0]
+        except Exception as exc:
+            print(f"[dsv4-collector] could not query device capability for {device}: {exc!r}; assuming Blackwell+")
+            major = 10
+        if major < 10:
             server_args.moe_runner_backend = "marlin"
-            print(f"[dsv4-collector] Hopper detected (sm_{major}*); setting moe_runner_backend=marlin")
+            print(
+                f"[dsv4-collector] Hopper detected (sm_{major}*); "
+                f"setting moe_runner_backend=marlin (was {prior!r})"
+            )
 
     print(
         f"[dsv4-collector] model_path {model_path} -> {local_model_path}; "
