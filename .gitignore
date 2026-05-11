@@ -21,3 +21,4 @@ env/
 *.pyc
 *.pyo
 *.pyd
+refactor_test_aic/
