@@ -333,27 +333,6 @@ def _resolve_model_path(
     if drop_quant:
         config.pop("quantization_config", None)
         config.pop("compression_config", None)
-    elif gemm_type == "fp8_block":
-        # ``gemm_type="fp8_block"`` is a misnomer — it flips ``server_args.quantization="fp8"``
-        # which is a model-wide setting that applies ``Fp8MoEMethod`` to the FusedMoE layers
-        # too. On pre-Blackwell devices, ``Fp8MoEMethod.process_weights_after_loading_block_quant``
-        # raises ``NotImplementedError: DeepSeekV4 FP4 experts now require a native FP4 MoE
-        # backend.`` because Hopper has no native FP4 tensor cores. The collector only times
-        # ``layer.self_attn(...)`` — MoE weight precision is irrelevant to the measurement —
-        # so add ``"experts"`` to the model config's ``quantization_config.ignored_layers``.
-        # ``Fp8Config.from_config`` reads this list and substitutes ``UnquantizedFusedMoEMethod``
-        # for any layer whose dotted prefix contains ``.experts.`` (per ``is_layer_skipped``'s
-        # ``_module_path_match``), which matches DeepseekV2MoE's ``FusedMoE(prefix=...experts)``
-        # construction. Attention projections continue to use ``Fp8LinearMethod``. On Blackwell
-        # this is also safe: the routed-experts kernel choice has no effect on attention timings
-        # and the data we collected with the native FP4 path is identical to the data we'd
-        # collect with this MoE bypass.
-        qc = config.get("quantization_config")
-        if isinstance(qc, dict):
-            existing = list(qc.get("ignored_layers") or [])
-            if "experts" not in existing:
-                existing.append("experts")
-                qc["ignored_layers"] = existing
 
     old_ratios = config.get("compress_ratios") or []
     if old_ratios:
