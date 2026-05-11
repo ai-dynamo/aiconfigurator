@@ -534,6 +534,20 @@ def _load_model_runner(
         if major < 10:
             server_args.moe_runner_backend = "marlin"
             print(f"[dsv4-collector] Hopper detected (sm_{major}*); setting moe_runner_backend=marlin (was {prior!r})")
+            # ``server_args.moe_runner_backend`` alone is not enough — sglang's
+            # FP4-experts code path reads a process-global ``MOE_RUNNER_BACKEND``
+            # populated by ``initialize_moe_config(server_args)``. Without that
+            # call, ``get_moe_runner_backend()`` returns ``AUTO`` and
+            # ``is_marlin()`` is False, so the Marlin path is never taken and
+            # ``NotImplementedError: DeepSeekV4 FP4 experts now require...``
+            # is raised at weight-load time.
+            try:
+                from sglang.srt.layers.moe.utils import initialize_moe_config
+
+                initialize_moe_config(server_args)
+                print("[dsv4-collector] initialize_moe_config(server_args) called to commit marlin override")
+            except Exception as exc:
+                print(f"[dsv4-collector] WARNING: initialize_moe_config import/call failed: {exc!r}")
 
     print(
         f"[dsv4-collector] model_path {model_path} -> {local_model_path}; "
