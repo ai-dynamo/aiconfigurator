@@ -796,6 +796,28 @@ _DSV4_FLASH_MODULE_SEQ_LENGTHS = [
 _DSV4_FLASH_MODULE_TP_SIZES = [1, 2, 4, 8]
 
 
+def _has_native_fp4_experts() -> bool:
+    """True when the device exposes a native FP4 MoE path (Blackwell sm_100+).
+
+    DSv4 ships routed experts in FP4. Loading the model with sglang's fp8 block
+    quant method requires a native FP4 MoE runtime to materialize them. Native
+    FP4 tensor cores only exist on sm_100+ (Blackwell B200/B300/GB200/GB300).
+    On Hopper (sm_90) and earlier, sglang refuses to load these experts unless
+    a software emulation backend (``--moe-runner-backend marlin``) is forced —
+    which would produce emulation-speed perf data that does not match how
+    DSv4-Flash is actually deployed on Hopper. Skipping fp8_block sweeps on
+    pre-Blackwell parts is therefore correct, not a defect.
+    """
+    try:
+        import torch as _t
+
+        if not _t.cuda.is_available():
+            return False
+        return _t.cuda.get_device_capability(0)[0] >= 10
+    except Exception:
+        return False
+
+
 def _dsv4_flash_module_precision_combos(phase: str):
     """``(compute_dtype, kv_cache_dtype, gemm_type)`` triples.
 
@@ -804,12 +826,22 @@ def _dsv4_flash_module_precision_combos(phase: str):
       * ``bfloat16``  — projections through cuBLASLt nvjet kernels
       * ``fp8_block`` — fp8 block-quantised weights → DeepGEMM
                         ``sm90_fp8_gemm_1d2d_impl`` (matches production)
+
+    ``fp8_block`` is omitted on pre-Blackwell parts: DSv4's FP4 routed experts
+    have no native runtime on Hopper, so the load would either raise
+    ``NotImplementedError`` or fall back to a software emulator (Marlin) that
+    yields perf characteristics unrepresentative of any real deployment.
     """
     del phase
-    return [
-        ("bfloat16", "fp8", "bfloat16"),
-        ("bfloat16", "fp8", "fp8_block"),
-    ]
+    combos = [("bfloat16", "fp8", "bfloat16")]
+    if _has_native_fp4_experts():
+        combos.append(("bfloat16", "fp8", "fp8_block"))
+    else:
+        print(
+            "[dsv4-flash-test-cases] device lacks native FP4 experts (pre-Blackwell); "
+            "omitting fp8_block from gemm_type sweep"
+        )
+    return combos
 
 
 def _dsv4_flash_module_filter_pairs(mode: str, batch_sizes, seq_lens):
