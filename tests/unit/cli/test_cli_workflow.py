@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aiconfigurator.cli.main import build_default_task_configs, configure_parser
+from aiconfigurator.cli.main import build_default_task_configs, build_experiment_task_configs, configure_parser
 from aiconfigurator.cli.main import main as cli_main
 
 pytestmark = pytest.mark.unit
@@ -211,6 +211,37 @@ exp_with_db_mode:
         mock_build_exp.assert_called_once()
         mock_execute.assert_called_once()
 
+    @patch("aiconfigurator.cli.main._execute_task_configs")
+    @patch("aiconfigurator.cli.main.build_experiment_task_configs")
+    def test_cli_exp_mode_passes_global_engine_step_backend(
+        self,
+        mock_build_exp,
+        mock_execute,
+        cli_args_factory,
+        mock_exp_yaml_path,
+    ):
+        """The shared --engine-step-backend flag should apply to exp mode."""
+        mock_build_exp.return_value = {"my_exp": MagicMock(name="TaskConfig")}
+        mock_execute.return_value = ("my_exp", {}, {}, {}, {})
+
+        args = cli_args_factory(
+            mode="exp",
+            extra_args=[
+                "--yaml-path",
+                str(mock_exp_yaml_path),
+                "--engine-step-backend",
+                "rust",
+            ],
+        )
+
+        cli_main(args)
+
+        mock_build_exp.assert_called_once_with(
+            yaml_path=str(mock_exp_yaml_path),
+            engine_step_backend="rust",
+        )
+        mock_execute.assert_called_once()
+
 
 class TestBuildDefaultTaskConfigs:
     """Tests for build_default_task_configs function."""
@@ -248,3 +279,35 @@ class TestBuildDefaultTaskConfigs:
         assert "disagg" in result
         # TaskConfig should be called twice (agg + disagg)
         assert mock_task_config.call_count == 2
+
+
+class TestBuildExperimentTaskConfigs:
+    """Tests for experiment config construction."""
+
+    @patch("aiconfigurator.cli.main.TaskConfig")
+    def test_global_engine_step_backend_applies_unless_exp_overrides(self, mock_task_config):
+        mock_task_config.side_effect = lambda **kwargs: MagicMock(**kwargs)
+        config = {
+            "global_backend": {
+                "serving_mode": "agg",
+                "model_path": "Qwen/Qwen3-32B",
+                "system_name": "h200_sxm",
+                "total_gpus": 8,
+            },
+            "exp_backend": {
+                "serving_mode": "agg",
+                "model_path": "Qwen/Qwen3-32B",
+                "system_name": "h200_sxm",
+                "total_gpus": 8,
+                "engine_step_backend": "python",
+            },
+        }
+
+        build_experiment_task_configs(config=config, engine_step_backend="rust")
+
+        kwargs_by_backend = {
+            call.kwargs["engine_step_backend"]: call.kwargs for call in mock_task_config.call_args_list
+        }
+        assert set(kwargs_by_backend) == {"rust", "python"}
+        assert kwargs_by_backend["rust"]["model_path"] == "Qwen/Qwen3-32B"
+        assert kwargs_by_backend["python"]["model_path"] == "Qwen/Qwen3-32B"

@@ -108,6 +108,7 @@ class TaskContext:
     database_mode: str | None = None
     free_gpu_memory_fraction: float | None = None
     max_seq_len: int | None = None
+    engine_step_backend: str | None = None
     profiles: list[str] = field(default_factory=list)
     yaml_patch: dict = field(default_factory=dict)
     yaml_mode: Literal["patch", "replace"] = "patch"
@@ -450,6 +451,7 @@ class TaskConfigFactory:
                 "ttft": ctx.ttft,
                 "tpot": ctx.tpot,
                 "request_latency": ctx.request_latency,
+                "engine_step_backend": ctx.engine_step_backend,
             },
             "enable_wideep": ctx.enable_wideep,
             "enable_chunked_prefill": ctx.enable_chunked_prefill,
@@ -749,6 +751,7 @@ class TaskConfig:
         database_mode: str | None = None,
         free_gpu_memory_fraction: float | None = None,
         max_seq_len: int | None = None,
+        engine_step_backend: str | None = None,
     ) -> None:
         """
         Initialize a TaskConfig object.
@@ -839,6 +842,7 @@ class TaskConfig:
             yaml_mode=yaml_mode,
             free_gpu_memory_fraction=free_gpu_memory_fraction,
             max_seq_len=max_seq_len,
+            engine_step_backend=engine_step_backend,
         )
 
         self.config, applied_layers = TaskConfigFactory.create(ctx)
@@ -856,9 +860,13 @@ class TaskConfig:
         self.total_gpus = total_gpus
         self.free_gpu_memory_fraction = free_gpu_memory_fraction
         self.max_seq_len = max_seq_len
+        self.engine_step_backend = engine_step_backend
         self.yaml_mode = yaml_mode
         self.yaml_patch = yaml_patch
         self.profiles = list(effective_profiles)
+
+        if engine_step_backend not in {None, "python", "rust"}:
+            raise ValueError(f"Invalid engine_step_backend: {engine_step_backend!r}. Use 'python' or 'rust'.")
 
         if serving_mode == "agg":
             effective_backend_version = self.config.worker_config.backend_version
@@ -1125,7 +1133,7 @@ class TaskConfig:
         printable.update(
             {
                 k: runtime_dict.get(k)
-                for k in ("isl", "osl", "prefix", "ttft", "tpot", "request_latency")
+                for k in ("isl", "osl", "prefix", "ttft", "tpot", "request_latency", "engine_step_backend")
                 if runtime_dict.get(k) is not None
             }
         )
@@ -1253,6 +1261,7 @@ class TaskRunner:
             ttft=task_config.runtime_config.ttft,
             tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
             request_latency=getattr(task_config.runtime_config, "request_latency", None),
+            engine_step_backend=getattr(task_config.runtime_config, "engine_step_backend", None),
         )
         logger.debug("Task %s: Setting up database", task_config.task_name)
         try:
@@ -1343,6 +1352,7 @@ class TaskRunner:
             ttft=task_config.runtime_config.ttft,
             tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
             request_latency=getattr(task_config.runtime_config, "request_latency", None),
+            engine_step_backend=getattr(task_config.runtime_config, "engine_step_backend", None),
         )
 
         # Get database mode from config

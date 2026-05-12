@@ -124,6 +124,13 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
         help="Deployment target platform. Options: dynamo-j2 (default, Jinja2 templates), "
         "dynamo-python (Dynamo Python config modifiers), llm-d (llm-d Helm values).",
     )
+    common_parser.add_argument(
+        "--engine-step-backend",
+        choices=["python", "rust"],
+        default=None,
+        help="Experimental static latency backend. Default keeps the existing Python SDK path; "
+        "use 'rust' to route static step estimates through the Rust FPM estimator.",
+    )
     add_generator_override_arguments(common_parser)
     return common_parser
 
@@ -755,6 +762,7 @@ def build_default_task_configs(
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
     enable_wideep: bool = False,
+    engine_step_backend: str | None = None,
 ) -> dict[str, TaskConfig]:
     """Build agg and disagg task configs for default mode comparison.
 
@@ -777,6 +785,7 @@ def build_default_task_configs(
         nextn_accept_rates: Acceptance rates for MTP draft tokens.
         enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
         enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
+        engine_step_backend: Experimental static latency backend ("python" or "rust").
 
     Returns:
         Dict with TaskConfig objects. When backend='auto', returns 6 configs
@@ -893,6 +902,7 @@ def build_default_task_configs(
         "free_gpu_memory_fraction": free_gpu_memory_fraction,
         "max_seq_len": max_seq_len,
         "enable_wideep": enable_wideep,
+        "engine_step_backend": engine_step_backend,
     }
 
     # Auto-set moe_backend for SGLang wideep, matching webapp behavior
@@ -982,6 +992,7 @@ _EXPERIMENT_RESERVED_KEYS = {
     "enable_eplb",
     "total_gpus",
     "database_mode",
+    "engine_step_backend",
 }
 
 
@@ -1004,6 +1015,7 @@ def _build_yaml_config(exp_config: dict, config_section: dict) -> dict | None:
 def build_experiment_task_configs(
     yaml_path: str | None = None,
     config: dict[str, Any] | None = None,
+    engine_step_backend: str | None = None,
 ) -> dict[str, TaskConfig]:
     """Build task configs from YAML file or config dict.
 
@@ -1011,6 +1023,8 @@ def build_experiment_task_configs(
         yaml_path: Path to a YAML file containing experiment definitions.
         config: Dict containing experiment definitions (alternative to yaml_path).
             Keys are experiment names, values are experiment configs.
+        engine_step_backend: Optional global experimental static-latency backend.
+            Per-experiment ``engine_step_backend`` entries take precedence.
 
     Returns:
         Dict mapping experiment names to TaskConfig objects.
@@ -1119,6 +1133,9 @@ def build_experiment_task_configs(
             task_kwargs["enable_chunked_prefill"] = exp_config["enable_chunked_prefill"]
         if "database_mode" in exp_config:
             task_kwargs["database_mode"] = exp_config["database_mode"]
+        effective_engine_step_backend = exp_config.get("engine_step_backend", engine_step_backend)
+        if effective_engine_step_backend is not None:
+            task_kwargs["engine_step_backend"] = effective_engine_step_backend
 
         yaml_config = _build_yaml_config(exp_config, config_section)
         if yaml_config:
@@ -1563,6 +1580,7 @@ def _run_estimate_mode(args):
         comm_quant_mode=args.comm_quant_mode,
         free_gpu_memory_fraction=args.free_gpu_memory_fraction,
         max_seq_len=args.max_seq_len,
+        engine_step_backend=args.engine_step_backend,
     )
 
     if estimate_mode == "disagg":
@@ -1712,11 +1730,15 @@ def main(args):
             enable_chunked_prefill=args.enable_chunked_prefill,
             free_gpu_memory_fraction=args.free_gpu_memory_fraction,
             max_seq_len=args.max_seq_len,
+            engine_step_backend=args.engine_step_backend,
             enable_wideep=getattr(args, "enable_wideep", False),
         )
     elif args.mode == "exp":
         try:
-            task_configs = build_experiment_task_configs(yaml_path=args.yaml_path)
+            build_kwargs: dict[str, Any] = {"yaml_path": args.yaml_path}
+            if args.engine_step_backend is not None:
+                build_kwargs["engine_step_backend"] = args.engine_step_backend
+            task_configs = build_experiment_task_configs(**build_kwargs)
         except (ValueError, TypeError) as exc:
             logger.exception("Failed to build experiment task configs")
             raise SystemExit(1) from exc

@@ -118,6 +118,7 @@ class TestCLIArgumentParsing:
         assert args.tpot == 30.0
         assert args.request_latency is None
         assert args.prefix == 0
+        assert args.engine_step_backend is None
 
     def test_debug_mode_flag(self, cli_parser):
         """Test that debug mode can be enabled."""
@@ -135,6 +136,24 @@ class TestCLIArgumentParsing:
         )
 
         assert args.debug is True
+
+    def test_engine_step_backend_flag(self, cli_parser):
+        """Test that the experimental engine step backend can be selected."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--engine-step-backend",
+                "rust",
+            ]
+        )
+
+        assert args.engine_step_backend == "rust"
 
     def test_save_directory_argument(self, cli_parser):
         """Test that save directory can be specified."""

@@ -136,3 +136,47 @@ def test_run_static_latency_only_matches_run_static_latency(
 
     assert latency_only == pytest.approx(summary_latency)
     assert latency_only == pytest.approx(request_latency, abs=1e-3)
+
+
+def test_run_static_can_route_to_rust_engine_step_backend(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    from aiconfigurator.sdk.backends import base_backend as base_backend_module
+
+    calls = []
+
+    def _fake_rust_breakdown(model_arg, database_arg, runtime_config_arg, mode_arg, stride_arg, scale_arg):
+        calls.append((model_arg, database_arg, runtime_config_arg, mode_arg, stride_arg, scale_arg))
+        return (
+            {"rust_engine_step_context": 7.0},
+            {"rust_engine_step_generation": 3.0},
+            {"rust_engine_step_context": "rust"},
+            {"rust_engine_step_generation": "rust"},
+        )
+
+    monkeypatch.setattr(
+        base_backend_module,
+        "estimate_static_latency_breakdown_with_rust",
+        _fake_rust_breakdown,
+    )
+
+    summary = backend.run_static(
+        model,
+        database,
+        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, prefix=2, engine_step_backend="rust"),
+        mode="static",
+        stride=2,
+        latency_correction_scale=1.25,
+    )
+
+    assert len(calls) == 1
+    assert calls[0][3:] == ("static", 2, 1.25)
+    assert summary.get_context_latency_dict() == {"rust_engine_step_context": 7.0}
+    assert summary.get_generation_latency_dict() == {"rust_engine_step_generation": 3.0}
+    assert summary.get_context_energy_wms_dict() == {"rust_engine_step_context": 0.0}
+    assert summary.get_generation_energy_wms_dict() == {"rust_engine_step_generation": 0.0}
+    assert summary.get_context_source_dict() == {"rust_engine_step_context": "rust"}
+    assert summary.get_generation_source_dict() == {"rust_engine_step_generation": "rust"}

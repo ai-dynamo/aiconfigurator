@@ -13,6 +13,11 @@ from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.inference_summary import InferenceSummary
 from aiconfigurator.sdk.models import BaseModel
 from aiconfigurator.sdk.perf_database import PerfDatabase
+from aiconfigurator.sdk.rust_engine_step import (
+    estimate_decode_step_latency_with_rust,
+    estimate_mixed_step_latency_with_rust,
+    should_use_rust_engine_step,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +44,16 @@ class VLLMBackend(BaseBackend):
         osl = runtime_config.osl
         prefix = runtime_config.prefix
         b = runtime_config.batch_size
+        engine_step_backend_key = "rust" if should_use_rust_engine_step(runtime_config) else "python"
         ctx_seq_imbalance_correction_scale = runtime_config.seq_imbalance_correction_scale
         gen_seq_imbalance_correction_scale = runtime_config.gen_seq_imbalance_correction_scale
         ctx_tokens = kwargs.get("ctx_tokens")
         assert ctx_tokens is not None, "ctx_tokens is required"
         balance_score = isl * b / ctx_tokens / osl
 
+        cache_by_ctx_tokens = self._agg_cache[isl][osl][b]
         try:
-            summary = self._agg_cache[isl][osl][b][ctx_tokens]
+            summary = cache_by_ctx_tokens[ctx_tokens][engine_step_backend_key]
         except KeyError:
             # we would like to calculate num_mix_steps and num_genonly_steps based on
             # isl, osl, b, ctx_tokens within osl steps, need to finish all the ctx tokens
@@ -102,6 +109,20 @@ class VLLMBackend(BaseBackend):
                 Returns:
                     tuple: (latency in ms, energy in watt-milliseconds)
                 """
+                if should_use_rust_engine_step(runtime_config):
+                    latency_ms = estimate_mixed_step_latency_with_rust(
+                        model,
+                        database,
+                        ctx_tokens=ctx_tokens,
+                        gen_tokens=gen_tokens,
+                        isl=isl,
+                        osl=osl,
+                        prefix=prefix,
+                    )
+                    per_ops_data["mix_step"] = {"rust_engine_step_mixed": latency_ms}
+                    per_ops_source["mix_step"] = {"rust_engine_step_mixed": "rust"}
+                    return latency_ms, 0.0
+
                 num_tokens = ctx_tokens + gen_tokens
                 # treat this as a combined single batch inference, extract non-attention latency
                 summary = self.run_static(
@@ -210,6 +231,18 @@ class VLLMBackend(BaseBackend):
                 """
                 if gen_tokens <= 0:
                     return 0.0, 0.0
+                if should_use_rust_engine_step(runtime_config):
+                    latency_ms = estimate_decode_step_latency_with_rust(
+                        model,
+                        database,
+                        gen_tokens=gen_tokens,
+                        isl=isl,
+                        osl=osl,
+                    )
+                    per_ops_data["genonly_step"] = {"rust_engine_step_generation": latency_ms}
+                    per_ops_source["genonly_step"] = {"rust_engine_step_generation": "rust"}
+                    return latency_ms, 0.0
+
                 num_tokens = gen_tokens
                 summary = self.run_static(
                     model,
@@ -403,7 +436,7 @@ class VLLMBackend(BaseBackend):
             summary.set_per_ops_source(per_ops_source)
 
             # caching
-            self._agg_cache[isl][osl][b][ctx_tokens] = summary
+            cache_by_ctx_tokens.setdefault(ctx_tokens, {})[engine_step_backend_key] = summary
 
         return summary
 
@@ -492,6 +525,7 @@ class VLLMBackend(BaseBackend):
                         osl=osl,
                         prefix=prefix,
                         seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
+                        engine_step_backend=runtime_config.engine_step_backend,
                     ),
                     ctx_tokens=ctx_tokens,
                 )
