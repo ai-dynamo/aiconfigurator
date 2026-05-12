@@ -160,12 +160,16 @@ def _backend_source(backend: str, version: str) -> str:
     repo_path = _WORKSPACE_ROOT / "third_party" / repo_name
     if not (repo_path / ".git").exists():
         return ""
-    result = subprocess.run(
-        ["git", "-C", str(repo_path), "show", f"{ref}:{source_path}"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "show", f"{ref}:{source_path}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(f"Timed out reading {backend} {version} source from {repo_path}: {exc}")
     return result.stdout if result.returncode == 0 else ""
 
 

@@ -50,7 +50,7 @@ print_iter_log: {{ print_iter_log | default(false) }}
 {% if speculative_config.decoding_type is defined %}  # speculative decoding
 speculative_config:
   decoding_type: {{ speculative_config.decoding_type }}
-  {% if speculative_config.decoding_type == 'MTP' %}
-  num_nextn_predict_layers: {{ num_nextn_predict_layers }}
+  {% if speculative_config.decoding_type == 'MTP' and speculative_config.num_nextn_predict_layers is defined %}
+  num_nextn_predict_layers: {{ speculative_config.num_nextn_predict_layers }}
   {% endif %}
 {% endif %}
