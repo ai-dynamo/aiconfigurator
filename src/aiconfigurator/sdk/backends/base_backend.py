@@ -24,6 +24,29 @@ logger = logging.getLogger(__name__)
 _USE_LAYERWISE = os.environ.get("AIC_USE_LAYERWISE", "0") == "1"
 
 
+def _layerwise_allreduce_cost(
+    database: PerfDatabase,
+    tp_size: int,
+    num_tokens: int,
+    hidden_size: int,
+    num_layers: int,
+) -> float:
+    """Compute allreduce communication cost missing from layerwise data.
+
+    Layerwise perf data is collected on a single GPU with reduced tensor
+    dimensions to simulate TP, so it does not include inter-GPU communication.
+    A standard transformer layer has 2 allreduce operations per layer
+    (post-attention projection and post-MLP).
+
+    Returns total allreduce latency in ms for all layers.
+    """
+    if tp_size <= 1:
+        return 0.0
+    message_size = num_tokens * hidden_size  # element count
+    per_allreduce_ms = float(database.query_custom_allreduce(common.CommQuantMode.half, tp_size, message_size))
+    return 2 * per_allreduce_ms * num_layers
+
+
 class BaseBackend(ABC):
     """
     Base class for all backends.
@@ -165,9 +188,15 @@ class BaseBackend(ABC):
         )
         total_ms = per_layer_ms * num_layers
 
-        latency_dict = {"context_layerwise": total_ms}
-        energy_dict = {"context_layerwise": 0.0}
-        source_dict = {"context_layerwise": "silicon"}
+        # Add TP allreduce communication (2 per layer: post-attn + post-MLP)
+        allreduce_ms = _layerwise_allreduce_cost(
+            database, tp_size, batch_size * effective_isl, model._hidden_size, num_layers
+        )
+        total_ms += allreduce_ms
+
+        latency_dict = {"context_layerwise": total_ms - allreduce_ms, "context_allreduce": allreduce_ms}
+        energy_dict = {"context_layerwise": 0.0, "context_allreduce": 0.0}
+        source_dict = {"context_layerwise": "silicon", "context_allreduce": "silicon"}
         return latency_dict, energy_dict, source_dict
 
     def _run_generation_phase_layerwise(
@@ -187,6 +216,11 @@ class BaseBackend(ABC):
         effective_bs = batch_size * beam_width * (model._nextn + 1)
 
         total_gen_ms = 0.0
+        # Allreduce cost per step is constant (message size = effective_bs * hidden_size)
+        allreduce_per_step_ms = _layerwise_allreduce_cost(
+            database, tp_size, effective_bs, model._hidden_size, num_layers
+        )
+        total_allreduce_ms = 0.0
         for i in range(0, osl - 1, stride):
             kv_len = isl + i + 1
             per_layer_ms = float(
@@ -198,14 +232,19 @@ class BaseBackend(ABC):
                     kv_len,
                 )
             )
-            step_ms = per_layer_ms * num_layers
+            step_ms = per_layer_ms * num_layers + allreduce_per_step_ms
             repeat_count = min(stride, osl - 1 - i)
             total_gen_ms += step_ms * repeat_count
+            total_allreduce_ms += allreduce_per_step_ms * repeat_count
 
-        latency_dict = {"generation_layerwise": total_gen_ms}
-        energy_dict = {"generation_layerwise": 0.0}
-        source_dict = {"generation_layerwise": "silicon"}
+        latency_dict = {
+            "generation_layerwise": total_gen_ms - total_allreduce_ms,
+            "generation_allreduce": total_allreduce_ms,
+        }
+        energy_dict = {"generation_layerwise": 0.0, "generation_allreduce": 0.0}
+        source_dict = {"generation_layerwise": "silicon", "generation_allreduce": "silicon"}
         return latency_dict, energy_dict, source_dict
+
     def _run_static_breakdown(
         self,
         model: BaseModel,

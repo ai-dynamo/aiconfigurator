@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.backends.base_backend import BaseBackend
+from aiconfigurator.sdk.backends.base_backend import BaseBackend, _layerwise_allreduce_cost
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.inference_summary import InferenceSummary
 from aiconfigurator.sdk.models import BaseModel
@@ -184,7 +184,11 @@ class TRTLLMBackend(BaseBackend):
                         )
                     )
                     total_ms = per_layer_ms * num_layers
-                    per_ops_data["mix_step"] = {"layerwise": total_ms}
+                    allreduce_ms = _layerwise_allreduce_cost(
+                        database, tp_size, total_tokens, model._hidden_size, num_layers
+                    )
+                    total_ms += allreduce_ms
+                    per_ops_data["mix_step"] = {"layerwise": total_ms - allreduce_ms, "allreduce": allreduce_ms}
                     return total_ms, 0.0
 
                 num_tokens = ctx_tokens + gen_tokens
@@ -322,7 +326,11 @@ class TRTLLMBackend(BaseBackend):
                         )
                     )
                     total_ms = per_layer_ms * num_layers
-                    per_ops_data["genonly_step"] = {"layerwise": total_ms}
+                    allreduce_ms = _layerwise_allreduce_cost(
+                        database, tp_size, gen_tokens, model._hidden_size, num_layers
+                    )
+                    total_ms += allreduce_ms
+                    per_ops_data["genonly_step"] = {"layerwise": total_ms - allreduce_ms, "allreduce": allreduce_ms}
                     return total_ms, 0.0
                 num_tokens = gen_tokens
                 summary = self.run_static(
@@ -362,6 +370,100 @@ class TRTLLMBackend(BaseBackend):
             genonly_step_latency_ms, genonly_step_energy_wms = _get_genonly_step_latency(
                 model, database, num_genonly_tokens, isl, osl
             )
+
+            # run simulation
+            # ttfts = []
+            # # num_unprocessed_requests = b * 10 - 1
+            # unprocessed_requests = list(range(b * 10))
+            # queued_requests = list()
+            # in_flight_requests = list()
+            # num_completed_requests = 0
+
+            # # num_queued_requests = 0
+            # # num_in_flight_requests = 0
+            # # num_completed_requests = 0
+            # requests_start_times = dict()
+            # req_isl_osl = dict()
+            # t = 0
+            # # new_request_id = 0
+
+            # # ctx_tokens_limit = 8000
+            # ctx_tokens_limit = 2 * isl
+
+            # while num_completed_requests < b * 10:
+            #     # print(f"t: {t}, num_unprocessed_requests: {len(unprocessed_requests)}, num_in_flight_requests:
+            #       {len(in_flight_requests)}, num_queued_requests: {len(queued_requests)}, num_completed_requests:
+            #       {num_completed_requests}")
+            #     # print(f"t: {t}, num_unprocessed_requests: {len(unprocessed_requests)}, num_in_flight_requests:
+            #       {len(in_flight_requests)}, num_queued_requests: {len(queued_requests)}, num_completed_requests:
+            #       {num_completed_requests}, req_isl_osl: {req_isl_osl}")
+            #     while (len(in_flight_requests) + len(queued_requests)) < b and unprocessed_requests:
+            #         new_request_id = unprocessed_requests.pop(0)
+            #         requests_start_times[new_request_id] = t
+            #         req_isl_osl[new_request_id] = [isl, osl]
+            #         queued_requests.append(new_request_id)
+
+            #     # moved queued requests to in-flight
+            #     while queued_requests and len(in_flight_requests) < b:
+            #         new_request_id = queued_requests.pop(0)
+            #         in_flight_requests.append(new_request_id)
+
+            #     # First process context
+            #     curr_context_tokens = 0
+            #     curr_context_requests = []
+            #     # for (request_id, [req_isl, req_osl]) in req_isl_osl.items():
+            #     for request_id in in_flight_requests:
+            #         # import pdb; pdb.set_trace()
+            #         [req_isl, req_osl] = req_isl_osl[request_id]
+            #         if curr_context_tokens < ctx_tokens_limit:
+            #             if req_isl > 0:
+            #                 curr_context_tokens += isl
+            #                 req_isl_osl[request_id] = [0, req_osl]
+            #                 curr_context_requests.append(request_id)
+
+            #     if curr_context_tokens:
+            #         # run mixed step
+            #         t += mix_step_latency_ms
+            #         for context_request in curr_context_requests:
+            #             ttfts.append(t - requests_start_times[context_request])
+            #         # continue
+
+            #     # assert not curr_context_requests
+            #     curr_gen_tokens = 0
+            #     curr_gen_requests = []
+            #     # for (request_id, [req_isl, req_osl]) in req_isl_osl.items():
+            #     for request_id in in_flight_requests:
+            #         [req_isl, req_osl] = req_isl_osl[request_id]
+            #         if req_osl <= 0 or req_isl > 0:
+            #             continue
+
+            #         if curr_gen_tokens < b:
+            #             curr_gen_tokens += 1
+            #             req_isl_osl[request_id] = [req_isl, req_osl - 1]
+            #             curr_gen_requests.append(request_id)
+            #         else:
+            #             break
+
+            #     if curr_gen_tokens:
+            #         # run genonly step
+            #         if not curr_context_requests:
+            #             t += genonly_step_latency_ms
+            #         for gen_request in curr_gen_requests:
+            #             if req_isl_osl[gen_request][1] == 0:
+            #                 del req_isl_osl[gen_request]
+            #                 in_flight_requests.remove(gen_request)
+            #                 num_completed_requests += 1
+            #         continue
+
+            #     # import time
+            #     # time.sleep(0.01)
+
+            # ttft = sum(ttfts) / len(ttfts)
+            # assert len(in_flight_requests) == 0
+            # assert len(queued_requests) == 0
+            # assert len(unprocessed_requests) == 0
+            # assert num_completed_requests == b * 10
+            # assert len(ttfts) == b * 10
 
             # Calculate timing (unchanged)
             ttft = mix_step_latency_ms * np.ceil(isl / ctx_tokens)

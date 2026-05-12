@@ -2558,7 +2558,7 @@ def load_layerwise_data(layerwise_file):
     with open(layerwise_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            model = row["model"]
+            model = row["model"].lower()
             phase = row["phase"]
             tp_size = int(row["tp_size"])
             batch_size = int(row["batch_size"])
@@ -7855,6 +7855,11 @@ class PerfDatabase:
         Returns:
             PerformanceResult with latency in ms.
         """
+        model = model.lower()
+        # TEMP: remove
+        if model == "deepseek-ai/deepseek-r1" or model == "deepseek-ai/deepseek-v3":
+            model = "deepseek-ai/deepseek-r1-0528"
+
         layerwise_data = self._layerwise_data
         if layerwise_data is None or not layerwise_data.loaded:
             raise ValueError("Layerwise data not available for this system/backend/version")

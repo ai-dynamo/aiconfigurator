@@ -113,9 +113,14 @@ def benchmark_trtllm_allreduce(
     perf_filename: str,
     measure_power: bool = False,
     power_min_duration: float = 1.0,
-    use_nsys: bool = False,
 ):
     """Benchmark TensorRT-LLM AllReduce implementation"""
+    # Disable the autotuner so that the strategy lookup table (selectImplementation)
+    # is used directly.  Without this, tunable_allreduce may override the strategy
+    # to NCCL symmetric, which is significantly slower than the Lamport custom
+    # allreduce kernels used during actual inference.
+    os.environ["TLLM_DISABLE_ALLREDUCE_AUTOTUNE"] = "1"
+
     trtllm_mods = import_trtllm()
     tllm = trtllm_mods["tllm"]
 
@@ -150,10 +155,9 @@ def benchmark_trtllm_allreduce(
     )
 
     # Benchmark parameters
+    repeat_n = 5
     num_warmups = 3
-
-    # Number of allreduce ops per graph
-    graph_ops = 100
+    num_runs = 20
 
     size = min_size
     while size < max_size:
@@ -161,134 +165,111 @@ def benchmark_trtllm_allreduce(
         input_tensor = torch.ones(input_shape, dtype=torch_dtype, device="cuda")
 
         op_list = []
-        for _ in range(graph_ops):
+        for i in range(repeat_n):
             allreduce = trtllm_mods["AllReduce"](mapping=mapping).cuda()
             allreduce(input_tensor, all_reduce_params=all_reduce_params)  # dry run to init
             op_list.append(allreduce)
 
-        # Capture graph with allreduce ops only
+        # Capture CUDA Graph
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             for op in op_list:
                 op(input_tensor, all_reduce_params=all_reduce_params)
 
-        # Warmup
-        torch.cuda.synchronize()
-        for _ in range(num_warmups):
-            g.replay()
-        torch.cuda.synchronize()
+        # Adaptive num_runs calculation for power measurement
+        actual_num_runs = num_runs
+        if measure_power:
+            # Estimate single iteration time (only on rank 0)
+            if rank == 0:
+                start_warmup = torch.cuda.Event(enable_timing=True)
+                end_warmup = torch.cuda.Event(enable_timing=True)
 
-        if use_nsys:
-            # nsys mode: replay once with NVTX marker, nsys captures kernel durations
-            torch.cuda.nvtx.range_push(f"allreduce_size_{size}")
-            g.replay()
-            torch.cuda.synchronize()
-            torch.cuda.nvtx.range_pop()
+                torch.cuda.synchronize()
+                start_warmup.record()
+                for i in range(num_warmups):
+                    g.replay()
+                end_warmup.record()
+                torch.cuda.synchronize()
 
-            if rank == 0 and local_rank == 0:
-                print(f"[TensorRT-LLM nsys] Size: {size}, captured {graph_ops} ops")
+                single_iter_time = start_warmup.elapsed_time(end_warmup) / num_warmups / 1000.0  # seconds
+                actual_num_runs = max(num_runs, int(power_min_duration / (single_iter_time * repeat_n)) + 1)
+                actual_num_runs = min(actual_num_runs, 1000)  # Cap at 1000 to avoid excessive runtime
+            else:
+                # Other ranks do warmup but don't calculate
+                torch.cuda.synchronize()
+                for i in range(num_warmups):
+                    g.replay()
+                torch.cuda.synchronize()
+
+            # Broadcast actual_num_runs from rank 0 to all ranks
+            actual_num_runs = mpi_comm.bcast(actual_num_runs, root=0)
         else:
-            # CUDA event timing mode (with compute interleaving + subtraction)
-            dummy_tensor = torch.ones(256, 256, dtype=torch_dtype, device="cuda")
-
-            # Need separate graph with interleaved compute for subtraction
-            op_list_compute = []
-            for _ in range(graph_ops):
-                ar = trtllm_mods["AllReduce"](mapping=mapping).cuda()
-                ar(input_tensor, all_reduce_params=all_reduce_params)
-                op_list_compute.append(ar)
-
-            for _ in range(graph_ops):
-                torch.mm(dummy_tensor, dummy_tensor)
-
-            g_with_compute = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g_with_compute):
-                for op in op_list_compute:
-                    op(input_tensor, all_reduce_params=all_reduce_params)
-                    torch.mm(dummy_tensor, dummy_tensor)
-
-            g_compute_only = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g_compute_only):
-                for _ in range(graph_ops):
-                    torch.mm(dummy_tensor, dummy_tensor)
-
-            # Warmup compute graphs
+            # Normal warmup
             torch.cuda.synchronize()
-            for _ in range(num_warmups):
-                g_with_compute.replay()
-                g_compute_only.replay()
+            for i in range(num_warmups):
+                g.replay()
             torch.cuda.synchronize()
 
-            # Initialize power monitoring
-            power_monitor = None
-            power_stats = None
-            if measure_power:
-                power_monitor = PowerMonitor(local_rank)
-                if not power_monitor.start_sampling():
-                    power_monitor = None
+        # Initialize power monitoring
+        power_monitor = None
+        power_stats = None
+        if measure_power:
+            power_monitor = PowerMonitor(local_rank)
+            if not power_monitor.start_sampling():
+                power_monitor = None  # Failed to start
 
-            # Timing: single graph replay, take best of 3
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            start_compute = torch.cuda.Event(enable_timing=True)
-            end_compute = torch.cuda.Event(enable_timing=True)
+        # Timing
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
 
-            best_latency = float("inf")
-            for _ in range(3):
-                start_event.record()
-                g_with_compute.replay()
-                end_event.record()
-                torch.cuda.synchronize()
-                total_ms = start_event.elapsed_time(end_event)
+        start_event.record()
+        for i in range(actual_num_runs):
+            g.replay()
+        end_event.record()
+        torch.cuda.synchronize()
 
-                start_compute.record()
-                g_compute_only.replay()
-                end_compute.record()
-                torch.cuda.synchronize()
-                compute_ms = start_compute.elapsed_time(end_compute)
+        # Stop power monitoring
+        if power_monitor:
+            power_stats = power_monitor.stop_sampling()
 
-                per_op = max(total_ms - compute_ms, 0.0) / graph_ops
-                best_latency = min(best_latency, per_op)
+        latency = start_event.elapsed_time(end_event) / actual_num_runs / repeat_n
 
-            if power_monitor:
-                power_stats = power_monitor.stop_sampling()
+        if rank == 0 and local_rank == 0:
+            print(f"[TensorRT-LLM] Size: {size}, Latency: {latency:.4f} ms")
+            if power_stats:
+                print(f"  Power: {power_stats['power']:.2f}W (limit: {power_stats['power_limit']:.2f}W)")
 
-            latency = best_latency
+            # Get TensorRT-LLM version
+            trtllm_version = tllm.__version__ if hasattr(tllm, "__version__") else "unknown"
 
-            if rank == 0 and local_rank == 0:
-                print(f"[TensorRT-LLM] Size: {size}, Latency: {latency:.4f} ms")
-                if power_stats:
-                    print(f"  Power: {power_stats['power']:.2f}W (limit: {power_stats['power_limit']:.2f}W)")
-
-                trtllm_version = tllm.__version__ if hasattr(tllm, "__version__") else "unknown"
-                log_perf(
-                    item_list=[
-                        {
-                            "allreduce_dtype": dtype,
-                            "num_gpus": world_size,
-                            "message_size": size,
-                            "latency": latency,
-                            "implementation": "trtllm",
-                        }
-                    ],
-                    framework="TRTLLM",
-                    version=trtllm_version,
-                    device_name=get_device_module().get_device_name(),
-                    op_name="all_reduce",
-                    kernel_source="TRTLLM",
-                    perf_filename=perf_filename,
-                    power_stats=power_stats,
-                )
+            log_perf(
+                item_list=[
+                    {
+                        "allreduce_dtype": dtype,
+                        "num_gpus": world_size,
+                        "message_size": size,
+                        "latency": latency,
+                        "implementation": "trtllm",
+                    }
+                ],
+                framework="TRTLLM",
+                version=trtllm_version,
+                device_name=get_device_module().get_device_name(),
+                op_name="all_reduce",
+                kernel_source="TRTLLM",
+                perf_filename=perf_filename,
+                power_stats=power_stats,
+            )
 
         # Synchronize all ranks after each iteration to prevent hanging
         torch.cuda.synchronize()
-        mpi_comm.Barrier()
+        mpi_comm.Barrier()  # MPI barrier to ensure all ranks complete this iteration
 
         size *= ratio
 
     # Synchronize all ranks before exit to prevent hanging
     torch.cuda.synchronize()
-    mpi_comm.Barrier()
+    mpi_comm.Barrier()  # Final MPI barrier before exit
 
 
 def setup_vllm_distributed(world_size, rank, use_slurm):
@@ -956,7 +937,6 @@ def allreduce_benchmark(
     rank: Optional[int] = None,
     measure_power: bool = False,
     power_min_duration: float = 1.0,
-    use_nsys: bool = False,
 ):
     """
     CUDA Graph based AllReduce benchmark method supporting multiple backends
@@ -989,15 +969,7 @@ def allreduce_benchmark(
             raise RuntimeError("Benchmark must run with world_size > 1")
 
         benchmark_trtllm_allreduce(
-            dtype,
-            test_range,
-            world_size,
-            rank,
-            use_slurm,
-            perf_filename,
-            measure_power,
-            power_min_duration,
-            use_nsys=use_nsys,
+            dtype, test_range, world_size, rank, use_slurm, perf_filename, measure_power, power_min_duration
         )
 
     elif backend == "vllm":
@@ -1085,12 +1057,6 @@ if __name__ == "__main__":
         default=1.0,
         help="Minimum duration for benchmark runs when power measurement is enabled (default: 1.0s)",
     )
-    parser.add_argument(
-        "--use-nsys",
-        action="store_true",
-        help="nsys mode: replay graphs with NVTX markers for nsys profiling. "
-        "Run under 'nsys profile' and post-process with parse_nsys_allreduce.py.",
-    )
 
     args = parser.parse_args()
 
@@ -1104,5 +1070,4 @@ if __name__ == "__main__":
         args.rank,
         args.measure_power,
         args.power_test_duration_sec,
-        use_nsys=args.use_nsys,
     )
