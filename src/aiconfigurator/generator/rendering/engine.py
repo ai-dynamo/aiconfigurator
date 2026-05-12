@@ -267,24 +267,45 @@ def render_backend_templates(
                 _remove_key_and_nested(bk)
         return wc
 
+    def _populate_trtllm_nested_engine_config(wc: dict[str, Any]) -> None:
+        def _set_nested(config_name: str, nested_key: str, source_key: str) -> None:
+            source_value = wc.get(source_key)
+            if source_value is None:
+                return
+            config = dict(wc.get(config_name) or {})
+            if nested_key not in config or config.get(nested_key) is None:
+                config[nested_key] = source_value
+            wc[config_name] = config
+
+        _set_nested("kv_cache_config", "free_gpu_memory_fraction", "kv_cache_free_gpu_memory_fraction")
+        _set_nested("kv_cache_config", "dtype", "kv_cache_dtype")
+        _set_nested("kv_cache_config", "tokens_per_block", "tokens_per_block")
+        _set_nested("cuda_graph_config", "enable_padding", "cuda_graph_enable_padding")
+        _set_nested("cuda_graph_config", "batch_sizes", "cuda_graph_batch_sizes")
+        _set_nested("cache_transceiver_config", "max_tokens_in_buffer", "cache_transceiver_max_tokens_in_buffer")
+
+        if wc.get("cache_transceiver_config"):
+            cache_transceiver_config = dict(wc["cache_transceiver_config"])
+            cache_transceiver_config.setdefault("backend", "DEFAULT")
+            wc["cache_transceiver_config"] = cache_transceiver_config
+
+        decoding_type = wc.get("speculative_decoding_type")
+        num_nextn_predict_layers = wc.get("num_nextn_predict_layers")
+        if decoding_type is not None or num_nextn_predict_layers is not None:
+            speculative_config = dict(wc.get("speculative_config") or {})
+            if decoding_type is not None:
+                speculative_config.setdefault("decoding_type", decoding_type)
+            if num_nextn_predict_layers is not None:
+                speculative_config.setdefault("num_nextn_predict_layers", num_nextn_predict_layers)
+            wc["speculative_config"] = speculative_config
+
     if engine_template_file is not None:
         try:
             eng_tmpl = env.get_template(engine_template_file.name)
             for worker in worker_plan:
                 wc = make_worker_context(context, worker, param_keys, mapping_data)
-                # Populate cache_transceiver_config for trtllm so extra_engine_args emits it
-                # (template expects cache_transceiver_config.max_tokens_in_buffer; rule sets
-                # cache_transceiver_max_tokens_in_buffer scalar only)
                 if backend == "trtllm":
-                    mtib = wc.get("cache_transceiver_max_tokens_in_buffer")
-                    if mtib is not None and (
-                        not wc.get("cache_transceiver_config")
-                        or not wc["cache_transceiver_config"].get("max_tokens_in_buffer")
-                    ):
-                        ctc = dict(wc.get("cache_transceiver_config") or {})
-                        ctc.setdefault("max_tokens_in_buffer", mtib)
-                        ctc.setdefault("backend", "DEFAULT")
-                        wc["cache_transceiver_config"] = ctc
+                    _populate_trtllm_nested_engine_config(wc)
                 rendered = eng_tmpl.render(**wc)
                 if worker == "agg":
                     out_name = "extra_engine_args_agg.yaml"
