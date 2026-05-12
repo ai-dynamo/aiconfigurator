@@ -16,6 +16,7 @@ from aiconfigurator.sdk.common import (
 )
 from aiconfigurator.sdk.perf_database import (
     PerfDatabase,
+    PerfDataNotAvailableError,
     databases_cache,
     get_all_databases,
     get_database,
@@ -526,6 +527,36 @@ def test_load_dsv4_megamoe_module_data_merges_source_list(tmp_path):
 
 def test_load_dsv4_megamoe_module_data_missing_source_list_returns_none(tmp_path):
     assert load_dsv4_megamoe_module_data([str(tmp_path / "missing_a.txt"), str(tmp_path / "missing_b.txt")]) is None
+
+
+def test_load_dsv4_megamoe_module_data_skips_nested_none_sources(tmp_path):
+    assert load_dsv4_megamoe_module_data([None, [None, str(tmp_path / "missing.txt")]]) is None
+
+
+def test_query_dsv4_megamoe_module_missing_data_raises(tmp_path):
+    systems_root = tmp_path / "systems"
+    data_dir = systems_root / "data" / "sglang" / "0.5.10"
+    data_dir.mkdir(parents=True)
+    (systems_root / "gb200.yaml").write_text(
+        yaml.safe_dump({"data_dir": "data", "gpu": {"sm_version": 100}, "misc": {"nccl_version": "test"}})
+    )
+
+    db = PerfDatabase("gb200", "sglang", "0.5.10", str(systems_root))
+
+    assert db.supported_quant_mode["dsv4_megamoe_module"] == []
+    with pytest.raises(PerfDataNotAvailableError, match="dsv4_megamoe_module"):
+        db.query_dsv4_megamoe_module(
+            num_tokens=1024,
+            hidden_size=7168,
+            inter_size=3072,
+            topk=6,
+            num_experts=384,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            quant_mode=MoEQuantMode.w4a8_mxfp4_mxfp8,
+            workload_distribution="balanced",
+            is_context=True,
+        )
 
 
 def test_perf_database_merges_dsv4_megamoe_split_files_for_generic_capability(tmp_path):

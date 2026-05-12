@@ -2054,6 +2054,9 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
         dict: Nested dict whose leaves contain latency, power, energy and
         routing metadata.
     """
+    if dsv4_megamoe_module_file is None:
+        return None
+
     if isinstance(dsv4_megamoe_module_file, list | tuple):
         merged_data: dict = {}
         for source_file in dsv4_megamoe_module_file:

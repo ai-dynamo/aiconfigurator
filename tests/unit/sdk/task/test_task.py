@@ -511,6 +511,35 @@ def test_taskconfig_sglang_deepseek_v4_megamoe_validates_megamoe_table(monkeypat
     assert _enum_name(task.config.worker_config.moe_quant_mode) == "w4a8_mxfp4_mxfp8"
 
 
+def test_taskconfig_sglang_deepseek_v4_megamoe_requires_megamoe_table(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 100}}
+            self.supported_quant_mode = {
+                "gemm": ["fp8_block"],
+                "moe": ["bfloat16"],
+                "dsv4_megamoe_module": [],
+                "deepseek_v4_context_module": ["bfloat16"],
+                "deepseek_v4_generation_module": ["fp8"],
+            }
+
+    def fake_get_database(system, backend, version):
+        return FakeDatabase()
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+
+    with pytest.raises(ValueError, match="dsv4_megamoe_module performance data"):
+        TaskConfig(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V4-Pro",
+            system_name="gb200",
+            backend_name="sglang",
+            backend_version="0.5.10",
+            moe_backend="megamoe",
+            total_gpus=32,
+        )
+
+
 def test_taskconfig_rejects_flash_megamoe_until_rows_are_packaged():
     with pytest.raises(ValueError, match=r"packaged performance data only for DeepSeek-V4-Pro"):
         TaskConfig(

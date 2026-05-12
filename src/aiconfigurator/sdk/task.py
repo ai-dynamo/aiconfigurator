@@ -1145,6 +1145,11 @@ class TaskConfig:
             if self.backend_name == "sglang" and wc_moe_backend == "megamoe":
                 if not is_deepseek_v4:
                     raise ValueError("moe_backend='megamoe' is currently supported only for DeepSeek-V4 models.")
+                if not supported.get("dsv4_megamoe_module"):
+                    raise ValueError(
+                        "moe_backend='megamoe' requires dsv4_megamoe_module performance data for "
+                        f"system='{system_name}', backend='{self.backend_name}', version='{backend_version}'."
+                    )
                 _supported_or_raise("dsv4_megamoe_module", moe_mode, supported, system_name, backend_version)
             elif self.backend_name == "sglang" and wc_moe_backend == "deepep_moe":
                 if validate_context:
