@@ -13,6 +13,7 @@ For every (model, system, backend, version) combination the test:
   2. If unsupported → the test is skipped.
   3. If supported   → runs the full ``SupportMatrix.run_single_test`` pipeline
      and **fails** the test when the result disagrees with the matrix.
+  4. For supported modes, compares Rust engine-step output against Python.
 """
 
 from __future__ import annotations
@@ -22,24 +23,19 @@ from functools import cache
 import pytest
 
 from aiconfigurator.cli.api import cli_support
-from aiconfigurator.sdk.common import BackendName
 from aiconfigurator.sdk.perf_database import get_latest_database_version
 
 pytestmark = [pytest.mark.e2e, pytest.mark.build, pytest.mark.support_matrix]
 
-# Representative models — one per major architecture family.
-PR_MODELS: list[str] = [
-    "nvidia/DeepSeek-V3.1-NVFP4",
-    "meta-llama/Meta-Llama-3.1-8B",
-    "MiniMaxAI/MiniMax-M2.5",
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "Qwen/Qwen3-235B-A22B",
-    "openai/gpt-oss-20b",
-    "zai-org/GLM-5-FP8",
+# Representative model/system/backend cases. Keep this intentionally small:
+# the full cross product belongs in the scheduled support-matrix workflow,
+# while PR e2e has a 30-minute job timeout shared with the rest of the suite.
+PR_CASES: list[tuple[str, str, str]] = [
+    ("nvidia/DeepSeek-V3.1-NVFP4", "b200_sxm", "trtllm"),
+    ("meta-llama/Meta-Llama-3.1-8B", "b200_sxm", "sglang"),
+    ("MiniMaxAI/MiniMax-M2.5", "b200_sxm", "vllm"),
+    ("openai/gpt-oss-20b", "h100_sxm", "trtllm"),
 ]
-
-PR_SYSTEMS: list[str] = ["h100_sxm", "b200_sxm"]
-PR_BACKENDS: list[str] = sorted(b.value for b in BackendName)
 
 
 @cache
@@ -48,30 +44,40 @@ def _latest_version(system: str, backend: str) -> str | None:
 
 
 def _build_param_grid() -> list[pytest.param]:
-    """Build a flat list of pytest params for every valid (model, system, backend, version) combo."""
+    """Build pytest params for the curated PR smoke cases."""
     params: list[pytest.param] = []
-    for model in PR_MODELS:
+    for model, system, backend in PR_CASES:
         short_model = model.rsplit("/", 1)[-1]
-        for system in PR_SYSTEMS:
-            for backend in PR_BACKENDS:
-                version = _latest_version(system, backend)
-                if version is None:
-                    continue
-                params.append(
-                    pytest.param(
-                        model,
-                        system,
-                        backend,
-                        version,
-                        id=f"{short_model}-{system}-{backend}-v{version}",
-                    )
+        version = _latest_version(system, backend)
+        if version is None:
+            params.append(
+                pytest.param(
+                    model,
+                    system,
+                    backend,
+                    "",
+                    id=f"{short_model}-{system}-{backend}-no-database",
                 )
+            )
+            continue
+        params.append(
+            pytest.param(
+                model,
+                system,
+                backend,
+                version,
+                id=f"{short_model}-{system}-{backend}-v{version}",
+            )
+        )
     return params
 
 
 @pytest.mark.parametrize("model, system, backend, version", _build_param_grid())
 def test_pr_support_matrix(model: str, system: str, backend: str, version: str):
-    """Validate that supported model/system/backend combos still produce results."""
+    """Validate that supported model/system/backend combos produce Python/Rust comparable results."""
+    if not version:
+        pytest.fail(f"No latest database version found for {system=}, {backend=}")
+
     agg_supported, disagg_supported = cli_support(model, system, backend=backend, backend_version=version)
 
     if not agg_supported and not disagg_supported:
@@ -84,6 +90,7 @@ def test_pr_support_matrix(model: str, system: str, backend: str, version: str):
         system=system,
         backend=backend,
         version=version,
+        compare_engine_step_backends=True,
     )
 
     failures: list[str] = []

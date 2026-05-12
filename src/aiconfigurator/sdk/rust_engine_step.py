@@ -316,10 +316,16 @@ def _build_rust_core() -> Path:
 
 
 def _crate_root() -> Path | None:
-    for parent in Path(__file__).resolve().parents:
-        candidate = parent / "rust" / "aiconfigurator-core"
-        if (candidate / "Cargo.toml").is_file():
-            return candidate
+    search_starts = [Path(__file__).resolve().parent, Path.cwd().resolve()]
+    searched: set[Path] = set()
+    for start in search_starts:
+        for parent in (start, *start.parents):
+            if parent in searched:
+                continue
+            searched.add(parent)
+            candidate = parent / "rust" / "aiconfigurator-core"
+            if (candidate / "Cargo.toml").is_file():
+                return candidate
     return None
 
 

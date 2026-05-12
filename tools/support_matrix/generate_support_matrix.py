@@ -19,7 +19,13 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 sys.path.insert(0, _REPO_ROOT)
 
-from tools.support_matrix.support_matrix import SupportMatrix
+from tools.support_matrix.support_matrix import (
+    DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
+    DEFAULT_ENGINE_STEP_COMPARISON_RTOL,
+    DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
+    DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
+    SupportMatrix,
+)
 
 
 def main():
@@ -47,6 +53,36 @@ def main():
         default=None,
         help="Maximum number of processes for parallel execution (default: auto)",
     )
+    parser.add_argument(
+        "--compare-engine-step-backends",
+        action="store_true",
+        default=False,
+        help="Run both Python and Rust engine-step backends and fail rows whose Pareto outputs drift.",
+    )
+    parser.add_argument(
+        "--engine-step-comparison-rtol",
+        type=float,
+        default=DEFAULT_ENGINE_STEP_COMPARISON_RTOL,
+        help="Relative tolerance for Python-vs-Rust Pareto metric comparison.",
+    )
+    parser.add_argument(
+        "--engine-step-comparison-atol",
+        type=float,
+        default=DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
+        help="Absolute tolerance for Python-vs-Rust Pareto metric comparison.",
+    )
+    parser.add_argument(
+        "--engine-step-frontier-rtol",
+        type=float,
+        default=DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
+        help="Loose relative tolerance when Python and Rust Pareto frontiers choose different rows.",
+    )
+    parser.add_argument(
+        "--engine-step-frontier-atol",
+        type=float,
+        default=DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
+        help="Loose absolute tolerance when Python and Rust Pareto frontiers choose different rows.",
+    )
 
     args = parser.parse_args()
 
@@ -58,7 +94,13 @@ def main():
         format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s",
     )
 
-    support_matrix = SupportMatrix()
+    support_matrix = SupportMatrix(
+        compare_engine_step_backends=args.compare_engine_step_backends,
+        engine_step_comparison_rtol=args.engine_step_comparison_rtol,
+        engine_step_comparison_atol=args.engine_step_comparison_atol,
+        engine_step_frontier_rtol=args.engine_step_frontier_rtol,
+        engine_step_frontier_atol=args.engine_step_frontier_atol,
+    )
     results = support_matrix.test_support_matrix(max_workers=args.max_workers)
 
     # Always save results (now has a default output location)

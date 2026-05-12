@@ -15,6 +15,8 @@ RUN mkdir /opt/aiconfigurator && \
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV MPLCONFIGDIR=/tmp/matplotlib
 
+FROM rust:1-slim-bookworm AS rust-toolchain
+
 FROM base AS build
 COPY src/ /workspace/src/
 COPY LICENSE pyproject.toml README.md /workspace/
@@ -38,10 +40,23 @@ RUN WHL=$(ls -d /wheelhouse/*) && \
 
 FROM runtime AS test
 
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /workspace/dist /wheelhouse
 RUN WHL=$(ls -d /wheelhouse/*) && \
     uv pip install "$WHL[dev]" && \
     rm -rf /wheelhouse
+
+COPY rust/ /workspace/rust/
+RUN cargo build --manifest-path /workspace/rust/aiconfigurator-core/Cargo.toml
+ENV AICONFIGURATOR_RUST_CORE_LIB=/workspace/rust/aiconfigurator-core/target/debug/libaiconfigurator_core.so
 
 COPY pytest.ini /workspace/
 COPY tests/ /workspace/tests/

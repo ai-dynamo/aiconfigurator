@@ -82,12 +82,17 @@ python3 -m pytest tests/unit/sdk/test_rust_engine_step.py \
   --aic-rust-core-autobuild
 ```
 
-The same flag works with E2E and support-matrix tests, for example:
+The support-matrix PR regression now runs Python first and compares Rust engine-step output against it.
+Rust core autobuild is enabled by the support-matrix runner for the Rust pass, so the usual command is:
 
 ```bash
-TEST_SUPPORT_MATRIX=true python3 -m pytest tests/e2e/support_matrix \
-  --aic-engine-step-backend=rust \
-  --aic-rust-core-autobuild
+TEST_SUPPORT_MATRIX=true python3 -m pytest tests/e2e/support_matrix
+```
+
+For the full support-matrix generation runner, enable the same parity check explicitly:
+
+```bash
+python3 tools/support_matrix/generate_support_matrix.py --compare-engine-step-backends
 ```
 
 ### Where tests live
@@ -106,4 +111,3 @@ If `pytest-xdist` is installed:
 ```bash
 python3 -m pytest -n 4 -m "unit or build"
 ```
-
