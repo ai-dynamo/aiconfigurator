@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Union
 
 from aiconfigurator.sdk import common
@@ -119,3 +119,133 @@ class RuntimeConfig:
     image_width: int = 0
     num_images_per_request: int = 1
     num_image_tokens: int = 0  # override: ViT output tokens per image; ignored when image_height/width are set
+
+
+
+@dataclass
+class AFDConfig:
+    """Configuration for Attention-FFN Disaggregated (AFD) serving mode.
+
+    In AFD mode, Attention ops run on A-Workers while FFN/MoE ops run on
+    F-Workers.  The two pools communicate activation tensors every layer.
+
+    The deployment topology is described by the triple
+    ``(n_a_nodes, n_f_nodes, gpus_per_node)``.  The A/F rank mapping is
+    static and determined at deployment time — AIC models this as a
+    configuration input, not a dynamic scheduling problem.
+
+    Single-source-of-truth invariants
+    ---------------------------------
+    ``gpus_per_node`` is **not** a user-tunable knob: once the target
+    system is picked, this is a hardware fact (h100_sxm/h200_sxm = 8,
+    gb200 = 4, …). Callers must inject the value from
+    ``system_spec["node"]["num_gpus_per_node"]`` — the default sentinel
+    of ``0`` makes "I forgot to inject" loud rather than silently
+    mis-shaping ``n_f_workers`` / ``AFDTransfer`` BW selection. A
+    yaml/CLI "what-if" override is allowed but must be done deliberately
+    (the constructing layer is responsible for cross-checking against
+    the spec).
+
+    ``tp_f`` is the **total GPU count of one F-replica** (i.e. the
+    ``ModelConfig.tp_size`` used to shape the F-Worker model). Under the
+    Phase 1 assumption F-side DP=1, that's exactly ``n_f_workers``, so
+    ``tp_f`` is derived — exposing it as a user input opens a foot-gun
+    (e.g. ``n_f_nodes=2, gpus_per_node=8, tp_f=8`` silently implies
+    F-DP=2). The sentinel ``0`` requests automatic derivation; passing
+    a non-zero value triggers an invariant check.
+
+    Derived quantities (computed in ``__post_init__``):
+
+    * ``n_a_workers`` — A-side DP count = ``n_a_nodes * gpus_per_node // tp_a``
+    * ``n_f_workers`` — total F-side GPUs = ``n_f_nodes * gpus_per_node``
+    * ``tp_f``        — set to ``n_f_workers`` (Phase 1: F-DP = 1)
+
+    AFD is orthogonal to Prefill/Decode (P/D) disaggregation — it can be
+    applied to the Decode phase (default, where batch concentration benefits
+    are strongest), to the Prefill phase, or to both phases simultaneously.
+    """
+
+    # -- Topology inputs --
+    n_a_nodes: int = 1
+    n_f_nodes: int = 1
+    # 0 = sentinel "inject from system_spec"; see class docstring.
+    gpus_per_node: int = 0
+
+    # -- Per-worker parallelism --
+    tp_a: int = 1
+    # 0 = sentinel "derive from n_f_workers" (Phase 1: F-DP = 1).
+    # A non-zero value is treated as a what-if override and validated
+    # against the F-DP=1 invariant in ``__post_init__``.
+    tp_f: int = 0
+    f_moe_ep_size: int = 1
+
+    # -- Batch and pipeline --
+    a_batch_size: int = 128
+    num_microbatches: int = 3
+    pipeline_model: str = "optimistic"  # "optimistic" (K=3) or "conservative" (K=2)
+    comm_overhead_factor: float = 1.0
+    # Which phase(s) AFD should be applied to.
+    # "decode" (default) mirrors existing behavior; "prefill" applies to
+    # the context phase; "both" produces an aggregated estimate combining
+    # prefill (TTFT) and decode (TPOT).
+    phase: str = "decode"  # "prefill" | "decode" | "both"
+    # Whether this AFD pool is used together with a separate P/D disagg
+    # deployment.  Currently this is *purely informational* -- the flag is
+    # surfaced in the result dataframe (see ``InferenceSummary``) but no
+    # code path branches on it.
+    # TODO(afd, Phase-2): wire ``combined_with_pd`` into the estimate so
+    # it is more than a metadata tag.  Specifically:
+    #   * ``inference_session`` / ``_simulate_phase`` do not adjust
+    #     latency / throughput when combined with a separate P/D disagg
+    #     deployment (no rate-matching between the AFD-decoded tokens and
+    #     the upstream prefill pool, no shared SLA).
+    #   * ``task._finalize_afd`` only counts ``n_a_nodes + n_f_nodes``
+    #     against the GPU budget; the GPUs of the "other side" P/D
+    #     workers are not added to ``total_requested``.
+    #   * ``pareto_analysis`` does not merge the AFD frontier with the
+    #     agg / disagg frontiers, so a deployment that uses AFD on one
+    #     phase and standard P/D on the other cannot be Pareto-evaluated
+    #     end-to-end today.
+    # Either drop the flag entirely, or add proper rate-matching /
+    # resource-budget / frontier-merging code to make it meaningful.
+    combined_with_pd: bool = False
+    # Boundary-op assignment: ``add_norm_2`` and ``logits_gemm`` sit at
+    # the natural Attention/FFN boundary and can be assigned to either
+    # pool.  Defaults to A-Worker, but exposed here as a configurable
+    # knob.  When False the boundary ops are appended to the F-Worker
+    # partition instead.
+    boundary_on_attn: bool = True
+
+    # -- Derived (set in __post_init__) --
+    n_a_workers: int = field(init=False)
+    n_f_workers: int = field(init=False)
+
+    def __post_init__(self) -> None:
+        if self.gpus_per_node < 1:
+            raise ValueError(
+                f"gpus_per_node ({self.gpus_per_node}) must be >= 1. "
+                "AFDConfig must be constructed with gpus_per_node injected "
+                "from system_spec['node']['num_gpus_per_node']; do not rely "
+                "on the default sentinel."
+            )
+        if self.tp_a < 1 or self.gpus_per_node % self.tp_a != 0:
+            raise ValueError(
+                f"tp_a ({self.tp_a}) must be a positive divisor of "
+                f"gpus_per_node ({self.gpus_per_node})."
+            )
+        self.n_a_workers = self.n_a_nodes * self.gpus_per_node // self.tp_a
+        self.n_f_workers = self.n_f_nodes * self.gpus_per_node
+
+        # Phase 1: F-side DP = 1, so tp_f (= ModelConfig.tp_size of one
+        # F-replica) is exactly n_f_workers. A caller-supplied non-zero
+        # tp_f is treated as a what-if override and must match the
+        # invariant; otherwise it silently implies F-DP > 1.
+        derived_tp_f = self.n_f_workers
+        if self.tp_f and self.tp_f != derived_tp_f:
+            raise ValueError(
+                f"tp_f ({self.tp_f}) is derived under the Phase 1 F-DP=1 "
+                f"assumption as n_f_nodes * gpus_per_node = {derived_tp_f}; "
+                "an explicit different value would silently imply F-DP > 1. "
+                "Remove the override, or change n_f_nodes / gpus_per_node."
+            )
+        self.tp_f = derived_tp_f

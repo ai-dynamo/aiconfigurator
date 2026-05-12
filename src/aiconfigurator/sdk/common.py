@@ -755,6 +755,67 @@ ColumnsDisagg = [
     "power_w",  # NEW: E2E weighted average power in watts
 ]
 
+"""
+Columns for AFD (Attention-FFN Disaggregated) inference summary dataframe
+
+AFD is orthogonal to P/D disaggregation: the same schema is used whether
+AFD is applied to the prefill phase, the decode phase, or both.  Fields
+that do not apply to a given phase are populated with zero:
+
+* Prefill-only run: ``tpot``/``seq/s``-style decode metrics are 0, ``ttft``
+  and per-step context metrics are populated.
+* Decode-only run: ``ttft`` is 0 and generation-side metrics are populated.
+* Combined run ("both"): ``ttft`` and ``tpot`` together describe the
+  end-to-end request.
+"""
+ColumnsAFD = [
+    "model",
+    "phase",
+    "isl",
+    "osl",
+    "gpus_per_node",
+    "(a)nodes",
+    "(a)tp",
+    "(a)bs",
+    "(a)workers",
+    "(a)memory",
+    "(a)is_oom",
+    "(f)nodes",
+    "(f)tp",
+    "(f)ep",
+    "(f)workers",
+    "(f)memory",
+    "(f)is_oom",
+    "t_a_layer",
+    "t_f_layer",
+    "t_a2f_layer",
+    "t_f2a_layer",
+    "t_c_layer",
+    "t_step",
+    "ttft",
+    "tpot",
+    "request_latency",
+    "b_total",
+    "tokens/s",
+    "tokens/s/gpu",
+    "tokens/s/user",
+    "seq/s",
+    "concurrency",
+    "tpuc",
+    "balance_ratio",
+    "comm_hidden",
+    "pipeline_model",
+    "num_microbatches",
+    "combined_with_pd",
+    "boundary_on_attn",
+    "num_total_gpus",
+    "memory",
+    "backend",
+    "version",
+    "system",
+    "power_w",
+]
+
 
 class DatabaseMode(Enum):
     """

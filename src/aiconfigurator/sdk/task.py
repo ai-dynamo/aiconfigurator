@@ -32,6 +32,34 @@ DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE = 1.1
 DEFAULT_DECODE_LATENCY_CORRECTION_SCALE = 1.08
 
 
+def _lookup_num_gpus_per_node(system_name: str) -> int | None:
+    """Best-effort lookup of ``num_gpus_per_node`` from a system's yaml spec.
+
+    Used by AFD finalization to cross-check yaml overrides without paying
+    the cost of loading the full perf database. Returns ``None`` if the
+    spec cannot be found / parsed; callers must treat ``None`` as "skip
+    the cross-check" rather than as a definitive answer.
+    """
+    import os
+
+    from aiconfigurator.sdk.perf_database import get_systems_paths
+
+    for systems_root in get_systems_paths():
+        yaml_path = os.path.join(systems_root, f"{system_name}.yaml")
+        if not os.path.isfile(yaml_path):
+            continue
+        try:
+            with open(yaml_path) as fh:
+                spec = yaml.safe_load(fh) or {}
+        except Exception:
+            logger.debug("Could not read system yaml at %s", yaml_path, exc_info=True)
+            continue
+        node = spec.get("node") if isinstance(spec, dict) else None
+        if isinstance(node, dict) and isinstance(node.get("num_gpus_per_node"), int):
+            return int(node["num_gpus_per_node"])
+    return None
+
+
 class UnsupportedWideepConfigError(ValueError):
     """Raised when a requested WideEP configuration is not supported by perf data."""
 
@@ -151,7 +179,7 @@ class ConfigLayer:
 
 @dataclass
 class TaskContext:
-    serving_mode: Literal["agg", "disagg"]
+    serving_mode: Literal["agg", "disagg", "afd"]
     model_path: str
     model_family: str
     system_name: str
@@ -501,6 +529,8 @@ class TaskConfigFactory:
             cls._finalize_agg(config, ctx)
         elif ctx.serving_mode == "disagg":
             cls._finalize_disagg(config, ctx)
+        elif ctx.serving_mode == "afd":
+            cls._finalize_afd(config, ctx)
         else:
             raise ValueError(f"Invalid serving mode: {ctx.serving_mode}")
 
@@ -517,6 +547,8 @@ class TaskConfigFactory:
             return [ConfigLayer("agg-defaults", cls._agg_defaults_layer)]
         if ctx.serving_mode == "disagg":
             return [ConfigLayer("disagg-defaults", cls._disagg_defaults_layer)]
+        if ctx.serving_mode == "afd":
+            return [ConfigLayer("afd-defaults", cls._afd_defaults_layer)]
         return []
 
     @staticmethod
@@ -743,6 +775,108 @@ class TaskConfigFactory:
             logger.debug("Overwriting num gpu per prefill worker to %s", prefill_cfg.num_gpu_per_worker)
             decode_cfg.num_gpu_per_worker = [num for num in decode_cfg.num_gpu_per_worker if num <= ctx.total_gpus]
             logger.debug("Overwriting num gpu per decode worker to %s", decode_cfg.num_gpu_per_worker)
+
+
+    @staticmethod
+    def _afd_defaults_layer(ctx: TaskContext) -> dict:
+        """Default configuration for AFD (Attention-FFN Disaggregation) mode.
+
+        AFD is orthogonal to P/D disaggregation — ``phase`` selects whether
+        this session simulates prefill, decode (default), or both.
+
+        Notes on derived fields (intentionally absent from this default
+        layer):
+
+        * ``gpus_per_node`` — single source of truth is
+          ``system_spec['node']['num_gpus_per_node']``; injected at
+          AFDConfig construction in ``run_afd``. Setting it here would
+          let the default (e.g. ``8``) silently mis-shape AFDTransfer /
+          ``n_f_workers`` on systems where the spec says otherwise
+          (e.g. gb200 = 4).
+        * ``tp_f`` — Phase 1 locks F-DP = 1, so
+          ``tp_f == n_f_nodes * gpus_per_node`` is derived in
+          ``AFDConfig.__post_init__``.
+        """
+        return {
+            "afd_config": {
+                "n_a_nodes": 1,
+                "n_f_nodes": 1,
+                "tp_a": 1,
+                "f_moe_ep_size": 1,
+                "a_batch_size": 128,
+                "num_microbatches": 3,
+                "pipeline_model": "optimistic",
+                "comm_overhead_factor": 1.0,
+                "phase": "decode",
+                "combined_with_pd": False,
+                "boundary_on_attn": True,
+            },
+            "worker_config": {
+                "system_name": ctx.system_name,
+                "backend_name": ctx.backend_name,
+                "backend_version": ctx.resolved_backend_version_for(ctx.system_name),
+            },
+        }
+
+    @classmethod
+    def _finalize_afd(cls, config: DefaultMunch, ctx: TaskContext) -> None:
+        """AFD mode finalization: cross-check yaml overrides and resource budget.
+
+        ``gpus_per_node`` is anchored to ``system_spec`` (see
+        ``_afd_defaults_layer``); we look up the spec value here so we
+        can both:
+
+        1. Fail loudly if the user explicitly set
+           ``afd_config.gpus_per_node`` in their yaml patch and it
+           disagrees with the spec (silent mismatch is the real
+           foot-gun; an explicit what-if override remains possible by
+           bumping the spec yaml or asking for a follow-up flag).
+        2. Use the right per-node GPU count when validating
+           ``total_gpus`` against the requested ``(n_a_nodes +
+           n_f_nodes) * gpus_per_node`` budget.
+        """
+        afd_cfg = config.get("afd_config", {})
+
+        spec_gpus_per_node = _lookup_num_gpus_per_node(ctx.system_name)
+
+        user_set_gpus_per_node = (
+            ctx.yaml_patch
+            and isinstance(ctx.yaml_patch.get("afd_config"), dict)
+            and "gpus_per_node" in ctx.yaml_patch["afd_config"]
+        )
+        if user_set_gpus_per_node:
+            user_value = ctx.yaml_patch["afd_config"]["gpus_per_node"]
+            if spec_gpus_per_node is not None and int(user_value) != int(spec_gpus_per_node):
+                raise ValueError(
+                    f"afd_config.gpus_per_node={user_value} from yaml does not match "
+                    f"system_spec['node']['num_gpus_per_node']={spec_gpus_per_node} for "
+                    f"system '{ctx.system_name}'. Remove the override, or update the "
+                    "system spec yaml to match the desired what-if topology."
+                )
+        elif "gpus_per_node" in afd_cfg:
+            # Sanitize the merged config so downstream consumers can't
+            # accidentally re-introduce a stale default.
+            afd_cfg.pop("gpus_per_node", None)
+
+        if ctx.total_gpus is not None and ctx.total_gpus > 0:
+            n_a_nodes = afd_cfg.get("n_a_nodes", 1)
+            n_f_nodes = afd_cfg.get("n_f_nodes", 1)
+            if spec_gpus_per_node is None:
+                logger.debug(
+                    "AFD total_gpus check skipped: could not resolve "
+                    "num_gpus_per_node for system '%s'.",
+                    ctx.system_name,
+                )
+                return
+            total_requested = (n_a_nodes + n_f_nodes) * spec_gpus_per_node
+            if total_requested > ctx.total_gpus:
+                logger.warning(
+                    "AFD config requests %d GPUs "
+                    "(n_a_nodes=%d + n_f_nodes=%d) * gpus_per_node=%d "
+                    "but total_gpus=%d. Consider adjusting.",
+                    total_requested, n_a_nodes, n_f_nodes, spec_gpus_per_node,
+                    ctx.total_gpus,
+                )
 
 
 _quants = {
@@ -1006,6 +1140,11 @@ class TaskConfig:
         elif serving_mode == "disagg":
             self._convert_worker_config_to_enum(self.config.prefill_worker_config)
             self._convert_worker_config_to_enum(self.config.decode_worker_config)
+        elif serving_mode == "afd":
+            # AFD worker_config is minimal (system / backend / version); no
+            # quant modes to convert at the worker level — per-side
+            # ModelConfigs are built inside TaskRunner.run_afd().
+            pass
         else:
             raise ValueError(f"Invalid serving mode: {serving_mode}")
 
@@ -1686,6 +1825,105 @@ class TaskRunner:
         )
         return {"pareto_df": result_df}
 
+    def run_afd(self, task_config: DefaultMunch) -> dict[str, pd.DataFrame | None]:
+        """Run AFD (Attention-FFN Disaggregated) estimation via TaskConfig.
+
+        Unlike agg/disagg, AFD runs a single-point estimation using the
+        AFDInferenceSession (no Pareto sweep in this baseline).
+
+        The phase of the simulation — ``"prefill"``, ``"decode"``, or
+        ``"both"`` — is picked up from ``afd_config.phase``.  This makes AFD
+        orthogonal to P/D disaggregation: a user can model a P-only, D-only,
+        or combined AFD deployment with the same session.
+        """
+        from aiconfigurator.sdk.config import AFDConfig, ModelConfig, RuntimeConfig
+        from aiconfigurator.sdk.inference_session import AFDInferenceSession
+
+        logger.debug("Task %s: Setting up AFD config", task_config.task_name)
+        afd_cfg_dict = task_config.afd_config
+
+        # Load the database first so we can pull ``gpus_per_node`` from
+        # the authoritative system_spec; ``AFDConfig`` rejects the
+        # default-sentinel path so this ordering is enforced by design.
+        worker_cfg = task_config.worker_config
+        try:
+            database_mode = getattr(task_config, "database_mode", None)
+            database = self._get_database(
+                system=worker_cfg.system_name,
+                backend=worker_cfg.backend_name,
+                version=worker_cfg.backend_version,
+                database_mode=database_mode,
+            )
+        except Exception:
+            logger.exception("Error getting database for AFD task")
+            return None
+
+        from aiconfigurator.sdk.backends.factory import get_backend
+
+        backend = get_backend(worker_cfg.backend_name)
+
+        gpus_per_node = int(database.system_spec["node"]["num_gpus_per_node"])
+
+        afd_config = AFDConfig(
+            n_a_nodes=int(afd_cfg_dict.get("n_a_nodes", 1)),
+            n_f_nodes=int(afd_cfg_dict.get("n_f_nodes", 1)),
+            gpus_per_node=gpus_per_node,
+            tp_a=int(afd_cfg_dict.get("tp_a", 1)),
+            # tp_f is derived inside AFDConfig (Phase 1: F-DP=1); not
+            # threaded through from yaml. ``_finalize_afd`` is
+            # responsible for cross-checking any explicit yaml override.
+            f_moe_ep_size=int(afd_cfg_dict.get("f_moe_ep_size", 1)),
+            a_batch_size=int(afd_cfg_dict.get("a_batch_size", 128)),
+            num_microbatches=int(afd_cfg_dict.get("num_microbatches", 3)),
+            pipeline_model=str(afd_cfg_dict.get("pipeline_model", "optimistic")),
+            comm_overhead_factor=float(afd_cfg_dict.get("comm_overhead_factor", 1.0)),
+            phase=str(afd_cfg_dict.get("phase", "decode")),
+            combined_with_pd=bool(afd_cfg_dict.get("combined_with_pd", False)),
+            boundary_on_attn=bool(afd_cfg_dict.get("boundary_on_attn", True)),
+        )
+
+        runtime_config = RuntimeConfig(
+            isl=task_config.runtime_config.isl,
+            osl=task_config.runtime_config.osl,
+            batch_size=afd_config.n_a_workers * afd_config.a_batch_size,
+        )
+
+        # On the F-Worker, tp * attention_dp must equal moe_tp * moe_ep; since
+        # we keep attention_dp=1 on the F-side, moe_tp = tp_f / f_moe_ep_size.
+        if afd_config.f_moe_ep_size <= 0 or afd_config.tp_f % afd_config.f_moe_ep_size != 0:
+            raise ValueError(
+                f"f_moe_ep_size ({afd_config.f_moe_ep_size}) must be a positive divisor "
+                f"of tp_f ({afd_config.tp_f}) so that f_moe_tp is an integer."
+            )
+        f_moe_tp = afd_config.tp_f // afd_config.f_moe_ep_size
+
+        a_model_config = ModelConfig(
+            tp_size=afd_config.tp_a,
+            pp_size=1,
+            moe_tp_size=afd_config.tp_a,
+            moe_ep_size=1,
+            attention_dp_size=1,
+        )
+        f_model_config = ModelConfig(
+            tp_size=afd_config.tp_f,
+            pp_size=1,
+            moe_tp_size=f_moe_tp,
+            moe_ep_size=afd_config.f_moe_ep_size,
+            attention_dp_size=1,
+        )
+
+        session = AFDInferenceSession(
+            model_path=task_config.model_path,
+            a_model_config=a_model_config,
+            f_model_config=f_model_config,
+            database=database,
+            backend=backend,
+            afd_config=afd_config,
+        )
+        summary = session.run_afd(runtime_config, phase=afd_config.phase)
+        result_df = summary.get_summary_df()
+        return {"pareto_df": result_df}
+
     def run(
         self,
         task_config: TaskConfig,
@@ -1705,6 +1943,10 @@ class TaskRunner:
                 result = self.run_agg(task_config.config)
             elif serving_mode == "disagg":
                 result = self.run_disagg(task_config.config, autoscale=autoscale)
+            elif serving_mode == "afd":
+                if autoscale:
+                    raise ValueError("autoscale mode is not supported for afd serving mode.")
+                result = self.run_afd(task_config.config)
             else:
                 raise ValueError(f"Invalid serving mode: {serving_mode}")
         except NoFeasibleConfigError as exc:

@@ -5,6 +5,7 @@ import copy
 import functools
 import logging
 import warnings
+from collections import defaultdict
 
 import pandas as pd
 
@@ -839,3 +840,745 @@ class DisaggInferenceSession:
         # set final disagg summary
         disagg_summary.set_summary_df(disagg_summary_df)
         return disagg_summary
+
+
+class AFDInferenceSession:
+    """Attention-FFN Disaggregated inference session.
+
+    Simulates the AFD pipeline where Attention ops run on A-Workers and
+    FFN/MoE ops run on F-Workers, communicating hidden activations every
+    layer via a ping-pong pipeline.
+
+    AFD is **orthogonal** to Prefill/Decode (P/D) disaggregation:
+
+    * ``phase="decode"`` (default) — matches historical behavior: per-layer
+      ping-pong pipeline for generation steps.  ``TPOT`` is populated,
+      ``TTFT`` is 0.
+    * ``phase="prefill"`` — applies the same A/F split to context ops.
+      ``TTFT`` (= one prefill ``T_step``) is populated, ``TPOT`` is 0.
+    * ``phase="both"`` — combines both above and reports end-to-end
+      ``request_latency = TTFT + (osl-1) * TPOT``.
+
+    In combination with P/D disagg, an external caller can run two
+    sessions (one for prefill workers, one for decode workers) and
+    aggregate the two summaries.
+
+    ``run_afd(runtime_config, phase=None)`` is the public entry point;
+    ``run_afd_decode`` / ``run_afd_prefill`` are thin convenience wrappers.
+
+    Memory (HBM) bound is checked for both A-Workers and F-Workers via
+    :class:`aiconfigurator.sdk.inference_summary.InferenceSummary`.
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        a_model_config: config.ModelConfig,
+        f_model_config: config.ModelConfig,
+        database: perf_database.PerfDatabase,
+        backend: BaseBackend,
+        afd_config: config.AFDConfig,
+    ) -> None:
+        self._model_path = model_path
+        self._a_model_config = a_model_config
+        self._f_model_config = f_model_config
+        self._database = database
+        self._backend = backend
+        self._afd_config = afd_config
+
+    # ------------------------------------------------------------------ #
+    # Private helpers
+    # ------------------------------------------------------------------ #
+    def _build_models(self):
+        """Construct A-Worker and F-Worker model instances."""
+        from aiconfigurator.sdk.models import get_model
+
+        a_model = get_model(self._model_path, self._a_model_config, self._backend.name.value)
+        f_model = get_model(self._model_path, self._f_model_config, self._backend.name.value)
+        return a_model, f_model
+
+    def _sum_latency(
+        self,
+        ops_iter,
+        *,
+        batch_size: int,
+        seq_len: int,
+        model,
+        runtime_config: config.RuntimeConfig,
+        is_context: bool,
+    ):
+        """Sum the query() latencies for a list of ops, returning (total, per-op dict).
+
+        For prefill (``is_context=True``) we pass ``seq_imbalance_correction_scale``;
+        for decode we pass ``gen_seq_imbalance_correction_scale``.  Tokens
+        processed per call = ``batch_size`` for decode, ``batch_size*seq_len``
+        for prefill (one token per sequence vs. full sequence).
+        """
+        x = batch_size * seq_len if is_context else batch_size
+
+        kwargs_common = {
+            "x": x,
+            "batch_size": batch_size,
+            "beam_width": 1,
+            "s": seq_len,
+            "prefix": runtime_config.prefix,
+            "model_name": getattr(model, "model_name", ""),
+        }
+        if is_context:
+            kwargs_common["seq_imbalance_correction_scale"] = runtime_config.seq_imbalance_correction_scale
+        else:
+            kwargs_common["gen_seq_imbalance_correction_scale"] = runtime_config.gen_seq_imbalance_correction_scale
+
+        per_op = defaultdict(float)
+        for op in ops_iter:
+            result = op.query(self._database, **kwargs_common)
+            per_op[op._name] += float(result)
+        return sum(per_op.values()), per_op
+
+    def _build_afd_transfer_op(self, a_model, f_model, *, rank_mapping: str = "one_to_one"):
+        """Construct the single AFDTransfer op covering all AFD comm.
+
+        ``AFDTransfer.query()`` returns a breakdown dict with the
+        cross-pool A→F / F→A latencies plus the F-side intra-node AG/RS
+        and A-side combine, so one op per layer is sufficient.
+
+        ``rank_mapping`` selects the dispatch topology:
+        ``"one_to_one"`` (current default) keeps the F-side AG/RS;
+        ``"broadcast"`` reports them as 0 (placeholder for future
+        modeling of A-rank → all-F-ranks fan-out).
+        """
+        from aiconfigurator.sdk.operations import AFDTransfer
+
+        cfg = self._afd_config
+        is_moe = hasattr(f_model, "_topk") and hasattr(f_model, "_num_experts")
+        transfer_mode = "moe_selective" if (is_moe and cfg.f_moe_ep_size > 1) else "p2p"
+        return AFDTransfer(
+            name="afd_transfer",
+            hidden_size=a_model._hidden_size,
+            n_a_workers=cfg.n_a_workers,
+            n_f_workers=cfg.n_f_workers,
+            gpus_per_node=cfg.gpus_per_node,
+            tp_a=cfg.tp_a,
+            tp_f=cfg.tp_f,
+            f_moe_ep_size=cfg.f_moe_ep_size,
+            topk=getattr(f_model, "_topk", 1),
+            num_experts=getattr(f_model, "_num_experts", 1),
+            comm_quant_mode=self._a_model_config.comm_quant_mode,
+            comm_overhead_factor=cfg.comm_overhead_factor,
+            transfer_mode=transfer_mode,
+            rank_mapping=rank_mapping,
+        )
+
+    def _pipeline_tcycle(
+        self, t_a: float, t_f: float, t_a2f: float, t_f2a: float
+    ) -> tuple[float, bool]:
+        """Compute per-layer cycle time and whether comm is hidden.
+
+        Two pipeline regimes are supported:
+
+        * **K=3 (optimistic, 3-batch overlap)** — the network round trip
+          ``t_c = t_a2f + t_f2a`` is its own pipeline stage, so::
+
+              TPOT_layer = max(t_a, t_f, t_c)            (N_min = 3)
+
+          When ``t_c <= max(t_a, t_f)`` communication is fully hidden
+          by computation; otherwise the network is the bottleneck.
+
+        * **K=2 (conservative, blocking communication)** — each pool
+          waits for its own outgoing/incoming transfer::
+
+              TPOT_layer = max(t_a + t_a2f, t_f + t_f2a) (N_min = 2)
+
+        The optimistic model falls back to conservative when there are
+        not enough in-flight micro-batches to fill the K=3 pipeline.
+
+        Returns:
+            (t_cycle, comm_hidden).  ``comm_hidden`` is True only in the
+            K=3 ideal case where the network stage does not dominate the
+            cycle.
+        """
+        cfg = self._afd_config
+        t_c = t_a2f + t_f2a
+        if cfg.pipeline_model == "optimistic":
+            # Need ≥ 2 + t_c / max(t_a, t_f) in-flight microbatches to
+            # hide the network stage behind compute.  Equivalent to the
+            # legacy ``2 * (1 + t_c_one_dir / max(...))`` under the
+            # symmetric Phase-1 assumption (t_a2f == t_f2a).
+            min_m = 2.0 + t_c / max(t_a, t_f, 1e-9)
+            if cfg.num_microbatches < min_m:
+                logger.warning(
+                    "AFD optimistic pipeline: num_microbatches (%d) < min required (%.1f) "
+                    "to hide communication. Falling back to conservative model.",
+                    cfg.num_microbatches,
+                    min_m,
+                )
+                return max(t_a + t_a2f, t_f + t_f2a), False
+            t_cycle = max(t_a, t_f, t_c)
+            comm_hidden = t_c <= max(t_a, t_f)
+            return t_cycle, comm_hidden
+        # conservative K=2
+        return max(t_a + t_a2f, t_f + t_f2a), False
+
+    def _estimate_a_memory_gb(
+        self,
+        *,
+        a_model,
+        a_partition,
+        phase: str,
+        batch_size: int,
+        isl: int,
+        osl: int,
+    ) -> float:
+        """Estimate A-Worker per-GPU HBM usage in GiB.
+
+        * Weights: sum of attention-side op weights (per-GPU after TP shard).
+        * KV cache:
+            - ``phase == "prefill"``: transient KV for a single prefill sequence
+              (grows to ISL).
+            - ``phase == "decode"``:  persistent KV for (isl+osl) tokens per
+              sequence, concurrently held for ``num_microbatches`` in-flight batches.
+            - ``phase == "both"``: take the decode estimate (worst case).
+        """
+        cfg = self._afd_config
+        num_layers = a_model._num_layers
+        a_weights_gb = sum(op.get_weights() for op in a_partition.attn_ops) / (1 << 30)
+
+        kv_bytes_per_element = (
+            self._a_model_config.kvcache_quant_mode.value.memory
+            if self._a_model_config.kvcache_quant_mode
+            else 2
+        )
+        kv_per_token = (
+            2 * a_model._num_kv_heads * a_model._head_size * kv_bytes_per_element / max(cfg.tp_a, 1)
+        )
+
+        if phase == "prefill":
+            kv_tokens_per_seq = isl
+            kv_multiplier = 1  # no persistent in-flight replicas for pure prefill
+        else:  # decode or both → worst-case decode KV
+            kv_tokens_per_seq = isl + osl
+            kv_multiplier = max(cfg.num_microbatches, 1)
+
+        kv_cache_gb = (
+            num_layers * batch_size * kv_tokens_per_seq * kv_per_token * kv_multiplier
+        ) / (1 << 30)
+        return a_weights_gb + kv_cache_gb
+
+    def _estimate_f_memory_gb(self, *, f_partition) -> float:
+        """Estimate F-Worker per-GPU HBM usage in GiB (weights only; FFN is stateless)."""
+        return sum(op.get_weights() for op in f_partition.ffn_ops) / (1 << 30)
+
+    def _gpu_mem_capacity_gb(self) -> float:
+        mem_capacity = self._database.system_spec.get("gpu", {}).get("mem_capacity", 80 * (1 << 30))
+        return mem_capacity / (1 << 30)
+
+    # Stride for sampling KV-cache length ``s`` along the decode trace.
+    # Mirrors ``base_backend._run_generation_phase`` so the AFD path
+    # uses the same numerical integration grid as agg/disagg.
+    _AFD_DECODE_STRIDE = 32
+
+    def _integrate_decode_phase(
+        self,
+        *,
+        a_partition,
+        f_partition,
+        a_model,
+        f_model,
+        runtime_config: config.RuntimeConfig,
+        isl: int,
+        osl: int,
+        b_total: int,
+        num_layers: int,
+        brk_t_a_per_layer: float,
+        brk_t_f_per_layer: float,
+        t_a2f_layer: float,
+        t_f2a_layer: float,
+    ) -> tuple[float, float, float, dict, dict]:
+        """Integrate compute latency along the decode KV-cache length.
+
+        Attention is the only op whose latency reads ``s``; sampling at
+        ``stride = _AFD_DECODE_STRIDE`` mirrors the trapezoidal rule
+        used by ``_run_generation_phase`` and recovers the average
+        per-step latency over the full decode trace.
+
+        Returns ``(t_a_layer_avg, t_f_layer_avg, t_step_avg, a_per_op,
+        f_per_op)``, where the scalars are per-step averages and the
+        per-op dicts are *per-step* totals (averaged across the trace)
+        in the same units as ``_sum_latency`` output.
+
+        ``brk_t_a_per_layer`` / ``brk_t_f_per_layer`` are the
+        AFDTransfer per-layer intra-pool contributions (s-independent);
+        they are folded into ``t_a_layer_i`` / ``t_f_layer_i`` *before*
+        the per-step ``_pipeline_tcycle`` call so the pipeline max is
+        evaluated on the full per-layer time, not on the compute-only
+        time.
+        """
+        cfg = self._afd_config
+        stride = self._AFD_DECODE_STRIDE
+
+        t_a_layer_sum = 0.0
+        t_f_layer_sum = 0.0
+        t_step_sum = 0.0
+        a_per_op_sum: dict[str, float] = defaultdict(float)
+        f_per_op_sum: dict[str, float] = defaultdict(float)
+        total_repeat = 0
+
+        decode_steps = max(osl - 1, 1)
+        for i in range(0, decode_steps, stride):
+            s_i = isl + i + 1
+            # ``osl <= 1`` is degenerate (no decode tokens); fall back
+            # to a single representative sample so callers still get a
+            # non-zero estimate rather than zero-filled metrics.
+            repeat = min(stride, osl - 1 - i) if osl > 1 else 1
+            if repeat <= 0:
+                break
+
+            t_a_step_i, a_per_op_i = self._sum_latency(
+                a_partition.attn_ops,
+                batch_size=cfg.a_batch_size,
+                seq_len=s_i,
+                model=a_model,
+                runtime_config=runtime_config,
+                is_context=False,
+            )
+            t_f_step_i, f_per_op_i = self._sum_latency(
+                f_partition.ffn_ops,
+                batch_size=b_total,
+                seq_len=s_i,
+                model=f_model,
+                runtime_config=runtime_config,
+                is_context=False,
+            )
+
+            t_a_layer_i = t_a_step_i / num_layers + brk_t_a_per_layer
+            t_f_layer_i = t_f_step_i / num_layers + brk_t_f_per_layer
+            # IMPORTANT: pipeline max is applied per-step before
+            # accumulation. ``sum_i max(...)`` ≠ ``max(sum_i ...)``;
+            # the latter under-estimates the bottleneck whenever the
+            # winning pool changes across the decode trace.
+            t_cycle_i, _ = self._pipeline_tcycle(
+                t_a_layer_i, t_f_layer_i, t_a2f_layer, t_f2a_layer
+            )
+            t_step_i = num_layers * t_cycle_i
+
+            t_a_layer_sum += t_a_layer_i * repeat
+            t_f_layer_sum += t_f_layer_i * repeat
+            t_step_sum += t_step_i * repeat
+            for k, v in a_per_op_i.items():
+                a_per_op_sum[k] += v * repeat
+            for k, v in f_per_op_i.items():
+                f_per_op_sum[k] += v * repeat
+            total_repeat += repeat
+
+        denom = max(total_repeat, 1)
+        t_a_layer_avg = t_a_layer_sum / denom
+        t_f_layer_avg = t_f_layer_sum / denom
+        t_step_avg = t_step_sum / denom
+        a_per_op = {k: v / denom for k, v in a_per_op_sum.items()}
+        f_per_op = {k: v / denom for k, v in f_per_op_sum.items()}
+        return t_a_layer_avg, t_f_layer_avg, t_step_avg, a_per_op, f_per_op
+
+    def _simulate_phase(
+        self,
+        *,
+        phase: str,
+        runtime_config: config.RuntimeConfig,
+        a_model,
+        f_model,
+    ) -> dict:
+        """Simulate one phase (prefill or decode) and return a metrics dict.
+
+        Keys: ``t_a_layer``, ``t_f_layer``, ``t_a2f_layer``,
+        ``t_f2a_layer``, ``t_c_layer`` (round-trip = t_a2f + t_f2a),
+        ``t_cycle``, ``t_step``, ``comm_hidden``, ``balance_ratio``,
+        ``a_per_op``, ``f_per_op``, ``a_memory_gb``, ``f_memory_gb``,
+        ``a_is_oom``, ``f_is_oom``, ``num_layers``.
+
+        Decode integrates per-step compute along the KV-cache length
+        ``s`` (sampled every ``_AFD_DECODE_STRIDE`` tokens, mirroring
+        ``base_backend._run_generation_phase``). Attention is the only
+        op that reads ``s`` — sampling at a single ``s = isl + 1`` would
+        under-count A-side latency by ~33% in the typical ``osl ~ isl``
+        regime and several-fold for ``osl ≫ isl``, which silently flips
+        the AFD bottleneck judgement and biases sizing.
+
+        The pipeline cycle is evaluated **per step before summing**:
+        ``sum_i max(t_a_i, t_f_i, t_c)`` is not equal to
+        ``max(sum_i t_a_i, sum_i t_f_i, N · t_c)``, and the latter
+        consistently under-estimates the bottleneck. Headline scalars
+        in the returned dict are *per-step averages* so they remain
+        compatible with the downstream ``request_latency = tpot ·
+        (osl - 1)`` convention used by ``_build_summary``.
+        """
+        from aiconfigurator.sdk.afd_partition import build_afd_ops_partition
+
+        cfg = self._afd_config
+        ops_phase = "context" if phase == "prefill" else "generation"
+        # Boundary ops (``add_norm_2`` / ``logits_gemm``) default to the
+        # A-Worker, but ``cfg.boundary_on_attn`` lets the user reassign
+        # them to the F-Worker for sensitivity studies.
+        a_partition = build_afd_ops_partition(
+            a_model, phase=ops_phase, boundary_on_attn=cfg.boundary_on_attn
+        )
+        f_partition = build_afd_ops_partition(
+            f_model, phase=ops_phase, boundary_on_attn=cfg.boundary_on_attn
+        )
+
+        isl = runtime_config.isl
+        osl = runtime_config.osl or 1
+        num_layers = max(int(getattr(a_model, "_num_layers", 1)), 1)
+
+        # A-Worker sees its local batch (a_batch_size); F-Worker sees the full
+        # combined batch post-AllGather.
+        b_total = cfg.n_a_workers * cfg.a_batch_size
+
+        # AFD cross-pool comm (AFDTransfer, F-node AllGather/ReduceScatter,
+        # A-side combine) bills by *token* volume per step, not request
+        # count.  In prefill each request contributes ``isl`` tokens per
+        # layer; in decode it contributes 1 token per step.  Pre-compute
+        # the per-step token totals to feed into the AFD ops so the
+        # per-link byte volume is correctly scaled by sequence length
+        # (without this, prefill comm latency is under-estimated by ``isl``).
+        tokens_per_req = isl if phase == "prefill" else 1
+        afd_b_tokens = b_total * tokens_per_req
+        afd_a_batch_tokens = cfg.a_batch_size * tokens_per_req
+
+        # Single AFDTransfer op covers cross-pool A→F / F→A and the
+        # F-side intra-node AG/RS + A-side combine.  ``query()`` returns
+        # a per-layer latency breakdown keyed by ``t_a2f`` / ``t_f2a``
+        # (cross-pool, *one-direction*) and ``t_a`` / ``t_f`` (intra-pool
+        # additions to each side's per-layer compute).  AFDTransfer
+        # bills by token volume only — it is independent of ``s`` — so
+        # we query it once outside the decode stride loop.
+        transfer_op = self._build_afd_transfer_op(a_model, f_model)
+        brk = transfer_op.query(
+            self._database,
+            b_total=afd_b_tokens,
+            a_batch_size=afd_a_batch_tokens,
+        )
+        t_a2f_layer = sum(brk["t_a2f"].values())
+        t_f2a_layer = sum(brk["t_f2a"].values())
+        t_c_layer = t_a2f_layer + t_f2a_layer
+        brk_t_a_per_layer = sum(brk["t_a"].values())
+        brk_t_f_per_layer = sum(brk["t_f"].values())
+
+        # Ops in :mod:`aiconfigurator.sdk.models` are constructed with
+        # ``scale_factor=num_layers`` (per-layer ops such as qkv_gemm) or
+        # ``scale_factor=1`` (once-per-step ops such as embedding /
+        # logits_gemm).  ``_sum_latency`` therefore returns the *full
+        # per-step* contribution of each pool, not a single layer.  The
+        # AFD pipeline model is layer-granular, so amortize across layers
+        # to recover the per-layer cycle ingredients before pipelining.
+        # Once-per-step ops (embedding/logits_gemm) get folded into the
+        # per-layer average; their absolute cost is small relative to
+        # ``num_layers`` per-layer compute and AFD does not currently
+        # model them as separate stages.
+        if phase == "decode":
+            t_a_layer, t_f_layer, t_step, a_per_op, f_per_op = self._integrate_decode_phase(
+                a_partition=a_partition,
+                f_partition=f_partition,
+                a_model=a_model,
+                f_model=f_model,
+                runtime_config=runtime_config,
+                isl=isl,
+                osl=osl,
+                b_total=b_total,
+                num_layers=num_layers,
+                brk_t_a_per_layer=brk_t_a_per_layer,
+                brk_t_f_per_layer=brk_t_f_per_layer,
+                t_a2f_layer=t_a2f_layer,
+                t_f2a_layer=t_f2a_layer,
+            )
+            t_cycle = t_step / num_layers
+            # The ``comm_hidden`` flag is informational only; report it
+            # at the *average* operating point so it stays a single
+            # stable scalar even though the per-step pipeline above
+            # already accounts for s-dependent bottleneck shifts.
+            _, comm_hidden = self._pipeline_tcycle(
+                t_a_layer, t_f_layer, t_a2f_layer, t_f2a_layer
+            )
+        else:
+            # Prefill: single shot over the full input sequence; no
+            # need to integrate, ``s == isl`` everywhere.
+            seq_len_query = max(isl, 1)
+            t_a_total, a_per_op = self._sum_latency(
+                a_partition.attn_ops,
+                batch_size=cfg.a_batch_size,
+                seq_len=seq_len_query,
+                model=a_model,
+                runtime_config=runtime_config,
+                is_context=True,
+            )
+            t_f_total, f_per_op = self._sum_latency(
+                f_partition.ffn_ops,
+                batch_size=b_total,
+                seq_len=seq_len_query,
+                model=f_model,
+                runtime_config=runtime_config,
+                is_context=True,
+            )
+            t_a_layer = t_a_total / num_layers + brk_t_a_per_layer
+            t_f_layer = t_f_total / num_layers + brk_t_f_per_layer
+            t_cycle, comm_hidden = self._pipeline_tcycle(
+                t_a_layer, t_f_layer, t_a2f_layer, t_f2a_layer
+            )
+            t_step = num_layers * t_cycle
+
+        # Per-op dicts are tracked in *per-step* units (matching
+        # ``_sum_latency`` output), so amortize per-layer values up by
+        # ``num_layers`` before recording.
+        for label, ms in brk["t_a"].items():
+            a_per_op[label] = ms * num_layers
+        for label, ms in brk["t_f"].items():
+            f_per_op[label] = ms * num_layers
+
+        balance_ratio = min(t_a_layer, t_f_layer) / max(t_a_layer, t_f_layer, 1e-9)
+
+        # HBM (memory) bound check — per-GPU on each pool.
+        a_memory_gb = self._estimate_a_memory_gb(
+            a_model=a_model,
+            a_partition=a_partition,
+            phase=phase,
+            batch_size=cfg.a_batch_size,
+            isl=isl,
+            osl=osl,
+        )
+        f_memory_gb = self._estimate_f_memory_gb(f_partition=f_partition)
+        cap_gb = self._gpu_mem_capacity_gb()
+
+        return {
+            "t_a_layer": t_a_layer,
+            "t_f_layer": t_f_layer,
+            "t_a2f_layer": t_a2f_layer,
+            "t_f2a_layer": t_f2a_layer,
+            "t_c_layer": t_c_layer,
+            "t_cycle": t_cycle,
+            "t_step": t_step,
+            "comm_hidden": comm_hidden,
+            "balance_ratio": balance_ratio,
+            "a_per_op": dict(a_per_op),
+            "f_per_op": dict(f_per_op),
+            "a_memory_gb": a_memory_gb,
+            "f_memory_gb": f_memory_gb,
+            "a_is_oom": a_memory_gb >= cap_gb,
+            "f_is_oom": f_memory_gb >= cap_gb,
+            "num_layers": num_layers,
+            "a_partition": a_partition,
+            "f_partition": f_partition,
+        }
+
+    # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
+    def run_afd(
+        self,
+        runtime_config: config.RuntimeConfig,
+        *,
+        phase: str | None = None,
+    ) -> InferenceSummary:
+        """Run AFD performance simulation, possibly for prefill, decode, or both.
+
+        AFD is orthogonal to P/D disaggregation: ``phase`` controls which
+        phase is being modeled by *this* session.  When combined with P/D
+        disagg, the caller typically constructs two sessions (one per pool)
+        and reports both summaries.
+
+        Args:
+            runtime_config: ISL / OSL / prefix / correction scales.
+            phase:          ``"prefill"``, ``"decode"``, or ``"both"``.
+                             Defaults to ``self._afd_config.phase``.
+
+        Returns:
+            InferenceSummary.  ``check_oom()`` reflects the per-pool HBM check.
+        """
+        cfg = self._afd_config
+        phase = phase if phase is not None else cfg.phase
+        if phase not in ("prefill", "decode", "both"):
+            raise ValueError(f"AFDInferenceSession.run_afd: invalid phase {phase!r}")
+
+        a_model, f_model = self._build_models()
+
+        prefill_metrics = None
+        decode_metrics = None
+        if phase in ("prefill", "both"):
+            prefill_metrics = self._simulate_phase(
+                phase="prefill",
+                runtime_config=runtime_config,
+                a_model=a_model,
+                f_model=f_model,
+            )
+        if phase in ("decode", "both"):
+            decode_metrics = self._simulate_phase(
+                phase="decode",
+                runtime_config=runtime_config,
+                a_model=a_model,
+                f_model=f_model,
+            )
+
+        return self._build_summary(
+            runtime_config=runtime_config,
+            phase=phase,
+            prefill_metrics=prefill_metrics,
+            decode_metrics=decode_metrics,
+        )
+
+    def run_afd_decode(self, runtime_config: config.RuntimeConfig) -> InferenceSummary:
+        """Backwards-compatible Decode-only entry point."""
+        return self.run_afd(runtime_config, phase="decode")
+
+    def run_afd_prefill(self, runtime_config: config.RuntimeConfig) -> InferenceSummary:
+        """Prefill-only AFD entry point.
+
+        Uses the same A/F split as decode but applies it to ``context_ops``,
+        producing a TTFT estimate.  No persistent KV cache is required —
+        the A-Worker HBM estimate tracks the transient prefill KV only.
+        """
+        return self.run_afd(runtime_config, phase="prefill")
+
+    def _build_summary(
+        self,
+        *,
+        runtime_config: config.RuntimeConfig,
+        phase: str,
+        prefill_metrics: dict | None,
+        decode_metrics: dict | None,
+    ) -> InferenceSummary:
+        """Construct the InferenceSummary (result dict + per-ops + OOM flag).
+
+        Output schema follows :data:`common.ColumnsAFD`. Metrics that do not
+        apply to the current phase are populated with zero.
+        """
+        cfg = self._afd_config
+        isl = runtime_config.isl
+        osl = runtime_config.osl or 1
+        b_total = cfg.n_a_workers * cfg.a_batch_size
+
+        # Pick the metrics that drive latency/throughput headline numbers.
+        drive = decode_metrics if decode_metrics is not None else prefill_metrics
+        assert drive is not None, "At least one phase must be simulated"
+
+        # Per-phase scalar metrics (zero-fill the ones we didn't run).
+        t_a_layer = drive["t_a_layer"]
+        t_f_layer = drive["t_f_layer"]
+        t_a2f_layer = drive["t_a2f_layer"]
+        t_f2a_layer = drive["t_f2a_layer"]
+        t_c_layer = drive["t_c_layer"]
+        t_step = drive["t_step"]
+        comm_hidden = drive["comm_hidden"]
+        balance_ratio = drive["balance_ratio"]
+
+        if decode_metrics is not None:
+            tpot = decode_metrics["t_step"]
+            tokens_per_s = b_total / (tpot / 1000.0) if tpot > 0 else 0.0
+        else:
+            tpot = 0.0
+            tokens_per_s = 0.0
+
+        if prefill_metrics is not None:
+            ttft = prefill_metrics["t_step"]
+        else:
+            ttft = 0.0
+
+        if phase == "prefill":
+            request_latency = ttft
+        elif phase == "decode":
+            request_latency = tpot * max(osl - 1, 1) if tpot > 0 else tpot
+        else:  # both
+            request_latency = ttft + tpot * max(osl - 1, 0)
+
+        total_gpus = cfg.n_a_workers * cfg.tp_a + cfg.n_f_workers
+        tokens_per_s_per_gpu = tokens_per_s / total_gpus if total_gpus > 0 else 0.0
+
+        # HBM / OOM — take the worst of any simulated phase.
+        def _max_mem(key: str) -> float:
+            vals = [m[key] for m in (prefill_metrics, decode_metrics) if m is not None]
+            return max(vals) if vals else 0.0
+
+        def _any_oom(key: str) -> bool:
+            return any(m[key] for m in (prefill_metrics, decode_metrics) if m is not None)
+
+        a_memory_gb = _max_mem("a_memory_gb")
+        f_memory_gb = _max_mem("f_memory_gb")
+        a_is_oom = _any_oom("a_is_oom")
+        f_is_oom = _any_oom("f_is_oom")
+        is_oom = a_is_oom or f_is_oom
+
+        tokens_per_s_per_user = (1000.0 / tpot) if tpot > 0 else 0.0
+        seq_per_s = tokens_per_s / max(osl - 1, 1) if tokens_per_s > 0 else 0.0
+
+        result_dict = {
+            "model": self._model_path,
+            "phase": phase,
+            "isl": isl,
+            "osl": osl,
+            "gpus_per_node": cfg.gpus_per_node,
+            "(a)nodes": cfg.n_a_nodes,
+            "(a)tp": cfg.tp_a,
+            "(a)bs": cfg.a_batch_size,
+            "(a)workers": cfg.n_a_workers,
+            "(a)memory": round(a_memory_gb, 2),
+            "(a)is_oom": bool(a_is_oom),
+            "(f)nodes": cfg.n_f_nodes,
+            "(f)tp": cfg.tp_f,
+            "(f)ep": cfg.f_moe_ep_size,
+            "(f)workers": cfg.n_f_workers,
+            "(f)memory": round(f_memory_gb, 2),
+            "(f)is_oom": bool(f_is_oom),
+            "t_a_layer": round(t_a_layer, 3),
+            "t_f_layer": round(t_f_layer, 3),
+            "t_a2f_layer": round(t_a2f_layer, 3),
+            "t_f2a_layer": round(t_f2a_layer, 3),
+            "t_c_layer": round(t_c_layer, 3),
+            "t_step": round(t_step, 3),
+            "ttft": round(ttft, 3),
+            "tpot": round(tpot, 3),
+            "request_latency": round(request_latency, 3),
+            "b_total": b_total,
+            "tokens/s": round(tokens_per_s, 2),
+            "tokens/s/gpu": round(tokens_per_s_per_gpu, 2),
+            "tokens/s/user": round(tokens_per_s_per_user, 2),
+            "seq/s": round(seq_per_s, 3),
+            "concurrency": b_total,
+            "tpuc": round(tokens_per_s_per_gpu, 2),
+            "balance_ratio": round(balance_ratio, 3),
+            "comm_hidden": comm_hidden,
+            "pipeline_model": cfg.pipeline_model,
+            "num_microbatches": cfg.num_microbatches,
+            "combined_with_pd": bool(cfg.combined_with_pd),
+            "boundary_on_attn": bool(cfg.boundary_on_attn),
+            "num_total_gpus": total_gpus,
+            "memory": round(max(a_memory_gb, f_memory_gb), 2),
+            "backend": self._backend.name.value,
+            "version": str(self._database.version),
+            "system": str(self._database.system),
+            "power_w": 0.0,
+        }
+
+        summary_df = pd.DataFrame([result_dict], columns=common.ColumnsAFD)
+        summary = InferenceSummary(runtime_config)
+        summary.set_summary_df(summary_df)
+        summary.set_result_dict(result_dict)
+
+        summary.set_oom(bool(is_oom))
+
+        # Per-ops breakdown by phase / pool.  AFD inserts two transfer
+        # ops per layer (A→F and F→A); both per-direction values are
+        # surfaced here alongside the round-trip total ``t_c_layer``.
+        per_ops_data: dict = {}
+        if prefill_metrics is not None:
+            per_ops_data["prefill_a_worker"] = prefill_metrics["a_per_op"]
+            per_ops_data["prefill_f_worker"] = prefill_metrics["f_per_op"]
+            comm = per_ops_data.setdefault("comm", {})
+            comm["prefill_afd_transfer_a2f"] = prefill_metrics["t_a2f_layer"]
+            comm["prefill_afd_transfer_f2a"] = prefill_metrics["t_f2a_layer"]
+            comm["prefill_afd_transfer"] = prefill_metrics["t_c_layer"]
+        if decode_metrics is not None:
+            per_ops_data["decode_a_worker"] = decode_metrics["a_per_op"]
+            per_ops_data["decode_f_worker"] = decode_metrics["f_per_op"]
+            comm = per_ops_data.setdefault("comm", {})
+            comm["decode_afd_transfer_a2f"] = decode_metrics["t_a2f_layer"]
+            comm["decode_afd_transfer_f2a"] = decode_metrics["t_f2a_layer"]
+            comm["decode_afd_transfer"] = decode_metrics["t_c_layer"]
+        summary.set_per_ops_data(per_ops_data)
+
+        return summary
