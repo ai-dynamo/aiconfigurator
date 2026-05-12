@@ -198,7 +198,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
 
     exit_stack.enter_context(set_current_vllm_config(VllmConfig()))
 
-    outside_loop_count = 6
+    outside_loop_count = 1 if gemm_type in ("fp8_block", "nvfp4") else 6
     op_list = []
     for i in range(outside_loop_count):
         op_list.append(create_gemm())
@@ -213,6 +213,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
         num_warmups=3,
         num_runs=6,
         repeat_n=1,
+        use_cuda_graph=gemm_type != "fp8_block",
     ) as results:
         pass
 

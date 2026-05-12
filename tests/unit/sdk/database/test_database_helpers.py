@@ -276,7 +276,7 @@ def test_get_database_prefers_measured_later_path_over_estimate_fallback(tmp_pat
     (second_root / "data_sys" / "trtllm" / "1.0.0").mkdir(parents=True)
 
     class FakePerfDatabase:
-        def __init__(self, system, backend, version, systems_root):
+        def __init__(self, system, backend, version, systems_root, database_mode=None):
             self.systems_root = systems_root
 
     monkeypatch.setattr(perf_database, "PerfDatabase", FakePerfDatabase)
@@ -311,7 +311,7 @@ def test_get_database_skips_incomplete_version_directory(tmp_path: Path, perf_da
     (second_root / "data_sys" / "trtllm" / "1.0.0").mkdir(parents=True)
 
     class FakePerfDatabase:
-        def __init__(self, system, backend, version, systems_root):
+        def __init__(self, system, backend, version, systems_root, database_mode=None):
             self.systems_root = systems_root
 
     monkeypatch.setattr(perf_database, "PerfDatabase", FakePerfDatabase)

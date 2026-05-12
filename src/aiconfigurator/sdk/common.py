@@ -349,6 +349,8 @@ DefaultHFModels = {
     # DeepSeek V3.2 / GLM-5 (DEEPSEEKV32 family)
     "deepseek-ai/DeepSeek-V3.2",
     "zai-org/GLM-5",
+    "zai-org/GLM-5-FP8",
+    "nvidia/GLM-5-NVFP4",
     # DeepSeek V4
     *DEEPSEEK_V4_HF_MODELS,
     # Qwen 3 Models
@@ -406,7 +408,7 @@ SupportedSystems = {
     "l4",
     "l40s",
     "b60",
-    "rtxpro6000_blackwell_server",
+    "rtx_pro_6000_server",
 }
 
 """

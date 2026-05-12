@@ -226,20 +226,35 @@ def _ensure_munch(obj: dict | DefaultMunch | Munch) -> DefaultMunch:
 
 
 def _get_database_with_optional_missing_data(
-    *, system: str, backend: str, version: str, allow_missing_data: bool = False
+    *,
+    system: str,
+    backend: str,
+    version: str,
+    allow_missing_data: bool = False,
+    database_mode: str | None = None,
 ):
-    """Call get_database while tolerating legacy test doubles without allow_missing_data."""
+    """Call get_database while tolerating legacy test doubles whose stub `get_database`
+    doesn't yet accept `allow_missing_data` / `database_mode`. Real `get_database` accepts
+    both; older test fakes may not, so we feature-detect via signature inspection.
+    """
     kwargs = {"system": system, "backend": backend, "version": version}
-    if allow_missing_data:
-        try:
-            signature = inspect.signature(get_database)
-            accepts_allow_missing_data = "allow_missing_data" in signature.parameters or any(
-                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
-            )
-        except (TypeError, ValueError):
-            accepts_allow_missing_data = True
-        if accepts_allow_missing_data:
-            kwargs["allow_missing_data"] = True
+    try:
+        signature = inspect.signature(get_database)
+        accepts_kwargs = {
+            "allow_missing_data": "allow_missing_data" in signature.parameters,
+            "database_mode": "database_mode" in signature.parameters,
+        }
+        var_keyword = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+        )
+        if var_keyword:
+            accepts_kwargs = dict.fromkeys(accepts_kwargs, True)
+    except (TypeError, ValueError):
+        accepts_kwargs = {"allow_missing_data": True, "database_mode": True}
+    if allow_missing_data and accepts_kwargs["allow_missing_data"]:
+        kwargs["allow_missing_data"] = True
+    if database_mode is not None and accepts_kwargs["database_mode"]:
+        kwargs["database_mode"] = database_mode
     return get_database(**kwargs)
 
 
@@ -1046,6 +1061,7 @@ class TaskConfig:
                     backend=self.backend_name,
                     version=backend_version,
                     allow_missing_data=allow_missing_data,
+                    database_mode=database_mode_for_validation,
                 )
             except Exception:
                 # If database can't be loaded at all, let downstream handle/report it.
@@ -1316,6 +1332,11 @@ class TaskRunner:
         return a deep copy first because `set_default_database_mode` mutates
         query-cache state. If the requested mode already matches, reuse the
         cached instance directly.
+
+        `database_mode` is also passed through to `get_database` so the loader
+        can resolve shared-layer defaults — HYBRID mode auto-enables sibling-row
+        inheritance, which means HYBRID and SILICON queries cache as separate
+        PerfDatabase instances.
         """
         allow_missing_data = database_mode is not None and database_mode != common.DatabaseMode.SILICON.name
         db = _get_database_with_optional_missing_data(
@@ -1323,6 +1344,7 @@ class TaskRunner:
             backend=backend,
             version=version,
             allow_missing_data=allow_missing_data,
+            database_mode=database_mode,
         )
         if db is None:
             raise RuntimeError(f"Failed to load database for {system=}, {backend=}, {version=}")

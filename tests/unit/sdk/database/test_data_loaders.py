@@ -41,11 +41,12 @@ pytestmark = pytest.mark.unit
 
 
 class DummyPerfDatabase:
-    def __init__(self, system, backend, version, systems_root_arg):
+    def __init__(self, system, backend, version, systems_root_arg, database_mode=None):
         self.system = system
         self.backend = backend
         self.version = version
         self.systems_root = systems_root_arg
+        self.database_mode = database_mode
 
 
 def test_get_database_with_yaml_and_data_path(tmp_path, monkeypatch):
@@ -523,6 +524,38 @@ def test_load_dsv4_megamoe_module_data_merges_source_list(tmp_path):
     ]["balanced"][6][384][0][7168][3072][1][8][1024]
     assert context_leaf["latency"] == pytest.approx(1.25)
     assert generation_leaf["latency"] == pytest.approx(2.5)
+
+
+def test_load_dsv4_megamoe_module_data_accepts_filtered_source_tuples(tmp_path):
+    csv_file = tmp_path / "dsv4_megamoe_module_perf.txt"
+    header = (
+        "framework,version,device,op_name,kernel_source,phase,moe_dtype,kernel_dtype,"
+        "num_tokens,global_num_tokens,hidden_size,inter_size,topk,num_experts,"
+        "num_fused_shared_experts,moe_tp_size,moe_ep_size,distribution,source_policy,"
+        "pre_dispatch,num_max_tokens_per_rank,"
+        "effective_num_max_tokens_per_rank,routed_scaling_factor,includes_routed_scale,"
+        "includes_gate_topk,buffer_policy,includes_buffer_init,used_cuda_graph,"
+        "latency\n"
+    )
+    row = (
+        "SGLang,unknown,NVIDIA GB200,dsv4_megamoe_module,{kernel_source},context,"
+        "w4a8_mxfp4_mxfp8,fp8_fp4,1024,8192,7168,3072,6,384,0,1,8,"
+        "balanced,random,sglang_jit,16384,16448,2.5,true,false,"
+        "cached_sglang,false,true,{latency}\n"
+    )
+    csv_file.write_text(
+        header
+        + row.format(kernel_source="wrong_kernel", latency=99.0)
+        + row.format(kernel_source="deepgemm_megamoe", latency=1.25)
+    )
+
+    data = load_dsv4_megamoe_module_data([(str(csv_file), {"deepgemm_megamoe"})])
+
+    assert "wrong_kernel" not in data["context"]
+    leaf = data["context"]["deepgemm_megamoe"]["fp8_fp4"][MoEQuantMode.w4a8_mxfp4_mxfp8]["sglang_jit"]["random"][
+        "balanced"
+    ][6][384][0][7168][3072][1][8][1024]
+    assert leaf["latency"] == pytest.approx(1.25)
 
 
 def test_load_dsv4_megamoe_module_data_missing_source_list_returns_none(tmp_path):
