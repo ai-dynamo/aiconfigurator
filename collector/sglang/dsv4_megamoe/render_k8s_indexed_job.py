@@ -59,6 +59,23 @@ def _parse_extra_env(values: list[str]) -> list[tuple[str, str]]:
     return envs
 
 
+def _parse_node_selector(value: str) -> list[tuple[str, str]]:
+    pairs = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise SystemExit(f"--node-selector entries must be KEY=VALUE, got {item!r}")
+        key, selector_value = item.split("=", 1)
+        key = key.strip()
+        selector_value = selector_value.strip()
+        if not key or not selector_value:
+            raise SystemExit(f"--node-selector entries must be non-empty KEY=VALUE pairs, got {item!r}")
+        pairs.append((key, selector_value))
+    return pairs
+
+
 def _parse_int_list(value: str) -> list[int]:
     return [int(item.strip()) for item in value.split(",") if item.strip()]
 
@@ -188,7 +205,7 @@ spec:
           claimName: {args.pvc_name}"""
     node_selector = ""
     if args.node_selector:
-        pairs = [item.split("=", 1) for item in args.node_selector.split(",") if item]
+        pairs = _parse_node_selector(args.node_selector)
         node_selector = "\n      nodeSelector:\n" + "\n".join(f"        {key}: {value}" for key, value in pairs)
 
     tolerations = ""

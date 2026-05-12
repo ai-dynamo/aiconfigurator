@@ -74,7 +74,7 @@ DeepGEMM symmetric buffer after DeepGEMM applies its internal token alignment.
 If `NUM_MAX_TOKENS_PER_RANK` or `--num-max-tokens-per-rank` is left at `0`, the
 wrapper/renderer uses the largest token count in the selected phase list.
 
-The committed perf schema follows the existing SGLang wideep MoE tables and
+The committed perf schema follows the existing SGLang WideEP MoE tables and
 keeps only query keys plus required boundary/topology fields:
 
 ```text

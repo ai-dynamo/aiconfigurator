@@ -170,9 +170,9 @@ wait_job() {
   local job="$1"
   echo "JOB_START ${job} $(date '+%Y-%m-%d %H:%M:%S')" | tee -a "${LOCAL_RESULT_DIR}/runner.log"
   current_job="${job}"
-  kubectl apply --server-side --dry-run=server -f "${LOCAL_RESULT_DIR}/jobs/${job}.yaml" \
+  kubectl apply --validate=false --server-side --dry-run=server -f "${LOCAL_RESULT_DIR}/jobs/${job}.yaml" \
     >>"${LOCAL_RESULT_DIR}/jobs_dry_run.log" 2>&1
-  kubectl apply -f "${LOCAL_RESULT_DIR}/jobs/${job}.yaml" | tee "${LOCAL_RESULT_DIR}/${job}_apply.log"
+  kubectl apply --validate=false -f "${LOCAL_RESULT_DIR}/jobs/${job}.yaml" | tee "${LOCAL_RESULT_DIR}/${job}_apply.log"
   kubectl get job,pod,svc,computedomain -n "${NAMESPACE}" -l "app=${job}" -o wide \
     >"${LOCAL_RESULT_DIR}/${job}_resources_after_apply.txt" 2>&1 || true
   kubectl get pods -n "${NAMESPACE}" -l "app=${job}" -o wide \
@@ -181,26 +181,40 @@ wait_job() {
   local deadline=$((SECONDS + JOB_TIMEOUT_SECONDS))
   local iter=0
   while true; do
-    local succeeded failed active
+    local succeeded failed active completions
     succeeded="$(kubectl get job "${job}" -n "${NAMESPACE}" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
     failed="$(kubectl get job "${job}" -n "${NAMESPACE}" -o jsonpath='{.status.failed}' 2>/dev/null || true)"
     active="$(kubectl get job "${job}" -n "${NAMESPACE}" -o jsonpath='{.status.active}' 2>/dev/null || true)"
+    completions="$(kubectl get job "${job}" -n "${NAMESPACE}" -o jsonpath='{.spec.completions}' 2>/dev/null || true)"
     succeeded="${succeeded:-0}"
     failed="${failed:-0}"
     active="${active:-0}"
-    echo "JOB_WAIT ${job} active=${active} succeeded=${succeeded} failed=${failed} $(date '+%Y-%m-%d %H:%M:%S')" \
+    completions="${completions:-1}"
+    echo "JOB_WAIT ${job} active=${active} succeeded=${succeeded}/${completions} failed=${failed} $(date '+%Y-%m-%d %H:%M:%S')" \
       | tee -a "${LOCAL_RESULT_DIR}/runner.log"
     kubectl get pods -n "${NAMESPACE}" -l "app=${job}" -o wide \
       >"${LOCAL_RESULT_DIR}/${job}_pods_wait_${iter}.txt" 2>&1 || true
-    if [[ "${succeeded}" != "0" ]]; then
+    if (( succeeded >= completions )); then
       break
     fi
     if [[ "${failed}" != "0" ]]; then
       echo "JOB_FAILED ${job}" | tee -a "${LOCAL_RESULT_DIR}/runner.log"
+      kubectl get job "${job}" -n "${NAMESPACE}" -o yaml >"${LOCAL_RESULT_DIR}/${job}_job_failed.yaml" 2>&1 || true
+      kubectl get pods -n "${NAMESPACE}" -l "app=${job}" -o wide >"${LOCAL_RESULT_DIR}/${job}_pods_failed.txt" 2>&1 || true
+      for pod in $(kubectl get pods -n "${NAMESPACE}" -l "app=${job}" -o name 2>/dev/null | sed 's#pod/##'); do
+        kubectl logs "${pod}" -n "${NAMESPACE}" --all-containers=true >"${LOCAL_RESULT_DIR}/logs/${pod}.log" 2>&1 || true
+        kubectl describe pod "${pod}" -n "${NAMESPACE}" >"${LOCAL_RESULT_DIR}/logs/${pod}.describe.txt" 2>&1 || true
+      done
       return 1
     fi
     if (( SECONDS > deadline )); then
       echo "JOB_TIMEOUT ${job}" | tee -a "${LOCAL_RESULT_DIR}/runner.log"
+      kubectl get job "${job}" -n "${NAMESPACE}" -o yaml >"${LOCAL_RESULT_DIR}/${job}_job_timeout.yaml" 2>&1 || true
+      kubectl get pods -n "${NAMESPACE}" -l "app=${job}" -o wide >"${LOCAL_RESULT_DIR}/${job}_pods_timeout.txt" 2>&1 || true
+      for pod in $(kubectl get pods -n "${NAMESPACE}" -l "app=${job}" -o name 2>/dev/null | sed 's#pod/##'); do
+        kubectl logs "${pod}" -n "${NAMESPACE}" --all-containers=true >"${LOCAL_RESULT_DIR}/logs/${pod}.log" 2>&1 || true
+        kubectl describe pod "${pod}" -n "${NAMESPACE}" >"${LOCAL_RESULT_DIR}/logs/${pod}.describe.txt" 2>&1 || true
+      done
       return 1
     fi
     iter=$((iter + 1))
@@ -309,7 +323,7 @@ tar \
   | kubectl exec -i "${JOB_TAG}-sync" -n "${NAMESPACE}" -- tar -C "${REMOTE_WORKDIR}" -xf -
 
 kubectl exec "${JOB_TAG}-sync" -n "${NAMESPACE}" -- bash -lc \
-  "cd '${REMOTE_WORKDIR}' && grep -R \"power_law_sampled_1.9\" -n collector/sglang/collect_dsv4_megamoe.py collector/sglang/dsv4_megamoe_workload.py | head -20" \
+  "set -euo pipefail; cd '${REMOTE_WORKDIR}'; files='collector/sglang/collect_dsv4_megamoe.py collector/sglang/dsv4_megamoe_workload.py'; grep -q 'power_law_sampled_1.9' \${files}; grep 'power_law_sampled_1.9' -n \${files} | head -20" \
   | tee "${LOCAL_RESULT_DIR}/remote_code_check.txt"
 
 for job in "${JOBS[@]}"; do
@@ -329,7 +343,8 @@ python3 - \
   "${PREFILL_TOKENS}" \
   "${DECODE_TOKENS}" \
   "${DISTRIBUTIONS}" \
-  "${ROUTING_SEEDS}" <<'PY'
+  "${ROUTING_SEEDS}" \
+  "${PHASE_ORDER}" <<'PY'
 import csv
 import sys
 from collections import Counter
@@ -342,6 +357,7 @@ prefill_tokens = [int(x) for x in sys.argv[4].split(",") if x.strip()]
 decode_tokens = [int(x) for x in sys.argv[5].split(",") if x.strip()]
 distributions = [x.strip() for x in sys.argv[6].split(",") if x.strip()]
 routing_seeds = [x.strip() for x in sys.argv[7].split(",") if x.strip()]
+phases = {x.strip() for x in sys.argv[8].split(",") if x.strip()}
 
 if not perf_path.exists():
     raise SystemExit(f"perf file not found: {perf_path}")
@@ -357,15 +373,17 @@ def seed_count(distribution: str) -> int:
     return 1
 
 cases_per_token = sum(seed_count(dist) for dist in distributions)
-expected = (
-    len(prefill_eps) * len(prefill_tokens) * cases_per_token
-    + len(decode_eps) * len(decode_tokens) * cases_per_token
-)
+expected = 0
+if "context" in phases:
+    expected += len(prefill_eps) * len(prefill_tokens) * cases_per_token
+if "generation" in phases:
+    expected += len(decode_eps) * len(decode_tokens) * cases_per_token
 
 perf_files = sorted(perf_path.parent.glob("*_perf.txt"))
 summary = []
 summary.append(f"perf_files={len(perf_files)}")
 summary.append(f"perf_file={perf_path.name}")
+summary.append("phases=" + ",".join(sorted(phases)))
 summary.append(f"total_rows={len(rows)} expected={expected}")
 for ep in sorted(set(prefill_eps + decode_eps)):
     for phase in ("context", "generation"):

@@ -2054,6 +2054,15 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
         dict: Nested dict whose leaves contain latency, power, energy and
         routing metadata.
     """
+    if isinstance(dsv4_megamoe_module_file, list | tuple):
+        merged_data: dict = {}
+        for source_file in dsv4_megamoe_module_file:
+            source_data = load_dsv4_megamoe_module_data(source_file)
+            if source_data is None:
+                continue
+            _deep_merge_dsv4_dicts(merged_data, source_data)
+        return merged_data or None
+
     if not os.path.exists(dsv4_megamoe_module_file):
         logger.debug(f"DeepSeek-V4 MegaMoE data file {dsv4_megamoe_module_file} not found.")
         return None
@@ -2064,13 +2073,15 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
     def _row_phases(row: dict[str, str]) -> list[str]:
         phase = row.get("phase", "").strip()
         if phase:
+            if phase not in {"context", "generation"}:
+                raise ValueError(f"DSv4 MegaMoE perf row has unsupported phase={phase!r}: {row}")
             return [phase]
         filename = os.path.basename(dsv4_megamoe_module_file)
         if "context" in filename:
             return ["context"]
         if "generation" in filename:
             return ["generation"]
-        return ["context", "generation"]
+        raise ValueError(f"DSv4 MegaMoE unified perf file requires a phase column: {dsv4_megamoe_module_file} {row}")
 
     def _put_nested(root: dict, keys: list[object], value: dict) -> None:
         current = root
@@ -2852,6 +2863,16 @@ class PerfDatabase:
                 return None
             return LoadedOpData(merged, first_loaded.op_name_enum, first_loaded.filepath)
 
+        def _load_dsv4_megamoe_split(loaded_list, generic_loaded):
+            merged: dict = {}
+            for loaded in loaded_list:
+                if loaded is None or not loaded.loaded:
+                    continue
+                _deep_merge_dsv4_dicts(merged, loaded.data)
+            if not merged:
+                return None
+            return LoadedOpData(merged, generic_loaded.op_name_enum, generic_loaded.filepath)
+
         ctx_split = [
             _load_op_data(PerfDataFilename.dsv4_flash_csa_context_module),
             _load_op_data(PerfDataFilename.dsv4_flash_hca_context_module),
@@ -2893,6 +2914,13 @@ class PerfDatabase:
                 self._dsv4_megamoe_context_module_data = _load_op_data(PerfDataFilename.dsv4_megamoe_context_module)
                 self._dsv4_megamoe_generation_module_data = _load_op_data(
                     PerfDataFilename.dsv4_megamoe_generation_module
+                )
+                self._dsv4_megamoe_module_data = (
+                    _load_dsv4_megamoe_split(
+                        [self._dsv4_megamoe_context_module_data, self._dsv4_megamoe_generation_module_data],
+                        self._dsv4_megamoe_module_data,
+                    )
+                    or self._dsv4_megamoe_module_data
                 )
 
         # DSA module-level attention data (DeepSeek Sparse Attention)
@@ -4352,27 +4380,26 @@ class PerfDatabase:
 
         # Check if values are dicts (new format) or floats (legacy)
         if isinstance(y0, dict) and isinstance(y1, dict):
-            # New format: interpolate latency and power separately
+            # New format: interpolate latency, power, and energy separately.
+            # Energy is not reconstructed from interpolated power * latency,
+            # because that does not preserve the measured energy curve between buckets.
+            def _interp_metric(metric0, metric1):
+                if (x0 - x1) * (metric0 - metric1) < 0 and (value - x0) * (value - x1) > 0:
+                    metric1 = metric0
+                if metric0 == metric1:
+                    return metric0
+                return metric0 + (metric1 - metric0) / (x1 - x0) * (value - x0)
+
             lat0, lat1 = y0["latency"], y1["latency"]
             pow0, pow1 = y0["power"], y1["power"]
+            energy0 = y0.get("energy", pow0 * lat0)
+            energy1 = y1.get("energy", pow1 * lat1)
 
-            # Apply interpolation logic for latency
-            if (x0 - x1) * (lat0 - lat1) < 0 and (value - x0) * (value - x1) > 0:
-                lat1 = lat0
-            if lat0 == lat1:
-                lat_result = lat0
-            else:
-                lat_result = lat0 + (lat1 - lat0) / (x1 - x0) * (value - x0)
-
-            # Apply interpolation logic for power
-            if (x0 - x1) * (pow0 - pow1) < 0 and (value - x0) * (value - x1) > 0:
-                pow1 = pow0
-            if pow0 == pow1:
-                pow_result = pow0
-            else:
-                pow_result = pow0 + (pow1 - pow0) / (x1 - x0) * (value - x0)
-
-            return {"latency": lat_result, "power": pow_result}
+            return {
+                "latency": _interp_metric(lat0, lat1),
+                "power": _interp_metric(pow0, pow1),
+                "energy": _interp_metric(energy0, energy1),
+            }
         else:
             # Legacy format: y values are floats
             if (x0 - x1) * (y0 - y1) < 0 and (value - x0) * (value - x1) > 0:

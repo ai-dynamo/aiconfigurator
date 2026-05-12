@@ -30,6 +30,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import aiconfigurator.sdk.task as task_module
+from aiconfigurator.sdk.perf_database import get_systems_paths, set_systems_paths
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 
@@ -77,6 +78,27 @@ def stub_pareto_analysis(monkeypatch):
 
 def _enum_name(value):
     return value.name if hasattr(value, "name") else value
+
+
+def test_load_system_spec_uses_configured_systems_paths(tmp_path):
+    systems_a = tmp_path / "systems_a"
+    systems_b = tmp_path / "systems_b"
+    systems_a.mkdir()
+    systems_b.mkdir()
+    (systems_a / "custom_system.yaml").write_text(yaml.safe_dump({"gpu": {"sm_version": 90}}))
+    (systems_b / "custom_system.yaml").write_text(yaml.safe_dump({"gpu": {"sm_version": 100}}))
+
+    previous_paths = get_systems_paths()
+    task_module._SYSTEM_SPEC_CACHE.clear()
+    try:
+        set_systems_paths(str(systems_a))
+        assert not task_module._is_blackwell_system("custom_system")
+
+        set_systems_paths(str(systems_b))
+        assert task_module._is_blackwell_system("custom_system")
+    finally:
+        set_systems_paths(previous_paths)
+        task_module._SYSTEM_SPEC_CACHE.clear()
 
 
 def test_taskconfig_agg_default():

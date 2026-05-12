@@ -14,5 +14,11 @@ kubectl -n "${NAMESPACE}" delete computedomains.resource.nvidia.com "${JOB_NAME}
 kubectl -n "${NAMESPACE}" delete resourceclaimtemplates.resource.k8s.io "${JOB_NAME}-compute-domain-channel" --ignore-not-found=true
 
 echo "Remaining owned resources:"
+kubectl -n "${NAMESPACE}" get \
+  "job/${JOB_NAME}" \
+  "service/${JOB_NAME}" \
+  "computedomains.resource.nvidia.com/${JOB_NAME}-compute-domain" \
+  "resourceclaimtemplates.resource.k8s.io/${JOB_NAME}-compute-domain-channel" \
+  --ignore-not-found=true || true
 kubectl -n "${NAMESPACE}" get job,svc,pod,computedomains.resource.nvidia.com -l \
   "app=${JOB_NAME},aic.nvidia.com/collector=dsv4-megamoe" || true

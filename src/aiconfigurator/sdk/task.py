@@ -18,7 +18,7 @@ from munch import DefaultMunch, Munch
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.models import _apply_model_quant_defaults, check_is_moe, get_model_family
 from aiconfigurator.sdk.pareto_analysis import get_pareto_front
-from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version
+from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version, get_systems_paths
 from aiconfigurator.sdk.utils import ListFlowDumper, enumerate_parallel_config, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -47,21 +47,23 @@ def _is_hopper_system(system_name: str | None) -> bool:
     return system_name.startswith(("h100", "h200", "gh200"))
 
 
-_SYSTEM_SPEC_CACHE: dict[str, dict] = {}
+_SYSTEM_SPEC_CACHE: dict[tuple[tuple[str, ...], str], dict] = {}
 
 
 def _load_system_spec(system_name: str | None) -> dict:
     if not system_name:
         return {}
-    if system_name not in _SYSTEM_SPEC_CACHE:
-        systems_dir = Path(__file__).resolve().parents[1] / "systems"
-        spec_path = systems_dir / f"{system_name}.yaml"
-        if not spec_path.exists():
-            _SYSTEM_SPEC_CACHE[system_name] = {}
-        else:
-            with spec_path.open(encoding="utf-8") as f:
-                _SYSTEM_SPEC_CACHE[system_name] = yaml.safe_load(f) or {}
-    return _SYSTEM_SPEC_CACHE[system_name]
+    systems_paths = tuple(get_systems_paths())
+    cache_key = (systems_paths, system_name)
+    if cache_key not in _SYSTEM_SPEC_CACHE:
+        _SYSTEM_SPEC_CACHE[cache_key] = {}
+        for systems_root in systems_paths:
+            spec_path = Path(systems_root) / f"{system_name}.yaml"
+            if spec_path.exists():
+                with spec_path.open(encoding="utf-8") as f:
+                    _SYSTEM_SPEC_CACHE[cache_key] = yaml.safe_load(f) or {}
+                break
+    return _SYSTEM_SPEC_CACHE[cache_key]
 
 
 def _is_blackwell_system(system_name: str | None) -> bool:

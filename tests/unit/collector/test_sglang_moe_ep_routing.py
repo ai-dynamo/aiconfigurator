@@ -8,21 +8,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# test_parallel_run.py injects a MagicMock as "torch" into sys.modules so
-# collector code can be imported without CUDA.  This test needs real tensors,
-# so evict the mock and attempt a real import.  If torch is not installed
-# (CI Docker image), restore the mock and skip the entire module.
-_saved_mock = None
-if isinstance(sys.modules.get("torch"), MagicMock):
-    _saved_mock = sys.modules.pop("torch")
-
-try:
-    import torch
-except ImportError:
-    if _saved_mock is not None:
-        sys.modules["torch"] = _saved_mock
-    pytest.skip("real torch required for tensor operations", allow_module_level=True)
-
 
 def _import_helper_module():
     module_name = "collector.helper_test_copy"
@@ -33,9 +18,34 @@ def _import_helper_module():
     return module
 
 
+# test_parallel_run.py injects a MagicMock as "torch" into sys.modules so
+# collector code can be imported without CUDA.  This test needs real tensors
+# and a helper.py copy imported against real torch, but it must not permanently
+# replace the injected mock in sys.modules.
+_saved_mock = sys.modules.get("torch")
+_restore_mock = isinstance(_saved_mock, MagicMock)
+if _restore_mock:
+    sys.modules.pop("torch")
+
+try:
+    import torch as _real_torch
+except ImportError:
+    if _restore_mock:
+        sys.modules["torch"] = _saved_mock
+    pytest.skip("real torch required for tensor operations", allow_module_level=True)
+
+try:
+    _HELPER_MODULE = _import_helper_module()
+finally:
+    if _restore_mock:
+        sys.modules["torch"] = _saved_mock
+
+torch = _real_torch
+
+
 @pytest.mark.unit
 def test_build_rank0_local_workload_masks_remote_experts():
-    helper = _import_helper_module()
+    helper = _HELPER_MODULE
 
     rank0_info = {
         "rank0_logits": torch.tensor(
@@ -67,7 +77,7 @@ def test_build_rank0_local_workload_masks_remote_experts():
 
 @pytest.mark.unit
 def test_global_power_law_rank0_workload_keeps_global_distribution():
-    helper = _import_helper_module()
+    helper = _HELPER_MODULE
 
     torch.manual_seed(0)
     _, rank0_info = helper.power_law_logits_v3(

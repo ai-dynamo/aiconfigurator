@@ -7,23 +7,30 @@ from unittest.mock import MagicMock
 
 import pytest
 
-_saved_mock = None
-if isinstance(sys.modules.get("torch"), MagicMock):
-    _saved_mock = sys.modules.pop("torch")
+_saved_mock = sys.modules.get("torch")
+_restore_mock = isinstance(_saved_mock, MagicMock)
+if _restore_mock:
+    sys.modules.pop("torch")
 
 try:
-    import torch
+    import torch as _real_torch
 except ImportError:
-    if _saved_mock is not None:
+    if _restore_mock:
         sys.modules["torch"] = _saved_mock
     pytest.skip("real torch required for tensor operations", allow_module_level=True)
 
-from collector.sglang.collect_dsv4_megamoe import build_cases
-from collector.sglang.dsv4_megamoe_workload import (
-    _sampled_power_law_xmax,
-    build_routing_plan,
-    parse_distribution,
-)
+try:
+    from collector.sglang.collect_dsv4_megamoe import build_cases
+    from collector.sglang.dsv4_megamoe_workload import (
+        _sampled_power_law_xmax,
+        build_routing_plan,
+        parse_distribution,
+    )
+finally:
+    if _restore_mock:
+        sys.modules["torch"] = _saved_mock
+
+torch = _real_torch
 
 
 @pytest.mark.unit
