@@ -6,6 +6,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 
 use crate::{create_engine_step_estimator, EngineConfig, EngineStepEstimator, ForwardPassMetrics};
 
@@ -37,7 +38,7 @@ pub extern "C" fn aic_engine_step_estimator_new(
     })
 }
 
-/// Estimate one forward-pass iteration from JSON-serialized
+/// Estimate one forward-pass iteration from JSON-serialized per-rank
 /// `ForwardPassMetrics`.
 ///
 /// Returns null on success. On failure, returns a heap-allocated error string
@@ -56,7 +57,8 @@ pub extern "C" fn aic_engine_step_forward_pass_time_ms(
             return Err("out_ms must not be null".to_string());
         }
 
-        let metrics: ForwardPassMetrics = parse_json(metrics_json, "ForwardPassMetrics")?;
+        let metrics: ForwardPassMetricsInput = parse_json(metrics_json, "ForwardPassMetrics list")?;
+        let metrics = metrics.into_vec();
         let latency_ms = unsafe { &*estimator }
             .estimator
             .forward_pass_time_ms(&metrics)
@@ -66,6 +68,22 @@ pub extern "C" fn aic_engine_step_forward_pass_time_ms(
         }
         Ok(())
     })
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ForwardPassMetricsInput {
+    PerRank(Vec<ForwardPassMetrics>),
+    Single(ForwardPassMetrics),
+}
+
+impl ForwardPassMetricsInput {
+    fn into_vec(self) -> Vec<ForwardPassMetrics> {
+        match self {
+            Self::PerRank(metrics) => metrics,
+            Self::Single(metrics) => vec![metrics],
+        }
+    }
 }
 
 #[no_mangle]

@@ -599,6 +599,7 @@ class TRTLLMBackend(BaseBackend):
                         osl=osl,
                         prefix=prefix,
                         seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
+                        engine_step_backend=runtime_config.engine_step_backend,
                     ),
                     ctx_tokens=ctx_tokens,
                     max_seq_len=max_seq_len,

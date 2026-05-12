@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aiconfigurator_core::{
     BackendKind, DataType, EngineConfig, EngineStepEstimator, ForwardPassMetrics, ModelSpec,
@@ -25,7 +25,7 @@ fn prefill_estimate_uses_perf_files() {
         ..Default::default()
     };
 
-    let latency = estimator.forward_pass_time_ms(&metrics).unwrap();
+    let latency = estimator.forward_pass_time_ms(&[metrics]).unwrap();
 
     assert_close(latency, 30.5);
 }
@@ -43,14 +43,24 @@ fn decode_estimate_uses_perf_files() {
         ..Default::default()
     };
 
-    let latency = estimator.forward_pass_time_ms(&metrics).unwrap();
+    let latency = estimator.forward_pass_time_ms(&[metrics]).unwrap();
 
     assert_close(latency, 3.9);
 }
 
 #[test]
-fn mixed_estimate_sums_phase_estimates() {
+fn mixed_estimate_combines_non_attention_tokens() {
     let fixture = Fixture::new();
+    fs::write(
+        fixture.perf_dir().join("gemm_perf.txt"),
+        "gemm_dtype,m,n,k,latency\n\
+bfloat16,22,64,32,1.0\n\
+bfloat16,22,32,32,2.0\n\
+bfloat16,22,128,32,3.0\n\
+bfloat16,22,32,64,4.0\n\
+bfloat16,4,160,32,0.5\n",
+    )
+    .unwrap();
     let estimator = fixture.estimator();
     let metrics = ForwardPassMetrics {
         scheduled_requests: ScheduledRequestMetrics {
@@ -64,9 +74,52 @@ fn mixed_estimate_sums_phase_estimates() {
         ..Default::default()
     };
 
-    let latency = estimator.engine_step_time_ms(&metrics).unwrap();
+    let latency = estimator.engine_step_time_ms(&[metrics]).unwrap();
 
-    assert_close(latency, 34.4);
+    assert_close(latency, 31.9);
+}
+
+#[test]
+fn attention_dp_rank_metrics_use_max_rank_attention_workload() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.perf_dir().join("gemm_perf.txt"),
+        "gemm_dtype,m,n,k,latency\n\
+bfloat16,40,64,32,1.0\n\
+bfloat16,40,32,32,2.0\n\
+bfloat16,40,128,32,3.0\n\
+bfloat16,40,32,64,4.0\n\
+bfloat16,2,160,32,0.5\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.perf_dir().join("context_attention_perf.txt"),
+        "attn_dtype,kv_cache_dtype,batch_size,isl,num_heads,num_key_value_heads,head_dim,latency\n\
+bfloat16,bfloat16,1,20,4,2,8,3.0\n\
+bfloat16,bfloat16,2,20,4,2,8,7.0\n",
+    )
+    .unwrap();
+    let estimator = fixture.estimator();
+    let rank0 = ForwardPassMetrics {
+        scheduled_requests: ScheduledRequestMetrics {
+            num_prefill_requests: 1,
+            sum_prefill_tokens: 20,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let rank1 = ForwardPassMetrics {
+        scheduled_requests: ScheduledRequestMetrics {
+            num_prefill_requests: 2,
+            sum_prefill_tokens: 40,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let latency = estimator.forward_pass_time_ms(&[rank0, rank1]).unwrap();
+
+    assert_close(latency, 34.5);
 }
 
 #[test]
@@ -75,7 +128,7 @@ fn empty_step_returns_zero() {
     let estimator = fixture.estimator();
     let metrics = ForwardPassMetrics::default();
 
-    let latency = estimator.forward_pass_time_ms(&metrics).unwrap();
+    let latency = estimator.forward_pass_time_ms(&[metrics]).unwrap();
 
     assert_eq!(latency, 0.0);
 }
@@ -90,7 +143,7 @@ fn invalid_schema_rejected() {
     };
 
     let err = estimator
-        .forward_pass_time_ms(&metrics)
+        .forward_pass_time_ms(&[metrics])
         .unwrap_err()
         .to_string();
 
@@ -144,6 +197,78 @@ fn git_lfs_pointer_is_reported() {
     .to_string();
 
     assert!(err.contains("Git LFS pointer"));
+}
+
+#[test]
+fn long_prefill_prefix_rescale_avoids_u32_overflow() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.perf_dir().join("gemm_perf.txt"),
+        "gemm_dtype,m,n,k,latency\nbfloat16,1,1,1,0.0\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.perf_dir().join("context_attention_perf.txt"),
+        "attn_dtype,kv_cache_dtype,batch_size,isl,num_heads,num_key_value_heads,head_dim,latency\n\
+bfloat16,bfloat16,1,131072,4,2,8,4.0\n",
+    )
+    .unwrap();
+    let estimator = fixture.estimator();
+    let metrics = ForwardPassMetrics {
+        scheduled_requests: ScheduledRequestMetrics {
+            num_prefill_requests: 1,
+            sum_prefill_tokens: 65_536,
+            sum_prefill_kv_tokens: 65_536,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let latency = estimator.forward_pass_time_ms(&[metrics]).unwrap();
+
+    assert_close(latency, 6.0);
+}
+
+#[test]
+fn omitted_backend_version_uses_numerically_latest_directory() {
+    let fixture = Fixture::new();
+    let stale_dir = fixture.version_dir("0.5.9");
+    let latest_dir = fixture.version_dir("0.5.10");
+    copy_perf_files(&fixture.perf_dir(), &stale_dir);
+    copy_perf_files(&fixture.perf_dir(), &latest_dir);
+    fs::write(fixture.perf_dir().join("INCOMPLETE.txt"), "").unwrap();
+    fs::write(
+        stale_dir.join("context_attention_perf.txt"),
+        "attn_dtype,kv_cache_dtype,batch_size,isl,num_heads,num_key_value_heads,head_dim,latency\n\
+bfloat16,bfloat16,2,10,4,2,8,100.0\n",
+    )
+    .unwrap();
+    fs::write(
+        latest_dir.join("context_attention_perf.txt"),
+        "attn_dtype,kv_cache_dtype,batch_size,isl,num_heads,num_key_value_heads,head_dim,latency\n\
+bfloat16,bfloat16,2,10,4,2,8,5.0\n",
+    )
+    .unwrap();
+    let mut config = engine_config();
+    config.backend_version = None;
+    let estimator = EngineStepEstimator::from_config_with_roots(
+        config,
+        fixture.systems_root(),
+        fixture.model_configs_root(),
+    )
+    .unwrap();
+    let metrics = ForwardPassMetrics {
+        scheduled_requests: ScheduledRequestMetrics {
+            num_prefill_requests: 2,
+            sum_prefill_tokens: 20,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let latency = estimator.forward_pass_time_ms(&[metrics]).unwrap();
+
+    assert_close(latency, 30.5);
 }
 
 struct Fixture {
@@ -224,6 +349,10 @@ bfloat16,bfloat16,2,16,4,2,8,1,0.7\n",
         self.root.join("systems/data/test_sxm/vllm/1.0.0")
     }
 
+    fn version_dir(&self, version: &str) -> PathBuf {
+        self.root.join("systems/data/test_sxm/vllm").join(version)
+    }
+
     fn estimator(&self) -> EngineStepEstimator {
         EngineStepEstimator::from_config_with_roots(
             engine_config(),
@@ -234,18 +363,27 @@ bfloat16,bfloat16,2,16,4,2,8,1,0.7\n",
     }
 }
 
+fn copy_perf_files(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    for file_name in [
+        "gemm_perf.txt",
+        "context_attention_perf.txt",
+        "generation_attention_perf.txt",
+    ] {
+        fs::copy(source.join(file_name), destination.join(file_name)).unwrap();
+    }
+}
+
 fn engine_config() -> EngineConfig {
     EngineConfig {
         schema_version: ENGINE_CONFIG_SCHEMA_VERSION,
         model_name: "Test/Dense".to_string(),
         model_arch: None,
-        max_sequence_length: None,
         system_name: "test_sxm".to_string(),
         backend: BackendKind::Vllm,
         backend_version: Some("1.0.0".to_string()),
         tp_size: 1,
         pp_size: 1,
-        dp_size: 1,
         moe_tp_size: None,
         moe_ep_size: None,
         attention_dp_size: None,

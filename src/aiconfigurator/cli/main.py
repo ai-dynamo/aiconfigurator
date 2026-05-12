@@ -1015,6 +1015,7 @@ def _build_yaml_config(exp_config: dict, config_section: dict) -> dict | None:
 def build_experiment_task_configs(
     yaml_path: str | None = None,
     config: dict[str, Any] | None = None,
+    engine_step_backend: str | None = None,
 ) -> dict[str, TaskConfig]:
     """Build task configs from YAML file or config dict.
 
@@ -1022,6 +1023,8 @@ def build_experiment_task_configs(
         yaml_path: Path to a YAML file containing experiment definitions.
         config: Dict containing experiment definitions (alternative to yaml_path).
             Keys are experiment names, values are experiment configs.
+        engine_step_backend: Optional global experimental static-latency backend.
+            Per-experiment ``engine_step_backend`` entries take precedence.
 
     Returns:
         Dict mapping experiment names to TaskConfig objects.
@@ -1130,8 +1133,9 @@ def build_experiment_task_configs(
             task_kwargs["enable_chunked_prefill"] = exp_config["enable_chunked_prefill"]
         if "database_mode" in exp_config:
             task_kwargs["database_mode"] = exp_config["database_mode"]
-        if "engine_step_backend" in exp_config:
-            task_kwargs["engine_step_backend"] = exp_config["engine_step_backend"]
+        effective_engine_step_backend = exp_config.get("engine_step_backend", engine_step_backend)
+        if effective_engine_step_backend is not None:
+            task_kwargs["engine_step_backend"] = effective_engine_step_backend
 
         yaml_config = _build_yaml_config(exp_config, config_section)
         if yaml_config:
@@ -1731,7 +1735,10 @@ def main(args):
         )
     elif args.mode == "exp":
         try:
-            task_configs = build_experiment_task_configs(yaml_path=args.yaml_path)
+            build_kwargs: dict[str, Any] = {"yaml_path": args.yaml_path}
+            if args.engine_step_backend is not None:
+                build_kwargs["engine_step_backend"] = args.engine_step_backend
+            task_configs = build_experiment_task_configs(**build_kwargs)
         except (ValueError, TypeError) as exc:
             logger.exception("Failed to build experiment task configs")
             raise SystemExit(1) from exc

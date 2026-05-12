@@ -28,7 +28,7 @@ def test_static_latency_breakdown_maps_runtime_config_to_fpm(monkeypatch) -> Non
     class _FakeEstimator:
         def forward_pass_time_ms(self, metrics):
             calls.append(metrics)
-            scheduled = metrics["scheduled_requests"]
+            scheduled = metrics[0]["scheduled_requests"]
             if scheduled.get("num_prefill_requests", 0):
                 return 10.0
             return 2.0
@@ -43,7 +43,7 @@ def test_static_latency_breakdown_maps_runtime_config_to_fpm(monkeypatch) -> Non
         config=ModelConfig(
             tp_size=1,
             pp_size=1,
-            attention_dp_size=1,
+            attention_dp_size=2,
             moe_tp_size=1,
             moe_ep_size=1,
             gemm_quant_mode=common.GEMMQuantMode.bfloat16,
@@ -69,16 +69,17 @@ def test_static_latency_breakdown_maps_runtime_config_to_fpm(monkeypatch) -> Non
     assert generation_latency == {"rust_engine_step_generation": 9.0}
     assert context_source == {"rust_engine_step_context": "rust"}
     assert generation_source == {"rust_engine_step_generation": "rust"}
-    assert calls[0]["scheduled_requests"] == {
+    assert [len(call) for call in calls] == [2, 2, 2]
+    assert calls[0][0]["scheduled_requests"] == {
         "num_prefill_requests": 2,
         "sum_prefill_tokens": 12,
         "sum_prefill_kv_tokens": 4,
     }
-    assert calls[1]["scheduled_requests"] == {
+    assert calls[1][0]["scheduled_requests"] == {
         "num_decode_requests": 2,
         "sum_decode_kv_tokens": 16,
     }
-    assert calls[2]["scheduled_requests"] == {
+    assert calls[2][0]["scheduled_requests"] == {
         "num_decode_requests": 2,
         "sum_decode_kv_tokens": 20,
     }
@@ -129,14 +130,14 @@ def test_mixed_and_decode_helpers_map_to_fpm(monkeypatch) -> None:
 
     assert mixed_ms == 8.5
     assert decode_ms == 9.5
-    assert calls[0]["scheduled_requests"] == {
+    assert calls[0][0]["scheduled_requests"] == {
         "num_prefill_requests": 2,
         "sum_prefill_tokens": 384,
         "sum_prefill_kv_tokens": 256,
         "num_decode_requests": 7,
         "sum_decode_kv_tokens": 2688,
     }
-    assert calls[1]["scheduled_requests"] == {
+    assert calls[1][0]["scheduled_requests"] == {
         "num_decode_requests": 7,
         "sum_decode_kv_tokens": 2688,
     }
@@ -192,13 +193,11 @@ def test_ctypes_wrapper_calls_real_rust_core(tmp_path, monkeypatch) -> None:
             "schema_version": 1,
             "model_name": "Test/Dense",
             "model_arch": None,
-            "max_sequence_length": None,
             "system_name": "test_sxm",
             "backend": "vllm",
             "backend_version": "1.0.0",
             "tp_size": 1,
             "pp_size": 1,
-            "dp_size": 1,
             "moe_tp_size": None,
             "moe_ep_size": None,
             "attention_dp_size": None,
@@ -211,14 +210,16 @@ def test_ctypes_wrapper_calls_real_rust_core(tmp_path, monkeypatch) -> None:
     )
 
     latency_ms = estimator.forward_pass_time_ms(
-        {
-            "version": 1,
-            "scheduled_requests": {
-                "num_prefill_requests": 2,
-                "sum_prefill_tokens": 20,
-                "sum_prefill_kv_tokens": 0,
+        [
+            {
+                "version": 1,
+                "scheduled_requests": {
+                    "num_prefill_requests": 2,
+                    "sum_prefill_tokens": 20,
+                    "sum_prefill_kv_tokens": 0,
+                },
             },
-        }
+        ]
     )
 
     assert latency_ms == pytest.approx(30.5)

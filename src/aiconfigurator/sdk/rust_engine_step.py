@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import ctypes
 import json
 import math
@@ -41,7 +42,7 @@ class RustEngineStepEstimator:
         err = self._lib.aic_engine_step_estimator_new(config_json, ctypes.byref(self._handle))
         _raise_for_error(self._lib, err)
 
-    def forward_pass_time_ms(self, metrics: dict[str, Any]) -> float:
+    def forward_pass_time_ms(self, metrics: dict[str, Any] | list[dict[str, Any]]) -> float:
         out_ms = ctypes.c_double()
         metrics_json = _json_bytes(metrics)
         err = self._lib.aic_engine_step_forward_pass_time_ms(
@@ -85,10 +86,13 @@ def estimate_static_latency_breakdown_with_rust(
 
     if mode in {"static", "static_ctx"}:
         context_latency_ms = estimator.forward_pass_time_ms(
-            _prefill_metrics(
-                batch_size=int(runtime_config.batch_size),
-                isl=int(runtime_config.isl),
-                prefix=int(runtime_config.prefix or 0),
+            _metrics_by_attention_dp_rank(
+                model,
+                _prefill_metrics(
+                    batch_size=int(runtime_config.batch_size),
+                    isl=int(runtime_config.isl),
+                    prefix=int(runtime_config.prefix or 0),
+                ),
             )
         )
 
@@ -97,9 +101,12 @@ def estimate_static_latency_breakdown_with_rust(
         beam_width = int(runtime_config.beam_width or 1)
         for i in range(0, max(int(runtime_config.osl) - 1, 0), stride):
             step_latency_ms = estimator.forward_pass_time_ms(
-                _decode_metrics(
-                    batch_size=decode_batch_size * beam_width,
-                    context_length=int(runtime_config.isl) + i,
+                _metrics_by_attention_dp_rank(
+                    model,
+                    _decode_metrics(
+                        batch_size=decode_batch_size * beam_width,
+                        context_length=int(runtime_config.isl) + i,
+                    ),
                 )
             )
             repeat_count = min(stride, int(runtime_config.osl) - 1 - i)
@@ -154,7 +161,9 @@ def estimate_mixed_step_latency_with_rust(
 
     if not scheduled_requests:
         return 0.0
-    return estimator.forward_pass_time_ms({"version": 1, "scheduled_requests": scheduled_requests})
+    return estimator.forward_pass_time_ms(
+        _metrics_by_attention_dp_rank(model, {"version": 1, "scheduled_requests": scheduled_requests})
+    )
 
 
 def estimate_decode_step_latency_with_rust(
@@ -171,7 +180,9 @@ def estimate_decode_step_latency_with_rust(
     if gen_tokens == 0:
         return 0.0
     context_length = max(int(isl), 1) + max(int(osl), 1) // 2
-    return estimator.forward_pass_time_ms(_decode_metrics(batch_size=gen_tokens, context_length=context_length))
+    return estimator.forward_pass_time_ms(
+        _metrics_by_attention_dp_rank(model, _decode_metrics(batch_size=gen_tokens, context_length=context_length))
+    )
 
 
 def is_rust_core_available(*, autobuild: bool = False) -> bool:
@@ -187,19 +198,22 @@ def _cached_estimator(config_json: str) -> RustEngineStepEstimator:
     return RustEngineStepEstimator(json.loads(config_json))
 
 
+def _metrics_by_attention_dp_rank(model: Any, metrics: dict[str, Any]) -> list[dict[str, Any]]:
+    rank_count = max(int(getattr(model.config, "attention_dp_size", 1) or 1), 1)
+    return [copy.deepcopy(metrics) for _ in range(rank_count)]
+
+
 def _engine_config_json(model: Any, database: Any) -> str:
     model_config = model.config
     config = {
         "schema_version": 1,
         "model_name": getattr(model, "model_path", getattr(model, "model_name", "")),
         "model_arch": getattr(model, "architecture", None),
-        "max_sequence_length": getattr(model, "_context_length", None),
         "system_name": database.system,
         "backend": _backend_name(database.backend),
         "backend_version": getattr(database, "version", None),
         "tp_size": int(model_config.tp_size or 1),
         "pp_size": int(model_config.pp_size or 1),
-        "dp_size": int(getattr(model_config, "attention_dp_size", 1) or 1),
         "moe_tp_size": _optional_int(getattr(model_config, "moe_tp_size", None)),
         "moe_ep_size": _optional_int(getattr(model_config, "moe_ep_size", None)),
         "attention_dp_size": _optional_int(getattr(model_config, "attention_dp_size", None)),
@@ -236,9 +250,12 @@ def _decode_metrics(*, batch_size: int, context_length: int) -> dict[str, Any]:
 
 @cache
 def _load_library(autobuild: bool) -> ctypes.CDLL:
-    library_path = _find_library()
-    if library_path is None and autobuild:
+    if autobuild and not os.environ.get(RUST_CORE_LIB_ENV):
         library_path = _build_rust_core()
+    else:
+        library_path = _find_library()
+        if library_path is None and autobuild:
+            library_path = _build_rust_core()
     if library_path is None:
         raise RustCoreUnavailableError(
             "Rust core shared library not found. Build it with "

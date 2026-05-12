@@ -35,7 +35,6 @@ pub struct EngineConfig {
 
     pub model_name: String,
     pub model_arch: Option<String>,
-    pub max_sequence_length: Option<u32>,
 
     pub system_name: String,
 
@@ -44,7 +43,6 @@ pub struct EngineConfig {
 
     pub tp_size: u32,
     pub pp_size: u32,
-    pub dp_size: u32,
     pub moe_tp_size: Option<u32>,
     pub moe_ep_size: Option<u32>,
     pub attention_dp_size: Option<u32>,
@@ -95,8 +93,7 @@ pub enum DataType {
 impl DataType {
     fn gemm_quant_name(&self) -> &'static str {
         match self {
-            Self::Bfloat16 => "bfloat16",
-            Self::Float16 => "bfloat16",
+            Self::Bfloat16 | Self::Float16 => "bfloat16",
             Self::Fp8 => "fp8",
             Self::Fp8Static => "fp8_static",
             Self::Fp8Block => "fp8_block",
@@ -267,84 +264,111 @@ impl EngineStepEstimator {
         })
     }
 
-    /// Estimate one forward-pass iteration. The primary Rust API returns
-    /// [`Duration`] to keep units explicit.
-    pub fn forward_pass_time(&self, metrics: &ForwardPassMetrics) -> Result<Duration, AicError> {
-        let ms = self.forward_pass_time_ms(metrics)?;
+    /// Estimate one forward-pass iteration from per-attention-DP-rank metrics.
+    ///
+    /// The primary Rust API returns [`Duration`] to keep units explicit.
+    pub fn forward_pass_time(
+        &self,
+        metrics_by_rank: &[ForwardPassMetrics],
+    ) -> Result<Duration, AicError> {
+        let ms = self.forward_pass_time_ms(metrics_by_rank)?;
         Ok(Duration::from_secs_f64(ms / 1000.0))
     }
 
     /// Numeric millisecond convenience API for callers that track virtual time
     /// as floating-point milliseconds.
-    pub fn forward_pass_time_ms(&self, metrics: &ForwardPassMetrics) -> Result<f64, AicError> {
-        validate_forward_pass_metrics(metrics)?;
-
-        let scheduled = &metrics.scheduled_requests;
-        let mut total_ms = 0.0;
-
-        if scheduled.num_prefill_requests > 0 && scheduled.sum_prefill_tokens > 0 {
-            total_ms += self.prefill_step_time_ms(
-                scheduled.num_prefill_requests,
-                scheduled.sum_prefill_tokens,
-                scheduled.sum_prefill_kv_tokens,
-            )?;
+    pub fn forward_pass_time_ms(
+        &self,
+        metrics_by_rank: &[ForwardPassMetrics],
+    ) -> Result<f64, AicError> {
+        if metrics_by_rank.is_empty() {
+            return Err(AicError::InvalidForwardPassMetrics(
+                "at least one attention-DP rank metric is required".to_string(),
+            ));
         }
-        if scheduled.num_decode_requests > 0 {
-            total_ms += self.decode_step_time_ms(
-                scheduled.num_decode_requests,
-                scheduled.sum_decode_kv_tokens,
-            )?;
+        for metrics in metrics_by_rank {
+            validate_forward_pass_metrics(metrics)?;
         }
-        Ok(total_ms.max(0.0))
+
+        let workloads = metrics_by_rank
+            .iter()
+            .map(RankWorkload::from_metrics)
+            .collect::<Vec<_>>();
+        let dense_tokens = workloads
+            .iter()
+            .map(RankWorkload::non_attention_tokens)
+            .max()
+            .unwrap_or(0);
+        let moe_tokens = workloads.iter().fold(0_u32, |tokens, workload| {
+            tokens.saturating_add(workload.non_attention_tokens())
+        });
+        let logits_batch = workloads
+            .iter()
+            .map(RankWorkload::logits_batch)
+            .max()
+            .unwrap_or(0);
+
+        let non_attention_ms =
+            self.model_non_attention_latency_ms(dense_tokens, moe_tokens, logits_batch)?;
+        let attention_ms = self.prefill_attention_step_time_ms(&workloads)?
+            + self.decode_attention_step_time_ms(&workloads)?;
+
+        Ok((non_attention_ms + attention_ms).max(0.0))
     }
 
     /// Engine-step naming alias over the FPM-shaped v1 input.
-    pub fn engine_step_time(&self, metrics: &ForwardPassMetrics) -> Result<Duration, AicError> {
-        self.forward_pass_time(metrics)
+    pub fn engine_step_time(
+        &self,
+        metrics_by_rank: &[ForwardPassMetrics],
+    ) -> Result<Duration, AicError> {
+        self.forward_pass_time(metrics_by_rank)
     }
 
     /// Engine-step naming alias over the FPM-shaped v1 input.
-    pub fn engine_step_time_ms(&self, metrics: &ForwardPassMetrics) -> Result<f64, AicError> {
-        self.forward_pass_time_ms(metrics)
+    pub fn engine_step_time_ms(
+        &self,
+        metrics_by_rank: &[ForwardPassMetrics],
+    ) -> Result<f64, AicError> {
+        self.forward_pass_time_ms(metrics_by_rank)
     }
 
-    fn prefill_step_time_ms(
+    fn prefill_attention_step_time_ms(&self, workloads: &[RankWorkload]) -> Result<f64, AicError> {
+        let mut latency_ms = 0.0_f64;
+        for workload in workloads {
+            if let Some((batch_size, effective_isl, prefix)) = workload.prefill_shape() {
+                latency_ms = latency_ms.max(self.model_prefill_attention_latency_ms(
+                    batch_size,
+                    effective_isl,
+                    prefix,
+                )?);
+            }
+        }
+        Ok(latency_ms)
+    }
+
+    fn decode_attention_step_time_ms(&self, workloads: &[RankWorkload]) -> Result<f64, AicError> {
+        let mut latency_ms = 0.0_f64;
+        for workload in workloads {
+            if let Some((batch_size, context_length)) = workload.decode_shape() {
+                latency_ms = latency_ms
+                    .max(self.model_decode_attention_latency_ms(batch_size, context_length)?);
+            }
+        }
+        Ok(latency_ms)
+    }
+
+    fn model_non_attention_latency_ms(
         &self,
-        batch_size: u32,
-        sum_prefill_tokens: u32,
-        sum_prefill_kv_tokens: u32,
+        dense_tokens: u32,
+        moe_tokens: u32,
+        logits_batch: u32,
     ) -> Result<f64, AicError> {
-        let effective_isl = ceil_div_u32(sum_prefill_tokens, batch_size);
-        let prefix = ceil_div_u32(sum_prefill_kv_tokens, batch_size);
-        if batch_size == 0 || effective_isl == 0 {
+        if dense_tokens == 0 {
             return Ok(0.0);
         }
-
-        self.model_prefill_latency_ms(batch_size, effective_isl, prefix)
-    }
-
-    fn decode_step_time_ms(
-        &self,
-        batch_size: u32,
-        sum_decode_kv_tokens: u32,
-    ) -> Result<f64, AicError> {
-        let context_length = ceil_div_u32(sum_decode_kv_tokens, batch_size);
-        if batch_size == 0 {
-            return Ok(0.0);
-        }
-        self.model_decode_latency_ms(batch_size, context_length, 2)
-    }
-
-    fn model_prefill_latency_ms(
-        &self,
-        batch_size: u32,
-        effective_isl: u32,
-        prefix: u32,
-    ) -> Result<f64, AicError> {
         let tp = self.config.tp_size.max(1);
         let model = &self.model;
         let layers = model.num_hidden_layers as f64;
-        let m = batch_size * effective_isl;
         let quant = self.gemm_quant_name();
 
         let qkv_out = model.num_attention_heads * model.head_dim / tp
@@ -353,13 +377,70 @@ impl EngineStepEstimator {
         let ffn1_out = 2 * model.intermediate_size / tp;
         let ffn2_k = model.intermediate_size / tp;
 
+        let dense_ffn = self
+            .perf
+            .query_gemm(quant, dense_tokens, ffn1_out, model.hidden_size)?
+            + self
+                .perf
+                .query_gemm(quant, dense_tokens, model.hidden_size, ffn2_k)?;
+        let ffn = if model.uses_moe() {
+            self.perf
+                .query_moe(
+                    self.moe_quant_name(),
+                    moe_tokens.max(1),
+                    model.hidden_size,
+                    model.moe_intermediate_size.max(model.intermediate_size),
+                    model.top_k.max(1),
+                    model.num_experts.max(1),
+                    self.config.moe_tp_size.unwrap_or(tp).max(1),
+                    self.config.moe_ep_size.unwrap_or(1).max(1),
+                    "uniform",
+                )
+                .unwrap_or(dense_ffn)
+        } else {
+            dense_ffn
+        };
+
+        let per_layer = self
+            .perf
+            .query_gemm(quant, dense_tokens, qkv_out, model.hidden_size)?
+            + self
+                .perf
+                .query_gemm(quant, dense_tokens, model.hidden_size, proj_k)?
+            + ffn;
+
+        let logits = if logits_batch > 0 {
+            self.perf
+                .query_gemm(
+                    self.logits_gemm_quant_name(),
+                    logits_batch,
+                    model.vocab_size / tp,
+                    model.hidden_size,
+                )
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+
+        Ok(per_layer * layers + logits)
+    }
+
+    fn model_prefill_attention_latency_ms(
+        &self,
+        batch_size: u32,
+        effective_isl: u32,
+        prefix: u32,
+    ) -> Result<f64, AicError> {
+        let tp = self.config.tp_size.max(1);
+        let model = &self.model;
+        let layers = model.num_hidden_layers as f64;
         let attention = if model.uses_mla_attention() || model.uses_module_attention() {
             self.perf
                 .query_context_mla(
                     self.fmha_quant_name(),
                     self.kv_cache_quant_name(),
                     batch_size,
-                    effective_isl + prefix,
+                    effective_isl.saturating_add(prefix),
                     model.num_attention_heads / tp,
                 )
                 .unwrap_or_else(|| {
@@ -388,140 +469,49 @@ impl EngineStepEstimator {
                 model.head_dim,
             )?
         };
-
-        let dense_ffn = self
-            .perf
-            .query_gemm(quant, m, ffn1_out, model.hidden_size)?
-            + self.perf.query_gemm(quant, m, model.hidden_size, ffn2_k)?;
-        let ffn = if model.uses_moe() {
-            self.perf
-                .query_moe(
-                    self.moe_quant_name(),
-                    m,
-                    model.hidden_size,
-                    model.moe_intermediate_size.max(model.intermediate_size),
-                    model.top_k.max(1),
-                    model.num_experts.max(1),
-                    self.config.moe_tp_size.unwrap_or(tp).max(1),
-                    self.config.moe_ep_size.unwrap_or(1).max(1),
-                    "uniform",
-                )
-                .unwrap_or(dense_ffn)
-        } else {
-            dense_ffn
-        };
-
-        let per_layer = self.perf.query_gemm(quant, m, qkv_out, model.hidden_size)?
-            + attention
-            + self.perf.query_gemm(quant, m, model.hidden_size, proj_k)?
-            + ffn;
-
-        let logits = self
-            .perf
-            .query_gemm(
-                "bfloat16",
-                batch_size,
-                model.vocab_size / tp,
-                model.hidden_size,
-            )
-            .unwrap_or(0.0);
-
-        Ok(per_layer * layers + logits)
+        Ok(attention * layers)
     }
 
-    fn model_decode_latency_ms(
+    fn model_decode_attention_latency_ms(
         &self,
         batch_size: u32,
         context_length: u32,
-        osl: u32,
     ) -> Result<f64, AicError> {
-        if osl <= 1 {
-            return Ok(0.0);
-        }
-
         let tp = self.config.tp_size.max(1);
         let model = &self.model;
         let layers = model.num_hidden_layers as f64;
-        let quant = self.gemm_quant_name();
-        let m = batch_size;
-
-        let qkv_out = model.num_attention_heads * model.head_dim / tp
-            + model.head_dim * model.kv_heads_per_gpu(tp) * 2;
-        let proj_k = model.num_attention_heads * model.head_dim / tp;
-        let ffn1_out = 2 * model.intermediate_size / tp;
-        let ffn2_k = model.intermediate_size / tp;
-
-        let mut total = 0.0;
-        for step in 0..(osl - 1) {
-            let s = context_length + step + 1;
-            let attention = if model.uses_mla_attention() || model.uses_module_attention() {
-                self.perf
-                    .query_generation_mla(
-                        self.kv_cache_quant_name(),
-                        batch_size,
-                        s,
-                        model.num_attention_heads / tp,
-                    )
-                    .unwrap_or_else(|| {
-                        self.perf
-                            .query_generation_attention(
-                                self.kv_cache_quant_name(),
-                                batch_size,
-                                s,
-                                model.num_attention_heads / tp,
-                                model.kv_heads_per_gpu(tp),
-                                model.head_dim,
-                            )
-                            .unwrap_or(0.0)
-                    })
-            } else {
-                self.perf.query_generation_attention(
+        let sequence_tokens = context_length.saturating_add(1);
+        let attention = if model.uses_mla_attention() || model.uses_module_attention() {
+            self.perf
+                .query_generation_mla(
                     self.kv_cache_quant_name(),
                     batch_size,
-                    s,
+                    sequence_tokens,
                     model.num_attention_heads / tp,
-                    model.kv_heads_per_gpu(tp),
-                    model.head_dim,
-                )?
-            };
-            let dense_ffn = self
-                .perf
-                .query_gemm(quant, m, ffn1_out, model.hidden_size)?
-                + self.perf.query_gemm(quant, m, model.hidden_size, ffn2_k)?;
-            let ffn = if model.uses_moe() {
-                self.perf
-                    .query_moe(
-                        self.moe_quant_name(),
-                        m,
-                        model.hidden_size,
-                        model.moe_intermediate_size.max(model.intermediate_size),
-                        model.top_k.max(1),
-                        model.num_experts.max(1),
-                        self.config.moe_tp_size.unwrap_or(tp).max(1),
-                        self.config.moe_ep_size.unwrap_or(1).max(1),
-                        "uniform",
-                    )
-                    .unwrap_or(dense_ffn)
-            } else {
-                dense_ffn
-            };
-            let per_layer = self.perf.query_gemm(quant, m, qkv_out, model.hidden_size)?
-                + attention
-                + self.perf.query_gemm(quant, m, model.hidden_size, proj_k)?
-                + ffn;
-            let logits = self
-                .perf
-                .query_gemm(
-                    "bfloat16",
-                    batch_size,
-                    model.vocab_size / tp,
-                    model.hidden_size,
                 )
-                .unwrap_or(0.0);
-            total += per_layer * layers + logits;
-        }
-
-        Ok(total)
+                .unwrap_or_else(|| {
+                    self.perf
+                        .query_generation_attention(
+                            self.kv_cache_quant_name(),
+                            batch_size,
+                            sequence_tokens,
+                            model.num_attention_heads / tp,
+                            model.kv_heads_per_gpu(tp),
+                            model.head_dim,
+                        )
+                        .unwrap_or(0.0)
+                })
+        } else {
+            self.perf.query_generation_attention(
+                self.kv_cache_quant_name(),
+                batch_size,
+                sequence_tokens,
+                model.num_attention_heads / tp,
+                model.kv_heads_per_gpu(tp),
+                model.head_dim,
+            )?
+        };
+        Ok(attention * layers)
     }
 
     fn gemm_quant_name(&self) -> &'static str {
@@ -554,6 +544,69 @@ impl EngineStepEstimator {
         match self.config.weight_dtype.as_ref() {
             Some(dtype) => dtype.moe_quant_name(),
             None => DataType::Bfloat16.moe_quant_name(),
+        }
+    }
+
+    fn logits_gemm_quant_name(&self) -> &'static str {
+        // Match the Python op graph: logits/LM-head GEMM stays BF16 even when
+        // transformer layer GEMMs use quantized kernels.
+        DataType::Bfloat16.gemm_quant_name()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RankWorkload {
+    prefill_requests: u32,
+    prefill_tokens: u32,
+    prefill_kv_tokens: u32,
+    decode_requests: u32,
+    decode_kv_tokens: u32,
+}
+
+impl RankWorkload {
+    fn from_metrics(metrics: &ForwardPassMetrics) -> Self {
+        let scheduled = &metrics.scheduled_requests;
+        Self {
+            prefill_requests: scheduled.num_prefill_requests,
+            prefill_tokens: scheduled.sum_prefill_tokens,
+            prefill_kv_tokens: scheduled.sum_prefill_kv_tokens,
+            decode_requests: scheduled.num_decode_requests,
+            decode_kv_tokens: scheduled.sum_decode_kv_tokens,
+        }
+    }
+
+    fn prefill_shape(&self) -> Option<(u32, u32, u32)> {
+        if self.prefill_requests == 0 || self.prefill_tokens == 0 {
+            return None;
+        }
+        Some((
+            self.prefill_requests,
+            ceil_div_u32(self.prefill_tokens, self.prefill_requests),
+            ceil_div_u32(self.prefill_kv_tokens, self.prefill_requests),
+        ))
+    }
+
+    fn decode_shape(&self) -> Option<(u32, u32)> {
+        if self.decode_requests == 0 {
+            return None;
+        }
+        Some((
+            self.decode_requests,
+            ceil_div_u32(self.decode_kv_tokens, self.decode_requests),
+        ))
+    }
+
+    fn non_attention_tokens(&self) -> u32 {
+        self.prefill_tokens.saturating_add(self.decode_requests)
+    }
+
+    fn logits_batch(&self) -> u32 {
+        if self.non_attention_tokens() == 0 {
+            0
+        } else {
+            self.prefill_requests
+                .saturating_add(self.decode_requests)
+                .max(1)
         }
     }
 }
@@ -669,11 +722,6 @@ fn validate_engine_config(config: &EngineConfig) -> Result<(), AicError> {
             "pp_size must be >= 1".to_string(),
         ));
     }
-    if config.dp_size == 0 {
-        return Err(AicError::InvalidEngineConfig(
-            "dp_size must be >= 1".to_string(),
-        ));
-    }
     if config.pp_size != 1 {
         return Err(AicError::UnsupportedModel(
             "Phase 1 Rust estimator supports pp_size=1; pipeline-parallel P2P composition will be added later"
@@ -711,7 +759,7 @@ fn ceil_div_u32(sum: u32, count: u32) -> u32 {
     if count == 0 {
         0
     } else {
-        ((u64::from(sum) + u64::from(count) - 1) / u64::from(count)) as u32
+        sum.div_ceil(count)
     }
 }
 

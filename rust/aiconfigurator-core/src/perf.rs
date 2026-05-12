@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -116,7 +118,7 @@ impl PerfDatabase {
             }
         }
 
-        let full_sequence_tokens = sequence_tokens + prefix_tokens;
+        let full_sequence_tokens = sequence_tokens.saturating_add(prefix_tokens);
         let query_kv_heads = normalized_kv_heads(num_heads, num_kv_heads);
         let mut best: Option<(f64, f64)> = None;
 
@@ -140,12 +142,14 @@ impl PerfDatabase {
                 "no context-attention perf point for fmha_quant={fmha_quant}, kv_cache_quant={kv_cache_quant}, b={batch_size}, s={full_sequence_tokens}, prefix={prefix_tokens}, n={num_heads}, n_kv={num_kv_heads}, head_dim={head_dim}"
             ))
         })?;
-        let denominator = full_sequence_tokens.saturating_mul(full_sequence_tokens);
-        if denominator == 0 {
+        let full_sequence_tokens_f = f64::from(sequence_tokens) + f64::from(prefix_tokens);
+        if full_sequence_tokens_f == 0.0 {
             return Ok(0.0);
         }
-        let numerator = denominator.saturating_sub(prefix_tokens.saturating_mul(prefix_tokens));
-        let latency = latency * f64::from(numerator) / f64::from(denominator);
+        let prefix_tokens_f = f64::from(prefix_tokens);
+        let denominator = full_sequence_tokens_f * full_sequence_tokens_f;
+        let numerator = (denominator - prefix_tokens_f * prefix_tokens_f).max(0.0);
+        let latency = latency * numerator / denominator;
         if let Ok(mut cache) = self.query_cache.lock() {
             cache.context_attention.insert(key, latency);
         }
@@ -457,13 +461,55 @@ fn resolve_backend_version(
             versions.push(path);
         }
     }
-    versions.sort();
+    versions.sort_by(|left, right| compare_backend_version_paths(left, right));
     versions.pop().ok_or_else(|| {
         AicError::PerfDatabase(format!(
             "no complete backend versions under {}",
             backend_root.display()
         ))
     })
+}
+
+fn compare_backend_version_paths(left: &Path, right: &Path) -> Ordering {
+    let left_name = version_dir_name(left);
+    let right_name = version_dir_name(right);
+    compare_version_names(left_name, right_name)
+        .then_with(|| left_name.cmp(right_name))
+        .then_with(|| left.cmp(right))
+}
+
+fn version_dir_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+}
+
+fn compare_version_names(left: &str, right: &str) -> Ordering {
+    let left_numbers = version_number_runs(left);
+    let right_numbers = version_number_runs(right);
+    left_numbers.cmp(&right_numbers)
+}
+
+fn version_number_runs(version: &str) -> Vec<u64> {
+    let mut numbers = Vec::new();
+    let mut current = None;
+    for byte in version.bytes() {
+        if byte.is_ascii_digit() {
+            let digit = u64::from(byte - b'0');
+            current = Some(
+                current
+                    .unwrap_or(0_u64)
+                    .saturating_mul(10)
+                    .saturating_add(digit),
+            );
+        } else if let Some(number) = current.take() {
+            numbers.push(number);
+        }
+    }
+    if let Some(number) = current {
+        numbers.push(number);
+    }
+    numbers
 }
 
 fn load_gemm_points(path: &Path) -> Result<Vec<GemmPoint>, AicError> {
@@ -651,14 +697,7 @@ fn load_optional_context_mla_points(path: &Path) -> Result<Vec<ContextMlaPoint>,
             path: path.to_path_buf(),
             source,
         })?;
-        let num_heads = parse_optional_u32(&record, &headers, "num_heads", path)?
-            .or_else(|| {
-                parse_optional_u32(&record, &headers, "tp_size", path)
-                    .ok()
-                    .flatten()
-                    .map(|tp| 128 / tp.max(1))
-            })
-            .unwrap_or(1);
+        let num_heads = parse_u32(&record, &headers, "num_heads", path)?;
         points.push(ContextMlaPoint {
             fmha_quant: required_field(&record, &headers, "mla_dtype", path)?.to_string(),
             kv_cache_quant: required_field(&record, &headers, "kv_cache_dtype", path)?.to_string(),
@@ -692,14 +731,7 @@ fn load_optional_generation_mla_points(path: &Path) -> Result<Vec<GenerationMlaP
             path: path.to_path_buf(),
             source,
         })?;
-        let num_heads = parse_optional_u32(&record, &headers, "num_heads", path)?
-            .or_else(|| {
-                parse_optional_u32(&record, &headers, "tp_size", path)
-                    .ok()
-                    .flatten()
-                    .map(|tp| 128 / tp.max(1))
-            })
-            .unwrap_or(1);
+        let num_heads = parse_u32(&record, &headers, "num_heads", path)?;
         points.push(GenerationMlaPoint {
             kv_cache_quant: required_field(&record, &headers, "kv_cache_dtype", path)?.to_string(),
             batch_size: parse_u32(&record, &headers, "batch_size", path)?,
@@ -712,12 +744,24 @@ fn load_optional_generation_mla_points(path: &Path) -> Result<Vec<GenerationMlaP
     Ok(points)
 }
 
-fn ensure_real_perf_file(path: &Path) -> Result<(), AicError> {
-    let text = fs::read_to_string(path).map_err(|source| AicError::Io {
+const LFS_POINTER_PREFIX: &[u8] = b"version https://git-lfs.github.com/spec/v1";
+
+fn read_lfs_header(path: &Path) -> Result<Vec<u8>, AicError> {
+    let mut file = fs::File::open(path).map_err(|source| AicError::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    if text.starts_with("version https://git-lfs.github.com/spec/v1") {
+    let mut buffer = vec![0_u8; LFS_POINTER_PREFIX.len()];
+    let bytes_read = file.read(&mut buffer).map_err(|source| AicError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    buffer.truncate(bytes_read);
+    Ok(buffer)
+}
+
+fn ensure_real_perf_file(path: &Path) -> Result<(), AicError> {
+    if read_lfs_header(path)?.starts_with(LFS_POINTER_PREFIX) {
         return Err(AicError::PerfDatabase(format!(
             "{} is a Git LFS pointer; run `git lfs pull` before using the Rust core estimator with repository perf data",
             path.display()
@@ -727,11 +771,7 @@ fn ensure_real_perf_file(path: &Path) -> Result<(), AicError> {
 }
 
 fn is_lfs_pointer(path: &Path) -> Result<bool, AicError> {
-    let text = fs::read_to_string(path).map_err(|source| AicError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(text.starts_with("version https://git-lfs.github.com/spec/v1"))
+    Ok(read_lfs_header(path)?.starts_with(LFS_POINTER_PREFIX))
 }
 
 fn header_map(headers: &StringRecord) -> HashMap<String, usize> {
