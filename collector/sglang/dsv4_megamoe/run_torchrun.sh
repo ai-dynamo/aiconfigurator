@@ -37,6 +37,7 @@ CAP_POLICY="${CAP_POLICY:-fixed}"
 WRITE_DEBUG_OUTPUT="${WRITE_DEBUG_OUTPUT:-${AIC_DSV4_MEGAMOE_DEBUG:-0}}"
 PERF_FILE="${PERF_FILE:-dsv4_megamoe_module_perf.txt}"
 AIC_WAIT_FOR_ALL_NODES="${AIC_WAIT_FOR_ALL_NODES:-0}"
+AIC_WAIT_FOR_ALL_NODES_MAX_ATTEMPTS="${AIC_WAIT_FOR_ALL_NODES_MAX_ATTEMPTS:-60}"
 
 MAX_CASE_TOKENS=0
 PHASES_COMPACT="${PHASES//[[:space:]]/}"
@@ -76,6 +77,13 @@ if (( EP_SIZE != NNODES * GPUS_PER_NODE )); then
   exit 1
 fi
 
+if (( NNODES > 1 )) && [[ "${MASTER_ADDR}" == "127.0.0.1" || "${MASTER_ADDR}" == "localhost" ]]; then
+  echo "MASTER_ADDR must be reachable from all nodes for multi-node collection." >&2
+  echo "MASTER_ADDR=${MASTER_ADDR} NNODES=${NNODES} GPUS_PER_NODE=${GPUS_PER_NODE}" >&2
+  echo "Set MASTER_ADDR to the rank-0 host or service DNS name." >&2
+  exit 1
+fi
+
 mkdir -p "${OUTPUT_PATH}"
 SGLANG_PYTHONPATHS=()
 for candidate in /workspace/sglang/python /sgl-workspace/sglang/python; do
@@ -112,6 +120,7 @@ if [[ "${AIC_WAIT_FOR_ALL_NODES}" == "1" && "${NNODES}" -gt 1 ]]; then
   echo "[dsv4-megamoe] waiting for ${NNODES} indexed job pod DNS records before torchrun"
   for ((idx = 0; idx < NNODES; idx++)); do
     peer_host="${JOB_PREFIX}-${idx}.${MASTER_DOMAIN}"
+    attempts=0
     until python3 - "${peer_host}" <<'PY'
 import socket
 import sys
@@ -122,6 +131,12 @@ except OSError:
     sys.exit(1)
 PY
     do
+      attempts=$((attempts + 1))
+      if (( attempts >= AIC_WAIT_FOR_ALL_NODES_MAX_ATTEMPTS )); then
+        echo "[dsv4-megamoe] timed out waiting for peer ${peer_host}" >&2
+        echo "MASTER_ADDR=${MASTER_ADDR} NNODES=${NNODES} GPUS_PER_NODE=${GPUS_PER_NODE} attempts=${attempts}" >&2
+        exit 1
+      fi
       echo "[dsv4-megamoe] waiting for peer ${peer_host}"
       sleep 10
     done
