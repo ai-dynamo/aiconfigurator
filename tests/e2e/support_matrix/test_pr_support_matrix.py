@@ -30,6 +30,7 @@ pytestmark = [pytest.mark.e2e, pytest.mark.build, pytest.mark.support_matrix]
 # Representative model/system/backend cases. Keep this intentionally small:
 # the full cross product belongs in the scheduled support-matrix workflow,
 # while PR e2e has a 30-minute job timeout shared with the rest of the suite.
+# Add cases only when the whole e2e job still fits that budget.
 PR_CASES: list[tuple[str, str, str]] = [
     ("nvidia/DeepSeek-V3.1-NVFP4", "b200_sxm", "trtllm"),
     ("meta-llama/Meta-Llama-3.1-8B", "b200_sxm", "sglang"),
