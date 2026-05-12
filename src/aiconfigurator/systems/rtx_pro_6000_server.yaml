@@ -6,7 +6,7 @@
 # Memory bandwidth and Tensor Core ratios are based on NVIDIA RTX PRO 6000
 # Blackwell architecture specs, scaled conservatively to the observed max SM clock.
 
-data_dir: data/rtxpro6000_blackwell_server # relative to systems_dir
+data_dir: data/rtx_pro_6000_server # relative to systems_dir
 gpu:
   mem_bw: 1792000000000 # 1.792 TB/s GDDR7
   mem_bw_empirical_scaling_factor: 0.8 # some nonofficial correction based on observations, you should try to modify based on your own observations
