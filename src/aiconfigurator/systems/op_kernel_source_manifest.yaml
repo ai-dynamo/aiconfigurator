@@ -63,7 +63,7 @@ groups:
   - op_file: context_attention_perf.txt
     kernel_source: 'triton'
     tier: shared
-    systems: [rtxpro6000_blackwell_server]
+    systems: [rtx_pro_6000_server]
     frameworks: [sglang]
     total_raw_rows: 33522
     within_framework_dedup_rows: 0
@@ -105,7 +105,7 @@ groups:
   - op_file: context_mla_perf.txt
     kernel_source: 'triton'
     tier: shared
-    systems: [rtxpro6000_blackwell_server]
+    systems: [rtx_pro_6000_server]
     frameworks: [sglang]
     total_raw_rows: 1540
     within_framework_dedup_rows: 0
@@ -140,14 +140,14 @@ groups:
   - op_file: custom_allreduce_perf.txt
     kernel_source: 'SGLang_CustomAllReduce_eager'
     tier: shared
-    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server]
+    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang]
     total_raw_rows: 1058
     within_framework_dedup_rows: 0
   - op_file: custom_allreduce_perf.txt
     kernel_source: 'SGLang_CustomAllReduce_graph'
     tier: shared
-    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server]
+    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang]
     total_raw_rows: 1058
     within_framework_dedup_rows: 0
@@ -205,7 +205,7 @@ groups:
   - op_file: gdn_perf.txt
     kernel_source: 'causal_conv1d_fn'
     tier: shared
-    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server]
+    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang, trtllm]
     total_raw_rows: 15654
     within_framework_dedup_rows: 17
@@ -213,7 +213,7 @@ groups:
   - op_file: gdn_perf.txt
     kernel_source: 'causal_conv1d_update'
     tier: shared
-    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server]
+    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang, trtllm, vllm]
     total_raw_rows: 2068
     within_framework_dedup_rows: 1
@@ -228,7 +228,7 @@ groups:
   - op_file: gdn_perf.txt
     kernel_source: 'fused_recurrent_gated_delta_rule'
     tier: shared
-    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server]
+    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang, trtllm]
     total_raw_rows: 1507
     within_framework_dedup_rows: 1
@@ -243,7 +243,7 @@ groups:
   - op_file: gemm_perf.txt
     kernel_source: 'sglang'
     tier: shared
-    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server]
+    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang]
     total_raw_rows: 1745481
     within_framework_dedup_rows: 1223
@@ -292,7 +292,7 @@ groups:
   - op_file: generation_attention_perf.txt
     kernel_source: 'triton'
     tier: shared
-    systems: [rtxpro6000_blackwell_server]
+    systems: [rtx_pro_6000_server]
     frameworks: [sglang]
     total_raw_rows: 19484
     within_framework_dedup_rows: 0
@@ -334,7 +334,7 @@ groups:
   - op_file: generation_mla_perf.txt
     kernel_source: 'triton'
     tier: shared
-    systems: [rtxpro6000_blackwell_server]
+    systems: [rtx_pro_6000_server]
     frameworks: [sglang]
     total_raw_rows: 2324
     within_framework_dedup_rows: 0
@@ -383,14 +383,14 @@ groups:
   - op_file: mhc_module_perf.txt
     kernel_source: 'sglang_mhc'
     tier: shared
-    systems: [rtxpro6000_blackwell_server]
+    systems: [rtx_pro_6000_server]
     frameworks: [sglang]
     total_raw_rows: 139
     within_framework_dedup_rows: 0
   - op_file: mla_bmm_perf.txt
     kernel_source: 'default'
     tier: shared_fallback
-    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server]
+    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang, trtllm]
     total_raw_rows: 22048
     within_framework_dedup_rows: 32
@@ -456,14 +456,14 @@ groups:
   - op_file: moe_perf.txt
     kernel_source: 'sglang_fused_moe_triton'
     tier: shared
-    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server]
+    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang]
     total_raw_rows: 936086
     within_framework_dedup_rows: 34
   - op_file: moe_perf.txt
     kernel_source: 'sglang_marlin_moe'
     tier: shared
-    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server]
+    systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang]
     total_raw_rows: 228443
     within_framework_dedup_rows: 11
@@ -477,7 +477,7 @@ groups:
   - op_file: moe_perf.txt
     kernel_source: 'vllm_fused_moe'
     tier: shared
-    systems: [a100_sxm, b200_sxm, b300_sxm, b60, gb200, gb300, h100_sxm, h200_sxm, l40s, rtxpro6000_blackwell_server]
+    systems: [a100_sxm, b200_sxm, b300_sxm, b60, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [vllm]
     total_raw_rows: 367818
     within_framework_dedup_rows: 12

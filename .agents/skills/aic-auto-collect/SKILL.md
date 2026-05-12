@@ -56,7 +56,7 @@ Establish these before collecting:
   - `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:<tag>`
   - `nvcr.io/nvidia/ai-dynamo/sglang-runtime:<tag>`
   - `nvcr.io/nvidia/ai-dynamo/vllm-runtime:<tag>`
-- Target system name, such as `rtxpro6000_blackwell_server`.
+- Target system name, such as `rtx_pro_6000_server`.
 - Target ops: start narrow, then expand to all relevant registry ops.
 - Whether to collect power columns.
 - Whether the GPU type is already supported by AIC.
