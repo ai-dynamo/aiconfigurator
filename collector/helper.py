@@ -713,6 +713,62 @@ def log_perf(
             os.unlink(lock_file)
 
 
+def convert_perf_csv_to_parquet(
+    csv_file: str | os.PathLike,
+    *,
+    delete_source: bool = True,
+    compression: str = "zstd",
+) -> Path:
+    """Convert a collector CSV staging file to parquet atomically."""
+    csv_path = Path(csv_file)
+    if csv_path.name == "INCOMPLETE.txt" or not csv_path.name.endswith("_perf.txt"):
+        raise ValueError(f"Expected a collector perf CSV ending in _perf.txt, got {csv_path}")
+    if not csv_path.exists():
+        raise FileNotFoundError(csv_path)
+
+    lock_path = Path(f"{csv_path}.lock")
+    if lock_path.exists():
+        raise RuntimeError(f"Cannot convert {csv_path} while lock file exists: {lock_path}")
+
+    try:
+        import pyarrow.csv as pc
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise RuntimeError(
+            "Finalizing collector perf data as parquet requires pyarrow. "
+            "Install the project runtime dependencies before collecting perf data."
+        ) from exc
+
+    parquet_path = csv_path.with_suffix(".parquet")
+    tmp_path = parquet_path.with_name(f".{parquet_path.name}.tmp")
+    try:
+        table = pc.read_csv(csv_path)
+        pq.write_table(table, tmp_path, compression=compression)
+        os.replace(tmp_path, parquet_path)
+        if delete_source:
+            csv_path.unlink()
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+    return parquet_path
+
+
+def finalize_perf_outputs(
+    output_root: str | os.PathLike = ".",
+    *,
+    delete_source: bool = True,
+    compression: str = "zstd",
+) -> list[Path]:
+    """Finalize collector CSV staging files under `output_root` as parquet."""
+    root = Path(output_root)
+    converted: list[Path] = []
+    for csv_path in sorted(root.rglob("*_perf.txt")):
+        if csv_path.name == "INCOMPLETE.txt":
+            continue
+        converted.append(convert_perf_csv_to_parquet(csv_path, delete_source=delete_source, compression=compression))
+    return converted
+
+
 # Helper functions for MoE
 def balanced_logits(num_tokens, num_experts, topk):
     import torch

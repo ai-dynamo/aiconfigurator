@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Comment Perf Parquet Diff
+
+on:
+  workflow_run:
+    workflows: ["Create Perf Parquet Diff"]
+    types: [completed]
+
+jobs:
+  post-comment:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Download parquet diff artifact bundle
+        id: download
+        uses: actions/download-artifact@v4
+        with:
+          name: perf-parquet-diff
+          path: ./artifact
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Post comment with parquet diff summary
+        if: steps.download.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const artifactDir = './artifact';
+            const prNumberFile = path.join(artifactDir, 'pr-number.txt');
+            const commentFile = path.join(artifactDir, 'comment.md');
+            const COMMENT_MARKER = '<!-- perf-parquet-diff-comment -->';
+
+            if (!fs.existsSync(prNumberFile) || !fs.existsSync(commentFile)) {
+              console.log('Missing parquet diff artifact files, skipping comment.');
+              return;
+            }
+
+            const prNumberRaw = fs.readFileSync(prNumberFile, 'utf8').trim();
+            if (!/^[0-9]+$/.test(prNumberRaw)) {
+              console.log(`Invalid PR number in artifact: ${JSON.stringify(prNumberRaw)}`);
+              return;
+            }
+            const prNumber = parseInt(prNumberRaw, 10);
+
+            let comment = fs.readFileSync(commentFile, 'utf8');
+            if (!comment.includes(COMMENT_MARKER)) {
+              comment = `${COMMENT_MARKER}\n${comment}`;
+            }
+
+            const MAX_COMMENT_LENGTH = 65536;
+            const TRUNCATED_SUFFIX = '\n\n*(comment truncated to fit GitHub comment limit)*';
+            if (comment.length > MAX_COMMENT_LENGTH) {
+              comment = comment.slice(0, MAX_COMMENT_LENGTH - TRUNCATED_SUFFIX.length) + TRUNCATED_SUFFIX;
+            }
+
+            const allComments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+
+            const botComment = allComments.find(
+              c => c.user.type === 'Bot' && c.body.includes(COMMENT_MARKER)
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment,
+              });
+              console.log('Updated existing parquet diff comment');
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: comment,
+              });
+              console.log('Created parquet diff comment');
+            }

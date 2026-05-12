@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Create Perf Parquet Diff
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'src/aiconfigurator/systems/data/**/*.parquet'
+      - 'src/aiconfigurator/systems/data/**/*_perf.txt'
+      - 'tools/perf_database/parquet_diff.py'
+      - 'tools/perf_database/parquet_textconv.py'
+      - '.gitattributes'
+
+jobs:
+  parquet-diff:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Fetch base ref and LFS objects
+        run: |
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          git fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git lfs install
+          git lfs fetch origin "refs/remotes/origin/${BASE_REF}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyarrow
+
+      - name: Create parquet diff report
+        run: |
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          python tools/perf_database/parquet_diff.py \
+            --base-ref "origin/${BASE_REF}" \
+            --head-ref HEAD \
+            --output comment.md
+
+      - name: Save PR number for downstream comment workflow
+        run: echo "${{ github.event.pull_request.number }}" > pr-number.txt
+
+      - name: Upload parquet diff artifact bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-parquet-diff
+          path: |
+            comment.md
+            pr-number.txt
+          retention-days: 30
