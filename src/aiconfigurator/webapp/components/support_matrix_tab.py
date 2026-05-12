@@ -22,43 +22,37 @@ def parse_version(ver_str):
 # Cell colors for support matrix (used in styling and legend)
 COLOR_FAIL_BG = "#ffcccc"
 COLOR_FAIL_TEXT = "#cc0000"
-COLOR_AT_OR_ABOVE_MIN = "#80ff80"  # Green: version at or above target
-COLOR_BELOW_MIN = "#ccffcc"  # Light green: version below target
+COLOR_LATEST_PASS = "#80ff80"  # Green: latest tested backend version passes
+COLOR_OLDER_PASS = "#ccffcc"  # Light green: older tested backend version passes
 
 SUPPORT_MATRIX_LEGEND = (
     f'<div style="margin-bottom: 10px; font-size: 0.95em;">'
     f"<strong>Legend:</strong>"
     f'<span style="margin-left: 8px; margin-right: 24px;">'
-    f'<span style="background: {COLOR_AT_OR_ABOVE_MIN}; padding: 2px 10px; border-radius: 4px; margin-right: 8px;">Green</span>'
-    f"at or above target version</span>"
+    f'<span style="background: {COLOR_LATEST_PASS}; padding: 2px 10px; border-radius: 4px; margin-right: 8px;">Green</span>'
+    f"latest tested version passes</span>"
     f'<span style="margin-right: 24px;">'
-    f'<span style="background: {COLOR_BELOW_MIN}; padding: 2px 10px; border-radius: 4px; margin-right: 8px;">Light green</span>'
-    f"below target version</span>"
+    f'<span style="background: {COLOR_OLDER_PASS}; padding: 2px 10px; border-radius: 4px; margin-right: 8px;">Light green</span>'
+    f"older tested version passes</span>"
     f'<span style="margin-right: 24px;">'
     f'<span style="background: {COLOR_FAIL_BG}; color: {COLOR_FAIL_TEXT}; padding: 2px 10px; border-radius: 4px; font-weight: bold;">FAIL</span>'
     f" test failed (click cell to see error message)</span>"
     f"</div>"
 )
 
-# Hard-coded target version per backend (used for "target" check and as minimum for green)
-TARGET_VERSIONS = {
-    "vllm": "0.14.0",
-    "sglang": "0.5.9",
-    "trtllm": "1.2.0rc6",
-}
-
 
 def get_latest_supported_version(df, huggingface_id, system, backend):
     """
     Get the latest version status for a given HuggingFace ID and system combination.
-    Uses hard-coded latest versions. If the latest version fails, returns "FAIL".
+    Uses the latest backend version present in the filtered matrix data. If that
+    latest version fails for the model/system/backend combination, returns "FAIL".
 
     Returns:
         tuple: (version, is_latest, error_msg) where:
             - version: Latest version string if latest version passes, "FAIL" if latest version fails,
                        None if no data exists
-            - is_latest: True if the returned version is at or above the hard-coded minimum (green),
-                         False if below (light green). Ignored when version is "FAIL".
+            - is_latest: True if the returned version is the latest tested version (green),
+                         False if an older passing version is shown (light green). Ignored when version is "FAIL".
             - error_msg: Error message if version fails, None otherwise
     """
     # Filter for this specific combination (both PASS and FAIL)
@@ -106,29 +100,19 @@ def get_latest_supported_version(df, huggingface_id, system, backend):
     if len(version_has_fail) == 0 and len(version_has_pass) == 0:
         return (None, False, None)
 
-    min_ver = TARGET_VERSIONS.get(backend)
+    backend_versions = df[(df["System"] == system) & (df["Backend"] == backend)]["Version"].dropna().unique()
+    latest_version = max((str(version) for version in backend_versions), key=parse_version, default=None)
+    if latest_version in version_has_pass:
+        return (latest_version, True, None)
+    if latest_version in version_has_fail:
+        error_msg = version_error_msgs.get(latest_version, "No error message available")
+        return ("FAIL", False, error_msg)
 
-    def at_or_above_min(ver_str):
-        if min_ver is None:
-            return True
-        try:
-            return parse_version(ver_str) >= parse_version(min_ver)
-        except Exception:
-            return False
-
-    latest_version = min_ver
-    if latest_version is not None:
-        if latest_version in version_has_pass:
-            return (latest_version, at_or_above_min(latest_version), None)
-        if latest_version in version_has_fail:
-            error_msg = version_error_msgs.get(latest_version, "No error message available")
-            return ("FAIL", False, error_msg)
-
-    # Hard-coded latest not in data or no min set - find the latest passing version
+    # Latest backend version is not tested for this model; show the newest passing version.
     passing_versions = sorted(version_has_pass.keys(), key=parse_version, reverse=True)
     if passing_versions:
         v = passing_versions[0]
-        return (v, at_or_above_min(v), None)
+        return (v, False, None)
     else:
         # No passing version exists - collect error messages from all failed versions
         all_error_msgs = []
@@ -202,9 +186,9 @@ def create_system_matrix(df, system_name, mode_filter="all"):
             elif (row_idx, col_idx - 1) in matrix_is_latest:
                 is_latest = matrix_is_latest.get((row_idx, col_idx - 1), True)
                 if not is_latest:
-                    styles[col_idx] = f"background-color: {COLOR_BELOW_MIN};"
+                    styles[col_idx] = f"background-color: {COLOR_OLDER_PASS};"
                 else:
-                    styles[col_idx] = f"background-color: {COLOR_AT_OR_ABOVE_MIN};"
+                    styles[col_idx] = f"background-color: {COLOR_LATEST_PASS};"
         return styles
 
     # Apply styling using pandas Styler
