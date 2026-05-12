@@ -9,8 +9,10 @@ import functools
 import importlib.resources as pkg_resources
 import logging
 import os
+import traceback
 from collections import UserDict, defaultdict
 from collections.abc import Callable, Iterable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
 
 import numpy as np
@@ -402,72 +404,211 @@ def get_database(
     return None
 
 
-def get_all_databases(
-    systems_paths: str | os.PathLike | Iterable[str] | None = None,
-) -> dict[str, dict[str, dict[str, PerfDatabase]]]:
-    """
-    Get all the databases for all the systems, backends and versions
-    """
-    database_dict = defaultdict(lambda: defaultdict(lambda: defaultdict()))
-    if systems_paths is None:
-        systems_paths = get_systems_paths()
-    elif isinstance(systems_paths, str):
-        systems_paths = [systems_paths]
+DatabaseRef = tuple[str, str, str, str]
+LoadedDatabaseResult = tuple[DatabaseRef, object | None, str | None]
 
-    seen_systems: dict[str, str] = {}
+
+def _as_systems_path_list(systems_paths: str | os.PathLike | Iterable[str] | None) -> list[str]:
+    if systems_paths is None:
+        return get_systems_paths()
+    if isinstance(systems_paths, (str, os.PathLike)):
+        return [os.fspath(systems_paths)]
+    return [os.fspath(path) for path in systems_paths]
+
+
+def _iter_system_yaml_files(systems_paths: list[str]):
     for systems_root in systems_paths:
         try:
-            entries = os.listdir(systems_root)
+            entries = sorted(os.listdir(systems_root))
         except Exception as e:
             logger.warning("Could not list systems dir %s: %s", systems_root, e)
             continue
+
         for entry in entries:
-            if not entry.endswith(".yaml"):
+            if entry.endswith(".yaml"):
+                yield systems_root, entry[:-5], os.path.join(systems_root, entry)
+
+
+def _load_system_spec(system_yaml_path: str) -> dict | None:
+    try:
+        with open(system_yaml_path) as f:
+            system_spec = yaml.load(f, Loader=yaml.SafeLoader)
+    except Exception as e:
+        logger.warning("Could not process system config %s: %s", os.path.basename(system_yaml_path), e)
+        return None
+    if not isinstance(system_spec, dict) or "data_dir" not in system_spec:
+        logger.warning("Could not process system config %s: missing data_dir", os.path.basename(system_yaml_path))
+        return None
+    return system_spec
+
+
+def _iter_database_refs_for_system(systems_root: str, system: str, system_spec: dict):
+    data_dir = os.path.join(systems_root, system_spec["data_dir"])
+    if not os.path.isdir(data_dir):
+        return
+
+    for backend in common.BackendName:
+        backend_name = backend.value
+        backend_path = os.path.join(data_dir, backend_name)
+        if not os.path.isdir(backend_path):
+            continue
+
+        for version in sorted(os.listdir(backend_path)):
+            version_path = os.path.join(backend_path, version)
+            if version.startswith(".") or not os.path.isdir(version_path):
                 continue
-            system = entry[:-5]
-            if system in seen_systems:
+            if os.path.isfile(os.path.join(version_path, "INCOMPLETE.txt")):
+                continue
+            yield system, backend_name, version, systems_root
+
+
+def _discover_database_refs(systems_paths: list[str]) -> list[DatabaseRef]:
+    refs: list[DatabaseRef] = []
+    seen_systems: dict[str, str] = {}
+    seen_databases: dict[tuple[str, str, str], str] = {}
+
+    for systems_root, system, system_yaml_path in _iter_system_yaml_files(systems_paths):
+        if system in seen_systems:
+            logger.warning(
+                "System config '%s' already loaded from %s; also found in %s",
+                system,
+                seen_systems[system],
+                systems_root,
+            )
+        else:
+            seen_systems[system] = systems_root
+
+        system_spec = _load_system_spec(system_yaml_path)
+        if system_spec is None:
+            continue
+
+        for ref in _iter_database_refs_for_system(systems_root, system, system_spec):
+            db_key = ref[:3]
+            existing_root = seen_databases.get(db_key)
+            if existing_root is not None:
                 logger.warning(
-                    "System config '%s' already loaded from %s; also found in %s",
-                    system,
-                    seen_systems[system],
+                    "Database '%s/%s/%s' already loaded from %s; ignoring %s",
+                    db_key[0],
+                    db_key[1],
+                    db_key[2],
+                    existing_root,
                     systems_root,
                 )
-            else:
-                seen_systems[system] = systems_root
-            system_yaml_path = os.path.join(systems_root, entry)
+                continue
+            seen_databases[db_key] = systems_root
+            refs.append(ref)
+
+    return refs
+
+
+def _finalize_loaded_value(value):
+    if isinstance(value, SystemSpec):
+        return value
+    if isinstance(value, LoadedOpData):
+        value.data = _finalize_loaded_value(value.data)
+        return value
+    if isinstance(value, defaultdict):
+        return {_finalize_loaded_value(key): _finalize_loaded_value(item) for key, item in value.items()}
+    if isinstance(value, dict):
+        return {_finalize_loaded_value(key): _finalize_loaded_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_finalize_loaded_value(item) for item in value)
+    if isinstance(value, list):
+        return [_finalize_loaded_value(item) for item in value]
+    return value
+
+
+def _load_database_ref(ref: DatabaseRef) -> LoadedDatabaseResult:
+    system, backend, version, systems_root = ref
+    try:
+        database = get_database(system, backend, version, systems_root)
+        if database is None:
+            return ref, None, "get_database returned None"
+        return ref, database, None
+    except Exception:
+        return ref, None, traceback.format_exc()
+
+
+def _new_database_dict() -> dict[str, dict[str, dict[str, PerfDatabase]]]:
+    return defaultdict(lambda: defaultdict(lambda: defaultdict()))
+
+
+def _store_loaded_database(
+    database_dict: dict[str, dict[str, dict[str, PerfDatabase]]],
+    ref: DatabaseRef,
+    database: PerfDatabase,
+) -> None:
+    system, backend, version, systems_root = ref
+    database_dict[system][backend][version] = database
+    databases_cache[(systems_root, system, False)][backend][version] = database
+
+
+def _load_database_ref_in_parent(ref: DatabaseRef) -> PerfDatabase | None:
+    system, backend, version, systems_root = ref
+    return get_database(system, backend, version, systems_root)
+
+
+def get_all_databases(
+    systems_paths: str | os.PathLike | Iterable[str] | None = None,
+    max_workers: int | None = None,
+) -> dict[str, dict[str, dict[str, PerfDatabase]]]:
+    """
+    Get all databases for all systems, backends, and versions.
+
+    Discovery stays in-process so path precedence and duplicate warnings are
+    deterministic. Database construction runs in a process pool because loading
+    the CSV-backed op tables is the expensive part.
+    """
+    database_dict = _new_database_dict()
+    refs = _discover_database_refs(_as_systems_path_list(systems_paths))
+    if not refs:
+        return database_dict
+
+    if max_workers is None:
+        max_workers = min(len(refs), max(1, (os.cpu_count() or 1) - 1))
+    else:
+        max_workers = max(1, min(max_workers, len(refs)))
+
+    if max_workers == 1:
+        for ref in refs:
+            database = _load_database_ref_in_parent(ref)
+            if database is not None:
+                _store_loaded_database(database_dict, ref, database)
+        return database_dict
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_load_database_ref, ref): ref for ref in refs}
+        for future in as_completed(futures):
+            ref = futures[future]
+            system, backend, version, systems_root = ref
             try:
-                with open(system_yaml_path) as f:
-                    system_spec = yaml.load(f, Loader=yaml.SafeLoader)
-                data_dir = os.path.join(systems_root, system_spec["data_dir"])
-                if not os.path.exists(data_dir):
-                    continue
-                for backend in common.BackendName:
-                    if not os.path.exists(os.path.join(data_dir, backend.value)):
-                        continue
-                    backend_path = os.path.join(data_dir, backend.value)
-                    for version in os.listdir(backend_path):
-                        if version.startswith("."):
-                            continue
-                        if os.path.isfile(os.path.join(backend_path, version, "INCOMPLETE.txt")):
-                            continue
-                        database = get_database(system, backend.value, version, systems_root)
-                        if database is None:
-                            continue
-                        if version in database_dict[system][backend.value]:
-                            existing = database_dict[system][backend.value][version]
-                            existing_root = getattr(existing, "systems_root", None) or "unknown"
-                            logger.warning(
-                                "Database '%s/%s/%s' already loaded from %s; ignoring %s",
-                                system,
-                                backend.value,
-                                version,
-                                existing_root,
-                                systems_root,
-                            )
-                            continue
-                        database_dict[system][backend.value][version] = database
-            except Exception as e:
-                logger.warning(f"Could not process system config {os.path.basename(system_yaml_path)}: {e}")
+                loaded_ref, database, error = future.result()
+            except Exception:
+                logger.warning(
+                    "Parallel load failed for %s/%s/%s from %s; retrying in parent",
+                    system,
+                    backend,
+                    version,
+                    systems_root,
+                    exc_info=True,
+                )
+                database = _load_database_ref_in_parent(ref)
+                if database is not None:
+                    _store_loaded_database(database_dict, ref, database)
+                continue
+
+            if error is not None:
+                logger.warning(
+                    "Could not load database %s/%s/%s from %s: %s",
+                    system,
+                    backend,
+                    version,
+                    systems_root,
+                    error,
+                )
+                continue
+            if database is not None:
+                _store_loaded_database(database_dict, loaded_ref, database)
 
     return database_dict
 
@@ -3324,6 +3465,12 @@ class PerfDatabase:
         self._correct_data()
 
         self._update_support_matrix()
+        self._finalize_loaded_data()
+
+    def _finalize_loaded_data(self) -> None:
+        """Stop loader-time defaultdicts from mutating database state after construction."""
+        for attr, value in list(vars(self).items()):
+            setattr(self, attr, _finalize_loaded_value(value))
 
     def _update_support_matrix(self):
         """

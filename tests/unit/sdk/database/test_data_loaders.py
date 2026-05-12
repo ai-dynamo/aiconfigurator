@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from collections import defaultdict
 from itertools import product
 
 import pytest
@@ -13,8 +14,11 @@ from aiconfigurator.sdk.common import (
     GEMMQuantMode,
     KVCacheQuantMode,
     MoEQuantMode,
+    PerfDataFilename,
 )
 from aiconfigurator.sdk.perf_database import (
+    LoadedOpData,
+    PerfDatabase,
     databases_cache,
     get_all_databases,
     get_database,
@@ -44,6 +48,30 @@ class DummyPerfDatabase:
         self.version = version
         self.systems_root = systems_root_arg
         self.database_mode = database_mode
+
+
+def test_perf_database_finalize_loaded_data_converts_defaultdicts():
+    nested = defaultdict(lambda: defaultdict(dict))
+    nested["fp8"][128]["latency"] = 1.0
+
+    loaded = LoadedOpData(nested, PerfDataFilename.gemm, "gemm_perf.txt")
+    database = object.__new__(PerfDatabase)
+    database._gemm_data = loaded
+    database._raw_nested_data = {"loaded": loaded, "nested": nested}
+
+    database._finalize_loaded_data()
+
+    assert isinstance(database._gemm_data, LoadedOpData)
+    assert isinstance(database._gemm_data.data, dict)
+    assert not isinstance(database._gemm_data.data, defaultdict)
+    assert isinstance(database._gemm_data.data["fp8"], dict)
+    assert not isinstance(database._gemm_data.data["fp8"], defaultdict)
+    assert database._gemm_data["fp8"][128]["latency"] == 1.0
+    assert isinstance(database._raw_nested_data, dict)
+    assert isinstance(database._raw_nested_data["nested"], dict)
+    assert not isinstance(database._raw_nested_data["nested"], defaultdict)
+    with pytest.raises(KeyError):
+        database._gemm_data["missing"]
 
 
 def test_get_database_with_yaml_and_data_path(tmp_path, monkeypatch):
