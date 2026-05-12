@@ -160,8 +160,8 @@ def enumerate_parallel_config(
                                     continue
                                 # sglang
                                 elif backend == common.BackendName.sglang:
-                                    if (enable_wideep or moe_backend == "deepep_moe") and moe_tp > 1:
-                                        continue  # DeepEP forces ep_size=tp_size, moe_tp must be 1
+                                    if (enable_wideep or moe_backend in {"deepep_moe", "megamoe"}) and moe_tp > 1:
+                                        continue  # SGLang EP-only MoE backends require moe_tp=1.
                                 elif backend == common.BackendName.vllm:  # noqa: SIM102
                                     if moe_tp > 1 and moe_ep > 1:
                                         continue  # vllm does not support MoE TP and MoE EP simultaneously

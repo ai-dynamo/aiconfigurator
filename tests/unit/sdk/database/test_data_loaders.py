@@ -15,6 +15,8 @@ from aiconfigurator.sdk.common import (
     MoEQuantMode,
 )
 from aiconfigurator.sdk.perf_database import (
+    PerfDatabase,
+    PerfDataNotAvailableError,
     databases_cache,
     get_all_databases,
     get_database,
@@ -23,6 +25,7 @@ from aiconfigurator.sdk.perf_database import (
     load_context_mla_data,
     load_context_mla_module_data,
     load_custom_allreduce_data,
+    load_dsv4_megamoe_module_data,
     load_gemm_data,
     load_generation_attention_data,
     load_generation_mla_data,
@@ -417,6 +420,281 @@ def test_load_moe_data_basic(tmp_path):
     assert 2 in data[qm]["uniform"][2][4][16][32][2]  # moe_ep_size
     assert 1 in data[qm]["uniform"][2][4][16][32][2][2]  # num_tokens
     assert data[qm]["uniform"][2][4][16][32][2][2][1]["latency"] == pytest.approx(1.23)
+
+
+def test_load_dsv4_megamoe_module_data_slim_schema(tmp_path):
+    csv_file = tmp_path / "dsv4_megamoe_module_perf.txt"
+    csv_file.write_text(
+        "framework,version,device,op_name,kernel_source,phase,moe_dtype,kernel_dtype,"
+        "num_tokens,global_num_tokens,hidden_size,inter_size,topk,num_experts,"
+        "num_fused_shared_experts,moe_tp_size,moe_ep_size,distribution,source_policy,"
+        "pre_dispatch,num_max_tokens_per_rank,"
+        "effective_num_max_tokens_per_rank,routed_scaling_factor,includes_routed_scale,"
+        "includes_gate_topk,buffer_policy,includes_buffer_init,used_cuda_graph,"
+        "latency\n"
+        "SGLang,unknown,NVIDIA GB200,dsv4_megamoe_module,deepgemm_megamoe,context,"
+        "w4a8_mxfp4_mxfp8,fp8_fp4,1024,8192,7168,3072,6,384,0,1,8,"
+        "balanced,random,sglang_jit,16384,16448,2.5,true,false,"
+        "cached_sglang,false,true,1.25\n"
+    )
+
+    data = load_dsv4_megamoe_module_data(str(csv_file))
+
+    leaf = data["context"]["deepgemm_megamoe"]["fp8_fp4"][MoEQuantMode.w4a8_mxfp4_mxfp8]["sglang_jit"]["random"][
+        "balanced"
+    ][6][384][0][7168][3072][1][8][1024]
+    assert leaf["latency"] == pytest.approx(1.25)
+    assert leaf["global_num_tokens"] == 8192
+    assert leaf["effective_num_max_tokens_per_rank"] == 16448
+    assert leaf["phase"] == "context"
+
+
+def test_load_dsv4_megamoe_module_data_requires_phase_for_unified_file(tmp_path):
+    csv_file = tmp_path / "dsv4_megamoe_module_perf.txt"
+    csv_file.write_text(
+        "framework,version,device,op_name,kernel_source,moe_dtype,kernel_dtype,"
+        "num_tokens,global_num_tokens,hidden_size,inter_size,topk,num_experts,"
+        "num_fused_shared_experts,moe_tp_size,moe_ep_size,distribution,source_policy,"
+        "pre_dispatch,num_max_tokens_per_rank,"
+        "effective_num_max_tokens_per_rank,routed_scaling_factor,includes_routed_scale,"
+        "includes_gate_topk,buffer_policy,includes_buffer_init,used_cuda_graph,"
+        "latency\n"
+        "SGLang,unknown,NVIDIA GB200,dsv4_megamoe_module,deepgemm_megamoe,"
+        "w4a8_mxfp4_mxfp8,fp8_fp4,1024,8192,7168,3072,6,384,0,1,8,"
+        "balanced,random,sglang_jit,16384,16448,2.5,true,false,"
+        "cached_sglang,false,true,1.25\n"
+    )
+
+    with pytest.raises(ValueError, match="unified perf file requires a phase column"):
+        load_dsv4_megamoe_module_data(str(csv_file))
+
+
+def test_load_dsv4_megamoe_split_context_file_infers_missing_phase(tmp_path):
+    csv_file = tmp_path / "dsv4_megamoe_context_module_perf.txt"
+    csv_file.write_text(
+        "framework,version,device,op_name,kernel_source,moe_dtype,kernel_dtype,"
+        "num_tokens,global_num_tokens,hidden_size,inter_size,topk,num_experts,"
+        "num_fused_shared_experts,moe_tp_size,moe_ep_size,distribution,source_policy,"
+        "pre_dispatch,num_max_tokens_per_rank,"
+        "effective_num_max_tokens_per_rank,routed_scaling_factor,includes_routed_scale,"
+        "includes_gate_topk,buffer_policy,includes_buffer_init,used_cuda_graph,"
+        "latency\n"
+        "SGLang,unknown,NVIDIA GB200,dsv4_megamoe_module,deepgemm_megamoe,"
+        "w4a8_mxfp4_mxfp8,fp8_fp4,1024,8192,7168,3072,6,384,0,1,8,"
+        "balanced,random,sglang_jit,16384,16448,2.5,true,false,"
+        "cached_sglang,false,true,1.25\n"
+    )
+
+    data = load_dsv4_megamoe_module_data(str(csv_file))
+
+    leaf = data["context"]["deepgemm_megamoe"]["fp8_fp4"][MoEQuantMode.w4a8_mxfp4_mxfp8]["sglang_jit"]["random"][
+        "balanced"
+    ][6][384][0][7168][3072][1][8][1024]
+    assert leaf["phase"] == "context"
+
+
+def test_load_dsv4_megamoe_module_data_merges_source_list(tmp_path):
+    context_file = tmp_path / "dsv4_megamoe_context_module_perf.txt"
+    generation_file = tmp_path / "dsv4_megamoe_generation_module_perf.txt"
+    header = (
+        "framework,version,device,op_name,kernel_source,moe_dtype,kernel_dtype,"
+        "num_tokens,global_num_tokens,hidden_size,inter_size,topk,num_experts,"
+        "num_fused_shared_experts,moe_tp_size,moe_ep_size,distribution,source_policy,"
+        "pre_dispatch,num_max_tokens_per_rank,"
+        "effective_num_max_tokens_per_rank,routed_scaling_factor,includes_routed_scale,"
+        "includes_gate_topk,buffer_policy,includes_buffer_init,used_cuda_graph,"
+        "latency\n"
+    )
+    row = (
+        "SGLang,unknown,NVIDIA GB200,dsv4_megamoe_module,deepgemm_megamoe,"
+        "w4a8_mxfp4_mxfp8,fp8_fp4,1024,8192,7168,3072,6,384,0,1,8,"
+        "balanced,random,sglang_jit,16384,16448,2.5,true,false,"
+        "cached_sglang,false,true,{latency}\n"
+    )
+    context_file.write_text(header + row.format(latency=1.25))
+    generation_file.write_text(header + row.format(latency=2.5))
+
+    data = load_dsv4_megamoe_module_data([str(context_file), str(generation_file), str(tmp_path / "missing.txt")])
+
+    context_leaf = data["context"]["deepgemm_megamoe"]["fp8_fp4"][MoEQuantMode.w4a8_mxfp4_mxfp8]["sglang_jit"][
+        "random"
+    ]["balanced"][6][384][0][7168][3072][1][8][1024]
+    generation_leaf = data["generation"]["deepgemm_megamoe"]["fp8_fp4"][MoEQuantMode.w4a8_mxfp4_mxfp8]["sglang_jit"][
+        "random"
+    ]["balanced"][6][384][0][7168][3072][1][8][1024]
+    assert context_leaf["latency"] == pytest.approx(1.25)
+    assert generation_leaf["latency"] == pytest.approx(2.5)
+
+
+def test_load_dsv4_megamoe_module_data_accepts_filtered_source_tuples(tmp_path):
+    csv_file = tmp_path / "dsv4_megamoe_module_perf.txt"
+    header = (
+        "framework,version,device,op_name,kernel_source,phase,moe_dtype,kernel_dtype,"
+        "num_tokens,global_num_tokens,hidden_size,inter_size,topk,num_experts,"
+        "num_fused_shared_experts,moe_tp_size,moe_ep_size,distribution,source_policy,"
+        "pre_dispatch,num_max_tokens_per_rank,"
+        "effective_num_max_tokens_per_rank,routed_scaling_factor,includes_routed_scale,"
+        "includes_gate_topk,buffer_policy,includes_buffer_init,used_cuda_graph,"
+        "latency\n"
+    )
+    row = (
+        "SGLang,unknown,NVIDIA GB200,dsv4_megamoe_module,{kernel_source},context,"
+        "w4a8_mxfp4_mxfp8,fp8_fp4,1024,8192,7168,3072,6,384,0,1,8,"
+        "balanced,random,sglang_jit,16384,16448,2.5,true,false,"
+        "cached_sglang,false,true,{latency}\n"
+    )
+    csv_file.write_text(
+        header
+        + row.format(kernel_source="wrong_kernel", latency=99.0)
+        + row.format(kernel_source="deepgemm_megamoe", latency=1.25)
+    )
+
+    data = load_dsv4_megamoe_module_data([(str(csv_file), {"deepgemm_megamoe"})])
+
+    assert "wrong_kernel" not in data["context"]
+    leaf = data["context"]["deepgemm_megamoe"]["fp8_fp4"][MoEQuantMode.w4a8_mxfp4_mxfp8]["sglang_jit"]["random"][
+        "balanced"
+    ][6][384][0][7168][3072][1][8][1024]
+    assert leaf["latency"] == pytest.approx(1.25)
+
+
+def test_load_dsv4_megamoe_module_data_missing_source_list_returns_none(tmp_path):
+    assert load_dsv4_megamoe_module_data([str(tmp_path / "missing_a.txt"), str(tmp_path / "missing_b.txt")]) is None
+
+
+def test_load_dsv4_megamoe_module_data_skips_nested_none_sources(tmp_path):
+    assert load_dsv4_megamoe_module_data([None, [None, str(tmp_path / "missing.txt")]]) is None
+
+
+def test_query_dsv4_megamoe_module_missing_data_raises(tmp_path):
+    systems_root = tmp_path / "systems"
+    data_dir = systems_root / "data" / "sglang" / "0.5.10"
+    data_dir.mkdir(parents=True)
+    (systems_root / "gb200.yaml").write_text(
+        yaml.safe_dump({"data_dir": "data", "gpu": {"sm_version": 100}, "misc": {"nccl_version": "test"}})
+    )
+
+    db = PerfDatabase("gb200", "sglang", "0.5.10", str(systems_root))
+
+    assert db.supported_quant_mode["dsv4_megamoe_module"] == []
+    with pytest.raises(PerfDataNotAvailableError, match="dsv4_megamoe_module"):
+        db.query_dsv4_megamoe_module(
+            num_tokens=1024,
+            hidden_size=7168,
+            inter_size=3072,
+            topk=6,
+            num_experts=384,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            quant_mode=MoEQuantMode.w4a8_mxfp4_mxfp8,
+            workload_distribution="balanced",
+            is_context=True,
+        )
+
+
+def test_perf_database_merges_dsv4_megamoe_split_files_for_generic_capability(tmp_path):
+    systems_root = tmp_path / "systems"
+    data_dir = systems_root / "data" / "sglang" / "0.5.10"
+    data_dir.mkdir(parents=True)
+    (systems_root / "gb200.yaml").write_text(yaml.safe_dump({"data_dir": "data", "misc": {"nccl_version": "test"}}))
+
+    header = (
+        "framework,version,device,op_name,kernel_source,moe_dtype,kernel_dtype,"
+        "num_tokens,global_num_tokens,hidden_size,inter_size,topk,num_experts,"
+        "num_fused_shared_experts,moe_tp_size,moe_ep_size,distribution,source_policy,"
+        "pre_dispatch,num_max_tokens_per_rank,"
+        "effective_num_max_tokens_per_rank,routed_scaling_factor,includes_routed_scale,"
+        "includes_gate_topk,buffer_policy,includes_buffer_init,used_cuda_graph,"
+        "latency\n"
+    )
+    row = (
+        "SGLang,unknown,NVIDIA GB200,dsv4_megamoe_module,deepgemm_megamoe,"
+        "w4a8_mxfp4_mxfp8,fp8_fp4,1024,8192,7168,3072,6,384,0,1,8,"
+        "balanced,random,sglang_jit,1024,1024,2.5,true,false,"
+        "cached_sglang,false,true,{latency}\n"
+    )
+    (data_dir / "dsv4_megamoe_context_module_perf.txt").write_text(header + row.format(latency=1.25))
+    (data_dir / "dsv4_megamoe_generation_module_perf.txt").write_text(header + row.format(latency=2.5))
+
+    db = PerfDatabase("gb200", "sglang", "0.5.10", str(systems_root))
+
+    assert db.supported_quant_mode["dsv4_megamoe_module"] == ["w4a8_mxfp4_mxfp8"]
+    assert db.supported_quant_mode["dsv4_megamoe_context_module"] == ["w4a8_mxfp4_mxfp8"]
+    assert db.supported_quant_mode["dsv4_megamoe_generation_module"] == ["w4a8_mxfp4_mxfp8"]
+    assert float(
+        db.query_dsv4_megamoe_module(
+            num_tokens=1024,
+            hidden_size=7168,
+            inter_size=3072,
+            topk=6,
+            num_experts=384,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            quant_mode=MoEQuantMode.w4a8_mxfp4_mxfp8,
+            workload_distribution="balanced",
+            is_context=True,
+        )
+    ) == pytest.approx(1.25)
+    assert float(
+        db.query_dsv4_megamoe_module(
+            num_tokens=1024,
+            hidden_size=7168,
+            inter_size=3072,
+            topk=6,
+            num_experts=384,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            quant_mode=MoEQuantMode.w4a8_mxfp4_mxfp8,
+            workload_distribution="balanced",
+            is_context=False,
+        )
+    ) == pytest.approx(2.5)
+
+
+def test_query_dsv4_megamoe_module_interpolates_energy_from_rows(tmp_path):
+    systems_root = tmp_path / "systems"
+    data_dir = systems_root / "data" / "sglang" / "0.5.10"
+    data_dir.mkdir(parents=True)
+    (systems_root / "gb200.yaml").write_text(yaml.safe_dump({"data_dir": "data", "misc": {"nccl_version": "test"}}))
+
+    header = (
+        "framework,version,device,op_name,kernel_source,phase,moe_dtype,kernel_dtype,"
+        "num_tokens,global_num_tokens,hidden_size,inter_size,topk,num_experts,"
+        "num_fused_shared_experts,moe_tp_size,moe_ep_size,distribution,source_policy,"
+        "pre_dispatch,num_max_tokens_per_rank,"
+        "effective_num_max_tokens_per_rank,routed_scaling_factor,includes_routed_scale,"
+        "includes_gate_topk,buffer_policy,includes_buffer_init,used_cuda_graph,"
+        "latency,power\n"
+    )
+    row = (
+        "SGLang,unknown,NVIDIA GB200,dsv4_megamoe_module,deepgemm_megamoe,context,"
+        "w4a8_mxfp4_mxfp8,fp8_fp4,{num_tokens},8192,7168,3072,6,384,0,1,8,"
+        "balanced,random,sglang_jit,1024,1024,2.5,true,false,"
+        "cached_sglang,false,true,{latency},{power}\n"
+    )
+    (data_dir / "dsv4_megamoe_module_perf.txt").write_text(
+        header
+        + row.format(num_tokens=1024, latency=1.0, power=100.0)
+        + row.format(num_tokens=2048, latency=3.0, power=200.0)
+    )
+
+    db = PerfDatabase("gb200", "sglang", "0.5.10", str(systems_root))
+    result = db.query_dsv4_megamoe_module(
+        num_tokens=1536,
+        hidden_size=7168,
+        inter_size=3072,
+        topk=6,
+        num_experts=384,
+        moe_tp_size=1,
+        moe_ep_size=8,
+        quant_mode=MoEQuantMode.w4a8_mxfp4_mxfp8,
+        workload_distribution="balanced",
+        is_context=True,
+    )
+
+    assert float(result) == pytest.approx(2.0)
+    assert result.power == pytest.approx(175.0)
+    assert result.energy == pytest.approx(350.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

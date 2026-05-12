@@ -165,24 +165,24 @@ def interp_1d(x: list[int], y: list, value: int):
     y0, y1 = y
 
     if isinstance(y0, dict) and isinstance(y1, dict):
+
+        def _interp_metric(metric0, metric1):
+            if (x0 - x1) * (metric0 - metric1) < 0 and (value - x0) * (value - x1) > 0:
+                metric1 = metric0
+            if metric0 == metric1:
+                return metric0
+            return metric0 + (metric1 - metric0) / (x1 - x0) * (value - x0)
+
         lat0, lat1 = y0["latency"], y1["latency"]
         pow0, pow1 = y0["power"], y1["power"]
+        energy0 = y0.get("energy", pow0 * lat0)
+        energy1 = y1.get("energy", pow1 * lat1)
 
-        if (x0 - x1) * (lat0 - lat1) < 0 and (value - x0) * (value - x1) > 0:
-            lat1 = lat0
-        if lat0 == lat1:
-            lat_result = lat0
-        else:
-            lat_result = lat0 + (lat1 - lat0) / (x1 - x0) * (value - x0)
-
-        if (x0 - x1) * (pow0 - pow1) < 0 and (value - x0) * (value - x1) > 0:
-            pow1 = pow0
-        if pow0 == pow1:
-            pow_result = pow0
-        else:
-            pow_result = pow0 + (pow1 - pow0) / (x1 - x0) * (value - x0)
-
-        return {"latency": lat_result, "power": pow_result}
+        return {
+            "latency": _interp_metric(lat0, lat1),
+            "power": _interp_metric(pow0, pow1),
+            "energy": _interp_metric(energy0, energy1),
+        }
 
     if (x0 - x1) * (y0 - y1) < 0 and (value - x0) * (value - x1) > 0:
         y1 = y0

@@ -54,6 +54,9 @@ class PerfFile(str, Enum):
     # perf_database — no CSV is collected for them.
     DSV4_FLASH_PAGED_MQA_LOGITS_MODULE = "dsv4_flash_paged_mqa_logits_module_perf.txt"
     DSV4_FLASH_HCA_ATTN_MODULE = "dsv4_flash_hca_attn_module_perf.txt"
+    DSV4_MEGAMOE_MODULE = "dsv4_megamoe_module_perf.txt"
+    DSV4_MEGAMOE_CONTEXT_MODULE = "dsv4_megamoe_context_module_perf.txt"
+    DSV4_MEGAMOE_GENERATION_MODULE = "dsv4_megamoe_generation_module_perf.txt"
     NCCL = "nccl_perf.txt"
     CUSTOM_ALLREDUCE = "custom_allreduce_perf.txt"
     TRTLLM_ALLTOALL = "trtllm_alltoall_perf.txt"

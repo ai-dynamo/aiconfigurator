@@ -556,6 +556,111 @@ class MoE(Operation):
         return self._weights * self._scale_factor
 
 
+class DeepSeekV4MegaMoEModule(Operation):
+    """
+    SGLang DeepSeek-V4 MegaMoE routed module.
+
+    This models the measured routed MegaMoE module boundary used by
+    ``collector/sglang/collect_dsv4_megamoe.py``: prepared hidden states and
+    top-k tensors -> SGLang pre-dispatch -> ``deep_gemm.fp8_fp4_mega_moe`` ->
+    routed output scaling.  Gate/top-k and shared experts are modeled outside
+    this operation.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        moe_tp_size: int,
+        moe_ep_size: int,
+        quant_mode: common.MoEQuantMode,
+        workload_distribution: str,
+        is_context: bool = True,
+        source_policy: str = "random",
+        pre_dispatch: str = "sglang_jit",
+        num_fused_shared_experts: int = 0,
+        kernel_source: str = "deepgemm_megamoe",
+        kernel_dtype: str = "fp8_fp4",
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._hidden_size = hidden_size
+        self._inter_size = inter_size
+        self._topk = topk
+        self._num_experts = num_experts
+        self._moe_tp_size = moe_tp_size
+        self._moe_ep_size = moe_ep_size
+        self._quant_mode = quant_mode
+        self._workload_distribution = self._normalize_distribution(workload_distribution)
+        self._is_context = is_context
+        self._source_policy = source_policy
+        self._pre_dispatch = pre_dispatch
+        self._num_fused_shared_experts = num_fused_shared_experts
+        self._kernel_source = kernel_source
+        self._kernel_dtype = kernel_dtype
+        self._weights = (
+            self._hidden_size
+            * self._inter_size
+            * self._num_experts
+            * quant_mode.value.memory
+            * 3
+            // self._moe_ep_size
+            // self._moe_tp_size
+        )
+
+    @staticmethod
+    def _normalize_distribution(workload_distribution: str) -> str:
+        if workload_distribution == "uniform":
+            return "balanced"
+        return workload_distribution
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """Query measured MegaMoE routed-module latency."""
+        sm_version = int(database.system_spec.get("gpu", {}).get("sm_version", -1))
+        if sm_version < 100:
+            raise ValueError(
+                "DeepSeek-V4 MegaMoE is only supported on Blackwell-class GPUs "
+                f"(SM >= 100); got sm_version={sm_version}."
+            )
+
+        # DSv4 MegaMoE perf rows are indexed by local-rank tokens.  Do not
+        # multiply by attention_dp_size here; the old decomposed MoE table is
+        # indexed differently.
+        x = int(kwargs.get("x"))
+        overwrite_quant_mode = kwargs.get("quant_mode")
+        quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
+
+        result = database.query_dsv4_megamoe_module(
+            num_tokens=x,
+            hidden_size=self._hidden_size,
+            inter_size=self._inter_size,
+            topk=self._topk,
+            num_experts=self._num_experts,
+            moe_tp_size=self._moe_tp_size,
+            moe_ep_size=self._moe_ep_size,
+            quant_mode=quant_mode,
+            workload_distribution=self._workload_distribution,
+            is_context=self._is_context,
+            source_policy=self._source_policy,
+            pre_dispatch=self._pre_dispatch,
+            num_fused_shared_experts=self._num_fused_shared_experts,
+            kernel_source=self._kernel_source,
+            kernel_dtype=self._kernel_dtype,
+        )
+
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
 # a comm op to deduce the communication cost of MoE
 class MoEDispatch(Operation):
     """
