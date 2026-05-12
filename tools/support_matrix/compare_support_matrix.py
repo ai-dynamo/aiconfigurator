@@ -29,7 +29,13 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 sys.path.insert(0, _REPO_ROOT)
 
-from tools.support_matrix.support_matrix import SupportMatrix
+from tools.support_matrix.support_matrix import (
+    STATUS_FAIL,
+    STATUS_HW_INCOMPATIBLE,
+    STATUS_PASS,
+    VALID_STATUSES,
+    SupportMatrix,
+)
 
 
 def read_csv(csv_path: str) -> tuple[list[str], list[list[str]]]:
@@ -90,8 +96,12 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
             errors.append(f"Row {i}: Invalid mode '{mode}', expected 'agg' or 'disagg'")
 
         status = row[6]
-        if status not in ["PASS", "FAIL"]:
-            errors.append(f"Row {i}: Invalid status '{status}', expected 'PASS' or 'FAIL'")
+        if status not in VALID_STATUSES:
+            errors.append(f"Row {i}: Invalid status '{status}', expected one of {sorted(VALID_STATUSES)}")
+
+        err_msg = row[7].strip() if len(row) > 7 else ""
+        if status == STATUS_HW_INCOMPATIBLE and not err_msg:
+            errors.append(f"Row {i}: {STATUS_HW_INCOMPATIBLE} rows must include a hardware incompatibility reason")
 
     return errors
 
@@ -193,6 +203,30 @@ def compare_csv_files(
     return added_rows, removed_rows, changed_rows
 
 
+def find_blocking_status_transitions(changed_rows: list[tuple]) -> list[str]:
+    """
+    Return status transitions that should block an automated support-matrix PR.
+
+    Hardware-incompatible rows are produced by deterministic preflight. A previous
+    PASS becoming hardware-incompatible, or a hardware-incompatible row becoming a
+    normal FAIL, indicates either bad metadata or a broken preflight and should be
+    investigated explicitly instead of treated as a routine support change.
+    """
+    errors = []
+    for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in changed_rows:
+        if old_status == STATUS_PASS and new_status == STATUS_HW_INCOMPATIBLE:
+            errors.append(
+                "Unexpected PASS -> HW_INCOMPATIBLE transition: "
+                f"{huggingface_id} ({architecture}) {system}/{backend} v{version} {mode}"
+            )
+        elif old_status == STATUS_HW_INCOMPATIBLE and new_status == STATUS_FAIL:
+            errors.append(
+                "Unexpected HW_INCOMPATIBLE -> FAIL transition: "
+                f"{huggingface_id} ({architecture}) {system}/{backend} v{version} {mode}"
+            )
+    return errors
+
+
 def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], changed_rows: list[tuple]) -> str:
     """
     Generate PR description markdown with tables of changes.
@@ -208,8 +242,9 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     Returns:
         Markdown formatted PR description
     """
-    regressions = [r for r in changed_rows if r[6] == "PASS" and r[7] == "FAIL"]
-    fixed = [r for r in changed_rows if r[6] == "FAIL" and r[7] == "PASS"]
+    regressions = [r for r in changed_rows if r[6] == STATUS_PASS and r[7] == STATUS_FAIL]
+    fixed = [r for r in changed_rows if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE}]
+    reclassified_hw = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_HW_INCOMPATIBLE]
 
     lines = [
         "This PR updates aiconfigurator/systems/support_matrix.csv with the following changes:",
@@ -219,7 +254,9 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
         "| Category | Count |",
         "|----------|-------|",
         f"| Regressions (PASS -> FAIL) | {len(regressions)} |",
-        f"| Fixed (FAIL -> PASS) | {len(fixed)} |",
+        f"| Fixed ({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE} -> PASS) | {len(fixed)} |",
+        f"| Reclassified as hardware-incompatible ({STATUS_FAIL} -> {STATUS_HW_INCOMPATIBLE}) "
+        f"| {len(reclassified_hw)} |",
         f"| Removed rows | {len(removed_rows)} |",
         f"| Added rows | {len(added_rows)} |",
         "",
@@ -250,7 +287,7 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     lines.append("")
 
     # Fixed (FAIL -> PASS)
-    lines.append(f"### {section}. Fixed (FAIL -> PASS): {len(fixed)} rows")
+    lines.append(f"### {section}. Fixed ({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE} -> PASS): {len(fixed)} rows")
     section += 1
     if fixed:
         lines.append("")
@@ -269,6 +306,31 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     else:
         lines.append("")
         lines.append("*No fixes*")
+    lines.append("")
+
+    # Reclassified hardware incompatibilities
+    lines.append(
+        f"### {section}. Reclassified as hardware-incompatible ({STATUS_FAIL} -> {STATUS_HW_INCOMPATIBLE}): "
+        f"{len(reclassified_hw)} rows"
+    )
+    section += 1
+    if reclassified_hw:
+        lines.append("")
+        lines.append(
+            "| HuggingFaceID | Architecture | System | Backend | Version | Mode | Previous Status | New Status |"
+        )
+        lines.append(
+            "|---------------|--------------|--------|---------|---------|------|-----------------|------------|"
+        )
+        for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in reclassified_hw:
+            row = (
+                f"| {huggingface_id} | {architecture} | {system} | {backend} "
+                f"| {version} | {mode} | {old_status} | {new_status} |"
+            )
+            lines.append(row)
+    else:
+        lines.append("")
+        lines.append("*No hardware-incompatible reclassifications*")
     lines.append("")
 
     # Removed rows
@@ -381,17 +443,34 @@ def main():
     print("-" * 40)
 
     added_rows, removed_rows, changed_rows = compare_csv_files(old_data_rows, new_data_rows)
+    transition_errors = find_blocking_status_transitions(changed_rows)
+    validation_errors.extend(transition_errors)
 
     print(f"Added rows: {len(added_rows)}")
     print(f"Removed rows: {len(removed_rows)}")
     print(f"Changed rows: {len(changed_rows)}")
-    print(f"  - Regressions (PASS -> FAIL): {len([r for r in changed_rows if r[6] == 'PASS' and r[7] == 'FAIL'])}")
-    print(f"  - Fixed (FAIL -> PASS): {len([r for r in changed_rows if r[6] == 'FAIL' and r[7] == 'PASS'])}")
+    print(
+        f"  - Regressions (PASS -> FAIL): "
+        f"{len([r for r in changed_rows if r[6] == STATUS_PASS and r[7] == STATUS_FAIL])}"
+    )
+    print(
+        f"  - Fixed ({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE} -> PASS): "
+        f"{len([r for r in changed_rows if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE}])}"
+    )
+    print(
+        f"  - Reclassified as hardware-incompatible ({STATUS_FAIL} -> {STATUS_HW_INCOMPATIBLE}): "
+        f"{len([r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_HW_INCOMPATIBLE])}"
+    )
+    if transition_errors:
+        print("Blocking status transitions:")
+        for err in transition_errors:
+            print(f"  - {err}")
 
     has_changes = len(added_rows) > 0 or len(removed_rows) > 0 or len(changed_rows) > 0
 
-    regressions = [r for r in changed_rows if r[6] == "PASS" and r[7] == "FAIL"]
-    fixed = [r for r in changed_rows if r[6] == "FAIL" and r[7] == "PASS"]
+    regressions = [r for r in changed_rows if r[6] == STATUS_PASS and r[7] == STATUS_FAIL]
+    fixed = [r for r in changed_rows if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE}]
+    reclassified_hw = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_HW_INCOMPATIBLE]
 
     # Generate output
     if args.output_diff:
@@ -403,9 +482,11 @@ def main():
             "changed_count": len(changed_rows),
             "regression_count": len(regressions),
             "fixed_count": len(fixed),
+            "reclassified_hw_incompatible_count": len(reclassified_hw),
             "added_rows": added_rows,
             "removed_rows": removed_rows,
             "changed_rows": changed_rows,
+            "blocking_status_transition_errors": transition_errors,
             "pr_description": generate_pr_description(added_rows, removed_rows, changed_rows),
         }
         with open(args.output_diff, "w") as f:

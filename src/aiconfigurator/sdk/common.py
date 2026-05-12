@@ -273,6 +273,7 @@ def check_support(
         if row["Architecture"] == architecture
         and row["System"].lower() == system.lower()
         and _matches_filters(row, backend, version)
+        and row["Status"] != "HW_INCOMPATIBLE"
     ]
 
     agg_results = [row["Status"] == "PASS" for row in arch_matches if row["Mode"] == "agg"]
