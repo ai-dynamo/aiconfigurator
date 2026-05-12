@@ -111,6 +111,8 @@ def run_attention_torch(
         use_fp8_kv_cache=use_fp8_kv_cache,
         sliding_window=window_size if window_size > 0 else None,
         head_dim=head_dim,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
     )
 
     # vLLM >=0.19.0 requires an active config context for backend selection
@@ -286,6 +288,15 @@ def run_attention_torch(
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
         if backend_name_str == "FLEX_ATTENTION":
             builder.direct_build = use_direct_block_mask
+        # FA3's metadata builder auto-detects sliding_window by walking registered
+        # Attention layers; the collector doesn't register any, so the auto-detect
+        # finds nothing and aot_sliding_window stays at (-1, -1). Then FA3's
+        # AOT scheduler computes scheduler_metadata for "no sliding window", but
+        # impl.forward later passes the actual (window_size-1, 0) tuple, and FA3's
+        # shape check rejects the mismatched metadata_size. Pre-populate the
+        # builder's aot_sliding_window to match what impl.sliding_window will be.
+        if window_size > 0 and hasattr(builder, "aot_sliding_window"):
+            builder.aot_sliding_window = (window_size - 1, 0)
         attn_metadata = builder.build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
@@ -313,10 +324,8 @@ def run_attention_torch(
     test_ite = 6
     warm_up = 3
 
-    if use_fp8_kv_cache and backend_name_str in ("FLASH_ATTN", "FLASHINFER"):
-        query_vllm = query_vllm.to(current_platform.fp8_dtype())
-        output = output.to(torch.bfloat16)
-
+    # vLLM's FP8 KV cache path keeps Q/K/V tensors in BF16; only the paged
+    # KV cache storage uses FP8.
     def run():
         impl.forward(
             mock_layer,

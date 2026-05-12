@@ -133,6 +133,35 @@ SUPPORTED_MODELS: dict[str, str] = {
 }
 
 
+def _is_sm120_or_newer() -> bool:
+    return get_sm_version() >= 120
+
+
+def _is_vllm_sm120_mla_module_fp8_block_unsupported() -> bool:
+    """Return True when vLLM's block-FP8 MLA module path rejects SM120."""
+    return _is_sm120_or_newer() and vllm_version.startswith("0.19.0")
+
+
+def _is_vllm_sm120_dsa_module_unsupported() -> bool:
+    """Return True when vLLM's sparse DSA module backend rejects SM120."""
+    return _is_sm120_or_newer() and vllm_version.startswith("0.19.0")
+
+
+def _is_vllm_sm120_mla_generation_fp8_large_cache_unsupported() -> bool:
+    """Return True when vLLM's FP8 MLA generation path hits SM120 illegal accesses."""
+    return _is_sm120_or_newer() and vllm_version.startswith("0.19.0")
+
+
+def _is_vllm_sm120_mla_generation_nvfp4_fp8_unsupported() -> bool:
+    """Return True when vLLM's NVFP4+FP8 MLA generation path hits SM120 illegal accesses."""
+    return _is_sm120_or_newer() and vllm_version.startswith("0.19.0")
+
+
+def _is_vllm_sm120_mla_generation_nvfp4_large_cache_unsupported() -> bool:
+    """Return True when vLLM's NVFP4 MLA generation path hits SM120 illegal accesses."""
+    return _is_sm120_or_newer() and vllm_version.startswith("0.19.0")
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Test Cases — aligned with TRT-LLM's collect_mla_module.py
 # ═══════════════════════════════════════════════════════════════════════
@@ -186,6 +215,10 @@ def get_context_test_cases(attn_type: str):
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 32768]
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context"):
+        if attn_type == "mla" and gemm_type == "fp8_block" and _is_vllm_sm120_mla_module_fp8_block_unsupported():
+            # vLLM 0.19.0 routes these module GEMMs through CUTLASS
+            # cutlass_scaled_mm on SM120 and returns "Invalid status".
+            continue
         for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
             for b in b_list:
                 for s in s_list:
@@ -204,11 +237,45 @@ def get_generation_test_cases(attn_type: str):
     cases = []
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     s_list = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+    max_tokens = 1024 * 4096 * 2 * 2 * 2
+    max_fp8_kv_tokens_sm120 = 1024 * 4096 * 2 * 2
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation"):
+        if attn_type == "mla" and gemm_type == "fp8_block" and _is_vllm_sm120_mla_module_fp8_block_unsupported():
+            # Same vLLM/CUTLASS SM120 failure as context MLA module.
+            continue
         for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
             for b in b_list:
                 for s in s_list:
-                    if b * s > 1024 * 4096 * 2 * 2 * 2:
+                    if b * s > max_tokens:
+                        continue
+                    if (
+                        attn_type == "mla"
+                        and kv_dtype == "fp8"
+                        and gemm_type == "nvfp4"
+                        and _is_vllm_sm120_mla_generation_nvfp4_fp8_unsupported()
+                    ):
+                        # The vLLM 0.19.0 SM120 generation path with NVFP4
+                        # module GEMMs and FP8 KV cache reports illegal memory
+                        # access even below the large-cache threshold.
+                        continue
+                    if (
+                        attn_type == "mla"
+                        and gemm_type == "nvfp4"
+                        and b * s >= max_fp8_kv_tokens_sm120
+                        and _is_vllm_sm120_mla_generation_nvfp4_large_cache_unsupported()
+                    ):
+                        # NVFP4 module GEMMs hit the same illegal access at
+                        # larger generation-cache sizes, even with BF16 KV.
+                        continue
+                    if (
+                        attn_type == "mla"
+                        and kv_dtype == "fp8"
+                        and b * s >= max_fp8_kv_tokens_sm120
+                        and _is_vllm_sm120_mla_generation_fp8_large_cache_unsupported()
+                    ):
+                        # vLLM 0.19.0's SM120 MLA generation kernel can pass
+                        # the dry run but report illegal memory access during
+                        # benchmarking at larger FP8 KV cache sizes.
                         continue
                     cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
@@ -241,11 +308,19 @@ def get_mla_generation_module_test_cases():
 
 def get_dsa_context_module_test_cases():
     """collect.py entrypoint for DSA context module collection."""
+    if _is_vllm_sm120_dsa_module_unsupported():
+        # vLLM 0.19.0 has no valid sparse MLA backend for these DSA module
+        # shapes on RTX PRO 6000 Blackwell Server (SM120); backend selection
+        # reports "compute capability not supported" for all candidates.
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="context")
 
 
 def get_dsa_generation_module_test_cases():
     """collect.py entrypoint for DSA generation module collection."""
+    if _is_vllm_sm120_dsa_module_unsupported():
+        # The generation path hits the same sparse MLA backend selector gap.
+        return []
     return _build_module_test_cases(attn_type="dsa", mode="generation")
 
 
@@ -343,6 +418,17 @@ def _create_attention_module(
         max_num_batched_tokens=max(max_batch_size * max_seq_len, 131072) if is_context else max_batch_size,
         use_fp8_kv_cache=use_fp8_kv_cache,
         trust_remote_code=True,
+        # Forward the test sweep's per-case head counts so that
+        # ModelConfig.model_arch_config (built once at __init__ from hf_config) stays in
+        # sync. Without this, the V1 FA3 builder reads the model's natural head count
+        # via get_num_attention_heads(), the AOT scheduler precomputes
+        # scheduler_metadata for that shape, and impl.forward then runs with the test's
+        # actual head count — _vllm_fa3_C.fwd's shape check rejects the mismatch.
+        # MLA collapses KV to 1 head via get_num_kv_heads (use_mla=True), so the
+        # num_kv_heads override is a no-op in that path; we pass it for parity with
+        # the attention collector.
+        num_heads=num_heads,
+        num_kv_heads=num_heads,
     )
 
     # Override quant_config to control linear-layer GEMM precision.
