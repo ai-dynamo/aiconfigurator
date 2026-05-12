@@ -549,6 +549,10 @@ class SGLANGBackend(BaseBackend):
         weights /= model.config.pp_size
 
         h = model._num_heads * model._head_size
+        # MoE block-scale workspace is routed-token payload, so its feature
+        # width is the residual hidden size. For most models this equals
+        # num_heads * head_size; DeepSeek-V4's attention expansion is wider.
+        moe_workspace_h = getattr(model, "_hidden_size", h)
         if num_tokens == 0:
             num_tokens = (isl - prefix) * batch_size
 
@@ -572,7 +576,7 @@ class SGLANGBackend(BaseBackend):
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations += (
                 num_tokens
-                * h
+                * moe_workspace_h
                 * model.config.attention_dp_size
                 * model._num_experts
                 * model._topk

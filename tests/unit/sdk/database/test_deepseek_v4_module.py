@@ -7,6 +7,7 @@ import pytest
 
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk import operations as ops
+from aiconfigurator.sdk.backends.sglang_backend import SGLANGBackend
 from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.models import get_model
@@ -561,3 +562,66 @@ def test_deepseek_v4_static_sol_and_hybrid_run_end_to_end(mutable_comprehensive_
         summary = backend.run_static(model, db, runtime, mode="static", stride=1)
         assert sum(summary.get_context_latency_dict().values()) > 0
         assert sum(summary.get_generation_latency_dict().values()) > 0
+
+
+def test_sglang_deepseek_v4_pro_moe_workspace_uses_residual_hidden_size(mutable_comprehensive_perf_db):
+    db = mutable_comprehensive_perf_db
+    db.system_spec["gpu"]["mem_capacity"] = 198674743296  # GB200 189471 MiB
+    db.system_spec["misc"]["nccl_mem"] = {1: 0, 2: 358612992, 4: 411041792, 8: 411041792}
+    db.system_spec["misc"]["other_mem"] = 3758096384
+
+    model_config = config.ModelConfig(
+        tp_size=1,
+        pp_size=1,
+        attention_dp_size=8,
+        moe_tp_size=1,
+        moe_ep_size=8,
+        gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+        moe_quant_mode=common.MoEQuantMode.w4a8_mxfp4_mxfp8,
+        kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        comm_quant_mode=common.CommQuantMode.half,
+        nextn=0,
+    )
+    model = get_model("deepseek-ai/DeepSeek-V4-Pro", model_config, backend_name="sglang")
+
+    memory = SGLANGBackend()._get_memory_usage(
+        model,
+        db,
+        batch_size=1,
+        beam_width=1,
+        isl=8192,
+        osl=1024,
+    )
+
+    num_tokens = 8192
+    attention_width = model._num_heads * model._head_size
+    residual_width = model._hidden_size
+    tp_activation_factor = 28
+    attention_workspace = 2 * num_tokens * attention_width * tp_activation_factor
+    moe_scale_workspace = (
+        num_tokens
+        * residual_width
+        * model.config.attention_dp_size
+        * model._num_experts
+        * model._topk
+        / model.config.moe_ep_size
+        / 128
+        * 4
+    )
+    expected_activation_gib = (attention_workspace + moe_scale_workspace) * 1.15 / (1 << 30)
+
+    assert memory["activations"] == pytest.approx(expected_activation_gib)
+
+    old_moe_scale_workspace = (
+        num_tokens
+        * attention_width
+        * model.config.attention_dp_size
+        * model._num_experts
+        * model._topk
+        / model.config.moe_ep_size
+        / 128
+        * 4
+    )
+    old_activation_gib = (attention_workspace + old_moe_scale_workspace) * 1.15 / (1 << 30)
+    assert memory["activations"] < old_activation_gib
