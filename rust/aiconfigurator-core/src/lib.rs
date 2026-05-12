@@ -40,6 +40,8 @@ pub struct EngineConfig {
 
     pub backend: BackendKind,
     pub backend_version: Option<String>,
+    #[serde(default)]
+    pub database_mode: DatabaseMode,
 
     pub tp_size: u32,
     pub pp_size: u32,
@@ -74,6 +76,18 @@ impl BackendKind {
             Self::Vllm => "vllm",
         }
     }
+}
+
+/// Performance estimation data source mode.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DatabaseMode {
+    #[default]
+    Silicon,
+    Hybrid,
+    Empirical,
+    Sol,
+    SolFull,
 }
 
 /// Precision/quantization dtypes exposed by the v1 Rust core API.
@@ -255,6 +269,7 @@ impl EngineStepEstimator {
             &config.system_name,
             config.backend.as_str(),
             config.backend_version.as_deref(),
+            config.database_mode,
         )?;
 
         Ok(Self {
@@ -440,7 +455,8 @@ impl EngineStepEstimator {
                     self.fmha_quant_name(),
                     self.kv_cache_quant_name(),
                     batch_size,
-                    effective_isl.saturating_add(prefix),
+                    effective_isl,
+                    prefix,
                     model.num_attention_heads / tp,
                 )
                 .unwrap_or_else(|| {

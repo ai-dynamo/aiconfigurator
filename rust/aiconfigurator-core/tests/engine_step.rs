@@ -6,8 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aiconfigurator_core::{
-    BackendKind, DataType, EngineConfig, EngineStepEstimator, ForwardPassMetrics, ModelSpec,
-    ScheduledRequestMetrics, ENGINE_CONFIG_SCHEMA_VERSION, FPM_VERSION,
+    BackendKind, DataType, DatabaseMode, EngineConfig, EngineStepEstimator, ForwardPassMetrics,
+    ModelSpec, ScheduledRequestMetrics, ENGINE_CONFIG_SCHEMA_VERSION, FPM_VERSION,
 };
 use tempfile::TempDir;
 
@@ -271,6 +271,93 @@ bfloat16,bfloat16,2,10,4,2,8,5.0\n",
     assert_close(latency, 30.5);
 }
 
+#[test]
+fn sol_mode_uses_roofline_without_perf_files() {
+    let fixture = Fixture::new();
+    fs::remove_dir_all(fixture.perf_dir()).unwrap();
+    let estimator = fixture.estimator_with_mode(DatabaseMode::Sol);
+    let metrics = ForwardPassMetrics {
+        scheduled_requests: ScheduledRequestMetrics {
+            num_prefill_requests: 2,
+            sum_prefill_tokens: 20,
+            sum_prefill_kv_tokens: 0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let latency = estimator.forward_pass_time_ms(&[metrics]).unwrap();
+
+    assert!(
+        latency > 0.0,
+        "expected positive SOL latency, got {latency}"
+    );
+}
+
+#[test]
+fn sol_full_mode_matches_sol_scalar() {
+    let fixture = Fixture::new();
+    fs::remove_dir_all(fixture.perf_dir()).unwrap();
+    let sol = fixture.estimator_with_mode(DatabaseMode::Sol);
+    let sol_full = fixture.estimator_with_mode(DatabaseMode::SolFull);
+    let metrics = ForwardPassMetrics {
+        scheduled_requests: ScheduledRequestMetrics {
+            num_decode_requests: 2,
+            sum_decode_kv_tokens: 32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let sol_latency = sol.forward_pass_time_ms(&[metrics.clone()]).unwrap();
+    let sol_full_latency = sol_full.forward_pass_time_ms(&[metrics]).unwrap();
+
+    assert_close(sol_full_latency, sol_latency);
+}
+
+#[test]
+fn empirical_and_hybrid_modes_fall_back_without_perf_files() {
+    let fixture = Fixture::new();
+    fs::remove_dir_all(fixture.perf_dir()).unwrap();
+    let sol = fixture.estimator_with_mode(DatabaseMode::Sol);
+    let empirical = fixture.estimator_with_mode(DatabaseMode::Empirical);
+    let hybrid = fixture.estimator_with_mode(DatabaseMode::Hybrid);
+    let metrics = ForwardPassMetrics {
+        scheduled_requests: ScheduledRequestMetrics {
+            num_prefill_requests: 2,
+            sum_prefill_tokens: 20,
+            sum_prefill_kv_tokens: 0,
+            num_decode_requests: 2,
+            sum_decode_kv_tokens: 32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let sol_latency = sol.forward_pass_time_ms(&[metrics.clone()]).unwrap();
+    let empirical_latency = empirical.forward_pass_time_ms(&[metrics.clone()]).unwrap();
+    let hybrid_latency = hybrid.forward_pass_time_ms(&[metrics]).unwrap();
+
+    assert!(empirical_latency > sol_latency);
+    assert_close(hybrid_latency, empirical_latency);
+}
+
+#[test]
+fn silicon_mode_still_requires_perf_files() {
+    let fixture = Fixture::new();
+    fs::remove_dir_all(fixture.perf_dir()).unwrap();
+
+    let err = EngineStepEstimator::from_config_with_roots(
+        engine_config(),
+        fixture.systems_root(),
+        fixture.model_configs_root(),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("backend version"));
+}
+
 struct Fixture {
     _temp: TempDir,
     root: PathBuf,
@@ -288,7 +375,12 @@ impl Fixture {
         fs::create_dir_all(&model_configs_root).unwrap();
         fs::write(
             systems_root.join("test_sxm.yaml"),
-            "data_dir: data/test_sxm\n",
+            "data_dir: data/test_sxm\n\
+gpu:\n\
+  mem_bw: 1000000000000\n\
+  bfloat16_tc_flops: 2000000000000\n\
+  fp8_tc_flops: 4000000000000\n\
+  fp4_tc_flops: 8000000000000\n",
         )
         .unwrap();
         fs::write(
@@ -361,6 +453,17 @@ bfloat16,bfloat16,2,16,4,2,8,1,0.7\n",
         )
         .unwrap()
     }
+
+    fn estimator_with_mode(&self, database_mode: DatabaseMode) -> EngineStepEstimator {
+        let mut config = engine_config();
+        config.database_mode = database_mode;
+        EngineStepEstimator::from_config_with_roots(
+            config,
+            self.systems_root(),
+            self.model_configs_root(),
+        )
+        .unwrap()
+    }
 }
 
 fn copy_perf_files(source: &Path, destination: &Path) {
@@ -382,6 +485,7 @@ fn engine_config() -> EngineConfig {
         system_name: "test_sxm".to_string(),
         backend: BackendKind::Vllm,
         backend_version: Some("1.0.0".to_string()),
+        database_mode: DatabaseMode::Silicon,
         tp_size: 1,
         pp_size: 1,
         moe_tp_size: None,
