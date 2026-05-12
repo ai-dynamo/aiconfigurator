@@ -350,7 +350,12 @@ function buildTopErrors(rows, systemName, modeFilter, topN = 10) {
 }
 
 // ── Data Fetching ───────────────────────────────────────────────────
+function isLocalPreview() {
+  return ['localhost', '127.0.0.1', '0.0.0.0'].includes(window.location.hostname);
+}
+
 function csvUrl(branch) {
+  if (isLocalPreview()) return `/${CSV_PATH}`;
   return `https://raw.githubusercontent.com/${REPO}/refs/heads/${branch}/${CSV_PATH}`;
 }
 
@@ -934,7 +939,7 @@ function App() {
 
   const [activeSystem, setActiveSystem] = useState(null);
   const [activeMode, setActiveMode] = useState('all');
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState(() => new URLSearchParams(window.location.search).get('q') || '');
   const [sortCol, setSortCol] = useState(null);
   const [sortAsc, setSortAsc] = useState(true);
   const [showAllVersions, setShowAllVersions] = useState(false);
@@ -969,7 +974,7 @@ function App() {
         }
         setSortCol(null);
         setSortAsc(true);
-        setSearchQuery('');
+        setSearchQuery(new URLSearchParams(window.location.search).get('q') || '');
       })
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
