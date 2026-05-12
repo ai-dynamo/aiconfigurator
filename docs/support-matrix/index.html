@@ -79,7 +79,6 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
 // ── Constants ───────────────────────────────────────────────────────
 const REPO = 'ai-dynamo/aiconfigurator';
 const CSV_PATH = 'src/aiconfigurator/systems/support_matrix.csv';
-const TARGET_VERSIONS = { vllm: '0.14.0', sglang: '0.5.9', trtllm: '1.2.0rc6' };
 const PREFERRED_DEFAULT_SYSTEM = 'b200_sxm';
 const SYSTEM_ORDER = ['b200', 'gb200', 'gb300', 'h100', 'h200', '__other__', 'a100', 'l40s'];
 
@@ -132,16 +131,6 @@ function parseVersionTuple(verStr) {
   return [...parts, PHASE_ORDER.release, 0, 0, 0];
 }
 
-function versionGe(a, b) {
-  const ta = parseVersionTuple(a);
-  const tb = parseVersionTuple(b);
-  for (let i = 0; i < 7; i++) {
-    if (ta[i] > tb[i]) return true;
-    if (ta[i] < tb[i]) return false;
-  }
-  return true;
-}
-
 function versionSortKey(verStr) {
   return parseVersionTuple(verStr);
 }
@@ -174,7 +163,7 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
   const subset = rows.filter(r =>
     r.HuggingFaceID === huggingfaceId && r.System === system && r.Backend === backend
   );
-  if (!subset.length) return { version: null, atTarget: false, error: null };
+  if (!subset.length) return { version: null, isLatest: false, error: null };
 
   const versionHasFail = {};
   const versionHasPass = {};
@@ -203,25 +192,25 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
   }
 
   if (!Object.keys(versionHasFail).length && !Object.keys(versionHasPass).length) {
-    return { version: null, atTarget: false, error: null };
+    return { version: null, isLatest: false, error: null };
   }
 
-  const targetVer = TARGET_VERSIONS[backend] || null;
-  const atOrAboveTarget = (ver) => targetVer === null || versionGe(ver, targetVer);
-
-  if (targetVer !== null) {
-    if (versionHasPass[targetVer]) {
-      return { version: targetVer, atTarget: atOrAboveTarget(targetVer), error: null };
-    }
-    if (versionHasFail[targetVer]) {
-      return { version: 'FAIL', atTarget: false, error: versionErrorMsgs[targetVer] || 'No error message available' };
-    }
+  const testedVersions = [...new Set(rows
+    .filter(r => r.System === system && r.Backend === backend && r.Version)
+    .map(r => r.Version))]
+    .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
+  const latestVersion = testedVersions[0] || null;
+  if (latestVersion && versionHasPass[latestVersion]) {
+    return { version: latestVersion, isLatest: true, error: null };
+  }
+  if (latestVersion && versionHasFail[latestVersion]) {
+    return { version: 'FAIL', isLatest: false, error: versionErrorMsgs[latestVersion] || 'No error message available' };
   }
 
   const passing = Object.keys(versionHasPass)
     .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
   if (passing.length) {
-    return { version: passing[0], atTarget: atOrAboveTarget(passing[0]), error: null };
+    return { version: passing[0], isLatest: false, error: null };
   }
 
   const allMsgs = [];
@@ -230,7 +219,7 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
   for (const ver of failVersions) {
     if (versionErrorMsgs[ver]) allMsgs.push(`${ver}: ${versionErrorMsgs[ver]}`);
   }
-  return { version: 'FAIL', atTarget: false, error: allMsgs.length ? allMsgs.join(' | ') : 'No error message available' };
+  return { version: 'FAIL', isLatest: false, error: allMsgs.length ? allMsgs.join(' | ') : 'No error message available' };
 }
 
 // Aggregate per-version statuses into a single (model, backend) cell. Each
