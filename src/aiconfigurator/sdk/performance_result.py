@@ -22,7 +22,9 @@ class PerformanceResult(float):
         - energy: watt-milliseconds (W·ms) = millijoules (mJ)
         - power: watts (W) - derived property
         - source: ``"silicon"`` (table data) | ``"empirical"`` (HYBRID-mode
-          SOL+empirical fallback) | ``"mixed"`` (sum of values from both)
+          SOL+empirical fallback) | ``"fallback"`` (FallbackOp returned the
+          summed fallback ops because the primary raised — see AIC-1059) |
+          ``"mixed"`` (sum of values from different sources)
 
     Note: 1 W·ms = 1 mJ. We use W·ms to match latency units (ms).
           To convert to Joules: divide by 1000 (J = W·s = W·ms / 1000)

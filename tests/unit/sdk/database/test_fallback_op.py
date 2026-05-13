@@ -206,6 +206,117 @@ class TestFallbackOp:
 
         assert perf_logger.level == original_level
 
+    def test_fallback_result_tagged_with_source_fallback(self):
+        """Result returned via fallback path is tagged source='fallback' (AIC-1059)."""
+        mock_db = _make_mock_db()
+        primary = _make_failing_op(PerfDataNotAvailableError)
+        fallback_1 = _make_mock_op(5.0, 50.0)
+
+        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
+        result = op.query(mock_db, batch_size=4)
+
+        assert result.source == "fallback"
+
+    def test_primary_success_preserves_source(self):
+        """When primary succeeds, its source tag is preserved (not overwritten)."""
+        mock_db = _make_mock_db()
+        primary = MagicMock()
+        primary._name = "primary"
+        primary.query.return_value = PerformanceResult(10.0, energy=100.0, source="silicon")
+        fallback_1 = _make_mock_op(5.0, 50.0)
+
+        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
+        result = op.query(mock_db, batch_size=4)
+
+        assert result.source == "silicon"
+
+    def test_warning_logged_on_first_fallback(self, caplog):
+        """First time primary fails, FallbackOp emits a WARNING (AIC-1059)."""
+        import logging
+
+        mock_db = _make_mock_db()
+        primary = _make_failing_op(PerfDataNotAvailableError, "missing module data")
+        primary._name = "context_mla_module"
+        fallback_1 = _make_mock_op(5.0, 50.0)
+        fallback_1._name = "context_attention"
+
+        op = FallbackOp("context_mla_block", primary=primary, fallback=[fallback_1])
+
+        with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.operations"):
+            op.query(mock_db, batch_size=4)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        msg = warnings[0].getMessage()
+        assert "context_mla_block" in msg
+        assert "context_mla_module" in msg
+        assert "PerfDataNotAvailableError" in msg
+        assert "context_attention" in msg  # fallback op listed
+        assert "missing module data" in msg
+
+    def test_warning_deduplicated_per_exception_type(self, caplog):
+        """Repeated failures with the same exception type warn ONCE, then debug-log.
+
+        FallbackOp is queried many times during a sweep. Spamming WARNING on
+        every iteration would drown out other diagnostics. We warn once per
+        (instance, exception type), then drop to DEBUG.
+        """
+        import logging
+
+        mock_db = _make_mock_db()
+        # Use KeyError so the primary is retried on every call (not latched off).
+        primary = _make_failing_op(KeyError, "fp8_block")
+        fallback_1 = _make_mock_op(5.0, 50.0)
+
+        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
+
+        with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.operations"):
+            for _ in range(10):
+                op.query(mock_db, batch_size=4)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1, f"expected 1 warning, got {len(warnings)}"
+
+    def test_warning_emitted_per_exception_type(self, caplog):
+        """Different exception types each get their own warning."""
+        import logging
+
+        mock_db = _make_mock_db()
+        # Cycle through different exception types across calls.
+        primary = MagicMock()
+        primary._name = "primary"
+        primary.query.side_effect = [
+            KeyError("missing key"),
+            AssertionError("empty data"),
+            KeyError("missing key again"),
+        ]
+        fallback_1 = _make_mock_op(5.0, 50.0)
+
+        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
+
+        with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.operations"):
+            for _ in range(3):
+                op.query(mock_db, batch_size=4)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        # First KeyError + first AssertionError -> 2 warnings; second KeyError dedup'd.
+        assert len(warnings) == 2
+
+    def test_no_warning_when_primary_succeeds(self, caplog):
+        """No warning is emitted on the happy path."""
+        import logging
+
+        mock_db = _make_mock_db()
+        primary = _make_mock_op(10.0, 100.0)
+        fallback_1 = _make_mock_op(5.0, 50.0)
+
+        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
+
+        with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.operations"):
+            op.query(mock_db, batch_size=4)
+
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
 
 class TestMLAModule:
     """Test cases for MLAModule class."""

@@ -1948,6 +1948,11 @@ class FallbackOp(Operation):
         self._primary = primary
         self._fallback = fallback
         self._primary_unavailable = False
+        # Exception types we've already warned about for this instance.
+        # Deduplicates per-iteration warnings during long sweeps; we still
+        # warn once per distinct failure mode so silent perf-DB gaps stay
+        # visible. See AIC-1059.
+        self._warned_exception_types: set[type] = set()
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         import logging as _logging
@@ -1970,13 +1975,28 @@ class FallbackOp(Operation):
             except (PerfDataNotAvailableError, KeyError, AssertionError) as e:
                 if isinstance(e, PerfDataNotAvailableError):
                     self._primary_unavailable = True
-                logger.debug(
-                    "FallbackOp '%s': primary op '%s' failed (%s: %s), using fallback ops",
-                    self._name,
-                    self._primary._name,
-                    type(e).__name__,
-                    e,
-                )
+                exc_type = type(e)
+                fallback_names = ", ".join(op._name for op in self._fallback)
+                if exc_type not in self._warned_exception_types:
+                    self._warned_exception_types.add(exc_type)
+                    logger.warning(
+                        "FallbackOp '%s': primary op '%s' failed (%s: %s); "
+                        "returning sum of fallback ops [%s]. "
+                        "Predictions for this op will be tagged source='fallback'.",
+                        self._name,
+                        self._primary._name,
+                        exc_type.__name__,
+                        e,
+                        fallback_names,
+                    )
+                else:
+                    logger.debug(
+                        "FallbackOp '%s': primary op '%s' failed (%s: %s), using fallback ops",
+                        self._name,
+                        self._primary._name,
+                        exc_type.__name__,
+                        e,
+                    )
             finally:
                 database._default_database_mode = prev_mode
                 perf_db_logger.setLevel(prev_log_level)
@@ -1987,7 +2007,11 @@ class FallbackOp(Operation):
             result = op.query(database, **kwargs)
             total_latency += float(result)
             total_energy += getattr(result, "energy", 0.0)
-        return PerformanceResult(total_latency, energy=total_energy)
+        # Tag with source="fallback" so downstream attribution (per_ops_source.json,
+        # reports) can distinguish a real prediction from a fallback-due-to-primary-
+        # failure prediction. The PerformanceResult source field propagates through
+        # arithmetic, so sums and averages will surface "fallback" or "mixed".
+        return PerformanceResult(total_latency, energy=total_energy, source="fallback")
 
     def get_weights(self, **kwargs):
         # Use primary weights if available, otherwise sum fallback weights.

@@ -59,8 +59,8 @@ class InferenceSummary:
         self._generation_latency_dict = {}  # ms
         self._context_energy_wms_dict = {}  # RENAMED from _context_power_dict, W·ms
         self._generation_energy_wms_dict = {}  # RENAMED from _generation_power_dict, W·ms
-        # Per-op data source ("silicon", "empirical", or "mixed") populated by
-        # base_backend phase helpers from PerformanceResult.source.
+        # Per-op data source ("silicon", "empirical", "fallback", or "mixed")
+        # populated by base_backend phase helpers from PerformanceResult.source.
         self._context_source_dict: dict[str, str] = {}
         self._generation_source_dict: dict[str, str] = {}
         self._is_oom = None
@@ -80,7 +80,7 @@ class InferenceSummary:
         # per-ops latency breakdown (populated by run_agg or run_disagg)
         self._per_ops_data: dict | None = None
         # per-ops data source breakdown, parallel to _per_ops_data: same key
-        # structure but values are "silicon" / "empirical" / "mixed" strings.
+        # structure but values are "silicon" / "empirical" / "fallback" / "mixed".
         self._per_ops_source: dict | None = None
 
     def set_memory_and_check_oom(
