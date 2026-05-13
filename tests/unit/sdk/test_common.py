@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, perf_database
 
 pytestmark = pytest.mark.unit
 
@@ -122,6 +122,27 @@ class TestSupportMatrix:
         assert result.agg_supported is expected_agg
         assert result.disagg_supported is expected_disagg
         assert result.exact_match is True
+
+    def test_glm5_quantized_variants_cover_all_database_combinations(self):
+        """GLM-5 quantized variants should have exact rows for every support-matrix target."""
+        supported_databases = perf_database.get_supported_databases()
+        expected_keys = {
+            (system, backend, version, mode)
+            for system, backend_versions in supported_databases.items()
+            for backend, versions in backend_versions.items()
+            for version in versions
+            for mode in ("agg", "disagg")
+        }
+
+        matrix = common.get_support_matrix()
+        for model in ("zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"):
+            model_keys = {
+                (row["System"], row["Backend"], row["Version"], row["Mode"])
+                for row in matrix
+                if row["HuggingFaceID"] == model
+            }
+
+            assert model_keys == expected_keys
 
     def test_check_support_matches_architecture_fallback_case_insensitively(self, monkeypatch):
         """Test system/backend case normalization for architecture-based fallback."""
