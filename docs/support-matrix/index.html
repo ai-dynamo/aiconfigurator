@@ -761,6 +761,10 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
       <table className="w-full text-sm border-collapse">
         <thead>
           <tr>
+            <th className="bg-slate-50 dark:bg-slate-800 sticky top-0 z-10 px-3 py-2 text-right font-bold
+                  border-b-2 border-slate-200 dark:border-slate-600 whitespace-nowrap w-14 text-slate-500 dark:text-slate-400">
+              No.
+            </th>
             <th onClick={() => onSort('model')}
                 className={`bg-slate-50 dark:bg-slate-800 sticky top-0 z-10 px-3 py-2 text-left font-bold
                   border-b-2 border-slate-200 dark:border-slate-600 cursor-pointer select-none whitespace-nowrap
@@ -784,8 +788,11 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
           </tr>
         </thead>
         <tbody>
-          {filtered.map(row => (
+          {filtered.map((row, index) => (
             <tr key={row.model} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/50 transition-colors">
+              <td className="px-3 py-2 border-b border-slate-200 dark:border-slate-700 text-right text-slate-500 dark:text-slate-400 tabular-nums w-14">
+                {index + 1}
+              </td>
               <td className="px-3 py-2 border-b border-slate-200 dark:border-slate-700 font-medium max-w-xs overflow-hidden text-ellipsis whitespace-nowrap"
                   title={row.model}>
                 {row.model}
