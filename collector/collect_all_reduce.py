@@ -115,6 +115,12 @@ def benchmark_trtllm_allreduce(
     power_min_duration: float = 1.0,
 ):
     """Benchmark TensorRT-LLM AllReduce implementation"""
+    # Disable the autotuner so that the strategy lookup table (selectImplementation)
+    # is used directly.  Without this, tunable_allreduce may override the strategy
+    # to NCCL symmetric, which is significantly slower than the Lamport custom
+    # allreduce kernels used during actual inference.
+    os.environ["TLLM_DISABLE_ALLREDUCE_AUTOTUNE"] = "1"
+
     trtllm_mods = import_trtllm()
     tllm = trtllm_mods["tllm"]
 
