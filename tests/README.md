@@ -69,21 +69,20 @@ python3 -m pytest -m "unit or build"
 
 ### Rust Engine Step Opt-In
 
-The Python SDK keeps using the existing Python latency path by default. To run Python tests through the experimental Rust engine-step path, build the Rust core shared library first or let pytest build it on demand:
+The Python SDK keeps using the existing Python latency path by default. The Rust core shared library is built into the wheel by `setuptools-rust` when you install the project (`pip install -e .` or `pip install .`), so a normal install is enough to exercise the Rust path. If you'd rather point at a custom build, set `AICONFIGURATOR_RUST_CORE_LIB`:
 
 ```bash
-# Build manually, then run any pytest target with the Rust path enabled
-cargo build --manifest-path rust/aiconfigurator-core/Cargo.toml
+# Standard path: install builds the cdylib, then enable the rust backend
+pip install -e .
 python3 -m pytest tests/unit/sdk/test_rust_engine_step.py --aic-engine-step-backend=rust
 
-# Or let the test harness build the shared library when needed
-python3 -m pytest tests/unit/sdk/test_rust_engine_step.py \
-  --aic-engine-step-backend=rust \
-  --aic-rust-core-autobuild
+# Or point at a manually built artifact
+cargo build --manifest-path rust/aiconfigurator-core/Cargo.toml
+export AICONFIGURATOR_RUST_CORE_LIB="$PWD/rust/aiconfigurator-core/target/debug/libaiconfigurator_core.so"
+python3 -m pytest tests/unit/sdk/test_rust_engine_step.py --aic-engine-step-backend=rust
 ```
 
-The support-matrix PR regression now runs Python first and compares Rust engine-step output against it.
-Rust core autobuild is enabled by the support-matrix runner for the Rust pass, so the usual command is:
+The support-matrix PR regression now runs Python first and compares Rust engine-step output against it. The usual command is:
 
 ```bash
 TEST_SUPPORT_MATRIX=true python3 -m pytest tests/e2e/support_matrix

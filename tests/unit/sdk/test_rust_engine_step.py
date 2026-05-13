@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -143,7 +142,61 @@ def test_mixed_and_decode_helpers_map_to_fpm(monkeypatch) -> None:
     }
 
 
-@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo is required to build the Rust core shared library")
+def test_find_packaged_library_returns_resource_when_present(tmp_path, monkeypatch) -> None:
+    import platform
+
+    ext = ".dylib" if platform.system() == "Darwin" else (".dll" if platform.system() == "Windows" else ".so")
+    fake_lib = tmp_path / f"aiconfigurator_core{ext}"
+    fake_lib.write_bytes(b"")
+
+    monkeypatch.setattr(rust_engine_step.pkg_resources, "files", lambda _pkg: tmp_path)
+    rust_engine_step._load_library.cache_clear()
+
+    resolved = rust_engine_step._find_packaged_library()
+    assert resolved == fake_lib
+
+
+def test_find_packaged_library_resolves_ext_suffix_form(tmp_path, monkeypatch) -> None:
+    # setuptools-rust names the cdylib with Python's EXT_SUFFIX, e.g.
+    # aiconfigurator_core.cpython-312-x86_64-linux-gnu.so. The loader must
+    # find it even though it doesn't match the plain `.so` / `.dylib` name.
+    realistic_name = "aiconfigurator_core.cpython-312-darwin.so"
+    fake_lib = tmp_path / realistic_name
+    fake_lib.write_bytes(b"")
+
+    monkeypatch.setattr(rust_engine_step.pkg_resources, "files", lambda _pkg: tmp_path)
+    rust_engine_step._load_library.cache_clear()
+
+    resolved = rust_engine_step._find_packaged_library()
+    assert resolved == fake_lib
+
+
+def test_find_packaged_library_prefers_specific_filename(tmp_path, monkeypatch) -> None:
+    # When both naming conventions coexist (e.g. a developer copied a raw
+    # cargo output alongside an installed wheel), prefer the longer/more
+    # specific EXT_SUFFIX form because it matches the running interpreter ABI.
+    (tmp_path / "aiconfigurator_core.so").write_bytes(b"")
+    abi_lib = tmp_path / "aiconfigurator_core.cpython-312-x86_64-linux-gnu.so"
+    abi_lib.write_bytes(b"")
+
+    monkeypatch.setattr(rust_engine_step.pkg_resources, "files", lambda _pkg: tmp_path)
+    rust_engine_step._load_library.cache_clear()
+
+    assert rust_engine_step._find_packaged_library() == abi_lib
+
+
+def test_find_packaged_library_returns_none_when_missing(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(rust_engine_step.pkg_resources, "files", lambda _pkg: tmp_path)
+    rust_engine_step._load_library.cache_clear()
+
+    assert rust_engine_step._find_packaged_library() is None
+
+
+@pytest.mark.skipif(
+    not rust_engine_step.is_rust_core_available(),
+    reason="Rust core shared library is not available "
+    "(install with `pip install -e .` or set AICONFIGURATOR_RUST_CORE_LIB)",
+)
 def test_ctypes_wrapper_calls_real_rust_core(tmp_path, monkeypatch) -> None:
     systems_root = tmp_path / "systems"
     data_root = systems_root / "data" / "test_sxm" / "vllm" / "1.0.0"
@@ -185,7 +238,6 @@ def test_ctypes_wrapper_calls_real_rust_core(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setenv("AICONFIGURATOR_SYSTEMS_PATH", str(systems_root))
     monkeypatch.setenv("AICONFIGURATOR_MODEL_CONFIGS_PATH", str(model_configs_root))
-    monkeypatch.setenv("AICONFIGURATOR_RUST_CORE_AUTOBUILD", "1")
     rust_engine_step._load_library.cache_clear()
 
     estimator = rust_engine_step.RustEngineStepEstimator(

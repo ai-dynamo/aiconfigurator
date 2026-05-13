@@ -18,7 +18,19 @@ ENV MPLCONFIGDIR=/tmp/matplotlib
 FROM rust:1-slim-bookworm AS rust-toolchain
 
 FROM base AS build
+# setuptools-rust compiles the aiconfigurator-core cdylib into the wheel during
+# `uv build --wheel`, so the Rust toolchain + C compiler must be present here.
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY src/ /workspace/src/
+COPY rust/ /workspace/rust/
 COPY LICENSE pyproject.toml README.md /workspace/
 # Fail fast if Git LFS content wasn't materialized before the build — otherwise
 # the wheel ships pointer stubs in place of perf data (see DYN-2725).
@@ -32,6 +44,19 @@ RUN set -e; \
     fi
 RUN uv build --wheel --out-dir /workspace/dist
 
+# Generate a CycloneDX SBOM for the Rust crate and inject it into every wheel
+# under /workspace/dist per PEP 770.
+COPY tools/wheel_build/ /workspace/tools/wheel_build/
+RUN bash /workspace/tools/wheel_build/install_build_tools.sh
+RUN cargo cyclonedx \
+      --manifest-path /workspace/rust/aiconfigurator-core/Cargo.toml \
+      --format json \
+      --output-pattern bom
+RUN for whl in /workspace/dist/*.whl; do \
+      python3 /workspace/tools/wheel_build/inject_sbom.py "$whl" \
+        --sbom /workspace/rust/aiconfigurator-core/bom.cdx.json; \
+    done
+
 FROM base AS runtime
 COPY --from=build /workspace/dist /wheelhouse
 RUN WHL=$(ls -d /wheelhouse/*) && \
@@ -40,23 +65,10 @@ RUN WHL=$(ls -d /wheelhouse/*) && \
 
 FROM runtime AS test
 
-COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
-COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
-ENV CARGO_HOME=/usr/local/cargo
-ENV RUSTUP_HOME=/usr/local/rustup
-ENV PATH="${CARGO_HOME}/bin:${PATH}"
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
-    rm -rf /var/lib/apt/lists/*
-
 COPY --from=build /workspace/dist /wheelhouse
 RUN WHL=$(ls -d /wheelhouse/*) && \
     uv pip install "$WHL[dev]" && \
     rm -rf /wheelhouse
-
-COPY rust/ /workspace/rust/
-RUN cargo build --manifest-path /workspace/rust/aiconfigurator-core/Cargo.toml
-ENV AICONFIGURATOR_RUST_CORE_LIB=/workspace/rust/aiconfigurator-core/target/debug/libaiconfigurator_core.so
 
 COPY pytest.ini /workspace/
 COPY tests/ /workspace/tests/

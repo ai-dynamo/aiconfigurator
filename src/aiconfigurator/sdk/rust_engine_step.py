@@ -9,8 +9,6 @@ import json
 import math
 import os
 import platform
-import shutil
-import subprocess
 from functools import cache
 from importlib import resources as pkg_resources
 from pathlib import Path
@@ -20,7 +18,7 @@ from aiconfigurator.sdk.config import RuntimeConfig
 
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
 RUST_CORE_LIB_ENV = "AICONFIGURATOR_RUST_CORE_LIB"
-RUST_CORE_AUTOBUILD_ENV = "AICONFIGURATOR_RUST_CORE_AUTOBUILD"
+_NATIVE_PACKAGE = "aiconfigurator._native"
 
 
 class RustCoreUnavailableError(RuntimeError):
@@ -34,9 +32,9 @@ class RustCoreError(RuntimeError):
 class RustEngineStepEstimator:
     """ctypes wrapper over the Rust `aiconfigurator-core` FPM estimator."""
 
-    def __init__(self, config: dict[str, Any], *, autobuild: bool | None = None) -> None:
+    def __init__(self, config: dict[str, Any]) -> None:
         _configure_default_data_roots()
-        self._lib = _load_library(bool(autobuild) or _truthy(os.environ.get(RUST_CORE_AUTOBUILD_ENV)))
+        self._lib = _load_library()
         self._handle = ctypes.c_void_p()
         config_json = _json_bytes(config)
         err = self._lib.aic_engine_step_estimator_new(config_json, ctypes.byref(self._handle))
@@ -185,9 +183,9 @@ def estimate_decode_step_latency_with_rust(
     )
 
 
-def is_rust_core_available(*, autobuild: bool = False) -> bool:
+def is_rust_core_available() -> bool:
     try:
-        _load_library(autobuild)
+        _load_library()
     except RustCoreUnavailableError:
         return False
     return True
@@ -249,18 +247,13 @@ def _decode_metrics(*, batch_size: int, context_length: int) -> dict[str, Any]:
 
 
 @cache
-def _load_library(autobuild: bool) -> ctypes.CDLL:
-    if autobuild and not os.environ.get(RUST_CORE_LIB_ENV):
-        library_path = _build_rust_core()
-    else:
-        library_path = _find_library()
-        if library_path is None and autobuild:
-            library_path = _build_rust_core()
+def _load_library() -> ctypes.CDLL:
+    library_path = _find_library()
     if library_path is None:
         raise RustCoreUnavailableError(
-            "Rust core shared library not found. Build it with "
-            "`cargo build --manifest-path rust/aiconfigurator-core/Cargo.toml`, "
-            f"set {RUST_CORE_LIB_ENV}, or set {RUST_CORE_AUTOBUILD_ENV}=1."
+            "Rust core shared library not found. Install the project with "
+            "`pip install -e .` (which builds the cdylib via setuptools-rust), or "
+            f"set {RUST_CORE_LIB_ENV} to a prebuilt library."
         )
 
     lib = ctypes.CDLL(str(library_path))
@@ -287,6 +280,10 @@ def _find_library() -> Path | None:
             return path
         raise RustCoreUnavailableError(f"{RUST_CORE_LIB_ENV} points to a missing file: {path}")
 
+    packaged = _find_packaged_library()
+    if packaged is not None:
+        return packaged
+
     crate_root = _crate_root()
     if crate_root is None:
         return None
@@ -298,21 +295,49 @@ def _find_library() -> Path | None:
     return next((path for path in candidates if path.is_file()), None)
 
 
-def _build_rust_core() -> Path:
-    crate_root = _crate_root()
-    if crate_root is None:
-        raise RustCoreUnavailableError("could not locate rust/aiconfigurator-core/Cargo.toml")
-    if shutil.which("cargo") is None:
-        raise RustCoreUnavailableError("cargo is not available on PATH")
+_PACKAGED_LIBRARY_EXTENSIONS: tuple[str, ...] = (".so", ".dylib", ".pyd", ".dll")
+_PACKAGED_LIBRARY_STEM = "aiconfigurator_core"
 
-    subprocess.run(
-        ["cargo", "build", "--manifest-path", str(crate_root / "Cargo.toml")],
-        check=True,
-    )
-    library_path = crate_root / "target" / "debug" / _library_name()
-    if not library_path.is_file():
-        raise RustCoreUnavailableError(f"cargo build completed but did not produce {library_path}")
-    return library_path
+
+def _find_packaged_library() -> Path | None:
+    """Resolve the cdylib that setuptools-rust drops into ``aiconfigurator._native``.
+
+    setuptools-rust names the artifact with Python's ``EXT_SUFFIX``
+    (e.g. ``aiconfigurator_core.cpython-312-x86_64-linux-gnu.so``) rather than
+    the bare ``libaiconfigurator_core.so`` that ``cargo build`` produces. We
+    glob for any filename starting with ``aiconfigurator_core`` and ending in
+    a known shared-library extension so both naming conventions resolve.
+    """
+    try:
+        package_root = pkg_resources.files(_NATIVE_PACKAGE)
+    except (ModuleNotFoundError, FileNotFoundError):
+        return None
+    try:
+        entries = list(package_root.iterdir())
+    except (AttributeError, OSError, NotADirectoryError):
+        return None
+
+    matches: list[Path] = []
+    for resource in entries:
+        name = getattr(resource, "name", "")
+        if not name.startswith(_PACKAGED_LIBRARY_STEM):
+            continue
+        if not name.endswith(_PACKAGED_LIBRARY_EXTENSIONS):
+            continue
+        try:
+            path = Path(str(resource))
+        except TypeError:
+            continue
+        if path.is_file():
+            matches.append(path)
+
+    if not matches:
+        return None
+    # Prefer the longest filename — setuptools-rust's EXT_SUFFIX form is more
+    # specific than a bare `aiconfigurator_core.so`, and if both exist we want
+    # the one matching the running interpreter ABI.
+    matches.sort(key=lambda p: len(p.name), reverse=True)
+    return matches[0]
 
 
 def _crate_root() -> Path | None:
@@ -409,7 +434,3 @@ def _python_sdk_systems_root() -> Path | None:
         if path.exists():
             return path
     return None
-
-
-def _truthy(value: str | None) -> bool:
-    return str(value or "").lower() in {"1", "true", "yes", "on"}

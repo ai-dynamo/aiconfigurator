@@ -85,8 +85,14 @@ GitHub = "https://github.com/ai-dynamo/aiconfigurator"
 Repository = "https://github.com/ai-dynamo/aiconfigurator.git"
 
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools>=68", "setuptools-rust>=1.10"]
 build-backend = "setuptools.build_meta"
+
+[[tool.setuptools-rust.ext-modules]]
+target = "aiconfigurator._native.aiconfigurator_core"
+path = "rust/aiconfigurator-core/Cargo.toml"
+binding = "NoBinding"
+features = []
 
 [project.scripts]
 aiconfigurator = "aiconfigurator.main:main"
@@ -96,6 +102,7 @@ aiconfigurator = "aiconfigurator.main:main"
 "aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule"]
 "aiconfigurator" = ["systems/*.yaml", "systems/*.csv", "systems/**/*.txt", "model_configs/*.json"]
 "aiconfigurator.webapp.components.profiling" = ["styles.css", "js/*.js"]
+"aiconfigurator._native" = ["*.so", "*.dylib", "*.pyd", "*.dll"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

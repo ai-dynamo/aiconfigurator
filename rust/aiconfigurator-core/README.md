@@ -4,6 +4,12 @@ Phase 1 Rust core for estimating forward-pass latency from AIC model metadata an
 
 This crate intentionally does not change the existing Python SDK. It gives Rust callers, especially Dynamo Mocker, a reusable estimator that loads metadata once and then serves per-iteration estimates without Python/GIL overhead.
 
+The crate is compiled into the `aiconfigurator` Python wheel via
+[`setuptools-rust`](https://setuptools-rust.readthedocs.io/) — the resulting
+cdylib is bundled under `aiconfigurator/_native/` and loaded via `ctypes` from
+`aiconfigurator.sdk.rust_engine_step`. Running `cargo build` directly is for
+crate development only; end users do not need a Rust toolchain.
+
 The v1 input is a per-attention-DP-rank list of AIC-owned Rust `ForwardPassMetrics`, aligned with Dynamo FPM v1. That keeps this first iteration close to existing Dynamo telemetry while avoiding a direct AIC dependency on Dynamo crates.
 
 ```rust
