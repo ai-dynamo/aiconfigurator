@@ -7,6 +7,7 @@ Unit tests for common SDK configurations.
 Tests supported systems, model families, and other common configurations.
 """
 
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -136,13 +137,16 @@ class TestSupportMatrix:
 
         matrix = common.get_support_matrix()
         for model in ("zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"):
-            model_keys = {
-                (row["System"], row["Backend"], row["Version"], row["Mode"])
-                for row in matrix
-                if row["HuggingFaceID"] == model
-            }
+            model_rows = [row for row in matrix if row["HuggingFaceID"] == model]
+            model_key_counts = Counter(
+                (row["System"], row["Backend"], row["Version"], row["Mode"]) for row in model_rows
+            )
+            model_keys = set(model_key_counts)
 
             assert model_keys == expected_keys
+            assert all(count == 1 for count in model_key_counts.values()), (
+                f"{model} has duplicate support-matrix rows for one or more keys"
+            )
 
     def test_check_support_matches_architecture_fallback_case_insensitively(self, monkeypatch):
         """Test system/backend case normalization for architecture-based fallback."""

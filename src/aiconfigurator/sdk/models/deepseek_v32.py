@@ -76,7 +76,7 @@ class DeepSeekV32Model(BaseModel):
         if model_info["architecture"] == "GlmMoeDsaForCausalLM" and _dsa_attention_modules_excluded_from_quant(
             model_info.get("raw_config", {})
         ):
-            extra_params["dsa_gemm_quant_mode"] = common.GEMMQuantMode.bfloat16
+            extra_params.setdefault("dsa_gemm_quant_mode", common.GEMMQuantMode.bfloat16)
 
         if backend_name == "sglang" and model_config.enable_wideep:
             logger.debug(
