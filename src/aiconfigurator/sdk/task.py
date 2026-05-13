@@ -1920,7 +1920,12 @@ class TaskRunner:
             backend=backend,
             afd_config=afd_config,
         )
-        summary = session.run_afd(runtime_config, phase=afd_config.phase)
+        summary = session.run_afd(
+            runtime_config,
+            phase=afd_config.phase,
+            free_gpu_memory_fraction=getattr(task_config, "free_gpu_memory_fraction", None),
+            max_seq_len=getattr(task_config, "max_seq_len", None),
+        )
         result_df = summary.get_summary_df()
         return {"pareto_df": result_df}
 

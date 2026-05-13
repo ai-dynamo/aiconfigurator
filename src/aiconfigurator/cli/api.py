@@ -991,6 +991,8 @@ def cli_estimate(
             load_database=_load_database,
             get_backend=get_backend,
             get_model=get_model,
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
+            max_seq_len=max_seq_len,
         )
     else:
         raise ValueError(
@@ -1428,6 +1430,8 @@ def _run_afd_estimate(
     load_database,
     get_backend,
     get_model,
+    free_gpu_memory_fraction,
+    max_seq_len,
 ) -> EstimateResult:
     """Run AFD (Attention-FFN Disaggregated) estimation.
 
@@ -1507,7 +1511,12 @@ def _run_afd_estimate(
         backend=backend,
         afd_config=afd_config,
     )
-    summary = session.run_afd(runtime_config, phase=afd_phase)
+    summary = session.run_afd(
+        runtime_config,
+        phase=afd_phase,
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+        max_seq_len=max_seq_len,
+    )
 
     if summary.check_oom():
         raise RuntimeError(

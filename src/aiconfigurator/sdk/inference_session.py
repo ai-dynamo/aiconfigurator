@@ -1019,7 +1019,7 @@ class AFDInferenceSession:
         # conservative K=2
         return max(t_a + t_a2f, t_f + t_f2a), False
 
-    def _estimate_a_memory_gb(
+    def _estimate_a_memory_dict(
         self,
         *,
         a_model,
@@ -1028,49 +1028,85 @@ class AFDInferenceSession:
         batch_size: int,
         isl: int,
         osl: int,
-    ) -> float:
-        """Estimate A-Worker per-GPU HBM usage in GiB.
-
-        * Weights: sum of attention-side op weights (per-GPU after TP shard).
-        * KV cache:
-            - ``phase == "prefill"``: transient KV for a single prefill sequence
-              (grows to ISL).
-            - ``phase == "decode"``:  persistent KV for (isl+osl) tokens per
-              sequence, concurrently held for ``num_microbatches`` in-flight batches.
-            - ``phase == "both"``: take the decode estimate (worst case).
-        """
+        prefix: int,
+        max_seq_len: int | None,
+    ) -> dict[str, float]:
+        """Estimate A-Worker per-GPU HBM usage as a standard memory dict."""
         cfg = self._afd_config
-        num_layers = a_model._num_layers
-        a_weights_gb = sum(op.get_weights() for op in a_partition.attn_ops) / (1 << 30)
-
-        kv_bytes_per_element = (
-            self._a_model_config.kvcache_quant_mode.value.memory
-            if self._a_model_config.kvcache_quant_mode
-            else 2
-        )
-        kv_per_token = (
-            2 * a_model._num_kv_heads * a_model._head_size * kv_bytes_per_element / max(cfg.tp_a, 1)
-        )
-
         if phase == "prefill":
-            kv_tokens_per_seq = isl
-            kv_multiplier = 1  # no persistent in-flight replicas for pure prefill
-        else:  # decode or both → worst-case decode KV
-            kv_tokens_per_seq = isl + osl
-            kv_multiplier = max(cfg.num_microbatches, 1)
+            effective_max_seq_len = max_seq_len if max_seq_len is not None else max(isl, 1)
+            num_tokens = 0
+            kvcache_multiplier = 1
+        else:
+            effective_max_seq_len = max_seq_len if max_seq_len is not None else isl + osl
+            num_tokens = batch_size
+            kvcache_multiplier = max(cfg.num_microbatches, 1)
 
-        kv_cache_gb = (
-            num_layers * batch_size * kv_tokens_per_seq * kv_per_token * kv_multiplier
-        ) / (1 << 30)
-        return a_weights_gb + kv_cache_gb
+        return self._backend.get_partition_memory_usage(
+            a_model,
+            self._database,
+            partition_ops=a_partition.attn_ops,
+            batch_size=batch_size,
+            beam_width=1,
+            isl=isl,
+            osl=osl,
+            num_tokens=num_tokens,
+            prefix=prefix,
+            max_seq_len=effective_max_seq_len,
+            include_kvcache=True,
+            kvcache_multiplier=kvcache_multiplier,
+        )
 
-    def _estimate_f_memory_gb(self, *, f_partition) -> float:
-        """Estimate F-Worker per-GPU HBM usage in GiB (weights only; FFN is stateless)."""
-        return sum(op.get_weights() for op in f_partition.ffn_ops) / (1 << 30)
+    def _estimate_f_memory_dict(
+        self,
+        *,
+        f_model,
+        f_partition,
+        phase: str,
+        batch_size: int,
+        isl: int,
+        osl: int,
+        prefix: int,
+        max_seq_len: int | None,
+    ) -> dict[str, float]:
+        """Estimate F-Worker per-GPU HBM usage as a standard memory dict."""
+        if phase == "prefill":
+            effective_max_seq_len = max_seq_len if max_seq_len is not None else max(isl, 1)
+            num_tokens = 0
+        else:
+            effective_max_seq_len = max_seq_len if max_seq_len is not None else isl + osl
+            num_tokens = batch_size
 
-    def _gpu_mem_capacity_gb(self) -> float:
-        mem_capacity = self._database.system_spec.get("gpu", {}).get("mem_capacity", 80 * (1 << 30))
-        return mem_capacity / (1 << 30)
+        return self._backend.get_partition_memory_usage(
+            f_model,
+            self._database,
+            partition_ops=f_partition.ffn_ops,
+            batch_size=batch_size,
+            beam_width=1,
+            isl=isl,
+            osl=osl,
+            num_tokens=num_tokens,
+            prefix=prefix,
+            max_seq_len=effective_max_seq_len,
+            include_kvcache=False,
+        )
+
+    def _check_memory_dict(
+        self,
+        memory: dict[str, float],
+        runtime_config: config.RuntimeConfig,
+        free_gpu_memory_fraction: float | None,
+    ) -> InferenceSummary:
+        summary = InferenceSummary(runtime_config)
+        reserved_fraction, tolerance = self._backend.get_kv_cache_memory_check_params()
+        summary.set_memory_and_check_oom(
+            memory,
+            self._database.system_spec["gpu"]["mem_capacity"],
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
+            kv_cache_reserved_fraction=reserved_fraction,
+            kv_cache_tolerance=tolerance,
+        )
+        return summary
 
     # Stride for sampling KV-cache length ``s`` along the decode trace.
     # Mirrors ``base_backend._run_generation_phase`` so the AFD path
@@ -1185,13 +1221,15 @@ class AFDInferenceSession:
         runtime_config: config.RuntimeConfig,
         a_model,
         f_model,
+        free_gpu_memory_fraction: float | None,
+        max_seq_len: int | None,
     ) -> dict:
         """Simulate one phase (prefill or decode) and return a metrics dict.
 
         Keys: ``t_a_layer``, ``t_f_layer``, ``t_a2f_layer``,
         ``t_f2a_layer``, ``t_c_layer`` (round-trip = t_a2f + t_f2a),
         ``t_cycle``, ``t_step``, ``comm_hidden``, ``balance_ratio``,
-        ``a_per_op``, ``f_per_op``, ``a_memory_gb``, ``f_memory_gb``,
+        ``a_per_op``, ``f_per_op``, ``a_memory``, ``f_memory``,
         ``a_is_oom``, ``f_is_oom``, ``num_layers``.
 
         Decode integrates per-step compute along the KV-cache length
@@ -1335,16 +1373,28 @@ class AFDInferenceSession:
         balance_ratio = min(t_a_layer, t_f_layer) / max(t_a_layer, t_f_layer, 1e-9)
 
         # HBM (memory) bound check — per-GPU on each pool.
-        a_memory_gb = self._estimate_a_memory_gb(
+        a_memory = self._estimate_a_memory_dict(
             a_model=a_model,
             a_partition=a_partition,
             phase=phase,
             batch_size=cfg.a_batch_size,
             isl=isl,
             osl=osl,
+            prefix=runtime_config.prefix,
+            max_seq_len=max_seq_len,
         )
-        f_memory_gb = self._estimate_f_memory_gb(f_partition=f_partition)
-        cap_gb = self._gpu_mem_capacity_gb()
+        f_memory = self._estimate_f_memory_dict(
+            f_model=f_model,
+            f_partition=f_partition,
+            phase=phase,
+            batch_size=b_total,
+            isl=isl,
+            osl=osl,
+            prefix=runtime_config.prefix,
+            max_seq_len=max_seq_len,
+        )
+        a_memory_summary = self._check_memory_dict(a_memory, runtime_config, free_gpu_memory_fraction)
+        f_memory_summary = self._check_memory_dict(f_memory, runtime_config, None)
 
         return {
             "t_a_layer": t_a_layer,
@@ -1358,10 +1408,14 @@ class AFDInferenceSession:
             "balance_ratio": balance_ratio,
             "a_per_op": dict(a_per_op),
             "f_per_op": dict(f_per_op),
-            "a_memory_gb": a_memory_gb,
-            "f_memory_gb": f_memory_gb,
-            "a_is_oom": a_memory_gb >= cap_gb,
-            "f_is_oom": f_memory_gb >= cap_gb,
+            "a_memory": a_memory,
+            "f_memory": f_memory,
+            "a_memory_gb": a_memory["total"],
+            "f_memory_gb": f_memory["total"],
+            "a_is_oom": a_memory_summary.check_oom() or a_memory_summary.check_kv_cache_oom(),
+            "f_is_oom": f_memory_summary.check_oom() or f_memory_summary.check_kv_cache_oom(),
+            "a_is_kv_cache_oom": a_memory_summary.check_kv_cache_oom(),
+            "f_is_kv_cache_oom": f_memory_summary.check_kv_cache_oom(),
             "num_layers": num_layers,
             "a_partition": a_partition,
             "f_partition": f_partition,
@@ -1375,6 +1429,8 @@ class AFDInferenceSession:
         runtime_config: config.RuntimeConfig,
         *,
         phase: str | None = None,
+        free_gpu_memory_fraction: float | None = None,
+        max_seq_len: int | None = None,
     ) -> InferenceSummary:
         """Run AFD performance simulation, possibly for prefill, decode, or both.
 
@@ -1387,6 +1443,9 @@ class AFDInferenceSession:
             runtime_config: ISL / OSL / prefix / correction scales.
             phase:          ``"prefill"``, ``"decode"``, or ``"both"``.
                              Defaults to ``self._afd_config.phase``.
+            free_gpu_memory_fraction: Fraction of free GPU memory allocated
+                             for KV cache. Defaults to backend behavior.
+            max_seq_len:    Optional runtime max sequence length for KV cache.
 
         Returns:
             InferenceSummary.  ``check_oom()`` reflects the per-pool HBM check.
@@ -1395,6 +1454,8 @@ class AFDInferenceSession:
         phase = phase if phase is not None else cfg.phase
         if phase not in ("prefill", "decode", "both"):
             raise ValueError(f"AFDInferenceSession.run_afd: invalid phase {phase!r}")
+        if free_gpu_memory_fraction is None:
+            free_gpu_memory_fraction = self._backend.get_default_free_gpu_memory_fraction()
 
         a_model, f_model = self._build_models()
 
@@ -1406,6 +1467,8 @@ class AFDInferenceSession:
                 runtime_config=runtime_config,
                 a_model=a_model,
                 f_model=f_model,
+                free_gpu_memory_fraction=free_gpu_memory_fraction,
+                max_seq_len=max_seq_len,
             )
         if phase in ("decode", "both"):
             decode_metrics = self._simulate_phase(
@@ -1413,6 +1476,8 @@ class AFDInferenceSession:
                 runtime_config=runtime_config,
                 a_model=a_model,
                 f_model=f_model,
+                free_gpu_memory_fraction=free_gpu_memory_fraction,
+                max_seq_len=max_seq_len,
             )
 
         return self._build_summary(
@@ -1422,18 +1487,40 @@ class AFDInferenceSession:
             decode_metrics=decode_metrics,
         )
 
-    def run_afd_decode(self, runtime_config: config.RuntimeConfig) -> InferenceSummary:
+    def run_afd_decode(
+        self,
+        runtime_config: config.RuntimeConfig,
+        *,
+        free_gpu_memory_fraction: float | None = None,
+        max_seq_len: int | None = None,
+    ) -> InferenceSummary:
         """Backwards-compatible Decode-only entry point."""
-        return self.run_afd(runtime_config, phase="decode")
+        return self.run_afd(
+            runtime_config,
+            phase="decode",
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
+            max_seq_len=max_seq_len,
+        )
 
-    def run_afd_prefill(self, runtime_config: config.RuntimeConfig) -> InferenceSummary:
+    def run_afd_prefill(
+        self,
+        runtime_config: config.RuntimeConfig,
+        *,
+        free_gpu_memory_fraction: float | None = None,
+        max_seq_len: int | None = None,
+    ) -> InferenceSummary:
         """Prefill-only AFD entry point.
 
         Uses the same A/F split as decode but applies it to ``context_ops``,
         producing a TTFT estimate.  No persistent KV cache is required —
         the A-Worker HBM estimate tracks the transient prefill KV only.
         """
-        return self.run_afd(runtime_config, phase="prefill")
+        return self.run_afd(
+            runtime_config,
+            phase="prefill",
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
+            max_seq_len=max_seq_len,
+        )
 
     def _build_summary(
         self,
@@ -1490,17 +1577,30 @@ class AFDInferenceSession:
         tokens_per_s_per_gpu = tokens_per_s / total_gpus if total_gpus > 0 else 0.0
 
         # HBM / OOM — take the worst of any simulated phase.
-        def _max_mem(key: str) -> float:
+        def _max_memory_dict(key: str) -> dict[str, float]:
             vals = [m[key] for m in (prefill_metrics, decode_metrics) if m is not None]
-            return max(vals) if vals else 0.0
+            if not vals:
+                return {
+                    "total": 0.0,
+                    "weights": 0.0,
+                    "activations": 0.0,
+                    "kvcache": 0.0,
+                    "nccl": 0.0,
+                    "others": 0.0,
+                }
+            return dict(max(vals, key=lambda item: item["total"]))
 
         def _any_oom(key: str) -> bool:
             return any(m[key] for m in (prefill_metrics, decode_metrics) if m is not None)
 
-        a_memory_gb = _max_mem("a_memory_gb")
-        f_memory_gb = _max_mem("f_memory_gb")
+        a_memory = _max_memory_dict("a_memory")
+        f_memory = _max_memory_dict("f_memory")
+        a_memory_gb = a_memory["total"]
+        f_memory_gb = f_memory["total"]
         a_is_oom = _any_oom("a_is_oom")
         f_is_oom = _any_oom("f_is_oom")
+        a_is_kv_cache_oom = _any_oom("a_is_kv_cache_oom")
+        f_is_kv_cache_oom = _any_oom("f_is_kv_cache_oom")
         is_oom = a_is_oom or f_is_oom
 
         tokens_per_s_per_user = (1000.0 / tpot) if tpot > 0 else 0.0
@@ -1556,10 +1656,15 @@ class AFDInferenceSession:
 
         summary_df = pd.DataFrame([result_dict], columns=common.ColumnsAFD)
         summary = InferenceSummary(runtime_config)
+        summary_memory = dict(a_memory if a_memory_gb >= f_memory_gb else f_memory)
+        summary.set_memory_and_check_oom(
+            summary_memory,
+            self._database.system_spec["gpu"]["mem_capacity"],
+        )
+        summary.set_oom(bool(is_oom))
+        summary.set_kv_cache_oom(bool(a_is_kv_cache_oom or f_is_kv_cache_oom))
         summary.set_summary_df(summary_df)
         summary.set_result_dict(result_dict)
-
-        summary.set_oom(bool(is_oom))
 
         # Per-ops breakdown by phase / pool.  AFD inserts two transfer
         # ops per layer (A→F and F→A); both per-direction values are
@@ -1579,6 +1684,23 @@ class AFDInferenceSession:
             comm["decode_afd_transfer_a2f"] = decode_metrics["t_a2f_layer"]
             comm["decode_afd_transfer_f2a"] = decode_metrics["t_f2a_layer"]
             comm["decode_afd_transfer"] = decode_metrics["t_c_layer"]
+        memory_breakdown = {
+            "a_worker": a_memory,
+            "f_worker": f_memory,
+            "a_is_kv_cache_oom": bool(a_is_kv_cache_oom),
+            "f_is_kv_cache_oom": bool(f_is_kv_cache_oom),
+        }
+        if prefill_metrics is not None:
+            memory_breakdown["prefill"] = {
+                "a_worker": prefill_metrics["a_memory"],
+                "f_worker": prefill_metrics["f_memory"],
+            }
+        if decode_metrics is not None:
+            memory_breakdown["decode"] = {
+                "a_worker": decode_metrics["a_memory"],
+                "f_worker": decode_metrics["f_memory"],
+            }
+        per_ops_data["memory"] = memory_breakdown
         summary.set_per_ops_data(per_ops_data)
 
         return summary
