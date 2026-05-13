@@ -1562,27 +1562,6 @@ def load_mhc_module_data(mhc_file: str):
     return mhc_data
 
 
-def load_context_deepseek_v4_attention_module_data(attn_file: str):
-    """Reserved enum slot.
-
-    DeepSeek-V4's first supported DB format is split by attention kind under
-    ``dsv4_{csa,hca}_context_*`` files; no combined context file format exists.
-    """
-    logger.debug(f"DeepSeek-V4 combined context attention module data file {attn_file} is not supported.")
-    return None
-
-
-def load_generation_deepseek_v4_attention_module_data(attn_file: str):
-    """Reserved enum slot.
-
-    DeepSeek-V4's first supported DB format is split by attention kind under
-    ``dsv4_{csa,hca}_generation_*`` files; no combined generation file format
-    exists.
-    """
-    logger.debug(f"DeepSeek-V4 combined generation attention module data file {attn_file} is not supported.")
-    return None
-
-
 _DSV4_DTYPE_ALIASES = {
     # CSV columns use sglang naming; aic_dev enums use canonical short names.
     "fp8_e4m3": "fp8",
@@ -2834,8 +2813,6 @@ class PerfDatabase:
                 PerfDataFilename.dsa_context_module: load_context_dsa_module_data,
                 PerfDataFilename.dsa_generation_module: load_generation_dsa_module_data,
                 PerfDataFilename.mhc_module: load_mhc_module_data,
-                PerfDataFilename.deepseek_v4_context_module: load_context_deepseek_v4_attention_module_data,
-                PerfDataFilename.deepseek_v4_generation_module: load_generation_deepseek_v4_attention_module_data,
                 PerfDataFilename.dsv4_csa_context_module: load_context_dsv4_kind_module_data,
                 PerfDataFilename.dsv4_hca_context_module: load_context_dsv4_kind_module_data,
                 PerfDataFilename.dsv4_csa_generation_module: load_generation_dsv4_kind_module_data,
@@ -2901,8 +2878,8 @@ class PerfDatabase:
 
         # DeepSeek-V4 module-level data — collected as split files per mode
         # (csa/hca).  Each loader returns a nested dict scoped to one
-        # compress_ratio; we merge into the SAME attribute the legacy single-
-        # file loader fills, so downstream queries are unchanged.
+        # compress_ratio; we merge into one aggregate attribute so downstream
+        # queries do not need to know which attention kind produced each row.
         def _load_dsv4_split(loaded_list):
             merged: dict = {}
             first_loaded = next((x for x in loaded_list if x is not None), None)
@@ -2924,15 +2901,11 @@ class PerfDatabase:
             _load_op_data(PerfDataFilename.dsv4_csa_generation_module),
             _load_op_data(PerfDataFilename.dsv4_hca_generation_module),
         ]
-        self._context_deepseek_v4_attention_module_data = _load_dsv4_split(ctx_split) or _load_op_data(
-            PerfDataFilename.deepseek_v4_context_module
-        )
+        self._context_deepseek_v4_attention_module_data = _load_dsv4_split(ctx_split)
         self._raw_context_deepseek_v4_attention_module_data = copy.deepcopy(
             self._context_deepseek_v4_attention_module_data
         )
-        self._generation_deepseek_v4_attention_module_data = _load_dsv4_split(gen_split) or _load_op_data(
-            PerfDataFilename.deepseek_v4_generation_module
-        )
+        self._generation_deepseek_v4_attention_module_data = _load_dsv4_split(gen_split)
 
         # DeepSeek-V4 sparse-kernel data (kernel-level past_kv Δ correction).
         # Dict keyed by ``arch -> tp -> past_kv -> isl -> bs``.

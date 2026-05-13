@@ -16,8 +16,6 @@ from aiconfigurator.sdk.perf_database import (
     PerfDataNotAvailableError,
     _deep_merge_dsv4_dicts,
     _dsv4_robust_3d_lookup,
-    load_context_deepseek_v4_attention_module_data,
-    load_generation_deepseek_v4_attention_module_data,
     load_mhc_module_data,
 )
 
@@ -142,15 +140,8 @@ def _dsv4_sparse_kernel_grid(lat_without_prefix: float = 0.02, lat_with_prefix: 
     }
 
 
-def test_deepseek_v4_module_loaders_are_reserved_placeholders(tmp_path):
-    context_file = tmp_path / "deepseek_v4_context_module_perf.txt"
-    context_file.write_text("framework,version,device\n")
-    generation_file = tmp_path / "deepseek_v4_generation_module_perf.txt"
-    generation_file.write_text("framework,version,device\n")
-
+def test_mhc_module_loader_returns_none_for_missing_file(tmp_path):
     assert load_mhc_module_data(str(tmp_path / "mhc_module_perf.txt")) is None
-    assert load_context_deepseek_v4_attention_module_data(str(context_file)) is None
-    assert load_generation_deepseek_v4_attention_module_data(str(generation_file)) is None
 
 
 class TestDeepSeekV4MHCModule:
@@ -278,7 +269,7 @@ class TestDeepSeekV4AttentionModule:
         mock_grid = _dsv4_generation_sampled_grid()
         db._generation_deepseek_v4_attention_module_data = LoadedOpData(
             _generation_deepseek_v4_data(4, mock_grid),
-            common.PerfDataFilename.deepseek_v4_generation_module,
+            common.PerfDataFilename.dsv4_csa_generation_module,
             "mock_dsv4_generation_module_tp8",
         )
         kwargs = _deepseek_v4_attn_kwargs(4)
@@ -390,11 +381,11 @@ class TestDeepSeekV4AttentionModule:
             }
         }
         db._raw_context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(4, raw_attn_dict), common.PerfDataFilename.deepseek_v4_context_module, "raw"
+            _context_deepseek_v4_data(4, raw_attn_dict), common.PerfDataFilename.dsv4_csa_context_module, "raw"
         )
         db._context_deepseek_v4_attention_module_data = LoadedOpData(
             _context_deepseek_v4_data(4, extrapolated_attn_dict),
-            common.PerfDataFilename.deepseek_v4_context_module,
+            common.PerfDataFilename.dsv4_csa_context_module,
             "extrapolated",
         )
 
@@ -428,7 +419,7 @@ class TestDeepSeekV4AttentionModule:
         _deep_merge_dsv4_dicts(data, pro_data)
         db._context_deepseek_v4_attention_module_data = LoadedOpData(
             data,
-            common.PerfDataFilename.deepseek_v4_context_module,
+            common.PerfDataFilename.dsv4_csa_context_module,
             "models",
         )
         db._raw_context_deepseek_v4_attention_module_data = None
@@ -531,12 +522,12 @@ class TestDeepSeekV4AttentionModule:
         module_grid = _dsv4_sampled_batch_caps_grid()
         db._context_deepseek_v4_attention_module_data = LoadedOpData(
             _context_deepseek_v4_data(4, module_grid),
-            common.PerfDataFilename.deepseek_v4_context_module,
+            common.PerfDataFilename.dsv4_csa_context_module,
             "mock_dsv4_context_module_tp8",
         )
         db._raw_context_deepseek_v4_attention_module_data = LoadedOpData(
             _context_deepseek_v4_data(4, module_grid),
-            common.PerfDataFilename.deepseek_v4_context_module,
+            common.PerfDataFilename.dsv4_csa_context_module,
             "mock_raw_dsv4_context_module_tp8",
         )
         sparse_grid = _dsv4_sparse_kernel_grid()
@@ -568,7 +559,7 @@ class TestDeepSeekV4AttentionModule:
         module_grid = _dsv4_sampled_batch_caps_grid()
         db._context_deepseek_v4_attention_module_data = LoadedOpData(
             _context_deepseek_v4_data(4, module_grid),
-            common.PerfDataFilename.deepseek_v4_context_module,
+            common.PerfDataFilename.dsv4_csa_context_module,
             "mock_dsv4_context_module_tp8",
         )
 
@@ -592,12 +583,12 @@ class TestDeepSeekV4AttentionModule:
         module_grid = _dsv4_sampled_batch_caps_grid()
         db._context_deepseek_v4_attention_module_data = LoadedOpData(
             _context_deepseek_v4_data(4, module_grid),
-            common.PerfDataFilename.deepseek_v4_context_module,
+            common.PerfDataFilename.dsv4_csa_context_module,
             "mock_dsv4_context_module_tp8",
         )
         db._raw_context_deepseek_v4_attention_module_data = LoadedOpData(
             _context_deepseek_v4_data(4, module_grid),
-            common.PerfDataFilename.deepseek_v4_context_module,
+            common.PerfDataFilename.dsv4_csa_context_module,
             "mock_raw_dsv4_context_module_tp8",
         )
 

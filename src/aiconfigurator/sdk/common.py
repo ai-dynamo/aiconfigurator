@@ -672,8 +672,6 @@ class PerfDataFilename(Enum):
     dsa_context_module = "dsa_context_module_perf.txt"
     dsa_generation_module = "dsa_generation_module_perf.txt"
     mhc_module = "mhc_module_perf.txt"
-    deepseek_v4_context_module = "deepseek_v4_context_module_perf.txt"
-    deepseek_v4_generation_module = "deepseek_v4_generation_module_perf.txt"
     # DeepSeek-V4 module-level data — one CSV per (attn_kind ∈ {csa, hca},
     # mode ∈ {context, generation}) = 4 files.  Each file contains all
     # (tp_size, gemm_type, b, s) rows for that kind+mode.  SWA layers are
