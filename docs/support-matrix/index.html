@@ -352,7 +352,7 @@ function buildTopErrors(rows, systemName, modeFilter, topN = 10) {
 // ── Data Fetching ───────────────────────────────────────────────────
 function isLocalhostPreview() {
   const host = window.location.hostname;
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost');
+  return host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1' || host.endsWith('.localhost');
 }
 
 function usesLocalCsv(branch) {
@@ -991,7 +991,7 @@ function App() {
 
   const [activeSystem, setActiveSystem] = useState(null);
   const [activeMode, setActiveMode] = useState('all');
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState(() => new URLSearchParams(window.location.search).get('q') || '');
   const [sortCol, setSortCol] = useState(null);
   const [sortAsc, setSortAsc] = useState(true);
   const [showAllVersions, setShowAllVersions] = useState(false);
@@ -1026,7 +1026,7 @@ function App() {
         }
         setSortCol(null);
         setSortAsc(true);
-        setSearchQuery('');
+        setSearchQuery(new URLSearchParams(window.location.search).get('q') || '');
       })
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));

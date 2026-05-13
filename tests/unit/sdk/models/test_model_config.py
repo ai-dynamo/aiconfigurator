@@ -359,6 +359,18 @@ class TestHFModelSupport:
         assert model_config.moe_quant_mode == expected_moe_quant
         assert model_config.fmha_quant_mode == common.FMHAQuantMode.bfloat16
 
+    def test_glm5_nvfp4_dsa_attention_uses_unquantized_projection_tables(self):
+        model_config = config.ModelConfig(tp_size=1, moe_tp_size=1, moe_ep_size=1)
+        model = get_model("nvidia/GLM-5-NVFP4", model_config, backend_name="sglang")
+
+        context_dsa = next(op for op in model.context_ops if op._name == "context_attention")
+        generation_dsa = next(op for op in model.generation_ops if op._name == "generation_attention")
+
+        assert model_config.gemm_quant_mode == common.GEMMQuantMode.nvfp4
+        assert model_config.moe_quant_mode == common.MoEQuantMode.nvfp4
+        assert context_dsa._gemm_quant_mode == common.GEMMQuantMode.bfloat16
+        assert generation_dsa._gemm_quant_mode == common.GEMMQuantMode.bfloat16
+
     @pytest.mark.parametrize(
         "model_path,replacement",
         [

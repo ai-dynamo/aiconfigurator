@@ -7,11 +7,12 @@ Unit tests for common SDK configurations.
 Tests supported systems, model families, and other common configurations.
 """
 
+from collections import Counter
 from pathlib import Path
 
 import pytest
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, perf_database
 
 pytestmark = pytest.mark.unit
 
@@ -103,6 +104,49 @@ class TestSupportMatrix:
         agg, disagg = common.check_support(model, system, backend, version, architecture)
         assert agg is expected_agg
         assert disagg is expected_disagg
+
+    @pytest.mark.parametrize(
+        "model,backend,version,expected_agg,expected_disagg",
+        [
+            ("zai-org/GLM-5-FP8", "sglang", "0.5.10", True, True),
+            ("zai-org/GLM-5-FP8", "trtllm", "1.3.0rc10", False, False),
+            ("nvidia/GLM-5-NVFP4", "sglang", "0.5.10", True, True),
+            ("nvidia/GLM-5-NVFP4", "vllm", "0.19.0", True, True),
+        ],
+    )
+    def test_check_support_uses_exact_glm5_b200_variant_rows(
+        self, model, backend, version, expected_agg, expected_disagg
+    ):
+        """GLM-5 quantized variants should not inherit BF16 support results."""
+        result = common.check_support(model, "b200_sxm", backend, version, "GlmMoeDsaForCausalLM")
+
+        assert result.agg_supported is expected_agg
+        assert result.disagg_supported is expected_disagg
+        assert result.exact_match is True
+
+    def test_glm5_quantized_variants_cover_all_database_combinations(self):
+        """GLM-5 quantized variants should have exact rows for every support-matrix target."""
+        supported_databases = perf_database.get_supported_databases()
+        expected_keys = {
+            (system, backend, version, mode)
+            for system, backend_versions in supported_databases.items()
+            for backend, versions in backend_versions.items()
+            for version in versions
+            for mode in ("agg", "disagg")
+        }
+
+        matrix = common.get_support_matrix()
+        for model in ("zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"):
+            model_rows = [row for row in matrix if row["HuggingFaceID"] == model]
+            model_key_counts = Counter(
+                (row["System"], row["Backend"], row["Version"], row["Mode"]) for row in model_rows
+            )
+            model_keys = set(model_key_counts)
+
+            assert model_keys == expected_keys
+            assert all(count == 1 for count in model_key_counts.values()), (
+                f"{model} has duplicate support-matrix rows for one or more keys"
+            )
 
     def test_check_support_matches_architecture_fallback_case_insensitively(self, monkeypatch):
         """Test system/backend case normalization for architecture-based fallback."""
