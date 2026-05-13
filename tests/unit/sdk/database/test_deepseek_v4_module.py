@@ -59,6 +59,16 @@ def _write_mhc_perf(path, rows: list[str]) -> str:
     return str(path)
 
 
+def _write_deepseek_v4_module_perf(path, rows: list[str]) -> str:
+    header = (
+        "framework,version,device,op_name,kernel_source,model,architecture,"
+        "mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,"
+        "step,compress_ratio,latency"
+    )
+    path.write_text(header + "\n" + "\n".join(rows) + "\n")
+    return str(path)
+
+
 def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict, native_heads: int = 128) -> dict:
     return {
         common.FMHAQuantMode.bfloat16: {
@@ -142,13 +152,51 @@ def _dsv4_sparse_kernel_grid(lat_without_prefix: float = 0.02, lat_with_prefix: 
     }
 
 
-def test_deepseek_v4_module_loaders_are_placeholders(tmp_path):
+def test_deepseek_v4_module_loaders_return_none_for_missing_files(tmp_path):
     assert load_mhc_module_data(str(tmp_path / "mhc_module_perf.txt")) is None
     assert load_context_deepseek_v4_attention_module_data(str(tmp_path / "deepseek_v4_context_module_perf.txt")) is None
     assert (
         load_generation_deepseek_v4_attention_module_data(str(tmp_path / "deepseek_v4_generation_module_perf.txt"))
         is None
     )
+
+
+def test_legacy_deepseek_v4_context_module_loader_parses_combined_file(tmp_path):
+    path = _write_deepseek_v4_module_perf(
+        tmp_path / "deepseek_v4_context_module_perf.txt",
+        [
+            "SGLang,test,NVIDIA H20-3e,dsv4_csa_context_module,compressed_flashmla,"
+            "deepseek-ai/DeepSeek-V4-Flash,DeepseekV4ForCausalLM,bfloat16,fp8_e4m3,"
+            "fp8_block,64,2,1024,4,0,4,1.2500",
+            "SGLang,test,NVIDIA H20-3e,dsv4_hca_context_module,compressed_flashmla,"
+            "deepseek-ai/DeepSeek-V4-Flash,DeepseekV4ForCausalLM,bfloat16,fp8_e4m3,"
+            "fp8_block,64,2,1024,4,0,128,2.5000",
+        ],
+    )
+
+    data = load_context_deepseek_v4_attention_module_data(path)
+
+    assert data is not None
+    data = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block]
+    assert data[64][4][4][1024][2]["latency"] == pytest.approx(1.25)
+    assert data[64][128][4][1024][2]["latency"] == pytest.approx(2.50)
+
+
+def test_legacy_deepseek_v4_generation_module_loader_parses_combined_file(tmp_path):
+    path = _write_deepseek_v4_module_perf(
+        tmp_path / "deepseek_v4_generation_module_perf.txt",
+        [
+            "SGLang,test,NVIDIA H20-3e,dsv4_hca_generation_module,compressed_flashmla,"
+            "deepseek-ai/DeepSeek-V4-Flash,DeepseekV4ForCausalLM,bfloat16,fp8_e4m3,"
+            "fp8_block,64,2,1,4,1023,128,0.7500",
+        ],
+    )
+
+    data = load_generation_deepseek_v4_attention_module_data(path)
+
+    assert data is not None
+    data = data[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block]
+    assert data[64][128][4][2][1024]["latency"] == pytest.approx(0.75)
 
 
 class TestDeepSeekV4MHCModule:

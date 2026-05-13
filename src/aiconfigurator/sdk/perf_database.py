@@ -1567,14 +1567,30 @@ def load_context_deepseek_v4_attention_module_data(attn_file: str):
     combined ``deepseek_v4_context_module_perf.txt`` convention).  DeepSeek-V4
     data is now split across ``dsv4_{csa,hca}_context_*`` files —
     see ``load_context_dsv4_kind_module_data``."""
-    logger.debug(f"DeepSeek-V4 context attention module data file {attn_file} not loaded.")
-    return None
+    try:
+        data = load_context_dsv4_kind_module_data(attn_file)
+    except Exception:
+        logger.exception(f"Failed to load legacy DeepSeek-V4 context attention module data from {attn_file}.")
+        return None
+    if data is None:
+        logger.debug(f"Legacy DeepSeek-V4 context attention module data file {attn_file} not found.")
+    else:
+        logger.debug(f"Loaded legacy DeepSeek-V4 context attention module data from {attn_file}.")
+    return data
 
 
 def load_generation_deepseek_v4_attention_module_data(attn_file: str):
     """Legacy single-file loader; DeepSeek-V4 data is now split per attn_kind."""
-    logger.debug(f"DeepSeek-V4 generation attention module data file {attn_file} not loaded.")
-    return None
+    try:
+        data = load_generation_dsv4_kind_module_data(attn_file)
+    except Exception:
+        logger.exception(f"Failed to load legacy DeepSeek-V4 generation attention module data from {attn_file}.")
+        return None
+    if data is None:
+        logger.debug(f"Legacy DeepSeek-V4 generation attention module data file {attn_file} not found.")
+    else:
+        logger.debug(f"Loaded legacy DeepSeek-V4 generation attention module data from {attn_file}.")
+    return data
 
 
 _DSV4_DTYPE_ALIASES = {
