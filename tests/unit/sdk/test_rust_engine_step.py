@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from types import SimpleNamespace
 
@@ -143,6 +144,32 @@ def test_mixed_and_decode_helpers_map_to_fpm(monkeypatch) -> None:
     }
 
 
+def test_engine_config_json_includes_database_mode() -> None:
+    model = SimpleNamespace(
+        model_path="Test/Dense",
+        architecture="LlamaForCausalLM",
+        config=ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        ),
+    )
+    database = SimpleNamespace(
+        system="test_sxm",
+        backend="vllm",
+        version="1.0.0",
+        get_default_database_mode=lambda: common.DatabaseMode.HYBRID,
+    )
+
+    config = json.loads(rust_engine_step._engine_config_json(model, database))
+
+    assert config["database_mode"] == "HYBRID"
+
+
 @pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo is required to build the Rust core shared library")
 def test_ctypes_wrapper_calls_real_rust_core(tmp_path, monkeypatch) -> None:
     systems_root = tmp_path / "systems"
@@ -151,7 +178,14 @@ def test_ctypes_wrapper_calls_real_rust_core(tmp_path, monkeypatch) -> None:
     data_root.mkdir(parents=True)
     model_configs_root.mkdir()
 
-    (systems_root / "test_sxm.yaml").write_text("data_dir: data/test_sxm\n")
+    (systems_root / "test_sxm.yaml").write_text(
+        "data_dir: data/test_sxm\n"
+        "gpu:\n"
+        "  mem_bw: 1000000000000\n"
+        "  bfloat16_tc_flops: 2000000000000\n"
+        "  fp8_tc_flops: 4000000000000\n"
+        "  fp4_tc_flops: 8000000000000\n"
+    )
     (model_configs_root / "Test--Dense_config.json").write_text(
         """{
   "architectures": ["LlamaForCausalLM"],

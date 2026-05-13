@@ -10,10 +10,12 @@ use std::sync::{Arc, Mutex};
 
 use csv::StringRecord;
 
-use crate::AicError;
+use crate::{AicError, DatabaseMode};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PerfDatabase {
+    system: SystemSpec,
+    database_mode: DatabaseMode,
     gemm: Vec<GemmPoint>,
     context_attention: Vec<ContextAttentionPoint>,
     generation_attention: Vec<GenerationAttentionPoint>,
@@ -29,7 +31,7 @@ struct QueryCache {
     context_attention: HashMap<(String, String, u32, u32, u32, u32, u32, u32), f64>,
     generation_attention: HashMap<(String, u32, u32, u32, u32, u32), f64>,
     moe: HashMap<(String, u32, u32, u32, u32, u32, u32, u32, String), Option<f64>>,
-    context_mla: HashMap<(String, String, u32, u32, u32), Option<f64>>,
+    context_mla: HashMap<(String, String, u32, u32, u32, u32), Option<f64>>,
     generation_mla: HashMap<(String, u32, u32, u32), Option<f64>>,
 }
 
@@ -39,31 +41,90 @@ impl PerfDatabase {
         system_name: &str,
         backend: &str,
         backend_version: Option<&str>,
+        database_mode: DatabaseMode,
     ) -> Result<Self, AicError> {
         let system_path = systems_root.join(format!("{system_name}.yaml"));
-        let data_dir = read_data_dir(&system_path)?;
-        let backend_root = systems_root.join(data_dir).join(backend);
-        let version_path = resolve_backend_version(&backend_root, backend_version)?;
+        let system = read_system_spec(&system_path)?;
+        let backend_root = systems_root.join(&system.data_dir).join(backend);
+        let version_path =
+            resolve_backend_version_for_mode(&backend_root, backend_version, database_mode)?;
 
-        let gemm_path = version_path.join("gemm_perf.txt");
-        let context_attention_path = version_path.join("context_attention_perf.txt");
-        let generation_attention_path = version_path.join("generation_attention_perf.txt");
-        let moe_path = version_path.join("moe_perf.txt");
-        let context_mla_path = version_path.join("context_mla_perf.txt");
-        let generation_mla_path = version_path.join("generation_mla_perf.txt");
+        let empty_points = || {
+            (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+        let (gemm, context_attention, generation_attention, moe, context_mla, generation_mla) = if matches!(
+            database_mode,
+            DatabaseMode::Sol | DatabaseMode::SolFull | DatabaseMode::Empirical
+        ) {
+            empty_points()
+        } else if let Some(version_path) = version_path {
+            let gemm_path = version_path.join("gemm_perf.txt");
+            let context_attention_path = version_path.join("context_attention_perf.txt");
+            let generation_attention_path = version_path.join("generation_attention_perf.txt");
+            let moe_path = version_path.join("moe_perf.txt");
+            let context_mla_path = version_path.join("context_mla_perf.txt");
+            let generation_mla_path = version_path.join("generation_mla_perf.txt");
+
+            match database_mode {
+                DatabaseMode::Silicon => (
+                    load_gemm_points(&gemm_path)?,
+                    load_context_attention_points(&context_attention_path)?,
+                    load_generation_attention_points(&generation_attention_path)?,
+                    load_optional_moe_points(&moe_path)?,
+                    load_optional_context_mla_points(&context_mla_path)?,
+                    load_optional_generation_mla_points(&generation_mla_path)?,
+                ),
+                DatabaseMode::Hybrid => (
+                    load_optional_points(&gemm_path, load_gemm_points)?,
+                    load_optional_points(&context_attention_path, load_context_attention_points)?,
+                    load_optional_points(
+                        &generation_attention_path,
+                        load_generation_attention_points,
+                    )?,
+                    load_optional_moe_points(&moe_path)?,
+                    load_optional_context_mla_points(&context_mla_path)?,
+                    load_optional_generation_mla_points(&generation_mla_path)?,
+                ),
+                DatabaseMode::Sol | DatabaseMode::SolFull | DatabaseMode::Empirical => {
+                    empty_points()
+                }
+            }
+        } else {
+            empty_points()
+        };
 
         Ok(Self {
-            gemm: load_gemm_points(&gemm_path)?,
-            context_attention: load_context_attention_points(&context_attention_path)?,
-            generation_attention: load_generation_attention_points(&generation_attention_path)?,
-            moe: load_optional_moe_points(&moe_path)?,
-            context_mla: load_optional_context_mla_points(&context_mla_path)?,
-            generation_mla: load_optional_generation_mla_points(&generation_mla_path)?,
+            system,
+            database_mode,
+            gemm,
+            context_attention,
+            generation_attention,
+            moe,
+            context_mla,
+            generation_mla,
             query_cache: Arc::new(Mutex::new(QueryCache::default())),
         })
     }
 
     pub(crate) fn query_gemm(&self, quant: &str, m: u32, n: u32, k: u32) -> Result<f64, AicError> {
+        match self.database_mode {
+            DatabaseMode::Sol | DatabaseMode::SolFull => Ok(self.sol_gemm_ms(quant, m, n, k)),
+            DatabaseMode::Empirical => Ok(self.sol_gemm_ms(quant, m, n, k) / 0.8),
+            DatabaseMode::Hybrid => self
+                .query_gemm_silicon(quant, m, n, k)
+                .or_else(|_| Ok(self.sol_gemm_ms(quant, m, n, k) / 0.8)),
+            DatabaseMode::Silicon => self.query_gemm_silicon(quant, m, n, k),
+        }
+    }
+
+    fn query_gemm_silicon(&self, quant: &str, m: u32, n: u32, k: u32) -> Result<f64, AicError> {
         let key = (quant.to_string(), m, n, k);
         if let Ok(cache) = self.query_cache.lock() {
             if let Some(latency) = cache.gemm.get(&key) {
@@ -92,6 +153,74 @@ impl PerfDatabase {
     }
 
     pub(crate) fn query_context_attention(
+        &self,
+        fmha_quant: &str,
+        kv_cache_quant: &str,
+        batch_size: u32,
+        sequence_tokens: u32,
+        prefix_tokens: u32,
+        num_heads: u32,
+        num_kv_heads: u32,
+        head_dim: u32,
+    ) -> Result<f64, AicError> {
+        match self.database_mode {
+            DatabaseMode::Sol | DatabaseMode::SolFull => Ok(self.sol_context_attention_ms(
+                fmha_quant,
+                kv_cache_quant,
+                batch_size,
+                sequence_tokens,
+                prefix_tokens,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            )),
+            DatabaseMode::Empirical => Ok(self.sol_context_attention_ms(
+                fmha_quant,
+                kv_cache_quant,
+                batch_size,
+                sequence_tokens,
+                prefix_tokens,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            ) / 0.6),
+            DatabaseMode::Hybrid => self
+                .query_context_attention_silicon(
+                    fmha_quant,
+                    kv_cache_quant,
+                    batch_size,
+                    sequence_tokens,
+                    prefix_tokens,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                )
+                .or_else(|_| {
+                    Ok(self.sol_context_attention_ms(
+                        fmha_quant,
+                        kv_cache_quant,
+                        batch_size,
+                        sequence_tokens,
+                        prefix_tokens,
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
+                    ) / 0.6)
+                }),
+            DatabaseMode::Silicon => self.query_context_attention_silicon(
+                fmha_quant,
+                kv_cache_quant,
+                batch_size,
+                sequence_tokens,
+                prefix_tokens,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            ),
+        }
+    }
+
+    fn query_context_attention_silicon(
         &self,
         fmha_quant: &str,
         kv_cache_quant: &str,
@@ -165,6 +294,62 @@ impl PerfDatabase {
         num_kv_heads: u32,
         head_dim: u32,
     ) -> Result<f64, AicError> {
+        match self.database_mode {
+            DatabaseMode::Sol | DatabaseMode::SolFull => Ok(self.sol_generation_attention_ms(
+                kv_cache_quant,
+                batch_size,
+                sequence_tokens,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            )),
+            DatabaseMode::Empirical => Ok(self.sol_generation_attention_ms(
+                kv_cache_quant,
+                batch_size,
+                sequence_tokens,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            ) / 0.8),
+            DatabaseMode::Hybrid => self
+                .query_generation_attention_silicon(
+                    kv_cache_quant,
+                    batch_size,
+                    sequence_tokens,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                )
+                .or_else(|_| {
+                    Ok(self.sol_generation_attention_ms(
+                        kv_cache_quant,
+                        batch_size,
+                        sequence_tokens,
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
+                    ) / 0.8)
+                }),
+            DatabaseMode::Silicon => self.query_generation_attention_silicon(
+                kv_cache_quant,
+                batch_size,
+                sequence_tokens,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            ),
+        }
+    }
+
+    fn query_generation_attention_silicon(
+        &self,
+        kv_cache_quant: &str,
+        batch_size: u32,
+        sequence_tokens: u32,
+        num_heads: u32,
+        num_kv_heads: u32,
+        head_dim: u32,
+    ) -> Result<f64, AicError> {
         let key = (
             kv_cache_quant.to_string(),
             batch_size,
@@ -208,6 +393,81 @@ impl PerfDatabase {
     }
 
     pub(crate) fn query_moe(
+        &self,
+        quant: &str,
+        num_tokens: u32,
+        hidden_size: u32,
+        inter_size: u32,
+        top_k: u32,
+        num_experts: u32,
+        moe_tp_size: u32,
+        moe_ep_size: u32,
+        distribution: &str,
+    ) -> Option<f64> {
+        match self.database_mode {
+            DatabaseMode::Sol | DatabaseMode::SolFull => Some(self.sol_moe_ms(
+                quant,
+                num_tokens,
+                hidden_size,
+                inter_size,
+                top_k,
+                num_experts,
+                moe_tp_size,
+                moe_ep_size,
+            )),
+            DatabaseMode::Empirical => Some(
+                self.sol_moe_ms(
+                    quant,
+                    num_tokens,
+                    hidden_size,
+                    inter_size,
+                    top_k,
+                    num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                ) / 0.4,
+            ),
+            DatabaseMode::Hybrid => self
+                .query_moe_silicon(
+                    quant,
+                    num_tokens,
+                    hidden_size,
+                    inter_size,
+                    top_k,
+                    num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    distribution,
+                )
+                .or_else(|| {
+                    Some(
+                        self.sol_moe_ms(
+                            quant,
+                            num_tokens,
+                            hidden_size,
+                            inter_size,
+                            top_k,
+                            num_experts,
+                            moe_tp_size,
+                            moe_ep_size,
+                        ) / 0.4,
+                    )
+                }),
+            DatabaseMode::Silicon => self.query_moe_silicon(
+                quant,
+                num_tokens,
+                hidden_size,
+                inter_size,
+                top_k,
+                num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                distribution,
+            ),
+        }
+    }
+
+    fn query_moe_silicon(
         &self,
         quant: &str,
         num_tokens: u32,
@@ -270,6 +530,67 @@ impl PerfDatabase {
         kv_cache_quant: &str,
         batch_size: u32,
         sequence_tokens: u32,
+        prefix_tokens: u32,
+        num_heads: u32,
+    ) -> Option<f64> {
+        match self.database_mode {
+            DatabaseMode::Sol | DatabaseMode::SolFull => Some(self.sol_context_mla_ms(
+                fmha_quant,
+                kv_cache_quant,
+                batch_size,
+                sequence_tokens,
+                prefix_tokens,
+                num_heads,
+            )),
+            DatabaseMode::Empirical => Some(
+                self.sol_context_mla_ms(
+                    fmha_quant,
+                    kv_cache_quant,
+                    batch_size,
+                    sequence_tokens,
+                    prefix_tokens,
+                    num_heads,
+                ) / 0.6,
+            ),
+            DatabaseMode::Hybrid => self
+                .query_context_mla_silicon(
+                    fmha_quant,
+                    kv_cache_quant,
+                    batch_size,
+                    sequence_tokens,
+                    prefix_tokens,
+                    num_heads,
+                )
+                .or_else(|| {
+                    Some(
+                        self.sol_context_mla_ms(
+                            fmha_quant,
+                            kv_cache_quant,
+                            batch_size,
+                            sequence_tokens,
+                            prefix_tokens,
+                            num_heads,
+                        ) / 0.6,
+                    )
+                }),
+            DatabaseMode::Silicon => self.query_context_mla_silicon(
+                fmha_quant,
+                kv_cache_quant,
+                batch_size,
+                sequence_tokens,
+                prefix_tokens,
+                num_heads,
+            ),
+        }
+    }
+
+    fn query_context_mla_silicon(
+        &self,
+        fmha_quant: &str,
+        kv_cache_quant: &str,
+        batch_size: u32,
+        sequence_tokens: u32,
+        prefix_tokens: u32,
         num_heads: u32,
     ) -> Option<f64> {
         let key = (
@@ -277,6 +598,7 @@ impl PerfDatabase {
             kv_cache_quant.to_string(),
             batch_size,
             sequence_tokens,
+            prefix_tokens,
             num_heads,
         );
         if let Ok(cache) = self.query_cache.lock() {
@@ -286,17 +608,27 @@ impl PerfDatabase {
         }
 
         let mut best: Option<(f64, f64)> = None;
+        let full_sequence_tokens = sequence_tokens.saturating_add(prefix_tokens);
         for point in self.context_mla.iter().filter(|point| {
             point.fmha_quant == fmha_quant && point.kv_cache_quant == kv_cache_quant
         }) {
             let score = relative_distance(point.batch_size, batch_size)
-                + relative_distance(point.sequence_tokens, sequence_tokens)
+                + relative_distance(point.sequence_tokens, full_sequence_tokens)
                 + relative_distance(point.num_heads, num_heads);
             if best.map_or(true, |(best_score, _)| score < best_score) {
                 best = Some((score, point.latency_ms));
             }
         }
-        let latency = best.map(|(_, latency)| latency);
+        let latency = best.map(|(_, latency)| {
+            let full_sequence_tokens_f = f64::from(full_sequence_tokens);
+            if full_sequence_tokens_f == 0.0 {
+                return 0.0;
+            }
+            let prefix_tokens_f = f64::from(prefix_tokens);
+            let denominator = full_sequence_tokens_f * full_sequence_tokens_f;
+            let numerator = (denominator - prefix_tokens_f * prefix_tokens_f).max(0.0);
+            latency * numerator / denominator
+        });
         if let Ok(mut cache) = self.query_cache.lock() {
             cache.context_mla.insert(key, latency);
         }
@@ -304,6 +636,50 @@ impl PerfDatabase {
     }
 
     pub(crate) fn query_generation_mla(
+        &self,
+        kv_cache_quant: &str,
+        batch_size: u32,
+        sequence_tokens: u32,
+        num_heads: u32,
+    ) -> Option<f64> {
+        match self.database_mode {
+            DatabaseMode::Sol | DatabaseMode::SolFull => Some(self.sol_generation_mla_ms(
+                kv_cache_quant,
+                batch_size,
+                sequence_tokens,
+                num_heads,
+            )),
+            DatabaseMode::Empirical => Some(
+                self.sol_generation_mla_ms(kv_cache_quant, batch_size, sequence_tokens, num_heads)
+                    / 0.8,
+            ),
+            DatabaseMode::Hybrid => self
+                .query_generation_mla_silicon(
+                    kv_cache_quant,
+                    batch_size,
+                    sequence_tokens,
+                    num_heads,
+                )
+                .or_else(|| {
+                    Some(
+                        self.sol_generation_mla_ms(
+                            kv_cache_quant,
+                            batch_size,
+                            sequence_tokens,
+                            num_heads,
+                        ) / 0.8,
+                    )
+                }),
+            DatabaseMode::Silicon => self.query_generation_mla_silicon(
+                kv_cache_quant,
+                batch_size,
+                sequence_tokens,
+                num_heads,
+            ),
+        }
+    }
+
+    fn query_generation_mla_silicon(
         &self,
         kv_cache_quant: &str,
         batch_size: u32,
@@ -340,6 +716,142 @@ impl PerfDatabase {
             cache.generation_mla.insert(key, latency);
         }
         latency
+    }
+
+    fn sol_gemm_ms(&self, quant: &str, m: u32, n: u32, k: u32) -> f64 {
+        let quant = quant_spec(quant);
+        let tc_flops = self.system.gpu.quant_tc_flops(quant.compute_factor);
+        let m = f64::from(m);
+        let n = f64::from(n);
+        let k = f64::from(k);
+        let sol_math = 2.0 * m * n * k / tc_flops * 1000.0;
+        let sol_mem =
+            quant.memory_bytes * (m * n + m * k + n * k) / self.system.gpu.mem_bw * 1000.0;
+        sol_math.max(sol_mem)
+    }
+
+    fn sol_context_attention_ms(
+        &self,
+        fmha_quant: &str,
+        kv_cache_quant: &str,
+        batch_size: u32,
+        sequence_tokens: u32,
+        prefix_tokens: u32,
+        num_heads: u32,
+        num_kv_heads: u32,
+        head_dim: u32,
+    ) -> f64 {
+        let fmha = quant_spec(fmha_quant);
+        let kv = quant_spec(kv_cache_quant);
+        let b = f64::from(batch_size);
+        let s = f64::from(sequence_tokens);
+        let prefix = f64::from(prefix_tokens);
+        let full_s = s + prefix;
+        let n = f64::from(num_heads);
+        let n_kv = f64::from(num_kv_heads);
+        let h = f64::from(head_dim);
+        let ops = 2.0 * b * (full_s * full_s - prefix * prefix).max(0.0) * n * h;
+        let mem_bytes =
+            2.0 * b * (n * s * h + n * s * h) + kv.memory_bytes * b * (2.0 * n_kv * full_s * h);
+        let sol_math = ops / self.system.gpu.bfloat16_tc_flops * 1000.0 / fmha.compute_factor;
+        let sol_mem = mem_bytes / self.system.gpu.mem_bw * 1000.0;
+        sol_math.max(sol_mem)
+    }
+
+    fn sol_generation_attention_ms(
+        &self,
+        kv_cache_quant: &str,
+        batch_size: u32,
+        sequence_tokens: u32,
+        num_heads: u32,
+        num_kv_heads: u32,
+        head_dim: u32,
+    ) -> f64 {
+        let kv = quant_spec(kv_cache_quant);
+        let quant_gen = if kv_cache_quant == "fp8" { 2.0 } else { 1.0 };
+        let b = f64::from(batch_size);
+        let kv_len = f64::from(sequence_tokens.saturating_sub(1));
+        let n = f64::from(num_heads);
+        let n_kv = f64::from(num_kv_heads);
+        let h = f64::from(head_dim);
+        let ops = 2.0 * b * n * h * 2.0 * kv_len;
+        let mem_bytes = b * (n * h * 2.0 + 2.0 * n_kv * kv_len * h * kv.memory_bytes + n * h * 2.0);
+        let sol_math = ops / self.system.gpu.bfloat16_tc_flops * 1000.0 / quant_gen;
+        let sol_mem = mem_bytes / self.system.gpu.mem_bw * 1000.0;
+        sol_math.max(sol_mem)
+    }
+
+    fn sol_moe_ms(
+        &self,
+        quant: &str,
+        num_tokens: u32,
+        hidden_size: u32,
+        inter_size: u32,
+        top_k: u32,
+        num_experts: u32,
+        moe_tp_size: u32,
+        moe_ep_size: u32,
+    ) -> f64 {
+        let quant = quant_spec(quant);
+        let num_gemms = 3.0;
+        let total_tokens = f64::from(num_tokens.saturating_mul(top_k));
+        let hidden = f64::from(hidden_size);
+        let inter = f64::from(inter_size);
+        let tp = f64::from(moe_tp_size.max(1));
+        let ep = f64::from(moe_ep_size.max(1));
+        let slots = f64::from(num_experts.max(1));
+        let ops = total_tokens * hidden * inter * num_gemms * 2.0 / ep / tp;
+        let active_tokens = total_tokens / ep;
+        let mem_bytes = quant.memory_bytes
+            * (active_tokens * hidden * 2.0
+                + active_tokens * inter * num_gemms / tp
+                + hidden * inter * num_gemms / tp * (slots / ep).min(active_tokens));
+        let sol_math = ops / (self.system.gpu.bfloat16_tc_flops * quant.compute_factor) * 1000.0;
+        let sol_mem = mem_bytes / self.system.gpu.mem_bw * 1000.0;
+        sol_math.max(sol_mem)
+    }
+
+    fn sol_context_mla_ms(
+        &self,
+        fmha_quant: &str,
+        kv_cache_quant: &str,
+        batch_size: u32,
+        sequence_tokens: u32,
+        prefix_tokens: u32,
+        num_heads: u32,
+    ) -> f64 {
+        let fmha = quant_spec(fmha_quant);
+        let kv = quant_spec(kv_cache_quant);
+        let b = f64::from(batch_size);
+        let s = f64::from(sequence_tokens);
+        let prefix = f64::from(prefix_tokens);
+        let full_s = s + prefix;
+        let heads = f64::from(num_heads);
+        let ops = b * heads * (192.0 + 128.0) * (full_s * full_s - prefix * prefix).max(0.0);
+        let mem_bytes =
+            b * heads * (kv.memory_bytes * full_s * (192.0 + 128.0) + 2.0 * s * (192.0 + 128.0));
+        let sol_math = ops / self.system.gpu.bfloat16_tc_flops * 1000.0 / fmha.compute_factor;
+        let sol_mem = mem_bytes / self.system.gpu.mem_bw * 1000.0;
+        sol_math.max(sol_mem)
+    }
+
+    fn sol_generation_mla_ms(
+        &self,
+        kv_cache_quant: &str,
+        batch_size: u32,
+        sequence_tokens: u32,
+        num_heads: u32,
+    ) -> f64 {
+        let kv = quant_spec(kv_cache_quant);
+        let quant_gen = if kv_cache_quant == "fp8" { 2.0 } else { 1.0 };
+        let b = f64::from(batch_size);
+        let s = f64::from(sequence_tokens);
+        let heads = f64::from(num_heads);
+        let ops = 2.0 * b * heads * 1088.0 * s;
+        let mem_bytes = b * (heads * 1088.0 * 2.0 + (s.max(1.0) - 1.0) * 576.0 * kv.memory_bytes);
+        let sol_math = ops / self.system.gpu.bfloat16_tc_flops * 1000.0 / quant_gen;
+        let sol_mem = mem_bytes / self.system.gpu.mem_bw * 1000.0;
+        sol_math.max(sol_mem)
     }
 }
 
@@ -410,25 +922,170 @@ struct GenerationMlaPoint {
     latency_ms: f64,
 }
 
-fn read_data_dir(system_path: &Path) -> Result<PathBuf, AicError> {
+#[derive(Clone, Debug)]
+struct SystemSpec {
+    data_dir: PathBuf,
+    gpu: GpuSpec,
+}
+
+#[derive(Clone, Debug)]
+struct GpuSpec {
+    mem_bw: f64,
+    bfloat16_tc_flops: f64,
+    fp8_tc_flops: Option<f64>,
+    fp4_tc_flops: Option<f64>,
+}
+
+impl GpuSpec {
+    fn quant_tc_flops(&self, compute_factor: f64) -> f64 {
+        if (compute_factor - 2.0).abs() < f64::EPSILON {
+            return self
+                .fp8_tc_flops
+                .unwrap_or(self.bfloat16_tc_flops * compute_factor);
+        }
+        if (compute_factor - 4.0).abs() < f64::EPSILON {
+            return self
+                .fp4_tc_flops
+                .unwrap_or(self.bfloat16_tc_flops * compute_factor);
+        }
+        self.bfloat16_tc_flops * compute_factor
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct QuantSpec {
+    memory_bytes: f64,
+    compute_factor: f64,
+}
+
+fn quant_spec(name: &str) -> QuantSpec {
+    match name {
+        "fp8" | "fp8_static" | "fp8_block" | "fp8_ootb" | "sq" => QuantSpec {
+            memory_bytes: 1.0,
+            compute_factor: 2.0,
+        },
+        "nvfp4" => QuantSpec {
+            memory_bytes: 9.0 / 16.0,
+            compute_factor: 4.0,
+        },
+        "int8" | "int8_wo" => QuantSpec {
+            memory_bytes: 1.0,
+            compute_factor: 1.0,
+        },
+        "int4" | "int4_wo" | "w4afp8" | "w4a16_mxfp4" | "w4a8_mxfp4_mxfp8" => QuantSpec {
+            memory_bytes: 0.5,
+            compute_factor: if name == "w4afp8" || name == "w4a8_mxfp4_mxfp8" {
+                2.0
+            } else {
+                1.0
+            },
+        },
+        _ => QuantSpec {
+            memory_bytes: 2.0,
+            compute_factor: 1.0,
+        },
+    }
+}
+
+fn read_system_spec(system_path: &Path) -> Result<SystemSpec, AicError> {
     let text = fs::read_to_string(system_path).map_err(|source| AicError::Io {
         path: system_path.to_path_buf(),
         source,
     })?;
+    let mut data_dir = None;
+    let mut mem_bw = None;
+    let mut bfloat16_tc_flops = None;
+    let mut fp8_tc_flops = None;
+    let mut fp4_tc_flops = None;
+
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
-        let Some(value) = line.strip_prefix("data_dir:") else {
+        let Some((key, value)) = line.split_once(':') else {
             continue;
         };
-        let value = value.trim().trim_matches('"').trim_matches('\'');
-        if !value.is_empty() {
-            return Ok(PathBuf::from(value));
+        let key = key.trim();
+        let value = yaml_scalar(value);
+        if value.is_empty() {
+            continue;
+        }
+        match key {
+            "data_dir" => data_dir = Some(PathBuf::from(value)),
+            "mem_bw" => mem_bw = Some(parse_system_f64(system_path, key, value)?),
+            "bfloat16_tc_flops" => {
+                bfloat16_tc_flops = Some(parse_system_f64(system_path, key, value)?)
+            }
+            "fp8_tc_flops" => fp8_tc_flops = Some(parse_system_f64(system_path, key, value)?),
+            "fp4_tc_flops" => fp4_tc_flops = Some(parse_system_f64(system_path, key, value)?),
+            _ => {}
         }
     }
-    Err(AicError::PerfDatabase(format!(
-        "missing data_dir in system file {}",
-        system_path.display()
-    )))
+
+    let data_dir = data_dir.ok_or_else(|| {
+        AicError::PerfDatabase(format!(
+            "missing data_dir in system file {}",
+            system_path.display()
+        ))
+    })?;
+    let mem_bw = required_system_f64(system_path, "gpu.mem_bw", mem_bw)?;
+    let bfloat16_tc_flops =
+        required_system_f64(system_path, "gpu.bfloat16_tc_flops", bfloat16_tc_flops)?;
+
+    Ok(SystemSpec {
+        data_dir,
+        gpu: GpuSpec {
+            mem_bw,
+            bfloat16_tc_flops,
+            fp8_tc_flops,
+            fp4_tc_flops,
+        },
+    })
+}
+
+fn yaml_scalar(raw: &str) -> &str {
+    raw.trim().trim_matches('"').trim_matches('\'')
+}
+
+fn parse_system_f64(system_path: &Path, key: &str, raw: &str) -> Result<f64, AicError> {
+    raw.parse::<f64>().map_err(|source| {
+        AicError::PerfDatabase(format!(
+            "invalid numeric value '{raw}' for '{key}' in {}: {source}",
+            system_path.display()
+        ))
+    })
+}
+
+fn required_system_f64(system_path: &Path, key: &str, value: Option<f64>) -> Result<f64, AicError> {
+    value.ok_or_else(|| {
+        AicError::PerfDatabase(format!(
+            "missing {key} in system file {}",
+            system_path.display()
+        ))
+    })
+}
+
+fn resolve_backend_version_for_mode(
+    backend_root: &Path,
+    backend_version: Option<&str>,
+    database_mode: DatabaseMode,
+) -> Result<Option<PathBuf>, AicError> {
+    match database_mode {
+        DatabaseMode::Silicon => {
+            return resolve_backend_version(backend_root, backend_version).map(Some)
+        }
+        DatabaseMode::Sol | DatabaseMode::SolFull | DatabaseMode::Empirical => return Ok(None),
+        DatabaseMode::Hybrid => {}
+    }
+
+    if let Some(version) = backend_version {
+        let path = backend_root.join(version);
+        return Ok(path.is_dir().then_some(path));
+    }
+
+    if !backend_root.is_dir() {
+        return Ok(None);
+    }
+
+    Ok(resolve_backend_version(backend_root, None).ok())
 }
 
 fn resolve_backend_version(
@@ -510,6 +1167,16 @@ fn version_number_runs(version: &str) -> Vec<u64> {
         numbers.push(number);
     }
     numbers
+}
+
+fn load_optional_points<T>(
+    path: &Path,
+    load: fn(&Path) -> Result<Vec<T>, AicError>,
+) -> Result<Vec<T>, AicError> {
+    if !path.is_file() || is_lfs_pointer(path)? {
+        return Ok(Vec::new());
+    }
+    load(path)
 }
 
 fn load_gemm_points(path: &Path) -> Result<Vec<GemmPoint>, AicError> {

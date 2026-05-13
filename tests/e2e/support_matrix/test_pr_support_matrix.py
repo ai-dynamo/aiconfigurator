@@ -25,7 +25,12 @@ import pytest
 from aiconfigurator.cli.api import cli_support
 from aiconfigurator.sdk.perf_database import get_latest_database_version
 
-pytestmark = [pytest.mark.e2e, pytest.mark.build, pytest.mark.support_matrix]
+pytestmark = [
+    pytest.mark.e2e,
+    pytest.mark.build,
+    pytest.mark.support_matrix,
+    pytest.mark.timeout(300),
+]
 
 # Representative model/system/backend cases. Keep this intentionally small:
 # the full cross product belongs in the scheduled support-matrix workflow,

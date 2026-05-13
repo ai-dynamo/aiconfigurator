@@ -212,6 +212,7 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "system_name": database.system,
         "backend": _backend_name(database.backend),
         "backend_version": getattr(database, "version", None),
+        "database_mode": _database_mode_name(database),
         "tp_size": int(model_config.tp_size or 1),
         "pp_size": int(model_config.pp_size or 1),
         "moe_tp_size": _optional_int(getattr(model_config, "moe_tp_size", None)),
@@ -224,6 +225,21 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "extra": {},
     }
     return json.dumps(config, sort_keys=True, separators=(",", ":"))
+
+
+def _database_mode_name(database: Any) -> str:
+    get_default_mode = getattr(database, "get_default_database_mode", None)
+    if callable(get_default_mode):
+        mode = get_default_mode()
+    else:
+        mode = getattr(database, "database_mode", getattr(database, "_default_database_mode", None))
+
+    mode_name = getattr(mode, "name", None)
+    if mode_name is None and mode is not None:
+        mode_name = str(mode)
+    if mode_name and "." in mode_name:
+        mode_name = mode_name.rsplit(".", 1)[-1]
+    return str(mode_name or "SILICON").upper()
 
 
 def _prefill_metrics(*, batch_size: int, isl: int, prefix: int) -> dict[str, Any]:
