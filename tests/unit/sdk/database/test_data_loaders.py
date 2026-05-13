@@ -209,9 +209,7 @@ def test_get_all_databases_system_config_conflict(tmp_path, monkeypatch, caplog)
     # max_workers=1 keeps loading in-parent so the DummyPerfDatabase monkeypatch
     # is honored. The ProcessPoolExecutor path re-imports the module in workers
     # and would bypass the patch.
-    database_dict = get_all_databases(
-        systems_paths=[str(systems_root_a), str(systems_root_b)], max_workers=1
-    )
+    database_dict = get_all_databases(systems_paths=[str(systems_root_a), str(systems_root_b)], max_workers=1)
 
     assert "trtllm" in database_dict[system]
     assert "vllm" in database_dict[system]
@@ -238,9 +236,7 @@ def test_get_all_databases_conflicting_backend_version_keeps_first(tmp_path, mon
     # max_workers=1 keeps loading in-parent so the DummyPerfDatabase monkeypatch
     # is honored. The ProcessPoolExecutor path re-imports the module in workers
     # and would bypass the patch.
-    database_dict = get_all_databases(
-        systems_paths=[str(systems_root_a), str(systems_root_b)], max_workers=1
-    )
+    database_dict = get_all_databases(systems_paths=[str(systems_root_a), str(systems_root_b)], max_workers=1)
     db = database_dict[system]["trtllm"]["v1"]
     assert db.systems_root == str(systems_root_a)
     assert any("Database 'h100/trtllm/v1' already loaded from" in record.message for record in caplog.records)
