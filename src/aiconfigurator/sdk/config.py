@@ -36,6 +36,64 @@ class ModelConfig:
     enable_eplb: bool = False  # Expert Parallel Load Balancing
     wideep_num_slots: int = None  # EPLB num_slots, defaults to num_experts if None
 
+    def resolve_moe_parallelism(self) -> tuple[int, int]:
+        """Resolve and validate MoE parallelism dimensions in-place.
+
+        For MoE models, the attention width must match the expert width:
+        ``tp_size * attention_dp_size == moe_tp_size * moe_ep_size``. If one
+        MoE dimension is missing, infer it from the other. If both are missing,
+        keep the common default shape of ``moe_tp_size=tp_size`` and
+        ``moe_ep_size=attention_dp_size``.
+        """
+
+        def _validate_positive(name: str, value: int) -> None:
+            if value <= 0:
+                raise ValueError(f"{name} must be positive, got {value}.")
+
+        _validate_positive("tp_size", self.tp_size)
+        _validate_positive("attention_dp_size", self.attention_dp_size)
+
+        attn_width = self.tp_size * self.attention_dp_size
+        moe_tp_size = self.moe_tp_size
+        moe_ep_size = self.moe_ep_size
+        if moe_tp_size is None and moe_ep_size is None:
+            moe_tp_size = self.tp_size
+            moe_ep_size = self.attention_dp_size
+        elif moe_tp_size is None:
+            _validate_positive("moe_ep_size", moe_ep_size)
+            if attn_width % moe_ep_size != 0:
+                raise ValueError(
+                    f"Cannot infer moe_tp_size: tp_size({self.tp_size}) * "
+                    f"attention_dp_size({self.attention_dp_size}) = {attn_width} is not "
+                    f"divisible by moe_ep_size({moe_ep_size})."
+                )
+            moe_tp_size = attn_width // moe_ep_size
+        elif moe_ep_size is None:
+            _validate_positive("moe_tp_size", moe_tp_size)
+            if attn_width % moe_tp_size != 0:
+                raise ValueError(
+                    f"Cannot infer moe_ep_size: tp_size({self.tp_size}) * "
+                    f"attention_dp_size({self.attention_dp_size}) = {attn_width} is not "
+                    f"divisible by moe_tp_size({moe_tp_size})."
+                )
+            moe_ep_size = attn_width // moe_tp_size
+
+        _validate_positive("moe_tp_size", moe_tp_size)
+        _validate_positive("moe_ep_size", moe_ep_size)
+
+        moe_width = moe_tp_size * moe_ep_size
+        if attn_width != moe_width:
+            raise ValueError(
+                f"Parallelism width mismatch: tp_size({self.tp_size}) * "
+                f"attention_dp_size({self.attention_dp_size}) = {attn_width}, but "
+                f"moe_tp_size({moe_tp_size}) * moe_ep_size({moe_ep_size}) = "
+                f"{moe_width}. These must be equal."
+            )
+
+        self.moe_tp_size = moe_tp_size
+        self.moe_ep_size = moe_ep_size
+        return self.moe_tp_size, self.moe_ep_size
+
 
 @dataclass
 class RuntimeConfig:
