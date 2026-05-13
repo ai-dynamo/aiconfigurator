@@ -17,8 +17,7 @@ logger = logging.getLogger(__name__)
 class DeepSeekModel(BaseModel):
     """
     DeepSeek V3/R1 uses this model impl. Also serves as the entry point for
-    Kimi K2.5 (registered under the ``KIMIK25`` family), which differs only
-    in that it threads ``backend_name`` through for vLLM-specific quant paths.
+    Kimi K2.5 (registered under the ``KIMIK25`` family).
     """
 
     @classmethod
@@ -42,8 +41,9 @@ class DeepSeekModel(BaseModel):
         family = model_info["model_family"]
 
         if family == "KIMIK25":
-            # Kimi K2.5 reuses the DeepSeek architecture but needs backend_name
-            # threaded through for vLLM-specific quant paths.
+            # Kimi K2.5 reuses the DeepSeek architecture, but skips the WideEP
+            # dispatch below since the WideEP variants are DEEPSEEK-V3-specific
+            # (different hidden_size, layer count, etc.).
             return cls(*moe_args, *base_args, extra_params, backend_name=backend_name)
 
         # DEEPSEEK family — three-way dispatch on WideEP.
@@ -62,7 +62,10 @@ class DeepSeekModel(BaseModel):
             model_info["model_path"],
             backend_name,
         )
-        return cls(*moe_args, *base_args, extra_params)
+        # Thread backend_name through so backend-specific modeling (e.g. vLLM
+        # TP allreduce, vLLM-specific attention head size) fires for the
+        # DEEPSEEK family too, not just KIMIK25.
+        return cls(*moe_args, *base_args, extra_params, backend_name=backend_name)
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
         super().__init__(*args)

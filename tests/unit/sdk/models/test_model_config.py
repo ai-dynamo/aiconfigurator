@@ -695,7 +695,7 @@ class TestGetModelMOESGLangDispatch:
 
 
 class TestDeepSeekTPAllReduce:
-    """vLLM TP allreduce coverage in DeepSeekModel.generation_ops (AIC-1058)."""
+    """vLLM TP allreduce coverage in DeepSeekModel context+generation ops."""
 
     @staticmethod
     def _build(hf_id: str, backend: str, tp_size: int):
@@ -716,6 +716,18 @@ class TestDeepSeekTPAllReduce:
         assert ar._tp_size == 4
         assert ar._h == model._hidden_size
         assert ar._scale_factor == pytest.approx(2 * model._num_layers * model._mtp_scale_factor)
+
+    def test_vllm_deepseek_v3_also_emits_tp_allreduce(self):
+        # DEEPSEEK family (non-KIMIK25) goes through the create() fallback;
+        # confirm backend_name is threaded so DS-V3 + vLLM also emits the op.
+        # Also confirm the parser exposes v_head_dim (128 for the MLA arch) so
+        # the existing vLLM attention-swap doesn't silently use head_size=56.
+        model = self._build("deepseek-ai/DeepSeek-V3", "vllm", tp_size=4)
+        gen_ar = [op for op in model.generation_ops if op._name == "generation_tp_allreduce"]
+        ctx_ar = [op for op in model.context_ops if op._name == "context_tp_allreduce"]
+        assert len(gen_ar) == 1 and gen_ar[0]._tp_size == 4
+        assert len(ctx_ar) == 1 and ctx_ar[0]._tp_size == 4
+        assert model._vllm_head_size == 128
 
     def test_vllm_has_context_tp_allreduce_scaled_by_2x_num_layers(self):
         model = self._build("nvidia/Kimi-K2.5-NVFP4", "vllm", tp_size=4)
