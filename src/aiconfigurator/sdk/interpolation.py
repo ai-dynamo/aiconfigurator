@@ -523,6 +523,7 @@ def extrapolate_data_grid(
                     y_right_value = data_dict[x][y_right][z]
                     assert y_right_value is not None, "y_right_value cannot be None"
                     if sqrt_y_value:
+
                         def _sqrt_leaf(v):
                             if isinstance(v, dict):
                                 return {
