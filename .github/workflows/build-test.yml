@@ -114,6 +114,7 @@ jobs:
           mkdir -p dist
           docker buildx build \
             --platform ${{ matrix.platform }} \
+            --build-arg MANYLINUX_ARCH=${{ matrix.archs }} \
             --target wheel-out \
             --output type=local,dest=./dist \
             -f docker/Dockerfile \

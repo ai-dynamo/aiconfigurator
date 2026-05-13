@@ -2,44 +2,41 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-FROM nvcr.io/nvidia/base/ubuntu:jammy-20250619 AS base
+# Pass --build-arg MANYLINUX_ARCH=x86_64 or aarch64 to match the docker buildx
+# --platform target. CI sets this from matrix.archs (which already uses the
+# x86_64 / aarch64 names manylinux uses). Default keeps single-platform local
+# builds on x86_64 hosts working without an extra flag.
+ARG MANYLINUX_ARCH=x86_64
 
-WORKDIR /workspace
-
-ENV VIRTUAL_ENV=/opt/aiconfigurator/venv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN mkdir /opt/aiconfigurator && \
-    uv venv --python 3.12 ${VIRTUAL_ENV} && \
-    chmod a+rx /root && \
-    chmod -R a+rX /root/.local
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-ENV MPLCONFIGDIR=/tmp/matplotlib
-
-FROM rust:1-slim-bookworm AS rust-toolchain
-# Build-time tooling required to install pinned cargo binaries.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
-    rm -rf /var/lib/apt/lists/*
-# Install pinned cargo binaries (currently: cargo-cyclonedx) into the cargo
-# image's CARGO_HOME, so a single `COPY --from=rust-toolchain /usr/local/cargo`
-# in downstream stages brings rustc + cargo + every pinned tool over together.
-# This stage is only invalidated when install_build_tools.sh changes, not on
-# every source edit.
+# Rust toolchain stage, sourced from the same manylinux_2_28 image so that
+# rustup-installed cargo/rustc and any compiled cargo binaries run inside the
+# downstream `build` stage (matching glibc 2.28).
+FROM quay.io/pypa/manylinux_2_28_${MANYLINUX_ARCH} AS rust-toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+      sh -s -- -y --profile minimal --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+# Pinned binary cargo tools (currently cargo-cyclonedx). Installed once here
+# so every downstream stage picks them up via `COPY --from=rust-toolchain`.
 COPY tools/wheel_build/install_build_tools.sh /tmp/install_build_tools.sh
 RUN bash /tmp/install_build_tools.sh && rm /tmp/install_build_tools.sh
 
-FROM base AS build
-# setuptools-rust compiles the aiconfigurator-core cdylib into the wheel during
-# `uv build --wheel`, so the Rust toolchain + C compiler must be present here.
-# cargo-cyclonedx comes along inside CARGO_HOME from the rust-toolchain stage.
-COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
-COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
-ENV CARGO_HOME=/usr/local/cargo
-ENV RUSTUP_HOME=/usr/local/rustup
-ENV PATH="${CARGO_HOME}/bin:${PATH}"
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
-    rm -rf /var/lib/apt/lists/*
+# Wheel-build stage: manylinux_2_28 (AlmaLinux 8, glibc 2.28). Building here
+# means the cdylib references at most glibc 2.28 symbols, so `auditwheel
+# repair` can stamp the wheel `manylinux_2_28_<arch>` for broad compatibility
+# with RHEL 8 / Ubuntu 20.04 / Debian 11 hosts.
+FROM quay.io/pypa/manylinux_2_28_${MANYLINUX_ARCH} AS build
+COPY --from=rust-toolchain /root/.cargo /root/.cargo
+COPY --from=rust-toolchain /root/.rustup /root/.rustup
+ENV CARGO_HOME=/root/.cargo
+ENV RUSTUP_HOME=/root/.rustup
+ENV PATH="${CARGO_HOME}/bin:/opt/python/cp312-cp312/bin:${PATH}"
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+WORKDIR /workspace
+ENV VIRTUAL_ENV=/opt/aiconfigurator/venv
+RUN uv venv --python 3.12 ${VIRTUAL_ENV}
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV MPLCONFIGDIR=/tmp/matplotlib
 
 COPY src/ /workspace/src/
 COPY rust/ /workspace/rust/
@@ -57,19 +54,29 @@ RUN set -e; \
     fi
 RUN uv build --wheel --out-dir /workspace/dist
 
+# `auditwheel repair` rewrites the wheel's platform tag honestly based on the
+# actual symbol versions it observes (glibc, libstdc++ etc.) and bundles any
+# external shared-library deps inside the wheel. Lets auditwheel choose the
+# tag rather than hard-coding it — that way a future glibc-symbol bump from
+# Rust's std surfaces in the tag instead of silently breaking installs.
+RUN mkdir -p /workspace/dist-repaired && \
+    for whl in /workspace/dist/*.whl; do \
+      auditwheel repair --wheel-dir /workspace/dist-repaired "$whl" && \
+      rm "$whl"; \
+    done && \
+    mv /workspace/dist-repaired/*.whl /workspace/dist/ && \
+    rmdir /workspace/dist-repaired
+
 # Retag the wheel as `py3-none-<plat>`. The aiconfigurator-core cdylib is
 # loaded via ctypes and never links libpython, so a single platform wheel
-# can cover all supported CPython versions (>= 3.10 per pyproject.toml).
-# `wheel tags --remove` rewrites the wheel filename, updates the WHEEL
-# metadata, recomputes RECORD, and deletes the original cp<N>-cp<N> wheel.
+# covers all supported CPython versions (>= 3.10 per pyproject.toml).
 RUN uv pip install 'wheel>=0.42'
 RUN for whl in /workspace/dist/*.whl; do \
       python3 -m wheel tags --python-tag py3 --abi-tag none --remove "$whl"; \
     done
 
 # Generate a CycloneDX SBOM for the Rust crate and inject it into every wheel
-# under /workspace/dist per PEP 770. The SBOM is located by `find` so the
-# build doesn't depend on cargo-cyclonedx's exact output-naming behavior.
+# under /workspace/dist per PEP 770.
 RUN cargo cyclonedx \
       --manifest-path /workspace/rust/aiconfigurator-core/Cargo.toml \
       --format json
@@ -90,6 +97,19 @@ RUN set -e; \
 FROM scratch AS wheel-out
 COPY --from=build /workspace/dist/ /
 
+# Runtime / test stages keep the NVIDIA Ubuntu base — only the wheel-build
+# pipeline cares about the manylinux baseline.
+FROM nvcr.io/nvidia/base/ubuntu:jammy-20250619 AS base
+WORKDIR /workspace
+ENV VIRTUAL_ENV=/opt/aiconfigurator/venv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+RUN mkdir /opt/aiconfigurator && \
+    uv venv --python 3.12 ${VIRTUAL_ENV} && \
+    chmod a+rx /root && \
+    chmod -R a+rX /root/.local
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV MPLCONFIGDIR=/tmp/matplotlib
+
 FROM base AS runtime
 COPY --from=build /workspace/dist /wheelhouse
 RUN WHL=$(ls -d /wheelhouse/*) && \
@@ -97,7 +117,6 @@ RUN WHL=$(ls -d /wheelhouse/*) && \
     rm -rf /wheelhouse
 
 FROM runtime AS test
-
 COPY --from=build /workspace/dist /wheelhouse
 RUN WHL=$(ls -d /wheelhouse/*) && \
     uv pip install "$WHL[dev]" && \
