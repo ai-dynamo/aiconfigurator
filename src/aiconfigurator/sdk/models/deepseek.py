@@ -482,6 +482,23 @@ class DeepSeekModel(BaseModel):
             ]
         )
 
+        # vLLM TP allreduce: one collective after attention proj, one after MoE,
+        # per transformer layer. vLLM models with tp_size > 1 always pay this cost
+        # (cross_device_reduce); the FlashInfer fused variant only kicks in during
+        # pure decode steps with AllReduceFusionPass. Modeled here as the unfused
+        # cost since collect_all_reduce.py benchmarks vLLM's native allreduce.
+        # TRT-LLM (narrow EP) and SGLang paths model their allreduce/all-gather
+        # cost elsewhere (WideEP variants below; SGLang via NCCL ops).
+        if self._backend_name == "vllm":
+            self.generation_ops.append(
+                ops.CustomAllReduce(
+                    "generation_tp_allreduce",
+                    2 * self._num_layers * self._mtp_scale_factor,
+                    h,
+                    tp_size,
+                )
+            )
+
         # pp
         pp_scale_factor = pp_size - 1
         self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
