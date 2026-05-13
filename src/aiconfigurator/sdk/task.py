@@ -1070,9 +1070,7 @@ class TaskConfig:
                     if validate_context:
                         _supported_or_raise("wideep_context_moe", moe_mode, supported, system_name, backend_version)
                     if validate_generation:
-                        _supported_or_raise(
-                            "wideep_generation_moe", moe_mode, supported, system_name, backend_version
-                        )
+                        _supported_or_raise("wideep_generation_moe", moe_mode, supported, system_name, backend_version)
                 else:
                     _supported_or_raise("moe", moe_mode, supported, system_name, backend_version)
 
