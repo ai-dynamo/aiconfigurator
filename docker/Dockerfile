@@ -57,6 +57,16 @@ RUN set -e; \
     fi
 RUN uv build --wheel --out-dir /workspace/dist
 
+# Retag the wheel as `py3-none-<plat>`. The aiconfigurator-core cdylib is
+# loaded via ctypes and never links libpython, so a single platform wheel
+# can cover all supported CPython versions (>= 3.10 per pyproject.toml).
+# `wheel tags --remove` rewrites the wheel filename, updates the WHEEL
+# metadata, recomputes RECORD, and deletes the original cp<N>-cp<N> wheel.
+RUN uv pip install 'wheel>=0.42'
+RUN for whl in /workspace/dist/*.whl; do \
+      python3 -m wheel tags --python-tag py3 --abi-tag none --remove "$whl"; \
+    done
+
 # Generate a CycloneDX SBOM for the Rust crate and inject it into every wheel
 # under /workspace/dist per PEP 770. The SBOM is located by `find` so the
 # build doesn't depend on cargo-cyclonedx's exact output-naming behavior.
