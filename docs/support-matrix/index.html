@@ -350,8 +350,32 @@ function buildTopErrors(rows, systemName, modeFilter, topN = 10) {
 }
 
 // ── Data Fetching ───────────────────────────────────────────────────
-function csvUrl(branch) {
-  return `https://raw.githubusercontent.com/${REPO}/refs/heads/${branch}/${CSV_PATH}`;
+function isLocalhostPreview() {
+  const host = window.location.hostname;
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost');
+}
+
+function usesLocalCsv(branch) {
+  return branch === 'main' && isLocalhostPreview();
+}
+
+function localCsvUrls() {
+  return [
+    `/${CSV_PATH}`,
+    `../../${CSV_PATH}`,
+    `../${CSV_PATH}`,
+    CSV_PATH,
+  ];
+}
+
+function csvUrls(branch) {
+  if (usesLocalCsv(branch)) return localCsvUrls();
+  return [`https://raw.githubusercontent.com/${REPO}/refs/heads/${branch}/${CSV_PATH}`];
+}
+
+function csvSourceLabel(branch) {
+  if (usesLocalCsv(branch)) return `local checkout: ${CSV_PATH}`;
+  return `GitHub branch: ${branch}`;
 }
 
 const HARDCODED_RELEASE_BRANCHES = [
@@ -406,11 +430,29 @@ async function fetchBranchList() {
 }
 
 async function fetchCsv(branch) {
-  const res = await fetch(csvUrl(branch));
-  if (!res.ok) throw new Error(`Failed to fetch CSV (HTTP ${res.status}) from branch "${branch}"`);
-  const text = await res.text();
-  const result = Papa.parse(text, { header: true, skipEmptyLines: true });
-  return result.data;
+  const urls = csvUrls(branch);
+  const errors = [];
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      const result = Papa.parse(text, { header: true, skipEmptyLines: true });
+      return result.data;
+    } catch (err) {
+      errors.push(`${url}: ${err.message}`);
+    }
+  }
+
+  if (usesLocalCsv(branch)) {
+    throw new Error(
+      `Failed to fetch local CSV. Serve the preview from the repository root so ${CSV_PATH} is available. ` +
+      `Tried: ${errors.join('; ')}`
+    );
+  }
+
+  throw new Error(`Failed to fetch CSV from branch "${branch}". Tried: ${errors.join('; ')}`);
 }
 
 // ── React Components ────────────────────────────────────────────────
@@ -423,7 +465,7 @@ function GitHubIcon() {
   );
 }
 
-function Header({ activeBranch, onSelectBranch, releaseBranches, branchesLoading, branchWarning }) {
+function Header({ activeBranch, onSelectBranch, releaseBranches, branchesLoading, branchWarning, localPreviewActive }) {
   const [dark, setDark] = useState(() => {
     const saved = localStorage.getItem('sm-theme');
     return saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -448,6 +490,7 @@ function Header({ activeBranch, onSelectBranch, releaseBranches, branchesLoading
           releaseBranches={releaseBranches}
           branchesLoading={branchesLoading}
           branchWarning={branchWarning}
+          localPreviewActive={localPreviewActive}
         />
         <a href="https://github.com/ai-dynamo/aiconfigurator" target="_blank" rel="noopener"
            title="View on GitHub"
@@ -467,7 +510,7 @@ function Header({ activeBranch, onSelectBranch, releaseBranches, branchesLoading
   );
 }
 
-function BranchSelector({ activeBranch, onSelectBranch, releaseBranches, branchesLoading, branchWarning }) {
+function BranchSelector({ activeBranch, onSelectBranch, releaseBranches, branchesLoading, branchWarning, localPreviewActive }) {
   const isReleaseBranch = activeBranch !== 'main';
   const isCustom = isReleaseBranch && !releaseBranches.includes(activeBranch);
   const [customInput, setCustomInput] = useState('');
@@ -538,6 +581,12 @@ function BranchSelector({ activeBranch, onSelectBranch, releaseBranches, branche
       {branchWarning && (
         <span className="text-xs text-amber-600 dark:text-amber-400" title={branchWarning}>
           &#9888; {branchWarning}
+        </span>
+      )}
+      {localPreviewActive && (
+        <span className="text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950 border border-emerald-200 dark:border-emerald-800 px-2 py-1 rounded"
+              title={`Loaded from ${CSV_PATH}`}>
+          local CSV
         </span>
       )}
     </div>
@@ -920,10 +969,11 @@ function ErrorBanner({ message, onRetry }) {
   );
 }
 
-function Footer() {
+function Footer({ csvSource }) {
   return (
     <div className="text-center py-6 text-xs text-slate-400 dark:text-slate-500 border-t border-slate-200 dark:border-slate-700 mt-8">
       AI Configurator Support Matrix &middot; Data from <code className="text-xs">support_matrix.csv</code>
+      {csvSource && <span> &middot; {csvSource}</span>}
     </div>
   );
 }
@@ -997,6 +1047,7 @@ function App() {
     () => activeSystem ? buildTopErrors(csvRows, activeSystem, activeMode) : [],
     [csvRows, activeSystem, activeMode]
   );
+  const localPreviewActive = usesLocalCsv(branch);
 
   const handleSort = useCallback((col) => {
     setSortCol(prev => {
@@ -1030,6 +1081,7 @@ function App() {
         releaseBranches={releaseBranches}
         branchesLoading={branchesLoading}
         branchWarning={branchWarning}
+        localPreviewActive={localPreviewActive}
       />
 
       {error && <ErrorBanner message={error} onRetry={() => loadCsv(branch)} />}
@@ -1057,7 +1109,7 @@ function App() {
         </>
       )}
 
-      <Footer />
+      <Footer csvSource={csvSourceLabel(branch)} />
 
       {modal && (
         <ErrorModal
