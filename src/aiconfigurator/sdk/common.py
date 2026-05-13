@@ -388,6 +388,7 @@ DefaultHFModels = {
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+    "nvidia/nemotron-ultra-rl-050826",
     "nvidia/Nemotron-H-56B-Base-8K",
 }
 

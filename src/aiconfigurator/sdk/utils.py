@@ -27,6 +27,20 @@ from aiconfigurator.sdk.common import (
 logger = logging.getLogger(__name__)
 
 
+_NEMOTRONH_LAYER_BLOCK_PATTERN = {
+    "mamba": "M",
+    "moe": "E",
+    "attention": "*",
+    "mlp": "-",
+    "dense": "-",
+    "ffn": "-",
+    "M": "M",
+    "E": "E",
+    "*": "*",
+    "-": "-",
+}
+
+
 def _load_json_with_infinity(file_path) -> dict:
     """
     Load JSON file with support for JavaScript-style Infinity and NaN values.
@@ -42,6 +56,25 @@ def _load_json_with_infinity(file_path) -> dict:
     content = re.sub(r"-Infinity\b", "null", content)
     content = re.sub(r"\bNaN\b", "null", content)
     return json.loads(content)
+
+
+def _derive_nemotronh_hybrid_pattern(config: dict) -> str:
+    """Return a NemotronH hybrid pattern from either legacy or layer-block config fields."""
+    pattern = config.get("hybrid_override_pattern")
+    if isinstance(pattern, str):
+        return pattern
+
+    layer_blocks = config.get("layers_block_type")
+    if not isinstance(layer_blocks, list):
+        raise ValueError("NemotronH config must define 'hybrid_override_pattern' or 'layers_block_type'.")
+
+    try:
+        return "".join(_NEMOTRONH_LAYER_BLOCK_PATTERN[str(block)] for block in layer_blocks)
+    except KeyError as exc:
+        supported = ", ".join(sorted(_NEMOTRONH_LAYER_BLOCK_PATTERN))
+        raise ValueError(
+            f"Unsupported NemotronH layer block type '{exc.args[0]}'. Supported values: {supported}"
+        ) from exc
 
 
 def filter_real_silicon_configs(
@@ -485,7 +518,17 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"Supported architectures: {', '.join(ARCHITECTURE_TO_MODEL_FAMILY.keys())}"
         )
 
-    layers = config["num_hidden_layers"]
+    layers = config.get("num_hidden_layers")
+    if layers is None:
+        layer_blocks = config.get("layers_block_type")
+        if isinstance(layer_blocks, list):
+            layers = len(layer_blocks)
+        else:
+            pattern = config.get("hybrid_override_pattern")
+            if isinstance(pattern, str):
+                layers = len(pattern)
+    if layers is None:
+        raise ValueError("Model config must define 'num_hidden_layers' or a parseable layer pattern.")
     hidden_size = config["hidden_size"]
     n = config["num_attention_heads"]
     vocab = config["vocab_size"]
@@ -504,8 +547,9 @@ def _parse_hf_config_json(config: dict) -> dict:
     # Handle NemotronH-specific configuration (only fields unique to NemotronH)
     extra_params = None
     if architecture == "NemotronHForCausalLM":
+        hybrid_override_pattern = _derive_nemotronh_hybrid_pattern(config)
         extra_params = common.NemotronHConfig(
-            hybrid_override_pattern=config["hybrid_override_pattern"],
+            hybrid_override_pattern=hybrid_override_pattern,
             mamba_num_heads=config["mamba_num_heads"],
             mamba_head_dim=config["mamba_head_dim"],
             ssm_state_size=config["ssm_state_size"],
