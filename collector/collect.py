@@ -3,6 +3,7 @@
 import contextlib
 import functools
 import os
+import sys
 import warnings
 
 from helper import get_device_module, get_device_str
@@ -425,6 +426,17 @@ def worker(
                 # DSLCudaRuntimeError from CUTLASS DSL also corrupts CUDA
                 # context but isn't a torch.AcceleratorError subclass.
                 is_cuda_fatal = type(e).__name__ == "DSLCudaRuntimeError"
+            if not is_cuda_fatal and isinstance(e, RuntimeError):
+                message = str(e)
+                fatal_markers = (
+                    "illegal memory access",
+                    "unspecified launch failure",
+                    "CUDA_ERROR_LAUNCH_FAILED",
+                    "CUBLAS_STATUS_EXECUTION_FAILED",
+                    "CUBLAS_STATUS_INTERNAL_ERROR",
+                    "CUBLAS_STATUS_ALLOC_FAILED",
+                )
+                is_cuda_fatal = any(marker in message for marker in fatal_markers)
             if is_cuda_fatal:
                 worker_logger.warning(
                     f"Fatal {type(e).__name__} encountered on task {task_id}. "
@@ -434,9 +446,7 @@ def worker(
                 # Flush logs again after warning
                 for handler in worker_logger.handlers:
                     handler.flush()
-                # Exiting with non-zero code will add an additional error to the summary,
-                # which we don't want (error already reported above).
-                exit(0)
+                sys.exit(EXIT_CODE_RESTART)
         finally:
             with lock:
                 progress_value.value += 1
@@ -655,10 +665,11 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 last_progress = progress_value.value
 
             # Check process health — only restart if there is still work
-            # remaining.  Workers that consumed a None sentinel or finished
-            # via sys.exit(EXIT_CODE_RESTART) should not be restarted once
-            # all tasks are dispatched, otherwise the new worker blocks
-            # forever on queue.get().
+            # remaining. Workers that consumed a None sentinel or requested
+            # restart via EXIT_CODE_RESTART (successful task cleanup or handled
+            # fatal CUDA error cleanup) should not be restarted once all tasks
+            # are dispatched, otherwise the new worker blocks forever on
+            # queue.get().
             for i, p in enumerate(processes):
                 if p is None:
                     continue
@@ -669,8 +680,8 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                     process_stats[i]["restarts"] += 1
                     if exit_code == EXIT_CODE_RESTART:
                         logger.debug(
-                            f"Process {i} completed task and exited normally for release gpu memory"
-                            f"(completed tasks: {process_stats[i]['restarts']})"
+                            f"Process {i} requested restart after task cleanup or handled fatal error "
+                            f"(restart count: {process_stats[i]['restarts']})"
                         )
                     else:
                         logger.warning(
@@ -1088,7 +1099,6 @@ def main():
     )
     args = parser.parse_args()
     ops = args.ops
-    _dsv4_auto_expand = False
 
     if args.model_path:
         from collector.common_test_cases import get_all_model_names
@@ -1099,28 +1109,12 @@ def main():
                 f"Model '{args.model_path}' not found. Available models:\n" + "\n".join(f"  - {m}" for m in all_models)
             )
         os.environ["COLLECTOR_MODEL_PATH"] = args.model_path
-
-        # V4-Flash special-case: when the model is V4-Flash and no explicit
-        # ``--ops`` is given, scope to the ops consumed by the V4-Flash
-        # perf model: V4 Flash attention/sparse kernels plus generic GEMM,
-        # MoE, and mHC.  All other models keep the default behaviour: run
-        # every op and let each get_func's ``_filter_model_config_list``
-        # filter cases at the test-case level.
-        if args.ops is None and args.model_path == "sgl-project/DeepSeek-V4-Flash-FP8":
-            dsv4_flash_ops = [name for name in _all_op_names() if name.startswith("dsv4_flash_")]
-            ops = dsv4_flash_ops + ["gemm", "moe", "mhc_module"]
-            _dsv4_auto_expand = True
     else:
         os.environ.pop("COLLECTOR_MODEL_PATH", None)
 
     # Setup logging - debug flag is handled inside setup_logging
     if logger is None:
-        # Use short label when V4-Flash auto-expanded ops to several names
-        # (the joined scope may exceed Linux filename length limit).
-        if _dsv4_auto_expand:
-            log_scope = ["dsv4_flash"]
-        else:
-            log_scope = ops if ops else ["all"]
+        log_scope = ops if ops else ["all"]
         logger = setup_logging(scope=log_scope, debug=args.debug)
     elif args.debug:
         # Update log level if debug flag changed
@@ -1128,8 +1122,6 @@ def main():
 
     if args.model_path:
         logger.info(f"Model filter active: collecting only for '{args.model_path}'")
-        if ops and args.ops is None:
-            logger.info(f"  expanded to model-specific ops: {ops}")
 
     resume_options = {
         "resume": args.resume,

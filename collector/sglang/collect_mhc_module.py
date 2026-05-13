@@ -277,11 +277,12 @@ def _log_result(
     *,
     output_path: str | None,
     perf_filename: str | None,
-    model_path: str,
     op: str,
     num_tokens: int,
+    num_sites: int,
     hc_mult: int,
     hidden_size: int,
+    sinkhorn_iters: int,
     latency_ms: float,
     version: str,
     device_name: str,
@@ -290,11 +291,12 @@ def _log_result(
     log_perf(
         item_list=[
             {
-                "model": model_path,
                 "architecture": "DeepseekV4ForCausalLM",
                 "num_tokens": num_tokens,
+                "num_sites": num_sites,
                 "hc_mult": hc_mult,
                 "hidden_size": hidden_size,
+                "sinkhorn_iters": sinkhorn_iters,
                 "latency": f"{latency_ms:.4f}",
             }
         ],
@@ -370,11 +372,12 @@ def run_mhc_module(
                 _log_result(
                     output_path=output_path,
                     perf_filename=perf_filename,
-                    model_path=model_path,
                     op=op,
                     num_tokens=num_tokens,
+                    num_sites=len(_mhc_call_args(layer)),
                     hc_mult=layer.hc_mult,
                     hidden_size=hidden_size,
+                    sinkhorn_iters=int(getattr(layer.config, "hc_sinkhorn_iters", 20)),
                     latency_ms=latency_ms,
                     version=version,
                     device_name=device_name,

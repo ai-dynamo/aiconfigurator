@@ -66,7 +66,6 @@ class BaseBackend(ABC):
                 beam_width=1,
                 s=effective_isl,
                 prefix=prefix,
-                model_name=getattr(model, "model_name", ""),
                 seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
             )
             context_latency_dict[op._name] += float(result)
@@ -108,7 +107,6 @@ class BaseBackend(ABC):
                     batch_size=batch_size,
                     beam_width=beam_width,
                     s=isl + i + 1,
-                    model_name=getattr(model, "model_name", ""),
                     gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
                 )
                 latency_dict[op._name] += float(result)
