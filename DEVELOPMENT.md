@@ -136,11 +136,10 @@ locally:
 
 ```bash
 bash tools/wheel_build/install_build_tools.sh                       # pinned cargo install
-cargo cyclonedx --manifest-path rust/aiconfigurator-core/Cargo.toml \
-                --format json --output-pattern bom
+cargo cyclonedx --manifest-path rust/aiconfigurator-core/Cargo.toml --format json
 uv build --wheel
 python tools/wheel_build/inject_sbom.py dist/aiconfigurator-*.whl \
-    --sbom rust/aiconfigurator-core/bom.cdx.json
+    --sbom "$(find rust -maxdepth 5 -name '*.cdx.json' -type f -print -quit)"
 ```
 
 To inspect the SBOM in a built wheel:
