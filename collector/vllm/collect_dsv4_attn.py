@@ -633,14 +633,14 @@ def _kv_cache_cast_to_fp8_indexer(x: torch.Tensor) -> torch.Tensor:
 def _bench_paged_mqa_logits_kernel(
     *,
     hf_config,
-    query_len: int,
+    num_query_rows: int,
     past_kv: int,
     device: str,
     warming_up: int,
     test_ite: int,
 ) -> dict:
-    """Benchmark vLLM's paged MQA logits kernel with directly constructed inputs."""
-    m = query_len
+    """Benchmark paged MQA logits with packed M rows across the batch."""
+    m = num_query_rows
     full_s = m + past_kv
     full_c4 = max(1, full_s // 4)
     block_kv = 64
@@ -777,7 +777,7 @@ def _bench_sparse_kernel_shape(
         hf_config = SimpleNamespace(**_read_model_config(model_path))
         result = _bench_paged_mqa_logits_kernel(
             hf_config=hf_config,
-            query_len=num_tokens,
+            num_query_rows=num_tokens,
             past_kv=past_kv,
             device=device,
             warming_up=warming_up,
