@@ -25,12 +25,7 @@ pytestmark = pytest.mark.unit
 WHEEL_NAME = "demo-1.2.3-py3-none-any.whl"
 DIST_INFO = "demo-1.2.3.dist-info"
 METADATA_BODY = (
-    b"Metadata-Version: 2.1\n"
-    b"Name: demo\n"
-    b"Version: 1.2.3\n"
-    b"Summary: test wheel\n"
-    b"\n"
-    b"Long description goes here.\n"
+    b"Metadata-Version: 2.1\nName: demo\nVersion: 1.2.3\nSummary: test wheel\n\nLong description goes here.\n"
 )
 WHEEL_BODY = b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
 PACKAGE_FILE = "demo/__init__.py"
