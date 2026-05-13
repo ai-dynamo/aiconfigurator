@@ -1563,34 +1563,24 @@ def load_mhc_module_data(mhc_file: str):
 
 
 def load_context_deepseek_v4_attention_module_data(attn_file: str):
-    """Legacy single-file loader (kept for backwards compat with the old
-    combined ``deepseek_v4_context_module_perf.txt`` convention).  DeepSeek-V4
-    data is now split across ``dsv4_{csa,hca}_context_*`` files —
-    see ``load_context_dsv4_kind_module_data``."""
-    try:
-        data = load_context_dsv4_kind_module_data(attn_file)
-    except Exception:
-        logger.exception(f"Failed to load legacy DeepSeek-V4 context attention module data from {attn_file}.")
-        return None
-    if data is None:
-        logger.debug(f"Legacy DeepSeek-V4 context attention module data file {attn_file} not found.")
-    else:
-        logger.debug(f"Loaded legacy DeepSeek-V4 context attention module data from {attn_file}.")
-    return data
+    """Reserved enum slot.
+
+    DeepSeek-V4's first supported DB format is split by attention kind under
+    ``dsv4_{csa,hca}_context_*`` files; no combined context file format exists.
+    """
+    logger.debug(f"DeepSeek-V4 combined context attention module data file {attn_file} is not supported.")
+    return None
 
 
 def load_generation_deepseek_v4_attention_module_data(attn_file: str):
-    """Legacy single-file loader; DeepSeek-V4 data is now split per attn_kind."""
-    try:
-        data = load_generation_dsv4_kind_module_data(attn_file)
-    except Exception:
-        logger.exception(f"Failed to load legacy DeepSeek-V4 generation attention module data from {attn_file}.")
-        return None
-    if data is None:
-        logger.debug(f"Legacy DeepSeek-V4 generation attention module data file {attn_file} not found.")
-    else:
-        logger.debug(f"Loaded legacy DeepSeek-V4 generation attention module data from {attn_file}.")
-    return data
+    """Reserved enum slot.
+
+    DeepSeek-V4's first supported DB format is split by attention kind under
+    ``dsv4_{csa,hca}_generation_*`` files; no combined generation file format
+    exists.
+    """
+    logger.debug(f"DeepSeek-V4 combined generation attention module data file {attn_file} is not supported.")
+    return None
 
 
 _DSV4_DTYPE_ALIASES = {
