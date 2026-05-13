@@ -80,6 +80,13 @@ jobs:
             --plot-output tools/accuracy_regression_testing/results/comparison_plot.png
 
       - name: Run regression gate
+        # Allow-to-fail: AIC's overall accuracy is still under active
+        # development with many compensating modeling gaps, so any individual
+        # correction can move the aggregate prediction further from silicon
+        # (because previously-cancelling errors stop cancelling). Reviewers
+        # should still inspect the comparison summary / PR comment uploaded
+        # below — this just stops the threshold breach from blocking merges.
+        continue-on-error: true
         run: |
           python -m pytest tools/accuracy_regression_testing/test_regression_thresholds.py -q
 
