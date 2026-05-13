@@ -27,6 +27,16 @@ EXIT_CODE_RESTART = 10  # Exit code to indicate restart is needed
 _NVML_INITIALIZED = False
 _NVML_LOCK = threading.Lock()
 
+POWER_STATS_FIELDS = [
+    "power",
+    "power_limit",
+    "power_min",
+    "power_max",
+    "power_energy_j",
+    "power_duration_s",
+    "power_sample_count",
+]
+
 
 def _parse_bool_env(env_var: str, default: bool = False) -> bool:
     """
@@ -63,6 +73,56 @@ def _ensure_nvml_initialized():
                 logging.getLogger(__name__).warning(f"Failed to initialize NVML: {e}")
                 return False
         return _NVML_INITIALIZED
+
+
+def summarize_power_samples(
+    samples: list[tuple[float, int | float]],
+    power_limit_mw: int | float | None = None,
+) -> dict | None:
+    """Summarize NVML power samples.
+
+    Args:
+        samples: ``(timestamp_s, power_mw)`` samples from NVML.
+        power_limit_mw: Optional NVML power-management limit in milliwatts.
+
+    Returns:
+        Power stats compatible with collector perf CSV rows, or ``None`` when
+        no samples are available.
+    """
+    if not samples:
+        return None
+
+    samples = sorted((float(ts), float(power_mw)) for ts, power_mw in samples)
+    power_values_w = [power_mw / 1000.0 for _, power_mw in samples]
+
+    start_s = samples[0][0]
+    end_s = samples[-1][0]
+    duration_s = max(0.0, end_s - start_s)
+
+    energy_j = 0.0
+    if len(samples) >= 2:
+        for (left_ts, left_power_mw), (right_ts, right_power_mw) in zip(samples, samples[1:]):
+            delta_s = right_ts - left_ts
+            if delta_s <= 0:
+                continue
+            left_power_w = left_power_mw / 1000.0
+            right_power_w = right_power_mw / 1000.0
+            energy_j += ((left_power_w + right_power_w) / 2.0) * delta_s
+
+    if duration_s > 0:
+        average_power_w = energy_j / duration_s
+    else:
+        average_power_w = float(np.mean(power_values_w))
+
+    return {
+        "power": float(average_power_w),
+        "power_limit": float(power_limit_mw / 1000.0) if power_limit_mw else None,
+        "power_min": float(min(power_values_w)),
+        "power_max": float(max(power_values_w)),
+        "power_energy_j": float(energy_j),
+        "power_duration_s": float(duration_s),
+        "power_sample_count": len(samples),
+    }
 
 
 class PowerMonitor:
@@ -134,14 +194,9 @@ class PowerMonitor:
         with self._lock:
             if not self._samples:
                 return None
-            power_values_w = [p_mw / 1000.0 for _, p_mw in self._samples]
+            samples = list(self._samples)
 
-        import numpy as np
-
-        return {
-            "power": float(np.mean(power_values_w)),
-            "power_limit": float(self._power_limit_mw / 1000.0) if self._power_limit_mw else None,
-        }
+        return summarize_power_samples(samples, power_limit_mw=self._power_limit_mw)
 
     def _monitoring_loop(self):
         """Background thread function that samples power every 100ms."""
@@ -685,7 +740,7 @@ def log_perf(
                 fieldnames += list(item_list[0].keys())
             # Add power_stats keys if present
             if power_stats:
-                for key in ["power", "power_limit"]:
+                for key in POWER_STATS_FIELDS:
                     if key not in fieldnames:
                         fieldnames.append(key)
 
@@ -698,7 +753,7 @@ def log_perf(
                 row = base_data | item
                 # Add power_stats values if present
                 if power_stats:
-                    for key in ["power", "power_limit"]:
+                    for key in POWER_STATS_FIELDS:
                         row[key] = power_stats.get(key, "")
                 writer.writerow(row)
 
