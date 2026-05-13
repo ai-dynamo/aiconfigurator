@@ -125,8 +125,7 @@ class TestInterpolationMethods:
         assert mid["latency"] == pytest.approx(2.0)
         assert mid["power"] == pytest.approx(500.0)
         assert mid["energy"] == pytest.approx(1100.0), (
-            "Energy must not be dropped during 1D interpolation -- regression "
-            "of the H200 vLLM bfloat16 zero-power bug."
+            "Energy must not be dropped during 1D interpolation -- regression of the H200 vLLM bfloat16 zero-power bug."
         )
 
         # Endpoints
@@ -332,9 +331,7 @@ class TestExtrapolateDataGrid:
         target_x_list = [10, 15, 20]
         target_y_list = [30, 35, 40]
         target_z_list = [50, 55, 60]
-        comprehensive_perf_db._extrapolate_data_grid(
-            data_dict, target_x_list, target_y_list, target_z_list
-        )
+        comprehensive_perf_db._extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
 
         # Every newly created cell must have a positive energy field.
         new_cells = [
