@@ -294,6 +294,20 @@ class DeepSeekModel(BaseModel):
                 )
             ]
         )
+
+        # vLLM TP allreduce, prefill/mixed-step side. Same per-layer pattern as
+        # the generation_ops counterpart below; context_ops is not MTP-scaled.
+        # Chunked prefill iterations pay this unfused cost since
+        # AllReduceFusionPass only fires in pure decode CUDA-graph steps.
+        if self._backend_name == "vllm":
+            self.context_ops.append(
+                ops.CustomAllReduce(
+                    "context_tp_allreduce",
+                    2 * self._num_layers,
+                    h,
+                    tp_size,
+                )
+            )
         #####generation part, only generation part is scaled by mtp_scale_factor
         self.generation_ops.extend(
             [
