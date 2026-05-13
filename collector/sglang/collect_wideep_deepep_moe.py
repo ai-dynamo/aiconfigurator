@@ -815,8 +815,22 @@ def run_moe(
             # Direct attribute (deepep mode)
             actual_num_experts = moe_layer.num_experts
         else:
-            # Fall back to model_config
-            actual_num_experts = model_runner.model_config.hf_config.num_experts
+            # Fall back to hf_config; probe the same three field names as the
+            # pre-load probe at the top of this function, since the loaded
+            # config has had all three overridden to the simulated count.
+            hf_config = model_runner.model_config.hf_config
+            actual_num_experts = (
+                getattr(hf_config, "n_routed_experts", None)
+                or getattr(hf_config, "num_experts", None)
+                or getattr(hf_config, "num_local_experts", None)
+            )
+            if actual_num_experts is None:
+                raise AttributeError(
+                    f"Could not determine expert count from {type(moe_layer).__name__} "
+                    "or hf_config; tried .config.n_routed_experts / "
+                    ".experts.num_experts / .num_experts on the MoE layer and "
+                    "n_routed_experts / num_experts / num_local_experts on hf_config."
+                )
 
         rank_print(f"Loaded model with {actual_num_experts} local experts (simulating {model_total_experts} total)")
 
