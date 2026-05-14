@@ -736,28 +736,74 @@ def run_moe(
         original_model_config = ModelConfig.from_server_args(server_args)
         original_hf_config = original_model_config.hf_config
         model_hidden_size = original_hf_config.hidden_size
-        model_inter_size = getattr(original_hf_config, "moe_intermediate_size", 2048)
-        model_total_experts = getattr(original_hf_config, "n_routed_experts", None) or getattr(
-            original_hf_config, "num_experts", 256
+        # Per-expert MLP intermediate size. The HF field name varies:
+        #   moe_intermediate_size  - DeepSeek-V3, Qwen3-MoE, GPT-OSS
+        #   intermediate_size      - MiniMax-M2 (Mixtral-style; no separate dense MLP)
+        # Probe in priority order; raise if neither is present rather than silently
+        # falling back to a wrong default (2048 was DeepSeek-shaped).
+        model_inter_size = getattr(original_hf_config, "moe_intermediate_size", None)
+        if model_inter_size is None:
+            model_inter_size = getattr(original_hf_config, "intermediate_size", None)
+        if model_inter_size is None:
+            raise AttributeError(
+                f"Could not find MoE intermediate size on hf_config "
+                f"({type(original_hf_config).__name__}); tried "
+                "moe_intermediate_size / intermediate_size."
+            )
+        # Total expert count. The HF field name varies:
+        #   n_routed_experts   - DeepSeek-V3
+        #   num_experts        - Qwen3-MoE, GPT-OSS
+        #   num_local_experts  - MiniMax-M2 (Mixtral-style)
+        model_total_experts = (
+            getattr(original_hf_config, "n_routed_experts", None)
+            or getattr(original_hf_config, "num_experts", None)
+            or getattr(original_hf_config, "num_local_experts", None)
         )
+        if model_total_experts is None:
+            raise AttributeError(
+                f"Could not find expert count on hf_config "
+                f"({type(original_hf_config).__name__}); tried "
+                "n_routed_experts / num_experts / num_local_experts."
+            )
         rank_print(
             f"Original model config: hidden_size={model_hidden_size}, "
             f"inter_size={model_inter_size}, total_experts={model_total_experts}"
         )
 
-        # Now apply override to load model with reduced experts
-        # Support both DeepSeek-V3 (n_routed_experts) and Qwen3 (num_experts)
+        # Now apply override to load model with reduced experts.
+        # The HF expert-count field varies across model families; override
+        # all known names so this works for DeepSeek / Qwen / MiniMax.
         server_args.json_model_override_args = json.dumps(
             {
                 "num_hidden_layers": 4,
-                "n_routed_experts": num_experts,
-                "num_experts": num_experts,
+                "n_routed_experts": num_experts,  # DeepSeek-V3
+                "num_experts": num_experts,  # Qwen3-MoE, GPT-OSS
+                "num_local_experts": num_experts,  # MiniMax-M2 (Mixtral-style)
             }
         )
 
         model_runner = load_model_with_dummy_weights(server_args, port_args, tp_rank)
 
-        moe_layer = model_runner.model.model.layers[test_layer].mlp
+        # MoE submodule attribute name differs across sglang models:
+        #   .mlp                 - DeepSeek-V2/V3, Qwen2/3-MoE, GPT-OSS
+        #   .block_sparse_moe    - MiniMax-M2 (HF Mixtral-style), Mixtral
+        decoder_layer = model_runner.model.model.layers[test_layer]
+        moe_layer = None
+        for attr in ("mlp", "block_sparse_moe"):
+            candidate = getattr(decoder_layer, attr, None)
+            # Require an `experts` submodule whose `run_moe_core` is callable: this
+            # is what the benchmark actually invokes below, and it filters out
+            # non-MoE MLP layers (e.g. DeepSeek's leading dense layers).
+            experts = getattr(candidate, "experts", None) if candidate is not None else None
+            if experts is not None and callable(getattr(experts, "run_moe_core", None)):
+                moe_layer = candidate
+                break
+        if moe_layer is None:
+            raise AttributeError(
+                f"Could not find MoE submodule on {type(decoder_layer).__name__}; "
+                "tried .mlp / .block_sparse_moe. "
+                "Add the attribute name used by this model to the probe list."
+            )
         # Supports DeepSeek-V3 and Qwen3 MoE
         if hasattr(moe_layer, "config") and hasattr(moe_layer.config, "n_routed_experts"):
             # DeepSeek-V3 style
@@ -769,8 +815,22 @@ def run_moe(
             # Direct attribute (deepep mode)
             actual_num_experts = moe_layer.num_experts
         else:
-            # Fall back to model_config
-            actual_num_experts = model_runner.model_config.hf_config.num_experts
+            # Fall back to hf_config; probe the same three field names as the
+            # pre-load probe at the top of this function, since the loaded
+            # config has had all three overridden to the simulated count.
+            hf_config = model_runner.model_config.hf_config
+            actual_num_experts = (
+                getattr(hf_config, "n_routed_experts", None)
+                or getattr(hf_config, "num_experts", None)
+                or getattr(hf_config, "num_local_experts", None)
+            )
+            if actual_num_experts is None:
+                raise AttributeError(
+                    f"Could not determine expert count from {type(moe_layer).__name__} "
+                    "or hf_config; tried .config.n_routed_experts / "
+                    ".experts.num_experts / .num_experts on the MoE layer and "
+                    "n_routed_experts / num_experts / num_local_experts on hf_config."
+                )
 
         rank_print(f"Loaded model with {actual_num_experts} local experts (simulating {model_total_experts} total)")
 

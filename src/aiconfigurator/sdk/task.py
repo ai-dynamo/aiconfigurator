@@ -944,6 +944,7 @@ class TaskConfig:
         )
 
         model_family = get_model_family(self.model_path)
+        model_is_moe = check_is_moe(self.model_path)
         is_deepseek_fam = model_family in ("DEEPSEEK", "KIMIK25")
         is_deepseek_v32 = model_family == "DEEPSEEKV32"
         is_deepseek_v4 = model_family == "DEEPSEEKV4"
@@ -1069,13 +1070,14 @@ class TaskConfig:
 
             moe_mode = _to_name(_get_cfg_value(wc, "moe_quant_mode"))
             wc_moe_backend = getattr(wc, "moe_backend", None) or moe_backend
-            if self.backend_name == "sglang" and wc_moe_backend == "deepep_moe":
-                if validate_context:
-                    _supported_or_raise("wideep_context_moe", moe_mode, supported, system_name, backend_version)
-                if validate_generation:
-                    _supported_or_raise("wideep_generation_moe", moe_mode, supported, system_name, backend_version)
-            else:
-                _supported_or_raise("moe", moe_mode, supported, system_name, backend_version)
+            if model_is_moe:
+                if self.backend_name == "sglang" and wc_moe_backend == "deepep_moe":
+                    if validate_context:
+                        _supported_or_raise("wideep_context_moe", moe_mode, supported, system_name, backend_version)
+                    if validate_generation:
+                        _supported_or_raise("wideep_generation_moe", moe_mode, supported, system_name, backend_version)
+                else:
+                    _supported_or_raise("moe", moe_mode, supported, system_name, backend_version)
 
             if validate_context:
                 fmha_mode = _to_name(_get_cfg_value(wc, "fmha_quant_mode"))

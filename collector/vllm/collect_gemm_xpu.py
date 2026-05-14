@@ -21,7 +21,7 @@ from vllm.version import __version__ as vllm_version
 
 from collector.common_test_cases import GemmCommonTestCase
 from collector.helper import benchmark_with_power, get_device_module, log_perf
-from collector.vllm.utils import setup_distributed, with_exit_stack
+from collector.vllm.utils import create_vllm_config, setup_distributed, with_exit_stack
 
 FP8_BLOCK_SHAPE = (128, 128)
 
@@ -186,7 +186,16 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="xpu:0"):
 
         return gemm
 
-    exit_stack.enter_context(set_current_vllm_config(VllmConfig()))
+    # vLLM >=0.20 requires model_config.dtype in VllmConfig for FP8 layers;
+    # fall back to bare VllmConfig() for older versions where the vLLM config
+    # APIs used by create_vllm_config() may be incompatible.
+    try:
+        model = os.path.join(os.path.dirname(__file__), "fake_hf_model")
+        vllm_config = create_vllm_config(model_name=model, dtype=dtype)
+    except Exception as exc:
+        print(f"create_vllm_config failed, falling back to VllmConfig(): {exc}")
+        vllm_config = VllmConfig()
+    exit_stack.enter_context(set_current_vllm_config(vllm_config))
 
     outside_loop_count = 6
     op_list = []

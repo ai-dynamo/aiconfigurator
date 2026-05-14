@@ -19,6 +19,7 @@ from aiconfigurator.generator.api import (
     add_generator_override_arguments,
     generate_naive_config,
     generator_cli_helper,
+    load_generator_overrides_from_args,
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
@@ -1353,6 +1354,8 @@ def _run_generate_mode(args):
     model_path = args.model_path
     logger.info("Generating naive agg configuration for %s on %d GPUs", model_path, args.total_gpus)
 
+    generator_overrides = load_generator_overrides_from_args(args)
+
     # Use the public API function
     result = generate_naive_config(
         model_path=model_path,
@@ -1360,6 +1363,9 @@ def _run_generate_mode(args):
         system=args.system,
         backend=args.backend,
         output_dir=args.save_dir or "./output",
+        generated_config_version=getattr(args, "generated_config_version", None),
+        generator_dynamo_version=getattr(args, "generator_dynamo_version", None),
+        generator_overrides=generator_overrides,
         deployment_target=getattr(args, "deployment_target", "dynamo-j2"),
     )
 
@@ -1384,7 +1390,7 @@ def _run_generate_mode(args):
     print(f"  Total GPUs:      {args.total_gpus} (using {gpus_used})")
     print(f"  Parallelism:     TP={tp}, PP={pp}")
     print(f"  Replicas:        {replicas} (each using {gpus_per_worker} GPUs)")
-    print(f"  Max Batch Size:  {generator_params['params']['agg']['max_batch_size']}")
+    print(f"  Max Batch Size:  {_get_naive_summary_max_batch_size(generator_params)}")
     print(f"  Output:          {output_dir}")
     print("=" * 60)
     print("\nGenerated files:")
@@ -1406,6 +1412,20 @@ def _run_generate_mode(args):
     print("-" * 60)
     print("\nTo deploy, run the generated shell script or apply the k8s manifest.")
     print("=" * 60 + "\n")
+
+
+def _get_naive_summary_max_batch_size(generator_params: dict[str, Any]) -> Any:
+    params = generator_params.get("params", {})
+    if not isinstance(params, dict):
+        return "n/a"
+    for role in ("agg", "prefill", "decode"):
+        role_params = params.get(role)
+        if isinstance(role_params, dict) and role_params.get("max_batch_size") is not None:
+            return role_params["max_batch_size"]
+    for role_params in params.values():
+        if isinstance(role_params, dict) and role_params.get("max_batch_size") is not None:
+            return role_params["max_batch_size"]
+    return "n/a"
 
 
 def _run_support_matrix_mode(args):

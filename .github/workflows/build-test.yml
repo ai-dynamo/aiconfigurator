@@ -11,6 +11,22 @@ on:
       - synchronize
 
 jobs:
+  cargo-deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install and run cargo-deny
+        working-directory: rust/aiconfigurator-core
+        # Default log level (warn) surfaces "license inferred from file" notes
+        # so any crate that may need a [[licenses.clarify]] entry is named.
+        # --show-stats prints a per-license usage summary at the end.
+        run: |
+          cargo-deny --version || cargo install cargo-deny@0.19.0
+          cargo-deny --all-features check --show-stats licenses bans
+
   build-and-test:
     name: Build and Test (${{ matrix.suite.name }})
     runs-on: ubuntu-latest

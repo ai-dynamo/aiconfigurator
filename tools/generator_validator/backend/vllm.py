@@ -69,17 +69,55 @@ def _extract_vllm_cli_args(
     payload: dict[str, Any],
     service_key: Optional[str],
 ) -> Optional[list[str]]:
-    try:
-        services = payload.get("spec", {}).get("services", {})
-        worker = services.get(service_key or "VllmDecodeWorker", {})
-        container = worker.get("extraPodSpec", {}).get("mainContainer", {})
-        args = container.get("args")
-    except AttributeError:
+    expected_service = service_key or "VllmDecodeWorker"
+    spec = payload.get("spec")
+    if not isinstance(spec, dict):
+        if service_key:
+            raise ValueError("Unable to locate vLLM services mapping in k8s_deploy.yaml.")
         return None
+
+    services = spec.get("services", {})
+    if not isinstance(services, dict):
+        if service_key:
+            raise ValueError("Unable to locate vLLM services mapping in k8s_deploy.yaml.")
+        return None
+    if service_key and expected_service not in services:
+        available = ", ".join(sorted(str(key) for key in services)) or "<none>"
+        raise ValueError(
+            f"Unable to locate vLLM service '{expected_service}' in k8s_deploy.yaml (available services: {available})."
+        )
+
+    worker = services.get(expected_service, {})
+    if not isinstance(worker, dict):
+        if service_key:
+            raise ValueError(f"Unable to locate vLLM service '{expected_service}' in k8s_deploy.yaml.")
+        return None
+    pod_spec = worker.get("extraPodSpec", {})
+    if not isinstance(pod_spec, dict):
+        if service_key:
+            raise ValueError(
+                f"Unable to locate vLLM CLI args for service '{expected_service}' in k8s_deploy.yaml "
+                "(expected spec.services.<service>.extraPodSpec.mainContainer.args)."
+            )
+        return None
+    container = pod_spec.get("mainContainer", {})
+    if not isinstance(container, dict):
+        if service_key:
+            raise ValueError(
+                f"Unable to locate vLLM CLI args for service '{expected_service}' in k8s_deploy.yaml "
+                "(expected spec.services.<service>.extraPodSpec.mainContainer.args)."
+            )
+        return None
+    args = container.get("args")
     if not args:
+        if service_key:
+            raise ValueError(
+                f"Unable to locate vLLM CLI args for service '{expected_service}' in k8s_deploy.yaml "
+                "(expected spec.services.<service>.extraPodSpec.mainContainer.args)."
+            )
         return None
     if not isinstance(args, list):
-        raise TypeError("VllmDecodeWorker.extraPodSpec.mainContainer.args must be a list.")
+        raise TypeError(f"{expected_service}.extraPodSpec.mainContainer.args must be a list.")
     return [str(item) for item in args]
 
 
@@ -94,7 +132,7 @@ def collect_config_paths(root_dir: Path) -> list[tuple[str, Path, str]]:
     if missing:
         raise ValueError(f"Missing expected config under {root_dir}: {', '.join(missing)}.")
     return [
-        ("agg", agg_path, "VllmDecodeWorker"),
+        ("agg", agg_path, "VllmWorker"),
         ("prefill", disagg_path, "VllmPrefillWorker"),
         ("decode", disagg_path, "VllmDecodeWorker"),
     ]
