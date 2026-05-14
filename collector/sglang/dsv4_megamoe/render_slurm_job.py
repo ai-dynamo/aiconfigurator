@@ -134,6 +134,21 @@ export AIC_SYSTEM_NAME="${{SYSTEM_NAME}}"
 
 read -r -d '' AIC_SLURM_WORKLOAD <<'AIC_WORKLOAD' || true
 set -euo pipefail
+_write_rank0_env() {{
+  local allowed_env_regex
+  allowed_env_regex='^(AIC_|CUDA_|NCCL_|SGLANG_|TORCH_|SLURM_JOB_ID=|SLURM_JOB_NAME=|SLURM_NODELIST='
+  allowed_env_regex+='|SLURM_NNODES=|SLURM_NTASKS=|SLURM_PROCID=|SLURM_LOCALID=|RANK=|WORLD_SIZE='
+  allowed_env_regex+='|LOCAL_RANK=|NNODES=|MASTER_ADDR=|MASTER_PORT=|MODEL_CONFIG=|SYSTEM_NAME='
+  allowed_env_regex+='|GPUS_PER_NODE=|EP_SIZE=|OUTPUT_PATH=|PERF_FILE=|PHASES=|PREFILL_TOKENS='
+  allowed_env_regex+='|DECODE_TOKENS=|DISTRIBUTIONS=|SOURCE_POLICY=|PRE_DISPATCH='
+  allowed_env_regex+='|NUM_MAX_TOKENS_PER_RANK=|CAP_POLICY=)'
+  {{
+    env | sort \\
+      | grep -E "${{allowed_env_regex}}" \\
+      | grep -Evi '(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|PRIVATE|SSH|KEY)' \\
+      || true
+  }} >"${{OUTPUT_PATH}}/rank0_env.txt"
+}}
 cd "${{REMOTE_WORKDIR}}"
 SGLANG_PYTHONPATHS=()
 for candidate in /workspace/sglang/python /sgl-workspace/sglang/python; do
@@ -163,7 +178,7 @@ PY
 export SGLANG_VERSION
 if [[ "${{SLURM_PROCID:-0}}" == "0" ]]; then
   printf '%s\\n' "${{SGLANG_VERSION}}" >"${{OUTPUT_PATH}}/sglang_version.txt"
-  env | sort >"${{OUTPUT_PATH}}/rank0_env.txt"
+  _write_rank0_env
 fi
 python3 collector/sglang/collect_dsv4_megamoe.py \\
   --model-config "${{MODEL_CONFIG}}" \\

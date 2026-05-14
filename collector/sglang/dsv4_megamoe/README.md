@@ -262,6 +262,7 @@ LOCAL_REPO=/path/to/aiconfigurator \
 bash collector/sglang/dsv4_megamoe/run_slurm_full_collection.sh
 ```
 
+`SSH_TARGET` is required for non-dry-run Slurm execution.
 `DRY_RUN=1` renders the `.sbatch` files locally without staging or submitting.
 `TEST_ONLY=1` stages the repo and runs `sbatch --test-only` for every rendered
 job.  If a submitted Slurm run fails while `WAIT=1`, the runner writes

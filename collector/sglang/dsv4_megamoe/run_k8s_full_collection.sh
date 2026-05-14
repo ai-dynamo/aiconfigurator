@@ -43,6 +43,8 @@ NUM_ITERATIONS="${NUM_ITERATIONS:-20}"
 WRITE_DEBUG_OUTPUT="${WRITE_DEBUG_OUTPUT:-0}"
 CAP_POLICY="${CAP_POLICY:-fixed}"
 DRY_RUN="${DRY_RUN:-0}"
+TARGET_SGLANG_VERSION="${TARGET_SGLANG_VERSION:-0.5.10}"
+ALLOW_VERSION_MISMATCH="${ALLOW_VERSION_MISMATCH:-1}"
 
 IMAGE="${IMAGE:-}"
 IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-IfNotPresent}"
@@ -336,97 +338,17 @@ kubectl exec "${JOB_TAG}-sync" -n "${NAMESPACE}" -- bash -lc \
 kubectl exec "${JOB_TAG}-sync" -n "${NAMESPACE}" -- tar -C "${REMOTE_OUTPUT_PATH}" -cf - . \
   | tar -C "${LOCAL_RESULT_DIR}/remote_results" -xf -
 
-python3 - \
-  "${LOCAL_RESULT_DIR}/remote_results/${PERF_FILE}" \
-  "${PREFILL_EP_SIZES}" \
-  "${DECODE_EP_SIZES}" \
-  "${PREFILL_TOKENS}" \
-  "${DECODE_TOKENS}" \
-  "${DISTRIBUTIONS}" \
-  "${PHASE_ORDER}" <<'PY'
-import csv
-import sys
-from collections import Counter
-from pathlib import Path
-
-perf_path = Path(sys.argv[1])
-prefill_eps = [int(x) for x in sys.argv[2].split(",") if x.strip()]
-decode_eps = [int(x) for x in sys.argv[3].split(",") if x.strip()]
-prefill_tokens = [int(x) for x in sys.argv[4].split(",") if x.strip()]
-decode_tokens = [int(x) for x in sys.argv[5].split(",") if x.strip()]
-distributions = [x.strip() for x in sys.argv[6].split(",") if x.strip()]
-phases = {x.strip() for x in sys.argv[7].split(",") if x.strip()}
-
-if not perf_path.exists():
-    raise SystemExit(f"perf file not found: {perf_path}")
-
-with perf_path.open(newline="") as f:
-    rows = list(csv.DictReader(f))
-
-cases_per_token = len(distributions)
-expected = 0
-if "context" in phases:
-    expected += len(prefill_eps) * len(prefill_tokens) * cases_per_token
-if "generation" in phases:
-    expected += len(decode_eps) * len(decode_tokens) * cases_per_token
-
-perf_files = sorted(perf_path.parent.glob("*_perf.txt"))
-summary = []
-summary.append(f"perf_files={len(perf_files)}")
-summary.append(f"perf_file={perf_path.name}")
-summary.append("phases=" + ",".join(sorted(phases)))
-summary.append(f"total_rows={len(rows)} expected={expected}")
-summary.append("seed_samples=averaged_per_logical_case")
-for ep in sorted(set(prefill_eps + decode_eps)):
-    for phase in ("context", "generation"):
-        count = sum(1 for row in rows if int(row["moe_ep_size"]) == ep and row["phase"] == phase)
-        summary.append(f"rows ep={ep} phase={phase} count={count}")
-summary.append("distributions=" + ",".join(sorted({row["distribution"] for row in rows})))
-summary.append("op_names=" + ",".join(sorted({row["op_name"] for row in rows})))
-summary.append("kernel_sources=" + ",".join(sorted({row["kernel_source"] for row in rows})))
-summary.append("used_cuda_graph=" + ",".join(sorted({row["used_cuda_graph"] for row in rows})))
-summary.append("includes_gate_topk=" + ",".join(sorted({row["includes_gate_topk"] for row in rows})))
-summary.append("includes_routed_scale=" + ",".join(sorted({row["includes_routed_scale"] for row in rows})))
-summary.append("caps context=" + ",".join(sorted({
-    row["num_max_tokens_per_rank"] + "/effective" + row["effective_num_max_tokens_per_rank"]
-    for row in rows
-    if row["phase"] == "context"
-})))
-summary.append("caps generation=" + ",".join(sorted({
-    row["num_max_tokens_per_rank"] + "/effective" + row["effective_num_max_tokens_per_rank"]
-    for row in rows
-    if row["phase"] == "generation"
-})))
-counts = Counter((row["moe_ep_size"], row["phase"], row["distribution"]) for row in rows)
-for key, value in sorted(counts.items(), key=lambda item: (int(item[0][0]), item[0][1], item[0][2])):
-    summary.append(f"count ep={key[0]} phase={key[1]} distribution={key[2]} rows={value}")
-loader_key_fields = [
-    "phase",
-    "kernel_source",
-    "kernel_dtype",
-    "moe_dtype",
-    "pre_dispatch",
-    "source_policy",
-    "distribution",
-    "topk",
-    "num_experts",
-    "num_fused_shared_experts",
-    "hidden_size",
-    "inter_size",
-    "moe_tp_size",
-    "moe_ep_size",
-    "num_tokens",
-]
-loader_key_counts = Counter(tuple(row[field] for field in loader_key_fields) for row in rows)
-duplicate_loader_keys = sum(1 for count in loader_key_counts.values() if count > 1)
-summary.append(f"duplicate_loader_keys={duplicate_loader_keys}")
-valid = len(perf_files) == 1 and len(rows) == expected and duplicate_loader_keys == 0
-summary.append("VALIDATION=" + ("PASS" if valid else "FAIL"))
-out = perf_path.parent.parent / "validation_summary.txt"
-out.write_text("\n".join(summary) + "\n")
-print("\n".join(summary))
-if not valid:
-    raise SystemExit(1)
-PY
+python3 "${SCRIPT_DIR}/validate_perf.py" validate \
+  --perf-path "${LOCAL_RESULT_DIR}/remote_results/${PERF_FILE}" \
+  --prefill-ep-sizes "${PREFILL_EP_SIZES}" \
+  --decode-ep-sizes "${DECODE_EP_SIZES}" \
+  --prefill-tokens "${PREFILL_TOKENS}" \
+  --decode-tokens "${DECODE_TOKENS}" \
+  --distributions "${DISTRIBUTIONS}" \
+  --phase-order "${PHASE_ORDER}" \
+  --target-sglang-version "${TARGET_SGLANG_VERSION}" \
+  --allow-version-mismatch "${ALLOW_VERSION_MISMATCH}" \
+  --summary-path "${LOCAL_RESULT_DIR}/validation_summary.txt" \
+  --expect-single-perf-file
 
 echo "RUNNER_ALL_JOBS_COMPLETE $(date '+%Y-%m-%d %H:%M:%S')" | tee -a "${LOCAL_RESULT_DIR}/runner.log"

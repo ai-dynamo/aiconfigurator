@@ -7,7 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AIC_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-SSH_TARGET="${SSH_TARGET:-yuanli-mfa@login-lyris.nvidia.com}"
+SSH_TARGET="${SSH_TARGET:-}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d%H%M%S)}"
 JOB_PREFIX="${JOB_PREFIX:-aic-dsv4-megamoe}"
 JOB_TAG="${JOB_PREFIX}-${RUN_ID}"
@@ -112,6 +112,11 @@ _cleanup_on_exit() {
   fi
 }
 trap _cleanup_on_exit EXIT
+
+if [[ "${DRY_RUN}" != "1" && -z "${SSH_TARGET}" ]]; then
+  echo "SSH_TARGET must be set for Slurm staging/submission" >&2
+  exit 1
+fi
 
 _render_job() {
   local job="$1"
@@ -299,145 +304,22 @@ fi
 rsync -az "${SSH_TARGET}:${REMOTE_RESULTS}/" "${LOCAL_RESULT_DIR}/remote_results/"
 rsync -az "${SSH_TARGET}:${REMOTE_LOGS}/" "${LOCAL_RESULT_DIR}/logs/"
 
-python3 - \
-  "${LOCAL_RESULT_DIR}/remote_results" \
-  "${LOCAL_RESULT_DIR}/merged/${PERF_FILE}" <<'PY'
-import csv
-import sys
-from pathlib import Path
+python3 "${SCRIPT_DIR}/validate_perf.py" merge \
+  --input-root "${LOCAL_RESULT_DIR}/remote_results" \
+  --perf-file "${PERF_FILE}" \
+  --output "${LOCAL_RESULT_DIR}/merged/${PERF_FILE}"
 
-input_root = Path(sys.argv[1])
-output_path = Path(sys.argv[2])
-paths = sorted(path for path in input_root.rglob(output_path.name) if "merged" not in path.parts)
-fieldnames = []
-rows = []
-for path in paths:
-    with path.open(newline="") as f:
-        reader = csv.DictReader(f)
-        if not reader.fieldnames:
-            continue
-        for field in reader.fieldnames:
-            if field not in fieldnames:
-                fieldnames.append(field)
-        rows.extend(row for row in reader if row and row.get("framework") != "framework")
-
-output_path.parent.mkdir(parents=True, exist_ok=True)
-with output_path.open("w", newline="") as f:
-    writer = csv.DictWriter(f, fieldnames=fieldnames)
-    writer.writeheader()
-    for row in rows:
-        writer.writerow({field: row.get(field, "") for field in fieldnames})
-print(f"merged_files={len(paths)} rows={len(rows)} output={output_path}")
-PY
-
-python3 - \
-  "${LOCAL_RESULT_DIR}/merged/${PERF_FILE}" \
-  "${PREFILL_EP_SIZES}" \
-  "${DECODE_EP_SIZES}" \
-  "${PREFILL_TOKENS}" \
-  "${DECODE_TOKENS}" \
-  "${DISTRIBUTIONS}" \
-  "${PHASE_ORDER}" \
-  "${TARGET_SGLANG_VERSION}" \
-  "${ALLOW_VERSION_MISMATCH}" \
-  "${LOCAL_RESULT_DIR}/validation_summary.txt" <<'PY'
-import csv
-import sys
-from collections import Counter
-from pathlib import Path
-
-perf_path = Path(sys.argv[1])
-prefill_eps = [int(x) for x in sys.argv[2].split(",") if x.strip()]
-decode_eps = [int(x) for x in sys.argv[3].split(",") if x.strip()]
-prefill_tokens = [int(x) for x in sys.argv[4].split(",") if x.strip()]
-decode_tokens = [int(x) for x in sys.argv[5].split(",") if x.strip()]
-distributions = [x.strip() for x in sys.argv[6].split(",") if x.strip()]
-phases = {x.strip() for x in sys.argv[7].split(",") if x.strip()}
-target_version = sys.argv[8]
-allow_version_mismatch = sys.argv[9] == "1"
-summary_path = Path(sys.argv[10])
-
-if not perf_path.exists():
-    raise SystemExit(f"perf file not found: {perf_path}")
-
-with perf_path.open(newline="") as f:
-    rows = list(csv.DictReader(f))
-
-cases_per_token = len(distributions)
-expected = 0
-if "context" in phases:
-    expected += len(prefill_eps) * len(prefill_tokens) * cases_per_token
-if "generation" in phases:
-    expected += len(decode_eps) * len(decode_tokens) * cases_per_token
-
-summary = []
-errors = []
-summary.append(f"perf_file={perf_path.name}")
-summary.append("phases=" + ",".join(sorted(phases)))
-summary.append(f"total_rows={len(rows)} expected={expected}")
-summary.append("seed_samples=averaged_per_logical_case")
-if len(rows) != expected:
-    errors.append(f"expected {expected} rows, got {len(rows)}")
-versions = sorted({row.get("version", "") for row in rows})
-summary.append("versions=" + ",".join(versions))
-if not allow_version_mismatch and versions != [target_version]:
-    errors.append(f"version must be exactly {target_version}, got {versions}")
-for ep in sorted(set(prefill_eps + decode_eps)):
-    for phase in ("context", "generation"):
-        count = sum(1 for row in rows if int(row["moe_ep_size"]) == ep and row["phase"] == phase)
-        summary.append(f"rows ep={ep} phase={phase} count={count}")
-summary.append("distributions=" + ",".join(sorted({row["distribution"] for row in rows})))
-summary.append("op_names=" + ",".join(sorted({row["op_name"] for row in rows})))
-summary.append("kernel_sources=" + ",".join(sorted({row["kernel_source"] for row in rows})))
-summary.append("used_cuda_graph=" + ",".join(sorted({row["used_cuda_graph"] for row in rows})))
-summary.append("includes_gate_topk=" + ",".join(sorted({row["includes_gate_topk"] for row in rows})))
-summary.append("includes_routed_scale=" + ",".join(sorted({row["includes_routed_scale"] for row in rows})))
-if any(row.get("framework") != "SGLang" for row in rows):
-    errors.append("every row framework must be SGLang")
-if any(row.get("op_name") != "dsv4_megamoe_module" for row in rows):
-    errors.append("every row op_name must be dsv4_megamoe_module")
-if any(row.get("kernel_source") != "deepgemm_megamoe" for row in rows):
-    errors.append("every row kernel_source must be deepgemm_megamoe")
-if any(row.get("used_cuda_graph") != "true" for row in rows):
-    errors.append("every row must use CUDA Graph")
-if any(row.get("includes_gate_topk") != "false" for row in rows):
-    errors.append("rows must not include gate/topk latency")
-if any(row.get("includes_routed_scale") != "true" for row in rows):
-    errors.append("rows must include routed scale")
-if any(float(row.get("latency", "0") or 0) <= 0 for row in rows):
-    errors.append("every latency must be positive")
-
-loader_key_fields = [
-    "phase",
-    "kernel_source",
-    "kernel_dtype",
-    "moe_dtype",
-    "pre_dispatch",
-    "source_policy",
-    "distribution",
-    "topk",
-    "num_experts",
-    "num_fused_shared_experts",
-    "hidden_size",
-    "inter_size",
-    "moe_tp_size",
-    "moe_ep_size",
-    "num_tokens",
-]
-loader_key_counts = Counter(tuple(row[field] for field in loader_key_fields) for row in rows)
-duplicate_loader_keys = sum(1 for count in loader_key_counts.values() if count > 1)
-summary.append(f"duplicate_loader_keys={duplicate_loader_keys}")
-if duplicate_loader_keys:
-    errors.append(f"duplicate loader key groups: {duplicate_loader_keys}")
-
-summary.extend(f"ERROR: {error}" for error in errors)
-summary.append("VALIDATION=" + ("FAIL" if errors else "PASS"))
-text = "\n".join(summary) + "\n"
-summary_path.write_text(text)
-print(text, end="")
-if errors:
-    raise SystemExit(1)
-PY
+python3 "${SCRIPT_DIR}/validate_perf.py" validate \
+  --perf-path "${LOCAL_RESULT_DIR}/merged/${PERF_FILE}" \
+  --prefill-ep-sizes "${PREFILL_EP_SIZES}" \
+  --decode-ep-sizes "${DECODE_EP_SIZES}" \
+  --prefill-tokens "${PREFILL_TOKENS}" \
+  --decode-tokens "${DECODE_TOKENS}" \
+  --distributions "${DISTRIBUTIONS}" \
+  --phase-order "${PHASE_ORDER}" \
+  --target-sglang-version "${TARGET_SGLANG_VERSION}" \
+  --allow-version-mismatch "${ALLOW_VERSION_MISMATCH}" \
+  --summary-path "${LOCAL_RESULT_DIR}/validation_summary.txt"
 
 if [[ "${COPY_VALIDATED}" == "1" ]]; then
   target_system="$(printf '%s' "${SYSTEM_NAME}" | tr '[:upper:]' '[:lower:]')"

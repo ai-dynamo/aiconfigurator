@@ -65,6 +65,8 @@ def test_slurm_renderer_uses_one_task_per_gpu_and_megamoe_flags():
     assert 'export RANK="${SLURM_PROCID:?}"' in script
     assert 'export WORLD_SIZE="${SLURM_NTASKS:?}"' in script
     assert 'export LOCAL_RANK="${SLURM_LOCALID:-0}"' in script
+    assert "_write_rank0_env" in script
+    assert 'env | sort >"${OUTPUT_PATH}/rank0_env.txt"' not in script
 
 
 def test_slurm_renderer_rejects_ep_not_divisible_by_node_size():
