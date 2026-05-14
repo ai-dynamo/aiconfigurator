@@ -606,12 +606,47 @@ def test_taskconfig_quant_merge_deepseek_fmha_fallback(monkeypatch):
     monkeypatch.setattr(task_module, "get_database", fake_get_database)
     monkeypatch.setattr(task_module, "get_model_config_from_model_path", fake_model_info)
 
-    TaskConfig(
+    task = TaskConfig(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
         backend_name="trtllm",
     )
+
+    assert _enum_name(task.config.worker_config.fmha_quant_mode) == "bfloat16"
+
+
+def test_taskconfig_quant_merge_preserves_explicit_deepseek_fmha(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 90}}
+            self.supported_quant_mode = {
+                "gemm": ["fp8"],
+                "moe": ["fp8"],
+                "context_mla": ["bfloat16"],
+                "generation_mla": ["fp8"],
+            }
+
+    def fake_get_database(system, backend, version, database_mode=None):
+        return FakeDatabase()
+
+    def fake_model_info(_path):
+        return {
+            "raw_config": {"quant_algo": "fp8", "quant_dynamic": True},
+            "architecture": "DeepseekV3ForCausalLM",
+        }
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+    monkeypatch.setattr(task_module, "get_model_config_from_model_path", fake_model_info)
+
+    with pytest.raises(ValueError, match=r"Unsupported context_mla quant mode 'fp8'"):
+        TaskConfig(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            profiles=["fp8"],
+        )
 
 
 def test_taskrunner_runs_agg_and_disagg():

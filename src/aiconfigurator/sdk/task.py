@@ -1058,6 +1058,7 @@ class TaskConfig:
         def _validate_worker_config(
             wc: object, *, validate_context: bool, validate_generation: bool, worker_name: str
         ) -> None:
+            explicit_fmha_mode = _get_cfg_value(wc, "fmha_quant_mode") is not None
             _resolve_model_quant_modes(wc, worker_name)
             supported, system_name, backend_version = _load_worker_supported_quant_modes(wc)
             gemm_mode = _to_name(_get_cfg_value(wc, "gemm_quant_mode"))
@@ -1076,6 +1077,24 @@ class TaskConfig:
 
             if validate_context:
                 fmha_mode = _to_name(_get_cfg_value(wc, "fmha_quant_mode"))
+                context_modes = supported.get(context_attn_key, []) or []
+                if (
+                    not explicit_fmha_mode
+                    and model_architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
+                    and fmha_mode == common.FMHAQuantMode.fp8.name
+                    and context_modes
+                    and common.FMHAQuantMode.fp8.name not in context_modes
+                    and common.FMHAQuantMode.bfloat16.name in context_modes
+                ):
+                    wc["fmha_quant_mode"] = common.FMHAQuantMode.bfloat16
+                    fmha_mode = common.FMHAQuantMode.bfloat16.name
+                    logger.info(
+                        "Using bfloat16 FMHA for %s because %s/%s %s data does not support fp8",
+                        worker_name,
+                        system_name,
+                        self.backend_name,
+                        context_attn_key,
+                    )
                 _supported_or_raise(context_attn_key, fmha_mode, supported, system_name, backend_version)
 
             if validate_generation:
