@@ -78,6 +78,8 @@ class TestBenchmarkTemplates:
         )
         assert 'BENCH_PREFIX="${AICONFIGURATOR_BENCH_PREFIX:-512}"' in rendered
         assert 'BENCH_PREFIX_PROMPTS="${AICONFIGURATOR_BENCH_PREFIX_PROMPTS:-3}"' in rendered
+        assert '"${BENCH_PREFIX_PROMPTS}" =~ ^[0-9]+$' in rendered
+        assert '"${BENCH_PREFIX_PROMPTS}" -gt 0' in rendered
         assert prefix_arg_line in rendered
         assert '"${prefix_args[@]}" \\' in rendered
 
@@ -93,5 +95,7 @@ class TestBenchmarkTemplates:
         )
         assert 'BENCH_PREFIX="${AICONFIGURATOR_BENCH_PREFIX:-512}"' in rendered
         assert 'BENCH_PREFIX_PROMPTS="${AICONFIGURATOR_BENCH_PREFIX_PROMPTS:-3}"' in rendered
+        assert '"${BENCH_PREFIX_PROMPTS}" =~ ^[0-9]+$' in rendered
+        assert '"${BENCH_PREFIX_PROMPTS}" -gt 0' in rendered
         assert prefix_arg_line in rendered
         assert '"${prefix_args[@]}" \\' in rendered

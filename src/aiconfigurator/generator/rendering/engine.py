@@ -827,7 +827,14 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     if isinstance(bench_config, dict):
         bench_context = dict(bench_config)
         if bench_context.get("prefix") is None:
-            bench_context["prefix"] = model_config.get("prefix") or service_config.get("prefix") or 0
+            model_prefix = model_config.get("prefix")
+            service_prefix = service_config.get("prefix")
+            if model_prefix is not None:
+                bench_context["prefix"] = model_prefix
+            elif service_prefix is not None:
+                bench_context["prefix"] = service_prefix
+            else:
+                bench_context["prefix"] = 0
         if bench_context.get("prefix_prompt_pool_size") is None:
             bench_context["prefix_prompt_pool_size"] = 1
         context["BenchConfig"] = bench_context

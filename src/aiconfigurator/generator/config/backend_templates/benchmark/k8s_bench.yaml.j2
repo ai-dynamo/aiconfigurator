@@ -58,7 +58,8 @@ spec:
               BENCH_PREFIX="${AICONFIGURATOR_BENCH_PREFIX:-{{ BenchConfig.prefix | default(0) }}}"
               BENCH_PREFIX_PROMPTS="${AICONFIGURATOR_BENCH_PREFIX_PROMPTS:-{{ BenchConfig.prefix_prompt_pool_size | default(1) }}}"
               prefix_args=()
-              if [[ "${BENCH_PREFIX}" =~ ^[0-9]+$ && "${BENCH_PREFIX}" -gt 0 ]]; then
+              if [[ "${BENCH_PREFIX}" =~ ^[0-9]+$ && "${BENCH_PREFIX}" -gt 0 \
+                  && "${BENCH_PREFIX_PROMPTS}" =~ ^[0-9]+$ && "${BENCH_PREFIX_PROMPTS}" -gt 0 ]]; then
                 prefix_args+=(--prefix-prompt-length "${BENCH_PREFIX}" --num-prefix-prompts "${BENCH_PREFIX_PROMPTS}")
               fi
               for concurrency in "${concurrency_array[@]}"; do
