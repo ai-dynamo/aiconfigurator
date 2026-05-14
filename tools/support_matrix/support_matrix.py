@@ -527,7 +527,7 @@ class SupportMatrix:
                 results[mode] = False
                 error_messages[mode] = traceback.format_exc()
             finally:
-                error_messages[mode] = _format_exception_for_csv(error_messages[mode])
+                error_messages[mode] = _format_exception_for_csv(error_messages.get(mode))
         return results, error_messages
 
     def test_support_matrix(

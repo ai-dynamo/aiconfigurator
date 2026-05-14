@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import pathlib
 import sys
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import aiconfigurator.sdk.task as task_module
+from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 
@@ -87,6 +89,25 @@ def test_taskconfig_agg_default():
     assert _enum_name(cfg.worker_config.gemm_quant_mode) == "bfloat16"
     assert cfg.worker_config.num_gpu_per_worker == [1, 2, 4, 8]
     assert cfg.applied_layers == ["base-common", "agg-defaults"]
+
+
+def test_taskrunner_no_feasible_config_logs_without_traceback(monkeypatch, caplog):
+    """Expected strict-SLA no-match failures should not emit traceback records."""
+
+    def raise_no_feasible(**kwargs):
+        raise NoFeasibleConfigError("No configuration satisfied the TTFT/TPOT constraints.")
+
+    pa_stub = sys.modules["aiconfigurator.sdk.pareto_analysis"]
+    monkeypatch.setattr(pa_stub, "agg_pareto", raise_no_feasible)
+
+    task = TaskConfig(serving_mode="agg", model_path="Qwen/Qwen3-32B", system_name="h200_sxm")
+
+    with caplog.at_level(logging.WARNING), pytest.raises(NoFeasibleConfigError):
+        TaskRunner().run(task)
+
+    assert "No feasible configuration found" in caplog.text
+    assert "Traceback" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 def test_taskconfig_disagg_default():

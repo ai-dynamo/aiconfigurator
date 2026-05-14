@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import math
 
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.perf_database import DEFAULT_DSA_ARCHITECTURE, LoadedOpData
+from aiconfigurator.sdk.perf_database import DEFAULT_DSA_ARCHITECTURE, LoadedOpData, PerfDataNotAvailableError
 
 pytestmark = pytest.mark.unit
 
@@ -24,6 +25,16 @@ def _context_dsa_data(dsa_dict: dict) -> dict:
                 },
             },
         },
+    }
+
+
+def _generation_dsa_data(dsa_dict: dict) -> dict:
+    return {
+        common.KVCacheQuantMode.bfloat16: {
+            common.GEMMQuantMode.bfloat16: {
+                DEFAULT_DSA_ARCHITECTURE: dsa_dict,
+            },
+        }
     }
 
 
@@ -133,6 +144,29 @@ class TestContextDSAModule:
         assert float(result) == pytest.approx(123.0)
         assert result.energy == pytest.approx(456.0)
         assert len(cubic_calls) == 1
+
+    def test_unsupported_silicon_candidate_logs_warning_without_traceback(self, stub_perf_db, caplog):
+        dsa_dict = {64: {4000: {1: _dsa_value(10.0)}}}
+        stub_perf_db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data(dsa_dict), common.PerfDataFilename.dsa_context_module, "single-head"
+        )
+
+        caplog.set_level(logging.WARNING, logger="aiconfigurator.sdk.perf_database")
+        with pytest.raises(PerfDataNotAvailableError, match="Context DSA module perf data unavailable"):
+            stub_perf_db.query_context_dsa_module(
+                b=1,
+                s=4000,
+                prefix=0,
+                num_heads=32,
+                index_topk=2048,
+                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+                fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
+        assert any("Context DSA module perf data unavailable" in record.getMessage() for record in caplog.records)
+        assert all(record.exc_info is None for record in caplog.records)
 
     def test_sol_returns_positive(self, comprehensive_perf_db):
         result = comprehensive_perf_db.query_context_dsa_module(
@@ -270,6 +304,27 @@ class TestContextDSAModule:
 
 class TestGenerationDSAModule:
     """Tests for query_generation_dsa_module."""
+
+    def test_unsupported_silicon_candidate_logs_warning_without_traceback(self, stub_perf_db, caplog):
+        dsa_dict = {64: {1: {4000: _dsa_value(10.0)}}}
+        stub_perf_db._generation_dsa_module_data = LoadedOpData(
+            _generation_dsa_data(dsa_dict), common.PerfDataFilename.dsa_generation_module, "single-head"
+        )
+
+        caplog.set_level(logging.WARNING, logger="aiconfigurator.sdk.perf_database")
+        with pytest.raises(PerfDataNotAvailableError, match="Generation DSA module perf data unavailable"):
+            stub_perf_db.query_generation_dsa_module(
+                b=1,
+                s=4000,
+                num_heads=32,
+                index_topk=2048,
+                kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
+        assert any("Generation DSA module perf data unavailable" in record.getMessage() for record in caplog.records)
+        assert all(record.exc_info is None for record in caplog.records)
 
     def test_sol_returns_positive(self, comprehensive_perf_db):
         result = comprehensive_perf_db.query_generation_dsa_module(

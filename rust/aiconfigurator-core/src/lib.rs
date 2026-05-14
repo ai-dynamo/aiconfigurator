@@ -376,6 +376,18 @@ impl EngineStepEstimator {
         let proj_k = model.num_attention_heads * model.head_dim / tp;
         let ffn1_out = 2 * model.intermediate_size / tp;
         let ffn2_k = model.intermediate_size / tp;
+        let hidden = model.hidden_size;
+        let dense_tokens_u64 = u64::from(dense_tokens);
+
+        if model.uses_moe() {
+            return self.model_moe_non_attention_latency_ms(
+                dense_tokens,
+                moe_tokens,
+                logits_batch,
+                qkv_out,
+                proj_k,
+            );
+        }
 
         let dense_ffn = self
             .perf
@@ -383,23 +395,6 @@ impl EngineStepEstimator {
             + self
                 .perf
                 .query_gemm(quant, dense_tokens, model.hidden_size, ffn2_k)?;
-        let ffn = if model.uses_moe() {
-            self.perf
-                .query_moe(
-                    self.moe_quant_name(),
-                    moe_tokens.max(1),
-                    model.hidden_size,
-                    model.moe_intermediate_size.max(model.intermediate_size),
-                    model.top_k.max(1),
-                    model.num_experts.max(1),
-                    self.config.moe_tp_size.unwrap_or(tp).max(1),
-                    self.config.moe_ep_size.unwrap_or(1).max(1),
-                    "uniform",
-                )
-                .unwrap_or(dense_ffn)
-        } else {
-            dense_ffn
-        };
 
         let per_layer = self
             .perf
@@ -407,7 +402,7 @@ impl EngineStepEstimator {
             + self
                 .perf
                 .query_gemm(quant, dense_tokens, model.hidden_size, proj_k)?
-            + ffn;
+            + dense_ffn;
 
         let logits = if logits_batch > 0 {
             self.perf
@@ -421,8 +416,113 @@ impl EngineStepEstimator {
         } else {
             0.0
         };
+        let non_gemm = self.memory_op_latency_ms(dense_tokens_u64, hidden)
+            + layers
+                * (self.elementwise_latency_ms(dense_tokens_u64, 2 * hidden, 2 * hidden)
+                    + self.elementwise_latency_ms(dense_tokens_u64, 2 * hidden, 2 * hidden)
+                    + self.elementwise_latency_ms(dense_tokens_u64, ffn1_out, ffn2_k))
+            + self.custom_allreduce_latency_ms(1.0, dense_tokens_u64, hidden)
+            + self.custom_allreduce_latency_ms(layers, dense_tokens_u64, hidden)
+            + self.custom_allreduce_latency_ms(layers, dense_tokens_u64, hidden)
+            + self.p2p_latency_ms(layers, dense_tokens_u64, hidden);
 
-        Ok(per_layer * layers + logits)
+        Ok(per_layer * layers + logits + non_gemm)
+    }
+
+    fn model_moe_non_attention_latency_ms(
+        &self,
+        dense_tokens: u32,
+        moe_tokens: u32,
+        logits_batch: u32,
+        qkv_out: u32,
+        proj_k: u32,
+    ) -> Result<f64, AicError> {
+        let tp = self.config.tp_size.max(1);
+        let model = &self.model;
+        let layers = model.num_hidden_layers as f64;
+        let quant = self.gemm_quant_name();
+        let hidden = model.hidden_size;
+        let dense_tokens_u64 = u64::from(dense_tokens);
+        let moe_tp = self.config.moe_tp_size.unwrap_or(tp).max(1);
+        let moe_ep = self.config.moe_ep_size.unwrap_or(1).max(1);
+        let attention_dp = self.config.attention_dp_size.unwrap_or(1).max(1);
+
+        let dense_ffn =
+            self.perf.query_gemm(
+                quant,
+                dense_tokens,
+                2 * model.intermediate_size / tp,
+                hidden,
+            )? + self
+                .perf
+                .query_gemm(quant, dense_tokens, hidden, model.intermediate_size / tp)?;
+        let router = self.perf.query_gemm(
+            DataType::Bfloat16.gemm_quant_name(),
+            dense_tokens,
+            model.num_experts.max(1),
+            hidden,
+        )?;
+        let moe = self
+            .perf
+            .query_moe(
+                self.moe_quant_name(),
+                moe_tokens.max(1),
+                hidden,
+                model.moe_intermediate_size.max(1),
+                model.top_k.max(1),
+                model.num_experts.max(1),
+                moe_tp,
+                moe_ep,
+                &self.moe_workload_distribution(),
+            )
+            .unwrap_or(dense_ffn);
+        let dispatch_pre = self.moe_dispatch_latency_ms(
+            dense_tokens_u64,
+            hidden,
+            moe_tp,
+            moe_ep,
+            attention_dp,
+            true,
+        )?;
+        let dispatch_post = self.moe_dispatch_latency_ms(
+            dense_tokens_u64,
+            hidden,
+            moe_tp,
+            moe_ep,
+            attention_dp,
+            false,
+        )?;
+        let shared_expert =
+            self.shared_expert_latency_ms(dense_tokens, dense_tokens_u64, hidden)?;
+
+        let per_layer = self.perf.query_gemm(quant, dense_tokens, qkv_out, hidden)?
+            + self.perf.query_gemm(quant, dense_tokens, hidden, proj_k)?
+            + router
+            + dispatch_pre
+            + moe
+            + dispatch_post
+            + shared_expert;
+
+        let logits = if logits_batch > 0 {
+            self.perf
+                .query_gemm(
+                    self.logits_gemm_quant_name(),
+                    logits_batch,
+                    model.vocab_size / tp,
+                    hidden,
+                )
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        let non_gemm = self.memory_op_latency_ms(dense_tokens_u64, hidden)
+            + layers
+                * (self.elementwise_latency_ms(dense_tokens_u64, 2 * hidden, 2 * hidden)
+                    + self.elementwise_latency_ms(dense_tokens_u64, 2 * hidden, 2 * hidden))
+            + self.custom_allreduce_latency_ms(1.0, dense_tokens_u64, hidden)
+            + self.p2p_latency_ms(layers, dense_tokens_u64, hidden);
+
+        Ok(per_layer * layers + logits + non_gemm)
     }
 
     fn model_prefill_attention_latency_ms(
@@ -551,6 +651,113 @@ impl EngineStepEstimator {
         // Match the Python op graph: logits/LM-head GEMM stays BF16 even when
         // transformer layer GEMMs use quantized kernels.
         DataType::Bfloat16.gemm_quant_name()
+    }
+
+    fn memory_op_latency_ms(&self, tokens: u64, dim: u32) -> f64 {
+        self.perf
+            .query_mem_op(tokens.saturating_mul(u64::from(dim)).saturating_mul(2))
+    }
+
+    fn elementwise_latency_ms(&self, tokens: u64, dim_in: u32, dim_out: u32) -> f64 {
+        let bytes = tokens
+            .saturating_mul(u64::from(dim_in).saturating_add(u64::from(dim_out)))
+            .saturating_mul(2);
+        self.perf.query_mem_op(bytes)
+    }
+
+    fn custom_allreduce_latency_ms(&self, scale_factor: f64, tokens: u64, hidden: u32) -> f64 {
+        if self.config.tp_size <= 1 {
+            return 0.0;
+        }
+        let size = tokens.saturating_mul(u64::from(hidden));
+        self.perf.query_custom_allreduce(self.config.tp_size, size) * scale_factor
+    }
+
+    fn moe_dispatch_latency_ms(
+        &self,
+        tokens: u64,
+        hidden: u32,
+        moe_tp: u32,
+        moe_ep: u32,
+        attention_dp: u32,
+        pre_dispatch: bool,
+    ) -> Result<f64, AicError> {
+        let num_gpus = moe_tp.saturating_mul(moe_ep).max(1);
+        let attention_tp = num_gpus / attention_dp.max(1);
+        if matches!(self.config.backend, BackendKind::Sglang)
+            && attention_tp > 1
+            && attention_dp > 1
+        {
+            return Err(AicError::InvalidEngineConfig(
+                "SGLang non-DeepEP MoE dispatch does not support attention TP > 1 and attention DP > 1 together"
+                    .to_string(),
+            ));
+        }
+        let volume = tokens.saturating_mul(u64::from(hidden));
+        if attention_tp > 1 {
+            Ok(self.perf.query_custom_allreduce(num_gpus, volume))
+        } else if attention_dp > 1 {
+            let operation = if pre_dispatch {
+                "all_gather"
+            } else {
+                "reduce_scatter"
+            };
+            Ok(self.perf.query_nccl(
+                "half",
+                num_gpus,
+                operation,
+                volume.saturating_mul(u64::from(attention_dp)),
+            ))
+        } else {
+            Ok(0.0)
+        }
+    }
+
+    fn shared_expert_latency_ms(
+        &self,
+        dense_tokens: u32,
+        dense_tokens_u64: u64,
+        hidden: u32,
+    ) -> Result<f64, AicError> {
+        let shared_intermediate = self.model.shared_expert_intermediate_size;
+        if shared_intermediate == 0 {
+            return Ok(0.0);
+        }
+        let tp = self.config.tp_size.max(1);
+        let shared_per_tp = shared_intermediate / tp;
+        Ok(self
+            .perf
+            .query_gemm(self.gemm_quant_name(), dense_tokens, shared_per_tp, hidden)?
+            + self.elementwise_latency_ms(dense_tokens_u64, shared_per_tp, shared_per_tp)
+            + self
+                .perf
+                .query_gemm(self.gemm_quant_name(), dense_tokens, hidden, shared_per_tp)?)
+    }
+
+    fn moe_workload_distribution(&self) -> String {
+        let distribution = self
+            .config
+            .extra
+            .get("moe_workload_distribution")
+            .or_else(|| self.config.extra.get("workload_distribution"))
+            .map(String::as_str)
+            .unwrap_or("power_law");
+        if distribution != "power_law" {
+            return distribution.to_string();
+        }
+        let alpha = match self.model.family {
+            ModelFamily::Moe | ModelFamily::Qwen35 => "1.2",
+            _ => "1.01",
+        };
+        format!("power_law_{alpha}")
+    }
+
+    fn p2p_latency_ms(&self, scale_factor: f64, tokens: u64, hidden: u32) -> f64 {
+        if self.config.pp_size <= 1 || scale_factor == 0.0 {
+            return 0.0;
+        }
+        let bytes = tokens.saturating_mul(u64::from(hidden)).saturating_mul(2);
+        self.perf.query_p2p(bytes) * scale_factor
     }
 }
 

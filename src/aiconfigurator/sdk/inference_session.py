@@ -10,6 +10,7 @@ import pandas as pd
 
 from aiconfigurator.sdk import common, config, models, perf_database
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
+from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.inference_summary import InferenceSummary
 from aiconfigurator.sdk.picking import (
     _AUTOSCALE_TTFT_CORRECTION_FACTOR,
@@ -439,7 +440,7 @@ class DisaggInferenceSession:
                     "configuration. Try increasing --total-gpus, using a quantized model, or "
                     "using a system with more VRAM per GPU."
                 )
-            raise RuntimeError(
+            raise NoFeasibleConfigError(
                 "No results found for any parallel configuration. No configuration satisfied the "
                 "TTFT/TPOT or request-latency constraints. Try relaxing --ttft, --tpot, or "
                 "--request_latency (e.g., higher ttft/tpot or higher request_latency)."

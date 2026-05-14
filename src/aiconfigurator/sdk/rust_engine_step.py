@@ -250,16 +250,13 @@ def _decode_metrics(*, batch_size: int, context_length: int) -> dict[str, Any]:
 
 @cache
 def _load_library(autobuild: bool) -> ctypes.CDLL:
-    if autobuild and not os.environ.get(RUST_CORE_LIB_ENV):
+    library_path = _find_library(include_debug=not autobuild)
+    if library_path is None and autobuild:
         library_path = _build_rust_core()
-    else:
-        library_path = _find_library()
-        if library_path is None and autobuild:
-            library_path = _build_rust_core()
     if library_path is None:
         raise RustCoreUnavailableError(
             "Rust core shared library not found. Build it with "
-            "`cargo build --manifest-path rust/aiconfigurator-core/Cargo.toml`, "
+            "`cargo build --release --manifest-path rust/aiconfigurator-core/Cargo.toml`, "
             f"set {RUST_CORE_LIB_ENV}, or set {RUST_CORE_AUTOBUILD_ENV}=1."
         )
 
@@ -279,7 +276,7 @@ def _load_library(autobuild: bool) -> ctypes.CDLL:
     return lib
 
 
-def _find_library() -> Path | None:
+def _find_library(*, include_debug: bool = True) -> Path | None:
     explicit = os.environ.get(RUST_CORE_LIB_ENV)
     if explicit:
         path = Path(explicit)
@@ -291,10 +288,9 @@ def _find_library() -> Path | None:
     if crate_root is None:
         return None
     lib_name = _library_name()
-    candidates = [
-        crate_root / "target" / "release" / lib_name,
-        crate_root / "target" / "debug" / lib_name,
-    ]
+    candidates = [crate_root / "target" / "release" / lib_name]
+    if include_debug:
+        candidates.append(crate_root / "target" / "debug" / lib_name)
     return next((path for path in candidates if path.is_file()), None)
 
 
@@ -306,10 +302,10 @@ def _build_rust_core() -> Path:
         raise RustCoreUnavailableError("cargo is not available on PATH")
 
     subprocess.run(
-        ["cargo", "build", "--manifest-path", str(crate_root / "Cargo.toml")],
+        ["cargo", "build", "--release", "--manifest-path", str(crate_root / "Cargo.toml")],
         check=True,
     )
-    library_path = crate_root / "target" / "debug" / _library_name()
+    library_path = crate_root / "target" / "release" / _library_name()
     if not library_path.is_file():
         raise RustCoreUnavailableError(f"cargo build completed but did not produce {library_path}")
     return library_path
