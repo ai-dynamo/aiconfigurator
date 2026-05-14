@@ -444,7 +444,15 @@ class EstimateResult:
     """Full result dict from the InferenceSummary."""
 
     mode: str = "agg"
-    """Estimation mode: 'agg' or 'disagg'."""
+    """Estimation mode: 'agg', 'disagg', 'static', 'static_ctx', or 'static_gen'."""
+
+    summary: object | None = None
+    """The underlying :class:`InferenceSummary` (for ``format_detail_report``).
+
+    Populated for static and agg modes. ``None`` for disagg (which uses its
+    own DisaggInferenceSession.run_disagg pipeline and does not expose a
+    single summary object with per-op breakdowns at the API boundary).
+    """
 
     per_ops_data: dict | None = None
     """Per-operation latency breakdown (populated when available)."""
@@ -651,11 +659,16 @@ def cli_estimate(
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
     engine_step_backend: str | None = None,
+    # Static-mode (and shared) extras
+    prefix: int = 0,
+    nextn: int = 0,
+    nextn_accept_rates: list[float] | None = None,
+    stride: int = 32,
 ) -> EstimateResult:
     """
     Estimate TTFT, TPOT, and power for a single model/system/config combination.
 
-    Supports both aggregated (IFB) and disaggregated serving estimation.
+    Supports aggregated (IFB), disaggregated, and static-batching estimation.
 
     This is the programmatic equivalent of:
         aiconfigurator cli estimate --model-path ... --system ... --batch-size ...
@@ -663,7 +676,11 @@ def cli_estimate(
     Args:
         model_path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or local path.
         system_name: System name (GPU type), e.g., 'h200_sxm', 'h100_sxm'.
-        mode: Estimation mode — 'agg' (default) or 'disagg'.
+        mode: Estimation mode — 'agg' (default), 'disagg', or one of the static
+            modes ``'static'`` / ``'static_ctx'`` / ``'static_gen'``. Static modes
+            run a single-pass ``InferenceSession.run_static`` (no IFB scheduling,
+            no rate matching) and are useful for first-order latency/memory
+            breakdowns.
         backend_name: Backend name ('trtllm', 'sglang', 'vllm'). Default is 'trtllm'.
         backend_version: Backend database version. Default is latest.
         database_mode: Database mode for performance estimation
@@ -711,6 +728,12 @@ def cli_estimate(
             Controls how many KV blocks TRT-LLM pre-allocates per sequence. Defaults
             to ``isl + osl`` when ``None``.
         engine_step_backend: Experimental static latency backend ("python" or "rust").
+        prefix: Prefix cache length (subset of ``isl`` already cached). Default 0.
+        nextn: Number of MTP/speculative draft tokens. Default 0.
+        nextn_accept_rates: Acceptance rates for the MTP draft tokens
+            (only the first ``nextn`` entries are used). Default ``[0.85, 0.3, 0, 0, 0]``.
+        stride: Stride used by ``run_static`` to accelerate the OSL sweep.
+            Only used by the static modes. Default 32.
 
     Returns:
         EstimateResult with ttft, tpot, power_w, mode, and the full raw result dict.
@@ -785,6 +808,37 @@ def cli_estimate(
 
             db.set_default_database_mode(DatabaseMode[database_mode])
         return db
+
+    if mode in ("static", "static_ctx", "static_gen"):
+        resolved_version = _resolve_version_for(system_name)
+        return _run_static_estimate(
+            static_mode=mode,
+            model_path=model_path,
+            system_name=system_name,
+            backend_name=backend_name,
+            resolved_version=resolved_version,
+            isl=isl,
+            osl=osl,
+            batch_size=batch_size,
+            prefix=prefix,
+            tp_size=tp_size,
+            pp_size=pp_size,
+            attention_dp_size=attention_dp_size,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+            gemm_quant_mode=gemm_quant_mode,
+            kvcache_quant_mode=kvcache_quant_mode,
+            fmha_quant_mode=fmha_quant_mode,
+            moe_quant_mode=moe_quant_mode,
+            comm_quant_mode=comm_quant_mode,
+            nextn=nextn,
+            nextn_accept_rates=nextn_accept_rates,
+            stride=stride,
+            engine_step_backend=engine_step_backend,
+            load_database=_load_database,
+            get_backend=get_backend,
+            get_model=get_model,
+        )
 
     if mode == "agg":
         resolved_version = _resolve_version_for(system_name)
@@ -873,7 +927,9 @@ def cli_estimate(
             engine_step_backend=engine_step_backend,
         )
     else:
-        raise ValueError(f"Unsupported estimate mode: {mode!r}. Use 'agg' or 'disagg'.")
+        raise ValueError(
+            f"Unsupported estimate mode: {mode!r}. Use 'agg', 'disagg', 'static', 'static_ctx', or 'static_gen'."
+        )
 
 
 def _run_agg_estimate(
@@ -978,9 +1034,129 @@ def _run_agg_estimate(
         backend_version=resolved_version,
         raw=result_dict,
         mode="agg",
+        summary=summary,
         per_ops_data=summary.get_per_ops_data(),
         per_ops_source=summary.get_per_ops_source(),
         kv_cache_warning=kv_warning,
+    )
+
+
+def _run_static_estimate(
+    *,
+    static_mode: str,
+    model_path,
+    system_name,
+    backend_name,
+    resolved_version,
+    isl,
+    osl,
+    batch_size,
+    prefix,
+    tp_size,
+    pp_size,
+    attention_dp_size,
+    moe_tp_size,
+    moe_ep_size,
+    gemm_quant_mode,
+    kvcache_quant_mode,
+    fmha_quant_mode,
+    moe_quant_mode,
+    comm_quant_mode,
+    nextn,
+    nextn_accept_rates,
+    stride,
+    engine_step_backend,
+    load_database,
+    get_backend,
+    get_model,
+) -> EstimateResult:
+    """Run a single-pass static-batching estimation.
+
+    Wraps :meth:`InferenceSession.run_static` and produces an ``EstimateResult``
+    whose ``raw`` dict follows :data:`aiconfigurator.sdk.common.ColumnsStatic`.
+    """
+    from aiconfigurator.sdk.config import RuntimeConfig
+    from aiconfigurator.sdk.inference_session import InferenceSession
+
+    if static_mode not in ("static", "static_ctx", "static_gen"):
+        raise ValueError(
+            f"Unsupported static mode: {static_mode!r}. Expected one of 'static', 'static_ctx', 'static_gen'."
+        )
+
+    moe_tp_size, moe_ep_size = _resolve_moe_parallelism(
+        tp_size, attention_dp_size, moe_tp_size, moe_ep_size, model_path=model_path
+    )
+
+    model_config = _build_model_config(
+        tp_size,
+        pp_size,
+        attention_dp_size,
+        moe_tp_size,
+        moe_ep_size,
+        gemm_quant_mode,
+        kvcache_quant_mode,
+        fmha_quant_mode,
+        moe_quant_mode,
+        comm_quant_mode,
+    )
+    # MTP / nextn fields live on ModelConfig.
+    model_config.nextn = int(nextn or 0)
+    if nextn_accept_rates is not None:
+        model_config.nextn_accept_rates = list(nextn_accept_rates)
+    elif model_config.nextn > 0:
+        # Mirror webapp / cli default for convenience.
+        model_config.nextn_accept_rates = [0.85, 0.3, 0.0, 0.0, 0.0]
+
+    runtime_config = RuntimeConfig(
+        batch_size=batch_size,
+        isl=isl,
+        osl=osl,
+        prefix=prefix,
+        engine_step_backend=engine_step_backend,
+    )
+
+    model = get_model(model_path, model_config, backend_name)
+    database = load_database(system_name)
+    backend = get_backend(backend_name)
+    session = InferenceSession(model, database, backend)
+    summary = session.run_static(
+        runtime_config=runtime_config,
+        mode=static_mode,
+        stride=stride,
+    )
+
+    if summary.check_oom():
+        raise RuntimeError(
+            f"OOM: the model '{model_path}' does not fit in GPU memory on system "
+            f"'{system_name}' with the given parallelism (tp={tp_size}, pp={pp_size}, "
+            f"dp={attention_dp_size}) and batch_size={batch_size}. Reduce batch_size, "
+            "increase tp/pp, use quantization, or pick a system with more VRAM per GPU."
+        )
+
+    result_dict = summary.get_result_dict()
+    if result_dict is None:
+        raise RuntimeError("Static estimation produced no results. The configuration may be invalid.")
+
+    return EstimateResult(
+        ttft=float(result_dict.get("ttft", 0.0) or 0.0),
+        tpot=float(result_dict.get("tpot", 0.0) or 0.0),
+        power_w=float(result_dict.get("power_w", 0.0) or 0.0),
+        isl=isl,
+        osl=osl,
+        batch_size=batch_size,
+        ctx_tokens=isl,  # static has no IFB budget; expose isl for convenience.
+        tp_size=tp_size,
+        pp_size=pp_size,
+        model_path=model_path,
+        system_name=system_name,
+        backend_name=backend_name,
+        backend_version=resolved_version,
+        raw=result_dict,
+        mode=static_mode,
+        summary=summary,
+        per_ops_data=None,
+        per_ops_source=None,
+        kv_cache_warning=None,
     )
 
 
