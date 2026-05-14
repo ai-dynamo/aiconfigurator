@@ -102,6 +102,41 @@ def _select_versioned_template(
     return default_template
 
 
+def _log_versioned_template_selection(
+    template_kind: str,
+    selected_template: Path | None,
+    prefix: str,
+    suffix: str,
+    version: Optional[str],
+) -> None:
+    if not version:
+        return
+    if selected_template is None:
+        logger.warning("No %s template available for %s; using mapping fallback.", template_kind, version)
+        return
+
+    normalized_requested = str(version).strip()
+    if normalized_requested.lower().startswith("v") and len(normalized_requested) > 1:
+        normalized_requested = normalized_requested[1:]
+    selected_version = _versioned_template_part(selected_template.name, prefix, suffix)
+    if selected_version == normalized_requested:
+        return
+    if selected_version is None:
+        logger.warning(
+            "No version-specific %s template for %s, using default %s.",
+            template_kind,
+            version,
+            selected_template.name,
+        )
+    else:
+        logger.warning(
+            "No exact %s template for %s, using closest prior template %s.",
+            template_kind,
+            version,
+            selected_template.name,
+        )
+
+
 def _generate_k8s_via_dynamo(
     param_values: dict[str, Any],
     backend: str,
@@ -260,6 +295,14 @@ def render_backend_templates(
         ".yaml.j2",
         version,
     )
+    if has_engine_templates:
+        _log_versioned_template_selection(
+            "engine",
+            engine_template_file,
+            "extra_engine_args",
+            ".yaml.j2",
+            version,
+        )
 
     # Render engine templates per worker plan with worker-specific context
     mapping_data = load_yaml_mapping(_BACKEND_MAPPING_FILE)
@@ -391,6 +434,7 @@ def render_backend_templates(
     # Resolve CLI args template (version-specific preferred)
     cli_template_candidates = list(template_path.glob("cli_args*.j2"))
     cli_template_file = _select_versioned_template(cli_template_candidates, "cli_args", ".j2", version)
+    _log_versioned_template_selection("CLI args", cli_template_file, "cli_args", ".j2", version)
 
     # Compute CLI args per worker using template if present, else mapping fallback
     for worker in worker_plan:

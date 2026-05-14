@@ -19,6 +19,7 @@ from aiconfigurator.generator.api import (
     add_generator_override_arguments,
     generate_naive_config,
     generator_cli_helper,
+    load_generator_overrides_from_args,
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
@@ -1288,6 +1289,8 @@ def _run_generate_mode(args):
     model_path = args.model_path
     logger.info("Generating naive agg configuration for %s on %d GPUs", model_path, args.total_gpus)
 
+    generator_overrides = load_generator_overrides_from_args(args)
+
     # Use the public API function
     result = generate_naive_config(
         model_path=model_path,
@@ -1295,6 +1298,9 @@ def _run_generate_mode(args):
         system=args.system,
         backend=args.backend,
         output_dir=args.save_dir or "./output",
+        generated_config_version=getattr(args, "generated_config_version", None),
+        generator_dynamo_version=getattr(args, "generator_dynamo_version", None),
+        generator_overrides=generator_overrides,
         deployment_target=getattr(args, "deployment_target", "dynamo-j2"),
     )
 
