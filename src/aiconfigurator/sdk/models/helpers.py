@@ -174,15 +174,6 @@ def _apply_model_quant_defaults(
     if backend_name == "vllm" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
         model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
 
-    # SGLang RTX PRO GEMM perf tables expose dense Qwen3 FP8-block checkpoints
-    # under the equivalent fp8 GEMM mode.
-    if (
-        architecture == "Qwen3ForCausalLM"
-        and backend_name == "sglang"
-        and model_config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
-    ):
-        model_config.gemm_quant_mode = common.GEMMQuantMode.fp8
-
     # Only log if model_config was modified
     if original_config != model_config:
         logger.info(

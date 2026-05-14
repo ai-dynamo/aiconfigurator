@@ -371,13 +371,6 @@ class TestHFModelSupport:
         assert context_dsa._gemm_quant_mode == common.GEMMQuantMode.bfloat16
         assert generation_dsa._gemm_quant_mode == common.GEMMQuantMode.bfloat16
 
-    def test_qwen3_dense_fp8_block_uses_sglang_fp8_gemm_tables(self):
-        model_config = config.ModelConfig(tp_size=1, moe_tp_size=1, moe_ep_size=1)
-        get_model("Qwen/Qwen3-32B-FP8", model_config, backend_name="sglang")
-
-        assert model_config.gemm_quant_mode == common.GEMMQuantMode.fp8
-        assert model_config.moe_quant_mode == common.MoEQuantMode.fp8_block
-
     @pytest.mark.parametrize(
         "model_path,replacement",
         [
