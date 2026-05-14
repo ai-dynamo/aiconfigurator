@@ -294,14 +294,14 @@ impl PerfDatabase {
         if tp_size <= 1 {
             return 0.0;
         }
-        let effective_tp = tp_size.min(self.system.num_gpus_per_node.max(1));
-        let key = (effective_tp, size);
+        let key = (tp_size, size);
         if let Ok(cache) = self.query_cache.lock() {
             if let Some(latency) = cache.custom_allreduce.get(&key) {
                 return *latency;
             }
         }
 
+        let effective_tp = tp_size.min(self.system.num_gpus_per_node.max(1));
         let mut points = Vec::new();
         for point in self
             .custom_allreduce
@@ -311,6 +311,9 @@ impl PerfDatabase {
             points.push((point.message_size, point.latency_ms));
         }
         let latency = interpolate_1d_latency_u64(&points, size)
+            .map(|latency| {
+                self.scale_collective_latency_for_gpu_count(latency, effective_tp, tp_size)
+            })
             .unwrap_or_else(|| self.custom_allreduce_empirical(tp_size, size));
         if let Ok(mut cache) = self.query_cache.lock() {
             cache.custom_allreduce.insert(key, latency);
@@ -359,8 +362,7 @@ impl PerfDatabase {
                         let max_bw = self.p2p_bandwidth(effective_gpus);
                         let target_bw = self.p2p_bandwidth(num_gpus);
                         latency
-                            * (f64::from(num_gpus - 1) / f64::from(num_gpus))
-                            * (f64::from(effective_gpus) / f64::from(effective_gpus - 1))
+                            * collective_gpu_count_scale(effective_gpus, num_gpus)
                             * (max_bw / target_bw)
                     } else {
                         latency
@@ -408,6 +410,22 @@ impl PerfDatabase {
         } else {
             self.system.inter_node_bw
         }
+    }
+
+    fn scale_collective_latency_for_gpu_count(
+        &self,
+        latency: f64,
+        measured_gpus: u32,
+        requested_gpus: u32,
+    ) -> f64 {
+        if requested_gpus <= measured_gpus || measured_gpus <= 1 {
+            return latency;
+        }
+        let measured_bw = self.p2p_bandwidth(measured_gpus);
+        let requested_bw = self.p2p_bandwidth(requested_gpus);
+        latency
+            * collective_gpu_count_scale(measured_gpus, requested_gpus)
+            * (measured_bw / requested_bw)
     }
 
     pub(crate) fn query_moe(
@@ -1016,6 +1034,11 @@ fn average_generation_attention_latency(
         sum += interpolate_2d_latency(points, batch_size, sample)?;
     }
     Some(sum / 5.0)
+}
+
+fn collective_gpu_count_scale(measured_gpus: u32, requested_gpus: u32) -> f64 {
+    (f64::from(requested_gpus - 1) / f64::from(requested_gpus))
+        * (f64::from(measured_gpus) / f64::from(measured_gpus - 1))
 }
 
 fn load_gemm_points(path: &Path) -> Result<Vec<GemmPoint>, AicError> {

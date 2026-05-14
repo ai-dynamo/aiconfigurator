@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from types import SimpleNamespace
 
@@ -186,6 +187,30 @@ def test_mixed_and_decode_helpers_map_to_fpm(monkeypatch) -> None:
         "num_decode_requests": 7,
         "sum_decode_kv_tokens": 2688,
     }
+
+
+def test_engine_config_json_preserves_moe_specific_quant_mode() -> None:
+    model = SimpleNamespace(
+        model_path="Test/Moe",
+        architecture="GptOssForCausalLM",
+        config=ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.w4a16_mxfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        ),
+    )
+    database = SimpleNamespace(system="test_sxm", backend="vllm", version="1.0.0")
+
+    config = json.loads(rust_engine_step._engine_config_json(model, database))
+
+    assert config["weight_dtype"] == "bfloat16"
+    assert config["moe_dtype"] == "w4a16_mxfp4"
 
 
 @pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo is required to build the Rust core shared library")

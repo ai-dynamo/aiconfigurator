@@ -48,6 +48,8 @@ pub struct EngineConfig {
     pub attention_dp_size: Option<u32>,
 
     pub weight_dtype: Option<DataType>,
+    #[serde(default)]
+    pub moe_dtype: Option<DataType>,
     pub activation_dtype: Option<DataType>,
     pub kv_cache_dtype: Option<DataType>,
 
@@ -80,14 +82,28 @@ impl BackendKind {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DataType {
+    #[serde(rename = "bfloat16")]
     Bfloat16,
+    #[serde(rename = "float16")]
     Float16,
+    #[serde(rename = "fp8")]
     Fp8,
+    #[serde(rename = "fp8_static")]
     Fp8Static,
+    #[serde(rename = "fp8_block")]
     Fp8Block,
+    #[serde(rename = "nvfp4")]
     Nvfp4,
+    #[serde(rename = "int8")]
     Int8,
+    #[serde(rename = "int4")]
     Int4,
+    #[serde(rename = "w4afp8")]
+    W4afp8,
+    #[serde(rename = "w4a16_mxfp4")]
+    W4a16Mxfp4,
+    #[serde(rename = "w4a8_mxfp4_mxfp8")]
+    W4a8Mxfp4Mxfp8,
 }
 
 impl DataType {
@@ -99,7 +115,7 @@ impl DataType {
             Self::Fp8Block => "fp8_block",
             Self::Nvfp4 => "nvfp4",
             Self::Int8 => "int8_wo",
-            Self::Int4 => "int4_wo",
+            Self::Int4 | Self::W4afp8 | Self::W4a16Mxfp4 | Self::W4a8Mxfp4Mxfp8 => "int4_wo",
         }
     }
 
@@ -126,6 +142,9 @@ impl DataType {
             Self::Nvfp4 => "nvfp4",
             Self::Int8 => "int8_wo",
             Self::Int4 => "int4_wo",
+            Self::W4afp8 => "w4afp8",
+            Self::W4a16Mxfp4 => "w4a16_mxfp4",
+            Self::W4a8Mxfp4Mxfp8 => "w4a8_mxfp4_mxfp8",
         }
     }
 }
@@ -641,7 +660,12 @@ impl EngineStepEstimator {
     }
 
     fn moe_quant_name(&self) -> &'static str {
-        match self.config.weight_dtype.as_ref() {
+        match self
+            .config
+            .moe_dtype
+            .as_ref()
+            .or(self.config.weight_dtype.as_ref())
+        {
             Some(dtype) => dtype.moe_quant_name(),
             None => DataType::Bfloat16.moe_quant_name(),
         }

@@ -25,6 +25,7 @@ let estimator = create_engine_step_estimator(EngineConfig {
     moe_ep_size: None,
     attention_dp_size: None,
     weight_dtype: Some(DataType::Bfloat16),
+    moe_dtype: None,
     activation_dtype: Some(DataType::Bfloat16),
     kv_cache_dtype: Some(DataType::Bfloat16),
     kv_block_size: None,

@@ -172,6 +172,44 @@ bfloat16,60,32,64,2,4,1,1,power_law_1.2,7.0\n",
 }
 
 #[test]
+fn moe_dtype_selects_moe_specific_perf_rows() {
+    let fixture = Fixture::new_moe();
+    fs::write(
+        fixture.perf_dir().join("gemm_perf.txt"),
+        "gemm_dtype,m,n,k,latency\n\
+bfloat16,60,64,32,0.0\n\
+bfloat16,60,32,32,0.0\n\
+bfloat16,60,128,32,0.0\n\
+bfloat16,60,32,64,0.0\n\
+bfloat16,60,4,32,0.0\n\
+bfloat16,1,160,32,0.0\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.perf_dir().join("moe_perf.txt"),
+        "moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency\n\
+bfloat16,60,32,64,2,4,1,1,power_law_1.2,1.0\n\
+w4a16_mxfp4,60,32,64,2,4,1,1,power_law_1.2,7.0\n",
+    )
+    .unwrap();
+    let mut config = moe_engine_config();
+    config.moe_dtype = Some(DataType::W4a16Mxfp4);
+    let estimator = fixture.estimator_with_config(config);
+    let metrics = ForwardPassMetrics {
+        scheduled_requests: ScheduledRequestMetrics {
+            num_prefill_requests: 1,
+            sum_prefill_tokens: 60,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let latency = estimator.forward_pass_time_ms(&[metrics]).unwrap();
+
+    assert_close(latency, 14.0);
+}
+
+#[test]
 fn moe_non_attention_includes_router_and_dispatch_costs() {
     let fixture = Fixture::new_moe();
     fs::write(
@@ -424,6 +462,65 @@ bfloat16,2,320,1.0,vLLM_custom_graph,vllm_graph\n",
     let latency = estimator.forward_pass_time_ms(&[metrics]).unwrap();
 
     assert_close(latency, 5.0);
+}
+
+#[test]
+fn custom_allreduce_scales_node_local_perf_for_multi_node_tp() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.systems_root().join("test_sxm.yaml"),
+        "data_dir: data/test_sxm\n\
+gpu:\n\
+  mem_bw: 1000000000000000000000000000000\n\
+  mem_bw_empirical_scaling_factor: 1.0\n\
+  mem_empirical_constant_latency: 0.0\n\
+node:\n\
+  num_gpus_per_node: 2\n\
+  inter_node_bw: 50\n\
+  intra_node_bw: 100\n\
+  p2p_latency: 0.0\n\
+misc:\n\
+  nccl_version: '1.0.0'\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.perf_dir().join("gemm_perf.txt"),
+        "gemm_dtype,m,n,k,latency\n\
+bfloat16,10,24,32,0.0\n\
+bfloat16,10,32,8,0.0\n\
+bfloat16,10,32,32,0.0\n\
+bfloat16,10,32,16,0.0\n\
+bfloat16,1,40,32,0.0\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.perf_dir().join("context_attention_perf.txt"),
+        "attn_dtype,kv_cache_dtype,batch_size,isl,num_heads,num_key_value_heads,head_dim,latency\n\
+bfloat16,bfloat16,1,10,1,1,8,0.0\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.perf_dir().join("custom_allreduce_perf.txt"),
+        "allreduce_dtype,num_gpus,message_size,latency,kernel_source,backend\n\
+bfloat16,2,320,1.0,vLLM_custom_graph,vllm_graph\n",
+    )
+    .unwrap();
+    let estimator = fixture.estimator_with_config(EngineConfig {
+        tp_size: 4,
+        ..engine_config()
+    });
+    let metrics = ForwardPassMetrics {
+        scheduled_requests: ScheduledRequestMetrics {
+            num_prefill_requests: 1,
+            sum_prefill_tokens: 10,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let latency = estimator.forward_pass_time_ms(&[metrics]).unwrap();
+
+    assert_close(latency, 15.0);
 }
 
 #[test]
@@ -798,6 +895,7 @@ fn engine_config() -> EngineConfig {
         moe_ep_size: None,
         attention_dp_size: None,
         weight_dtype: Some(DataType::Bfloat16),
+        moe_dtype: None,
         activation_dtype: Some(DataType::Bfloat16),
         kv_cache_dtype: Some(DataType::Bfloat16),
         kv_block_size: None,

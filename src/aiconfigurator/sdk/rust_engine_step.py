@@ -218,6 +218,7 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "moe_ep_size": _optional_int(getattr(model_config, "moe_ep_size", None)),
         "attention_dp_size": _optional_int(getattr(model_config, "attention_dp_size", None)),
         "weight_dtype": _quant_to_dtype(getattr(model_config, "gemm_quant_mode", None)),
+        "moe_dtype": _moe_quant_to_dtype(getattr(model_config, "moe_quant_mode", None)),
         "activation_dtype": _quant_to_dtype(getattr(model_config, "fmha_quant_mode", None)),
         "kv_cache_dtype": _quant_to_dtype(getattr(model_config, "kvcache_quant_mode", None)),
         "kv_block_size": None,
@@ -382,6 +383,18 @@ def _quant_to_dtype(value: Any) -> str | None:
     if name in {"int4", "int4_wo", "w4afp8", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}:
         return "int4"
     return None
+
+
+def _moe_quant_to_dtype(value: Any) -> str | None:
+    if value is None:
+        return None
+    name = getattr(value, "name", str(value)).lower()
+    value_name = getattr(getattr(value, "value", None), "name", None)
+    if value_name:
+        name = value_name.lower()
+    if name in {"w4afp8", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}:
+        return name
+    return _quant_to_dtype(value)
 
 
 def _configure_default_data_roots() -> None:
