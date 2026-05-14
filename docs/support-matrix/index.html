@@ -414,7 +414,9 @@ async function fetchCsv(branch) {
   const res = await fetch(csvUrl(branch));
   if (!res.ok) throw new Error(`Failed to fetch CSV (HTTP ${res.status}) from branch "${branch}"`);
   const text = await res.text();
-  const result = Papa.parse(text, { header: true, skipEmptyLines: true });
+  // Support generated updates that mix historical CRLF rows with LF rows.
+  const normalizedText = text.replace(/\r\n?/g, '\n');
+  const result = Papa.parse(normalizedText, { header: true, skipEmptyLines: true });
   return result.data;
 }
 
