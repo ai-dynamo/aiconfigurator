@@ -182,6 +182,9 @@ class EventFn:
         enable_eplb,
         mode,
         record_df,
+        image_height=0,
+        image_width=0,
+        num_images=1,
     ):
         is_error = False
         stdout_buffer = StringIO()
@@ -215,7 +218,12 @@ class EventFn:
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
-                runtime_config = config.RuntimeConfig(batch_size=batch_size, isl=isl, osl=osl, prefix=prefix)
+                runtime_config = config.RuntimeConfig(
+                    batch_size=batch_size, isl=isl, osl=osl, prefix=prefix,
+                    image_height=int(image_height or 0),
+                    image_width=int(image_width or 0),
+                    num_images_per_request=int(num_images or 1),
+                )
 
                 model = get_model(model_path, model_config, backend_name)
                 stride = (osl + 8 - 1) // 8  # run at most 8 steps
