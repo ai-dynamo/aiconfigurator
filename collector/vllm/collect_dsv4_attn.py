@@ -242,7 +242,7 @@ def _create_dsv4_attention_module(
 ):
     compress_ratio = ATTN_KIND_TO_COMPRESS_RATIO[attn_kind]
     with _patched_config_dir(model_path, compress_ratio=compress_ratio) as local_model:
-        max_model_len = max(seq_len + 1, 4096)
+        max_model_len = max(seq_len, 4096)
         if query_len is None:
             query_len = seq_len if is_context else 1
         query_tokens = batch_size * query_len
@@ -367,6 +367,24 @@ def _remap_common_metadata(common, *, block_size: int, device: str):
     return remapped
 
 
+def _allocate_attention_kv_cache(backend, spec, num_blocks: int, cache_dtype: str, *, device: str) -> torch.Tensor:
+    shape_block_size = spec.storage_block_size if spec.storage_block_size != spec.block_size else spec.block_size
+    shape = backend.get_kv_cache_shape(
+        num_blocks,
+        shape_block_size,
+        spec.num_kv_heads,
+        spec.head_size,
+        cache_dtype,
+    )
+    if spec.page_size_padded is None:
+        return torch.zeros(shape, dtype=spec.dtype, device=device)
+
+    dtype_size = torch.empty((), dtype=spec.dtype).element_size()
+    strides = list(torch.empty(shape).stride())
+    strides[0] = spec.page_size_bytes // dtype_size
+    return torch.empty_strided(shape, tuple(strides), dtype=spec.dtype, device=device).zero_()
+
+
 def _build_metadata_and_bind_caches(attn_module: DeepseekV4Attention, vllm_config, common, *, device: str):
     hf_config = vllm_config.model_config.hf_config
     compress_ratio = attn_module.mla_attn.compress_ratio
@@ -440,38 +458,26 @@ def _build_metadata_and_bind_caches(attn_module: DeepseekV4Attention, vllm_confi
 
     static_ctx = vllm_config.compilation_config.static_forward_context
     if compress_ratio > 1:
-        static_ctx[attn_prefix].kv_cache = torch.zeros(
-            DeepseekV4FlashMLASparseBackend.get_kv_cache_shape(
-                cache_blocks,
-                256,
-                1,
-                hf_config.head_dim,
-                "fp8_ds_mla",
-            ),
-            dtype=torch.uint8,
+        static_ctx[attn_prefix].kv_cache = _allocate_attention_kv_cache(
+            DeepseekV4FlashMLASparseBackend,
+            main_spec,
+            cache_blocks,
+            "fp8_ds_mla",
             device=device,
         )
-    static_ctx[swa_prefix].kv_cache = torch.zeros(
-        DeepseekSparseSWABackend.get_kv_cache_shape(
-            cache_blocks,
-            64,
-            1,
-            hf_config.head_dim,
-            "fp8_ds_mla",
-        ),
-        dtype=torch.uint8,
+    static_ctx[swa_prefix].kv_cache = _allocate_attention_kv_cache(
+        DeepseekSparseSWABackend,
+        swa_spec,
+        cache_blocks,
+        "fp8_ds_mla",
         device=device,
     )
     if compress_ratio == 4 and attn_module.indexer is not None:
-        static_ctx[f"{attn_prefix}.indexer.k_cache"].kv_cache = torch.zeros(
-            DeepseekV4IndexerBackend.get_kv_cache_shape(
-                cache_blocks,
-                64,
-                1,
-                hf_config.index_head_dim + 4,
-                "auto",
-            ),
-            dtype=torch.uint8,
+        static_ctx[f"{attn_prefix}.indexer.k_cache"].kv_cache = _allocate_attention_kv_cache(
+            DeepseekV4IndexerBackend,
+            indexer_spec,
+            cache_blocks,
+            "auto",
             device=device,
         )
     for compressor in filter(None, [attn_module.mla_attn.compressor, getattr(attn_module.indexer, "compressor", None)]):
@@ -1004,6 +1010,12 @@ def run_dsv4_sparse_kernel_worker(
     if tp_size not in _DSV4_MODULE_TP_SIZES:
         raise ValueError(f"unsupported tp_size={tp_size}")
     full_s = isl + past_kv
+    if full_s > _DSV4_SPARSE_MAX_FULL_S:
+        print(
+            f"[vllm-dsv4] skip {kernel} b={batch_size} isl={isl} past_kv={past_kv}: "
+            f"full_s={full_s} > max_position_embeddings={_DSV4_SPARSE_MAX_FULL_S}"
+        )
+        return
     if kernel == "paged_mqa_logits" and full_s < 4:
         print(f"[vllm-dsv4] skip paged_mqa_logits b={batch_size} isl={isl} past_kv={past_kv}: full_s < 4")
         return
