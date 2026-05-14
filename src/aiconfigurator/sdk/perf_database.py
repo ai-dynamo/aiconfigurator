@@ -543,6 +543,50 @@ def _store_loaded_database(
     databases_cache[(systems_root, system, False)][backend][version] = database
 
 
+def clear_database_runtime_caches(system: str, backend: str, version: str) -> None:
+    """Clear per-query/interpolation caches for one loaded database."""
+    seen_database_ids: set[int] = set()
+    for cache_key, systems_cache in databases_cache.items():
+        _, cached_system, _ = cache_key
+        if cached_system != system:
+            continue
+
+        backend_cache = systems_cache.get(backend)
+        if not backend_cache or version not in backend_cache:
+            continue
+
+        database = backend_cache[version]
+        database_id = id(database)
+        if database_id in seen_database_ids:
+            continue
+        seen_database_ids.add(database_id)
+        clear_runtime_caches = getattr(database, "clear_runtime_caches", None)
+        if callable(clear_runtime_caches):
+            clear_runtime_caches()
+
+
+def unload_database(system: str, backend: str, version: str) -> None:
+    """Remove one loaded database from every systems-root/shared-mode cache."""
+    for cache_key in list(databases_cache.keys()):
+        _, cached_system, _ = cache_key
+        if cached_system != system:
+            continue
+
+        systems_cache = databases_cache[cache_key]
+        backend_cache = systems_cache.get(backend)
+        if not backend_cache or version not in backend_cache:
+            continue
+
+        database = backend_cache.pop(version)
+        clear_runtime_caches = getattr(database, "clear_runtime_caches", None)
+        if callable(clear_runtime_caches):
+            clear_runtime_caches()
+        if not backend_cache:
+            systems_cache.pop(backend, None)
+        if not systems_cache:
+            databases_cache.pop(cache_key, None)
+
+
 def _load_database_ref_in_parent(ref: DatabaseRef) -> PerfDatabase | None:
     system, backend, version, systems_root = ref
     return get_database(system, backend, version, systems_root)
@@ -3932,11 +3976,7 @@ class PerfDatabase:
         Set the default database mode
         """
         if mode != self._default_database_mode:
-            # Clear cached query methods since default database mode affects the results
-            for attr_name in dir(self):
-                attr = getattr(self, attr_name)
-                if hasattr(attr, "cache_clear") and callable(attr):
-                    attr.cache_clear()
+            self.clear_runtime_caches()
             self._default_database_mode = mode
 
     def get_default_database_mode(self) -> common.DatabaseMode:
@@ -3944,6 +3984,15 @@ class PerfDatabase:
         Get the default database mode
         """
         return self._default_database_mode
+
+    def clear_runtime_caches(self) -> None:
+        """Clear cached query/interpolation state while preserving loaded op data."""
+        self._extracted_metrics_cache.clear()
+        for attr_name in dir(self):
+            attr = getattr(self, attr_name)
+            cache_clear = getattr(attr, "cache_clear", None)
+            if callable(cache_clear):
+                cache_clear()
 
     def _query_silicon_or_hybrid(
         self,

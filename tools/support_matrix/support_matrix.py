@@ -16,9 +16,9 @@ import traceback
 from concurrent.futures import BrokenExecutor, ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import groupby
 
 import pandas as pd
-from packaging.version import Version
 from tqdm import tqdm
 
 from aiconfigurator.generator.naive import _estimate_model_weight_bytes
@@ -56,6 +56,16 @@ _FRONTIER_ENVELOPE_COLUMNS = {
     "tpot": "min",
     "request_latency": "min",
 }
+
+
+def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[str, str, str, str]:
+    model, system, backend, version = combo
+    return system, backend, version, model
+
+
+def _combination_group_key(combo: tuple[str, str, str, str]) -> tuple[str, str, str]:
+    _model, system, backend, version = combo
+    return system, backend, version
 
 
 @dataclass(frozen=True)
@@ -321,10 +331,10 @@ class SupportMatrix:
         logger.info("Loading models...")
         self.models: set[str] = self.get_models()
         logger.info("Found %d models", len(self.models))
-        # database structure: {system: {backend: {version}}}
-        logger.info("Loading perf databases...")
-        self.databases: dict[str, dict[str, dict[str, str]]] = self.load_databases()
-        logger.info("Databases loaded for %d systems", len(self.databases))
+        # database structure: {system: {backend: [version]}}
+        logger.info("Discovering perf databases...")
+        self.databases: dict[str, dict[str, list[str]]] = self.load_databases()
+        logger.info("Discovered perf databases for %d systems", len(self.databases))
 
     def get_models(self):
         """Get the set of models to test - uses DefaultHFModels (models with cached configs)."""
@@ -341,15 +351,16 @@ class SupportMatrix:
         return set(x.value for x in common.BackendName)
 
     def load_databases(self):
-        return perf_database.get_all_databases()
+        return perf_database.get_supported_databases()
 
     def __get_hardware_and_backend_combinations(self) -> list[tuple[str, str, str]]:
         """
         Iterate over all combinations of hardware, and inference backend, version.
         """
-        for hardware in self.get_systems():
-            for backend in self.get_backends():
-                for version in self.databases[hardware][backend]:
+        for hardware in sorted(self.get_systems()):
+            hardware_databases = self.databases.get(hardware, {})
+            for backend in sorted(self.get_backends()):
+                for version in sorted(hardware_databases.get(backend, [])):
                     yield hardware, backend, version
 
     def __get_model_and_hardware_and_backend_combinations(self) -> list[tuple[str, str, str, str]]:
@@ -364,7 +375,7 @@ class SupportMatrix:
         """
         Generate all combinations of models, hardware, and inference backend, version.
         """
-        combinations = list(self.__get_model_and_hardware_and_backend_combinations())
+        combinations = sorted(self.__get_model_and_hardware_and_backend_combinations(), key=_combination_sort_key)
         return combinations
 
     @staticmethod
@@ -528,7 +539,58 @@ class SupportMatrix:
                 error_messages[mode] = traceback.format_exc()
             finally:
                 error_messages[mode] = _format_exception_for_csv(error_messages[mode])
+                perf_database.clear_database_runtime_caches(system, backend, version)
         return results, error_messages
+
+    def _run_parallel_combinations(
+        self,
+        combinations: list[tuple[str, str, str, str]],
+        *,
+        max_workers: int,
+        pbar: tqdm,
+    ) -> tuple[list[tuple[str, str, str, str, str, str, bool, str | None]], set[tuple[str, str, str, str]]]:
+        group_results: list[tuple[str, str, str, str, str, str, bool, str | None]] = []
+        retry_combos: set[tuple[str, str, str, str]] = set()
+        processed_futures = set()
+
+        with ProcessPoolExecutor(max_workers=min(max_workers, len(combinations))) as executor:
+            futures = {executor.submit(_process_combination_worker, combo): combo for combo in combinations}
+            for future in as_completed(futures):
+                combo = futures[future]
+                model, system, backend, version = combo
+                try:
+                    group_results.extend(future.result())
+                    processed_futures.add(future)
+                    pbar.update(1)
+                except BrokenExecutor:
+                    logger.warning(
+                        "Process pool broken while running %s/%s/%s/%s. "
+                        "A worker was likely killed (OOM). "
+                        "Queuing this and remaining group combos for sequential retry.",
+                        model,
+                        system,
+                        backend,
+                        version,
+                    )
+                    unprocessed_futures = [remaining for remaining in futures if remaining not in processed_futures]
+                    for remaining in unprocessed_futures:
+                        remaining.cancel()
+                        retry_combos.add(futures[remaining])
+                    pbar.update(len(unprocessed_futures))
+                    break
+                except Exception:
+                    logger.exception(
+                        "Unexpected error retrieving result for %s/%s/%s/%s",
+                        model,
+                        system,
+                        backend,
+                        version,
+                    )
+                    retry_combos.add(combo)
+                    processed_futures.add(future)
+                    pbar.update(1)
+
+        return group_results, retry_combos
 
     def test_support_matrix(
         self, max_workers: int | None = None
@@ -538,7 +600,7 @@ class SupportMatrix:
         Tests both agg and disagg modes for each combination and captures error messages.
 
         Runs in two phases:
-        1. Parallel execution with ProcessPoolExecutor.
+        1. Parallel execution with one ProcessPoolExecutor per (system, backend, version).
         2. Sequential single-process retry of every combination that failed in phase 1
            (including combos that never ran due to a broken process pool).
 
@@ -587,43 +649,23 @@ class SupportMatrix:
         global _worker_matrix
         _worker_matrix = self
 
-        # -- Phase 1: parallel execution --
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_process_combination_worker, combo): combo for combo in combinations}
-            pbar = tqdm(total=len(combinations), desc="Phase 1: parallel testing", unit="config")
-            for future in as_completed(futures):
-                combo = futures[future]
-                model, system, backend, version = combo
+        # -- Phase 1: parallel execution, one short-lived pool per database group --
+        with tqdm(total=len(combinations), desc="Phase 1: parallel testing", unit="config") as pbar:
+            for (system, backend, version), group_iter in groupby(combinations, key=_combination_group_key):
+                group_combinations = list(group_iter)
+                tqdm.write(
+                    f"Phase 1 group: {system}/{backend}/{version} ({len(group_combinations)} model combination(s))"
+                )
                 try:
-                    results.extend(future.result())
-                except BrokenExecutor:
-                    logger.warning(
-                        "Process pool broken while running %s/%s/%s/%s. "
-                        "A worker was likely killed (OOM). "
-                        "Queuing this and remaining combos for sequential retry.",
-                        model,
-                        system,
-                        backend,
-                        version,
+                    group_results, group_retry_combos = self._run_parallel_combinations(
+                        group_combinations,
+                        max_workers=max_workers,
+                        pbar=pbar,
                     )
-                    retry_combos.add(combo)
-                    for remaining in futures:
-                        if remaining is not future and not remaining.done():
-                            remaining.cancel()
-                            retry_combos.add(futures[remaining])
-                    pbar.update(len(combinations) - pbar.n)
-                    break
-                except Exception:
-                    logger.exception(
-                        "Unexpected error retrieving result for %s/%s/%s/%s",
-                        model,
-                        system,
-                        backend,
-                        version,
-                    )
-                    retry_combos.add(combo)
-                pbar.update(1)
-            pbar.close()
+                    results.extend(group_results)
+                    retry_combos.update(group_retry_combos)
+                finally:
+                    perf_database.unload_database(system, backend, version)
 
         # Also collect combos whose Phase 1 results had any failure
         for model, _arch, system, backend, version, _mode, success, _err in results:
@@ -638,50 +680,67 @@ class SupportMatrix:
             print(f"Phase 2: retrying {len(retry_combos)} failed combination(s) sequentially")
             print(f"{'=' * 80}\n")
 
-            for combo in tqdm(sorted(retry_combos), desc="Phase 2: sequential retry", unit="config"):
-                model, system, backend, version = combo
-                try:
-                    success_dict, error_dict = self.run_single_test(
-                        model=model,
-                        system=system,
-                        backend=backend,
-                        version=version,
-                        compare_engine_step_backends=self.compare_engine_step_backends,
-                        engine_step_comparison_rtol=self.engine_step_comparison_rtol,
-                        engine_step_comparison_atol=self.engine_step_comparison_atol,
-                        engine_step_frontier_rtol=self.engine_step_frontier_rtol,
-                        engine_step_frontier_atol=self.engine_step_frontier_atol,
-                    )
-                    architecture = self.get_architecture(model)
-                    for mode in success_dict:
-                        results.append(
-                            (model, architecture, system, backend, version, mode, success_dict[mode], error_dict[mode])
-                        )
-                except Exception:
-                    logger.exception(
-                        "Sequential retry also failed for %s/%s/%s/%s",
-                        model,
-                        system,
-                        backend,
-                        version,
-                    )
-                    architecture = self.get_architecture(model)
-                    for mode in ("agg", "disagg"):
-                        results.append(
-                            (
-                                model,
-                                architecture,
-                                system,
-                                backend,
-                                version,
-                                mode,
-                                False,
-                                traceback.format_exc().replace("\n", "\\n"),
-                            )
-                        )
+            sorted_retry_combos = sorted(retry_combos, key=_combination_sort_key)
+            with tqdm(total=len(sorted_retry_combos), desc="Phase 2: sequential retry", unit="config") as pbar:
+                for (system, backend, version), group_iter in groupby(sorted_retry_combos, key=_combination_group_key):
+                    try:
+                        for combo in group_iter:
+                            model, system, backend, version = combo
+                            try:
+                                success_dict, error_dict = self.run_single_test(
+                                    model=model,
+                                    system=system,
+                                    backend=backend,
+                                    version=version,
+                                    compare_engine_step_backends=self.compare_engine_step_backends,
+                                    engine_step_comparison_rtol=self.engine_step_comparison_rtol,
+                                    engine_step_comparison_atol=self.engine_step_comparison_atol,
+                                    engine_step_frontier_rtol=self.engine_step_frontier_rtol,
+                                    engine_step_frontier_atol=self.engine_step_frontier_atol,
+                                )
+                                architecture = self.get_architecture(model)
+                                for mode in success_dict:
+                                    results.append(
+                                        (
+                                            model,
+                                            architecture,
+                                            system,
+                                            backend,
+                                            version,
+                                            mode,
+                                            success_dict[mode],
+                                            error_dict[mode],
+                                        )
+                                    )
+                            except Exception:
+                                logger.exception(
+                                    "Sequential retry also failed for %s/%s/%s/%s",
+                                    model,
+                                    system,
+                                    backend,
+                                    version,
+                                )
+                                architecture = self.get_architecture(model)
+                                for mode in ("agg", "disagg"):
+                                    results.append(
+                                        (
+                                            model,
+                                            architecture,
+                                            system,
+                                            backend,
+                                            version,
+                                            mode,
+                                            False,
+                                            traceback.format_exc().replace("\n", "\\n"),
+                                        )
+                                    )
+                            finally:
+                                pbar.update(1)
+                    finally:
+                        perf_database.unload_database(system, backend, version)
 
         # Sort results by (huggingface_id, architecture, system, backend, version, mode)
-        results.sort(key=lambda x: (x[0], x[1], x[2], x[3], Version(x[4]), x[5]))
+        results.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4], x[5]))
 
         # Print results summary
         self._print_results_summary(results)
