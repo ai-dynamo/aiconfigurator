@@ -24,7 +24,10 @@ jobs:
           tool: cargo-deny@0.19.0
       - name: Run cargo-deny
         working-directory: rust/aiconfigurator-core
-        run: cargo-deny -L error --all-features check licenses bans
+        # Default log level (warn) surfaces "license inferred from file" notes
+        # so any crate that may need a [[licenses.clarify]] entry is named.
+        # --show-stats prints a per-license usage summary at the end.
+        run: cargo-deny --all-features check --show-stats licenses bans
 
   build-and-test:
     name: Build and Test (${{ matrix.suite.name }})
