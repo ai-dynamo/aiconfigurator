@@ -27,6 +27,7 @@ databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
+_MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError)
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
@@ -4034,6 +4035,12 @@ class PerfDatabase:
             # get the full traceback via logger.exception.
             if isinstance(e, PerfDataNotAvailableError):
                 logger.warning(exception_msg)
+            elif isinstance(e, _MISSING_SILICON_DATA_EXCEPTIONS):
+                missing_data_error = PerfDataNotAvailableError(
+                    f"{exception_msg} Missing silicon data for the requested lookup."
+                )
+                logger.warning(str(missing_data_error))
+                raise missing_data_error from e
             else:
                 logger.exception(exception_msg)
             # Modify the original exception message
@@ -5664,6 +5671,24 @@ class PerfDatabase:
 
             return PerformanceResult(est_latency, energy=est_energy)
 
+        def _require_moe_token_points(
+            moe_dict: dict,
+            query_tokens: int,
+            used_workload_distribution: str,
+        ) -> list[int]:
+            token_points = sorted(moe_dict.keys())
+            if token_points:
+                return token_points
+
+            raise PerfDataNotAvailableError(
+                "No MoE silicon data points for requested shape. "
+                f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
+                f"num_tokens={query_tokens}, hidden_size={hidden_size}, inter_size={inter_size}, "
+                f"topk={topk}, num_experts={num_experts}, moe_tp_size={moe_tp_size}, "
+                f"moe_ep_size={moe_ep_size}, quant_mode={quant_mode}, "
+                f"workload_distribution='{used_workload_distribution}'."
+            )
+
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
@@ -5727,7 +5752,11 @@ class PerfDatabase:
                     moe_dict = moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
                         inter_size
                     ][moe_tp_size][moe_ep_size]
-                    token_points = sorted(moe_dict.keys())
+                    token_points = _require_moe_token_points(
+                        moe_dict,
+                        num_tokens_corrected,
+                        used_workload_distribution,
+                    )
                     if num_tokens_corrected > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
                             num_tokens_corrected,
@@ -5810,7 +5839,7 @@ class PerfDatabase:
                         moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
                             hidden_size
                         ][inter_size][moe_tp_size][moe_ep_size]
-                    token_points = sorted(moe_dict.keys())
+                    token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
                     if num_tokens > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
                             num_tokens,
@@ -5849,7 +5878,7 @@ class PerfDatabase:
                     moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
                         inter_size
                     ][moe_tp_size][moe_ep_size]
-                    token_points = sorted(moe_dict.keys())
+                    token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
                     if num_tokens > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
                             num_tokens,
