@@ -228,6 +228,21 @@ def _add_default_mode_arguments(parser):
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length. Default: 4000.")
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length. Default: 1000.")
     parser.add_argument(
+        "--image-height",
+        type=int,
+        default=0,
+        help="Image height in pixels for vision-language models. Default: 0 (disabled).",
+    )
+    parser.add_argument(
+        "--image-width",
+        type=int,
+        default=0,
+        help="Image width in pixels for vision-language models. Default: 0 (disabled).",
+    )
+    parser.add_argument(
+        "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
+    )
+    parser.add_argument(
         "--ttft",
         type=float,
         default=2000.0,
@@ -938,6 +953,9 @@ def build_default_task_configs(
     database_mode: str = "SILICON",
     isl: int = 4000,
     osl: int = 1000,
+    image_height: int = 0,
+    image_width: int = 0,
+    num_images: int = 1,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -1079,6 +1097,9 @@ def build_default_task_configs(
         "total_gpus": total_gpus,
         "isl": isl,
         "osl": osl,
+        "image_height": image_height,
+        "image_width": image_width,
+        "num_images_per_request": num_images,
         "ttft": ttft,
         "tpot": tpot,
         "request_latency": request_latency,
@@ -1958,6 +1979,9 @@ def main(args):
             database_mode=args.database_mode,
             isl=args.isl,
             osl=args.osl,
+            image_height=args.image_height,
+            image_width=args.image_width,
+            num_images=args.num_images,
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,
