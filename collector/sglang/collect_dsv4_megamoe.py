@@ -33,20 +33,16 @@ try:
     from collector.registry_types import PerfFile
     from collector.sglang.dsv4_megamoe_workload import (
         SUPPORTED_SOURCE_POLICIES,
-        TRACE_DISTRIBUTION,
         append_fused_shared_experts,
         build_routing_plan,
-        build_routing_plan_from_iter_dump,
         parse_distribution,
         parse_int_list,
     )
 except ImportError:
     from dsv4_megamoe_workload import (
         SUPPORTED_SOURCE_POLICIES,
-        TRACE_DISTRIBUTION,
         append_fused_shared_experts,
         build_routing_plan,
-        build_routing_plan_from_iter_dump,
         parse_distribution,
         parse_int_list,
     )
@@ -102,30 +98,6 @@ DEFAULT_ACCUMULATOR_DTYPE = "fp32"
 BUFFER_POLICY = "cached_sglang"
 DEBUG_FILENAME = "dsv4_megamoe_module_debug.jsonl"
 _MEGA_MOE_BUFFER_CACHE = {}
-
-
-def _parse_routing_dump_layers(value: str) -> list[str]:
-    layers: list[str] = []
-    for item in str(value or "").split(","):
-        item = item.strip()
-        if not item:
-            continue
-        if "-" in item:
-            start_str, end_str = item.split("-", 1)
-            start = int(start_str.strip())
-            end = int(end_str.strip())
-            if end < start:
-                raise ValueError(f"invalid routing dump layer range: {item}")
-            layers.extend(str(layer) for layer in range(start, end + 1))
-        else:
-            layers.append(item)
-    return layers
-
-
-def _routing_dump_layers_for_case(args: argparse.Namespace, case: MegaMoECase) -> list[str]:
-    if case.distribution == "sglang_trace" and args.routing_dump_layers:
-        return _parse_routing_dump_layers(args.routing_dump_layers)
-    return [args.routing_dump_layer]
 
 
 @dataclass(frozen=True)
@@ -291,7 +263,7 @@ def _env_flag(name: str, default: str = "0") -> int:
 def _parse_distributions(value: str) -> list[str]:
     distributions = [item.strip() for item in value.split(",") if item.strip()]
     for distribution in distributions:
-        if distribution == "balanced" or distribution == TRACE_DISTRIBUTION:
+        if distribution == "balanced":
             continue
         parse_distribution(distribution)
     return distributions
@@ -316,8 +288,6 @@ def _seeds_for_distribution(
     routing_seeds: list[int],
     routing_seeds_explicit: bool,
 ) -> list[int]:
-    if distribution == TRACE_DISTRIBUTION:
-        return routing_seeds[:1]
     spec = parse_distribution(distribution)
     if spec.kind == "sampled_power_law" and not routing_seeds_explicit:
         start_seed = int(args.routing_seed)
@@ -445,7 +415,7 @@ def _mean_power_stats(results: list[CaseRunResult]) -> dict[str, float] | None:
 
 
 def aggregate_case_run_results(results: list[CaseRunResult]) -> CaseRunResult | None:
-    """Average seed/layer samples into the single row consumed by AIC."""
+    """Average seed samples into the single row consumed by AIC."""
     if not results:
         return None
     if len(results) == 1:
@@ -549,7 +519,6 @@ def run_case(
     dist_info: DistInfo,
     model_config: dict[str, int | float | bool | str],
     transformed_weights,
-    routing_dump_layer: str | None = None,
 ) -> CaseRunResult | None:
     import deep_gemm
 
@@ -588,36 +557,17 @@ def run_case(
         )
 
     tokens_per_rank = [case.tokens_per_rank for _ in range(ep_size)]
-    effective_routing_dump_layer = routing_dump_layer or args.routing_dump_layer
-    if case.distribution == "sglang_trace":
-        if not args.routing_dump_root:
-            raise ValueError("distribution=sglang_trace requires --routing-dump-root")
-        plan = build_routing_plan_from_iter_dump(
-            dump_root=args.routing_dump_root,
-            phase=case.phase,
-            distribution=case.distribution,
-            tokens_per_rank=tokens_per_rank,
-            routed_num_experts=routed_num_experts,
-            routed_topk=routed_topk,
-            ep_size=ep_size,
-            rank=rank,
-            source_policy=args.source_policy,
-            routing_layer=effective_routing_dump_layer,
-            topk_weight_policy=args.routing_dump_weight_policy,
-            norm_topk_prob=norm_topk_prob,
-        )
-    else:
-        plan = build_routing_plan(
-            distribution=case.distribution,
-            tokens_per_rank=tokens_per_rank,
-            routed_num_experts=routed_num_experts,
-            routed_topk=routed_topk,
-            ep_size=ep_size,
-            rank=rank,
-            source_policy=args.source_policy,
-            routing_seed=case.routing_seed,
-            norm_topk_prob=norm_topk_prob,
-        )
+    plan = build_routing_plan(
+        distribution=case.distribution,
+        tokens_per_rank=tokens_per_rank,
+        routed_num_experts=routed_num_experts,
+        routed_topk=routed_topk,
+        ep_size=ep_size,
+        rank=rank,
+        source_policy=args.source_policy,
+        routing_seed=case.routing_seed,
+        norm_topk_prob=norm_topk_prob,
+    )
     print(
         f"[dsv4-megamoe] rank={rank} routing-ready phase={case.phase} "
         f"distribution={case.distribution} routing_seed={case.routing_seed} "
@@ -772,15 +722,6 @@ def run_case(
         "used_cuda_graph": "true",
         "latency": f"{latency:.6f}",
     }
-    if plan.routing_source == "iter_dump":
-        row.update(
-            {
-                "routing_source": plan.routing_source,
-                "routing_dump_case": plan.routing_dump_case or "",
-                "routing_dump_layer": plan.routing_dump_layer if plan.routing_dump_layer is not None else "",
-                "topk_weight_policy": plan.topk_weight_policy,
-            }
-        )
     if args.write_debug_output:
         debug_row = {
             "model": model_config["model"],
@@ -869,14 +810,6 @@ def parse_args() -> argparse.Namespace:
             "seeds for power_law_sampled_1.9 and --routing-seed for other synthetic distributions"
         ),
     )
-    parser.add_argument("--routing-dump-root", default=os.environ.get("ROUTING_DUMP_ROOT", ""))
-    parser.add_argument("--routing-dump-layer", default=os.environ.get("ROUTING_DUMP_LAYER", "bottleneck"))
-    parser.add_argument("--routing-dump-layers", default=os.environ.get("ROUTING_DUMP_LAYERS", ""))
-    parser.add_argument(
-        "--routing-dump-weight-policy",
-        choices=["uniform"],
-        default=os.environ.get("ROUTING_DUMP_WEIGHT_POLICY", "uniform"),
-    )
     parser.add_argument("--num-fused-shared-experts", type=int, default=0)
     parser.add_argument("--routed-scaling-factor", type=float, default=None)
     parser.add_argument("--include-routed-scale", type=int, choices=[0, 1], default=1)
@@ -956,18 +889,16 @@ def main() -> None:
                     destroy_cached_mega_moe_buffers()
                     _barrier()
                 cached_cap = case_cap
-                for routing_layer in _routing_dump_layers_for_case(args, case):
-                    sample_count += 1
-                    result = run_case(
-                        case=case,
-                        args=args,
-                        dist_info=dist_info,
-                        model_config=model_config,
-                        transformed_weights=transformed_weights,
-                        routing_dump_layer=routing_layer,
-                    )
-                    if result is not None:
-                        results.append(result)
+                sample_count += 1
+                result = run_case(
+                    case=case,
+                    args=args,
+                    dist_info=dist_info,
+                    model_config=model_config,
+                    transformed_weights=transformed_weights,
+                )
+                if result is not None:
+                    results.append(result)
             aggregated = aggregate_case_run_results(results)
             if aggregated is not None:
                 log_case_run_result(

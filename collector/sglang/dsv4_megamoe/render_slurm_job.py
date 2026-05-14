@@ -75,10 +75,6 @@ def render(args: argparse.Namespace) -> str:
         _export("SOURCE_POLICY", args.source_policy),
         _export("ROUTING_SEED", args.routing_seed),
         _export("ROUTING_SEEDS", args.routing_seeds),
-        _export("ROUTING_DUMP_ROOT", args.routing_dump_root),
-        _export("ROUTING_DUMP_LAYER", args.routing_dump_layer),
-        _export("ROUTING_DUMP_LAYERS", args.routing_dump_layers),
-        _export("ROUTING_DUMP_WEIGHT_POLICY", args.routing_dump_weight_policy),
         _export("PRE_DISPATCH", args.pre_dispatch),
         _export("INCLUDE_ROUTED_SCALE", args.include_routed_scale),
         _export("RENORMALIZE_TOPK_WEIGHTS", args.renormalize_topk_weights),
@@ -180,10 +176,6 @@ python3 collector/sglang/collect_dsv4_megamoe.py \\
   --source-policy "${{SOURCE_POLICY}}" \\
   --routing-seed "${{ROUTING_SEED}}" \\
   --routing-seeds "${{ROUTING_SEEDS}}" \\
-  --routing-dump-root "${{ROUTING_DUMP_ROOT}}" \\
-  --routing-dump-layer "${{ROUTING_DUMP_LAYER}}" \\
-  --routing-dump-layers "${{ROUTING_DUMP_LAYERS}}" \\
-  --routing-dump-weight-policy "${{ROUTING_DUMP_WEIGHT_POLICY}}" \\
   --pre-dispatch "${{PRE_DISPATCH}}" \\
   --include-routed-scale "${{INCLUDE_ROUTED_SCALE}}" \\
   --renormalize-topk-weights "${{RENORMALIZE_TOPK_WEIGHTS}}" \\
@@ -236,13 +228,9 @@ def parse_args() -> argparse.Namespace:
         "--distributions",
         default="balanced,power_law_1.01,power_law_1.2,power_law_sampled_1.9",
     )
-    parser.add_argument("--source-policy", default="random")
+    parser.add_argument("--source-policy", choices=["random"], default="random")
     parser.add_argument("--routing-seed", type=int, default=0)
     parser.add_argument("--routing-seeds", default="")
-    parser.add_argument("--routing-dump-root", default="")
-    parser.add_argument("--routing-dump-layer", default="bottleneck")
-    parser.add_argument("--routing-dump-layers", default="")
-    parser.add_argument("--routing-dump-weight-policy", choices=["uniform"], default="uniform")
     parser.add_argument("--pre-dispatch", default="sglang_jit")
     parser.add_argument("--include-routed-scale", type=int, default=1)
     parser.add_argument("--renormalize-topk-weights", type=int, default=1)

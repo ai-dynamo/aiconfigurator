@@ -35,10 +35,6 @@ def _args(**overrides):
         source_policy="random",
         routing_seed=0,
         routing_seeds="",
-        routing_dump_root="",
-        routing_dump_layer="bottleneck",
-        routing_dump_layers="",
-        routing_dump_weight_policy="uniform",
         pre_dispatch="sglang_jit",
         include_routed_scale=1,
         renormalize_topk_weights=1,
@@ -64,7 +60,6 @@ def test_slurm_renderer_uses_one_task_per_gpu_and_megamoe_flags():
     assert "--container-writable" in script
     assert "collector/sglang/collect_dsv4_megamoe.py" in script
     assert '--routing-seeds "${ROUTING_SEEDS}"' in script
-    assert '--routing-dump-root "${ROUTING_DUMP_ROOT}"' in script
     assert '--sglang-version "${SGLANG_VERSION}"' in script
     assert "SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE" in script
     assert 'export RANK="${SLURM_PROCID:?}"' in script

@@ -20,10 +20,6 @@ DISTRIBUTIONS="${DISTRIBUTIONS:-balanced,power_law_1.01,power_law_1.2,power_law_
 SOURCE_POLICY="${SOURCE_POLICY:-random}"
 ROUTING_SEED="${ROUTING_SEED:-0}"
 ROUTING_SEEDS="${ROUTING_SEEDS:-}"
-ROUTING_DUMP_ROOT="${ROUTING_DUMP_ROOT:-}"
-ROUTING_DUMP_LAYER="${ROUTING_DUMP_LAYER:-bottleneck}"
-ROUTING_DUMP_LAYERS="${ROUTING_DUMP_LAYERS:-}"
-ROUTING_DUMP_WEIGHT_POLICY="${ROUTING_DUMP_WEIGHT_POLICY:-uniform}"
 PHASES="${PHASES:-context,generation}"
 PREFILL_TOKENS="${PREFILL_TOKENS:-1024,2048,4096,8192,16384,32768}"
 DECODE_TOKENS="${DECODE_TOKENS:-1,2,4,8,16,32,64,128,256,512}"
@@ -184,10 +180,6 @@ RUN_CMD=(
   --source-policy "${SOURCE_POLICY}" \
   --routing-seed "${ROUTING_SEED}" \
   --routing-seeds "${ROUTING_SEEDS}" \
-  --routing-dump-root "${ROUTING_DUMP_ROOT}" \
-  --routing-dump-layer "${ROUTING_DUMP_LAYER}" \
-  --routing-dump-layers "${ROUTING_DUMP_LAYERS}" \
-  --routing-dump-weight-policy "${ROUTING_DUMP_WEIGHT_POLICY}" \
   --num-max-tokens-per-rank "${NUM_MAX_TOKENS_PER_RANK}" \
   --cap-policy "${CAP_POLICY}" \
   --pre-dispatch "${PRE_DISPATCH}" \

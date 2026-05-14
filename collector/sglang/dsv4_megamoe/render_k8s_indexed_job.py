@@ -152,10 +152,6 @@ spec:
         _env("SOURCE_POLICY", args.source_policy),
         _env("ROUTING_SEED", str(args.routing_seed)),
         _env("ROUTING_SEEDS", args.routing_seeds),
-        _env("ROUTING_DUMP_ROOT", args.routing_dump_root),
-        _env("ROUTING_DUMP_LAYER", args.routing_dump_layer),
-        _env("ROUTING_DUMP_LAYERS", args.routing_dump_layers),
-        _env("ROUTING_DUMP_WEIGHT_POLICY", args.routing_dump_weight_policy),
         _env("PHASES", args.phases),
         _env("PREFILL_TOKENS", args.prefill_tokens),
         _env("DECODE_TOKENS", args.decode_tokens),
@@ -308,17 +304,13 @@ def parse_args() -> argparse.Namespace:
         "--distributions",
         default="balanced,power_law_1.01,power_law_1.2,power_law_sampled_1.9",
     )
-    parser.add_argument("--source-policy", choices=["random", "engine_dump"], default="random")
+    parser.add_argument("--source-policy", choices=["random"], default="random")
     parser.add_argument("--routing-seed", type=int, default=0)
     parser.add_argument(
         "--routing-seeds",
         default="",
         help="optional comma-separated routing seeds; empty lets collection expand power_law_sampled_1.9 to 10 seeds",
     )
-    parser.add_argument("--routing-dump-root", default="")
-    parser.add_argument("--routing-dump-layer", default="bottleneck")
-    parser.add_argument("--routing-dump-layers", default="")
-    parser.add_argument("--routing-dump-weight-policy", choices=["uniform"], default="uniform")
     parser.add_argument("--phases", default="context,generation")
     parser.add_argument("--prefill-tokens", default="1024,2048,4096,8192,16384,32768")
     parser.add_argument("--decode-tokens", default="1,2,4,8,16,32,64,128,256,512")

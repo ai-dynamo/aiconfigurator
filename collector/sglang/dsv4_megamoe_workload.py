@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
 
 import torch
 
@@ -25,14 +24,12 @@ except ImportError:
 
 SAMPLED_POWER_LAW_DISTRIBUTION = "power_law_sampled_1.9"
 SAMPLED_POWER_LAW_ALPHA = 1.9
-TRACE_DISTRIBUTION = "sglang_trace"
 SUPPORTED_DISTRIBUTIONS = (
     "balanced",
     "power_law_<alpha>",
     SAMPLED_POWER_LAW_DISTRIBUTION,
-    TRACE_DISTRIBUTION,
 )
-SUPPORTED_SOURCE_POLICIES = ("random", "engine_dump")
+SUPPORTED_SOURCE_POLICIES = ("random",)
 
 
 @dataclass(frozen=True)
@@ -62,13 +59,9 @@ class RoutingPlan:
     bottleneck_rank: int
     routing_seed: int
     norm_topk_prob: bool
-    routing_source: str = "synthetic"
-    routing_dump_case: str | None = None
-    routing_dump_layer: int | None = None
-    topk_weight_policy: str = "synthetic_logits"
 
     def metadata(self) -> dict[str, object]:
-        metadata = {
+        return {
             "distribution": self.distribution,
             "source_policy": self.source_policy,
             "global_num_tokens": self.global_num_tokens,
@@ -80,14 +73,7 @@ class RoutingPlan:
             "remote_selection_ratio": f"{self.remote_selection_ratio:.6f}",
             "bottleneck_rank": self.bottleneck_rank,
             "norm_topk_prob": str(self.norm_topk_prob).lower(),
-            "routing_source": self.routing_source,
-            "topk_weight_policy": self.topk_weight_policy,
         }
-        if self.routing_dump_case is not None:
-            metadata["routing_dump_case"] = self.routing_dump_case
-        if self.routing_dump_layer is not None:
-            metadata["routing_dump_layer"] = self.routing_dump_layer
-        return metadata
 
 
 def parse_distribution(distribution: str) -> DistributionSpec:
@@ -105,8 +91,6 @@ def parse_distribution(distribution: str) -> DistributionSpec:
         if alpha <= 0:
             raise ValueError(f"power-law alpha must be positive, got {alpha}")
         return DistributionSpec(name=distribution, kind="power_law", alpha=alpha)
-    if distribution == TRACE_DISTRIBUTION:
-        raise ValueError(f"{TRACE_DISTRIBUTION} requires --routing-dump-root and cannot use synthetic logits")
     raise ValueError(f"unsupported distribution: {distribution}; expected one of {SUPPORTED_DISTRIBUTIONS}")
 
 
@@ -395,232 +379,6 @@ def build_routing_plan(
         bottleneck_rank=int(max(range(ep_size), key=lambda idx: dst_rank_loads[idx])),
         routing_seed=int(routing_seed),
         norm_topk_prob=bool(norm_topk_prob),
-    )
-
-
-def _iter_dump_kind(phase: str) -> tuple[str, str]:
-    if phase == "context":
-        return "prefill", "extend"
-    if phase == "generation":
-        return "decode", "decode"
-    raise ValueError(f"unsupported phase for iter dump: {phase}")
-
-
-def _summary_rows(case_dir: Path) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for path in sorted(case_dir.glob("iter_dump_summary_rank*.jsonl")):
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    return rows
-
-
-def _find_iter_dump_case_dir(
-    *,
-    dump_root: str | Path,
-    phase: str,
-    tokens_per_rank: int,
-    ep_size: int,
-) -> Path:
-    root = Path(dump_root)
-    if not root.exists():
-        raise FileNotFoundError(f"routing dump root does not exist: {root}")
-
-    role, kind = _iter_dump_kind(phase)
-    preferred = root / f"{role}_{kind}_tokens{tokens_per_rank}_ep{ep_size}"
-    if preferred.exists():
-        return preferred
-
-    matches: list[Path] = []
-    for case_dir in sorted(path for path in root.iterdir() if path.is_dir()):
-        rows = _summary_rows(case_dir)
-        if not rows:
-            continue
-        first = rows[0]
-        if (
-            str(first.get("role")) == role
-            and str(first.get("kind")) == kind
-            and int(first.get("local_num_tokens", -1)) == int(tokens_per_rank)
-            and int(first.get("moe_ep_size", -1)) == int(ep_size)
-        ):
-            matches.append(case_dir)
-    if len(matches) == 1:
-        return matches[0]
-    if not matches:
-        raise FileNotFoundError(
-            f"no iter-dump case found under {root} for phase={phase} tokens_per_rank={tokens_per_rank} ep={ep_size}"
-        )
-    raise ValueError(f"ambiguous iter-dump cases for phase={phase} tokens={tokens_per_rank}: {matches}")
-
-
-def _load_iter_dump_topk_by_rank(
-    *,
-    case_dir: Path,
-    tokens_per_rank: Sequence[int],
-    routed_num_experts: int,
-    routed_topk: int,
-    ep_size: int,
-) -> list[torch.Tensor]:
-    topk_ids_by_rank: list[torch.Tensor] = []
-    for ep_rank, expected_tokens in enumerate(tokens_per_rank):
-        matches = sorted(case_dir.glob(f"rank*_ep{ep_rank:03d}_*.pt"))
-        if len(matches) != 1:
-            raise ValueError(f"expected exactly one dump file for ep={ep_rank} under {case_dir}, got {matches}")
-        payload = torch.load(matches[0], map_location="cpu")
-        topk_ids = payload["topk_ids"] if isinstance(payload, dict) else payload
-        if topk_ids.ndim == 2:
-            topk_ids = topk_ids[:, None, :]
-        if topk_ids.ndim != 3:
-            raise ValueError(f"{matches[0]} topk_ids must be [tokens,layers,topk] or [tokens,topk]")
-        if int(topk_ids.shape[0]) != int(expected_tokens):
-            raise ValueError(f"{matches[0]} token count mismatch: got {topk_ids.shape[0]}, expected {expected_tokens}")
-        if int(topk_ids.shape[2]) != int(routed_topk):
-            raise ValueError(f"{matches[0]} topk mismatch: got {topk_ids.shape[2]}, expected {routed_topk}")
-        topk_ids = topk_ids.to(dtype=torch.int32, device="cpu").contiguous()
-        if torch.any(topk_ids < 0) or torch.any(topk_ids >= routed_num_experts):
-            raise ValueError(f"{matches[0]} contains expert ids outside [0, {routed_num_experts})")
-        topk_ids_by_rank.append(topk_ids)
-    if len({int(item.shape[1]) for item in topk_ids_by_rank}) != 1:
-        raise ValueError("iter dump files do not agree on number of layers")
-    if len(topk_ids_by_rank) != ep_size:
-        raise ValueError("iter dump rank count mismatch")
-    return topk_ids_by_rank
-
-
-def _select_iter_dump_layer(
-    *,
-    topk_ids_by_rank: Sequence[torch.Tensor],
-    layer_selector: str,
-    routed_num_experts: int,
-    ep_size: int,
-) -> int:
-    num_layers = int(topk_ids_by_rank[0].shape[1])
-    selector = str(layer_selector).strip().lower()
-    if selector in {"first", "layer0"}:
-        return 0
-    if selector in {"bottleneck", "max_rank_load"}:
-        best_layer = 0
-        best_score = -1
-        for layer_idx in range(num_layers):
-            layer_topk = [topk_ids[:, layer_idx, :] for topk_ids in topk_ids_by_rank]
-            matrix = _route_matrix(layer_topk, routed_num_experts=routed_num_experts, ep_size=ep_size)
-            dst_rank_loads = [sum(row[dst] for row in matrix) for dst in range(ep_size)]
-            score = max(dst_rank_loads)
-            if score > best_score:
-                best_layer = layer_idx
-                best_score = score
-        return best_layer
-    try:
-        layer_idx = int(selector)
-    except ValueError as exc:
-        raise ValueError(
-            f"unsupported routing dump layer selector {layer_selector!r}; use bottleneck, first, or an integer"
-        ) from exc
-    if layer_idx < 0 or layer_idx >= num_layers:
-        raise ValueError(f"routing dump layer {layer_idx} outside [0, {num_layers})")
-    return layer_idx
-
-
-def build_routing_plan_from_iter_dump(
-    *,
-    dump_root: str | Path,
-    phase: str,
-    distribution: str,
-    tokens_per_rank: Sequence[int],
-    routed_num_experts: int,
-    routed_topk: int,
-    ep_size: int,
-    rank: int,
-    source_policy: str = "engine_dump",
-    routing_layer: str = "bottleneck",
-    topk_weight_policy: str = "uniform",
-    norm_topk_prob: bool = True,
-) -> RoutingPlan:
-    """Build a local routing plan by replaying SGLang engine-dumped top-k ids."""
-    if source_policy != "engine_dump":
-        raise ValueError(f"iter dump replay requires source_policy=engine_dump, got {source_policy}")
-    if topk_weight_policy != "uniform":
-        raise ValueError(f"unsupported topk_weight_policy for iter dump replay: {topk_weight_policy}")
-    tokens_per_rank = _validate_common(
-        tokens_per_rank=tokens_per_rank,
-        routed_num_experts=routed_num_experts,
-        routed_topk=routed_topk,
-        ep_size=ep_size,
-        rank=rank,
-    )
-    if len(set(tokens_per_rank)) != 1:
-        raise ValueError("iter dump replay currently requires equal local tokens on every rank")
-
-    case_dir = _find_iter_dump_case_dir(
-        dump_root=dump_root,
-        phase=phase,
-        tokens_per_rank=tokens_per_rank[0],
-        ep_size=ep_size,
-    )
-    dumped_topk_by_rank = _load_iter_dump_topk_by_rank(
-        case_dir=case_dir,
-        tokens_per_rank=tokens_per_rank,
-        routed_num_experts=routed_num_experts,
-        routed_topk=routed_topk,
-        ep_size=ep_size,
-    )
-    selected_layer = _select_iter_dump_layer(
-        topk_ids_by_rank=dumped_topk_by_rank,
-        layer_selector=routing_layer,
-        routed_num_experts=routed_num_experts,
-        ep_size=ep_size,
-    )
-    topk_ids_by_rank = [topk_ids[:, selected_layer, :].contiguous() for topk_ids in dumped_topk_by_rank]
-    weight_value = 1.0 / routed_topk if norm_topk_prob else 1.0
-    topk_weights_by_rank = [
-        torch.full(tuple(topk_ids.shape), weight_value, dtype=torch.float32, device="cpu")
-        for topk_ids in topk_ids_by_rank
-    ]
-    expected_expert_counts = torch.bincount(
-        torch.cat([item.reshape(-1).to(dtype=torch.int64) for item in topk_ids_by_rank]),
-        minlength=routed_num_experts,
-    )
-    _validate_plan(
-        topk_ids_by_rank=topk_ids_by_rank,
-        topk_weights_by_rank=topk_weights_by_rank,
-        routed_num_experts=routed_num_experts,
-        routed_topk=routed_topk,
-        tokens_per_rank=tokens_per_rank,
-        expected_expert_counts=expected_expert_counts[:routed_num_experts],
-    )
-    matrix = _route_matrix(topk_ids_by_rank, routed_num_experts=routed_num_experts, ep_size=ep_size)
-    experts_per_rank = routed_num_experts // ep_size
-    dst_rank_loads = tuple(
-        int(expected_expert_counts[dst * experts_per_rank : (dst + 1) * experts_per_rank].sum().item())
-        for dst in range(ep_size)
-    )
-    local_selections = sum(matrix[src][src] for src in range(ep_size))
-    total_selections = int(sum(tokens_per_rank)) * routed_topk
-    local_ratio = local_selections / total_selections if total_selections else 0.0
-    return RoutingPlan(
-        distribution=distribution,
-        source_policy=source_policy,
-        global_num_tokens=int(sum(tokens_per_rank)),
-        tokens_per_rank=tokens_per_rank,
-        routed_num_experts=int(routed_num_experts),
-        routed_topk=int(routed_topk),
-        ep_size=int(ep_size),
-        rank=int(rank),
-        local_topk_ids=topk_ids_by_rank[rank],
-        local_topk_weights=topk_weights_by_rank[rank],
-        routed_expert_counts=tuple(int(value) for value in expected_expert_counts[:routed_num_experts].tolist()),
-        dst_rank_loads=dst_rank_loads,
-        src_dst_matrix=tuple(tuple(int(value) for value in row) for row in matrix),
-        local_selection_ratio=float(local_ratio),
-        remote_selection_ratio=float(1.0 - local_ratio),
-        bottleneck_rank=int(max(range(ep_size), key=lambda idx: dst_rank_loads[idx])),
-        routing_seed=0,
-        norm_topk_prob=bool(norm_topk_prob),
-        routing_source="iter_dump",
-        routing_dump_case=case_dir.name,
-        routing_dump_layer=int(selected_layer),
-        topk_weight_policy=topk_weight_policy,
     )
 
 

@@ -2071,42 +2071,24 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
     if dsv4_megamoe_module_file is None:
         return None
 
-    def _is_source_tuple(value: object) -> bool:
-        return (
-            isinstance(value, tuple)
-            and len(value) == 2
-            and isinstance(value[0], str)
-            and (value[1] is None or isinstance(value[1], set))
-        )
-
-    source_tuples = None
-    if _is_source_tuple(dsv4_megamoe_module_file):
-        source_tuples = [dsv4_megamoe_module_file]
-    elif isinstance(dsv4_megamoe_module_file, list) and all(
-        item is None or _is_source_tuple(item) for item in dsv4_megamoe_module_file
-    ):
-        source_tuples = [item for item in dsv4_megamoe_module_file if item is not None]
-
-    if source_tuples is not None:
-        rows = _read_filtered_rows(source_tuples)
-        if rows is None:
-            logger.debug(f"DeepSeek-V4 MegaMoE data file sources {source_tuples} not found.")
-            return None
-        source_label = source_tuples[0][0] if source_tuples else "dsv4_megamoe_module_perf.txt"
-    elif isinstance(dsv4_megamoe_module_file, list | tuple):
+    if isinstance(dsv4_megamoe_module_file, list):
         merged_data: dict = {}
         for source_file in dsv4_megamoe_module_file:
+            if isinstance(source_file, list | tuple):
+                raise TypeError("DSv4 MegaMoE data loader expects a path or flat list of paths")
             source_data = load_dsv4_megamoe_module_data(source_file)
             if source_data is None:
                 continue
             _deep_merge_dsv4_dicts(merged_data, source_data)
         return merged_data or None
-    else:
-        rows = _read_filtered_rows(dsv4_megamoe_module_file)
-        if rows is None:
-            logger.debug(f"DeepSeek-V4 MegaMoE data file {dsv4_megamoe_module_file} not found.")
-            return None
-        source_label = dsv4_megamoe_module_file
+    if isinstance(dsv4_megamoe_module_file, tuple):
+        raise TypeError("DSv4 MegaMoE data loader expects a path or flat list of paths")
+
+    source_label = os.fspath(dsv4_megamoe_module_file)
+    rows = _read_filtered_rows(source_label)
+    if rows is None:
+        logger.debug(f"DeepSeek-V4 MegaMoE data file {source_label} not found.")
+        return None
 
     def _to_bool(value: object) -> bool:
         return str(value).strip().lower() in {"1", "true", "yes", "y"}
@@ -2122,7 +2104,7 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
             return ["context"]
         if "generation" in filename:
             return ["generation"]
-        raise ValueError(f"DSv4 MegaMoE unified perf file requires a phase column: {dsv4_megamoe_module_file} {row}")
+        raise ValueError(f"DSv4 MegaMoE unified perf file requires a phase column: {source_label} {row}")
 
     def _put_nested(root: dict, keys: list[object], value: dict) -> None:
         current = root
@@ -2130,24 +2112,21 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
             current = current.setdefault(key, {})
         leaf_key = keys[-1]
         if leaf_key in current:
-            raise ValueError(f"duplicate DSv4 MegaMoE data row for {dsv4_megamoe_module_file} {keys}")
+            raise ValueError(f"duplicate DSv4 MegaMoE data row for {source_label} {keys}")
         current[leaf_key] = value
 
     dsv4_megamoe_data: dict = {}
-    logger.debug(f"Loading DeepSeek-V4 MegaMoE module data from: {dsv4_megamoe_module_file}")
+    logger.debug(f"Loading DeepSeek-V4 MegaMoE module data from: {source_label}")
     for row in rows:
         if not _to_bool(row.get("used_cuda_graph")):
-            raise ValueError(
-                f"DSv4 MegaMoE perf row was not collected with CUDA Graph: {dsv4_megamoe_module_file} {row}"
-            )
+            raise ValueError(f"DSv4 MegaMoE perf row was not collected with CUDA Graph: {source_label} {row}")
         if _to_bool(row.get("includes_gate_topk", "true")):
             raise ValueError(
-                f"DSv4 MegaMoE perf row includes gate/top-k outside the supported boundary: "
-                f"{dsv4_megamoe_module_file} {row}"
+                f"DSv4 MegaMoE perf row includes gate/top-k outside the supported boundary: {source_label} {row}"
             )
         if not _to_bool(row.get("includes_routed_scale")):
             raise ValueError(
-                f"DSv4 MegaMoE perf row does not include SGLang routed output scaling: {dsv4_megamoe_module_file} {row}"
+                f"DSv4 MegaMoE perf row does not include SGLang routed output scaling: {source_label} {row}"
             )
 
         kernel_source = row.get("kernel_source", "deepgemm_megamoe")
@@ -2843,12 +2822,21 @@ class PerfDatabase:
             data_filepath = os.path.join(perf_data_dir, op_filename_enum.value)
             load_fn = func_map[op_filename_enum]
 
-            # `sources` is a list of `(path, kernel_source_filter | None)` tuples in
-            # priority order. Each loader walks them once and applies the existing
-            # first-wins-on-key-conflict logic per row, so cross-version / cross-
-            # backend inheritance falls out for free without a separate merge pass.
-            sources = self._build_op_sources(op_filename_enum, data_filepath, system_data_root)
-            result = load_fn(sources)
+            if op_filename_enum in (
+                PerfDataFilename.dsv4_megamoe_module,
+                PerfDataFilename.dsv4_megamoe_context_module,
+                PerfDataFilename.dsv4_megamoe_generation_module,
+            ):
+                # MegaMoE keeps kernel_source in the query key, so it does not need
+                # the generic shared-layer `(path, filter)` source tuple shape.
+                result = load_fn(data_filepath)
+            else:
+                # `sources` is a list of `(path, kernel_source_filter | None)` tuples in
+                # priority order. Each loader walks them once and applies the existing
+                # first-wins-on-key-conflict logic per row, so cross-version / cross-
+                # backend inheritance falls out for free without a separate merge pass.
+                sources = self._build_op_sources(op_filename_enum, data_filepath, system_data_root)
+                result = load_fn(sources)
 
             def _wrap_data_dict(data_dict: Optional[dict]):
                 return LoadedOpData(data_dict, op_filename_enum, data_filepath)

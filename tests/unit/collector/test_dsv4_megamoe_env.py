@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sys
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,7 +19,6 @@ try:
         CaseRunResult,
         MegaMoECase,
         _env_flag,
-        _routing_dump_layers_for_case,
         aggregate_case_run_results,
         group_cases_for_logging,
     )
@@ -44,14 +42,6 @@ def test_env_flag_treats_empty_value_as_default(monkeypatch):
 
     monkeypatch.setenv("AIC_TEST_FLAG", "   ")
     assert _env_flag("AIC_TEST_FLAG", default="1") == 1
-
-
-def test_routing_dump_layers_for_case_does_not_mutate_args():
-    args = SimpleNamespace(routing_dump_layer="bottleneck", routing_dump_layers="2,5-6")
-
-    assert _routing_dump_layers_for_case(args, SimpleNamespace(distribution="sglang_trace")) == ["2", "5", "6"]
-    assert args.routing_dump_layer == "bottleneck"
-    assert _routing_dump_layers_for_case(args, SimpleNamespace(distribution="balanced")) == ["bottleneck"]
 
 
 def test_group_cases_for_logging_groups_seed_variants():

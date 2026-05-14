@@ -75,7 +75,7 @@ def _sglang_megamoe_parallel_lists(system_name: str, should_enable_pp: bool) -> 
     spec = _load_system_spec(system_name)
     node_spec = spec.get("node", {})
     has_rack_nvl = int(node_spec.get("num_gpus_per_rack", 0) or 0) >= 32
-    ep_list = [8, 16, 32] if has_rack_nvl else [8]
+    ep_list = [4, 8, 16, 32] if has_rack_nvl else [8]
     return {
         "num_gpu_per_worker": ep_list,
         "tp_list": [1, 2, 4, 8],
