@@ -58,6 +58,7 @@ class InferenceSummary:
 
         # raw data dict
         self._memory = {}
+        self._encoder_memory = {}  # encoder-node memory breakdown (VL models only)
         self._encoder_latency_dict = {}  # ms
         self._context_latency_dict = {}  # ms
         self._generation_latency_dict = {}  # ms
@@ -161,6 +162,14 @@ class InferenceSummary:
             * (1 - kv_cache_tolerance)
         )
         self._is_kv_cache_oom = kv_gib > kv_budget
+
+    def set_encoder_memory(self, memory_dict: dict) -> None:
+        """Set encoder-node memory breakdown (VL models only)."""
+        self._encoder_memory = memory_dict
+
+    def get_encoder_memory(self) -> dict:
+        """Get encoder-node memory breakdown. Empty dict for text-only models."""
+        return self._encoder_memory
 
     def set_oom(self, is_oom: bool) -> None:
         """
