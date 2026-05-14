@@ -565,7 +565,7 @@ def test_deepseek_v4_static_sol_and_hybrid_run_end_to_end(mutable_comprehensive_
         assert sum(summary.get_generation_latency_dict().values()) > 0
 
 
-def test_sglang_deepseek_v4_pro_prefill_memory_uses_hidden_size(mutable_comprehensive_perf_db):
+def test_sglang_deepseek_v4_pro_prefill_memory_uses_hidden_size(mutable_comprehensive_perf_db, monkeypatch):
     db = mutable_comprehensive_perf_db
     db.system_spec["gpu"]["mem_capacity"] = 198674743296  # GB200 189471 MiB
     db.system_spec["misc"]["nccl_mem"] = {1: 0, 2: 358612992, 4: 411041792, 8: 411041792}
@@ -586,17 +586,27 @@ def test_sglang_deepseek_v4_pro_prefill_memory_uses_hidden_size(mutable_comprehe
         nextn=0,
     )
     model = get_model("deepseek-ai/DeepSeek-V4-Pro", model_config, backend_name="sglang")
+    backend = SGLANGBackend()
 
-    memory = SGLANGBackend()._get_memory_usage(
-        model,
-        db,
-        batch_size=1,
-        beam_width=1,
-        isl=8192,
-        osl=1024,
-    )
+    def _prefill_memory():
+        return backend._get_memory_usage(
+            model,
+            db,
+            batch_size=1,
+            beam_width=1,
+            isl=8192,
+            osl=1024,
+        )
 
-    assert memory["activations"] == pytest.approx(8.05)
+    memory = _prefill_memory()
+    expanded_hidden_size = model._num_heads * model._head_size
+    assert model.activation_hidden_size == model._hidden_size
+    assert expanded_hidden_size > model.activation_hidden_size
+
+    monkeypatch.setattr(type(model), "activation_hidden_size", property(lambda self: expanded_hidden_size))
+    expanded_memory = _prefill_memory()
+
+    assert memory["activations"] < expanded_memory["activations"]
     summary = InferenceSummary(RuntimeConfig(isl=8192, osl=1024))
     summary.set_memory_and_check_oom(memory, db.system_spec["gpu"]["mem_capacity"])
     assert not summary.check_oom()

@@ -50,7 +50,6 @@ INCLUDE_ROUTED_SCALE="${INCLUDE_ROUTED_SCALE:-1}"
 RENORMALIZE_TOPK_WEIGHTS="${RENORMALIZE_TOPK_WEIGHTS:-1}"
 NUM_WARMUP="${NUM_WARMUP:-5}"
 NUM_ITERATIONS="${NUM_ITERATIONS:-20}"
-WRITE_DEBUG_OUTPUT="${WRITE_DEBUG_OUTPUT:-0}"
 CAP_POLICY="${CAP_POLICY:-fixed}"
 
 DRY_RUN="${DRY_RUN:-0}"
@@ -157,7 +156,6 @@ _render_job() {
     --num-iterations "${NUM_ITERATIONS}"
     --num-max-tokens-per-rank "${cap}"
     --cap-policy "${CAP_POLICY}"
-    --write-debug-output "${WRITE_DEBUG_OUTPUT}"
     --env "AIC_DSV4_MODEL_PATH=${MODEL_PATH}"
   )
   if [[ "${CONTAINER_WRITABLE}" == "1" ]]; then
@@ -177,8 +175,6 @@ _stage_repo() {
     --exclude=artifacts \
     "${LOCAL_REPO}/" "${SSH_TARGET}:${REMOTE_WORKDIR}/"
   rsync -az "${LOCAL_RESULT_DIR}/jobs/" "${SSH_TARGET}:${REMOTE_JOBS}/"
-  ssh "${SSH_TARGET}" \
-    "set -euo pipefail; cd '${REMOTE_WORKDIR}'; files='collector/sglang/collect_dsv4_megamoe.py collector/sglang/dsv4_megamoe_workload.py'; grep -q 'power_law_sampled_1.9' \${files}; grep 'aggregate_case_run_results' -n collector/sglang/collect_dsv4_megamoe.py"
 }
 
 _wait_job() {

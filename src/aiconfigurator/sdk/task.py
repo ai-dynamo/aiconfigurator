@@ -8,7 +8,6 @@ import inspect
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 import pandas as pd
@@ -18,7 +17,7 @@ from munch import DefaultMunch, Munch
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.models import _apply_model_quant_defaults, check_is_moe, get_model_family
 from aiconfigurator.sdk.pareto_analysis import get_pareto_front
-from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version, get_systems_paths
+from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version, load_system_spec
 from aiconfigurator.sdk.utils import ListFlowDumper, enumerate_parallel_config, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -47,32 +46,13 @@ def _is_hopper_system(system_name: str | None) -> bool:
     return system_name.startswith(("h100", "h200", "gh200"))
 
 
-_SYSTEM_SPEC_CACHE: dict[tuple[tuple[str, ...], str], dict] = {}
-
-
-def _load_system_spec(system_name: str | None) -> dict:
-    if not system_name:
-        return {}
-    systems_paths = tuple(get_systems_paths())
-    cache_key = (systems_paths, system_name)
-    if cache_key not in _SYSTEM_SPEC_CACHE:
-        _SYSTEM_SPEC_CACHE[cache_key] = {}
-        for systems_root in systems_paths:
-            spec_path = Path(systems_root) / f"{system_name}.yaml"
-            if spec_path.exists():
-                with spec_path.open(encoding="utf-8") as f:
-                    _SYSTEM_SPEC_CACHE[cache_key] = yaml.safe_load(f) or {}
-                break
-    return _SYSTEM_SPEC_CACHE[cache_key]
-
-
 def _is_blackwell_system(system_name: str | None) -> bool:
-    spec = _load_system_spec(system_name)
+    spec = load_system_spec(system_name)
     return int(spec.get("gpu", {}).get("sm_version", -1)) >= 100
 
 
 def _sglang_megamoe_parallel_lists(system_name: str, should_enable_pp: bool) -> dict:
-    spec = _load_system_spec(system_name)
+    spec = load_system_spec(system_name)
     node_spec = spec.get("node", {})
     has_rack_nvl = int(node_spec.get("num_gpus_per_rack", 0) or 0) >= 32
     ep_list = [4, 8, 16, 32] if has_rack_nvl else [8]
@@ -266,6 +246,12 @@ def _config_get(obj: object, key: str, default: Any = None) -> Any:
     if value is DefaultMunch:
         return default
     return value
+
+
+def _config_get_or(obj: object, key: str, fallback: Any) -> Any:
+    """Read config values and treat None/missing as unset."""
+    value = _config_get(obj, key, None)
+    return fallback if value is None else value
 
 
 def build_disagg_parallel_lists(
@@ -1047,14 +1033,9 @@ class TaskConfig:
                 return None
             return value.name if hasattr(value, "name") else str(value)
 
-        def _get_cfg_value(cfg: object, key: str) -> object:
-            if isinstance(cfg, Mapping):
-                return cfg.get(key, None)
-            return getattr(cfg, key, None)
-
         def _load_worker_supported_quant_modes(worker_cfg: object) -> tuple[dict, str, str]:
-            system_name = _get_cfg_value(worker_cfg, "system_name") or self.system_name
-            backend_version = _get_cfg_value(worker_cfg, "backend_version") or self.backend_version
+            system_name = _config_get(worker_cfg, "system_name") or self.system_name
+            backend_version = _config_get(worker_cfg, "backend_version") or self.backend_version
             try:
                 database = _get_database_with_optional_missing_data(
                     system=system_name,
@@ -1098,11 +1079,11 @@ class TaskConfig:
 
         def _resolve_model_quant_modes(worker_cfg: object, worker_name: str) -> None:
             model_config = config.ModelConfig(
-                gemm_quant_mode=_get_cfg_value(worker_cfg, "gemm_quant_mode"),
-                moe_quant_mode=_get_cfg_value(worker_cfg, "moe_quant_mode"),
-                kvcache_quant_mode=_get_cfg_value(worker_cfg, "kvcache_quant_mode"),
-                fmha_quant_mode=_get_cfg_value(worker_cfg, "fmha_quant_mode"),
-                comm_quant_mode=_get_cfg_value(worker_cfg, "comm_quant_mode"),
+                gemm_quant_mode=_config_get(worker_cfg, "gemm_quant_mode"),
+                moe_quant_mode=_config_get(worker_cfg, "moe_quant_mode"),
+                kvcache_quant_mode=_config_get(worker_cfg, "kvcache_quant_mode"),
+                fmha_quant_mode=_config_get(worker_cfg, "fmha_quant_mode"),
+                comm_quant_mode=_config_get(worker_cfg, "comm_quant_mode"),
             )
             # TODO: _apply_model_quant_defaults is only called here. Maybe these two functions should be merged.
             _apply_model_quant_defaults(
@@ -1124,9 +1105,9 @@ class TaskConfig:
             for k, v in quant_modes.items():
                 worker_cfg[k] = v
 
-        cfg_enable_wideep = _get_cfg_value(self.config, "enable_wideep")
+        cfg_enable_wideep = _config_get(self.config, "enable_wideep")
         enable_wideep = bool(self.enable_wideep if cfg_enable_wideep is None else cfg_enable_wideep)
-        moe_backend = _get_cfg_value(self.config, "moe_backend") or self.moe_backend
+        moe_backend = _config_get(self.config, "moe_backend") or self.moe_backend
 
         # DeepSeek uses MLA perf tables; others use attention perf tables.
         # vLLM absorbs MLA KV projections into standard attention kernels, so it
@@ -1153,11 +1134,11 @@ class TaskConfig:
         ) -> None:
             _resolve_model_quant_modes(wc, worker_name)
             supported, system_name, backend_version = _load_worker_supported_quant_modes(wc)
-            gemm_mode = _to_name(_get_cfg_value(wc, "gemm_quant_mode"))
+            gemm_mode = _to_name(_config_get(wc, "gemm_quant_mode"))
             _supported_or_raise("gemm", gemm_mode, supported, system_name, backend_version)
 
-            moe_mode = _to_name(_get_cfg_value(wc, "moe_quant_mode"))
-            wc_moe_backend = _get_cfg_value(wc, "moe_backend") or moe_backend
+            moe_mode = _to_name(_config_get(wc, "moe_quant_mode"))
+            wc_moe_backend = _config_get(wc, "moe_backend") or moe_backend
             if self.backend_name == "sglang" and wc_moe_backend == "megamoe":
                 if not is_deepseek_v4:
                     raise ValueError("moe_backend='megamoe' is currently supported only for DeepSeek-V4 models.")
@@ -1176,11 +1157,11 @@ class TaskConfig:
                 _supported_or_raise("moe", moe_mode, supported, system_name, backend_version)
 
             if validate_context:
-                fmha_mode = _to_name(_get_cfg_value(wc, "fmha_quant_mode"))
+                fmha_mode = _to_name(_config_get(wc, "fmha_quant_mode"))
                 _supported_or_raise(context_attn_key, fmha_mode, supported, system_name, backend_version)
 
             if validate_generation:
-                kvcache_mode = _to_name(_get_cfg_value(wc, "kvcache_quant_mode"))
+                kvcache_mode = _to_name(_config_get(wc, "kvcache_quant_mode"))
                 _supported_or_raise(generation_attn_key, kvcache_mode, supported, system_name, backend_version)
 
         # agg/disagg worker configs use the same field names
@@ -1462,24 +1443,19 @@ class TaskRunner:
         # Get database mode from config
         database_mode = getattr(task_config, "database_mode", None)
 
-        def _wc_get(wc: object, key: str, fallback):
-            """Read from worker_config; treat None/missing as 'not set'."""
-            val = _config_get(wc, key, None)
-            return val if val is not None else fallback
-
         _pwc = task_config.prefill_worker_config
         _dwc = task_config.decode_worker_config
-        prefill_enable_wideep = _wc_get(_pwc, "enable_wideep", task_config.enable_wideep)
-        prefill_enable_eplb = _wc_get(_pwc, "enable_eplb", getattr(task_config, "enable_eplb", False))
-        prefill_moe_backend = _wc_get(_pwc, "moe_backend", task_config.moe_backend)
-        prefill_attention_backend = _wc_get(_pwc, "attention_backend", task_config.attention_backend)
+        prefill_enable_wideep = _config_get_or(_pwc, "enable_wideep", task_config.enable_wideep)
+        prefill_enable_eplb = _config_get_or(_pwc, "enable_eplb", getattr(task_config, "enable_eplb", False))
+        prefill_moe_backend = _config_get_or(_pwc, "moe_backend", task_config.moe_backend)
+        prefill_attention_backend = _config_get_or(_pwc, "attention_backend", task_config.attention_backend)
         task_workload_distribution = _config_get(task_config, "workload_distribution", "power_law")
-        prefill_workload_distribution = _wc_get(_pwc, "workload_distribution", task_workload_distribution)
-        decode_enable_wideep = _wc_get(_dwc, "enable_wideep", task_config.enable_wideep)
-        decode_enable_eplb = _wc_get(_dwc, "enable_eplb", getattr(task_config, "enable_eplb", False))
-        decode_moe_backend = _wc_get(_dwc, "moe_backend", task_config.moe_backend)
-        decode_attention_backend = _wc_get(_dwc, "attention_backend", task_config.attention_backend)
-        decode_workload_distribution = _wc_get(_dwc, "workload_distribution", task_workload_distribution)
+        prefill_workload_distribution = _config_get_or(_pwc, "workload_distribution", task_workload_distribution)
+        decode_enable_wideep = _config_get_or(_dwc, "enable_wideep", task_config.enable_wideep)
+        decode_enable_eplb = _config_get_or(_dwc, "enable_eplb", getattr(task_config, "enable_eplb", False))
+        decode_moe_backend = _config_get_or(_dwc, "moe_backend", task_config.moe_backend)
+        decode_attention_backend = _config_get_or(_dwc, "attention_backend", task_config.attention_backend)
+        decode_workload_distribution = _config_get_or(_dwc, "workload_distribution", task_workload_distribution)
 
         logger.debug("Task %s: Setting up prefill database", task_config.task_name)
         try:

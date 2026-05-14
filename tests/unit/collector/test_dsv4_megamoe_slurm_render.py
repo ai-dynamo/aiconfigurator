@@ -42,7 +42,6 @@ def _args(**overrides):
         num_iterations=20,
         num_max_tokens_per_rank=32768,
         cap_policy="fixed",
-        write_debug_output=0,
         env=[],
     )
     for key, value in overrides.items():

@@ -18,7 +18,6 @@ try:
     from collector.sglang.collect_dsv4_megamoe import (
         CaseRunResult,
         MegaMoECase,
-        _env_flag,
         aggregate_case_run_results,
         group_cases_for_logging,
     )
@@ -34,14 +33,6 @@ finally:
         sys.modules.pop("torch.distributed", None)
     else:
         sys.modules["torch.distributed"] = _saved_torch_distributed
-
-
-def test_env_flag_treats_empty_value_as_default(monkeypatch):
-    monkeypatch.setenv("AIC_TEST_FLAG", "")
-    assert _env_flag("AIC_TEST_FLAG") == 0
-
-    monkeypatch.setenv("AIC_TEST_FLAG", "   ")
-    assert _env_flag("AIC_TEST_FLAG", default="1") == 1
 
 
 def test_group_cases_for_logging_groups_seed_variants():

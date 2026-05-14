@@ -59,10 +59,32 @@ def set_systems_paths(raw_paths: str | Iterable[str] | None) -> None:
             f"Invalid entries: {', '.join(invalid_paths)}"
         )
     _SYSTEMS_PATHS = resolved_paths
+    _load_system_spec_from_paths.cache_clear()
 
 
 def get_systems_paths() -> list[str]:
     return list(_SYSTEMS_PATHS)
+
+
+@functools.cache
+def _load_system_spec_from_paths(systems_paths: tuple[str, ...], system_name: str) -> dict:
+    for systems_root in systems_paths:
+        spec_path = os.path.join(systems_root, f"{system_name}.yaml")
+        if os.path.exists(spec_path):
+            with open(spec_path, encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+    return {}
+
+
+def load_system_spec(
+    system_name: str | None,
+    systems_paths: str | os.PathLike | Iterable[str] | None = None,
+) -> dict:
+    """Load a system YAML without constructing a full performance database."""
+    if not system_name:
+        return {}
+    resolved_paths = get_systems_paths() if systems_paths is None else _normalize_systems_paths(systems_paths)
+    return _load_system_spec_from_paths(tuple(resolved_paths), system_name)
 
 
 def build_no_databases_message() -> str:
@@ -2071,18 +2093,8 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
     if dsv4_megamoe_module_file is None:
         return None
 
-    if isinstance(dsv4_megamoe_module_file, list):
-        merged_data: dict = {}
-        for source_file in dsv4_megamoe_module_file:
-            if isinstance(source_file, list | tuple):
-                raise TypeError("DSv4 MegaMoE data loader expects a path or flat list of paths")
-            source_data = load_dsv4_megamoe_module_data(source_file)
-            if source_data is None:
-                continue
-            _deep_merge_dsv4_dicts(merged_data, source_data)
-        return merged_data or None
-    if isinstance(dsv4_megamoe_module_file, tuple):
-        raise TypeError("DSv4 MegaMoE data loader expects a path or flat list of paths")
+    if isinstance(dsv4_megamoe_module_file, list | tuple):
+        raise TypeError("DSv4 MegaMoE data loader expects a single unified perf file path")
 
     source_label = os.fspath(dsv4_megamoe_module_file)
     rows = _read_filtered_rows(source_label)
@@ -2093,18 +2105,13 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
     def _to_bool(value: object) -> bool:
         return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
-    def _row_phases(row: dict[str, str]) -> list[str]:
+    def _row_phase(row: dict[str, str]) -> str:
         phase = row.get("phase", "").strip()
-        if phase:
-            if phase not in {"context", "generation"}:
-                raise ValueError(f"DSv4 MegaMoE perf row has unsupported phase={phase!r}: {row}")
-            return [phase]
-        filename = os.path.basename(source_label)
-        if "context" in filename:
-            return ["context"]
-        if "generation" in filename:
-            return ["generation"]
-        raise ValueError(f"DSv4 MegaMoE unified perf file requires a phase column: {source_label} {row}")
+        if not phase:
+            raise ValueError(f"DSv4 MegaMoE unified perf file requires a phase column: {source_label} {row}")
+        if phase not in {"context", "generation"}:
+            raise ValueError(f"DSv4 MegaMoE perf row has unsupported phase={phase!r}: {row}")
+        return phase
 
     def _put_nested(root: dict, keys: list[object], value: dict) -> None:
         current = root
@@ -2173,30 +2180,29 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
             "includes_buffer_init": _to_bool(row.get("includes_buffer_init", "false")),
             "norm_topk_prob": _to_bool(row.get("norm_topk_prob", "false")),
         }
-        for phase in _row_phases(row):
-            phase_entry = dict(entry)
-            phase_entry["phase"] = phase
-            _put_nested(
-                dsv4_megamoe_data,
-                [
-                    phase,
-                    kernel_source,
-                    kernel_dtype,
-                    quant_mode,
-                    pre_dispatch,
-                    source_policy,
-                    distribution,
-                    topk,
-                    num_experts,
-                    num_fused_shared_experts,
-                    hidden_size,
-                    inter_size,
-                    moe_tp_size,
-                    moe_ep_size,
-                    num_tokens,
-                ],
-                phase_entry,
-            )
+        phase = _row_phase(row)
+        entry["phase"] = phase
+        _put_nested(
+            dsv4_megamoe_data,
+            [
+                phase,
+                kernel_source,
+                kernel_dtype,
+                quant_mode,
+                pre_dispatch,
+                source_policy,
+                distribution,
+                topk,
+                num_experts,
+                num_fused_shared_experts,
+                hidden_size,
+                inter_size,
+                moe_tp_size,
+                moe_ep_size,
+                num_tokens,
+            ],
+            entry,
+        )
 
     return dsv4_megamoe_data
 
@@ -2810,8 +2816,6 @@ class PerfDatabase:
                 PerfDataFilename.dsv4_flash_paged_mqa_logits_module: load_dsv4_flash_sparse_kernel_data,
                 PerfDataFilename.dsv4_flash_hca_attn_module: load_dsv4_flash_sparse_kernel_data,
                 PerfDataFilename.dsv4_megamoe_module: load_dsv4_megamoe_module_data,
-                PerfDataFilename.dsv4_megamoe_context_module: load_dsv4_megamoe_module_data,
-                PerfDataFilename.dsv4_megamoe_generation_module: load_dsv4_megamoe_module_data,
             }
             perf_data_dir = data_dir
             if op_filename_enum == PerfDataFilename.nccl:
@@ -2822,11 +2826,7 @@ class PerfDatabase:
             data_filepath = os.path.join(perf_data_dir, op_filename_enum.value)
             load_fn = func_map[op_filename_enum]
 
-            if op_filename_enum in (
-                PerfDataFilename.dsv4_megamoe_module,
-                PerfDataFilename.dsv4_megamoe_context_module,
-                PerfDataFilename.dsv4_megamoe_generation_module,
-            ):
+            if op_filename_enum is PerfDataFilename.dsv4_megamoe_module:
                 # MegaMoE keeps kernel_source in the query key, so it does not need
                 # the generic shared-layer `(path, filter)` source tuple shape.
                 result = load_fn(data_filepath)
@@ -2895,16 +2895,6 @@ class PerfDatabase:
                 return None
             return LoadedOpData(merged, first_loaded.op_name_enum, first_loaded.filepath)
 
-        def _load_dsv4_megamoe_split(loaded_list, generic_loaded):
-            merged: dict = {}
-            for loaded in loaded_list:
-                if loaded is None or not loaded.loaded:
-                    continue
-                _deep_merge_dsv4_dicts(merged, loaded.data)
-            if not merged:
-                return None
-            return LoadedOpData(merged, generic_loaded.op_name_enum, generic_loaded.filepath)
-
         ctx_split = [
             _load_op_data(PerfDataFilename.dsv4_flash_csa_context_module),
             _load_op_data(PerfDataFilename.dsv4_flash_hca_context_module),
@@ -2939,21 +2929,6 @@ class PerfDatabase:
             self._wideep_deepep_normal_data = _load_op_data(PerfDataFilename.wideep_deepep_normal)
             self._wideep_deepep_ll_data = _load_op_data(PerfDataFilename.wideep_deepep_ll)
             self._dsv4_megamoe_module_data = _load_op_data(PerfDataFilename.dsv4_megamoe_module)
-            if self._dsv4_megamoe_module_data.loaded:
-                self._dsv4_megamoe_context_module_data = self._dsv4_megamoe_module_data
-                self._dsv4_megamoe_generation_module_data = self._dsv4_megamoe_module_data
-            else:
-                self._dsv4_megamoe_context_module_data = _load_op_data(PerfDataFilename.dsv4_megamoe_context_module)
-                self._dsv4_megamoe_generation_module_data = _load_op_data(
-                    PerfDataFilename.dsv4_megamoe_generation_module
-                )
-                self._dsv4_megamoe_module_data = (
-                    _load_dsv4_megamoe_split(
-                        [self._dsv4_megamoe_context_module_data, self._dsv4_megamoe_generation_module_data],
-                        self._dsv4_megamoe_module_data,
-                    )
-                    or self._dsv4_megamoe_module_data
-                )
 
         # DSA module-level attention data (DeepSeek Sparse Attention)
         # Uses same dict structure as MLA so interpolation/query can be reused
@@ -3608,12 +3583,6 @@ class PerfDatabase:
                 "wideep_context_mla": list(wideep_context_mla_modes),
                 "wideep_generation_mla": list(wideep_generation_mla_modes),
                 "dsv4_megamoe_module": _dsv4_megamoe_modes(getattr(self, "_dsv4_megamoe_module_data", None)),
-                "dsv4_megamoe_context_module": _dsv4_megamoe_modes(
-                    getattr(self, "_dsv4_megamoe_context_module_data", None)
-                ),
-                "dsv4_megamoe_generation_module": _dsv4_megamoe_modes(
-                    getattr(self, "_dsv4_megamoe_generation_module_data", None)
-                ),
             }
         elif self.backend == "trtllm":
             self.supported_quant_mode = {
@@ -5534,7 +5503,7 @@ class PerfDatabase:
         MegaMoE rows and does not fall back to uniform/random distributions or
         analytical constants when a row is missing.  New databases use the
         unified ``dsv4_megamoe_module`` file for both context and generation;
-        ``is_context`` is kept so older split files can still be queried.
+        ``is_context`` selects the phase stored inside that table.
         """
         if database_mode is None:
             database_mode = self._default_database_mode
@@ -5547,9 +5516,7 @@ class PerfDatabase:
             quant_mode = common.MoEQuantMode[str(quant_mode)]
         phase = "context" if is_context else "generation"
 
-        module_data = (
-            self._dsv4_megamoe_context_module_data if is_context else self._dsv4_megamoe_generation_module_data
-        )
+        module_data = self._dsv4_megamoe_module_data
         module_data.raise_if_not_loaded()
 
         try:

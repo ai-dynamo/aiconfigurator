@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import inspect
-import json
 import os
 import socket
 from dataclasses import dataclass
@@ -87,16 +86,10 @@ DEFAULT_DECODE_TOKENS = "1,2,4,8,16,32,64,128,256,512"
 DEFAULT_NUM_MAX_TOKENS_PER_RANK = 0
 DEFAULT_CAP_POLICY = "fixed"
 DEFAULT_SAMPLED_POWER_LAW_SEED_COUNT = 10
-DEFAULT_MODULE_PERF = getattr(PerfFile, "DSV4_MEGAMOE_MODULE", PerfFile.DSV4_MEGAMOE_CONTEXT_MODULE).value
-DEFAULT_CONTEXT_PERF = PerfFile.DSV4_MEGAMOE_CONTEXT_MODULE.value
-DEFAULT_GENERATION_PERF = PerfFile.DSV4_MEGAMOE_GENERATION_MODULE.value
+DEFAULT_MODULE_PERF = PerfFile.DSV4_MEGAMOE_MODULE.value
 DEFAULT_MOE_DTYPE = "w4a8_mxfp4_mxfp8"
 DEFAULT_KERNEL_DTYPE = "fp8_fp4"
-DEFAULT_COMPUTE_OPERAND_A = "fp8_e4m3"
-DEFAULT_COMPUTE_OPERAND_B = "fp4_e2m1"
-DEFAULT_ACCUMULATOR_DTYPE = "fp32"
 BUFFER_POLICY = "cached_sglang"
-DEBUG_FILENAME = "dsv4_megamoe_module_debug.jsonl"
 _MEGA_MOE_BUFFER_CACHE = {}
 
 
@@ -188,76 +181,6 @@ def _all_reduce_min_int(value: int, device: torch.device) -> int:
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
     return int(tensor.item())
-
-
-def _profile_case_enabled(case: MegaMoECase) -> bool:
-    """Return true when this case should emit a CUDA profiler capture range.
-
-    The expected environment format is a comma-separated list of
-    ``phase:tokens:distribution`` entries, for example:
-
-        AIC_PROFILE_CASES=context:1024:balanced,generation:16:balanced
-
-    Profiling is intentionally opt-in so normal collection keeps the same
-    timing path and does not depend on nsys or profiler state.
-    """
-
-    raw = os.environ.get("AIC_PROFILE_CASES", "").strip()
-    if not raw:
-        return False
-    current = f"{case.phase}:{case.tokens_per_rank}:{case.distribution}"
-    return current in {item.strip() for item in raw.split(",") if item.strip()}
-
-
-def _cuda_profiler_start_if_needed(case: MegaMoECase, rank: int) -> bool:
-    if not _profile_case_enabled(case):
-        return False
-    torch.cuda.synchronize()
-    torch.cuda.cudart().cudaProfilerStart()
-    print(
-        f"[dsv4-megamoe] rank={rank} cuda-profiler-start case={case.phase}:{case.tokens_per_rank}:{case.distribution}",
-        flush=True,
-    )
-    return True
-
-
-def _cuda_profiler_stop_if_needed(started: bool, case: MegaMoECase, rank: int) -> None:
-    if not started:
-        return
-    torch.cuda.synchronize()
-    torch.cuda.cudart().cudaProfilerStop()
-    print(
-        f"[dsv4-megamoe] rank={rank} cuda-profiler-stop case={case.phase}:{case.tokens_per_rank}:{case.distribution}",
-        flush=True,
-    )
-
-
-def _torch_profile_path(case: MegaMoECase, rank: int) -> str | None:
-    profile_dir = os.environ.get("AIC_TORCH_PROFILE_DIR", "").strip()
-    if not profile_dir or not _profile_case_enabled(case):
-        return None
-    os.makedirs(profile_dir, exist_ok=True)
-    name = f"{case.phase}_tokens{case.tokens_per_rank}_{case.distribution}_seed{case.routing_seed}_rank{rank}.json"
-    return os.path.join(profile_dir, name)
-
-
-def _write_debug_row(output_path: str, row: dict[str, object]) -> None:
-    debug_path = os.path.join(output_path, DEBUG_FILENAME)
-    with open(debug_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
-
-
-def _env_flag(name: str, default: str = "0") -> int:
-    raw_value = os.environ.get(name)
-    value = default if raw_value is None or not raw_value.strip() else raw_value
-    value = value.strip().lower()
-    if value in {"1", "true", "yes", "y", "on"}:
-        return 1
-    if value in {"0", "false", "no", "n", "off"}:
-        return 0
-    raise ValueError(f"{name} must be a boolean flag, got {value!r}")
 
 
 def _parse_distributions(value: str) -> list[str]:
@@ -635,49 +558,16 @@ def run_case(
         f"distribution={case.distribution} routing_seed={case.routing_seed}",
         flush=True,
     )
-    profiler_started = _cuda_profiler_start_if_needed(case, rank)
-    torch_profile_path = _torch_profile_path(case, rank)
-    try:
-        if torch_profile_path:
-            with (
-                torch.profiler.profile(
-                    activities=[
-                        torch.profiler.ProfilerActivity.CPU,
-                        torch.profiler.ProfilerActivity.CUDA,
-                    ],
-                    record_shapes=False,
-                    profile_memory=False,
-                    with_stack=False,
-                ) as prof,
-                benchmark_with_power(
-                    device=device,
-                    kernel_func=timed_megamoe,
-                    num_warmups=args.num_warmup,
-                    num_runs=args.num_iterations,
-                    repeat_n=1,
-                    allow_graph_fail=False,
-                    use_cuda_graph=True,
-                ) as bench,
-            ):
-                pass
-            prof.export_chrome_trace(torch_profile_path)
-            print(
-                f"[dsv4-megamoe] rank={rank} torch-profile-export path={torch_profile_path}",
-                flush=True,
-            )
-        else:
-            with benchmark_with_power(
-                device=device,
-                kernel_func=timed_megamoe,
-                num_warmups=args.num_warmup,
-                num_runs=args.num_iterations,
-                repeat_n=1,
-                allow_graph_fail=False,
-                use_cuda_graph=True,
-            ) as bench:
-                pass
-    finally:
-        _cuda_profiler_stop_if_needed(profiler_started, case, rank)
+    with benchmark_with_power(
+        device=device,
+        kernel_func=timed_megamoe,
+        num_warmups=args.num_warmup,
+        num_runs=args.num_iterations,
+        repeat_n=1,
+        allow_graph_fail=False,
+        use_cuda_graph=True,
+    ) as bench:
+        pass
     used_cuda_graph = bool(bench.get("used_cuda_graph", False))
     if not used_cuda_graph:
         raise RuntimeError("benchmark_with_power did not use CUDA Graph")
@@ -695,7 +585,6 @@ def run_case(
     if rank != 0:
         return None
 
-    plan_metadata = plan.metadata()
     row = {
         "phase": case.phase,
         "moe_dtype": DEFAULT_MOE_DTYPE,
@@ -722,45 +611,6 @@ def run_case(
         "used_cuda_graph": "true",
         "latency": f"{latency:.6f}",
     }
-    if args.write_debug_output:
-        debug_row = {
-            "model": model_config["model"],
-            "phase": case.phase,
-            "moe_dtype": DEFAULT_MOE_DTYPE,
-            "kernel_dtype": DEFAULT_KERNEL_DTYPE,
-            "compute_operand_a": DEFAULT_COMPUTE_OPERAND_A,
-            "compute_operand_b": DEFAULT_COMPUTE_OPERAND_B,
-            "accumulator_dtype": DEFAULT_ACCUMULATOR_DTYPE,
-            "routed_scaling_factor": routed_scaling_factor,
-            "includes_routed_scale": str(bool(args.include_routed_scale)).lower(),
-            "num_tokens": case.tokens_per_rank,
-            "global_num_tokens": plan.global_num_tokens,
-            "hidden_size": hidden_size,
-            "inter_size": inter_size,
-            "topk": routed_topk,
-            "total_topk": total_topk,
-            "num_experts": routed_num_experts,
-            "total_num_experts": total_num_experts,
-            "num_fused_shared_experts": num_fused_shared_experts,
-            "moe_tp_size": 1,
-            "moe_ep_size": ep_size,
-            "world_size": dist_info.world_size,
-            "num_nodes": dist_info.num_nodes,
-            "gpus_per_node": dist_info.gpus_per_node,
-            "system_name": args.system_name,
-            "num_max_tokens_per_rank": num_max_tokens_per_rank,
-            "effective_num_max_tokens_per_rank": effective_num_max_tokens_per_rank,
-            "pre_dispatch": args.pre_dispatch,
-            "includes_gate_topk": "false",
-            "buffer_policy": BUFFER_POLICY,
-            "buffer_lookup_in_timed_callable": "true",
-            "includes_buffer_init": "false",
-            "used_cuda_graph": "true",
-            "latency": f"{latency:.6f}",
-            "rank0_latency": f"{local_latency:.6f}",
-            **plan_metadata,
-        }
-        _write_debug_row(args.output_path, debug_row)
     return CaseRunResult(row=row, power_stats=bench.get("power_stats"))
 
 
@@ -831,9 +681,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-iterations", type=int, default=20)
     parser.add_argument("--output-path", default=os.getcwd())
     parser.add_argument("--perf-file", default=DEFAULT_MODULE_PERF)
-    parser.add_argument("--write-debug-output", type=int, choices=[0, 1], default=_env_flag("AIC_DSV4_MEGAMOE_DEBUG"))
-    parser.add_argument("--context-perf", default=DEFAULT_CONTEXT_PERF, help=argparse.SUPPRESS)
-    parser.add_argument("--generation-perf", default=DEFAULT_GENERATION_PERF, help=argparse.SUPPRESS)
     parser.add_argument("--sglang-version", default=os.environ.get("SGLANG_VERSION", "unknown"))
     return parser.parse_args()
 

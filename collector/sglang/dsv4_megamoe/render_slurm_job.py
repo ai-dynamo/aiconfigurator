@@ -82,7 +82,6 @@ def render(args: argparse.Namespace) -> str:
         _export("NUM_ITERATIONS", args.num_iterations),
         _export("NUM_MAX_TOKENS_PER_RANK", args.num_max_tokens_per_rank),
         _export("CAP_POLICY", args.cap_policy),
-        _export("WRITE_DEBUG_OUTPUT", args.write_debug_output),
         _export("CONTAINER_IMAGE", args.container_image),
         _export("CONTAINER_MOUNTS", args.container_mounts),
         _export("CONTAINER_WRITABLE", 1 if args.container_writable else 0),
@@ -200,7 +199,6 @@ python3 collector/sglang/collect_dsv4_megamoe.py \\
   --cap-policy "${{CAP_POLICY}}" \\
   --output-path "${{OUTPUT_PATH}}" \\
   --perf-file "${{PERF_FILE}}" \\
-  --write-debug-output "${{WRITE_DEBUG_OUTPUT}}" \\
   --sglang-version "${{SGLANG_VERSION}}"
 AIC_WORKLOAD
 
@@ -253,7 +251,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-iterations", type=int, default=20)
     parser.add_argument("--num-max-tokens-per-rank", type=int, required=True)
     parser.add_argument("--cap-policy", default="fixed")
-    parser.add_argument("--write-debug-output", type=int, default=0)
     parser.add_argument("--env", action="append", default=[])
     return parser.parse_args()
 

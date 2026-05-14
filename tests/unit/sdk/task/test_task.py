@@ -89,7 +89,6 @@ def test_load_system_spec_uses_configured_systems_paths(tmp_path):
     (systems_b / "custom_system.yaml").write_text(yaml.safe_dump({"gpu": {"sm_version": 100}}))
 
     previous_paths = get_systems_paths()
-    task_module._SYSTEM_SPEC_CACHE.clear()
     try:
         set_systems_paths(str(systems_a))
         assert not task_module._is_blackwell_system("custom_system")
@@ -98,7 +97,6 @@ def test_load_system_spec_uses_configured_systems_paths(tmp_path):
         assert task_module._is_blackwell_system("custom_system")
     finally:
         set_systems_paths(previous_paths)
-        task_module._SYSTEM_SPEC_CACHE.clear()
 
 
 def test_taskconfig_agg_default():

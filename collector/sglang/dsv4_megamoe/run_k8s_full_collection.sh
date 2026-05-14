@@ -40,7 +40,6 @@ INCLUDE_ROUTED_SCALE="${INCLUDE_ROUTED_SCALE:-1}"
 RENORMALIZE_TOPK_WEIGHTS="${RENORMALIZE_TOPK_WEIGHTS:-1}"
 NUM_WARMUP="${NUM_WARMUP:-5}"
 NUM_ITERATIONS="${NUM_ITERATIONS:-20}"
-WRITE_DEBUG_OUTPUT="${WRITE_DEBUG_OUTPUT:-0}"
 CAP_POLICY="${CAP_POLICY:-fixed}"
 DRY_RUN="${DRY_RUN:-0}"
 TARGET_SGLANG_VERSION="${TARGET_SGLANG_VERSION:-0.5.10}"
@@ -142,7 +141,6 @@ render_job() {
     --num-warmup "${NUM_WARMUP}"
     --num-iterations "${NUM_ITERATIONS}"
     --num-max-tokens-per-rank "${cap}"
-    --write-debug-output "${WRITE_DEBUG_OUTPUT}"
     --ipc-lock "${IPC_LOCK}"
     --env AIC_WAIT_FOR_ALL_NODES=1
     --env "CAP_POLICY=${CAP_POLICY}"
@@ -323,10 +321,6 @@ tar \
   --exclude=artifacts \
   -C "${LOCAL_REPO}" -cf - . \
   | kubectl exec -i "${JOB_TAG}-sync" -n "${NAMESPACE}" -- tar -C "${REMOTE_WORKDIR}" -xf -
-
-kubectl exec "${JOB_TAG}-sync" -n "${NAMESPACE}" -- bash -lc \
-  "set -euo pipefail; cd '${REMOTE_WORKDIR}'; files='collector/sglang/collect_dsv4_megamoe.py collector/sglang/dsv4_megamoe_workload.py'; grep -q 'power_law_sampled_1.9' \${files}; grep 'power_law_sampled_1.9' -n \${files} | head -20" \
-  | tee "${LOCAL_RESULT_DIR}/remote_code_check.txt"
 
 for job in "${JOBS[@]}"; do
   wait_job "${job}"

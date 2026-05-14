@@ -548,14 +548,7 @@ class SGLANGBackend(BaseBackend):
         # Count weights on a single GPU
         weights /= model.config.pp_size
 
-        h = model._num_heads * model._head_size
-        if model.model_family == "DEEPSEEKV4":
-            # DeepSeek-V4 decouples the residual/MoE hidden width from the
-            # attention-internal Q/O expansion. The coarse activation model
-            # below describes resident hidden/workspace tensors, so using
-            # num_heads * head_size would incorrectly apply the 65K-wide
-            # attention temporary dimension to MoE and residual activations.
-            h = getattr(model, "_hidden_size", h)
+        h = model.activation_hidden_size
         if num_tokens == 0:
             num_tokens = (isl - prefix) * batch_size
 

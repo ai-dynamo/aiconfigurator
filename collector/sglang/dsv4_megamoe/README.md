@@ -120,13 +120,7 @@ does not have a separate sampled variant.
 shuffles complete token rows before assigning them to source ranks, preserving
 expert counts and per-token top-k structure while making the source/destination
 traffic explicit.  Source placement is prepared before timing, so it does not
-add overhead to the measured MegaMoE module.  Routing diagnostics such as
-`rank_loads`, `tokens_per_rank`, `src_dst_matrix`, `local_selection_ratio`,
-`remote_selection_ratio`, and `bottleneck_rank` are written to
-`dsv4_megamoe_module_debug.jsonl` beside the perf output only when debug output
-is explicitly enabled with `--write-debug-output 1`, `WRITE_DEBUG_OUTPUT=1`, or
-`AIC_DSV4_MEGAMOE_DEBUG=1`.  The default collector path does not create this
-debug file.
+add overhead to the measured MegaMoE module.
 
 ## Hardware Mapping
 

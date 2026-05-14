@@ -30,7 +30,6 @@ NUM_WARMUP="${NUM_WARMUP:-5}"
 NUM_ITERATIONS="${NUM_ITERATIONS:-20}"
 NUM_MAX_TOKENS_PER_RANK="${NUM_MAX_TOKENS_PER_RANK:-0}"
 CAP_POLICY="${CAP_POLICY:-fixed}"
-WRITE_DEBUG_OUTPUT="${WRITE_DEBUG_OUTPUT:-${AIC_DSV4_MEGAMOE_DEBUG:-0}}"
 PERF_FILE="${PERF_FILE:-dsv4_megamoe_module_perf.txt}"
 AIC_WAIT_FOR_ALL_NODES="${AIC_WAIT_FOR_ALL_NODES:-0}"
 AIC_WAIT_FOR_ALL_NODES_MAX_ATTEMPTS="${AIC_WAIT_FOR_ALL_NODES_MAX_ATTEMPTS:-60}"
@@ -196,39 +195,8 @@ RUN_CMD=(
   --num-warmup "${NUM_WARMUP}" \
   --num-iterations "${NUM_ITERATIONS}" \
   --output-path "${OUTPUT_PATH}" \
-  --write-debug-output "${WRITE_DEBUG_OUTPUT}" \
   --perf-file "${PERF_FILE}" \
   --sglang-version "${SGLANG_VERSION}"
 )
-
-if [[ "${AIC_NSYS_PROFILE:-0}" == "1" ]]; then
-  if ! command -v nsys >/dev/null 2>&1 && [[ -d /nsys-tools ]]; then
-    for nsys_bin in /nsys-tools/NsightSystems-cli-*/target-linux-sbsa-armv8/nsys /nsys-tools/NsightSystems-cli-*/target-linux-x64/nsys; do
-      if [[ -x "${nsys_bin}" ]]; then
-        export PATH="$(dirname "${nsys_bin}"):${PATH}"
-        break
-      fi
-    done
-  fi
-  if ! command -v nsys >/dev/null 2>&1; then
-    echo "AIC_NSYS_PROFILE=1 but nsys is not available in PATH" >&2
-    exit 1
-  fi
-  NSYS_OUTPUT_DIR="${AIC_NSYS_OUTPUT_DIR:-${OUTPUT_PATH}/nsys}"
-  mkdir -p "${NSYS_OUTPUT_DIR}"
-  NSYS_OUTPUT="${NSYS_OUTPUT_DIR}/node${NODE_RANK}"
-  echo "[dsv4-megamoe] nsys profile output=${NSYS_OUTPUT}.nsys-rep"
-  exec nsys profile \
-    --force-overwrite=true \
-    --trace=cuda,nvtx,osrt \
-    --sample=none \
-    --cpuctxsw=none \
-    --capture-range=cudaProfilerApi \
-    --capture-range-end=stop \
-    --trace-fork-before-exec=true \
-    --cuda-graph-trace=node \
-    --output="${NSYS_OUTPUT}" \
-    "${RUN_CMD[@]}"
-fi
 
 exec "${RUN_CMD[@]}"

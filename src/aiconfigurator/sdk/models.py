@@ -638,6 +638,10 @@ class BaseModel:
         self._nextn = model_config.nextn
         self._nextn_accept_rates = model_config.nextn_accept_rates
 
+    @property
+    def activation_hidden_size(self) -> int:
+        return self._num_heads * self._head_size
+
     def get_kvcache_elements_per_token(self) -> int:
         """KV cache size per token (per GPU) summed over all layers, in elements.
 
@@ -2028,6 +2032,11 @@ class DeepSeekV4Model(BaseModel):
 
     _SUPPORTED_COMPRESS_RATIOS: ClassVar[set[int]] = {0, 4, 128}
 
+    @property
+    def activation_hidden_size(self) -> int:
+        # DSv4 attention expands Q/O internals, but resident MoE/residual activations use hidden_size.
+        return self._hidden_size
+
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
         super().__init__(*args)
 
@@ -2087,7 +2096,6 @@ class DeepSeekV4Model(BaseModel):
         local_heads = self._num_heads // tp_size
         local_o_groups = max(1, deepseek_v4_cfg.o_groups // tp_size)
         local_moe_inter_size = self._moe_inter_size // tp_size
-        megamoe_distribution = "balanced" if workload_distribution == "uniform" else workload_distribution
 
         def _attention_ops(is_context: bool, scale_factor: float):
             ratio_counts = Counter(self._compress_ratios)
@@ -2136,7 +2144,7 @@ class DeepSeekV4Model(BaseModel):
                     moe_tp_size,
                     moe_ep_size,
                     moe_quant_mode,
-                    megamoe_distribution,
+                    workload_distribution,
                     is_context=True,
                 )
             ]
@@ -2289,7 +2297,7 @@ class DeepSeekV4Model(BaseModel):
                     moe_tp_size,
                     moe_ep_size,
                     moe_quant_mode,
-                    megamoe_distribution,
+                    workload_distribution,
                     is_context=False,
                 )
             ]
