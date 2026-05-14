@@ -45,6 +45,9 @@ def create_static_tab(app_config):
             summary_box = gr.Markdown(
                 label="Summary",
             )
+            encoder_breakdown_box = gr.Markdown(
+                label="Encoder Breakdown",
+            )
             context_breakdown_box = gr.Markdown(
                 label="Context Breakdown",
             )
@@ -68,6 +71,7 @@ def create_static_tab(app_config):
         "mode": mode,
         "estimate_btn": estimate_btn,
         "summary_box": summary_box,
+        "encoder_breakdown_box": encoder_breakdown_box,
         "context_breakdown_box": context_breakdown_box,
         "generation_breakdown_box": generation_breakdown_box,
         "record_df": record_df,
