@@ -18,21 +18,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Install cargo-deny
-        env:
-          CARGO_DENY_VERSION: "0.19.0"
-        run: |
-          set -euo pipefail
-          tarball="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          url="https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${tarball}"
-          curl --proto '=https' --tlsv1.2 -sSfL "${url}" | tar -xz --strip-components=1 -C /usr/local/bin "${tarball%.tar.gz}/cargo-deny"
-          cargo-deny --version
-      - name: Run cargo-deny
+      - name: Install and run cargo-deny
         working-directory: rust/aiconfigurator-core
         # Default log level (warn) surfaces "license inferred from file" notes
         # so any crate that may need a [[licenses.clarify]] entry is named.
         # --show-stats prints a per-license usage summary at the end.
-        run: cargo-deny --all-features check --show-stats licenses bans
+        run: |
+          cargo-deny --version || cargo install cargo-deny@0.19.0
+          cargo-deny --all-features check --show-stats licenses bans
 
   build-and-test:
     name: Build and Test (${{ matrix.suite.name }})
