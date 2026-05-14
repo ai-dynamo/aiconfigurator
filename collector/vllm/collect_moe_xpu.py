@@ -276,23 +276,52 @@ def run_moe_torch(
         w13_scales = w2_scales = None
         w13_bias = w2_bias = None
 
-        # Create weight tensors in xpu_fused_moe layout
-        # w1: [num_experts, 2 * inter_size, hidden_size]
-        # w2: [num_experts, hidden_size, inter_size]
-        w1 = torch.randn(
-            local_num_experts,
-            2 * local_inter_size,
-            hidden_size,
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        w2 = torch.randn(
-            local_num_experts,
-            hidden_size,
-            local_inter_size,
-            dtype=torch.bfloat16,
-            device=device,
-        )
+        # Create weight tensors in xpu_fused_moe layout.
+        # The expected layout depends on the vllm_xpu_kernels version:
+        #   vllm-xpu >=0.20: [E, K, N] — inter_size = w13.shape[-1] // 2
+        #   vllm-xpu <0.20:  [E, N, K] — inter_size = w13.shape[-2] // 2
+        # Detect by inspecting how xpu_fused_moe derives inter_size.
+        import inspect as inspect_src
+
+        try:
+            moe_src = inspect_src.getsource(xpu_fused_moe)
+            use_kn_layout = "inter_size = list(w13.shape)[-1]" in moe_src
+        except (OSError, TypeError) as exc:
+            print(f"inspect.getsource(xpu_fused_moe) failed, defaulting to [E,N,K] layout: {exc}")
+            use_kn_layout = False
+
+        if use_kn_layout:
+            # [E, K, N] layout (vllm-xpu >=0.20)
+            w1 = torch.randn(
+                local_num_experts,
+                hidden_size,
+                2 * local_inter_size,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            w2 = torch.randn(
+                local_num_experts,
+                local_inter_size,
+                hidden_size,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+        else:
+            # [E, N, K] layout (vllm-xpu <0.20)
+            w1 = torch.randn(
+                local_num_experts,
+                2 * local_inter_size,
+                hidden_size,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            w2 = torch.randn(
+                local_num_experts,
+                hidden_size,
+                local_inter_size,
+                dtype=torch.bfloat16,
+                device=device,
+            )
 
         if is_fp8:
             w1, w13_scales = quantize_fp8_per_expert(w1)
@@ -366,6 +395,7 @@ def run_moe_torch(
                             n_experts_per_token=topk,
                             activation=activation_name,
                             num_experts=local_num_experts,
+                            ep_size=moe_ep_size,
                             is_mxfp4=True,
                         )
                     else:
@@ -382,6 +412,7 @@ def run_moe_torch(
                             n_experts_per_token=topk,
                             activation=activation_name,
                             num_experts=local_num_experts,
+                            ep_size=moe_ep_size,
                             is_fp8=is_fp8,
                         )
             else:
@@ -399,6 +430,7 @@ def run_moe_torch(
                         n_experts_per_token=topk,
                         activation=activation_name,
                         num_experts=local_num_experts,
+                        ep_size=moe_ep_size,
                         is_mxfp4=True,
                     )
                 else:
@@ -415,6 +447,7 @@ def run_moe_torch(
                         n_experts_per_token=topk,
                         activation=activation_name,
                         num_experts=local_num_experts,
+                        ep_size=moe_ep_size,
                         is_fp8=is_fp8,
                     )
 
