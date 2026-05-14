@@ -27,7 +27,7 @@ def create_static_tab(app_config):
 
         model_path_components = create_model_path_config(app_config)
         runtime_config_components = create_runtime_config(
-            app_config, tip_text="More inputs = more precise profiling results.", ttft_optional=True, itl_optional=True
+            app_config, tip_text="More inputs = more precise profiling results.", ttft_optional=True, itl_optional=True, with_images=True
         )
         model_misc_config_components = create_model_misc_config(app_config)
         model_system_components = create_system_config(app_config)
