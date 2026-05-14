@@ -592,6 +592,22 @@ class BaseBackend:
         except Exception:
             # Best-effort; downstream report degrades gracefully when unset.
             pass
+
+        # Encoder-node memory (VL models only): weights = ViT only, activations = patches, kvcache = 0.
+        if img_ctx_tokens > 0:
+            enc_cfg = getattr(model, "encoder_config", None)
+            if enc_cfg is not None:
+                pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
+                    runtime_config.image_width // enc_cfg.patch_size
+                )
+                enc_num_tokens = batch_size * runtime_config.num_images_per_request * pre_merge_per_image
+                encoder_memory = self._get_memory_usage(
+                    model, database, batch_size, 1, 0, 0,
+                    num_tokens=enc_num_tokens,
+                    role="encoder",
+                )
+                summary.set_encoder_memory(encoder_memory)
+
         summary.set_summary_df(summary_df)
 
         return summary
@@ -1221,6 +1237,7 @@ class BaseBackend:
         num_tokens: int = 0,
         prefix: int = 0,
         max_seq_len: int | None = None,
+        role: str = "combined",
     ) -> dict[str, float]:
         """
         Get the memory usage of the backend.
@@ -1230,6 +1247,7 @@ class BaseBackend:
                 (per-request) and does not need activation computation.
             max_seq_len: per-slot KV cache pre-allocation budget. Defaults to
                 ``isl + beam_width * osl`` when not supplied.
+            role: reserved for disaggregated deployments (unused in this shared implementation).
         """
         weights = 0.0
         for op in model.context_ops:

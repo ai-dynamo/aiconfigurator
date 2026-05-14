@@ -401,3 +401,155 @@ class TestVarlenAttentionMultiImage:
         for n_img in (1, 2, 4):
             eff_batch = batch_size * n_img
             assert eff_batch == batch_size * n_img
+
+
+class TestGetMemoryUsageRole:
+    """Tests for the `role` parameter of _get_memory_usage in trtllm and sglang backends."""
+
+    @pytest.fixture
+    def model_config(self):
+        return config.ModelConfig()
+
+    @pytest.fixture
+    def vl_model(self, model_config):
+        return get_model("Qwen/Qwen3-VL-32B-Instruct", model_config, "trtllm")
+
+    @pytest.fixture
+    def text_model(self, model_config):
+        return get_model("Qwen/Qwen3-32B", model_config, "trtllm")
+
+    @pytest.fixture
+    def database(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            backend="trtllm",
+            version="10.0",
+            system="h200_sxm",
+            system_spec={
+                "gpu": {"mem_capacity": 80 * (1 << 30)},
+                "misc": {
+                    "nccl_mem": {1: 500 * 1024 * 1024, 8: 1000 * 1024 * 1024},
+                    "other_mem": 200 * 1024 * 1024,
+                },
+            },
+        )
+
+    def test_encoder_role_has_no_context_op_weights(self, vl_model, database):
+        """role='encoder' must NOT include LLM context_op weights."""
+        from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+        backend = TRTLLMBackend()
+
+        combined = backend._get_memory_usage(vl_model, database, 1, 1, 1024, 128, role="combined")
+        encoder = backend._get_memory_usage(vl_model, database, 1, 1, 0, 0, num_tokens=784, role="encoder")
+
+        # Encoder-role weights must be smaller than combined (LLM dominates)
+        assert encoder["weights"] < combined["weights"]
+
+    def test_encoder_role_has_zero_kvcache(self, vl_model, database):
+        """role='encoder' must have kvcache=0 (ViT is not a KV-cache decoder)."""
+        from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+        backend = TRTLLMBackend()
+        memory = backend._get_memory_usage(vl_model, database, 1, 1, 0, 0, num_tokens=784, role="encoder")
+        assert memory["kvcache"] == 0.0
+
+    def test_prefill_role_has_no_encoder_weights(self, vl_model, database):
+        """role='prefill' must NOT include ViT encoder weights."""
+        from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+        backend = TRTLLMBackend()
+
+        combined = backend._get_memory_usage(vl_model, database, 1, 1, 1024, 128, role="combined")
+        prefill = backend._get_memory_usage(vl_model, database, 1, 1, 1024, 1, role="prefill")
+
+        # Prefill weights < combined weights because encoder weights are excluded
+        assert prefill["weights"] < combined["weights"]
+
+    def test_decode_role_has_no_encoder_weights(self, vl_model, database):
+        """role='decode' must NOT include ViT encoder weights."""
+        from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+        backend = TRTLLMBackend()
+
+        combined = backend._get_memory_usage(vl_model, database, 1, 1, 1024, 128, role="combined")
+        decode = backend._get_memory_usage(vl_model, database, 1, 1, 1024, 128, role="decode")
+
+        assert decode["weights"] < combined["weights"]
+
+    def test_combined_role_default_unchanged_for_text_model(self, text_model, database):
+        """role='combined' (default) must give same result as calling without role for text models."""
+        from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+        backend = TRTLLMBackend()
+
+        default = backend._get_memory_usage(text_model, database, 1, 1, 1024, 128)
+        explicit = backend._get_memory_usage(text_model, database, 1, 1, 1024, 128, role="combined")
+        assert default["total"] == explicit["total"]
+
+    def test_prefill_kvcache_less_than_decode_kvcache(self, vl_model, database):
+        """Prefill KV (isl only) must be less than decode KV (isl + osl)."""
+        from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+        backend = TRTLLMBackend()
+
+        prefill = backend._get_memory_usage(vl_model, database, 1, 1, 1024, 128, role="prefill")
+        decode = backend._get_memory_usage(vl_model, database, 1, 1, 1024, 128, role="decode")
+
+        assert prefill["kvcache"] < decode["kvcache"]
+
+
+class TestEncoderMemoryInSummary:
+    """Tests that run_static populates encoder_memory for VL models."""
+
+    @pytest.fixture
+    def model_config(self):
+        return config.ModelConfig()
+
+    def test_text_only_model_has_empty_encoder_memory(self, model_config):
+        """Text-only model: encoder_memory should be empty dict."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+
+        model = get_model("Qwen/Qwen3-32B", model_config, "trtllm")
+        database = SimpleNamespace(
+            backend="trtllm", version="10.0", system="h200_sxm",
+            system_spec={
+                "gpu": {"mem_capacity": 80 * (1 << 30)},
+                "misc": {"nccl_mem": {1: 500 * 1024 * 1024, 8: 1024 * 1024 * 1024}, "other_mem": 200 * 1024 * 1024},
+            },
+        )
+
+        # Stub out all op queries so run_static doesn't need real perf data
+        for op in model.context_ops + model.generation_ops:
+            op.query = MagicMock(return_value=MagicMock(__float__=lambda s: 1.0, energy=0.0, source="silicon"))
+
+        rc = RuntimeConfig(batch_size=1, isl=512, osl=64, num_images_per_request=0)
+        backend = TRTLLMBackend()
+        summary = backend.run_static(model, database, rc, mode="static")
+        assert summary.get_encoder_memory() == {}
+
+    def test_vl_model_with_images_has_encoder_memory(self, model_config):
+        """VL model with num_images>0: encoder_memory must contain weights/activations/kvcache."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+
+        model = get_model("Qwen/Qwen3-VL-32B-Instruct", model_config, "trtllm")
+        database = SimpleNamespace(
+            backend="trtllm", version="10.0", system="h200_sxm",
+            system_spec={
+                "gpu": {"mem_capacity": 80 * (1 << 30)},
+                "misc": {"nccl_mem": {1: 500 * 1024 * 1024, 8: 1024 * 1024 * 1024}, "other_mem": 200 * 1024 * 1024},
+            },
+        )
+
+        for op in model.context_ops + model.generation_ops + model.encoder_ops:
+            op.query = MagicMock(return_value=MagicMock(__float__=lambda s: 1.0, energy=0.0, source="silicon"))
+
+        rc = RuntimeConfig(batch_size=1, isl=512, osl=64,
+                           image_height=448, image_width=448, num_images_per_request=1)
+        backend = TRTLLMBackend()
+        summary = backend.run_static(model, database, rc, mode="static")
+
+        enc_mem = summary.get_encoder_memory()
+        assert "total" in enc_mem
+        assert "weights" in enc_mem
+        assert enc_mem["kvcache"] == 0.0
+        assert enc_mem["weights"] > 0.0
+        assert enc_mem["activations"] > 0.0
