@@ -115,14 +115,21 @@ def test_missing_explicit_vllm_service_does_not_fallback_to_manifest(tmp_path):
         )
 
 
-def test_missing_vllm_services_mapping_reports_clear_error(tmp_path):
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"services": None},
+        "not-a-mapping",
+    ],
+)
+def test_missing_vllm_services_mapping_reports_clear_error(tmp_path, spec):
     manifest_path = tmp_path / "k8s_deploy.yaml"
     manifest_path.write_text(
         yaml.safe_dump(
             {
                 "apiVersion": "nvidia.com/v1",
                 "kind": "DynamoGraphDeployment",
-                "spec": {"services": None},
+                "spec": spec,
             }
         ),
         encoding="utf-8",

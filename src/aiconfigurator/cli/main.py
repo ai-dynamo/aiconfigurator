@@ -1325,7 +1325,7 @@ def _run_generate_mode(args):
     print(f"  Total GPUs:      {args.total_gpus} (using {gpus_used})")
     print(f"  Parallelism:     TP={tp}, PP={pp}")
     print(f"  Replicas:        {replicas} (each using {gpus_per_worker} GPUs)")
-    print(f"  Max Batch Size:  {generator_params['params']['agg']['max_batch_size']}")
+    print(f"  Max Batch Size:  {_get_naive_summary_max_batch_size(generator_params)}")
     print(f"  Output:          {output_dir}")
     print("=" * 60)
     print("\nGenerated files:")
@@ -1347,6 +1347,20 @@ def _run_generate_mode(args):
     print("-" * 60)
     print("\nTo deploy, run the generated shell script or apply the k8s manifest.")
     print("=" * 60 + "\n")
+
+
+def _get_naive_summary_max_batch_size(generator_params: dict[str, Any]) -> Any:
+    params = generator_params.get("params", {})
+    if not isinstance(params, dict):
+        return "n/a"
+    for role in ("agg", "prefill", "decode"):
+        role_params = params.get(role)
+        if isinstance(role_params, dict) and role_params.get("max_batch_size") is not None:
+            return role_params["max_batch_size"]
+    for role_params in params.values():
+        if isinstance(role_params, dict) and role_params.get("max_batch_size") is not None:
+            return role_params["max_batch_size"]
+    return "n/a"
 
 
 def _run_support_matrix_mode(args):
