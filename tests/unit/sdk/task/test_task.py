@@ -425,6 +425,57 @@ def test_taskconfig_rejects_unsupported_quant_mode(monkeypatch):
         )
 
 
+def test_taskconfig_dense_model_skips_moe_quant_validation(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 90}}
+            self.supported_quant_mode = {
+                "gemm": ["fp8"],
+                "moe": ["bfloat16"],
+                "context_attention": ["fp8"],
+                "generation_attention": ["fp8"],
+            }
+
+    def fake_get_database(system, backend, version, database_mode=None):
+        return FakeDatabase()
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+
+    task = TaskConfig(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        profiles=["fp8"],
+    )
+
+    assert _enum_name(task.config.worker_config.moe_quant_mode) == "fp8"
+
+
+def test_taskconfig_moe_model_validates_moe_quant_mode(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 90}}
+            self.supported_quant_mode = {
+                "gemm": ["fp8"],
+                "moe": ["bfloat16"],
+                "context_attention": ["fp8"],
+                "generation_attention": ["fp8"],
+            }
+
+    def fake_get_database(system, backend, version, database_mode=None):
+        return FakeDatabase()
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+
+    with pytest.raises(ValueError, match=r"Unsupported moe quant mode"):
+        TaskConfig(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-30B-A3B",
+            system_name="h200_sxm",
+            profiles=["fp8"],
+        )
+
+
 def test_taskconfig_sol_still_validates_quant_for_non_deepseek_v4(monkeypatch):
     class FakeDatabase:
         def __init__(self):
