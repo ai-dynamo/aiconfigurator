@@ -513,12 +513,7 @@ class BaseBackend(ABC):
                     runtime_config.image_width // enc_cfg.patch_size
                 )
                 enc_num_tokens = batch_size * runtime_config.num_images_per_request * pre_merge_per_image
-                encoder_memory = self._get_memory_usage(
-                    model, database, batch_size, 1, 0, 0,
-                    num_tokens=enc_num_tokens,
-                    role="encoder",
-                )
-                summary.set_encoder_memory(encoder_memory)
+                summary.set_encoder_memory(self._get_encoder_node_memory(model, database, enc_num_tokens))
 
         summary.set_summary_df(summary_df)
 
@@ -593,6 +588,32 @@ class BaseBackend(ABC):
                 ctx_tokens_list.append(ctx_tokens)
         ctx_tokens_list.sort()
         return ctx_tokens_list
+
+    def _get_encoder_node_memory(self, model: BaseModel, database: PerfDatabase, num_tokens: int) -> dict[str, float]:
+        """
+        Encoder-node memory for VL disaggregated deployment.
+
+        Includes ViT weights only (no LLM weights), patch activations, and zero KV cache.
+        This is the memory footprint of a dedicated encoder node that runs only the ViT.
+        """
+        weights = sum(op.get_weights() for op in model.encoder_ops)
+        enc_cfg = getattr(model, "encoder_config", None)
+        activations = 0.0
+        if enc_cfg is not None and num_tokens > 0:
+            # ~3× hidden_size per patch covers QKV, attention output, and FFN intermediates (bfloat16)
+            activations = 2 * num_tokens * enc_cfg.hidden_size * 3
+        activations = max(activations, 32 * 1024 * 1024)  # 32 MiB minimum
+        nccl_mem = database.system_spec["misc"]["nccl_mem"][min(model.config.tp_size, 8)]
+        others_mem = database.system_spec["misc"]["other_mem"]
+        one_gib = 1 << 30
+        return {
+            "total": (weights + activations + nccl_mem + others_mem) / one_gib,
+            "weights": weights / one_gib,
+            "activations": activations / one_gib,
+            "kvcache": 0.0,
+            "nccl": nccl_mem / one_gib,
+            "others": others_mem / one_gib,
+        }
 
     @abstractmethod
     def run_agg(

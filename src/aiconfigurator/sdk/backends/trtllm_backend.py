@@ -639,113 +639,90 @@ class TRTLLMBackend(BaseBackend):
         num_tokens: int = 0,
         prefix: int = 0,
         max_seq_len: int | None = None,
-        role: str = "combined",
     ) -> dict[str, float]:
         """
         Get the memory usage of the backend.
-
-        Args:
-            role: Node role for disaggregated deployment.
-                ``"combined"`` (default): LLM + encoder weights on the same GPU — current behaviour.
-                ``"prefill"``: LLM weights only (no encoder), context-phase activations, context-only KV.
-                ``"decode"``: LLM weights only (no encoder), decode activations, full KV.
-                ``"encoder"``: ViT weights only, patch activations (num_tokens = batch×n_img×pre_merge), no KV.
         """
         weights, activations, kvcache = 0.0, 0.0, 0.0
+        for op in model.context_ops:
+            weights += op.get_weights()
 
-        if role != "encoder":
-            for op in model.context_ops:
-                weights += op.get_weights()
-            # count weights on a single GPU
-            weights /= model.config.pp_size
+        # count weights on a single GPU
+        weights /= model.config.pp_size
 
-        if role in ("combined", "encoder"):
-            for op in model.encoder_ops:
-                weights += op.get_weights()
+        for op in model.encoder_ops:
+            weights += op.get_weights()
 
         h = model._num_heads * model._head_size
-        if role == "encoder":
-            # Encoder node: ViT patch activations; no LLM KV cache.
-            enc_cfg = getattr(model, "encoder_config", None)
-            if enc_cfg is not None and num_tokens > 0:
-                h_vit = enc_cfg.hidden_size
-                # ~3× h_vit per patch covers QKV, attention output, and FFN intermediates (bfloat16)
-                activations = 2 * num_tokens * h_vit * 3
-            activations = max(activations, 32 * 1024 * 1024)  # 32 MiB minimum
-            kvcache = 0.0
-        else:
-            moe_workspace_h = getattr(model, "_hidden_size", h)
-            if num_tokens == 0:
-                num_tokens = (isl - prefix) * batch_size
+        moe_workspace_h = getattr(model, "_hidden_size", h)
+        if num_tokens == 0:
+            num_tokens = (isl - prefix) * batch_size
 
-            # ==== this below section is backend specific ====
-            # FIXME: the measurement is done based on trt workflow and traditional moe.
-            #        needs to study the new model again. Expecially fine-grained moe will introduce
-            #        more act/workspace memory.
-            if model.model_family == "GPT":
-                c_dict = {1: 10, 2: 6, 4: 5, 8: 5}
-                activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
-                activations = max(activations, 70 * 1024 * 1024)  # minimum act
-            elif model.model_family == "LLAMA":
-                c_dict = {1: 11, 2: 6.5, 4: 5, 8: 5}
-                activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
-                activations = max(activations, 70 * 1024 * 1024)  # minimum act
-            elif model.model_family in ("MOE", "GEMMA4MOE"):
-                c_dict = {1: 22, 2: 13, 4: 10, 8: 10}
-                activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
-                if model.model_family == "GEMMA4MOE":
-                    # Fine-grained MoE (128 experts top-8): add dispatch workspace term,
-                    # mirroring the DEEPSEEK family's accounting below.
-                    activations += (
-                        num_tokens
-                        * moe_workspace_h
-                        * model.config.attention_dp_size
-                        * model._num_experts
-                        * model._topk
-                        / model.config.moe_ep_size
-                        / 128
-                        * 4
-                    )
-                activations = max(activations, 70 * 1024 * 1024)  # minimum act
-            elif model.model_family in ("DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25"):
-                c_dict = {1: 22, 2: 13, 4: 10, 8: 10}
-                activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
-                # moe workspace, 128 for block scale, float for 4bytes
+        # ==== this below section is backend specific ====
+        # FIXME: the measurement is done based on trt workflow and traditional moe.
+        #        needs to study the new model again. Expecially fine-grained moe will introduce
+        #        more act/workspace memory.
+        if model.model_family == "GPT":
+            c_dict = {1: 10, 2: 6, 4: 5, 8: 5}
+            activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
+            activations = max(activations, 70 * 1024 * 1024)  # minimum act
+        elif model.model_family == "LLAMA":
+            c_dict = {1: 11, 2: 6.5, 4: 5, 8: 5}
+            activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
+            activations = max(activations, 70 * 1024 * 1024)  # minimum act
+        elif model.model_family in ("MOE", "GEMMA4MOE"):
+            c_dict = {1: 22, 2: 13, 4: 10, 8: 10}
+            activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
+            if model.model_family == "GEMMA4MOE":
+                # Fine-grained MoE (128 experts top-8): add dispatch workspace term,
+                # mirroring the DEEPSEEK family's accounting below.
                 activations += (
                     num_tokens
-                    * h
+                    * moe_workspace_h
                     * model.config.attention_dp_size
                     * model._num_experts
                     * model._topk
                     / model.config.moe_ep_size
                     / 128
                     * 4
-                )  # still an improvement opportunity in trtllm to achieve this.
-                activations = max(activations, 70 * 1024 * 1024)  # minimum act
-            else:
-                c_dict = {
-                    1: 10,
-                    2: 6,
-                    4: 5,
-                    8: 5,
-                }  # 4+6/TP, fp8 will have relatively low act, but ignore here. need more experiments
-                activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
-                activations = max(activations, 70 * 1024 * 1024)  # minimum act
-            # ==== this above section is backend specific ====
+                )
+            activations = max(activations, 70 * 1024 * 1024)  # minimum act
+        elif model.model_family in ("DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25"):
+            c_dict = {1: 22, 2: 13, 4: 10, 8: 10}
+            activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
+            # moe workspace, 128 for block scale, float for 4bytes
+            activations += (
+                num_tokens
+                * h
+                * model.config.attention_dp_size
+                * model._num_experts
+                * model._topk
+                / model.config.moe_ep_size
+                / 128
+                * 4
+            )  # still an improvement opportunity in trtllm to achieve this.
+            activations = max(activations, 70 * 1024 * 1024)  # minimum act
+        else:
+            c_dict = {
+                1: 10,
+                2: 6,
+                4: 5,
+                8: 5,
+            }  # 4+6/TP, fp8 will have relatively low act, but ignore here. need more experiments
+            activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
+            activations = max(activations, 70 * 1024 * 1024)  # minimum act
+        # ==== this above section is backend specific ====
 
-            # MTP correction: additional activation memory for draft tokens (applies to all models)
-            if model.config.nextn > 0:
-                activations = activations * (model.config.nextn + 1)
+        # MTP correction: additional activation memory for draft tokens (applies to all models)
+        if model.config.nextn > 0:
+            activations = activations * (model.config.nextn + 1)
 
-            if role == "prefill":
-                # Prefill node holds KV for the input context only; KV is transferred to decode.
-                seq_tokens = isl
-                kvcache = batch_size * model.get_kvcache_bytes_per_sequence(seq_tokens)
-            else:
-                # "combined" or "decode" role: full KV for isl + osl.
-                seq_tokens = max_seq_len if max_seq_len is not None else isl + beam_width * osl
-                kvcache = batch_size * model.get_kvcache_bytes_per_sequence(seq_tokens)
-                # should not be divided by pp_size as you need to hold all kvcache for stages.
+        seq_tokens = max_seq_len if max_seq_len is not None else isl + beam_width * osl
+        kvcache = batch_size * model.get_kvcache_bytes_per_sequence(seq_tokens)
+        # should not be divided by pp_size as you need to hold all kvcache for stages.
+        # if 'DEEPSEEK' in model.model_path or 'MOE' in model.model_path:
+        #    kvcache = kvcache * model.config.attention_dp_size # this is incorrect. tp will
+        #    duplicate the kvcache while attn_dp will not.
 
         # starting from 2.22
         nccl_mem = database.system_spec["misc"]["nccl_mem"][min(model.config.tp_size, 8)]
