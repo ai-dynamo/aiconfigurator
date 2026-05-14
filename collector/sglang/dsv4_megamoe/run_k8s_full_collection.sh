@@ -34,6 +34,10 @@ DISTRIBUTIONS="${DISTRIBUTIONS:-balanced,power_law_1.01,power_law_1.2,power_law_
 SOURCE_POLICY="${SOURCE_POLICY:-random}"
 ROUTING_SEED="${ROUTING_SEED:-0}"
 ROUTING_SEEDS="${ROUTING_SEEDS:-}"
+ROUTING_DUMP_ROOT="${ROUTING_DUMP_ROOT:-}"
+ROUTING_DUMP_LAYER="${ROUTING_DUMP_LAYER:-bottleneck}"
+ROUTING_DUMP_LAYERS="${ROUTING_DUMP_LAYERS:-}"
+ROUTING_DUMP_WEIGHT_POLICY="${ROUTING_DUMP_WEIGHT_POLICY:-uniform}"
 PHASE_ORDER="${PHASE_ORDER:-context,generation}"
 PRE_DISPATCH="${PRE_DISPATCH:-sglang_jit}"
 INCLUDE_ROUTED_SCALE="${INCLUDE_ROUTED_SCALE:-1}"
@@ -134,6 +138,10 @@ render_job() {
     --source-policy "${SOURCE_POLICY}"
     --routing-seed "${ROUTING_SEED}"
     --routing-seeds "${ROUTING_SEEDS}"
+    --routing-dump-root "${ROUTING_DUMP_ROOT}"
+    --routing-dump-layer "${ROUTING_DUMP_LAYER}"
+    --routing-dump-layers "${ROUTING_DUMP_LAYERS}"
+    --routing-dump-weight-policy "${ROUTING_DUMP_WEIGHT_POLICY}"
     --pre-dispatch "${PRE_DISPATCH}"
     --include-routed-scale "${INCLUDE_ROUTED_SCALE}"
     --renormalize-topk-weights "${RENORMALIZE_TOPK_WEIGHTS}"
@@ -273,6 +281,10 @@ PREFILL_TOKENS=${PREFILL_TOKENS}
 DECODE_TOKENS=${DECODE_TOKENS}
 DISTRIBUTIONS=${DISTRIBUTIONS}
 SOURCE_POLICY=${SOURCE_POLICY}
+ROUTING_DUMP_ROOT=${ROUTING_DUMP_ROOT}
+ROUTING_DUMP_LAYER=${ROUTING_DUMP_LAYER}
+ROUTING_DUMP_LAYERS=${ROUTING_DUMP_LAYERS}
+ROUTING_DUMP_WEIGHT_POLICY=${ROUTING_DUMP_WEIGHT_POLICY}
 CAP_POLICY=${CAP_POLICY}
 LOCAL_HEAD=$(git -C "${LOCAL_REPO}" rev-parse HEAD 2>/dev/null || true)
 EOF
@@ -343,7 +355,6 @@ python3 - \
   "${PREFILL_TOKENS}" \
   "${DECODE_TOKENS}" \
   "${DISTRIBUTIONS}" \
-  "${ROUTING_SEEDS}" \
   "${PHASE_ORDER}" <<'PY'
 import csv
 import sys
@@ -356,8 +367,7 @@ decode_eps = [int(x) for x in sys.argv[3].split(",") if x.strip()]
 prefill_tokens = [int(x) for x in sys.argv[4].split(",") if x.strip()]
 decode_tokens = [int(x) for x in sys.argv[5].split(",") if x.strip()]
 distributions = [x.strip() for x in sys.argv[6].split(",") if x.strip()]
-routing_seeds = [x.strip() for x in sys.argv[7].split(",") if x.strip()]
-phases = {x.strip() for x in sys.argv[8].split(",") if x.strip()}
+phases = {x.strip() for x in sys.argv[7].split(",") if x.strip()}
 
 if not perf_path.exists():
     raise SystemExit(f"perf file not found: {perf_path}")
@@ -365,14 +375,7 @@ if not perf_path.exists():
 with perf_path.open(newline="") as f:
     rows = list(csv.DictReader(f))
 
-def seed_count(distribution: str) -> int:
-    if routing_seeds:
-        return len(routing_seeds)
-    if distribution == "power_law_sampled_1.9":
-        return 10
-    return 1
-
-cases_per_token = sum(seed_count(dist) for dist in distributions)
+cases_per_token = len(distributions)
 expected = 0
 if "context" in phases:
     expected += len(prefill_eps) * len(prefill_tokens) * cases_per_token
@@ -385,6 +388,7 @@ summary.append(f"perf_files={len(perf_files)}")
 summary.append(f"perf_file={perf_path.name}")
 summary.append("phases=" + ",".join(sorted(phases)))
 summary.append(f"total_rows={len(rows)} expected={expected}")
+summary.append("seed_samples=averaged_per_logical_case")
 for ep in sorted(set(prefill_eps + decode_eps)):
     for phase in ("context", "generation"):
         count = sum(1 for row in rows if int(row["moe_ep_size"]) == ep and row["phase"] == phase)
@@ -408,7 +412,27 @@ summary.append("caps generation=" + ",".join(sorted({
 counts = Counter((row["moe_ep_size"], row["phase"], row["distribution"]) for row in rows)
 for key, value in sorted(counts.items(), key=lambda item: (int(item[0][0]), item[0][1], item[0][2])):
     summary.append(f"count ep={key[0]} phase={key[1]} distribution={key[2]} rows={value}")
-valid = len(perf_files) == 1 and len(rows) == expected
+loader_key_fields = [
+    "phase",
+    "kernel_source",
+    "kernel_dtype",
+    "moe_dtype",
+    "pre_dispatch",
+    "source_policy",
+    "distribution",
+    "topk",
+    "num_experts",
+    "num_fused_shared_experts",
+    "hidden_size",
+    "inter_size",
+    "moe_tp_size",
+    "moe_ep_size",
+    "num_tokens",
+]
+loader_key_counts = Counter(tuple(row[field] for field in loader_key_fields) for row in rows)
+duplicate_loader_keys = sum(1 for count in loader_key_counts.values() if count > 1)
+summary.append(f"duplicate_loader_keys={duplicate_loader_keys}")
+valid = len(perf_files) == 1 and len(rows) == expected and duplicate_loader_keys == 0
 summary.append("VALIDATION=" + ("PASS" if valid else "FAIL"))
 out = perf_path.parent.parent / "validation_summary.txt"
 out.write_text("\n".join(summary) + "\n")

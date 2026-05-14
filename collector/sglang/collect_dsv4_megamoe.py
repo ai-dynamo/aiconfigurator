@@ -147,6 +147,12 @@ class MegaMoECase:
     routing_seed: int
 
 
+@dataclass(frozen=True)
+class CaseRunResult:
+    row: dict[str, object]
+    power_stats: dict[str, object] | None
+
+
 def _init_process_group_with_device(device: torch.device) -> None:
     kwargs = {"backend": "nccl"}
     sig = inspect.signature(dist.init_process_group)
@@ -405,6 +411,52 @@ def build_cases(args: argparse.Namespace, ep_size: int) -> list[MegaMoECase]:
     return cases
 
 
+def _case_log_key(case: MegaMoECase) -> tuple[str, int, str, int]:
+    return (case.phase, case.tokens_per_rank, case.distribution, case.ep_size)
+
+
+def group_cases_for_logging(cases: list[MegaMoECase]) -> list[list[MegaMoECase]]:
+    """Group seed variants that should collapse into one perf row."""
+    groups: list[list[MegaMoECase]] = []
+    group_by_key: dict[tuple[str, int, str, int], list[MegaMoECase]] = {}
+    for case in cases:
+        key = _case_log_key(case)
+        if key not in group_by_key:
+            group_by_key[key] = []
+            groups.append(group_by_key[key])
+        group_by_key[key].append(case)
+    return groups
+
+
+def _mean_power_stats(results: list[CaseRunResult]) -> dict[str, float] | None:
+    averaged: dict[str, float] = {}
+    for key in ("power", "power_limit"):
+        values = []
+        for result in results:
+            if not result.power_stats:
+                continue
+            value = result.power_stats.get(key)
+            if value in (None, ""):
+                continue
+            values.append(float(value))
+        if values:
+            averaged[key] = sum(values) / len(values)
+    return averaged or None
+
+
+def aggregate_case_run_results(results: list[CaseRunResult]) -> CaseRunResult | None:
+    """Average seed/layer samples into the single row consumed by AIC."""
+    if not results:
+        return None
+    if len(results) == 1:
+        return results[0]
+
+    row = dict(results[0].row)
+    latencies = [float(result.row["latency"]) for result in results]
+    row["latency"] = f"{sum(latencies) / len(latencies):.6f}"
+    return CaseRunResult(row=row, power_stats=_mean_power_stats(results))
+
+
 def case_num_max_tokens_per_rank(args: argparse.Namespace, case: MegaMoECase) -> int:
     if args.cap_policy == "case_tokens":
         return int(case.tokens_per_rank)
@@ -498,7 +550,7 @@ def run_case(
     model_config: dict[str, int | float | bool | str],
     transformed_weights,
     routing_dump_layer: str | None = None,
-) -> dict[str, object] | None:
+) -> CaseRunResult | None:
     import deep_gemm
 
     rank = dist_info.rank
@@ -768,18 +820,30 @@ def run_case(
             **plan_metadata,
         }
         _write_debug_row(args.output_path, debug_row)
+    return CaseRunResult(row=row, power_stats=bench.get("power_stats"))
+
+
+def log_case_run_result(
+    *,
+    result: CaseRunResult,
+    args: argparse.Namespace,
+    dist_info: DistInfo,
+    sample_count: int,
+) -> None:
     log_perf(
-        item_list=[row],
+        item_list=[result.row],
         framework="SGLang",
         version=args.sglang_version,
-        device_name=torch.cuda.get_device_name(device),
+        device_name=torch.cuda.get_device_name(dist_info.device),
         op_name="dsv4_megamoe_module",
         kernel_source="deepgemm_megamoe",
         perf_filename=os.path.join(args.output_path, args.perf_file),
-        power_stats=bench.get("power_stats"),
+        power_stats=result.power_stats,
     )
-    print(f"[dsv4-megamoe] logged dsv4_megamoe_module {row}", flush=True)
-    return row
+    print(
+        f"[dsv4-megamoe] logged dsv4_megamoe_module samples={sample_count} {result.row}",
+        flush=True,
+    )
 
 
 def _default_gpus_per_node(system_name: str) -> int | None:
@@ -801,7 +865,7 @@ def parse_args() -> argparse.Namespace:
         "--routing-seeds",
         default=os.environ.get("ROUTING_SEEDS", ""),
         help=(
-            "comma-separated routing seeds to collect sequentially; defaults to ten consecutive "
+            "comma-separated routing seeds to collect and average into one perf row; defaults to ten consecutive "
             "seeds for power_law_sampled_1.9 and --routing-seed for other synthetic distributions"
         ),
     )
@@ -882,21 +946,35 @@ def main() -> None:
 
     try:
         cached_cap: int | None = None
-        for case in cases:
-            case_cap = case_num_max_tokens_per_rank(args, case)
-            if cached_cap is not None and case_cap != cached_cap:
-                _barrier()
-                destroy_cached_mega_moe_buffers()
-                _barrier()
-            cached_cap = case_cap
-            for routing_layer in _routing_dump_layers_for_case(args, case):
-                run_case(
-                    case=case,
+        for case_group in group_cases_for_logging(cases):
+            results: list[CaseRunResult] = []
+            sample_count = 0
+            for case in case_group:
+                case_cap = case_num_max_tokens_per_rank(args, case)
+                if cached_cap is not None and case_cap != cached_cap:
+                    _barrier()
+                    destroy_cached_mega_moe_buffers()
+                    _barrier()
+                cached_cap = case_cap
+                for routing_layer in _routing_dump_layers_for_case(args, case):
+                    sample_count += 1
+                    result = run_case(
+                        case=case,
+                        args=args,
+                        dist_info=dist_info,
+                        model_config=model_config,
+                        transformed_weights=transformed_weights,
+                        routing_dump_layer=routing_layer,
+                    )
+                    if result is not None:
+                        results.append(result)
+            aggregated = aggregate_case_run_results(results)
+            if aggregated is not None:
+                log_case_run_result(
+                    result=aggregated,
                     args=args,
                     dist_info=dist_info,
-                    model_config=model_config,
-                    transformed_weights=transformed_weights,
-                    routing_dump_layer=routing_layer,
+                    sample_count=sample_count,
                 )
     finally:
         _barrier()

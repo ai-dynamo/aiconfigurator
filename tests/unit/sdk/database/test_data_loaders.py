@@ -449,6 +449,29 @@ def test_load_dsv4_megamoe_module_data_slim_schema(tmp_path):
     assert leaf["phase"] == "context"
 
 
+def test_load_dsv4_megamoe_module_data_rejects_duplicate_loader_keys(tmp_path):
+    csv_file = tmp_path / "dsv4_megamoe_module_perf.txt"
+    header = (
+        "framework,version,device,op_name,kernel_source,phase,moe_dtype,kernel_dtype,"
+        "num_tokens,global_num_tokens,hidden_size,inter_size,topk,num_experts,"
+        "num_fused_shared_experts,moe_tp_size,moe_ep_size,distribution,source_policy,"
+        "pre_dispatch,num_max_tokens_per_rank,"
+        "effective_num_max_tokens_per_rank,routed_scaling_factor,includes_routed_scale,"
+        "includes_gate_topk,buffer_policy,includes_buffer_init,used_cuda_graph,"
+        "latency\n"
+    )
+    row = (
+        "SGLang,unknown,NVIDIA GB200,dsv4_megamoe_module,deepgemm_megamoe,context,"
+        "w4a8_mxfp4_mxfp8,fp8_fp4,1024,8192,7168,3072,6,384,0,1,8,"
+        "power_law_sampled_1.9,random,sglang_jit,16384,16448,2.5,true,false,"
+        "cached_sglang,false,true,{latency}\n"
+    )
+    csv_file.write_text(header + row.format(latency=1.25) + row.format(latency=1.50))
+
+    with pytest.raises(ValueError, match="duplicate DSv4 MegaMoE data row"):
+        load_dsv4_megamoe_module_data(str(csv_file))
+
+
 def test_load_dsv4_megamoe_module_data_requires_phase_for_unified_file(tmp_path):
     csv_file = tmp_path / "dsv4_megamoe_module_perf.txt"
     csv_file.write_text(

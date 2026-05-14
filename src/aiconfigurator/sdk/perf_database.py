@@ -2130,7 +2130,7 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
             current = current.setdefault(key, {})
         leaf_key = keys[-1]
         if leaf_key in current:
-            logger.debug(f"value conflict in DSv4 MegaMoE data: {dsv4_megamoe_module_file} {keys}")
+            raise ValueError(f"duplicate DSv4 MegaMoE data row for {dsv4_megamoe_module_file} {keys}")
         current[leaf_key] = value
 
     dsv4_megamoe_data: dict = {}

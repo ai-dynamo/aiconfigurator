@@ -53,20 +53,22 @@ The collector also follows the DSv4 model configs: `norm_topk_prob=true`, with
 overridden.
 
 The routed MegaMoE path uses the same SGLang/DeepGEMM kernel for context and
-generation.  The Kubernetes jobs can still be split with `PHASES=context` and
-`PHASES=generation` to reduce collection scope, but both phases write standard
-rows to the same `dsv4_megamoe_module_perf.txt` table.  The default split is:
+generation.  The Kubernetes and Slurm runners can still be split with
+`PHASES=context` and `PHASES=generation` to reduce collection scope, but both
+phases write standard rows to the same `dsv4_megamoe_module_perf.txt` table.
+The default split is:
 
 - context/prefill tokens: `1024,2048,4096,8192,16384,32768`
 - generation/decode tokens: `1,2,4,8,16,32,64,128,256,512`
 
 Together these cover the standard MoE token sweep.  For GB200 full collection,
 run both context and generation for EP4, EP8, EP16, and EP32 when all EP sizes are
-needed by the AIC query path.  Use `run_k8s_full_collection.sh` for this path:
-it submits the split EP/phase Kubernetes jobs sequentially but points every job
-at the same output directory and `dsv4_megamoe_module_perf.txt`, so the
-collection produces one canonical perf file instead of six job-local perf
-files.
+needed by the AIC query path.  Use `run_k8s_full_collection.sh` for Kubernetes
+or `run_slurm_full_collection.sh` for Slurm.  The Kubernetes runner points
+every job at the same output directory and `dsv4_megamoe_module_perf.txt`; the
+Slurm runner writes per-job perf files and merges them locally after all jobs
+complete.  Both paths validate the same logical row count and reject duplicate
+loader keys.
 
 Each row records both `num_max_tokens_per_rank` and
 `effective_num_max_tokens_per_rank`.  The effective value is read from the
@@ -106,10 +108,11 @@ the same inverse-CDF power-law weight family, samples the curve with
 experts without replacement.  The default MegaMoE collection includes
 `power_law_sampled_1.9`.  When this sampled distribution is requested without
 an explicit `--routing-seeds` list, collection expands it to ten consecutive
-routing seeds starting at `--routing-seed`. The standard perf schema
-intentionally omits the routing seed column; aggregate repeated sampled rows
-before installing them as system perf data. Other synthetic distributions use
-the single `--routing-seed` unless `--routing-seeds` is provided.
+routing seeds starting at `--routing-seed` and writes one perf row whose latency
+is the mean of those seed samples. The standard perf schema intentionally omits
+the routing seed column, so repeated samples are collapsed during collection.
+Other synthetic distributions use the single `--routing-seed` unless
+`--routing-seeds` is provided.
 `balanced` is already a deterministic per-token top-k assignment and therefore
 does not have a separate sampled variant.
 
@@ -245,6 +248,39 @@ ${LOCAL_RESULT_DIR}/remote_results/dsv4_megamoe_module_perf.txt
 ```
 
 `validation_summary.txt` must report `perf_files=1` and `VALIDATION=PASS`.
+
+## Slurm
+
+Render and submit the standard full matrix through Slurm:
+
+```bash
+SSH_TARGET=${SSH_TARGET} \
+SLURM_ACCOUNT=${SLURM_ACCOUNT} \
+SLURM_PARTITION=${SLURM_PARTITION} \
+SYSTEM_NAME=gb300 \
+LOCAL_REPO=/path/to/aiconfigurator \
+bash collector/sglang/dsv4_megamoe/run_slurm_full_collection.sh
+```
+
+`DRY_RUN=1` renders the `.sbatch` files locally without staging or submitting.
+`TEST_ONLY=1` stages the repo and runs `sbatch --test-only` for every rendered
+job.  If a submitted Slurm run fails while `WAIT=1`, the runner writes
+`cancel_jobs.sh` and cancels the submitted jobs unless `KEEP_JOBS=1`.
+Set `COPY_VALIDATED=1` to copy the merged perf file into
+`src/aiconfigurator/systems/data/${SYSTEM_NAME,,}/sglang/${TARGET_SGLANG_VERSION}`;
+set `ALLOW_VERSION_MISMATCH=0` when that copy should require exact collected
+SGLang version matching.
+
+The final local result is:
+
+```text
+${LOCAL_RESULT_DIR}/merged/dsv4_megamoe_module_perf.txt
+```
+
+The Slurm validation follows the Kubernetes validation semantics: sampled seed
+measurements must already be averaged into one row per logical case, and
+`validation_summary.txt` must report `duplicate_loader_keys=0` and
+`VALIDATION=PASS`.
 
 ## Alignment Cases
 

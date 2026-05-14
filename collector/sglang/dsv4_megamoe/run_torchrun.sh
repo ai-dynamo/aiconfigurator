@@ -106,6 +106,22 @@ export SGLANG_OPT_FIX_MEGA_MOE_MEMORY="${SGLANG_OPT_FIX_MEGA_MOE_MEMORY:-1}"
 export SGLANG_OPT_FIX_NEXTN_MEGA_MOE="${SGLANG_OPT_FIX_NEXTN_MEGA_MOE:-1}"
 export SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK="${SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK:-${NUM_MAX_TOKENS_PER_RANK}}"
 export SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK="${SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK:-0}"
+if [[ -z "${SGLANG_VERSION:-}" ]]; then
+  SGLANG_VERSION="$(python3 - <<'PY'
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    print(version("sglang"))
+except PackageNotFoundError:
+    print("unknown")
+PY
+)"
+fi
+export SGLANG_VERSION
+if [[ "${NODE_RANK}" == "0" ]]; then
+  printf '%s\n' "${SGLANG_VERSION}" >"${OUTPUT_PATH}/sglang_version.txt"
+  env | sort >"${OUTPUT_PATH}/rank0_env.txt"
+fi
 
 echo "[dsv4-megamoe] force MegaMoE env: SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE=${SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE} SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK=${SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK} SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=${SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK}"
 
@@ -181,7 +197,8 @@ RUN_CMD=(
   --num-iterations "${NUM_ITERATIONS}" \
   --output-path "${OUTPUT_PATH}" \
   --write-debug-output "${WRITE_DEBUG_OUTPUT}" \
-  --perf-file "${PERF_FILE}"
+  --perf-file "${PERF_FILE}" \
+  --sglang-version "${SGLANG_VERSION}"
 )
 
 if [[ "${AIC_NSYS_PROFILE:-0}" == "1" ]]; then
