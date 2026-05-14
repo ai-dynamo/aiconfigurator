@@ -3988,7 +3988,7 @@ class PerfDatabase:
                 logger.warning(exception_msg)
             elif isinstance(e, _MISSING_SILICON_DATA_EXCEPTIONS):
                 missing_data_error = PerfDataNotAvailableError(
-                    f"{exception_msg} Missing silicon data surfaced as {type(e).__name__}: {e}"
+                    f"{exception_msg} Missing silicon data for the requested lookup."
                 )
                 logger.warning(str(missing_data_error))
                 raise missing_data_error from e
