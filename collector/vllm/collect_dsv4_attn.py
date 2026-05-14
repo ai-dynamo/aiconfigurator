@@ -63,7 +63,7 @@ from collector.common_test_cases import (
     DSV4_SPARSE_KERNELS,
     _selected_dsv4_models,
 )
-from collector.helper import EXIT_CODE_RESTART, benchmark_with_power, log_perf
+from collector.helper import benchmark_with_power, log_perf
 from collector.registry_types import PerfFile
 from collector.vllm.utils import BatchSpec, create_common_attn_metadata, create_vllm_config, setup_distributed
 
@@ -986,7 +986,6 @@ def run_dsv4_attn_worker(
     except Exception:
         traceback.print_exc()
         raise
-    sys.exit(EXIT_CODE_RESTART)
 
 
 def run_dsv4_sparse_kernel_worker(
@@ -1007,10 +1006,10 @@ def run_dsv4_sparse_kernel_worker(
     full_s = isl + past_kv
     if kernel == "paged_mqa_logits" and full_s < 4:
         print(f"[vllm-dsv4] skip paged_mqa_logits b={batch_size} isl={isl} past_kv={past_kv}: full_s < 4")
-        sys.exit(EXIT_CODE_RESTART)
+        return
     if kernel == "hca_attn" and full_s < 64:
         print(f"[vllm-dsv4] skip hca_attn b={batch_size} isl={isl} past_kv={past_kv}: full_s < 64")
-        sys.exit(EXIT_CODE_RESTART)
+        return
 
     _init_cuda(device)
     try:
@@ -1032,7 +1031,6 @@ def run_dsv4_sparse_kernel_worker(
     except Exception:
         traceback.print_exc()
         raise
-    sys.exit(EXIT_CODE_RESTART)
 
 
 def get_dsv4_csa_context_test_cases():

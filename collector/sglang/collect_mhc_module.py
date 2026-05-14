@@ -32,13 +32,13 @@ try:
     from common_test_cases import get_common_mhc_test_cases
     from registry_types import PerfFile
 
-    from helper import EXIT_CODE_RESTART, benchmark_with_power, log_perf
+    from helper import benchmark_with_power, log_perf
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import get_common_mhc_test_cases
     from registry_types import PerfFile
 
-    from helper import EXIT_CODE_RESTART, benchmark_with_power, log_perf
+    from helper import benchmark_with_power, log_perf
 
 
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
@@ -441,7 +441,6 @@ def run_mhc_module_worker(
         output_path=output_path,
         perf_filename=os.path.basename(perf_filename),
     )
-    sys.exit(EXIT_CODE_RESTART)
 
 
 def main() -> None:

@@ -19,7 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 import torch
 
 from collector.common_test_cases import get_common_mhc_test_cases
-from collector.helper import EXIT_CODE_RESTART, benchmark_with_power, log_perf
+from collector.helper import benchmark_with_power, log_perf
 from collector.registry_types import PerfFile
 from collector.vllm.utils import setup_distributed
 
@@ -224,7 +224,6 @@ def run_mhc_module_worker(
         num_warmup=3 if "--smoke" in sys.argv else 5,
         num_iterations=3 if "--smoke" in sys.argv else 10,
     )
-    sys.exit(EXIT_CODE_RESTART)
 
 
 def main() -> None:
