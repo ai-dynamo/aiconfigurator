@@ -308,7 +308,7 @@ class BaseBackend(ABC):
             n_img_pre = pre_merge_per_image * num_images  # pre-merge: processed by ViT transformer
 
             for op in model.encoder_ops:
-                use_post = "encoder_merger" in op._name
+                use_post = "encoder_projector" in op._name
                 # ViT attention: each image is an independent varlen sequence.
                 # Model as batch_size*num_images sequences of pre_merge_per_image tokens
                 # rather than one concatenated sequence of n_img_pre tokens.

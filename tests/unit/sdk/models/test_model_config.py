@@ -1056,9 +1056,10 @@ class TestQwen3VLModel:
         assert "encoder_proj_gemm" in names
         assert "encoder_ffn1_gemm" in names
         assert "encoder_ffn2_gemm" in names
-        assert "encoder_merger_fc1" in names
-        assert "encoder_merger_act" in names
-        assert "encoder_merger_fc2" in names
+        assert "encoder_projector_fc0_gemm" in names
+        assert "encoder_projector_fc0_act" in names
+        assert "encoder_projector_fc1_gemm" in names
+        assert "encoder_projector_ar" in names
 
     def test_encoder_op_names_do_not_overlap_with_llm(self, vl_model):
         """Encoder op names must be distinct from LLM context op names."""

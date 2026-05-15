@@ -122,6 +122,11 @@ class VisionEncoderConfig:
         spatial_merge_size (int): Pixel-shuffle reduction factor applied after ViT
             (e.g., 2 means 2x2 patches are merged, dividing token count by 4)
         out_hidden_size (int): Output projection dimension (must match LLM hidden size)
+        projector_dims (tuple[tuple[int, int], ...]): Per-layer (in_dim, out_dim) pairs
+            for the vision-to-LLM projector MLP. Empty tuple means no projector.
+            Dimensions are absolute (before TP sharding); build_encoder_ops applies TP.
+        projector_n_instances (int): Number of projector instances to model (e.g.,
+            1 + len(deepstack_visual_indexes) for Qwen3VL deepstack variants).
     """
 
     depth: int
@@ -133,6 +138,8 @@ class VisionEncoderConfig:
     spatial_merge_size: int
     out_hidden_size: int
     deepstack_visual_indexes: tuple[int, ...] = ()
+    projector_dims: tuple[tuple[int, int], ...] = ()
+    projector_n_instances: int = 1
 
 
 @dataclass(frozen=True)

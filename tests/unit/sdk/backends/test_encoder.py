@@ -81,20 +81,20 @@ class TestEncoderTokenFormula:
         pre_merge  = (448 // enc_cfg.patch_size) * (448 // enc_cfg.patch_size)  # 784
         assert pre_merge == post_merge * (enc_cfg.spatial_merge_size ** 2)
 
-    def test_merger_ops_use_post_merge_by_name(self):
-        """PatchMerger ops are detected by 'encoder_merger' in op name."""
-        for name in ("encoder_merger_fc1", "encoder_merger_act", "encoder_merger_fc2"):
-            assert "encoder_merger" in name
+    def test_projector_ops_use_post_merge_by_name(self):
+        """Projector ops are detected by 'encoder_projector' in op name."""
+        for name in ("encoder_projector_fc0_gemm", "encoder_projector_fc0_act", "encoder_projector_fc1_gemm"):
+            assert "encoder_projector" in name
 
-    def test_transformer_ops_do_not_match_encoder_merger(self):
-        """ViT transformer ops must NOT match 'encoder_merger'."""
+    def test_transformer_ops_do_not_match_encoder_projector(self):
+        """ViT transformer ops must NOT match 'encoder_projector'."""
         transformer_ops = [
             "encoder_add_norm_1", "encoder_qkv_gemm", "encoder_attention",
             "encoder_proj_gemm", "encoder_add_norm_2", "encoder_ffn1_gemm",
             "encoder_act", "encoder_ffn2_gemm",
         ]
         for name in transformer_ops:
-            assert "encoder_merger" not in name
+            assert "encoder_projector" not in name
 
     def test_merger_dim_is_vit_hidden_times_spatial_merge_squared(self, enc_cfg):
         """merger_dim = hidden_size * spatial_merge_size² = 1152 * 4 = 4608."""
@@ -342,8 +342,8 @@ class TestVarlenAttentionMultiImage:
         non_attn_ops = [
             "encoder_add_norm_1", "encoder_qkv_gemm", "encoder_proj_gemm",
             "encoder_add_norm_2", "encoder_ffn1_gemm", "encoder_act",
-            "encoder_ffn2_gemm", "encoder_merger_fc1", "encoder_merger_act",
-            "encoder_merger_fc2",
+            "encoder_ffn2_gemm", "encoder_projector_fc0_gemm", "encoder_projector_fc0_act",
+            "encoder_projector_fc1_gemm",
         ]
         for name in non_attn_ops:
             assert "encoder_attention" not in name
