@@ -88,7 +88,7 @@ jobs:
             docker cp aic:/workspace/test_report.md ./test_report.md
 
   build-test-wheels:
-    name: Build & test wheel (${{ matrix.archs }})
+    name: Build & test wheels (${{ matrix.archs }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -109,50 +109,58 @@ jobs:
           fetch-depth: 0
       - name: Git LFS Pull
         run: git lfs pull
-      - name: Build wheel via docker/Dockerfile
+
+      - name: Build aiconfigurator-rust-core wheel
         run: |
           mkdir -p dist
           docker buildx build \
             --platform ${{ matrix.platform }} \
             --build-arg MANYLINUX_ARCH=${{ matrix.archs }} \
-            --target wheel-out \
+            --target wheel-out-rust \
+            --output type=local,dest=./dist \
+            -f docker/Dockerfile \
+            .
+
+      - name: Build pure-Python aiconfigurator wheel
+        run: |
+          docker buildx build \
+            --platform ${{ matrix.platform }} \
+            --target wheel-out-pure \
             --output type=local,dest=./dist \
             -f docker/Dockerfile \
             .
           ls -la dist/
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          version: latest
-      - name: Install wheel and run aiconfigurator with rust backend
+
+      - name: Unified combined-install smoke (rust + python fallback)
+        # combined-test installs both wheels into one venv, runs the CLI
+        # with --engine-step-backend rust, then uninstalls rust-core and
+        # re-runs with --engine-step-backend python. Either failure fails
+        # the build. Same `docker buildx build --target combined-test`
+        # command works locally and in CI.
         run: |
-          set -euo pipefail
-          uv venv --python 3.12 .venv-test
-          # shellcheck disable=SC1091
-          source .venv-test/bin/activate
-          uv pip install dist/aiconfigurator-*.whl
-          aiconfigurator cli default \
-            --model-path Qwen/Qwen3-32B \
-            --total-gpus 1 \
-            --system h200_sxm \
-            --engine-step-backend rust \
-            --save-dir "${RUNNER_TEMP}/aic-out"
-      - name: Extract CycloneDX SBOM from wheel
+          docker buildx build \
+            --platform ${{ matrix.platform }} \
+            --build-arg MANYLINUX_ARCH=${{ matrix.archs }} \
+            --target combined-test \
+            -f docker/Dockerfile \
+            .
+
+      - name: Extract CycloneDX SBOM from rust-core wheel
         run: |
           set -euo pipefail
           mkdir -p sbom
           # maturin's PEP 770 path drops the SBOM at
-          # `<dist-info>/sboms/<crate-name>-py3.cyclonedx.json` — for us that's
-          # `aiconfigurator-core-py3.cyclonedx.json`. The `*.cyclonedx.json`
-          # glob future-proofs us against a maturin version that tweaks the
-          # naming convention. `unzip -p` reads one file out of the wheel to
-          # stdout — the wheel itself is never unpacked.
-          unzip -p dist/aiconfigurator-*.whl 'aiconfigurator-*.dist-info/sboms/*.cyclonedx.json' \
-            > "sbom/sbom-aiconfigurator-wheel-rust-${{ matrix.archs }}.cdx.json"
+          # `<dist-info>/sboms/<crate-name>.cyclonedx.json`. The
+          # `*.cyclonedx.json` glob future-proofs us against a maturin
+          # version that tweaks the naming convention.
+          unzip -p dist/aiconfigurator_rust_core-*.whl \
+            'aiconfigurator_rust_core-*.dist-info/sboms/*.cyclonedx.json' \
+            > "sbom/sbom-aiconfigurator-rust-core-${{ matrix.archs }}.cdx.json"
           ls -la sbom/
+
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sbom-aiconfigurator-wheel-rust-${{ matrix.archs }}
-          path: sbom/sbom-aiconfigurator-wheel-rust-${{ matrix.archs }}.cdx.json
+          name: sbom-aiconfigurator-rust-core-${{ matrix.archs }}
+          path: sbom/sbom-aiconfigurator-rust-core-${{ matrix.archs }}.cdx.json
           if-no-files-found: error

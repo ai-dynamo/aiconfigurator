@@ -188,13 +188,23 @@ def _cached_estimator(config_json: str) -> RustEngineStepEstimator:
 
 @cache
 def _import_rust_core():
-    """Import the PyO3 extension module once and cache it."""
+    """Import the PyO3 extension module once and cache it.
+
+    The Rust accelerator ships as a separate distribution
+    (``aiconfigurator-rust-core``) so the bare ``aiconfigurator`` wheel
+    stays pure-Python and platform-independent. Users opt into the rust
+    path with the ``[rust]`` extra; on platforms where no precompiled
+    extension wheel exists we fall back to the Python latency path.
+    """
     try:
-        from aiconfigurator._native import aiconfigurator_core  # type: ignore[attr-defined]
+        from aiconfigurator_rust_core import aiconfigurator_core  # type: ignore[attr-defined]
     except ImportError as err:
         raise RustCoreUnavailableError(
-            "Rust core PyO3 extension not importable. Install the project with "
-            "`pip install -e .` or `maturin develop --release` to build it."
+            "Rust core not installed. Install the optional extension with:\n"
+            "  pip install aiconfigurator[rust]\n"
+            "or directly:\n"
+            "  pip install aiconfigurator-rust-core\n"
+            "Bare `pip install aiconfigurator` ships only the pure-Python path."
         ) from err
     return aiconfigurator_core
 

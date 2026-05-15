@@ -69,10 +69,15 @@ python3 -m pytest -m "unit or build"
 
 ### Rust Engine Step Opt-In
 
-The Python SDK keeps using the existing Python latency path by default. The Rust core is compiled into the wheel as a PyO3 extension module by `maturin` whenever you install the project (`pip install -e .`, `pip install .`, or `maturin develop --release`). The SDK imports it directly from `aiconfigurator._native.aiconfigurator_core`, so a normal install is enough to exercise the Rust path:
+The Python SDK keeps using the existing Python latency path by default. The Rust core ships as a separate distribution `aiconfigurator-rust-core`; install it via the `[rust]` extra. The SDK imports the extension as `aiconfigurator_rust_core.aiconfigurator_core` and falls back to the Python path if the extension isn't installed.
 
 ```bash
-pip install -e .   # or: maturin develop --release for fast iteration
+# Install both: pure-Python aiconfigurator + the optional Rust extension.
+pip install -e ".[rust]"
+# Or, for iterating on the Rust side without reinstalling the pure package:
+pip install -e .
+(cd rust/aiconfigurator-core && maturin develop --release)
+
 python3 -m pytest tests/unit/sdk/test_rust_engine_step.py --aic-engine-step-backend=rust
 ```
 
