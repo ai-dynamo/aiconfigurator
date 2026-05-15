@@ -330,3 +330,47 @@ def test_get_database_skips_incomplete_version_directory(tmp_path: Path, perf_da
     finally:
         perf_database.databases_cache.clear()
         perf_database.databases_cache.update(cache_snapshot)
+
+
+def test_perf_database_clear_runtime_caches_clears_interpolation_and_lru_state(perf_database):
+    db = object.__new__(perf_database.PerfDatabase)
+    db._extracted_metrics_cache = {"table": object()}
+    cache_clear_calls = []
+
+    def fake_cached_method():
+        return None
+
+    fake_cached_method.cache_clear = lambda: cache_clear_calls.append("cleared")
+    db.fake_cached_method = fake_cached_method
+
+    db.clear_runtime_caches()
+
+    assert db._extracted_metrics_cache == {}
+    assert cache_clear_calls == ["cleared"]
+
+
+def test_clear_database_runtime_caches_clears_matching_cached_database_once(perf_database):
+    class FakeDatabase:
+        def __init__(self):
+            self.clear_count = 0
+
+        def clear_runtime_caches(self):
+            self.clear_count += 1
+
+    keep_db = FakeDatabase()
+    clear_db = FakeDatabase()
+    cache_snapshot = dict(perf_database.databases_cache)
+    try:
+        perf_database.databases_cache.clear()
+        perf_database.databases_cache[("root", "system", False)]["backend"]["1.0.0"] = clear_db
+        perf_database.databases_cache[("root", "system", True)]["backend"]["1.0.0"] = clear_db
+        perf_database.databases_cache[("root", "system", False)]["backend"]["2.0.0"] = keep_db
+        perf_database.databases_cache[("root", "other-system", False)]["backend"]["1.0.0"] = keep_db
+
+        perf_database.clear_database_runtime_caches("system", "backend", "1.0.0")
+
+        assert clear_db.clear_count == 1
+        assert keep_db.clear_count == 0
+    finally:
+        perf_database.databases_cache.clear()
+        perf_database.databases_cache.update(cache_snapshot)
