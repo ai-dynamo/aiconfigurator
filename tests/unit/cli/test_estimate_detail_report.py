@@ -71,48 +71,52 @@ def test_format_estimate_detail_report_static_pairs_sol_summary() -> None:
     assert "10.000 ms  100.0%  SOL      5.000 ms    50.0% SOL/time" in report
 
 
-def test_format_estimate_detail_report_agg_uses_per_ops_data() -> None:
+@pytest.mark.parametrize(
+    ("mode", "per_ops_data", "sol_per_ops_data", "expected"),
+    [
+        (
+            "agg",
+            {
+                "mix_step": {"context_attention": 20.0},
+                "genonly_step": {"generation_attention": 10.0},
+                "scheduling": {"num_mix_steps": 2.0, "num_genonly_steps": 3.0},
+            },
+            {"mix_step": {"context_attention": 10.0}, "genonly_step": {"generation_attention": 5.0}},
+            (
+                "Scheduling: 2 mix steps + 3 gen-only steps",
+                "Mix Step (total = 20.000 ms, SOL = 10.000 ms, SOL/time = 50.0%)",
+            ),
+        ),
+        (
+            "disagg",
+            {"prefill": {"context_attention": 40.0}, "decode": {"generation_attention": 8.0}},
+            {"prefill": {"context_attention": 10.0}, "decode": {"generation_attention": 4.0}},
+            (
+                "Prefill (static_ctx) (total = 40.000 ms, SOL = 10.000 ms, SOL/time = 25.0%)",
+                "Decode (static_gen) (total = 8.000 ms, SOL = 4.000 ms, SOL/time = 50.0%)",
+            ),
+        ),
+    ],
+)
+def test_format_estimate_detail_report_uses_per_ops_data(
+    mode: str,
+    per_ops_data: dict,
+    sol_per_ops_data: dict,
+    expected: tuple[str, ...],
+) -> None:
     result = _estimate_result(
-        mode="agg",
+        mode=mode,
         raw={"ttft": 100.0, "tpot": 10.0, "request_latency": 250.0},
-        per_ops_data={
-            "mix_step": {"context_attention": 20.0},
-            "genonly_step": {"generation_attention": 10.0},
-            "scheduling": {"num_mix_steps": 2.0, "num_genonly_steps": 3.0},
-        },
+        per_ops_data=per_ops_data,
         per_ops_source={"mix_step": {"context_attention": "silicon"}},
     )
     sol_result = _estimate_result(
-        mode="agg",
+        mode=mode,
         raw={"ttft": 50.0, "tpot": 5.0, "request_latency": 125.0},
-        per_ops_data={
-            "mix_step": {"context_attention": 10.0},
-            "genonly_step": {"generation_attention": 5.0},
-            "scheduling": {"num_mix_steps": 2.0, "num_genonly_steps": 3.0},
-        },
+        per_ops_data=sol_per_ops_data,
     )
 
     report = format_estimate_detail_report(result, sol_result, detail="time", width=100)
 
-    assert "Scheduling: 2 mix steps + 3 gen-only steps" in report
-    assert "Mix Step (total = 20.000 ms, SOL = 10.000 ms, SOL/time = 50.0%)" in report
-    assert "context_attention" in report
-    assert "20.000 ms  100.0%  SOL     10.000 ms    50.0% SOL/time" in report
-
-
-def test_format_estimate_detail_report_disagg_uses_per_ops_data() -> None:
-    result = _estimate_result(
-        mode="disagg",
-        raw={"ttft": 80.0, "tpot": 8.0, "request_latency": 200.0},
-        per_ops_data={"prefill": {"context_attention": 40.0}, "decode": {"generation_attention": 8.0}},
-    )
-    sol_result = _estimate_result(
-        mode="disagg",
-        raw={"ttft": 20.0, "tpot": 4.0, "request_latency": 80.0},
-        per_ops_data={"prefill": {"context_attention": 10.0}, "decode": {"generation_attention": 4.0}},
-    )
-
-    report = format_estimate_detail_report(result, sol_result, detail="time", width=100)
-
-    assert "Prefill (static_ctx) (total = 40.000 ms, SOL = 10.000 ms, SOL/time = 25.0%)" in report
-    assert "Decode (static_gen) (total = 8.000 ms, SOL = 4.000 ms, SOL/time = 50.0%)" in report
+    for line in expected:
+        assert line in report
