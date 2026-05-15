@@ -40,6 +40,29 @@ _NEMOTRONH_LAYER_BLOCK_PATTERN = {
     "-": "-",
 }
 
+_LOW_SIGNAL_PARALLEL_CONFIG_ERROR_FRAGMENTS = (
+    "should be divisible by tp_size",
+    "Parallelism width mismatch:",
+    "Cannot infer moe_tp_size:",
+    "Cannot infer moe_ep_size:",
+)
+
+
+def representative_parallel_failure(exceptions: list[Exception]) -> Exception | None:
+    """Pick the most useful exception to show when every parallel candidate failed."""
+    if not exceptions:
+        return None
+
+    for exc in reversed(exceptions):
+        if not _is_low_signal_parallel_config_error(exc):
+            return exc
+    return exceptions[-1]
+
+
+def _is_low_signal_parallel_config_error(exc: Exception) -> bool:
+    message = str(exc)
+    return any(fragment in message for fragment in _LOW_SIGNAL_PARALLEL_CONFIG_ERROR_FRAGMENTS)
+
 
 def _load_json_with_infinity(file_path) -> dict:
     """

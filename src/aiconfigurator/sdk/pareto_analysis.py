@@ -18,7 +18,11 @@ from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.inference_session import DisaggInferenceSession, InferenceSession
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
-from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, strip_unicode_to_ascii
+from aiconfigurator.sdk.utils import (
+    enumerate_ttft_tpot_constraints,
+    representative_parallel_failure,
+    strip_unicode_to_ascii,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,9 +163,11 @@ def agg_pareto(
         results_df = results_df.sort_values(by="tokens/s/gpu", ascending=False).reset_index(drop=True)
     else:
         if exceptions:
+            representative_exception = representative_parallel_failure(exceptions)
             raise RuntimeError(
-                f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
-            ) from exceptions[-1]
+                "No results found for any parallel configuration. "
+                f"Showing representative exception: {representative_exception}"
+            ) from representative_exception
         if all_configs_oom:
             raise RuntimeError(
                 "No results found: the model does not fit in GPU memory for any parallel "

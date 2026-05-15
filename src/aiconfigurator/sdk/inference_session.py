@@ -18,7 +18,7 @@ from aiconfigurator.sdk.picking import (
     _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
     _build_disagg_summary_dict,
 )
-from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
+from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, representative_parallel_failure
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -431,9 +431,11 @@ class DisaggInferenceSession:
                 continue
         if summary_df.empty:
             if exceptions:
+                representative_exception = representative_parallel_failure(exceptions)
                 raise RuntimeError(
-                    f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
-                ) from exceptions[-1]
+                    "No results found for any parallel configuration. "
+                    f"Showing representative exception: {representative_exception}"
+                ) from representative_exception
             if all_configs_oom:
                 raise RuntimeError(
                     "No results found: the model does not fit in GPU memory for any parallel "
