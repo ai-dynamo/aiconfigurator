@@ -68,6 +68,13 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.GENERATION_ATTENTION,
     ),
     OpEntry(
+        op="attention_vision",
+        module="collector.sglang.collect_attn_mm",
+        get_func="get_vision_attention_test_cases",
+        run_func="run_vision_attention_torch",
+        perf_filename=PerfFile.VISION_ATTENTION,
+    ),
+    OpEntry(
         op="wideep_mla_context",
         module="collector.sglang.collect_mla_module",
         get_func="get_wideep_mla_context_test_cases",

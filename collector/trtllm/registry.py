@@ -68,6 +68,13 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.GENERATION_ATTENTION,
     ),
     OpEntry(
+        op="attention_vision",
+        module="collector.trtllm.collect_attn_mm",
+        get_func="get_vision_attention_test_cases",
+        run_func="run_vision_attention_torch",
+        perf_filename=PerfFile.VISION_ATTENTION,
+    ),
+    OpEntry(
         op="mla_bmm_gen_pre",
         module="collector.trtllm.collect_mla_bmm",
         get_func="get_mla_gen_pre_test_cases",
