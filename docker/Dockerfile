@@ -55,8 +55,8 @@ RUN WHL=$(ls -d /wheelhouse/*) && \
     rm -rf /wheelhouse
 
 COPY rust/ /workspace/rust/
-RUN cargo build --manifest-path /workspace/rust/aiconfigurator-core/Cargo.toml
-ENV AICONFIGURATOR_RUST_CORE_LIB=/workspace/rust/aiconfigurator-core/target/debug/libaiconfigurator_core.so
+RUN cargo build --release --manifest-path /workspace/rust/aiconfigurator-core/Cargo.toml
+ENV AICONFIGURATOR_RUST_CORE_LIB=/workspace/rust/aiconfigurator-core/target/release/libaiconfigurator_core.so
 
 COPY pytest.ini /workspace/
 COPY tests/ /workspace/tests/

@@ -23,6 +23,7 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner, UnsupportedWideepConfigError
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
@@ -684,6 +685,55 @@ def _get_backend_data_path(system_name: str, backend_name: str, backend_version:
     return None
 
 
+_SGLANG_DEEPEP_REQUIRED_FILES = (
+    common.PerfDataFilename.wideep_deepep_normal.value,
+    common.PerfDataFilename.wideep_deepep_ll.value,
+)
+
+
+def _sglang_deepep_perf_data_skip_reason(
+    system_name: str,
+    decode_system_name: str | None,
+    backend_version: str | None,
+) -> str | None:
+    """Return a concise skip reason when optional SGLang DeepEP data is absent."""
+    missing_paths: list[str] = []
+    missing_versions: list[str] = []
+
+    systems_to_check = [system_name]
+    if decode_system_name and decode_system_name != system_name:
+        systems_to_check.append(decode_system_name)
+
+    for system_to_check in systems_to_check:
+        resolved_version = backend_version or perf_database.get_latest_database_version(
+            system=system_to_check,
+            backend=common.BackendName.sglang.value,
+        )
+        if resolved_version is None:
+            missing_versions.append(f"{system_to_check}/{common.BackendName.sglang.value}")
+            continue
+
+        data_path = _get_backend_data_path(system_to_check, common.BackendName.sglang.value, resolved_version)
+        if data_path is None:
+            missing_paths.extend(
+                f"{system_to_check}/{common.BackendName.sglang.value}/{resolved_version}/{filename}"
+                for filename in _SGLANG_DEEPEP_REQUIRED_FILES
+            )
+            continue
+
+        missing_paths.extend(
+            os.path.join(data_path, filename)
+            for filename in _SGLANG_DEEPEP_REQUIRED_FILES
+            if not os.path.isfile(os.path.join(data_path, filename))
+        )
+
+    if missing_versions:
+        return "no database version available for " + ", ".join(missing_versions)
+    if missing_paths:
+        return "missing required DeepEP perf data: " + ", ".join(missing_paths)
+    return None
+
+
 def _ensure_backend_version_available(system_name: str, backend_name: str, backend_version: str | None = None) -> None:
     """
     Validate that the backend is supported for the given system and version.
@@ -936,15 +986,19 @@ def build_default_task_configs(
 
         # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
         if backend_name == "sglang" and not enable_wideep and is_moe_model:
-            deepep_kwargs = dict(agg_kwargs)
-            deepep_kwargs["moe_backend"] = "deepep_moe"
-            try:
-                deepep_task = TaskConfig(serving_mode="agg", **deepep_kwargs)
-            except UnsupportedWideepConfigError as exc:
-                logger.info("Skipping SGLang DeepEP agg sweep: %s", exc)
+            skip_reason = _sglang_deepep_perf_data_skip_reason(system, None, backend_version)
+            if skip_reason:
+                logger.info("Skipping SGLang DeepEP agg sweep: %s", skip_reason)
             else:
-                deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
-                task_configs[deepep_name] = deepep_task
+                deepep_kwargs = dict(agg_kwargs)
+                deepep_kwargs["moe_backend"] = "deepep_moe"
+                try:
+                    deepep_task = TaskConfig(serving_mode="agg", **deepep_kwargs)
+                except UnsupportedWideepConfigError as exc:
+                    logger.info("Skipping SGLang DeepEP agg sweep: %s", exc)
+                else:
+                    deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
+                    task_configs[deepep_name] = deepep_task
 
         if total_gpus < 2:
             logger.warning("Skipping disagg since it requires at least 2 GPUs.")
@@ -962,15 +1016,19 @@ def build_default_task_configs(
 
         # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
         if backend_name == "sglang" and not enable_wideep and is_moe_model:
-            deepep_disagg_kwargs = dict(disagg_kwargs)
-            deepep_disagg_kwargs["moe_backend"] = "deepep_moe"
-            try:
-                deepep_disagg_task = TaskConfig(serving_mode="disagg", **deepep_disagg_kwargs)
-            except UnsupportedWideepConfigError as exc:
-                logger.info("Skipping SGLang DeepEP disagg sweep: %s", exc)
+            skip_reason = _sglang_deepep_perf_data_skip_reason(system, decode_system, backend_version)
+            if skip_reason:
+                logger.info("Skipping SGLang DeepEP disagg sweep: %s", skip_reason)
             else:
-                deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
-                task_configs[deepep_name] = deepep_disagg_task
+                deepep_disagg_kwargs = dict(disagg_kwargs)
+                deepep_disagg_kwargs["moe_backend"] = "deepep_moe"
+                try:
+                    deepep_disagg_task = TaskConfig(serving_mode="disagg", **deepep_disagg_kwargs)
+                except UnsupportedWideepConfigError as exc:
+                    logger.info("Skipping SGLang DeepEP disagg sweep: %s", exc)
+                else:
+                    deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
+                    task_configs[deepep_name] = deepep_disagg_task
     return task_configs
 
 
@@ -1217,8 +1275,15 @@ def _execute_task_configs(
                 )
                 logger.warning(msg)
                 failure_messages.append(msg)
+        except NoFeasibleConfigError as exc:
+            msg = f"Experiment {exp_name} found no SLA-feasible configuration: {exc}"
+            logger.warning(msg)
+            failure_messages.append(msg)
         except Exception as exc:
-            logger.exception("Error running experiment %s", exp_name)
+            if perf_database.has_perf_data_not_available_cause(exc):
+                logger.log(logging.ERROR, "Error running experiment %s: %s", exp_name, exc)
+            else:
+                logger.exception("Error running experiment %s", exp_name)
             failure_messages.append(f"Experiment {exp_name} failed: {exc}")
 
     if len(results) < 1:

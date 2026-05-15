@@ -38,6 +38,7 @@ pub struct ModelSpec {
     pub top_k: u32,
     pub num_experts: u32,
     pub moe_intermediate_size: u32,
+    pub shared_expert_intermediate_size: u32,
 }
 
 impl ModelSpec {
@@ -112,6 +113,14 @@ impl ModelSpec {
             .unwrap_or(0);
         let moe_intermediate_size =
             optional_u32(model_value, "moe_intermediate_size", path)?.unwrap_or(intermediate_size);
+        let shared_expert_intermediate_size =
+            optional_u32(model_value, "shared_expert_intermediate_size", path)?
+                .or(optional_u32(
+                    model_value,
+                    "moe_shared_expert_intermediate_size",
+                    path,
+                )?)
+                .unwrap_or(0);
 
         Ok(Self {
             architecture,
@@ -127,6 +136,7 @@ impl ModelSpec {
             top_k,
             num_experts,
             moe_intermediate_size,
+            shared_expert_intermediate_size,
         })
     }
 }

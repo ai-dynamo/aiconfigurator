@@ -93,6 +93,24 @@ class PerfDataNotAvailableError(RuntimeError):
     """Raised when required performance data is missing or unsupported for a requested mode."""
 
 
+def has_perf_data_not_available_cause(error: BaseException) -> bool:
+    """Return True when an exception or chained cause is a structured perf-data miss."""
+    seen: set[int] = set()
+    stack: list[BaseException] = [error]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        if isinstance(current, PerfDataNotAvailableError):
+            return True
+        seen.add(id(current))
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)
+    return False
+
+
 @functools.cache
 def _load_op_kernel_source_manifest_entries(systems_root: str) -> dict[str, tuple[dict, ...]]:
     """Load `<systems_root>/op_kernel_source_manifest.yaml` and group entries by op_file.
@@ -3952,6 +3970,36 @@ class PerfDatabase:
         """Thin wrapper — delegates to ``interpolation.interp_dsa_context_topk_piecewise_from_raw``."""
         return interpolation.interp_dsa_context_topk_piecewise_from_raw(num_heads, full_s, b, dsa_dict, index_topk)
 
+    @staticmethod
+    def _is_dsa_interpolation_miss(error: Exception) -> bool:
+        message = str(error)
+        return isinstance(error, ValueError) and (
+            "x is not equal to the only value in the list" in message
+            or "x is less than the smallest value in the list" in message
+            or "x is greater than the largest value in the list" in message
+        )
+
+    @staticmethod
+    def _format_dsa_unavailable_message(
+        phase: str,
+        error: Exception,
+        *,
+        b: int,
+        s: int,
+        num_heads: int,
+        architecture: str,
+        index_n_heads: int,
+        index_head_dim: int,
+        index_topk: int,
+        prefix: int | None = None,
+    ) -> str:
+        prefix_part = "" if prefix is None else f", prefix={prefix}"
+        return (
+            f"{phase} DSA module perf data unavailable for candidate "
+            f"b={b}, s={s}{prefix_part}, num_heads={num_heads}, architecture={architecture}, "
+            f"index_n_heads={index_n_heads}, index_head_dim={index_head_dim}, index_topk={index_topk}: {error}"
+        )
+
     def _get_sample_leaf_value(self, data: dict):
         """Thin wrapper — delegates to ``interpolation.get_sample_leaf_value``."""
         return interpolation.get_sample_leaf_value(data)
@@ -7172,7 +7220,7 @@ class PerfDatabase:
                     latency *= correction
                     energy *= correction
                 return PerformanceResult(latency, energy=energy)
-            except Exception:
+            except Exception as e:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
                         f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
@@ -7180,6 +7228,24 @@ class PerfDatabase:
                     )
                     latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
                     return PerformanceResult(latency, energy=0.0)
+                if isinstance(e, PerfDataNotAvailableError):
+                    logger.warning(str(e))
+                    raise
+                if self._is_dsa_interpolation_miss(e):
+                    message = self._format_dsa_unavailable_message(
+                        "Context",
+                        e,
+                        b=b,
+                        s=s,
+                        prefix=prefix,
+                        num_heads=num_heads,
+                        architecture=architecture,
+                        index_n_heads=index_n_heads,
+                        index_head_dim=index_head_dim,
+                        index_topk=index_topk,
+                    )
+                    logger.warning(message)
+                    raise PerfDataNotAvailableError(message) from None
                 else:
                     logger.exception(
                         f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
@@ -7341,7 +7407,7 @@ class PerfDatabase:
                 except (KeyError, TypeError, ValueError, AssertionError) as exc:
                     raise missing_generation_dsa_error() from exc
                 return PerformanceResult(latency, energy=energy)
-            except Exception:
+            except Exception as e:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
                         f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "
@@ -7349,6 +7415,23 @@ class PerfDatabase:
                     )
                     latency = get_empirical(b, s, num_heads, kv_cache_dtype)
                     return PerformanceResult(latency, energy=0.0)
+                if isinstance(e, PerfDataNotAvailableError):
+                    logger.warning(str(e))
+                    raise
+                if self._is_dsa_interpolation_miss(e):
+                    message = self._format_dsa_unavailable_message(
+                        "Generation",
+                        e,
+                        b=b,
+                        s=s,
+                        num_heads=num_heads,
+                        architecture=architecture,
+                        index_n_heads=index_n_heads,
+                        index_head_dim=index_head_dim,
+                        index_topk=index_topk,
+                    )
+                    logger.warning(message)
+                    raise PerfDataNotAvailableError(message) from None
                 else:
                     logger.exception(
                         f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "

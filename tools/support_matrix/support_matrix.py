@@ -667,7 +667,7 @@ class SupportMatrix:
                 statuses[mode] = STATUS_FAIL
                 error_messages[mode] = traceback.format_exc()
             finally:
-                error_messages[mode] = _format_exception_for_csv(error_messages[mode])
+                error_messages[mode] = _format_exception_for_csv(error_messages.get(mode))
                 perf_database.clear_database_runtime_caches(system, backend, version)
         return statuses, error_messages
 

@@ -15,9 +15,14 @@ import yaml
 from munch import DefaultMunch, Munch
 
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import _apply_model_quant_defaults, check_is_moe, get_model_family
 from aiconfigurator.sdk.pareto_analysis import get_pareto_front
-from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version
+from aiconfigurator.sdk.perf_database import (
+    get_database,
+    get_latest_database_version,
+    has_perf_data_not_available_cause,
+)
 from aiconfigurator.sdk.utils import ListFlowDumper, enumerate_parallel_config, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -1569,12 +1574,30 @@ class TaskRunner:
                 result = self.run_disagg(task_config.config, autoscale=autoscale)
             else:
                 raise ValueError(f"Invalid serving mode: {serving_mode}")
-        except Exception:
-            logger.exception(
-                "Error running pareto analysis for %s in %s mode",
+        except NoFeasibleConfigError as exc:
+            logger.warning(
+                "No feasible configuration found for %s in %s mode: %s",
                 task_config.task_name,
                 serving_mode,
+                exc,
             )
+            result = None
+            raise
+        except Exception as exc:
+            if has_perf_data_not_available_cause(exc):
+                logger.log(
+                    logging.ERROR,
+                    "Error running pareto analysis for %s in %s mode: %s",
+                    task_config.task_name,
+                    serving_mode,
+                    exc,
+                )
+            else:
+                logger.exception(
+                    "Error running pareto analysis for %s in %s mode",
+                    task_config.task_name,
+                    serving_mode,
+                )
             result = None
             raise
 

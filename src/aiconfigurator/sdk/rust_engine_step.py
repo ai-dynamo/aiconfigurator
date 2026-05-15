@@ -218,6 +218,7 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "moe_ep_size": _optional_int(getattr(model_config, "moe_ep_size", None)),
         "attention_dp_size": _optional_int(getattr(model_config, "attention_dp_size", None)),
         "weight_dtype": _quant_to_dtype(getattr(model_config, "gemm_quant_mode", None)),
+        "moe_dtype": _moe_quant_to_dtype(getattr(model_config, "moe_quant_mode", None)),
         "activation_dtype": _quant_to_dtype(getattr(model_config, "fmha_quant_mode", None)),
         "kv_cache_dtype": _quant_to_dtype(getattr(model_config, "kvcache_quant_mode", None)),
         "kv_block_size": None,
@@ -250,16 +251,13 @@ def _decode_metrics(*, batch_size: int, context_length: int) -> dict[str, Any]:
 
 @cache
 def _load_library(autobuild: bool) -> ctypes.CDLL:
-    if autobuild and not os.environ.get(RUST_CORE_LIB_ENV):
+    library_path = _find_library(include_debug=not autobuild)
+    if library_path is None and autobuild:
         library_path = _build_rust_core()
-    else:
-        library_path = _find_library()
-        if library_path is None and autobuild:
-            library_path = _build_rust_core()
     if library_path is None:
         raise RustCoreUnavailableError(
             "Rust core shared library not found. Build it with "
-            "`cargo build --manifest-path rust/aiconfigurator-core/Cargo.toml`, "
+            "`cargo build --release --manifest-path rust/aiconfigurator-core/Cargo.toml`, "
             f"set {RUST_CORE_LIB_ENV}, or set {RUST_CORE_AUTOBUILD_ENV}=1."
         )
 
@@ -279,7 +277,7 @@ def _load_library(autobuild: bool) -> ctypes.CDLL:
     return lib
 
 
-def _find_library() -> Path | None:
+def _find_library(*, include_debug: bool = True) -> Path | None:
     explicit = os.environ.get(RUST_CORE_LIB_ENV)
     if explicit:
         path = Path(explicit)
@@ -291,10 +289,9 @@ def _find_library() -> Path | None:
     if crate_root is None:
         return None
     lib_name = _library_name()
-    candidates = [
-        crate_root / "target" / "release" / lib_name,
-        crate_root / "target" / "debug" / lib_name,
-    ]
+    candidates = [crate_root / "target" / "release" / lib_name]
+    if include_debug:
+        candidates.append(crate_root / "target" / "debug" / lib_name)
     return next((path for path in candidates if path.is_file()), None)
 
 
@@ -306,10 +303,10 @@ def _build_rust_core() -> Path:
         raise RustCoreUnavailableError("cargo is not available on PATH")
 
     subprocess.run(
-        ["cargo", "build", "--manifest-path", str(crate_root / "Cargo.toml")],
+        ["cargo", "build", "--release", "--manifest-path", str(crate_root / "Cargo.toml")],
         check=True,
     )
-    library_path = crate_root / "target" / "debug" / _library_name()
+    library_path = crate_root / "target" / "release" / _library_name()
     if not library_path.is_file():
         raise RustCoreUnavailableError(f"cargo build completed but did not produce {library_path}")
     return library_path
@@ -386,6 +383,18 @@ def _quant_to_dtype(value: Any) -> str | None:
     if name in {"int4", "int4_wo", "w4afp8", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}:
         return "int4"
     return None
+
+
+def _moe_quant_to_dtype(value: Any) -> str | None:
+    if value is None:
+        return None
+    name = getattr(value, "name", str(value)).lower()
+    value_name = getattr(getattr(value, "value", None), "name", None)
+    if value_name:
+        name = value_name.lower()
+    if name in {"w4afp8", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}:
+        return name
+    return _quant_to_dtype(value)
 
 
 def _configure_default_data_roots() -> None:
