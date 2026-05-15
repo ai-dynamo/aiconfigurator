@@ -107,7 +107,7 @@ class TestMOEParallelismResolution:
         assert model_config.moe_tp_size == 1
         assert model_config.moe_ep_size == 1
 
-    def test_both_missing_moe_parallelism_defaults_to_attention_width(self):
+    def test_both_missing_moe_parallelism_raises_clear_error(self):
         model_config = config.ModelConfig(
             tp_size=4,
             attention_dp_size=2,
@@ -115,10 +115,8 @@ class TestMOEParallelismResolution:
             moe_ep_size=None,
         )
 
-        get_model("Qwen/Qwen3-235B-A22B", model_config, backend_name="trtllm")
-
-        assert model_config.moe_tp_size == 4
-        assert model_config.moe_ep_size == 2
+        with pytest.raises(ValueError, match="At least one of moe_tp_size or moe_ep_size must be set"):
+            get_model("Qwen/Qwen3-235B-A22B", model_config, backend_name="trtllm")
 
     @pytest.mark.parametrize(
         "tp_size,attention_dp_size,moe_tp_size,moe_ep_size,expected_moe_tp_size,expected_moe_ep_size",

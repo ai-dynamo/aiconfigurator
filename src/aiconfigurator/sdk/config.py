@@ -42,8 +42,8 @@ class ModelConfig:
         For MoE models, the attention width must match the expert width:
         ``tp_size * attention_dp_size == moe_tp_size * moe_ep_size``. If one
         MoE dimension is missing, infer it from the other. If both are missing,
-        keep the common default shape of ``moe_tp_size=tp_size`` and
-        ``moe_ep_size=attention_dp_size``.
+        raise an error so callers do not silently get an MoE layout they did
+        not request.
         """
 
         def _validate_positive(name: str, value: int) -> None:
@@ -57,8 +57,7 @@ class ModelConfig:
         moe_tp_size = self.moe_tp_size
         moe_ep_size = self.moe_ep_size
         if moe_tp_size is None and moe_ep_size is None:
-            moe_tp_size = self.tp_size
-            moe_ep_size = self.attention_dp_size
+            raise ValueError("At least one of moe_tp_size or moe_ep_size must be set for MoE models.")
         elif moe_tp_size is None:
             _validate_positive("moe_ep_size", moe_ep_size)
             if attn_width % moe_ep_size != 0:
@@ -81,6 +80,7 @@ class ModelConfig:
         _validate_positive("moe_tp_size", moe_tp_size)
         _validate_positive("moe_ep_size", moe_ep_size)
 
+        # TODO: enforce moe_tp_size == 1 when enable_wideep is set.
         moe_width = moe_tp_size * moe_ep_size
         if attn_width != moe_width:
             raise ValueError(

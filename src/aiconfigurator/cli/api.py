@@ -677,8 +677,12 @@ def cli_estimate(
             prefill/decode TP when their specific args are omitted.
         pp_size: Pipeline parallelism size. Default is 1.
         attention_dp_size: Attention data parallelism size. Default is 1.
-        moe_tp_size: MoE tensor parallelism size. Default is None (auto).
-        moe_ep_size: MoE expert parallelism size. Default is None (auto).
+        moe_tp_size: MoE tensor parallelism size. At least one of ``moe_tp_size``
+            or ``moe_ep_size`` is required for MoE models; the missing dimension
+            is inferred when possible.
+        moe_ep_size: MoE expert parallelism size. At least one of ``moe_tp_size``
+            or ``moe_ep_size`` is required for MoE models; the missing dimension
+            is inferred when possible.
         gemm_quant_mode: GEMM quantization mode. Default is None (auto-inferred).
         kvcache_quant_mode: KV cache quantization mode. Default is None (auto-inferred).
         fmha_quant_mode: FMHA quantization mode. Default is None (auto-inferred).
