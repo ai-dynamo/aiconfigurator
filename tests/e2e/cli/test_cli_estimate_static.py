@@ -288,6 +288,62 @@ def test_agg_estimate_responds_to_common_nextn():
     ), "nextn=1 produced an estimate identical to nextn=0; the kwarg was dropped"
 
 
+def _disagg_kwargs() -> dict:
+    """Common disagg test fixture: small split so the run is cheap."""
+    return dict(
+        model_path=_MODEL,
+        system_name=_SYSTEM,
+        backend_name="trtllm",
+        mode="disagg",
+        isl=2048,
+        osl=512,
+        tp_size=2,
+        pp_size=1,
+        prefill_tp_size=2,
+        prefill_batch_size=1,
+        prefill_num_workers=1,
+        decode_tp_size=2,
+        decode_batch_size=4,
+        decode_num_workers=1,
+    )
+
+
+def test_disagg_estimate_responds_to_common_prefix():
+    """Regression: ``--prefix`` must reach the disagg path too.
+
+    Disagg builds two ``RuntimeConfig`` copies (one for prefill, one for
+    decode) by deep-copying the shared one; if ``prefix`` weren't plumbed in
+    via ``_run_disagg_estimate``, both copies would run at prefix=0 and the
+    TTFT wouldn't move when the user passes ``--prefix``.
+    """
+    base = cli_estimate(prefix=0, **_disagg_kwargs())
+    with_prefix = cli_estimate(prefix=512, **_disagg_kwargs())
+    # Prefix caching strictly reduces context work, so TTFT should drop on
+    # the prefill side. tpot is decode-only and should stay unchanged.
+    assert with_prefix.ttft < base.ttft, (
+        f"prefix did not reach the disagg prefill path: ttft@prefix=0 was {base.ttft:.3f}, "
+        f"ttft@prefix=512 was {with_prefix.ttft:.3f}"
+    )
+
+
+def test_disagg_estimate_responds_to_common_nextn():
+    """Regression: ``--nextn`` must apply to BOTH the prefill and decode
+    worker ModelConfigs (we call ``_apply_nextn`` on both inside
+    ``_run_disagg_estimate``)."""
+    base = cli_estimate(nextn=0, **_disagg_kwargs())
+    with_mtp = cli_estimate(
+        nextn=1,
+        nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+        **_disagg_kwargs(),
+    )
+    assert (
+        base.ttft != with_mtp.ttft
+        or base.tpot != with_mtp.tpot
+        or base.raw.get("(p)memory") != with_mtp.raw.get("(p)memory")
+        or base.raw.get("(d)memory") != with_mtp.raw.get("(d)memory")
+    ), "nextn=1 produced a disagg estimate identical to nextn=0; the kwarg was dropped"
+
+
 def test_static_estimate_source_tag_sol_in_sol_mode():
     """SOL database mode should tag ops as 'sol' (or non-silicon at minimum)."""
     result = cli_estimate(database_mode="SOL", mode="static", **_common_kwargs())
