@@ -3,10 +3,23 @@
 
 """Vision (ViT-style) attention collector for multimodal models.
 
-Non-causal, MHA, no KV cache. Calls SGLang's vision ``flash_attn_varlen_func``
-directly with ``causal=False``, matching the path used by ``VisionFlash3Attention``
-(see ``sglang/srt/layers/attention/vision.py:385-449``).  No paged KV cache pool
-is created — vision is single-pass.
+Non-causal, MHA, no KV cache. We call the **same underlying kernels** that
+sglang's production ``VisionAttention`` wrapper dispatches to per-SM, but skip
+the wrapper's ``seq_lens.max().item()`` host sync (vision.py:435, 489, 369) so
+the call can be captured into a CUDA graph — matching how the existing LLM
+collectors (``collect_attn.py``) measure attention latency. Eager-mode timing
+would include wrapper host overhead and would not be comparable to LLM data.
+
+SM dispatch mirrors ``VisionAttention._determine_attention_backend``
+(vision.py:934-975):
+
+- CUDA SM == 90 (Hopper)     -> ``flash_attn_varlen_func``           (FA3)
+- CUDA SM == 100 (Blackwell) -> ``flash_attn_varlen_func(ver=4)``    (FA4)
+- other CUDA (SM<90, SM120)  -> ``context_attention_fwd``            (Triton)
+
+For our uniform-shape sweep ``max_seqlen == seq_len`` is a known python int,
+so the wrapper's host sync is unnecessary — the kernel arguments are byte-
+identical to what production passes.
 """
 
 __compat__ = "sglang>=0.5.10rc0"
@@ -16,11 +29,102 @@ from typing import NamedTuple
 import pkg_resources
 import torch
 
-from collector.helper import benchmark_with_power, log_perf
+from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
 
 class Timing(NamedTuple):
     mean: float
+
+
+def _build_kernel_runner(
+    device: torch.device,
+    batch_size: int,
+    seq_len: int,
+    num_heads: int,
+    head_dim: int,
+    dtype: torch.dtype,
+):
+    """Return ``(run_iter, backend_tag)`` for the given device and shape.
+
+    ``run_iter`` calls the same kernel that the production sglang
+    ``VisionAttention`` wrapper would dispatch on this SM, with arguments
+    matched to vision.py:430/447/370/491 (non-cuda-graph branch). Inputs are
+    closed over so ``run_iter()`` is CUDA-graph capturable (no host syncs).
+    """
+    if device.type != "cuda":
+        raise RuntimeError(
+            f"vision attention collector requires CUDA device, got {device}"
+        )
+
+    total_tokens = batch_size * seq_len
+    q = torch.randn(total_tokens, num_heads, head_dim, device=device, dtype=dtype)
+    k = torch.randn(total_tokens, num_heads, head_dim, device=device, dtype=dtype)
+    v = torch.randn(total_tokens, num_heads, head_dim, device=device, dtype=dtype)
+
+    # Uniform batch: cu_seqlens = [0, s, 2s, ..., b*s], max_seqlen = s (python int)
+    cu_seqlens = torch.arange(
+        0, (batch_size + 1) * seq_len,
+        step=seq_len, dtype=torch.int32, device=device,
+    )
+    max_seqlen = seq_len
+    softmax_scale = head_dim ** -0.5
+
+    sm = get_sm_version()  # 90 / 100 / 120 / ...
+
+    if sm == 90:
+        # Matches VisionFlash3Attention.forward (vision.py:437-447) non-graph branch.
+        from sglang.jit_kernel.flash_attention import flash_attn_varlen_func
+
+        def run_iter():
+            flash_attn_varlen_func(
+                q, k, v,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                softmax_scale=softmax_scale,
+                window_size=(-1, -1),
+            )
+
+        return run_iter, "sglang_vision_fa3"
+
+    if sm == 100:
+        # Matches VisionFlash4Attention.forward (vision.py:491-501).
+        from sglang.jit_kernel.flash_attention import flash_attn_varlen_func
+
+        def run_iter():
+            flash_attn_varlen_func(
+                q, k, v,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                softmax_scale=softmax_scale,
+                ver=4,
+            )
+
+        return run_iter, "sglang_vision_fa4"
+
+    # SM<90 or SM>100 (e.g. SM80 A100, SM120 RTX 5090): Triton path,
+    # matching VisionTritonAttention.forward (vision.py:362-381) non-graph branch.
+    from sglang.srt.layers.attention.triton_ops.prefill_attention import (
+        context_attention_fwd,
+    )
+
+    seq_lens = torch.full(
+        (batch_size,), seq_len, dtype=torch.int32, device=device,
+    )
+    output = torch.empty_like(q)
+
+    def run_iter():
+        context_attention_fwd(
+            q, k, v, output,
+            cu_seqlens, seq_lens, max_seqlen,
+            is_causal=False,
+            sm_scale=softmax_scale,
+        )
+
+    return run_iter, "sglang_vision_triton"
 
 
 def run_vision_attention_torch(
@@ -32,33 +136,27 @@ def run_vision_attention_torch(
     perf_filename,
     device="cuda:0",
 ):
-    from sglang.jit_kernel.flash_attention import flash_attn_varlen_func
-
     torch_device = torch.device(device)
     torch.cuda.set_device(device)
 
-    total_tokens = batch_size * seq_len
-    dtype = torch.bfloat16
-    q = torch.randn(total_tokens, num_heads, head_dim, device=torch_device, dtype=dtype)
-    k = torch.randn(total_tokens, num_heads, head_dim, device=torch_device, dtype=dtype)
-    v = torch.randn(total_tokens, num_heads, head_dim, device=torch_device, dtype=dtype)
-
-    cu_seqlens = torch.arange(
-        0, (batch_size + 1) * seq_len, step=seq_len, dtype=torch.int32, device=torch_device
+    run_iter, backend_tag = _build_kernel_runner(
+        device=torch_device,
+        batch_size=batch_size,
+        seq_len=seq_len,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        dtype=torch.bfloat16,
     )
 
-    def run_iter():
-        flash_attn_varlen_func(
-            q, k, v,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=seq_len,
-            max_seqlen_k=seq_len,
-            causal=False,
-        )
-
+    # Inherit the LLM collectors' default ``use_cuda_graph=True`` (see
+    # collect_attn.py:501-507). The collected latency is then directly
+    # comparable to context_attention / generation_attention numbers.
     with benchmark_with_power(
-        device=torch_device, kernel_func=run_iter, num_warmups=3, num_runs=20, repeat_n=1,
+        device=torch_device,
+        kernel_func=run_iter,
+        num_warmups=3,
+        num_runs=20,
+        repeat_n=1,
     ) as results:
         pass
 
@@ -79,7 +177,7 @@ def run_vision_attention_torch(
         version=pkg_resources.get_distribution("sglang").version,
         device_name=torch.cuda.get_device_name(device),
         op_name="vision_attention",
-        kernel_source="sglang_vision_fa",
+        kernel_source=backend_tag,
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
     )
