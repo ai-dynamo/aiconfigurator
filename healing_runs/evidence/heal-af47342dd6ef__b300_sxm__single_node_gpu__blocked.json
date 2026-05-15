@@ -1,0 +1,44 @@
+{
+  "job_id": "heal-af47342dd6ef",
+  "gpu_type": "b300_sxm",
+  "phase": "single_node_gpu",
+  "recorded_at": "2026-05-15T21:08:43Z",
+  "status": "blocked_best_effort",
+  "requested_node_count": 1,
+  "node_provider_requested": "aic_auto_collector",
+  "matrix_path": "support_matrices/b300_sxm.csv",
+  "best_verified_coverage": {
+    "total": 376,
+    "passed": 248,
+    "failed": 66,
+    "unhealable": 62
+  },
+  "blocked_reasons": [
+    {
+      "type": "missing_cluster_credentials",
+      "evidence": "CLUSTER_USERNAME and CLUSTER_SSH_KEY_BASE64 are unset in the local environment; manage_gpu_debug_node.py was run with --mode plan instead of allocating a node."
+    }
+  ],
+  "planned_debug_node": {
+    "aic_repo": "ai-dynamo/aiconfigurator",
+    "aic_revision": "heal/b300-sxm-cpu-heal-af47342dd6ef",
+    "collector_system": "b300_sxm",
+    "container_name": "aic-heal-heal-af47342dd6ef-b300-sxm-one-gpu",
+    "docker_image": "lmsysorg/sglang:v0.5.10-cu130",
+    "framework": "sglang:0.5.10",
+    "framework_source_repo": "https://github.com/sgl-project/sglang.git",
+    "node_count": 1,
+    "planned_remote_dir": "/home/jasonzho/aic_matrix_healer/heal-af47342dd6ef/b300_sxm/one_gpu/gpu-debug-5178e61f7e",
+    "timeout": "12:00:00"
+  },
+  "remaining_failure_groups": {
+    "missing_context_attention_perf": 10,
+    "missing_moe_perf": 36,
+    "missing_mhc_module": 14,
+    "other_runtime_backed_failures": 6
+  },
+  "pr_update": {
+    "updated": false,
+    "reason": "No verified one-GPU coverage increase and no changes relative to heal/b300-sxm-cpu-heal-af47342dd6ef."
+  }
+}
