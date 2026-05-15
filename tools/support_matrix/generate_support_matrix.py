@@ -29,13 +29,13 @@ from tools.support_matrix.support_matrix import (
 
 
 def main():
-    # Default output location: <package>/systems/support_matrix.csv
+    # Default output location: split per-system CSVs under <package>/systems/support_matrix/
     default_output = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "src",
         "aiconfigurator",
         "systems",
-        "support_matrix.csv",
+        "support_matrix",
     )
 
     parser = argparse.ArgumentParser(
@@ -45,7 +45,7 @@ def main():
         "--output",
         type=str,
         default=default_output,
-        help=f"Output file to save results (CSV format) (default: {default_output})",
+        help=f"Output directory for split CSV results, or a legacy CSV file path (default: {default_output})",
     )
     parser.add_argument(
         "--max-workers",

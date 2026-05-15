@@ -169,9 +169,21 @@ DEEPSEEK_V4_HF_MODELS = frozenset(
 )
 
 
-def _get_support_matrix_resource():
-    """Get the support_matrix.csv as a Traversable resource."""
-    return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
+def _iter_support_matrix_resources():
+    """Yield support matrix CSV resources in deterministic order."""
+    systems_resource = pkg_resources.files("aiconfigurator") / "systems"
+    split_matrix_resource = systems_resource / "support_matrix"
+
+    if split_matrix_resource.is_dir():
+        yield from sorted(
+            (resource for resource in split_matrix_resource.iterdir() if resource.name.endswith(".csv")),
+            key=lambda resource: resource.name,
+        )
+        return
+
+    legacy_matrix_resource = systems_resource / "support_matrix.csv"
+    if legacy_matrix_resource.is_file():
+        yield legacy_matrix_resource
 
 
 @cache
@@ -180,15 +192,15 @@ def get_support_matrix() -> list[dict[str, str]]:
     Get the support matrix as a list of dictionaries.
 
     Returns:
-        list[dict[str, str]]: List of rows from support_matrix.csv.
+        list[dict[str, str]]: List of rows from the support matrix CSV files.
     """
-    csv_resource = _get_support_matrix_resource()
     results = []
-    # Use as_file() context manager for proper package resource access
-    with pkg_resources.as_file(csv_resource) as csv_path, open(csv_path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            results.append(row)
+    for csv_resource in _iter_support_matrix_resources():
+        # Use as_file() context manager for proper package resource access.
+        with pkg_resources.as_file(csv_resource) as csv_path, open(csv_path, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                results.append(row)
     return results
 
 
@@ -299,7 +311,7 @@ def check_support(
 @cache
 def get_supported_architectures() -> set[str]:
     """
-    Get the set of supported architectures from support_matrix.csv.
+    Get the set of supported architectures from the support matrix CSV files.
 
     Returns:
         set[str]: Set of architecture names that have at least one PASSing configuration.
@@ -317,13 +329,7 @@ def get_default_models() -> set[str]:
         set[str]: Set of unique HuggingFace model IDs from the support matrix
             plus locally cached default model configs.
     """
-    csv_resource = _get_support_matrix_resource()
-    models = set()
-    # Use as_file() context manager for proper package resource access
-    with pkg_resources.as_file(csv_resource) as csv_path, open(csv_path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            models.add(row["HuggingFaceID"])
+    models = {row["HuggingFaceID"] for row in get_support_matrix()}
     models.update(DefaultHFModels)
     return models
 
@@ -331,7 +337,8 @@ def get_default_models() -> set[str]:
 """
 Cached HuggingFace model configs - these are pre-downloaded and stored in model_configs/
 Model parameters are parsed from these configs via get_model_config_from_model_path() in utils.py
-The list of default models for testing is derived from support_matrix.csv and this set via get_default_models()
+The list of default models for testing is derived from the support matrix CSV files
+and this set via get_default_models()
 """
 DefaultHFModels = {
     # Llama 3.1 Models

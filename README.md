@@ -438,9 +438,9 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 
 #### Detailed Support Matrix
 
-For a comprehensive, interactive view of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, visit the **[Support Matrix on GitHub Pages](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)**. The page fetches `support_matrix.csv` directly from GitHub at load time and supports filtering by system, mode, model search, and switching between branches.
+For a comprehensive, interactive view of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, visit the **[Support Matrix on GitHub Pages](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)**. The page fetches the split support matrix CSV files directly from GitHub at load time and supports filtering by system, mode, model search, and switching between branches.
 
-The raw data is also available as a [CSV file](src/aiconfigurator/systems/support_matrix.csv).
+The raw data is also available as [per-system CSV files](src/aiconfigurator/systems/support_matrix).
 
 You can also check support via the CLI:
 ```bash
