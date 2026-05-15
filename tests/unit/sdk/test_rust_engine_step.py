@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from types import SimpleNamespace
 
@@ -20,6 +21,51 @@ def test_should_use_rust_engine_step_supports_runtime_config_and_env(monkeypatch
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig())
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="rust"))
     assert not rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"))
+
+
+def test_autobuild_uses_release_profile(tmp_path, monkeypatch) -> None:
+    crate_root = tmp_path / "rust" / "aiconfigurator-core"
+    crate_root.mkdir(parents=True)
+    (crate_root / "Cargo.toml").write_text('[package]\nname = "aiconfigurator-core"\nversion = "0.0.0"\n')
+
+    monkeypatch.setattr(rust_engine_step, "_crate_root", lambda: crate_root)
+    monkeypatch.setattr(rust_engine_step.shutil, "which", lambda name: "/usr/bin/cargo")
+
+    commands = []
+
+    def fake_run(command, check):
+        commands.append(command)
+        library_path = crate_root / "target" / "release" / rust_engine_step._library_name()
+        library_path.parent.mkdir(parents=True)
+        library_path.touch()
+
+    monkeypatch.setattr(rust_engine_step.subprocess, "run", fake_run)
+
+    library_path = rust_engine_step._build_rust_core()
+
+    assert library_path == crate_root / "target" / "release" / rust_engine_step._library_name()
+    assert commands == [
+        [
+            "cargo",
+            "build",
+            "--release",
+            "--manifest-path",
+            str(crate_root / "Cargo.toml"),
+        ]
+    ]
+
+
+def test_find_library_can_ignore_debug_artifacts(tmp_path, monkeypatch) -> None:
+    crate_root = tmp_path / "rust" / "aiconfigurator-core"
+    debug_library_path = crate_root / "target" / "debug" / rust_engine_step._library_name()
+    debug_library_path.parent.mkdir(parents=True)
+    debug_library_path.touch()
+
+    monkeypatch.delenv("AICONFIGURATOR_RUST_CORE_LIB", raising=False)
+    monkeypatch.setattr(rust_engine_step, "_crate_root", lambda: crate_root)
+
+    assert rust_engine_step._find_library(include_debug=False) is None
+    assert rust_engine_step._find_library(include_debug=True) == debug_library_path
 
 
 def test_static_latency_breakdown_maps_runtime_config_to_fpm(monkeypatch) -> None:
@@ -143,6 +189,30 @@ def test_mixed_and_decode_helpers_map_to_fpm(monkeypatch) -> None:
     }
 
 
+def test_engine_config_json_preserves_moe_specific_quant_mode() -> None:
+    model = SimpleNamespace(
+        model_path="Test/Moe",
+        architecture="GptOssForCausalLM",
+        config=ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.w4a16_mxfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        ),
+    )
+    database = SimpleNamespace(system="test_sxm", backend="vllm", version="1.0.0")
+
+    config = json.loads(rust_engine_step._engine_config_json(model, database))
+
+    assert config["weight_dtype"] == "bfloat16"
+    assert config["moe_dtype"] == "w4a16_mxfp4"
+
+
 @pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo is required to build the Rust core shared library")
 def test_ctypes_wrapper_calls_real_rust_core(tmp_path, monkeypatch) -> None:
     systems_root = tmp_path / "systems"
@@ -151,7 +221,18 @@ def test_ctypes_wrapper_calls_real_rust_core(tmp_path, monkeypatch) -> None:
     data_root.mkdir(parents=True)
     model_configs_root.mkdir()
 
-    (systems_root / "test_sxm.yaml").write_text("data_dir: data/test_sxm\n")
+    (systems_root / "test_sxm.yaml").write_text(
+        "data_dir: data/test_sxm\n"
+        "gpu:\n"
+        "  mem_bw: 1000000000000000000000000000000\n"
+        "  mem_bw_empirical_scaling_factor: 1.0\n"
+        "  mem_empirical_constant_latency: 0.0\n"
+        "node:\n"
+        "  num_gpus_per_node: 8\n"
+        "  inter_node_bw: 1000000000000000000000000000000\n"
+        "  intra_node_bw: 1000000000000000000000000000000\n"
+        "  p2p_latency: 0.0\n"
+    )
     (model_configs_root / "Test--Dense_config.json").write_text(
         """{
   "architectures": ["LlamaForCausalLM"],
