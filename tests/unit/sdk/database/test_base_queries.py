@@ -6,7 +6,7 @@ import math
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.perf_database import LoadedOpData
+from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataNotAvailableError
 
 # Import PerfDatabase and its dependencies
 
@@ -155,6 +155,89 @@ def test_query_trtllm_alltoall_normalizes_fp8_block_lookup(stub_perf_db):
     )
 
     assert math.isclose(float(result), 3.0)
+
+
+def test_query_moe_empty_token_table_reports_missing_perf(stub_perf_db):
+    """
+    Missing MoE shape leaves should report a structured data gap, not a raw
+    list-index or dictionary-key failure.
+    """
+    stub_perf_db.backend = common.BackendName.sglang.value
+    stub_perf_db._moe_data = LoadedOpData(
+        {
+            common.MoEQuantMode.bfloat16: {
+                "uniform": {
+                    1: {
+                        8: {
+                            2048: {
+                                4096: {
+                                    1: {
+                                        1: {},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        common.PerfDataFilename.moe,
+        "dummy_moe_perf.txt",
+    )
+
+    with pytest.raises(PerfDataNotAvailableError, match=r"hidden_size=2048.*no token points"):
+        stub_perf_db.query_moe(
+            num_tokens=128,
+            hidden_size=2048,
+            inter_size=4096,
+            topk=1,
+            num_experts=8,
+            moe_tp_size=1,
+            moe_ep_size=1,
+            quant_mode=common.MoEQuantMode.bfloat16,
+            workload_distribution="power_law_1.2",
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+
+def test_query_moe_missing_shape_key_reports_missing_perf(stub_perf_db):
+    """Missing MoE shape keys should not leak raw KeyError text."""
+    stub_perf_db.backend = common.BackendName.trtllm.value
+    stub_perf_db._moe_data = LoadedOpData(
+        {
+            common.MoEQuantMode.bfloat16: {
+                "uniform": {
+                    1: {
+                        8: {
+                            1024: {
+                                4096: {
+                                    1: {
+                                        1: {128: {"latency": 1.0, "power": 0.0, "energy": 0.0}},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        common.PerfDataFilename.moe,
+        "dummy_moe_perf.txt",
+    )
+
+    with pytest.raises(PerfDataNotAvailableError, match=r"hidden_size=2048.*missing key 2048"):
+        stub_perf_db.query_moe(
+            num_tokens=128,
+            hidden_size=2048,
+            inter_size=4096,
+            topk=1,
+            num_experts=8,
+            moe_tp_size=1,
+            moe_ep_size=1,
+            quant_mode=common.MoEQuantMode.bfloat16,
+            workload_distribution="power_law_1.2",
+            database_mode=common.DatabaseMode.SILICON,
+        )
 
 
 def test_query_custom_allreduce_database_mode_calculation(stub_perf_db):

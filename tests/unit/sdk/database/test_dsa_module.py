@@ -6,7 +6,7 @@ import math
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.perf_database import DEFAULT_DSA_ARCHITECTURE, LoadedOpData
+from aiconfigurator.sdk.perf_database import DEFAULT_DSA_ARCHITECTURE, LoadedOpData, PerfDataNotAvailableError
 
 pytestmark = pytest.mark.unit
 
@@ -236,6 +236,29 @@ class TestContextDSAModule:
         )
         assert float(result) > 0
 
+    def test_missing_architecture_reports_missing_perf(self, stub_perf_db):
+        stub_perf_db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data({32: {1024: {1: _dsa_value(1.0)}}}),
+            common.PerfDataFilename.dsa_context_module,
+            "dummy_context_dsa_module_perf.txt",
+        )
+
+        with pytest.raises(
+            PerfDataNotAvailableError,
+            match=r"Context DSA module perf data not available.*architecture='unprofiled_arch'",
+        ):
+            stub_perf_db.query_context_dsa_module(
+                b=1,
+                s=1024,
+                prefix=0,
+                num_heads=32,
+                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+                fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                architecture="unprofiled_arch",
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
     def test_different_index_params_change_sol(self, comprehensive_perf_db):
         """Different index_topk should yield different SOL estimates."""
         r1 = comprehensive_perf_db.query_context_dsa_module(
@@ -356,3 +379,30 @@ class TestGenerationDSAModule:
             database_mode=common.DatabaseMode.HYBRID,
         )
         assert float(result) > 0
+
+    def test_missing_architecture_reports_missing_perf(self, stub_perf_db):
+        stub_perf_db._generation_dsa_module_data = LoadedOpData(
+            {
+                common.KVCacheQuantMode.bfloat16: {
+                    common.GEMMQuantMode.bfloat16: {
+                        DEFAULT_DSA_ARCHITECTURE: {32: {1: {1024: _dsa_value(1.0)}}},
+                    },
+                },
+            },
+            common.PerfDataFilename.dsa_generation_module,
+            "dummy_generation_dsa_module_perf.txt",
+        )
+
+        with pytest.raises(
+            PerfDataNotAvailableError,
+            match=r"Generation DSA module perf data not available.*architecture='unprofiled_arch'",
+        ):
+            stub_perf_db.query_generation_dsa_module(
+                b=1,
+                s=1024,
+                num_heads=32,
+                kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                architecture="unprofiled_arch",
+                database_mode=common.DatabaseMode.SILICON,
+            )

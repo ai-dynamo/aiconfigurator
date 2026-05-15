@@ -5553,6 +5553,51 @@ class PerfDatabase:
             scale_factor = 0.4
             return latency / scale_factor
 
+        def _raise_missing_moe_perf(
+            *,
+            source: str,
+            used_workload_distribution: str | None,
+            reason: str,
+            cause: Exception | None = None,
+        ) -> None:
+            distribution = used_workload_distribution or workload_distribution
+            exc = PerfDataNotAvailableError(
+                "MoE perf data not available for requested shape. "
+                f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
+                f"source='{source}', num_tokens={num_tokens}, hidden_size={hidden_size}, "
+                f"inter_size={inter_size}, topk={topk}, num_experts={num_experts}, "
+                f"moe_tp_size={moe_tp_size}, moe_ep_size={moe_ep_size}, "
+                f"quant_mode='{quant_mode.name}', requested_distribution='{workload_distribution}', "
+                f"used_distribution='{distribution}', reason='{reason}'."
+            )
+            if cause is None:
+                raise exc
+            raise exc from cause
+
+        def _lookup_moe_token_table(moe_data: LoadedOpData, *, source: str) -> tuple[str, dict]:
+            used_workload_distribution: str | None = None
+            try:
+                quant_data = moe_data[quant_mode]
+                used_workload_distribution = workload_distribution if workload_distribution in quant_data else "uniform"
+                moe_dict = quant_data[used_workload_distribution][topk][num_experts][hidden_size][inter_size][
+                    moe_tp_size
+                ][moe_ep_size]
+            except KeyError as exc:
+                missing_key = exc.args[0] if exc.args else "<unknown>"
+                _raise_missing_moe_perf(
+                    source=source,
+                    used_workload_distribution=used_workload_distribution,
+                    reason=f"missing key {missing_key!r}",
+                    cause=exc,
+                )
+            if not moe_dict:
+                _raise_missing_moe_perf(
+                    source=source,
+                    used_workload_distribution=used_workload_distribution,
+                    reason="no token points for shape",
+                )
+            return used_workload_distribution, moe_dict
+
         def _estimate_overflow_with_last_token_util(
             query_tokens: int,
             moe_dict: dict,
@@ -5672,12 +5717,10 @@ class PerfDatabase:
 
                     moe_data.raise_if_not_loaded()
 
-                    used_workload_distribution = (
-                        workload_distribution if workload_distribution in moe_data[quant_mode] else "uniform"
+                    used_workload_distribution, moe_dict = _lookup_moe_token_table(
+                        moe_data,
+                        source="sglang_wideep_moe" if moe_backend == "deepep_moe" else "sglang_moe",
                     )
-                    moe_dict = moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
-                        inter_size
-                    ][moe_tp_size][moe_ep_size]
                     token_points = sorted(moe_dict.keys())
                     if num_tokens_corrected > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
@@ -5725,42 +5768,25 @@ class PerfDatabase:
                         and is_gated
                     ):
                         try:
-                            used_workload_distribution = (
-                                workload_distribution
-                                if workload_distribution in self._moe_low_latency_data[quant_mode]
-                                else "uniform"
+                            used_workload_distribution, moe_dict = _lookup_moe_token_table(
+                                self._moe_low_latency_data,
+                                source="trtllm_moe_low_latency",
                             )
-                            moe_dict = self._moe_low_latency_data[quant_mode][used_workload_distribution][topk][
-                                num_experts
-                            ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-                            if not moe_dict:
-                                # Shape not present in low-latency table (nested defaultdict returned
-                                # an empty dict instead of raising KeyError). Fall back to regular data.
-                                raise KeyError(
-                                    f"No low-latency data for nvfp4 shape "
-                                    f"[{hidden_size}, {inter_size}, {topk}, {num_experts}]"
-                                )
                             logger.debug(
                                 f"Using low-latency kernel for nvfp4 moe "
                                 f"{workload_distribution} {topk} {num_experts} {hidden_size} "
                                 f"{inter_size} {moe_tp_size} {moe_ep_size}."
                             )
-                        except:
-                            used_workload_distribution = (
-                                workload_distribution
-                                if workload_distribution in self._moe_data[quant_mode]
-                                else "uniform"
+                        except PerfDataNotAvailableError:
+                            used_workload_distribution, moe_dict = _lookup_moe_token_table(
+                                self._moe_data,
+                                source="trtllm_moe",
                             )
-                            moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
-                                hidden_size
-                            ][inter_size][moe_tp_size][moe_ep_size]
                     else:
-                        used_workload_distribution = (
-                            workload_distribution if workload_distribution in self._moe_data[quant_mode] else "uniform"
+                        used_workload_distribution, moe_dict = _lookup_moe_token_table(
+                            self._moe_data,
+                            source="trtllm_moe",
                         )
-                        moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
-                            hidden_size
-                        ][inter_size][moe_tp_size][moe_ep_size]
                     token_points = sorted(moe_dict.keys())
                     if num_tokens > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
@@ -5794,12 +5820,10 @@ class PerfDatabase:
                     return PerformanceResult(lat, energy=energy)
                 elif self.backend == common.BackendName.vllm.value:
                     self._moe_data.raise_if_not_loaded()
-                    used_workload_distribution = (
-                        workload_distribution if workload_distribution in self._moe_data[quant_mode] else "uniform"
+                    used_workload_distribution, moe_dict = _lookup_moe_token_table(
+                        self._moe_data,
+                        source="vllm_moe",
                     )
-                    moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
-                        inter_size
-                    ][moe_tp_size][moe_ep_size]
                     token_points = sorted(moe_dict.keys())
                     if num_tokens > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
@@ -7046,6 +7070,20 @@ class PerfDatabase:
             emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0)
         else:
+
+            def _raise_missing_context_dsa_perf(reason: str, cause: Exception | None = None) -> None:
+                exc = PerfDataNotAvailableError(
+                    "Context DSA module perf data not available for requested shape. "
+                    f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
+                    f"b={b}, s={s}, prefix={prefix}, num_heads={num_heads}, "
+                    f"index_n_heads={index_n_heads}, index_head_dim={index_head_dim}, index_topk={index_topk}, "
+                    f"kvcache_quant_mode='{kvcache_quant_mode.name}', fmha_quant_mode='{fmha_quant_mode.name}', "
+                    f"gemm_quant_mode='{gemm_quant_mode.name}', architecture='{architecture}', reason='{reason}'."
+                )
+                if cause is None:
+                    raise exc
+                raise exc from cause
+
             try:
                 dsa_module_data = getattr(self, "_context_dsa_module_data", None)
                 if dsa_module_data is None:
@@ -7053,19 +7091,23 @@ class PerfDatabase:
                         f"Context DSA module perf data not loaded for system='{self.system}', "
                         f"backend='{self.backend}', version='{self.version}'."
                     )
-                dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
-                full_s = s + prefix
-                raw_dsa_dict = None
-                raw_dsa_module_data = getattr(self, "_raw_context_dsa_module_data", None)
-                if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
-                    raw_dsa_dict = raw_dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][
-                        architecture
-                    ]
-                result = self._interp_dsa_context_topk_piecewise_from_raw(
-                    num_heads, full_s, b, raw_dsa_dict, index_topk
-                )
-                if result is None:
-                    result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
+                try:
+                    dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
+                    full_s = s + prefix
+                    raw_dsa_dict = None
+                    raw_dsa_module_data = getattr(self, "_raw_context_dsa_module_data", None)
+                    if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
+                        raw_dsa_dict = raw_dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][
+                            architecture
+                        ]
+                    result = self._interp_dsa_context_topk_piecewise_from_raw(
+                        num_heads, full_s, b, raw_dsa_dict, index_topk
+                    )
+                    if result is None:
+                        result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
+                except (AssertionError, KeyError, IndexError, TypeError) as exc:
+                    missing_key = exc.args[0] if isinstance(exc, KeyError) and exc.args else str(exc)
+                    _raise_missing_context_dsa_perf(f"missing key or interpolation point {missing_key!r}", exc)
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
                 if prefix > 0:
@@ -7075,7 +7117,7 @@ class PerfDatabase:
                     latency *= correction
                     energy *= correction
                 return PerformanceResult(latency, energy=energy)
-            except Exception:
+            except Exception as exc:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
                         f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
@@ -7084,7 +7126,8 @@ class PerfDatabase:
                     latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
                     return PerformanceResult(latency, energy=0.0)
                 else:
-                    logger.exception(
+                    log = logger.warning if isinstance(exc, PerfDataNotAvailableError) else logger.exception
+                    log(
                         f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
                         f"{index_n_heads=}, {index_head_dim=}, {index_topk=}, "
                         f"{kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}."
@@ -7219,6 +7262,20 @@ class PerfDatabase:
             emp_latency = get_empirical(b, s, num_heads, kv_cache_dtype)
             return PerformanceResult(emp_latency, energy=0.0)
         else:
+
+            def _raise_missing_generation_dsa_perf(reason: str, cause: Exception | None = None) -> None:
+                exc = PerfDataNotAvailableError(
+                    "Generation DSA module perf data not available for requested shape. "
+                    f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
+                    f"b={b}, s={s}, num_heads={num_heads}, index_n_heads={index_n_heads}, "
+                    f"index_head_dim={index_head_dim}, index_topk={index_topk}, "
+                    f"kv_cache_dtype='{kv_cache_dtype.name}', gemm_quant_mode='{gemm_quant_mode.name}', "
+                    f"architecture='{architecture}', reason='{reason}'."
+                )
+                if cause is None:
+                    raise exc
+                raise exc from cause
+
             try:
                 dsa_module_data = getattr(self, "_generation_dsa_module_data", None)
                 if dsa_module_data is None:
@@ -7226,12 +7283,16 @@ class PerfDatabase:
                         f"Generation DSA module perf data not loaded for system='{self.system}', "
                         f"backend='{self.backend}', version='{self.version}'."
                     )
-                dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
-                result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
+                try:
+                    dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
+                    result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
+                except (AssertionError, KeyError, IndexError, TypeError) as exc:
+                    missing_key = exc.args[0] if isinstance(exc, KeyError) and exc.args else str(exc)
+                    _raise_missing_generation_dsa_perf(f"missing key or interpolation point {missing_key!r}", exc)
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
                 return PerformanceResult(latency, energy=energy)
-            except Exception:
+            except Exception as exc:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
                         f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "
@@ -7240,7 +7301,8 @@ class PerfDatabase:
                     latency = get_empirical(b, s, num_heads, kv_cache_dtype)
                     return PerformanceResult(latency, energy=0.0)
                 else:
-                    logger.exception(
+                    log = logger.warning if isinstance(exc, PerfDataNotAvailableError) else logger.exception
+                    log(
                         f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "
                         f"{index_n_heads=}, {index_head_dim=}, {index_topk=}, "
                         f"{kv_cache_dtype=}, {database_mode=}."
