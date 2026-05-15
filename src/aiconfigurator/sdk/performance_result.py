@@ -21,14 +21,14 @@ class PerformanceResult(float):
         - latency: milliseconds (ms)
         - energy: watt-milliseconds (W·ms) = millijoules (mJ)
         - power: watts (W) - derived property
-        - source: ``"silicon"`` (table data) | ``"empirical"`` (HYBRID-mode
-          SOL+empirical fallback) | ``"mixed"`` (sum of values from both)
+        - source: ``"silicon"`` (table data) | ``"empirical"`` (formula
+          estimate) | ``"hybrid"`` (sum of values from both)
 
     Note: 1 W·ms = 1 mJ. We use W·ms to match latency units (ms).
           To convert to Joules: divide by 1000 (J = W·s = W·ms / 1000)
 
     Source propagation:
-        - ``__add__``: sources merged (same -> same; mismatch -> ``"mixed"``)
+        - ``__add__``: sources merged (same -> same; mismatch -> ``"hybrid"``)
         - ``__mul__`` / ``__rmul__`` / ``__truediv__``: scalar operand has no
           provenance, so the left operand's source is preserved unchanged.
         - ``__abs__``: source preserved.
@@ -48,7 +48,7 @@ class PerformanceResult(float):
         results = [result1, result2, result3]
         total = sum(results)  # __radd__ handles sum() start value
         print(total.energy)   # Energy is preserved
-        print(total.source)   # "silicon" if all were silicon, else "mixed"
+        print(total.source)   # "silicon" if all were silicon, else "hybrid"
 
         # Sorting works based on latency
         sorted_results = sorted(results)
@@ -67,7 +67,7 @@ class PerformanceResult(float):
             latency: The latency value in milliseconds (acts as the float value)
             energy: The energy value in watt-milliseconds (W·ms)
             source: Where this measurement came from --  "silicon" (table data),
-                "empirical" (SOL+empirical fallback in HYBRID mode), or "mixed"
+                "empirical" (formula estimate), or "hybrid"
                 (sum of values from different sources).
         """
         instance = float.__new__(cls, latency)
@@ -109,17 +109,23 @@ class PerformanceResult(float):
 
     @staticmethod
     def _merge_source(a: str, b: str) -> str:
-        """Combine source tags during arithmetic. Same -> same; mismatch -> 'mixed'."""
-        return a if a == b else "mixed"
+        """Combine source tags during arithmetic. Same -> same; mismatch -> 'hybrid'."""
+        return a if a == b else "hybrid"
 
     def __add__(self, other):
         """Add two PerformanceResults or a PerformanceResult and a number."""
         if isinstance(other, PerformanceResult):
             # Add latencies and energies (both are additive!) and merge sources.
+            if float(self) == 0.0 and self.energy == 0.0:
+                source = other.source
+            elif float(other) == 0.0 and other.energy == 0.0:
+                source = self.source
+            else:
+                source = self._merge_source(self.source, other.source)
             return PerformanceResult(
                 float(self) + float(other),
                 energy=self.energy + other.energy,
-                source=self._merge_source(self.source, other.source),
+                source=source,
             )
         else:
             # Add to latency only, keep same energy and source.

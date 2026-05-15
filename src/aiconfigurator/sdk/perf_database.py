@@ -4045,16 +4045,12 @@ class PerfDatabase:
 
     @staticmethod
     def _interp_pr(latency: float, energy: float = 0.0) -> PerformanceResult:
-        """Build a PerformanceResult that came from silicon-table interpolation
-        or an inline SOL/empirical formula — i.e. *not* an exact table hit.
+        """Build a PerformanceResult derived from silicon table data.
 
-        Per the project's source-tagging convention, anything that isn't a
-        direct table lookup is reported as ``"empirical"`` so consumers
-        (e.g. the breakdown report) can distinguish measured-from-silicon vs
-        computed values. Use the regular ``PerformanceResult(..., source="silicon")``
-        constructor explicitly when you have a true exact-key hit.
+        Silicon-table interpolation/extrapolation still uses silicon data; only
+        explicit formula fallbacks should be tagged as ``"empirical"``.
         """
-        return PerformanceResult(latency, energy=energy, source="empirical")
+        return PerformanceResult(latency, energy=energy, source="silicon")
 
     def _query_silicon_or_hybrid(
         self,
@@ -4192,7 +4188,7 @@ class PerfDatabase:
 
         # SOL and EMPIRICAL modes don't have power/energy data
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0, source="sol")
+            return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(m, n, k, quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -4289,7 +4285,7 @@ class PerfDatabase:
         table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
 
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
+            return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(m, k)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -4380,7 +4376,7 @@ class PerfDatabase:
         table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
 
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
+            return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(m, k)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -4524,7 +4520,7 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
+            return PerformanceResult(sol_latency, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -4664,7 +4660,7 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
+            return PerformanceResult(sol_latency, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -4779,7 +4775,7 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
+            return PerformanceResult(sol_latency, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -4869,7 +4865,7 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, num_heads, kvcache_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
+            return PerformanceResult(sol_latency, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, num_heads, kvcache_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -4957,7 +4953,7 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
+            return PerformanceResult(sol_latency, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -5050,7 +5046,7 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
+            return PerformanceResult(sol_latency, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, num_heads, kv_cache_dtype)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -5170,7 +5166,7 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_time = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_time, energy=0.0, source="sol")
+            return PerformanceResult(sol_time, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -5296,7 +5292,7 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_time = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_time, energy=0.0, source="sol")
+            return PerformanceResult(sol_time, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -5387,7 +5383,7 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(quant_mode, tp_size, size)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
+            return PerformanceResult(sol_latency, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(quant_mode, tp_size, size)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -5397,7 +5393,7 @@ class PerfDatabase:
             # SILICON or HYBRID mode - use database
             def get_silicon():
                 if tp_size == 1:
-                    return PerformanceResult(0.0, energy=0.0)
+                    return PerformanceResult(0.0, energy=0.0, source="empirical")
                 if self.system_spec["node"]["num_gpus_per_node"] == 72 and tp_size > 4:
                     # on GB200, we only have custom all reduce for up to tp4.
                     return self.query_nccl(quant_mode, tp_size, "all_reduce", size)
@@ -5513,7 +5509,9 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(dtype, num_gpus, operation, message_size)[0], energy=0.0, source="sol")
+            return PerformanceResult(
+                get_sol(dtype, num_gpus, operation, message_size)[0], energy=0.0, source="empirical"
+            )
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(dtype, num_gpus, operation, message_size)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -5524,7 +5522,7 @@ class PerfDatabase:
             # SILICON or HYBRID mode - use database
             def get_silicon():
                 if num_gpus == 1:
-                    return PerformanceResult(0.0, energy=0.0)
+                    return PerformanceResult(0.0, energy=0.0, source="empirical")
 
                 # Use oneCCL data as fallback when NCCL data is not available (e.g. XPU systems)
                 nccl_source = self._nccl_data
@@ -5776,7 +5774,7 @@ class PerfDatabase:
                 quant_mode,
                 workload_distribution,
             )[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
+            return PerformanceResult(sol_latency, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(
                 num_tokens,
@@ -6055,7 +6053,7 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
+            return PerformanceResult(sol_latency, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(num_tokens, num_heads, quant_mode, if_pre)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -6158,34 +6156,34 @@ class PerfDatabase:
             return sol_mem, 0, sol_mem
 
         if not mamba2_data:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
 
         model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
         try:
             by_phase = mamba2_data[kernel_source]
         except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
         try:
             by_key = by_phase[phase]
         except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
         if model_key not in by_key:
             # Nearest config by d_model
             keys_with_d_model = [k for k in by_key if k[0] == d_model]
             if keys_with_d_model:
                 model_key = keys_with_d_model[0]
             else:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+                return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
 
         table = by_key[model_key]
 
         if phase == "context":
             if seq_len is None or seq_len <= 0:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+                return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
             try:
                 result = self._interp_2d_linear(batch_size, seq_len, table)
             except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+                return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
             return self._interp_pr(
                 result["latency"],
                 energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
@@ -6196,7 +6194,7 @@ class PerfDatabase:
                     batch_size, list(table.keys()), inner_only=False
                 )
             except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+                return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
 
             # Ensure we pass entry dicts {latency, power, energy}; handle legacy nested batch_size -> seq_len -> entry
             def _mamba2_gen_entry(val):
@@ -6211,7 +6209,7 @@ class PerfDatabase:
             y_left = _mamba2_gen_entry(table[batch_left])
             y_right = _mamba2_gen_entry(table[batch_right])
             if y_left is None or y_right is None:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+                return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
             result = self._interp_1d(
                 [batch_left, batch_right],
                 [y_left, y_right],
@@ -6293,34 +6291,34 @@ class PerfDatabase:
             return sol_mem, 0, sol_mem
 
         if not gdn_data:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
 
         model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
         try:
             by_phase = gdn_data[kernel_source]
         except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
         try:
             by_key = by_phase[phase]
         except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
         if model_key not in by_key:
             # Nearest config by d_model, then num_v_heads as secondary discriminator
             keys_same_d_model = [k for k in by_key if k[0] == d_model]
             if keys_same_d_model:
                 model_key = min(keys_same_d_model, key=lambda k: abs(k[3] - num_v_heads))
             else:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+                return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
 
         table = by_key[model_key]
 
         if phase == "context":
             if seq_len is None or seq_len <= 0:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+                return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
             try:
                 result = self._interp_2d_linear(batch_size, seq_len, table)
             except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+                return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
             return self._interp_pr(
                 result["latency"],
                 energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
@@ -6331,7 +6329,7 @@ class PerfDatabase:
                     batch_size, list(table.keys()), inner_only=False
                 )
             except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+                return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
 
             def _gdn_gen_entry(val):
                 if isinstance(val, dict) and "latency" in val:
@@ -6345,7 +6343,7 @@ class PerfDatabase:
             y_left = _gdn_gen_entry(table[batch_left])
             y_right = _gdn_gen_entry(table[batch_right])
             if y_left is None or y_right is None:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+                return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
             result = self._interp_1d(
                 [batch_left, batch_right],
                 [y_left, y_right],
@@ -6394,7 +6392,7 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(message_bytes)[0], energy=0.0, source="sol")
+            return PerformanceResult(get_sol(message_bytes)[0], energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(message_bytes)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -6429,7 +6427,7 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(num_tokens, topk, num_experts)[0], energy=0.0, source="sol")
+            return PerformanceResult(get_sol(num_tokens, topk, num_experts)[0], energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(num_tokens, topk, num_experts)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -6468,7 +6466,9 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(num_tokens, num_experts, topk, hidden_size)[0], energy=0.0, source="sol")
+            return PerformanceResult(
+                get_sol(num_tokens, num_experts, topk, hidden_size)[0], energy=0.0, source="empirical"
+            )
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(num_tokens, num_experts, topk, hidden_size)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -6689,7 +6689,7 @@ class PerfDatabase:
                 quant_mode,
                 workload_distribution,
             )[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
+            return PerformanceResult(sol_latency, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(
                 num_tokens,
@@ -6931,7 +6931,7 @@ class PerfDatabase:
                 quant_mode,
                 node_num,
             )[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
+            return PerformanceResult(sol_latency, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(
                 num_tokens,
@@ -6962,7 +6962,7 @@ class PerfDatabase:
         if kernel_source == "NotEnabled":
             if database_mode == common.DatabaseMode.SOL_FULL:
                 return (0.0, 0.0, 0.0)
-            return PerformanceResult(0.0, energy=0.0)
+            return PerformanceResult(0.0, energy=0.0, source="empirical")
 
         # SILICON or HYBRID mode - use database
         def get_silicon():
@@ -7193,7 +7193,7 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
+            return PerformanceResult(sol_latency, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -7403,7 +7403,7 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
+            return PerformanceResult(sol_latency, energy=0.0, source="empirical")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, num_heads, kv_cache_dtype)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -7559,7 +7559,7 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
         if database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol()
         if database_mode == common.DatabaseMode.EMPIRICAL:
@@ -7604,7 +7604,7 @@ class PerfDatabase:
                 pre_result = _lookup_single("pre")
                 post_result = _lookup_single("post")
                 # Use PerformanceResult's __add__ to merge sources correctly
-                # (silicon + silicon -> silicon, mismatch -> mixed) instead of
+                # (silicon + silicon -> silicon, mismatch -> hybrid) instead of
                 # constructing a new PR that would default-tag as silicon.
                 return pre_result + post_result
 
@@ -7931,7 +7931,7 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
         if database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol()
         if database_mode == common.DatabaseMode.EMPIRICAL:
@@ -8122,7 +8122,7 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
         if database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol()
         if database_mode == common.DatabaseMode.EMPIRICAL:

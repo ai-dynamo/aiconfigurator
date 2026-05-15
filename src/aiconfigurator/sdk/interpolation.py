@@ -633,7 +633,7 @@ def estimate_mem_op(
     if database_mode is None:
         database_mode = default_database_mode
     if database_mode == common.DatabaseMode.SOL:
-        return PerformanceResult(get_sol(mem_bytes)[0], energy=0.0, source="sol")
+        return PerformanceResult(get_sol(mem_bytes)[0], energy=0.0, source="empirical")
     if database_mode == common.DatabaseMode.SOL_FULL:
         return get_sol(mem_bytes)
     # EMPIRICAL / SILICON / HYBRID share the same empirical formula. There is

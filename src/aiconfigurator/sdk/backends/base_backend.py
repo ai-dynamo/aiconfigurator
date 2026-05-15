@@ -50,7 +50,7 @@ class BaseBackend(ABC):
         context_latency_dict = defaultdict(float)
         context_energy_wms_dict = defaultdict(float)
         # Per-op data source, accumulated by merging across calls to the same op.
-        # Same-source repeated calls keep the tag; mismatched calls collapse to "mixed".
+        # Same-source repeated calls keep the tag; mismatched calls collapse to "hybrid".
         context_source_dict: dict[str, str] = {}
 
         effective_isl = isl - prefix
@@ -76,7 +76,7 @@ class BaseBackend(ABC):
             if existing is None or existing == new_src:
                 context_source_dict[op._name] = new_src
             else:
-                context_source_dict[op._name] = "mixed"
+                context_source_dict[op._name] = "hybrid"
 
         return context_latency_dict, context_energy_wms_dict, context_source_dict
 
@@ -118,7 +118,7 @@ class BaseBackend(ABC):
                 if existing is None or existing == new_src:
                     generation_source_dict[op._name] = new_src
                 else:
-                    generation_source_dict[op._name] = "mixed"
+                    generation_source_dict[op._name] = "hybrid"
 
             repeat_count = min(stride, osl - 1 - i)
             for op in latency_dict:

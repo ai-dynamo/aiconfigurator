@@ -63,7 +63,7 @@ class InferenceSummary:
         self._generation_latency_dict = {}  # ms
         self._context_energy_wms_dict = {}  # RENAMED from _context_power_dict, W·ms
         self._generation_energy_wms_dict = {}  # RENAMED from _generation_power_dict, W·ms
-        # Per-op data source ("silicon", "empirical", or "mixed") populated by
+        # Per-op data source ("silicon", "empirical", or "hybrid") populated by
         # base_backend phase helpers from PerformanceResult.source.
         self._context_source_dict: dict[str, str] = {}
         self._generation_source_dict: dict[str, str] = {}
@@ -84,7 +84,7 @@ class InferenceSummary:
         # per-ops latency breakdown (populated by run_agg or run_disagg)
         self._per_ops_data: dict | None = None
         # per-ops data source breakdown, parallel to _per_ops_data: same key
-        # structure but values are "silicon" / "empirical" / "mixed" strings.
+        # structure but values are "silicon" / "empirical" / "hybrid" strings.
         self._per_ops_source: dict | None = None
 
         # Capacity probing context. Populated by set_memory_and_check_oom
@@ -722,7 +722,7 @@ class InferenceSummary:
         return self._per_ops_data
 
     def set_per_ops_source(self, per_ops_source: dict) -> None:
-        """Set per-operation data-source breakdown ("silicon"/"empirical"/"mixed")."""
+        """Set per-operation data-source breakdown ("silicon"/"empirical"/"hybrid")."""
         self._per_ops_source = per_ops_source
 
     def get_per_ops_source(self) -> dict | None:

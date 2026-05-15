@@ -219,9 +219,9 @@ def _flatten_sources(summary):
 def test_static_estimate_source_tag_silicon_default():
     """SILICON database mode with table-covered config should tag ops as 'silicon'.
 
-    Regression guard for the source-tagging fix in perf_database.py: previously
-    interpolated and SOL/empirical-derived ops were silently labelled 'silicon';
-    now only direct table hits keep that tag.
+    Regression guard for the source-tagging fix in perf_database.py: silicon
+    table lookups, including interpolation, should keep the 'silicon' tag,
+    while formula-derived ops should not.
     """
     result = cli_estimate(database_mode="SILICON", mode="static", **_common_kwargs())
     sources = _flatten_sources(result.summary)
@@ -232,9 +232,6 @@ def test_static_estimate_source_tag_silicon_default():
     assert any(s == "silicon" for s in sources), (
         f"expected at least one 'silicon' tag in SILICON mode, got: {set(sources)}"
     )
-    # No op should be 'sol' in SILICON mode (only SOL mode emits that tag).
-    assert "sol" not in sources, f"'sol' tag leaked in SILICON mode: {sources}"
-
 
 def test_static_estimate_source_tag_empirical_in_empirical_mode():
     """EMPIRICAL database mode should never tag any op as 'silicon'."""
@@ -344,12 +341,15 @@ def test_disagg_estimate_responds_to_common_nextn():
     ), "nextn=1 produced a disagg estimate identical to nextn=0; the kwarg was dropped"
 
 
-def test_static_estimate_source_tag_sol_in_sol_mode():
-    """SOL database mode should tag ops as 'sol' (or non-silicon at minimum)."""
+def test_static_estimate_source_tag_empirical_in_sol_mode():
+    """SOL database mode should report formula-based ops as empirical."""
     result = cli_estimate(database_mode="SOL", mode="static", **_common_kwargs())
     sources = _flatten_sources(result.summary)
     assert sources, "expected per-op source tags to be populated"
     # No op should be tagged 'silicon' in SOL mode.
     assert all(s != "silicon" for s in sources), (
-        f"'silicon' tag leaked in SOL mode (sources should be 'sol' or 'empirical'): {sources}"
+        f"'silicon' tag leaked in SOL mode (sources should be empirical/hybrid): {sources}"
+    )
+    assert any(s == "empirical" for s in sources), (
+        f"expected at least one 'empirical' tag in SOL mode, got: {set(sources)}"
     )
