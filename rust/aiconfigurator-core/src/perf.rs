@@ -12,6 +12,12 @@ use csv::StringRecord;
 
 use crate::AicError;
 
+// Prefer exact MoE distribution matches; uniform is a cheap fallback, while
+// mismatched shaped distributions should be selected only when closer overall.
+const DIST_PENALTY_SAME: f64 = 0.0;
+const DIST_PENALTY_UNIFORM: f64 = 0.05;
+const DIST_PENALTY_OTHER: f64 = 0.25;
+
 #[derive(Clone, Debug)]
 pub(crate) struct PerfDatabase {
     system: SystemSpec,
@@ -470,11 +476,11 @@ impl PerfDatabase {
         let mut best: Option<(f64, f64)> = None;
         for point in self.moe.iter().filter(|point| point.quant == quant) {
             let distribution_penalty = if point.distribution == used_distribution {
-                0.0
+                DIST_PENALTY_SAME
             } else if point.distribution == "uniform" {
-                0.05
+                DIST_PENALTY_UNIFORM
             } else {
-                0.25
+                DIST_PENALTY_OTHER
             };
             let score = distribution_penalty
                 + relative_distance(point.num_tokens, num_tokens)
@@ -716,16 +722,36 @@ fn read_system_spec(system_path: &Path) -> Result<SystemSpec, AicError> {
         };
         let value = clean_yaml_scalar(value);
         match (section, name.trim()) {
-            ("gpu", "mem_bw") => mem_bw = parse_yaml_f64(&value),
+            ("gpu", "mem_bw") => {
+                mem_bw = Some(parse_required_yaml_f64(system_path, "gpu.mem_bw", &value)?)
+            }
             ("gpu", "mem_bw_empirical_scaling_factor") => {
                 mem_bw_empirical_scaling_factor = parse_yaml_f64(&value)
             }
             ("gpu", "mem_empirical_constant_latency") => {
                 mem_empirical_constant_latency = parse_yaml_f64(&value)
             }
-            ("node", "num_gpus_per_node") => num_gpus_per_node = parse_yaml_u32(&value),
-            ("node", "inter_node_bw") => inter_node_bw = parse_yaml_f64(&value),
-            ("node", "intra_node_bw") => intra_node_bw = parse_yaml_f64(&value),
+            ("node", "num_gpus_per_node") => {
+                num_gpus_per_node = Some(parse_required_yaml_u32(
+                    system_path,
+                    "node.num_gpus_per_node",
+                    &value,
+                )?)
+            }
+            ("node", "inter_node_bw") => {
+                inter_node_bw = Some(parse_required_yaml_f64(
+                    system_path,
+                    "node.inter_node_bw",
+                    &value,
+                )?)
+            }
+            ("node", "intra_node_bw") => {
+                intra_node_bw = Some(parse_required_yaml_f64(
+                    system_path,
+                    "node.intra_node_bw",
+                    &value,
+                )?)
+            }
             ("node", "p2p_latency") => p2p_latency = parse_yaml_f64(&value),
             ("misc", "nccl_version") => nccl_version = Some(value),
             _ => {}
@@ -739,12 +765,16 @@ fn read_system_spec(system_path: &Path) -> Result<SystemSpec, AicError> {
             ))
         })?,
         nccl_version: nccl_version.unwrap_or_default(),
-        mem_bw: mem_bw.unwrap_or(1.0),
+        mem_bw: require_system_field(system_path, "gpu.mem_bw", mem_bw)?,
         mem_bw_empirical_scaling_factor: mem_bw_empirical_scaling_factor.unwrap_or(1.0),
         mem_empirical_constant_latency: mem_empirical_constant_latency.unwrap_or(0.0),
-        num_gpus_per_node: num_gpus_per_node.unwrap_or(1),
-        inter_node_bw: inter_node_bw.unwrap_or(1.0),
-        intra_node_bw: intra_node_bw.or(inter_node_bw).unwrap_or(1.0),
+        num_gpus_per_node: require_system_field(
+            system_path,
+            "node.num_gpus_per_node",
+            num_gpus_per_node,
+        )?,
+        inter_node_bw: require_system_field(system_path, "node.inter_node_bw", inter_node_bw)?,
+        intra_node_bw: require_system_field(system_path, "node.intra_node_bw", intra_node_bw)?,
         p2p_latency: p2p_latency.unwrap_or(0.0),
     })
 }
@@ -761,8 +791,44 @@ fn parse_yaml_f64(value: &str) -> Option<f64> {
     value.split_whitespace().next()?.parse::<f64>().ok()
 }
 
-fn parse_yaml_u32(value: &str) -> Option<u32> {
-    value.split_whitespace().next()?.parse::<u32>().ok()
+fn parse_required_yaml_f64(system_path: &Path, field: &str, value: &str) -> Result<f64, AicError> {
+    value
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| missing_system_field_error(system_path, field))?
+        .parse::<f64>()
+        .map_err(|_| invalid_system_field_error(system_path, field, value))
+}
+
+fn parse_required_yaml_u32(system_path: &Path, field: &str, value: &str) -> Result<u32, AicError> {
+    value
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| missing_system_field_error(system_path, field))?
+        .parse::<u32>()
+        .map_err(|_| invalid_system_field_error(system_path, field, value))
+}
+
+fn require_system_field<T>(
+    system_path: &Path,
+    field: &str,
+    value: Option<T>,
+) -> Result<T, AicError> {
+    value.ok_or_else(|| missing_system_field_error(system_path, field))
+}
+
+fn missing_system_field_error(system_path: &Path, field: &str) -> AicError {
+    AicError::PerfDatabase(format!(
+        "missing {field} in system file {}",
+        system_path.display()
+    ))
+}
+
+fn invalid_system_field_error(system_path: &Path, field: &str, value: &str) -> AicError {
+    AicError::PerfDatabase(format!(
+        "invalid {field} value {value:?} in system file {}",
+        system_path.display()
+    ))
 }
 
 fn resolve_backend_version(
@@ -884,6 +950,8 @@ fn interpolate_1d_latency(points: &[(u32, f64)], query: u32) -> Option<f64> {
     if x0 == x1 {
         return Some(y0);
     }
+    // When extrapolating with a negative measured slope, flatten the line to
+    // avoid nonsensical latency estimates; keep this in sync with the u64 path.
     if (x0 - x1) * (y0 - y1) < 0.0 && (x - x0) * (x - x1) > 0.0 {
         y1 = y0;
     }
@@ -928,6 +996,7 @@ fn interpolate_1d_latency_u64(points: &[(u64, f64)], query: u64) -> Option<f64> 
     if x0 == x1 {
         return Some(y0);
     }
+    // Same negative-slope extrapolation guard used by interpolate_1d_latency.
     if (x0 - x1) * (y0 - y1) < 0.0 && (x - x0) * (x - x1) > 0.0 {
         y1 = y0;
     }
@@ -1037,6 +1106,9 @@ fn average_generation_attention_latency(
 }
 
 fn collective_gpu_count_scale(measured_gpus: u32, requested_gpus: u32) -> f64 {
+    if measured_gpus <= 1 || requested_gpus <= 1 {
+        return 1.0;
+    }
     (f64::from(requested_gpus - 1) / f64::from(requested_gpus))
         * (f64::from(measured_gpus) / f64::from(measured_gpus - 1))
 }

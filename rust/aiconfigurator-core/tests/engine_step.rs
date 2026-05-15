@@ -259,6 +259,27 @@ reduce_scatter,half,2,3840,11.0\n",
 }
 
 #[test]
+fn moe_dispatch_rejects_invalid_attention_dp_topology() {
+    let fixture = Fixture::new_moe();
+    let mut config = moe_engine_config();
+    config.moe_ep_size = Some(1);
+    config.attention_dp_size = Some(2);
+    let estimator = fixture.estimator_with_config(config);
+    let metrics = ForwardPassMetrics {
+        scheduled_requests: ScheduledRequestMetrics {
+            num_prefill_requests: 1,
+            sum_prefill_tokens: 60,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let err = estimator.forward_pass_time_ms(&[metrics]).unwrap_err();
+
+    assert!(err.to_string().contains("invalid MoE dispatch topology"));
+}
+
+#[test]
 fn moe_non_attention_includes_shared_expert_costs() {
     let fixture = Fixture::new_moe();
     fs::write(
@@ -641,6 +662,37 @@ fn git_lfs_pointer_is_reported() {
     .to_string();
 
     assert!(err.contains("Git LFS pointer"));
+}
+
+#[test]
+fn missing_required_system_perf_field_is_reported() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.systems_root().join("test_sxm.yaml"),
+        "data_dir: data/test_sxm\n\
+gpu:\n\
+  mem_bw_empirical_scaling_factor: 1.0\n\
+  mem_empirical_constant_latency: 0.0\n\
+node:\n\
+  num_gpus_per_node: 8\n\
+  inter_node_bw: 1000000000000\n\
+  intra_node_bw: 1000000000000\n\
+  p2p_latency: 0.0\n\
+misc:\n\
+  nccl_version: '1.0.0'\n",
+    )
+    .unwrap();
+
+    let err = EngineStepEstimator::from_config_with_roots(
+        engine_config(),
+        fixture.systems_root(),
+        fixture.model_configs_root(),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("missing gpu.mem_bw"));
+    assert!(err.contains("test_sxm.yaml"));
 }
 
 #[test]

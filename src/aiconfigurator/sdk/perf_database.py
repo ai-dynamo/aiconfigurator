@@ -95,12 +95,18 @@ class PerfDataNotAvailableError(RuntimeError):
 def has_perf_data_not_available_cause(error: BaseException) -> bool:
     """Return True when an exception or chained cause is a structured perf-data miss."""
     seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and id(current) not in seen:
+    stack: list[BaseException] = [error]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
         if isinstance(current, PerfDataNotAvailableError):
             return True
         seen.add(id(current))
-        current = current.__cause__ or current.__context__
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)
     return False
 
 

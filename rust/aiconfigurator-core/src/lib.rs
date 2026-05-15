@@ -464,7 +464,7 @@ impl EngineStepEstimator {
         let dense_tokens_u64 = u64::from(dense_tokens);
         let moe_tp = self.config.moe_tp_size.unwrap_or(tp).max(1);
         let moe_ep = self.config.moe_ep_size.unwrap_or(1).max(1);
-        let attention_dp = self.config.attention_dp_size.unwrap_or(1).max(1);
+        let attention_dp = self.config.attention_dp_size.unwrap_or(1);
 
         let dense_ffn =
             self.perf.query_gemm(
@@ -707,7 +707,12 @@ impl EngineStepEstimator {
         pre_dispatch: bool,
     ) -> Result<f64, AicError> {
         let num_gpus = moe_tp.saturating_mul(moe_ep).max(1);
-        let attention_tp = num_gpus / attention_dp.max(1);
+        if attention_dp == 0 || attention_dp > num_gpus || num_gpus % attention_dp != 0 {
+            return Err(AicError::InvalidEngineConfig(format!(
+                "invalid MoE dispatch topology: moe_tp ({moe_tp}) * moe_ep ({moe_ep}) must be divisible by attention_dp_size ({attention_dp})"
+            )));
+        }
+        let attention_tp = num_gpus / attention_dp;
         if matches!(self.config.backend, BackendKind::Sglang)
             && attention_tp > 1
             && attention_dp > 1
