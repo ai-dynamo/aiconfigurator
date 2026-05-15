@@ -485,7 +485,7 @@ class EstimateResult:
     """
 
     kv_cache_warning: str | None = None
-    """Warning message when batch_size exceeds KV cache capacity."""
+    """Warning message for non-fatal memory capacity issues."""
 
     @property
     def request_latency(self) -> float:
@@ -1157,8 +1157,9 @@ def _run_static_estimate(
         stride=stride,
     )
 
+    static_warning = None
     if summary.check_oom():
-        raise RuntimeError(
+        static_warning = (
             f"OOM: the model '{model_path}' does not fit in GPU memory on system "
             f"'{system_name}' with the given parallelism (tp={tp_size}, pp={pp_size}, "
             f"dp={attention_dp_size}) and batch_size={batch_size}. Reduce batch_size, "
@@ -1188,7 +1189,7 @@ def _run_static_estimate(
         summary=summary,
         per_ops_data=None,
         per_ops_source=None,
-        kv_cache_warning=None,
+        kv_cache_warning=static_warning,
     )
 
 

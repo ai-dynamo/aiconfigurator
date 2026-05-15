@@ -6102,12 +6102,27 @@ class PerfDatabase:
             PerformanceResult acting as float (latency in ms); energy via ``.energy``.
             For SOL_FULL, returns a ``(sol_time, 0, sol_time)`` tuple.
         """
-        return interpolation.estimate_mem_op(
-            mem_bytes,
-            self.system_spec["gpu"],
-            database_mode=database_mode,
-            default_database_mode=self._default_database_mode,
-        )
+        gpu_spec = self.system_spec["gpu"]
+
+        def get_sol() -> tuple[float, float, float]:
+            sol_time = mem_bytes / gpu_spec["mem_bw"] * 1000
+            return sol_time, 0, sol_time
+
+        def get_empirical() -> float:
+            return (
+                mem_bytes / (gpu_spec["mem_bw"] * gpu_spec["mem_bw_empirical_scaling_factor"])
+                + gpu_spec["mem_empirical_constant_latency"]
+            ) * 1000
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
+            return PerformanceResult(get_sol()[0], energy=0.0, source="empirical")
+        if database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol()
+        # EMPIRICAL / SILICON / HYBRID share the same empirical formula. There is
+        # no silicon table for raw memory ops, so always tag as ``empirical``.
+        return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
 
     def query_mamba2(
         self,

@@ -107,6 +107,60 @@ class TestCLIEstimateUnit:
         assert ("h200_sxm", "trtllm", "prefill-version", True) in database_calls
         assert ("h100_pcie", "trtllm", "estimate", True) in database_calls
 
+    def test_static_estimate_returns_warning_for_oom(self):
+        import aiconfigurator.cli.api as api
+
+        class FakeSummary:
+            def check_oom(self):
+                return True
+
+            def get_result_dict(self):
+                return {
+                    "ttft": 1.0,
+                    "tpot": 0.5,
+                    "power_w": 100.0,
+                    "request_latency": 8.5,
+                }
+
+        fake_summary = FakeSummary()
+
+        class FakeBackend:
+            def run_static(self, *args, **kwargs):
+                return fake_summary
+
+        result = api._run_static_estimate(
+            static_mode="static",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            resolved_version="test-version",
+            isl=128,
+            osl=16,
+            batch_size=1,
+            prefix=0,
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=None,
+            moe_ep_size=None,
+            gemm_quant_mode=None,
+            kvcache_quant_mode=None,
+            fmha_quant_mode=None,
+            moe_quant_mode=None,
+            comm_quant_mode=None,
+            nextn=0,
+            nextn_accept_rates=None,
+            stride=32,
+            engine_step_backend=None,
+            load_database=lambda system: object(),
+            get_backend=lambda backend_name: FakeBackend(),
+            get_model=lambda model_path, model_config, backend_name: object(),
+        )
+
+        assert result.summary is fake_summary
+        assert result.kv_cache_warning is not None
+        assert "OOM:" in result.kv_cache_warning
+
 
 class TestCLIExpUnit:
     """Unit tests for cli_exp API (mocked)."""
