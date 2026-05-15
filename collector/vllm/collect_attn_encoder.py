@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vision (ViT-style) attention collector for multimodal models.
+"""Encoder (non-causal) attention collector for multimodal / omni-modal models.
 
-Non-causal, MHA, no KV cache. Uses vLLM's official ``AttentionType.ENCODER_ONLY``
-path, which:
+Covers ViT-style vision encoders, audio encoders, and any other bidirectional
+encoder path: full N^2, MHA, no KV cache. Uses vLLM's official
+``AttentionType.ENCODER_ONLY`` path, which:
   - sets ``causal=False`` (vit_attn_wrappers.py)
   - skips ``reshape_and_cache_flash`` in ``FlashAttentionImpl.do_kv_cache_update``
-so the measured latency matches the kernel actually invoked by ViT inference.
+so the measured latency matches the kernel actually invoked by encoder inference.
 """
 
 __compat__ = "vllm>=0.11.0"
@@ -38,7 +39,7 @@ from collector.vllm.utils import (
 
 
 @with_exit_stack
-def run_vision_attention_torch(
+def run_encoder_attention_torch(
     exit_stack,
     batch_size,
     seq_len,
@@ -55,7 +56,7 @@ def run_vision_attention_torch(
     model = os.path.join(os.path.dirname(__file__), "fake_hf_model")
     block_size = 64
 
-    # All seqs are full-prefill (vision is single-pass)
+    # All seqs are full-prefill (encoder is single-pass)
     batch_spec = BatchSpec(
         seq_lens=[seq_len] * batch_size,
         query_lens=[seq_len] * batch_size,
@@ -96,7 +97,7 @@ def run_vision_attention_torch(
     backend_name_str = backend_name_obj.get_name()
 
     common_attn_metadata = create_common_attn_metadata(batch_spec, block_size, device)
-    # Non-causal: vit attention does not use causal mask
+    # Non-causal: encoder attention does not use causal mask
     if hasattr(common_attn_metadata, "causal"):
         common_attn_metadata.causal = False
 
@@ -122,7 +123,7 @@ def run_vision_attention_torch(
         attn_type=AttentionType.ENCODER_ONLY,
     )
 
-    # Generate raw Q/K/V (no paged KV cache prepopulation needed for ViT)
+    # Generate raw Q/K/V (no paged KV cache prepopulation needed for encoder)
     total_tokens = batch_size * seq_len
     query = torch.randn(total_tokens, num_heads, head_dim, dtype=dtype, device=device)
     key = torch.randn(total_tokens, num_heads, head_dim, dtype=dtype, device=device)
@@ -142,7 +143,7 @@ def run_vision_attention_torch(
         pass
 
     latency = results["latency_ms"]
-    print(f"vision attn latency: {latency}")
+    print(f"encoder attn latency: {latency}")
     kernel_source = f"vllm_{backend_name_str}".lower()
 
     log_perf(
@@ -159,15 +160,15 @@ def run_vision_attention_torch(
         framework="VLLM",
         version=vllm_version,
         device_name=torch.cuda.get_device_name(device),
-        op_name="vision_attention",
+        op_name="encoder_attention",
         kernel_source=kernel_source,
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
     )
 
 
-def get_vision_attention_test_cases(if_unit_test=False):
-    """ViT-only matrix: MHA, bf16, non-causal, head_dim covers Qwen3-VL / InternVL3 / Llama4-V."""
+def get_encoder_attention_test_cases(if_unit_test=False):
+    """Encoder matrix: MHA, bf16, non-causal, head_dim covers Qwen3-VL / InternVL3 / Llama4-V."""
     if if_unit_test:
         return [[1, 256, 16, 72]]
 
@@ -191,6 +192,6 @@ def get_vision_attention_test_cases(if_unit_test=False):
 if __name__ == "__main__":
     from collector.registry_types import PerfFile
 
-    for test_case in get_vision_attention_test_cases()[:5]:
-        print(f"Running vision attention test case: {test_case}")
-        run_vision_attention_torch(*test_case, perf_filename=PerfFile.VISION_ATTENTION)
+    for test_case in get_encoder_attention_test_cases()[:5]:
+        print(f"Running encoder attention test case: {test_case}")
+        run_encoder_attention_torch(*test_case, perf_filename=PerfFile.ENCODER_ATTENTION)

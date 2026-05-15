@@ -941,13 +941,13 @@ class ContextAttention(Operation):
 
 class EncoderAttention(Operation):
     """
-    ViT-style encoder attention: non-causal, MHA, no KV cache, optional partial RoPE.
+    Non-causal encoder attention: full N^2, MHA, no KV cache, optional partial RoPE.
 
-    Used to model vision transformer (and other bidirectional encoder) attention
-    where the kernel runs full N^2 attention without a causal mask and without
-    writing a KV cache. The optional ``partial_rotary_factor`` accounts for
-    partial-rotation RoPE variants such as Qwen3-VL (factor=0.5, rotating half
-    of head_dim). Set to 0.0 to disable RoPE entirely.
+    Used to model bidirectional encoders — ViT (vision), audio encoders, and any
+    other omni-modal encoder where the kernel runs full N^2 attention without a
+    causal mask and without writing a KV cache. The optional
+    ``partial_rotary_factor`` accounts for partial-rotation RoPE variants such as
+    Qwen3-VL (factor=0.5, rotating half of head_dim). Set to 0.0 to disable RoPE.
     """
 
     def __init__(
@@ -967,11 +967,11 @@ class EncoderAttention(Operation):
         self._weights = 0.0
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """Query vision encoder attention latency with energy data."""
+        """Query encoder attention latency with energy data."""
         batch_size = kwargs.get("batch_size")
         seq_len = kwargs.get("s")
 
-        result = database.query_vision_attention(
+        result = database.query_encoder_attention(
             batch_size,
             seq_len,
             self._n,

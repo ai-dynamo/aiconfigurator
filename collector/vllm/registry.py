@@ -35,11 +35,11 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.GENERATION_ATTENTION,
     ),
     OpEntry(
-        op="attention_vision",
-        module="collector.vllm.collect_attn_mm",
-        get_func="get_vision_attention_test_cases",
-        run_func="run_vision_attention_torch",
-        perf_filename=PerfFile.VISION_ATTENTION,
+        op="attention_encoder",
+        module="collector.vllm.collect_attn_encoder",
+        get_func="get_encoder_attention_test_cases",
+        run_func="run_encoder_attention_torch",
+        perf_filename=PerfFile.ENCODER_ATTENTION,
     ),
     OpEntry(
         op="moe",

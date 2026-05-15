@@ -645,7 +645,7 @@ class PerfDataFilename(Enum):
     oneccl = "oneccl_perf.txt"
     generation_attention = "generation_attention_perf.txt"
     context_attention = "context_attention_perf.txt"
-    vision_attention = "vision_attention_perf.txt"
+    encoder_attention = "encoder_attention_perf.txt"
     context_mla = "context_mla_perf.txt"
     generation_mla = "generation_mla_perf.txt"
     mla_bmm = "mla_bmm_perf.txt"

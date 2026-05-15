@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vision (ViT-style) attention collector for multimodal models.
+"""Encoder (non-causal) attention collector for multimodal / omni-modal models.
 
-Non-causal, MHA, no KV cache. Uses the same path Qwen2-VL ViT uses in TRT-LLM
-(see ``tensorrt_llm/_torch/models/modeling_qwen2vl.py``):
+Covers ViT-style vision encoders, audio encoders, and any other bidirectional
+encoder path: full N^2, MHA, no KV cache. Uses the same TRT-LLM path that
+Qwen2-VL ViT uses in production (see
+``tensorrt_llm/_torch/models/modeling_qwen2vl.py``):
   - ``kv_cache_manager=None`` -> prepare() sets use_cache=False, kv_cache_block_offsets=None
   - ``attention_mask=PredefinedAttentionMask.FULL`` -> mMaskType=padding (non-causal)
 """
@@ -30,7 +32,7 @@ from collector.helper import benchmark_with_power, log_perf
 from collector.registry_types import PerfFile
 
 
-def run_vision_attention_torch(
+def run_encoder_attention_torch(
     batch_size,
     seq_len,
     num_heads,
@@ -64,7 +66,7 @@ def run_vision_attention_torch(
     input_seq_lens = [seq_len] * batch_size
     request_ids = list(range(batch_size))
 
-    # No KV cache: vision is single-pass. This mirrors Qwen2-VL ViT
+    # No KV cache: encoder is single-pass. This mirrors Qwen2-VL ViT
     # (modeling_qwen2vl.py:708-717) which sets kv_cache_manager=None.
     attn_metadata = TrtllmAttentionMetadata(
         max_num_requests=batch_size,
@@ -123,15 +125,15 @@ def run_vision_attention_torch(
         framework="TRTLLM",
         version=tensorrt_llm.__version__,
         device_name=torch.cuda.get_device_name(device),
-        op_name="vision_attention",
+        op_name="encoder_attention",
         kernel_source="torch_flow",
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
     )
 
 
-def get_vision_attention_test_cases():
-    """ViT-only matrix: MHA, bf16, non-causal."""
+def get_encoder_attention_test_cases():
+    """Encoder matrix: MHA, bf16, non-causal."""
     b_list = [1, 2, 4, 8, 16, 32, 64]
     s_list = [256, 512, 1024, 2048, 4096, 8192, 16384]
     n_list = [12, 16, 24, 32]
@@ -149,6 +151,6 @@ def get_vision_attention_test_cases():
 
 
 if __name__ == "__main__":
-    for test_case in get_vision_attention_test_cases()[:5]:
-        print(f"Running vision attention test case: {test_case}")
-        run_vision_attention_torch(*test_case, perf_filename=PerfFile.VISION_ATTENTION)
+    for test_case in get_encoder_attention_test_cases()[:5]:
+        print(f"Running encoder attention test case: {test_case}")
+        run_encoder_attention_torch(*test_case, perf_filename=PerfFile.ENCODER_ATTENTION)

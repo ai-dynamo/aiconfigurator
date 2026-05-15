@@ -29,7 +29,7 @@ _LOADER_STUBS: dict[str, object] = {
     "load_gemm_data": None,
     "load_context_attention_data": None,
     "load_generation_attention_data": None,
-    "load_vision_attention_data": None,
+    "load_encoder_attention_data": None,
     "load_moe_data": (None, None),  # returns tuple
     "load_custom_allreduce_data": None,
     "load_nccl_data": None,  # also used for oneccl
@@ -210,9 +210,9 @@ def _build_comprehensive_test_data():
                                         window_size
                                     ][n][s][b] = 0.01 * (n * s * b) / 1000.0
 
-    # Vision (ViT-style) attention data: [fmha_quant][head_size][n][s][b]
+    # Encoder (non-causal) attention data: [fmha_quant][head_size][n][s][b]
     # MHA only, no kv_cache_dtype, no window_size.
-    dummy_vision_attention_data = defaultdict(
+    dummy_encoder_attention_data = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     )
     for quant_mode in [common.FMHAQuantMode.bfloat16]:
@@ -220,7 +220,7 @@ def _build_comprehensive_test_data():
             for n in [4, 8, 16, 32]:
                 for s in [16, 32, 64, 128, 256]:
                     for b in [1, 2, 4, 8]:
-                        dummy_vision_attention_data[quant_mode][head_size][n][s][b] = {
+                        dummy_encoder_attention_data[quant_mode][head_size][n][s][b] = {
                             "latency": 0.02 * (n * s * b) / 1000.0,
                             "power": 0.0,
                             "energy": 0.0,
@@ -319,7 +319,7 @@ def _build_comprehensive_test_data():
         "system_spec": dummy_system_spec,
         "gemm_data": dummy_gemm_data,
         "context_attention_data": dummy_context_attention_data,
-        "vision_attention_data": dummy_vision_attention_data,
+        "encoder_attention_data": dummy_encoder_attention_data,
         "generation_attention_data": dummy_generation_attention_data,
         "moe_data": dummy_moe_data,
         "context_mla_data": dummy_context_mla_data,
@@ -356,7 +356,7 @@ def _get_comprehensive_db_singleton() -> PerfDatabase:
         "load_gemm_data": cached["gemm_data"],
         "load_context_attention_data": cached["context_attention_data"],
         "load_generation_attention_data": cached["generation_attention_data"],
-        "load_vision_attention_data": cached["vision_attention_data"],
+        "load_encoder_attention_data": cached["encoder_attention_data"],
         "load_moe_data": (cached["moe_data"], cached["moe_data"]),
         "load_custom_allreduce_data": cached["custom_allreduce_data"],
         "load_nccl_data": cached["nccl_data"],

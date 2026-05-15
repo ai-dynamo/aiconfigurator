@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vision (ViT-style) attention collector for multimodal models.
+"""Encoder (non-causal) attention collector for multimodal / omni-modal models.
 
-Non-causal, MHA, no KV cache. We call the **same underlying kernels** that
-sglang's production ``VisionAttention`` wrapper dispatches to per-SM, but skip
-the wrapper's ``seq_lens.max().item()`` host sync (vision.py:435, 489, 369) so
-the call can be captured into a CUDA graph — matching how the existing LLM
+Covers ViT-style vision encoders, audio encoders, and any other bidirectional
+encoder path: full N^2, MHA, no KV cache. We call the **same underlying kernels**
+that sglang's production ``VisionAttention`` wrapper dispatches to per-SM, but
+skip the wrapper's ``seq_lens.max().item()`` host sync (vision.py:435, 489, 369)
+so the call can be captured into a CUDA graph — matching how the existing LLM
 collectors (``collect_attn.py``) measure attention latency. Eager-mode timing
 would include wrapper host overhead and would not be comparable to LLM data.
 
@@ -53,7 +54,7 @@ def _build_kernel_runner(
     """
     if device.type != "cuda":
         raise RuntimeError(
-            f"vision attention collector requires CUDA device, got {device}"
+            f"encoder attention collector requires CUDA device, got {device}"
         )
 
     total_tokens = batch_size * seq_len
@@ -86,7 +87,7 @@ def _build_kernel_runner(
                 window_size=(-1, -1),
             )
 
-        return run_iter, "sglang_vision_fa3"
+        return run_iter, "sglang_encoder_fa3"
 
     if sm == 100:
         # Matches VisionFlash4Attention.forward (vision.py:491-501).
@@ -103,7 +104,7 @@ def _build_kernel_runner(
                 ver=4,
             )
 
-        return run_iter, "sglang_vision_fa4"
+        return run_iter, "sglang_encoder_fa4"
 
     # SM<90 or SM>100 (e.g. SM80 A100, SM120 RTX 5090): Triton path,
     # matching VisionTritonAttention.forward (vision.py:362-381) non-graph branch.
@@ -124,10 +125,10 @@ def _build_kernel_runner(
             sm_scale=softmax_scale,
         )
 
-    return run_iter, "sglang_vision_triton"
+    return run_iter, "sglang_encoder_triton"
 
 
-def run_vision_attention_torch(
+def run_encoder_attention_torch(
     batch_size,
     seq_len,
     num_heads,
@@ -176,7 +177,7 @@ def run_vision_attention_torch(
         framework="SGLang",
         version=pkg_resources.get_distribution("sglang").version,
         device_name=torch.cuda.get_device_name(device),
-        op_name="vision_attention",
+        op_name="encoder_attention",
         kernel_source=backend_tag,
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
@@ -185,8 +186,8 @@ def run_vision_attention_torch(
     return Timing(latency * 1e-3)
 
 
-def get_vision_attention_test_cases():
-    """ViT-only matrix: MHA, bf16, non-causal."""
+def get_encoder_attention_test_cases():
+    """Encoder-only matrix: MHA, bf16, non-causal."""
     b_list = [1, 2, 4, 8, 16, 32, 64]
     s_list = [256, 512, 1024, 2048, 4096, 8192, 16384]
     n_list = [12, 16, 24, 32]
@@ -206,6 +207,6 @@ def get_vision_attention_test_cases():
 if __name__ == "__main__":
     from collector.registry_types import PerfFile
 
-    for test_case in get_vision_attention_test_cases()[:5]:
-        print(f"Running vision attention test case: {test_case}")
-        run_vision_attention_torch(*test_case, perf_filename=PerfFile.VISION_ATTENTION)
+    for test_case in get_encoder_attention_test_cases()[:5]:
+        print(f"Running encoder attention test case: {test_case}")
+        run_encoder_attention_torch(*test_case, perf_filename=PerfFile.ENCODER_ATTENTION)

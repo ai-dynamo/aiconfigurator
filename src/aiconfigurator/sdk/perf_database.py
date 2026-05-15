@@ -1095,29 +1095,29 @@ def load_context_attention_data(context_attention_file):
     return context_attention_data
 
 
-def load_vision_attention_data(vision_attention_file):
+def load_encoder_attention_data(encoder_attention_file):
     """
-    Load the vision (ViT-style) attention data.
+    Load the non-causal encoder attention data (ViT, audio encoder, etc.).
 
     Schema is intentionally simplified vs. context attention:
     - MHA only (n_kv == n), so no n_kv dimension
-    - No KV cache (vision is single-pass), so no kv_cache_dtype dimension
+    - No KV cache (encoder is single-pass), so no kv_cache_dtype dimension
     - No sliding window, so no window_size dimension
 
     Returns:
         dict: Nested dict [fmha_quant_mode][head_size][n][s][b] -> {latency, power, energy}.
     """
-    rows = _read_filtered_rows(vision_attention_file)
+    rows = _read_filtered_rows(encoder_attention_file)
     if rows is None:
-        logger.debug(f"Vision attention data file {vision_attention_file} not found.")
+        logger.debug(f"Encoder attention data file {encoder_attention_file} not found.")
         return None
-    vision_attention_data = defaultdict(
+    encoder_attention_data = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     )
 
     has_power = len(rows) > 0 and "power" in rows[0]
     if not has_power:
-        logger.debug("Legacy database format detected (vision_attention) - power will default to 0.0")
+        logger.debug("Legacy database format detected (encoder_attention) - power will default to 0.0")
 
     for row in rows:
         quant_mode, b, s, n, head_size, latency = (
@@ -1140,18 +1140,18 @@ def load_vision_attention_data(vision_attention_file):
         quant_mode = common.FMHAQuantMode[quant_mode]
 
         try:
-            vision_attention_data[quant_mode][head_size][n][s][b]
+            encoder_attention_data[quant_mode][head_size][n][s][b]
             logger.debug(
-                f"value conflict in vision attention data: {quant_mode} {head_size} {n} {s} {b}"
+                f"value conflict in encoder attention data: {quant_mode} {head_size} {n} {s} {b}"
             )
         except KeyError:
-            vision_attention_data[quant_mode][head_size][n][s][b] = {
+            encoder_attention_data[quant_mode][head_size][n][s][b] = {
                 "latency": latency,
                 "power": power,
                 "energy": energy,
             }
 
-    return vision_attention_data
+    return encoder_attention_data
 
 
 def load_generation_attention_data(generation_attention_file):
@@ -2832,7 +2832,7 @@ class PerfDatabase:
                 PerfDataFilename.gemm: load_gemm_data,
                 PerfDataFilename.context_attention: load_context_attention_data,
                 PerfDataFilename.generation_attention: load_generation_attention_data,
-                PerfDataFilename.vision_attention: load_vision_attention_data,
+                PerfDataFilename.encoder_attention: load_encoder_attention_data,
                 PerfDataFilename.moe: load_moe_data,
                 PerfDataFilename.custom_allreduce: load_custom_allreduce_data,
                 PerfDataFilename.nccl: load_nccl_data,
@@ -2901,7 +2901,7 @@ class PerfDatabase:
         self._gemm_data = _load_op_data(PerfDataFilename.gemm)
         self._context_attention_data = _load_op_data(PerfDataFilename.context_attention)
         self._generation_attention_data = _load_op_data(PerfDataFilename.generation_attention)
-        self._vision_attention_data = _load_op_data(PerfDataFilename.vision_attention)
+        self._encoder_attention_data = _load_op_data(PerfDataFilename.encoder_attention)
         self._moe_data, self._moe_low_latency_data = _load_op_data(PerfDataFilename.moe)
 
         # Comm ops
@@ -4516,7 +4516,7 @@ class PerfDatabase:
             )
 
     @functools.lru_cache(maxsize=32768)
-    def query_vision_attention(
+    def query_encoder_attention(
         self,
         b: int,
         s: int,
@@ -4526,11 +4526,12 @@ class PerfDatabase:
         database_mode: Optional[common.DatabaseMode] = None,
     ) -> PerformanceResult:
         """
-        Query vision (ViT-style) attention latency: non-causal, MHA, no KV cache.
+        Query non-causal encoder attention latency (ViT, audio encoder, etc.):
+        non-causal full N^2, MHA, no KV cache.
 
         Args:
-            b: Batch size (number of images / batched seqs)
-            s: Sequence length per image (pre-merge tokens)
+            b: Batch size (number of inputs / batched seqs)
+            s: Sequence length per input (e.g. pre-merge ViT tokens)
             n: Number of attention heads (MHA, n_kv == n)
             head_size: Dimension per head
             fmha_quant_mode: Attention compute quantization mode (bf16 / fp8)
@@ -4543,7 +4544,7 @@ class PerfDatabase:
         def get_sol(b: int, s: int, n: int, h: int, fmha_quant_mode: common.FMHAQuantMode) -> tuple[float, float, float]:
             # Non-causal full N^2: no /2 for causality
             ops = 2 * b * s * s * n * h * 2  # 2 for fma, 2 for q*k^t + *v
-            # Vision has no KV cache read; Q/K/V are all read once
+            # Encoder has no KV cache read; Q/K/V are all read once
             mem_bytes = 2 * b * (3 * n * s * h + n * s * h)  # Q/K/V read + output write, bf16
             sol_math = ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
@@ -4568,8 +4569,8 @@ class PerfDatabase:
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
-                self._vision_attention_data.raise_if_not_loaded()
-                attention_dict = self._vision_attention_data[fmha_quant_mode][head_size]
+                self._encoder_attention_data.raise_if_not_loaded()
+                attention_dict = self._encoder_attention_data[fmha_quant_mode][head_size]
                 result = self._interp_3d(n, s, b, attention_dict, "cubic")
                 return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
 
@@ -4578,7 +4579,7 @@ class PerfDatabase:
                 get_empirical=lambda: get_empirical(b, s, n, head_size, fmha_quant_mode),
                 database_mode=database_mode,
                 error_msg=(
-                    f"Failed to query vision attention data for {b=}, {s=}, {n=}, "
+                    f"Failed to query encoder attention data for {b=}, {s=}, {n=}, "
                     f"{head_size=}, {fmha_quant_mode=}"
                 ),
             )

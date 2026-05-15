@@ -11,15 +11,15 @@ from aiconfigurator.sdk.operations import EncoderAttention
 pytestmark = pytest.mark.unit
 
 
-class TestQueryVisionAttention:
-    """Test cases for query_vision_attention method (non-causal, MHA, no KV cache)."""
+class TestQueryEncoderAttention:
+    """Test cases for query_encoder_attention method (non-causal, MHA, no KV cache)."""
 
     def test_sol_mode_no_causal_factor(self, comprehensive_perf_db):
-        """SOL FLOPs for vision is full N^2 (no /2 for causality)."""
+        """SOL FLOPs for encoder is full N^2 (no /2 for causality)."""
         b, s, n, h = 2, 64, 16, 72
         fmha = common.FMHAQuantMode.bfloat16
 
-        result = comprehensive_perf_db.query_vision_attention(
+        result = comprehensive_perf_db.query_encoder_attention(
             b, s, n, h, fmha, database_mode=common.DatabaseMode.SOL
         )
 
@@ -36,12 +36,12 @@ class TestQueryVisionAttention:
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_sol_is_twice_causal_flops(self, comprehensive_perf_db):
-        """Vision SOL FLOPs should be 2x the LLM causal SOL FLOPs (compute-bound regime)."""
+        """Encoder SOL FLOPs should be 2x the LLM causal SOL FLOPs (compute-bound regime)."""
         b, s, n, h = 1, 4096, 32, 128  # large s, compute-bound
         fmha = common.FMHAQuantMode.bfloat16
         kv = common.KVCacheQuantMode.bfloat16
 
-        vision_sol_math = comprehensive_perf_db.query_vision_attention(
+        encoder_sol_math = comprehensive_perf_db.query_encoder_attention(
             b, s, n, h, fmha, database_mode=common.DatabaseMode.SOL_FULL
         )[1]
         # context_attention (causal) at same config: prefix=0
@@ -49,18 +49,18 @@ class TestQueryVisionAttention:
             b, s, 0, n, n, kv, fmha, database_mode=common.DatabaseMode.SOL_FULL
         )[1]
 
-        # vision is non-causal -> exactly 2x compute of causal
-        assert math.isclose(vision_sol_math, 2 * causal_sol_math, rel_tol=1e-6)
+        # encoder is non-causal -> exactly 2x compute of causal
+        assert math.isclose(encoder_sol_math, 2 * causal_sol_math, rel_tol=1e-6)
 
     def test_silicon_mode_lookup(self, comprehensive_perf_db):
         """SILICON mode looks up [fmha][head_size][n][s][b]."""
         b, s, n, h = 2, 64, 16, 72
         fmha = common.FMHAQuantMode.bfloat16
 
-        result = comprehensive_perf_db.query_vision_attention(
+        result = comprehensive_perf_db.query_encoder_attention(
             b, s, n, h, fmha, database_mode=common.DatabaseMode.SILICON
         )
-        expected = comprehensive_perf_db._vision_attention_data[fmha][h][n][s][b]["latency"]
+        expected = comprehensive_perf_db._encoder_attention_data[fmha][h][n][s][b]["latency"]
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_hybrid_falls_back_to_empirical(self, comprehensive_perf_db):
@@ -68,7 +68,7 @@ class TestQueryVisionAttention:
         b, s, n, h = 999, 64, 16, 72  # b=999 not in dummy data
         fmha = common.FMHAQuantMode.bfloat16
 
-        result = comprehensive_perf_db.query_vision_attention(
+        result = comprehensive_perf_db.query_encoder_attention(
             b, s, n, h, fmha, database_mode=common.DatabaseMode.HYBRID
         )
         assert float(result) > 0
@@ -78,7 +78,7 @@ class TestEncoderAttentionOp:
     """Test cases for EncoderAttention op class."""
 
     def test_query_matches_database(self, comprehensive_perf_db):
-        """EncoderAttention.query() returns query_vision_attention latency (no RoPE)."""
+        """EncoderAttention.query() returns query_encoder_attention latency (no RoPE)."""
         op = EncoderAttention(
             "encoder_attention",
             scale_factor=1.0,
@@ -88,7 +88,7 @@ class TestEncoderAttentionOp:
             partial_rotary_factor=0.0,  # disable RoPE for clean comparison
         )
         result = op.query(comprehensive_perf_db, batch_size=2, s=64)
-        expected = comprehensive_perf_db.query_vision_attention(
+        expected = comprehensive_perf_db.query_encoder_attention(
             2, 64, 16, 72, common.FMHAQuantMode.bfloat16
         )
         assert math.isclose(float(result), float(expected), rel_tol=1e-6)
