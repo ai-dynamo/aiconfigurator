@@ -1962,9 +1962,10 @@ class FallbackOp(Operation):
     profiling data (single op) while others still have granular per-kernel data
     (multiple ops). The fallback is symmetric: either group can be primary.
 
-    The primary is always queried in SILICON mode so that HYBRID does not
-    silently swallow a miss with an empirical estimate — the fallback ops
-    (which have real data) should be preferred over an empirical guess.
+    In HYBRID mode, the primary is queried in SILICON mode so that HYBRID does
+    not silently swallow a miss with an empirical estimate — the fallback ops
+    (which have real data) should be preferred over an empirical guess. In
+    explicit EMPIRICAL/SOL modes, the primary respects the requested mode.
 
     Once the primary fails on the first call, it is skipped on all subsequent
     calls to avoid redundant work.
@@ -1992,10 +1993,12 @@ class FallbackOp(Operation):
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
         if not self._primary_unavailable:
-            # Force SILICON mode on the primary so that HYBRID doesn't silently
-            # return an empirical estimate when module data is missing.
             prev_mode = database._default_database_mode
-            database._default_database_mode = common.DatabaseMode.SILICON
+            force_primary_silicon = prev_mode == common.DatabaseMode.HYBRID
+            if force_primary_silicon:
+                # Force SILICON mode on the primary so HYBRID does not silently
+                # return an empirical estimate when module data is missing.
+                database._default_database_mode = common.DatabaseMode.SILICON
 
             # Suppress ERROR-level logs from perf_database during the primary
             # attempt, since a failure here is expected and handled by fallback.
@@ -2015,7 +2018,8 @@ class FallbackOp(Operation):
                     e,
                 )
             finally:
-                database._default_database_mode = prev_mode
+                if force_primary_silicon:
+                    database._default_database_mode = prev_mode
                 perf_db_logger.setLevel(prev_log_level)
 
         total_latency = 0.0

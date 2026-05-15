@@ -13,6 +13,7 @@ import pandas as pd
 import yaml
 
 from aiconfigurator import __version__
+from aiconfigurator.cli.detail_report import detail_requests_time, format_estimate_detail
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
 from aiconfigurator.cli.utils import merge_experiment_results_by_mode, process_experiment_result
 from aiconfigurator.generator.api import (
@@ -620,12 +621,6 @@ def _add_estimate_mode_arguments(parser):
         "SOL+empirical estimates for configurations not yet in the database — use this "
         "for models released after the last silicon data collection. "
         "EMPIRICAL: SOL+empirical factor only. SOL: theoretical Speed-of-Light only.",
-    )
-    parser.add_argument(
-        "--print-per-ops-latency",
-        action="store_true",
-        default=False,
-        help="(Deprecated alias for --detail time) Print per-operation latency breakdown.",
     )
     parser.add_argument(
         "--detail",
@@ -1722,49 +1717,6 @@ def _run_support_mode(args):
     print("=" * 60 + "\n")
 
 
-def _print_per_ops_section(title: str, ops: dict) -> None:
-    """Print a single section of per-op latency breakdown."""
-    total = sum(ops.values())
-    print(f"  {title} (total: {total:.3f} ms)")
-    for op_name, latency in sorted(ops.items(), key=lambda x: -x[1]):
-        pct = latency / total * 100 if total > 0 else 0
-        print(f"    {op_name:<40s} {latency:>10.3f} ms  ({pct:>5.1f}%)")
-
-
-def _print_per_ops_latency(per_ops_data: dict) -> None:
-    """Print per-operation latency breakdown from run_agg or run_disagg."""
-    print("\n" + "-" * 60)
-    print("  Per-Operation Latency Breakdown")
-    print("-" * 60)
-
-    # Agg mode: mix_step + genonly_step + scheduling
-    scheduling = per_ops_data.get("scheduling")
-    if scheduling:
-        num_mix = scheduling.get("num_mix_steps", 0)
-        num_genonly = scheduling.get("num_genonly_steps", 0)
-        print(f"  Scheduling: {num_mix:.0f} mix steps + {num_genonly:.0f} gen-only steps")
-        print()
-
-    mix_ops = per_ops_data.get("mix_step", {})
-    if mix_ops:
-        _print_per_ops_section("Mix Step", mix_ops)
-
-    genonly_ops = per_ops_data.get("genonly_step", {})
-    if genonly_ops:
-        print()
-        _print_per_ops_section("Gen-Only Step", genonly_ops)
-
-    # Disagg mode: prefill + decode
-    prefill_ops = per_ops_data.get("prefill", {})
-    if prefill_ops:
-        _print_per_ops_section("Prefill (static_ctx)", prefill_ops)
-
-    decode_ops = per_ops_data.get("decode", {})
-    if decode_ops:
-        print()
-        _print_per_ops_section("Decode (static_gen)", decode_ops)
-
-
 def _run_estimate_mode(args):
     """Run the estimate mode to predict TTFT, TPOT, and power for a single config."""
     from aiconfigurator.cli.api import cli_estimate
@@ -1790,6 +1742,14 @@ def _run_estimate_mode(args):
             raise SystemExit(
                 f"Invalid --nextn-accept-rates {args.nextn_accept_rates!r}; expected comma-separated floats."
             ) from exc
+
+    # Resolve --detail before running the estimate so time detail can compare
+    # against a second SOL-mode result.
+    detail_arg = (args.detail or "").strip()
+    try:
+        needs_sol_detail = bool(detail_arg) and detail_requests_time(detail_arg)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     # Build kwargs shared between agg, disagg, and static
     estimate_kwargs = dict(
@@ -1842,6 +1802,14 @@ def _run_estimate_mode(args):
         )
 
     result = cli_estimate(**estimate_kwargs)
+    sol_result = None
+    if needs_sol_detail:
+        if args.database_mode == common.DatabaseMode.SOL.name:
+            sol_result = result
+        else:
+            sol_estimate_kwargs = dict(estimate_kwargs)
+            sol_estimate_kwargs["database_mode"] = common.DatabaseMode.SOL.name
+            sol_result = cli_estimate(**sol_estimate_kwargs)
 
     print("\n" + "=" * 60)
     print(f"  Performance Estimate ({result.mode})")
@@ -1912,29 +1880,16 @@ def _run_estimate_mode(args):
     if result.kv_cache_warning:
         logger.warning(result.kv_cache_warning)
 
-    # Resolve --detail (preferred) and legacy --print-per-ops-latency.
-    detail_arg = (args.detail or "").strip()
-    if args.print_per_ops_latency:
-        logger.warning("--print-per-ops-latency is deprecated; use --detail time (or --detail all) instead.")
-        if not detail_arg:
-            detail_arg = "time"
-        elif "time" not in detail_arg.split(",") and "all" not in detail_arg.split(","):
-            detail_arg = detail_arg + ",time"
-
     if detail_arg:
-        if result.summary is not None:
-            try:
-                report = result.summary.format_detail_report(detail=detail_arg)
-            except ValueError as exc:
-                raise SystemExit(str(exc)) from exc
+        try:
+            report = format_estimate_detail(result, sol_result, detail=detail_arg)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        if report:
             print("\n" + "-" * 60)
             print(f"  Detailed Breakdown ({detail_arg})")
             print("-" * 60)
             print(report)
-        elif result.per_ops_data:
-            # Disagg path: no single InferenceSummary; fall back to the legacy
-            # per-ops latency formatter so disagg still has a "time" view.
-            _print_per_ops_latency(result.per_ops_data)
         else:
             logger.warning("--detail requested but no breakdown data is available for this mode.")
 

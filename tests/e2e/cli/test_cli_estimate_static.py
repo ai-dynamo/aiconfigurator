@@ -233,6 +233,7 @@ def test_static_estimate_source_tag_silicon_default():
         f"expected at least one 'silicon' tag in SILICON mode, got: {set(sources)}"
     )
 
+
 def test_static_estimate_source_tag_empirical_in_empirical_mode():
     """EMPIRICAL database mode should never tag any op as 'silicon'."""
     result = cli_estimate(database_mode="EMPIRICAL", mode="static", **_common_kwargs())

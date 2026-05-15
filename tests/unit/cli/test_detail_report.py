@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import pytest
+
+from aiconfigurator.cli.api import EstimateResult
+from aiconfigurator.cli.detail_report import detail_requests_time, format_estimate_detail
+from aiconfigurator.sdk.config import RuntimeConfig
+from aiconfigurator.sdk.inference_summary import InferenceSummary
+
+pytestmark = pytest.mark.unit
+
+
+def _estimate_result(
+    *,
+    mode: str,
+    raw: dict,
+    summary: InferenceSummary | None = None,
+    per_ops_data: dict | None = None,
+    per_ops_source: dict | None = None,
+) -> EstimateResult:
+    return EstimateResult(
+        ttft=float(raw.get("ttft", 0.0) or 0.0),
+        tpot=float(raw.get("tpot", 0.0) or 0.0),
+        power_w=float(raw.get("power_w", 0.0) or 0.0),
+        isl=128,
+        osl=16,
+        batch_size=1,
+        ctx_tokens=128,
+        tp_size=1,
+        pp_size=1,
+        model_path="test-model",
+        system_name="test-system",
+        backend_name="test-backend",
+        backend_version="test-version",
+        raw=raw,
+        mode=mode,
+        summary=summary,
+        per_ops_data=per_ops_data,
+        per_ops_source=per_ops_source,
+    )
+
+
+def _static_summary(context: dict[str, float], generation: dict[str, float]) -> InferenceSummary:
+    summary = InferenceSummary(RuntimeConfig(batch_size=1, isl=128, osl=16))
+    summary.set_context_latency_dict(context)
+    summary.set_generation_latency_dict(generation)
+    summary.set_context_source_dict(dict.fromkeys(context, "silicon"))
+    summary.set_generation_source_dict(dict.fromkeys(generation, "empirical"))
+    return summary
+
+
+def test_detail_requests_time_expands_all() -> None:
+    assert detail_requests_time("time")
+    assert detail_requests_time("all")
+    assert not detail_requests_time("memory")
+
+
+def test_format_estimate_detail_static_pairs_sol_summary() -> None:
+    result = _estimate_result(
+        mode="static",
+        raw={"ttft": 10.0, "tpot": 2.0, "request_latency": 40.0},
+        summary=_static_summary({"context_qkv_gemm": 10.0}, {"generation_qkv_gemm": 30.0}),
+    )
+    sol_result = _estimate_result(
+        mode="static",
+        raw={"ttft": 5.0, "tpot": 1.0, "request_latency": 20.0},
+        summary=_static_summary({"context_qkv_gemm": 5.0}, {"generation_qkv_gemm": 15.0}),
+    )
+
+    report = format_estimate_detail(result, sol_result, detail="time", width=100)
+
+    assert "request latency" in report
+    assert "40.000 ms  SOL     20.000 ms    50.0% SOL/time" in report
+    assert "Context phase (total = 10.000 ms, SOL = 5.000 ms, SOL/time = 50.0%)" in report
+    assert "context_qkv_gemm" in report
+    assert "10.000 ms  100.0%  SOL      5.000 ms    50.0% SOL/time" in report
+
+
+def test_format_estimate_detail_agg_uses_per_ops_data() -> None:
+    result = _estimate_result(
+        mode="agg",
+        raw={"ttft": 100.0, "tpot": 10.0, "request_latency": 250.0},
+        per_ops_data={
+            "mix_step": {"context_attention": 20.0},
+            "genonly_step": {"generation_attention": 10.0},
+            "scheduling": {"num_mix_steps": 2.0, "num_genonly_steps": 3.0},
+        },
+        per_ops_source={"mix_step": {"context_attention": "silicon"}},
+    )
+    sol_result = _estimate_result(
+        mode="agg",
+        raw={"ttft": 50.0, "tpot": 5.0, "request_latency": 125.0},
+        per_ops_data={
+            "mix_step": {"context_attention": 10.0},
+            "genonly_step": {"generation_attention": 5.0},
+            "scheduling": {"num_mix_steps": 2.0, "num_genonly_steps": 3.0},
+        },
+    )
+
+    report = format_estimate_detail(result, sol_result, detail="time", width=100)
+
+    assert "Scheduling: 2 mix steps + 3 gen-only steps" in report
+    assert "Mix Step (total = 20.000 ms, SOL = 10.000 ms, SOL/time = 50.0%)" in report
+    assert "context_attention" in report
+    assert "20.000 ms  100.0%  SOL     10.000 ms    50.0% SOL/time" in report
+
+
+def test_format_estimate_detail_disagg_uses_per_ops_data() -> None:
+    result = _estimate_result(
+        mode="disagg",
+        raw={"ttft": 80.0, "tpot": 8.0, "request_latency": 200.0},
+        per_ops_data={"prefill": {"context_attention": 40.0}, "decode": {"generation_attention": 8.0}},
+    )
+    sol_result = _estimate_result(
+        mode="disagg",
+        raw={"ttft": 20.0, "tpot": 4.0, "request_latency": 80.0},
+        per_ops_data={"prefill": {"context_attention": 10.0}, "decode": {"generation_attention": 4.0}},
+    )
+
+    report = format_estimate_detail(result, sol_result, detail="time", width=100)
+
+    assert "Prefill (static_ctx) (total = 40.000 ms, SOL = 10.000 ms, SOL/time = 25.0%)" in report
+    assert "Decode (static_gen) (total = 8.000 ms, SOL = 4.000 ms, SOL/time = 50.0%)" in report
