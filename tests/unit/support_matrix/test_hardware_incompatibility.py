@@ -125,6 +125,27 @@ def test_run_single_test_marks_missing_silicon_data_as_unsupported(monkeypatch):
     assert "Missing silicon data for the requested lookup" in error_dict["agg"]
 
 
+def test_run_single_test_marks_unsupported_quant_mode_as_unsupported(monkeypatch):
+    def unsupported_quant_run_mode(**_kwargs):
+        raise ValueError(
+            "Unsupported gemm quant mode 'fp8_static' for system='rtx_pro_6000_server', "
+            "backend='vllm', version='0.19.0'. Supported gemm modes: ['bfloat16', 'fp8']"
+        )
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(unsupported_quant_run_mode))
+
+    status_dict, error_dict = SupportMatrix.run_single_test(
+        model="Qwen/Qwen3-32B",
+        system="rtx_pro_6000_server",
+        backend="vllm",
+        version="0.19.0",
+        system_spec=_system_spec(sm_version=120, fp8=True, fp4=True),
+    )
+
+    assert status_dict == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
+    assert "Unsupported gemm quant mode" in error_dict["agg"]
+
+
 def test_run_single_test_keeps_unclassified_errors_as_fail(monkeypatch):
     def transient_run_mode(**_kwargs):
         raise RuntimeError("temporary worker crash")

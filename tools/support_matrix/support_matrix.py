@@ -69,12 +69,16 @@ _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
 _DETERMINISTIC_UNSUPPORTED_ERROR_PATTERNS = (
+    re.compile(r"(?:ValueError|UnsupportedWideepConfigError): Unsupported .+ quant mode '.+'"),
+    re.compile(r"uses native FP4 routed-expert weights and is not supported on Hopper systems"),
+    re.compile(r"Invalid quantized MoE configuration: .*weight_block_size=\d+ != 0"),
     re.compile(
         r"This combination of model, system, backend, and backend version is not supported by AIC in SILICON mode"
     ),
     re.compile(r"Missing silicon data for the requested lookup"),
     re.compile(r"data not loaded for system="),
     re.compile(r"No results found: the model does not fit in GPU memory for any parallel configuration"),
+    re.compile(r"non-wideep SGLang to support TP>1 and DP>1 for attn simultaneously"),
 )
 
 
