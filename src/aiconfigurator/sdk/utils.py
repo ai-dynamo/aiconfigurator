@@ -745,6 +745,13 @@ def _parse_hf_config_json(config: dict) -> dict:
         )
     elif architecture in ("Qwen3VLForConditionalGeneration", "Qwen3VLMoeForConditionalGeneration"):
         if vision_cfg:
+            deepstack_visual_indexes = tuple(vision_cfg.get("deepstack_visual_indexes", []))
+            # PatchMerger: pixel-shuffle fuses spatial_merge_size² patches per token.
+            # The MLP operates on merged tokens: 2 layers (fc1, fc2) with dims
+            #   fc1: merger_dim → merger_dim  (merger_dim = hidden_size * spatial_merge_size²)
+            #   fc2: merger_dim → out_hidden_size
+            merger_dim = vision_cfg["hidden_size"] * vision_cfg["spatial_merge_size"] ** 2
+            out_hidden_size = vision_cfg["out_hidden_size"]
             extra_params = VisionEncoderConfig(
                 depth=vision_cfg["depth"],
                 hidden_size=vision_cfg["hidden_size"],
@@ -753,8 +760,10 @@ def _parse_hf_config_json(config: dict) -> dict:
                 patch_size=vision_cfg["patch_size"],
                 temporal_patch_size=vision_cfg["temporal_patch_size"],
                 spatial_merge_size=vision_cfg["spatial_merge_size"],
-                out_hidden_size=vision_cfg["out_hidden_size"],
-                deepstack_visual_indexes=tuple(vision_cfg.get("deepstack_visual_indexes", [])),
+                out_hidden_size=out_hidden_size,
+                deepstack_visual_indexes=deepstack_visual_indexes,
+                projector_dims=((merger_dim, merger_dim), (merger_dim, out_hidden_size)),
+                projector_n_instances=1 + len(deepstack_visual_indexes),
             )
             logger.info(
                 "Qwen3VL vision encoder config: depth=%d, hidden=%d, patch=%d, spatial_merge=%d",
