@@ -3,6 +3,7 @@
 
 import csv
 import functools
+import hashlib
 import heapq
 import json
 import logging
@@ -26,6 +27,7 @@ EXIT_CODE_RESTART = 10  # Exit code to indicate restart is needed
 # Global NVML state per worker process
 _NVML_INITIALIZED = False
 _NVML_LOCK = threading.Lock()
+_MAX_LOG_SCOPE_PREFIX_LENGTH = 120
 
 
 def _parse_bool_env(env_var: str, default: bool = False) -> bool:
@@ -46,6 +48,22 @@ def _parse_bool_env(env_var: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.lower() in ("true", "1", "yes")
+
+
+def _collector_log_dir_name(scope: list[str], time_stamp: str) -> str:
+    raw_prefix = "+".join(str(part) for part in scope if str(part)) or "all"
+    safe_prefix = "".join(char if char.isalnum() or char in ("-", "_", "+", ".") else "_" for char in raw_prefix).strip(
+        "._+"
+    )
+    if not safe_prefix:
+        safe_prefix = "all"
+
+    if len(safe_prefix) > _MAX_LOG_SCOPE_PREFIX_LENGTH:
+        digest = hashlib.sha256(safe_prefix.encode("utf-8")).hexdigest()[:12]
+        prefix_length = _MAX_LOG_SCOPE_PREFIX_LENGTH - len(digest) - 1
+        safe_prefix = f"{safe_prefix[:prefix_length].rstrip('._+-')}_{digest}"
+
+    return f"{safe_prefix}_{time_stamp}"
 
 
 def _ensure_nvml_initialized():
@@ -525,7 +543,7 @@ def setup_logging(scope=["all"], debug=False, worker_id=None):
 
     # Create log directory
     time_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    _LOG_DIR = Path(f"{'+'.join(scope)}_{time_stamp}")
+    _LOG_DIR = Path(_collector_log_dir_name(scope, time_stamp))
     if not _LOG_DIR.is_dir():
         _LOG_DIR.mkdir()
 
