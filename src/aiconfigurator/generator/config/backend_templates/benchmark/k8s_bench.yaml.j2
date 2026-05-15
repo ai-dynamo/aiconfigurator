@@ -55,6 +55,13 @@ spec:
               concurrency_array=({{ base_concurrency | join(' ') }})
               {% endif %}
               ARTIFACT_DIR="${BENCH_ARTIFACT_DIR:-/tmp/bench_artifacts}"
+              BENCH_PREFIX="${AICONFIGURATOR_BENCH_PREFIX:-{{ BenchConfig.prefix | default(0) }}}"
+              BENCH_PREFIX_PROMPTS="${AICONFIGURATOR_BENCH_PREFIX_PROMPTS:-{{ BenchConfig.prefix_prompt_pool_size | default(1) }}}"
+              prefix_args=()
+              if [[ "${BENCH_PREFIX}" =~ ^[0-9]+$ && "${BENCH_PREFIX}" -gt 0 \
+                  && "${BENCH_PREFIX_PROMPTS}" =~ ^[0-9]+$ && "${BENCH_PREFIX_PROMPTS}" -gt 0 ]]; then
+                prefix_args+=(--prefix-prompt-length "${BENCH_PREFIX}" --num-prefix-prompts "${BENCH_PREFIX_PROMPTS}")
+              fi
               for concurrency in "${concurrency_array[@]}"; do
                 echo "Run concurrency: $concurrency"
                 aiperf profile \
@@ -65,6 +72,7 @@ spec:
                   --tokenizer {{ BenchConfig.tokenizer }} \
                   --isl {{ BenchConfig.isl }} --isl-stddev {{ BenchConfig.isl_stddev }} \
                   --osl {{ BenchConfig.osl }} --osl-stddev {{ BenchConfig.osl_stddev }} \
+                  "${prefix_args[@]}" \
                   --extra-inputs ignore_eos:true \
                   --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
                   --concurrency ${concurrency} \

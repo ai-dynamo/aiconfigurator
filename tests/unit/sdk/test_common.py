@@ -7,6 +7,7 @@ Unit tests for common SDK configurations.
 Tests supported systems, model families, and other common configurations.
 """
 
+import csv
 from collections import Counter
 from pathlib import Path
 
@@ -83,6 +84,23 @@ class TestSupportMatrix:
         assert "System" in matrix[0]
         assert "Mode" in matrix[0]
         assert "Status" in matrix[0]
+
+    def test_support_matrix_files_are_split_by_system(self):
+        """Each split support matrix CSV should contain rows for exactly one system."""
+        repo_root = _find_repo_root(Path(__file__))
+        systems_dir = repo_root / "src" / "aiconfigurator" / "systems"
+        split_dir = systems_dir / "support_matrix"
+
+        assert split_dir.is_dir()
+        assert not (systems_dir / "support_matrix.csv").exists()
+
+        csv_paths = sorted(split_dir.glob("*.csv"))
+        assert csv_paths
+
+        for csv_path in csv_paths:
+            with csv_path.open(newline="") as f:
+                systems = {row["System"] for row in csv.DictReader(f)}
+            assert systems == {csv_path.stem}
 
     @pytest.mark.parametrize(
         "model,system,backend,version,architecture,expected_agg,expected_disagg",
@@ -186,3 +204,61 @@ class TestSupportMatrix:
         assert result.agg_supported is True
         assert result.disagg_supported is True
         assert result.exact_match is False
+
+    def test_check_support_ignores_hardware_incompatible_rows_for_architecture_fallback(self, monkeypatch):
+        """Hardware-incompatible quantized variants should not skew architecture majority voting."""
+        monkeypatch.setattr(
+            common,
+            "get_support_matrix",
+            lambda: [
+                {
+                    "HuggingFaceID": "Qwen/Qwen3-32B",
+                    "Architecture": "Qwen3ForCausalLM",
+                    "System": "a100_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.0.0",
+                    "Mode": "agg",
+                    "Status": "PASS",
+                },
+                {
+                    "HuggingFaceID": "Qwen/Qwen3-32B-FP8",
+                    "Architecture": "Qwen3ForCausalLM",
+                    "System": "a100_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.0.0",
+                    "Mode": "agg",
+                    "Status": "HW_INCOMPATIBLE",
+                },
+                {
+                    "HuggingFaceID": "Qwen/Qwen3-32B",
+                    "Architecture": "Qwen3ForCausalLM",
+                    "System": "a100_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.0.0",
+                    "Mode": "disagg",
+                    "Status": "PASS",
+                },
+                {
+                    "HuggingFaceID": "Qwen/Qwen3-32B-FP8",
+                    "Architecture": "Qwen3ForCausalLM",
+                    "System": "a100_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.0.0",
+                    "Mode": "disagg",
+                    "Status": "HW_INCOMPATIBLE",
+                },
+            ],
+        )
+
+        result = common.check_support(
+            "local-qwen-variant",
+            "a100_sxm",
+            backend="trtllm",
+            version="1.0.0",
+            architecture="Qwen3ForCausalLM",
+        )
+
+        assert result.agg_supported is True
+        assert result.disagg_supported is True
+        assert result.agg_pass_count == 1
+        assert result.agg_total_count == 1

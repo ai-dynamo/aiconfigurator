@@ -188,6 +188,43 @@ class TestParseHFConfig:
         assert "E" not in extra_params.hybrid_override_pattern  # No MoE layers
         assert extra_params.moe_shared_expert_intermediate_size == 0
 
+    def test_parse_nemotronh_layers_block_type_config(self):
+        """Test parsing NemotronH configs that use explicit layer block names."""
+        config = {
+            "architectures": ["NemotronHForCausalLM"],
+            "num_key_value_heads": 2,
+            "hidden_size": 8192,
+            "num_attention_heads": 64,
+            "intermediate_size": 5120,
+            "vocab_size": 131072,
+            "max_position_embeddings": 262144,
+            "num_experts_per_tok": 22,
+            "n_routed_experts": 512,
+            "moe_intermediate_size": 5120,
+            "head_dim": 128,
+            "layers_block_type": ["mamba", "moe", "mamba", "attention", "mlp"],
+            "mamba_num_heads": 256,
+            "mamba_head_dim": 64,
+            "ssm_state_size": 128,
+            "conv_kernel": 4,
+            "n_groups": 8,
+            "chunk_size": 128,
+            "moe_shared_expert_intermediate_size": 10240,
+        }
+
+        result = _parse_hf_config_json(config)
+
+        assert result["architecture"] == "NemotronHForCausalLM"
+        assert result["layers"] == 5
+        assert result["hidden_size"] == 8192
+        assert result["topk"] == 22
+        assert result["num_experts"] == 512
+        extra_params = result["extra_params"]
+        assert isinstance(extra_params, common.NemotronHConfig)
+        assert extra_params.hybrid_override_pattern == "MEM*-"
+        assert extra_params.mamba_num_heads == 256
+        assert extra_params.moe_shared_expert_intermediate_size == 10240
+
     def test_parse_qwen35_dense_config(self):
         """Test parsing Qwen3.5-27B (dense hybrid) config → Qwen35Config."""
         # Mimics Qwen/Qwen3.5-27B HF config structure (params nested under text_config).

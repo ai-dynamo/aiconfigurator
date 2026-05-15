@@ -69,6 +69,8 @@ def get_model(
     model_family = _architecture_to_model_family(architecture)
 
     _apply_model_quant_defaults(model_config, raw_config, architecture, backend_name)
+    if check_is_moe(model_path, model_info=model_info):
+        model_config.resolve_moe_parallelism()
 
     if model_config.overwrite_num_layers > 0:
         model_info["layers"] = model_config.overwrite_num_layers

@@ -8,6 +8,7 @@
 {%- set k8s_use_model_cache = (model_cache_input != '') -%}
 {%- set k8s_model_cache_pvc = (model_cache_input if k8s_use_model_cache else 'model-cache') -%}
 {%- set k8s_model_cache_mount = '/workspace/model_cache' -%}
+{%- set enable_router = DynConfig.enable_router | default(false) -%}
 
 {%- macro render_worker(component_name, role, replicas, gpu, cli_args_list) -%}
     {%- set parsed_args = cli_args_list | default([]) -%}
@@ -62,6 +63,10 @@
             {% for arg in parsed_args %}
             - {{ arg | tojson }}
             {% endfor %}
+            {% if enable_router %}
+            - --kv-events-config
+            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{{ ServiceConfig.dyn_vllm_kv_event_port | default(20081, true) }}","enable_kv_cache_events":true}'
+            {% endif %}
             {% if role == 'prefill' %}
             - --is-prefill-worker
             - --kv-transfer-config
@@ -82,17 +87,6 @@ spec:
   services:
     Frontend:
       envFromSecret: hf-token-secret
-      {% if K8sConfig.k8s_hf_home or K8sConfig.k8s_etcd_endpoints %}
-      envs:
-        {% if K8sConfig.k8s_etcd_endpoints %}
-        - name: ETCD_ENDPOINTS
-          value: {{ K8sConfig.k8s_etcd_endpoints }}
-        {% endif %}
-        {% if K8sConfig.k8s_hf_home %}
-        - name: HF_HOME
-          value: {{ K8sConfig.k8s_hf_home }}
-        {% endif %}
-      {% endif %}
       componentType: frontend
       replicas: {{ frontend_replicas | default(1) }}
       extraPodSpec:
@@ -103,6 +97,21 @@ spec:
         mainContainer:
           image: {{ K8sConfig.k8s_image }}
           imagePullPolicy: IfNotPresent
+      {% if enable_router or K8sConfig.k8s_hf_home or K8sConfig.k8s_etcd_endpoints %}
+      envs:
+        {% if K8sConfig.k8s_etcd_endpoints %}
+        - name: ETCD_ENDPOINTS
+          value: {{ K8sConfig.k8s_etcd_endpoints }}
+        {% endif %}
+        {% if enable_router %}
+        - name: DYN_ROUTER_MODE
+          value: kv
+        {% endif %}
+        {% if K8sConfig.k8s_hf_home %}
+        - name: HF_HOME
+          value: {{ K8sConfig.k8s_hf_home }}
+        {% endif %}
+      {% endif %}
 
     {% if DynConfig.mode | default('disagg') == 'agg' %}
 {{ render_worker(

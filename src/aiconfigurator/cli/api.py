@@ -23,6 +23,7 @@ from aiconfigurator.cli.main import (
     build_experiment_task_configs,
 )
 from aiconfigurator.cli.report_and_save import save_results
+from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task import (
     DEFAULT_DECODE_LATENCY_CORRECTION_SCALE,
@@ -557,26 +558,19 @@ def _resolve_moe_parallelism(
 ) -> tuple[int, int]:
     """Resolve and validate MoE parallelism widths, returning (moe_tp_size, moe_ep_size).
 
-    For dense (non-MoE) models the width constraint is not enforced because
-    MoE parallelism has no effect on the computation.
+    For dense (non-MoE) models, MoE parallelism has no effect on the
+    computation, so leave the fields as provided.
     """
-    if moe_tp_size is None and moe_ep_size is None:
-        moe_tp_size = tp_size
-        moe_ep_size = attention_dp_size
-    elif moe_tp_size is None:
-        moe_tp_size = tp_size * attention_dp_size // moe_ep_size
-    elif moe_ep_size is None:
-        moe_ep_size = tp_size * attention_dp_size // moe_tp_size
+    if model_path is not None and not check_is_moe(model_path):
+        return moe_tp_size, moe_ep_size
 
-    attn_width = tp_size * attention_dp_size
-    moe_width = moe_tp_size * moe_ep_size
-    if attn_width != moe_width and (model_path is None or check_is_moe(model_path)):
-        raise ValueError(
-            f"Parallelism width mismatch: tp_size({tp_size}) * attention_dp_size({attention_dp_size}) = {attn_width}, "
-            f"but moe_tp_size({moe_tp_size}) * moe_ep_size({moe_ep_size}) = {moe_width}. "
-            f"These must be equal."
-        )
-    return moe_tp_size, moe_ep_size
+    cfg = ModelConfig(
+        tp_size=tp_size,
+        attention_dp_size=attention_dp_size,
+        moe_tp_size=moe_tp_size,
+        moe_ep_size=moe_ep_size,
+    )
+    return cfg.resolve_moe_parallelism()
 
 
 def _build_model_config(
@@ -683,8 +677,12 @@ def cli_estimate(
             prefill/decode TP when their specific args are omitted.
         pp_size: Pipeline parallelism size. Default is 1.
         attention_dp_size: Attention data parallelism size. Default is 1.
-        moe_tp_size: MoE tensor parallelism size. Default is None (auto).
-        moe_ep_size: MoE expert parallelism size. Default is None (auto).
+        moe_tp_size: MoE tensor parallelism size. At least one of ``moe_tp_size``
+            or ``moe_ep_size`` is required for MoE models; the missing dimension
+            is inferred when possible.
+        moe_ep_size: MoE expert parallelism size. At least one of ``moe_tp_size``
+            or ``moe_ep_size`` is required for MoE models; the missing dimension
+            is inferred when possible.
         gemm_quant_mode: GEMM quantization mode. Default is None (auto-inferred).
         kvcache_quant_mode: KV cache quantization mode. Default is None (auto-inferred).
         fmha_quant_mode: FMHA quantization mode. Default is None (auto-inferred).
