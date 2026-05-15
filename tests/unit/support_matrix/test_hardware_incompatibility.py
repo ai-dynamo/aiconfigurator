@@ -4,6 +4,7 @@
 import pytest
 
 from tools.support_matrix.support_matrix import (
+    STATUS_FAIL,
     STATUS_HW_INCOMPATIBLE,
     STATUS_PASS,
     SupportMatrix,
@@ -99,3 +100,44 @@ def test_run_single_test_short_circuits_hardware_incompatible_model(monkeypatch)
     assert status_dict == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
     assert "does not support FP8" in error_dict["agg"]
     assert STATUS_PASS not in status_dict.values()
+
+
+def test_run_single_test_marks_missing_silicon_data_as_unsupported(monkeypatch):
+    def missing_data_run_mode(**_kwargs):
+        raise RuntimeError(
+            "No results found for any parallel configuration. "
+            "Showing last exception: Failed to query moe data. "
+            "Missing silicon data for the requested lookup."
+        )
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(missing_data_run_mode))
+
+    status_dict, error_dict = SupportMatrix.run_single_test(
+        model="Qwen/Qwen3-32B",
+        system="rtx_pro_6000_server",
+        backend="trtllm",
+        version="1.3.0rc10",
+        system_spec=_system_spec(sm_version=120, fp8=True, fp4=True),
+    )
+
+    assert status_dict == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
+    assert error_dict["agg"].startswith("Deterministic unsupported configuration:")
+    assert "Missing silicon data for the requested lookup" in error_dict["agg"]
+
+
+def test_run_single_test_keeps_unclassified_errors_as_fail(monkeypatch):
+    def transient_run_mode(**_kwargs):
+        raise RuntimeError("temporary worker crash")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(transient_run_mode))
+
+    status_dict, error_dict = SupportMatrix.run_single_test(
+        model="Qwen/Qwen3-32B",
+        system="rtx_pro_6000_server",
+        backend="trtllm",
+        version="1.3.0rc10",
+        system_spec=_system_spec(sm_version=120, fp8=True, fp4=True),
+    )
+
+    assert status_dict == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
+    assert "temporary worker crash" in error_dict["agg"]
