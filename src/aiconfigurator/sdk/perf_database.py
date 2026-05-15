@@ -7124,6 +7124,16 @@ class PerfDatabase:
             emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0)
         else:
+
+            def missing_context_dsa_error() -> PerfDataNotAvailableError:
+                return PerfDataNotAvailableError(
+                    f"Context DSA module data not available for system='{self.system}', "
+                    f"backend='{self.backend}', version='{self.version}', architecture='{architecture}', "
+                    f"fmha_quant_mode={fmha_quant_mode}, kvcache_quant_mode={kvcache_quant_mode}, "
+                    f"gemm_quant_mode={gemm_quant_mode}, num_heads={num_heads}, s={s}, prefix={prefix}, b={b}. "
+                    "Missing silicon data for the requested lookup."
+                )
+
             try:
                 dsa_module_data = getattr(self, "_context_dsa_module_data", None)
                 if dsa_module_data is None:
@@ -7131,21 +7141,30 @@ class PerfDatabase:
                         f"Context DSA module perf data not loaded for system='{self.system}', "
                         f"backend='{self.backend}', version='{self.version}'."
                     )
-                dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
+                try:
+                    dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
+                except (KeyError, TypeError) as exc:
+                    raise missing_context_dsa_error() from exc
                 full_s = s + prefix
                 raw_dsa_dict = None
                 raw_dsa_module_data = getattr(self, "_raw_context_dsa_module_data", None)
                 if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
-                    raw_dsa_dict = raw_dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][
-                        architecture
-                    ]
-                result = self._interp_dsa_context_topk_piecewise_from_raw(
-                    num_heads, full_s, b, raw_dsa_dict, index_topk
-                )
-                if result is None:
-                    result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
-                latency = result["latency"]
-                energy = result.get("energy", 0.0)
+                    try:
+                        raw_dsa_dict = raw_dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][
+                            architecture
+                        ]
+                    except (KeyError, TypeError):
+                        raw_dsa_dict = None
+                try:
+                    result = self._interp_dsa_context_topk_piecewise_from_raw(
+                        num_heads, full_s, b, raw_dsa_dict, index_topk
+                    )
+                    if result is None:
+                        result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
+                    latency = result["latency"]
+                    energy = result.get("energy", 0.0)
+                except (KeyError, TypeError, ValueError, AssertionError) as exc:
+                    raise missing_context_dsa_error() from exc
                 if prefix > 0:
                     base_sol = get_sol(b, full_s, 0, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
                     target_sol = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
@@ -7297,6 +7316,16 @@ class PerfDatabase:
             emp_latency = get_empirical(b, s, num_heads, kv_cache_dtype)
             return PerformanceResult(emp_latency, energy=0.0)
         else:
+
+            def missing_generation_dsa_error() -> PerfDataNotAvailableError:
+                return PerfDataNotAvailableError(
+                    f"Generation DSA module data not available for system='{self.system}', "
+                    f"backend='{self.backend}', version='{self.version}', architecture='{architecture}', "
+                    f"kv_cache_dtype={kv_cache_dtype}, gemm_quant_mode={gemm_quant_mode}, "
+                    f"num_heads={num_heads}, s={s}, b={b}. "
+                    "Missing silicon data for the requested lookup."
+                )
+
             try:
                 dsa_module_data = getattr(self, "_generation_dsa_module_data", None)
                 if dsa_module_data is None:
@@ -7304,10 +7333,13 @@ class PerfDatabase:
                         f"Generation DSA module perf data not loaded for system='{self.system}', "
                         f"backend='{self.backend}', version='{self.version}'."
                     )
-                dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
-                result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
-                latency = result["latency"]
-                energy = result.get("energy", 0.0)
+                try:
+                    dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
+                    result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
+                    latency = result["latency"]
+                    energy = result.get("energy", 0.0)
+                except (KeyError, TypeError, ValueError, AssertionError) as exc:
+                    raise missing_generation_dsa_error() from exc
                 return PerformanceResult(latency, energy=energy)
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
