@@ -62,9 +62,6 @@ jobs:
         run: |
           echo "CPU cores: $(nproc)"
           free -h
-      - name: Build wheel in container
-        run: |
-          docker build -f docker/Dockerfile -t aiconfigurator:build --target build .
       - name: Run tests in container
         shell: bash
         run: |
