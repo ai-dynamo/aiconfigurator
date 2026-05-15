@@ -7,34 +7,44 @@
 # extension wheel, plus a `combined-test` stage that installs both into one
 # venv and exercises the rust backend + python fallback end-to-end.
 #
-# Local / CI invocations:
+# Local / CI invocations (override WHEEL_BUILD_BASE for non-default platforms):
 #   docker buildx build --target wheel-out-pure --output type=local,dest=./dist -f docker/Dockerfile .
 #   docker buildx build --target wheel-out-rust --output type=local,dest=./dist \
-#       --build-arg MANYLINUX_ARCH=aarch64 --platform linux/arm64 -f docker/Dockerfile .
+#       --build-arg WHEEL_BUILD_BASE=quay.io/pypa/manylinux_2_28_aarch64 \
+#       --platform linux/arm64 -f docker/Dockerfile .
 #   docker buildx build --target combined-test \
-#       --build-arg MANYLINUX_ARCH=aarch64 --platform linux/arm64 -f docker/Dockerfile .
+#       --build-arg WHEEL_BUILD_BASE=quay.io/pypa/manylinux_2_28_aarch64 \
+#       --platform linux/arm64 -f docker/Dockerfile .
 
-# Match the docker buildx --platform target. CI sets this from matrix.archs.
-ARG MANYLINUX_ARCH=x86_64
+# The wheel-build base image. CI sets this per matrix row to one of:
+#   - quay.io/pypa/manylinux_2_28_{x86_64,aarch64}     (glibc 2.28, RHEL 8+)
+#   - quay.io/pypa/manylinux2014_{x86_64,aarch64}      (glibc 2.17, EL7-era)
+#   - quay.io/pypa/musllinux_1_2_{x86_64,aarch64}      (musl, Alpine/distroless)
+# Default keeps single-platform local builds on x86_64 hosts working without
+# an extra --build-arg flag. Auditwheel ≥ 5 auto-detects the libc family
+# from the binary, so the same downstream `auditwheel repair` step works
+# across all three families.
+ARG WHEEL_BUILD_BASE=quay.io/pypa/manylinux_2_28_x86_64
 
 # ----------------------------------------------------------------------------
 # Rust-side wheel build (aiconfigurator-rust-core)
 # ----------------------------------------------------------------------------
 
-# rust-toolchain: install rustup + the pinned cargo-cyclonedx into a
-# manylinux_2_28 image so the binaries are linkable against the build stage's
-# glibc 2.28. cargo-cyclonedx is on PATH so maturin's PEP 770 SBOM emission
-# fires automatically when the rust-core wheel is built.
-FROM quay.io/pypa/manylinux_2_28_${MANYLINUX_ARCH} AS rust-toolchain
+# rust-toolchain: install rustup + the pinned cargo-cyclonedx into the same
+# wheel-build base so the binaries are linkable against the build stage's
+# libc. cargo-cyclonedx is on PATH so maturin's PEP 770 SBOM emission fires
+# automatically when the rust-core wheel is built.
+FROM ${WHEEL_BUILD_BASE} AS rust-toolchain
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
       sh -s -- -y --profile minimal --default-toolchain stable
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN cargo install --locked cargo-cyclonedx --version 0.5.7
 
-# rust-build: produce the aiconfigurator-rust-core wheel. Builds on
-# manylinux_2_28 (glibc 2.28) so the cdylib's symbol floor is broad.
-# auditwheel repair stamps the wheel manylinux_2_28_<arch>.
-FROM quay.io/pypa/manylinux_2_28_${MANYLINUX_ARCH} AS rust-build
+# rust-build: produce the aiconfigurator-rust-core wheel. auditwheel
+# repair stamps the wheel with the appropriate platform tag based on the
+# actual symbol versions it observes — manylinux_2_28_<arch>,
+# manylinux2014_<arch>, or musllinux_1_2_<arch>.
+FROM ${WHEEL_BUILD_BASE} AS rust-build
 COPY --from=rust-toolchain /root/.cargo /root/.cargo
 COPY --from=rust-toolchain /root/.rustup /root/.rustup
 ENV CARGO_HOME=/root/.cargo

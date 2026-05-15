@@ -122,13 +122,35 @@ pre-commit run --all-files
 | Distribution | Wheel tag | Contents | Build tool |
 |---|---|---|---|
 | `aiconfigurator` | `py3-none-any` | Pure Python SDK + CLI + bundled data files (model_configs, systems, generator templates) | setuptools |
-| `aiconfigurator-rust-core` | `cp310-abi3-manylinux_2_28_<arch>` | PyO3 extension module `aiconfigurator_rust_core.aiconfigurator_core` | maturin |
+| `aiconfigurator-rust-core` | `cp310-abi3-<platform>` (matrix below) | PyO3 extension module `aiconfigurator_rust_core.aiconfigurator_core` | maturin |
 
 The pure-Python `aiconfigurator` works without the rust extension. The
 SDK's `--engine-step-backend rust` flag is gated by `is_rust_core_available()`
 which falls back to the Python latency path on platforms where the
 extension isn't installed. Version coordination: lock-step minor versions
 (`aiconfigurator 0.9.x` requires `aiconfigurator-rust-core>=0.9.0,<0.10.0`).
+
+#### Supported platforms
+
+CI publishes a precompiled `aiconfigurator-rust-core` wheel for each of the
+following platforms; `pip install aiconfigurator[rust]` picks the right one
+automatically:
+
+| Platform | Wheel tag |
+|---|---|
+| Linux x86_64 (glibc ≥ 2.28; RHEL 8+, Ubuntu 20.04+) | `cp310-abi3-manylinux_2_28_x86_64` |
+| Linux aarch64 (glibc ≥ 2.28) | `cp310-abi3-manylinux_2_28_aarch64` |
+| Linux x86_64 (glibc ≥ 2.17; RHEL 7-era, Amazon Linux 2) | `cp310-abi3-manylinux2014_x86_64` |
+| Linux aarch64 (glibc ≥ 2.17) | `cp310-abi3-manylinux2014_aarch64` |
+| Linux x86_64 (musl; Alpine / distroless) | `cp310-abi3-musllinux_1_2_x86_64` |
+| Linux aarch64 (musl) | `cp310-abi3-musllinux_1_2_aarch64` |
+| macOS arm64 (Apple Silicon) | `cp310-abi3-macosx_14_0_arm64` |
+| macOS x86_64 (Intel) | `cp310-abi3-macosx_10_13_x86_64` |
+| Windows x86_64 | `cp310-abi3-win_amd64` |
+
+Hosts outside this matrix (e.g. Windows ARM64, FreeBSD, PyPy) fall through
+to the source distribution and need a local Rust toolchain to build. Bare
+`pip install aiconfigurator` always works without the extension.
 
 #### Local build commands
 
@@ -143,16 +165,23 @@ uv build --wheel
 docker buildx build --target wheel-out-pure --output type=local,dest=./dist \
   -f docker/Dockerfile .
 
-# Rust extension wheel (requires docker buildx + a manylinux container):
+# Rust extension wheel (requires docker buildx + a manylinux/musllinux container):
 docker buildx build \
-  --platform linux/arm64 --build-arg MANYLINUX_ARCH=aarch64 \
+  --platform linux/arm64 \
+  --build-arg WHEEL_BUILD_BASE=quay.io/pypa/manylinux_2_28_aarch64 \
   --target wheel-out-rust --output type=local,dest=./dist \
   -f docker/Dockerfile .
+
+# Swap WHEEL_BUILD_BASE to target other Linux variants without other changes:
+#   quay.io/pypa/manylinux2014_aarch64   (older glibc)
+#   quay.io/pypa/musllinux_1_2_aarch64   (Alpine / distroless)
+#   quay.io/pypa/manylinux_2_28_x86_64   (x86_64, default if you omit the arg)
 
 # Unified end-to-end smoke (installs both wheels, runs CLI with rust then
 # python backends, fails if either path is broken):
 docker buildx build \
-  --platform linux/arm64 --build-arg MANYLINUX_ARCH=aarch64 \
+  --platform linux/arm64 \
+  --build-arg WHEEL_BUILD_BASE=quay.io/pypa/manylinux_2_28_aarch64 \
   --target combined-test \
   -f docker/Dockerfile .
 ```
