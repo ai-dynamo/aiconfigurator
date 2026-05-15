@@ -4,7 +4,7 @@
 import pytest
 
 from aiconfigurator.cli.api import EstimateResult
-from aiconfigurator.cli.detail_report import detail_requests_time, format_estimate_detail
+from aiconfigurator.cli.estimate_detail_report import format_estimate_detail_report
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.inference_summary import InferenceSummary
 
@@ -50,13 +50,7 @@ def _static_summary(context: dict[str, float], generation: dict[str, float]) -> 
     return summary
 
 
-def test_detail_requests_time_expands_all() -> None:
-    assert detail_requests_time("time")
-    assert detail_requests_time("all")
-    assert not detail_requests_time("memory")
-
-
-def test_format_estimate_detail_static_pairs_sol_summary() -> None:
+def test_format_estimate_detail_report_static_pairs_sol_summary() -> None:
     result = _estimate_result(
         mode="static",
         raw={"ttft": 10.0, "tpot": 2.0, "request_latency": 40.0},
@@ -68,7 +62,7 @@ def test_format_estimate_detail_static_pairs_sol_summary() -> None:
         summary=_static_summary({"context_qkv_gemm": 5.0}, {"generation_qkv_gemm": 15.0}),
     )
 
-    report = format_estimate_detail(result, sol_result, detail="time", width=100)
+    report = format_estimate_detail_report(result, sol_result, detail="time", width=100)
 
     assert "request latency" in report
     assert "40.000 ms  SOL     20.000 ms    50.0% SOL/time" in report
@@ -77,7 +71,7 @@ def test_format_estimate_detail_static_pairs_sol_summary() -> None:
     assert "10.000 ms  100.0%  SOL      5.000 ms    50.0% SOL/time" in report
 
 
-def test_format_estimate_detail_agg_uses_per_ops_data() -> None:
+def test_format_estimate_detail_report_agg_uses_per_ops_data() -> None:
     result = _estimate_result(
         mode="agg",
         raw={"ttft": 100.0, "tpot": 10.0, "request_latency": 250.0},
@@ -98,7 +92,7 @@ def test_format_estimate_detail_agg_uses_per_ops_data() -> None:
         },
     )
 
-    report = format_estimate_detail(result, sol_result, detail="time", width=100)
+    report = format_estimate_detail_report(result, sol_result, detail="time", width=100)
 
     assert "Scheduling: 2 mix steps + 3 gen-only steps" in report
     assert "Mix Step (total = 20.000 ms, SOL = 10.000 ms, SOL/time = 50.0%)" in report
@@ -106,7 +100,7 @@ def test_format_estimate_detail_agg_uses_per_ops_data() -> None:
     assert "20.000 ms  100.0%  SOL     10.000 ms    50.0% SOL/time" in report
 
 
-def test_format_estimate_detail_disagg_uses_per_ops_data() -> None:
+def test_format_estimate_detail_report_disagg_uses_per_ops_data() -> None:
     result = _estimate_result(
         mode="disagg",
         raw={"ttft": 80.0, "tpot": 8.0, "request_latency": 200.0},
@@ -118,7 +112,7 @@ def test_format_estimate_detail_disagg_uses_per_ops_data() -> None:
         per_ops_data={"prefill": {"context_attention": 10.0}, "decode": {"generation_attention": 4.0}},
     )
 
-    report = format_estimate_detail(result, sol_result, detail="time", width=100)
+    report = format_estimate_detail_report(result, sol_result, detail="time", width=100)
 
     assert "Prefill (static_ctx) (total = 40.000 ms, SOL = 10.000 ms, SOL/time = 25.0%)" in report
     assert "Decode (static_gen) (total = 8.000 ms, SOL = 4.000 ms, SOL/time = 50.0%)" in report

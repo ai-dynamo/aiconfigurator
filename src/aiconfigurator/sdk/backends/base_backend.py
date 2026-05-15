@@ -404,7 +404,7 @@ class BaseBackend(ABC):
         summary.set_generation_power_avg(generation_power_avg)
         summary.set_e2e_power_avg(e2e_power_avg)
         summary.set_memory_and_check_oom(memory, database.system_spec["gpu"]["mem_capacity"])
-        # KV-per-seq context for capacity probing in InferenceSummary.format_detail_report.
+        # KV-per-seq context for capacity probing in CLI detail reports.
         try:
             kv_seq_len_used = isl + beam_width * osl
             kv_bytes_per_seq = model.get_kvcache_bytes_per_sequence(kv_seq_len_used)

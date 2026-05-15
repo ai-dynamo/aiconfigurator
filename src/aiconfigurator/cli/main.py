@@ -13,7 +13,7 @@ import pandas as pd
 import yaml
 
 from aiconfigurator import __version__
-from aiconfigurator.cli.detail_report import detail_requests_time, format_estimate_detail
+from aiconfigurator.cli.estimate_detail_report import detail_requests_time, format_estimate_detail_report
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
 from aiconfigurator.cli.utils import merge_experiment_results_by_mode, process_experiment_result
 from aiconfigurator.generator.api import (
@@ -1882,7 +1882,7 @@ def _run_estimate_mode(args):
 
     if detail_arg:
         try:
-            report = format_estimate_detail(result, sol_result, detail=detail_arg)
+            report = format_estimate_detail_report(result, sol_result, detail=detail_arg)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
         if report:

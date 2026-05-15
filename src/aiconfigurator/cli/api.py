@@ -447,7 +447,7 @@ class EstimateResult:
     """Estimation mode: 'agg', 'disagg', 'static', 'static_ctx', or 'static_gen'."""
 
     summary: object | None = None
-    """The underlying :class:`InferenceSummary` (for ``format_detail_report``).
+    """The underlying :class:`InferenceSummary`.
 
     Populated for static and agg modes. ``None`` for disagg (which uses its
     own DisaggInferenceSession.run_disagg pipeline and does not expose a

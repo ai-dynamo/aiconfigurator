@@ -4,12 +4,12 @@
 """End-to-end tests for the static-batching estimate mode and its breakdown report.
 
 These tests cover the new behavior added alongside the
-``InferenceSummary.format_detail_report`` rollout:
+CLI estimate detail report rollout:
 
 * ``cli_estimate(mode="static" | "static_ctx" | "static_gen")`` runs and
   produces sane values (positive latency, populated memory dict, summary handle).
-* ``EstimateResult.summary.format_detail_report`` accepts both single-section
-  and ``all`` detail strings without raising.
+* ``format_summary_detail_report`` accepts both single-section and ``all``
+  detail strings without raising.
 * The new CLI short aliases (``--bs`` / ``--tp`` / ``--pp`` / etc.) parse to the
   same attribute names as the long forms (smoke check on argparse wiring; does
   not require running a database).
@@ -20,6 +20,7 @@ import argparse
 import pytest
 
 from aiconfigurator.cli.api import EstimateResult, cli_estimate
+from aiconfigurator.cli.estimate_detail_report import format_summary_detail_report
 from aiconfigurator.cli.main import configure_parser as configure_cli_parser
 
 pytestmark = pytest.mark.e2e
@@ -69,25 +70,25 @@ def test_static_estimate_runs(static_mode):
 
 
 def test_static_estimate_detail_report_renders():
-    """format_detail_report must accept summary / memory / time / all without raising."""
+    """Summary detail reports must accept summary / memory / time / all without raising."""
     result = cli_estimate(mode="static", **_common_kwargs())
     summary = result.summary
     assert summary is not None
 
     # Every individual section should produce non-empty output.
     for section in ("summary", "memory", "time"):
-        text = summary.format_detail_report(detail=section)
+        text = format_summary_detail_report(summary, detail=section)
         assert isinstance(text, str)
         assert text.strip(), f"detail={section!r} produced empty output"
 
     # "all" should superset the individual sections (at least char-wise).
-    full = summary.format_detail_report(detail="all")
+    full = format_summary_detail_report(summary, detail="all")
     assert "Memory Layout" in full
     assert "Performance Summary" in full
 
     # Unknown sections should raise a clear ValueError.
     with pytest.raises(ValueError):
-        summary.format_detail_report(detail="not_a_section")
+        format_summary_detail_report(summary, detail="not_a_section")
 
 
 def test_static_estimate_memory_capacity_context():
