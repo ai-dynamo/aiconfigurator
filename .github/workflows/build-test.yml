@@ -27,7 +27,7 @@ jobs:
             workers: "-n 2"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           lfs: true
           fetch-depth: 0
@@ -108,7 +108,7 @@ jobs:
           - { runner: windows-2022, archs: x86_64, build_method: native, combined_test: false, tag_label: win_amd64 }
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           lfs: true
           fetch-depth: 0
@@ -174,7 +174,7 @@ jobs:
 
       - name: Set up Python 3.10 (native)
         if: matrix.build_method == 'native'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.10"
 
@@ -225,7 +225,7 @@ jobs:
           PY
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: sbom-aiconfigurator-rust-core-${{ matrix.tag_label }}
           path: sbom/sbom-aiconfigurator-rust-core-${{ matrix.tag_label }}.cdx.json
