@@ -867,6 +867,18 @@ class TestParseCompressedTensorsQuant:
 class TestEnumerateParallelConfigSGLangMoE:
     """Test enumerate_parallel_config for SGLang MoE scenarios."""
 
+    def test_dense_configs_skip_tp_that_cannot_shard_attention_heads(self):
+        configs = enumerate_parallel_config(
+            num_gpu_list=[1, 2, 4, 8, 16],
+            tp_list=[1, 2, 4, 8, 16],
+            pp_list=[1],
+            is_moe=False,
+            backend=common.BackendName.sglang,
+            num_attention_heads=24,
+        )
+
+        assert [config[0] for config in configs] == [1, 2, 4, 8]
+
     def test_sglang_non_wideep_moe_includes_moe_ep_gt_1(self):
         """Test that SGLang + enable_wideep=False includes configs with moe_ep > 1."""
         configs = enumerate_parallel_config(

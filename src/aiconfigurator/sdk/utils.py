@@ -147,6 +147,7 @@ def enumerate_parallel_config(
     min_num_gpus: int | None = None,
     max_num_gpus: int | None = None,
     allow_moe_pure_tp: bool = True,
+    num_attention_heads: int | None = None,
 ) -> list[list[int]]:
     """
     Enumerate parallel configurations based on parallel list.
@@ -171,6 +172,8 @@ def enumerate_parallel_config(
         allow_moe_pure_tp: when True (default, GQA+MoE models), pure TP configs are kept.
             Set to False for MLA+MoE models (e.g. DeepSeek) to only allow TEP/DEP.
             Only effective when real_silicon_sweep=True.
+        num_attention_heads: if provided, exclude tensor-parallel sizes that cannot
+            evenly shard the model's attention heads.
     Returns:
         parallel_config_list: list of parallel configurations
     """
@@ -179,6 +182,13 @@ def enumerate_parallel_config(
 
     parallel_config_list = []
     for tp in tp_list:
+        if num_attention_heads is not None and (tp <= 0 or num_attention_heads % tp != 0):
+            logger.debug(
+                "Skipping tp=%s because num_attention_heads=%s is not divisible by it",
+                tp,
+                num_attention_heads,
+            )
+            continue
         for pp in pp_list:
             if is_moe:
                 for dp in dp_list:

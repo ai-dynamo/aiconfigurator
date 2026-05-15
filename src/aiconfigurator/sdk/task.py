@@ -66,6 +66,14 @@ def _validate_deepseek_v4_model_hardware_support(
     )
 
 
+def _get_num_attention_heads(model_path: str) -> int | None:
+    try:
+        return int(get_model_config_from_model_path(model_path)["n"])
+    except Exception as exc:
+        logger.debug("Could not resolve attention head count for %s: %s", model_path, exc)
+        return None
+
+
 @dataclass(frozen=True)
 class ConfigLayer:
     name: str
@@ -1285,6 +1293,7 @@ class TaskRunner:
             )
             return None
         logger.debug("Task %s: Setting up model config", task_config.task_name)
+        num_attention_heads = _get_num_attention_heads(task_config.model_path)
         model_config = config.ModelConfig(
             gemm_quant_mode=task_config.worker_config.gemm_quant_mode,
             kvcache_quant_mode=task_config.worker_config.kvcache_quant_mode,
@@ -1311,6 +1320,7 @@ class TaskRunner:
                 backend=common.BackendName(task_config.worker_config.backend_name),
                 enable_wideep=task_config.enable_wideep,
                 moe_backend=task_config.moe_backend,
+                num_attention_heads=num_attention_heads,
             )
         except Exception:  # pragma: no cover
             logger.exception(
@@ -1395,6 +1405,7 @@ class TaskRunner:
             )
             return None
         logger.debug("Task %s: Setting up prefill model config", task_config.task_name)
+        num_attention_heads = _get_num_attention_heads(task_config.model_path)
         prefill_model_config = config.ModelConfig(
             gemm_quant_mode=task_config.prefill_worker_config.gemm_quant_mode,
             kvcache_quant_mode=task_config.prefill_worker_config.kvcache_quant_mode,
@@ -1423,6 +1434,7 @@ class TaskRunner:
                 backend=common.BackendName(task_config.prefill_worker_config.backend_name),
                 enable_wideep=prefill_enable_wideep,
                 moe_backend=prefill_moe_backend,
+                num_attention_heads=num_attention_heads,
             )
         except Exception:  # pragma: no cover
             logger.exception(
@@ -1485,6 +1497,7 @@ class TaskRunner:
                 backend=common.BackendName(task_config.decode_worker_config.backend_name),
                 enable_wideep=decode_enable_wideep,
                 moe_backend=decode_moe_backend,
+                num_attention_heads=num_attention_heads,
             )
         except Exception:  # pragma: no cover
             logger.exception(
