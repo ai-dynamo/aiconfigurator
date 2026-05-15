@@ -42,6 +42,7 @@ class TestSupportedModels:
             "sgl-project/DeepSeek-V4-Pro-FP8",
             "zai-org/GLM-5-FP8",
             "nvidia/GLM-5-NVFP4",
+            "nvidia/nemotron-ultra-rl-050826",
         ],
     )
     def test_specific_models_are_in_default_list(self, hf_id):
@@ -81,6 +82,7 @@ class TestSupportedModels:
             ("Qwen/Qwen3-30B-A3B", True),
             # NemotronH: check hybrid_override_pattern for 'E' (MoE layers)
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' in pattern
+            ("nvidia/nemotron-ultra-rl-050826", True),  # Has 'E' in derived pattern
             ("nvidia/Nemotron-H-56B-Base-8K", False),  # No 'E' in pattern (only M, *, -)
         ],
     )
@@ -122,6 +124,7 @@ class TestHFModelSupport:
             ("nvidia/GLM-5-NVFP4", "DEEPSEEKV32"),
             ("Qwen/Qwen3-30B-A3B", "MOE"),
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "NEMOTRONH"),
+            ("nvidia/nemotron-ultra-rl-050826", "NEMOTRONH"),
             ("nvidia/Nemotron-H-56B-Base-8K", "NEMOTRONH"),
         ],
     )
@@ -147,6 +150,7 @@ class TestHFModelSupport:
             ("Qwen/Qwen3-30B-A3B", True),
             # NemotronH: is_moe depends on 'E' in hybrid_override_pattern
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' (MoE layers)
+            ("nvidia/nemotron-ultra-rl-050826", True),  # Has 'E' in derived pattern
             ("nvidia/Nemotron-H-56B-Base-8K", False),  # No 'E' (Mamba + Attention + MLP only)
         ],
     )
@@ -154,6 +158,43 @@ class TestHFModelSupport:
         """Test that MoE models are correctly identified via HF ID."""
         is_moe = check_is_moe(hf_id)
         assert is_moe == is_moe_expected
+
+    def test_nemotron_ultra_config_shape_and_quant(self):
+        """Test Nemotron 3 Ultra layer-block config parsing and quant defaults."""
+        hf_id = "nvidia/nemotron-ultra-rl-050826"
+        model_info = get_model_config_from_model_path(hf_id)
+
+        assert model_info["architecture"] == "NemotronHForCausalLM"
+        assert model_info["layers"] == 108
+        assert model_info["hidden_size"] == 8192
+        assert model_info["inter_size"] == 5120
+        assert model_info["topk"] == 22
+        assert model_info["num_experts"] == 512
+
+        extra = model_info["extra_params"]
+        assert isinstance(extra, common.NemotronHConfig)
+        assert Counter(extra.hybrid_override_pattern) == {"M": 48, "E": 48, "*": 12}
+        assert extra.mamba_num_heads == 256
+        assert extra.mamba_head_dim == 64
+        assert extra.moe_shared_expert_intermediate_size == 10240
+
+        model_config = config.ModelConfig(
+            tp_size=8,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=1,
+        )
+        model = get_model(hf_id, model_config, backend_name="trtllm")
+
+        assert model.model_family == "NEMOTRONH"
+        assert model_config.gemm_quant_mode == common.GEMMQuantMode.nvfp4
+        assert model_config.moe_quant_mode == common.MoEQuantMode.nvfp4
+        assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+        assert model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
+        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_mamba_norm") == 48
+        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_moe_norm") == 48
+        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_attn_norm") == 12
 
     @pytest.mark.parametrize(
         "hf_id,expected_layers,expected_hidden,expected_index_topk,expected_ratio_counts,expected_moe_quant",
