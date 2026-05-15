@@ -15,10 +15,11 @@ FROM quay.io/pypa/manylinux_2_28_${MANYLINUX_ARCH} AS rust-toolchain
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
       sh -s -- -y --profile minimal --default-toolchain stable
 ENV PATH="/root/.cargo/bin:${PATH}"
-# Pinned binary cargo tools (currently cargo-cyclonedx). Installed once here
-# so every downstream stage picks them up via `COPY --from=rust-toolchain`.
-COPY tools/wheel_build/install_build_tools.sh /tmp/install_build_tools.sh
-RUN bash /tmp/install_build_tools.sh && rm /tmp/install_build_tools.sh
+# cargo-cyclonedx is required by maturin's built-in PEP 770 SBOM emission —
+# maturin invokes it as a subprocess and embeds the result at
+# <dist-info>/sboms/<crate-name>-py3.cyclonedx.json. Pinned here so a single
+# COPY --from=rust-toolchain pulls cargo, rustc, and the SBOM tool together.
+RUN cargo install --locked cargo-cyclonedx --version 0.5.7
 
 # Wheel-build stage: manylinux_2_28 (AlmaLinux 8, glibc 2.28). Building here
 # means the cdylib references at most glibc 2.28 symbols, so `auditwheel
@@ -29,18 +30,15 @@ COPY --from=rust-toolchain /root/.cargo /root/.cargo
 COPY --from=rust-toolchain /root/.rustup /root/.rustup
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
-ENV PATH="${CARGO_HOME}/bin:/opt/python/cp312-cp312/bin:${PATH}"
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Pick cp310 as the build interpreter so maturin's abi3-py310 tag is honest
+# (the wheel works on cp310+, but maturin needs an interpreter ≥ 3.10 to
+# introspect during build).
+ENV PATH="${CARGO_HOME}/bin:/opt/python/cp310-cp310/bin:${PATH}"
+RUN pip install --no-cache-dir 'maturin>=1.10,<2'
 
 WORKDIR /workspace
-ENV VIRTUAL_ENV=/opt/aiconfigurator/venv
-RUN uv venv --python 3.12 ${VIRTUAL_ENV}
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-ENV MPLCONFIGDIR=/tmp/matplotlib
-
 COPY src/ /workspace/src/
 COPY rust/ /workspace/rust/
-COPY tools/wheel_build/ /workspace/tools/wheel_build/
 COPY LICENSE pyproject.toml README.md /workspace/
 # Fail fast if Git LFS content wasn't materialized before the build — otherwise
 # the wheel ships pointer stubs in place of perf data (see DYN-2725).
@@ -52,43 +50,19 @@ RUN set -e; \
         echo "Run 'git lfs install && git lfs pull' in the source tree before building." >&2; \
         exit 1; \
     fi
-RUN uv build --wheel --out-dir /workspace/dist
 
-# `auditwheel repair` rewrites the wheel's platform tag honestly based on the
-# actual symbol versions it observes (glibc, libstdc++ etc.) and bundles any
-# external shared-library deps inside the wheel. Lets auditwheel choose the
-# tag rather than hard-coding it — that way a future glibc-symbol bump from
-# Rust's std surfaces in the tag instead of silently breaking installs.
-RUN mkdir -p /workspace/dist-repaired && \
-    for whl in /workspace/dist/*.whl; do \
-      auditwheel repair --wheel-dir /workspace/dist-repaired "$whl" && \
-      rm "$whl"; \
-    done && \
-    mv /workspace/dist-repaired/*.whl /workspace/dist/ && \
-    rmdir /workspace/dist-repaired
+# Build the wheel via maturin. Maturin produces a cp310-abi3-linux_<arch>
+# wheel and, because cargo-cyclonedx is on PATH, embeds the CycloneDX SBOM
+# at <dist-info>/sboms/aiconfigurator-core-py3.cyclonedx.json — no separate
+# cargo cyclonedx step, no custom SBOM injector needed.
+RUN maturin build --release --out /workspace/raw-dist
 
-# Retag the wheel as `py3-none-<plat>`. The aiconfigurator-core cdylib is
-# loaded via ctypes and never links libpython, so a single platform wheel
-# covers all supported CPython versions (>= 3.10 per pyproject.toml).
-RUN uv pip install 'wheel>=0.42'
-RUN for whl in /workspace/dist/*.whl; do \
-      python3 -m wheel tags --python-tag py3 --abi-tag none --remove "$whl"; \
-    done
-
-# Generate a CycloneDX SBOM for the Rust crate and inject it into every wheel
-# under /workspace/dist per PEP 770.
-RUN cargo cyclonedx \
-      --manifest-path /workspace/rust/aiconfigurator-core/Cargo.toml \
-      --format json
-RUN set -e; \
-    sbom=$(find /workspace/rust -maxdepth 5 -name '*.cdx.json' -type f -print -quit); \
-    if [ -z "$sbom" ]; then \
-      echo "ERROR: cargo cyclonedx did not produce a *.cdx.json file under /workspace/rust" >&2; \
-      exit 1; \
-    fi; \
-    echo "Found SBOM at: $sbom"; \
-    for whl in /workspace/dist/*.whl; do \
-      python3 /workspace/tools/wheel_build/inject_sbom.py "$whl" --sbom "$sbom"; \
+# auditwheel repair rewrites the platform tag honestly based on observed
+# symbol versions (linux_<arch> -> manylinux_2_28_<arch>) and bundles any
+# external shared-library deps inside the wheel.
+RUN mkdir -p /workspace/dist && \
+    for whl in /workspace/raw-dist/*.whl; do \
+      auditwheel repair --wheel-dir /workspace/dist "$whl"; \
     done
 
 # Single-purpose stage that contains only the built wheels. Use this target

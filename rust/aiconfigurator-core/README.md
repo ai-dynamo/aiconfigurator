@@ -5,10 +5,13 @@ Phase 1 Rust core for estimating forward-pass latency from AIC model metadata an
 This crate intentionally does not change the existing Python SDK. It gives Rust callers, especially Dynamo Mocker, a reusable estimator that loads metadata once and then serves per-iteration estimates without Python/GIL overhead.
 
 The crate is compiled into the `aiconfigurator` Python wheel via
-[`setuptools-rust`](https://setuptools-rust.readthedocs.io/) — the resulting
-cdylib is bundled under `aiconfigurator/_native/` and loaded via `ctypes` from
-`aiconfigurator.sdk.rust_engine_step`. Running `cargo build` directly is for
-crate development only; end users do not need a Rust toolchain.
+[`maturin`](https://www.maturin.rs/) as a PyO3 extension module — the resulting
+`aiconfigurator_core.abi3.so` is bundled under `aiconfigurator/_native/` and
+imported directly by `aiconfigurator.sdk.rust_engine_step`. PyO3's
+`abi3-py310` stable-ABI feature means one compiled artifact works on every
+CPython ≥ 3.10. The raw C ABI in `src/ffi.rs` is retained for non-Python
+consumers (e.g. Dynamo Mocker via the `rlib`). Running `cargo build` directly
+is for crate development only; end users do not need a Rust toolchain.
 
 The v1 input is a per-attention-DP-rank list of AIC-owned Rust `ForwardPassMetrics`, aligned with Dynamo FPM v1. That keeps this first iteration close to existing Dynamo telemetry while avoiding a direct AIC dependency on Dynamo crates.
 
@@ -54,7 +57,7 @@ Current scope:
 - AIC-style Hugging Face model config JSON files.
 - AIC `gemm_perf.txt`, `context_attention_perf.txt`, `generation_attention_perf.txt`, `moe_perf.txt`, `context_mla_perf.txt`, and `generation_mla_perf.txt` CSV files.
 - Explicit Git LFS pointer detection for perf data that has not been pulled locally.
-- A minimal C ABI used by Python tests to opt into the Rust estimator without requiring PyO3 or changing the default Python SDK path.
+- A PyO3 extension module exposing the estimator to Python (`aiconfigurator._native.aiconfigurator_core`), plus a parallel C ABI in `src/ffi.rs` for non-Python consumers.
 
 Known Phase 1 limits:
 

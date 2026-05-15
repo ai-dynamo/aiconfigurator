@@ -69,16 +69,10 @@ python3 -m pytest -m "unit or build"
 
 ### Rust Engine Step Opt-In
 
-The Python SDK keeps using the existing Python latency path by default. The Rust core shared library is built into the wheel by `setuptools-rust` when you install the project (`pip install -e .` or `pip install .`), so a normal install is enough to exercise the Rust path. If you'd rather point at a custom build, set `AICONFIGURATOR_RUST_CORE_LIB`:
+The Python SDK keeps using the existing Python latency path by default. The Rust core is compiled into the wheel as a PyO3 extension module by `maturin` whenever you install the project (`pip install -e .`, `pip install .`, or `maturin develop --release`). The SDK imports it directly from `aiconfigurator._native.aiconfigurator_core`, so a normal install is enough to exercise the Rust path:
 
 ```bash
-# Standard path: install builds the cdylib, then enable the rust backend
-pip install -e .
-python3 -m pytest tests/unit/sdk/test_rust_engine_step.py --aic-engine-step-backend=rust
-
-# Or point at a manually built artifact
-cargo build --manifest-path rust/aiconfigurator-core/Cargo.toml
-export AICONFIGURATOR_RUST_CORE_LIB="$PWD/rust/aiconfigurator-core/target/debug/libaiconfigurator_core.so"
+pip install -e .   # or: maturin develop --release for fast iteration
 python3 -m pytest tests/unit/sdk/test_rust_engine_step.py --aic-engine-step-backend=rust
 ```
 

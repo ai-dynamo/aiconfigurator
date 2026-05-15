@@ -141,9 +141,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p sbom
-          # `unzip -p` reads one file out of the wheel to stdout — the wheel
-          # itself is never unpacked.
-          unzip -p dist/aiconfigurator-*.whl 'aiconfigurator-*.dist-info/sboms/cyclonedx.json' \
+          # maturin's PEP 770 path drops the SBOM at
+          # `<dist-info>/sboms/<crate-name>-py3.cyclonedx.json` — for us that's
+          # `aiconfigurator-core-py3.cyclonedx.json`. The `*.cyclonedx.json`
+          # glob future-proofs us against a maturin version that tweaks the
+          # naming convention. `unzip -p` reads one file out of the wheel to
+          # stdout — the wheel itself is never unpacked.
+          unzip -p dist/aiconfigurator-*.whl 'aiconfigurator-*.dist-info/sboms/*.cyclonedx.json' \
             > "sbom/sbom-aiconfigurator-wheel-rust-${{ matrix.archs }}.cdx.json"
           ls -la sbom/
       - name: Upload SBOM artifact

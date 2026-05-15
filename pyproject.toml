@@ -85,29 +85,38 @@ GitHub = "https://github.com/ai-dynamo/aiconfigurator"
 Repository = "https://github.com/ai-dynamo/aiconfigurator.git"
 
 [build-system]
-requires = ["setuptools>=68", "setuptools-rust>=1.10"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.10,<2"]
+build-backend = "maturin"
 
-[[tool.setuptools-rust.ext-modules]]
-target = "aiconfigurator._native.aiconfigurator_core"
-path = "rust/aiconfigurator-core/Cargo.toml"
-binding = "NoBinding"
-features = []
+[tool.maturin]
+manifest-path = "rust/aiconfigurator-core/Cargo.toml"
+bindings = "pyo3"
+features = ["extension-module"]
+module-name = "aiconfigurator._native.aiconfigurator_core"
+python-source = "src"
+# Maturin auto-includes non-Python files under python-source, but we list the
+# package data globs explicitly so the wheel contract stays visible and a
+# missing data file fails the A/B comparison loudly rather than silently.
+include = [
+    { path = "src/aiconfigurator/cli/*.yaml", format = ["sdist", "wheel"] },
+    { path = "src/aiconfigurator/cli/exps/*.yaml", format = ["sdist", "wheel"] },
+    { path = "src/aiconfigurator/generator/config/**/*.yaml", format = ["sdist", "wheel"] },
+    { path = "src/aiconfigurator/generator/config/backend_templates/**/*.j2", format = ["sdist", "wheel"] },
+    { path = "src/aiconfigurator/generator/rule_plugin/**/*.rule", format = ["sdist", "wheel"] },
+    { path = "src/aiconfigurator/systems/*.yaml", format = ["sdist", "wheel"] },
+    { path = "src/aiconfigurator/systems/*.csv", format = ["sdist", "wheel"] },
+    { path = "src/aiconfigurator/systems/**/*.txt", format = ["sdist", "wheel"] },
+    { path = "src/aiconfigurator/model_configs/*.json", format = ["sdist", "wheel"] },
+    { path = "src/aiconfigurator/webapp/components/profiling/styles.css", format = ["sdist", "wheel"] },
+    { path = "src/aiconfigurator/webapp/components/profiling/js/*.js", format = ["sdist", "wheel"] },
+    # Source distribution also needs the Rust crate to be buildable.
+    { path = "rust/**/*.rs", format = "sdist" },
+    { path = "rust/**/Cargo.toml", format = "sdist" },
+    { path = "rust/**/Cargo.lock", format = "sdist" },
+]
 
 [project.scripts]
 aiconfigurator = "aiconfigurator.main:main"
-
-[tool.setuptools.package-data]
-"aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
-"aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule"]
-"aiconfigurator" = ["systems/*.yaml", "systems/*.csv", "systems/**/*.txt", "model_configs/*.json"]
-"aiconfigurator.webapp.components.profiling" = ["styles.css", "js/*.js"]
-"aiconfigurator._native" = ["*.so", "*.dylib", "*.pyd", "*.dll"]
-
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["*"]
-exclude = ["tests", "docker", "collector", "systems"]
 
 [tool.ruff]
 line-length = 120

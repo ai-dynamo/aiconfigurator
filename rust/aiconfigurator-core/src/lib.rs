@@ -20,6 +20,9 @@ mod ffi;
 mod model;
 mod perf;
 
+#[cfg(feature = "extension-module")]
+mod python;
+
 use perf::PerfDatabase;
 
 pub use model::{ModelFamily, ModelSpec};
