@@ -22,6 +22,8 @@ def parse_version(ver_str):
 # Cell colors for support matrix (used in styling and legend)
 COLOR_FAIL_BG = "#ffcccc"
 COLOR_FAIL_TEXT = "#cc0000"
+COLOR_HW_INCOMPATIBLE_BG = "#e5e7eb"
+COLOR_HW_INCOMPATIBLE_TEXT = "#475569"
 COLOR_LATEST_PASS = "#80ff80"  # Green: latest tested backend version passes
 COLOR_OLDER_PASS = "#ccffcc"  # Light green: older tested backend version passes
 
@@ -37,6 +39,9 @@ SUPPORT_MATRIX_LEGEND = (
     f'<span style="margin-right: 24px;">'
     f'<span style="background: {COLOR_FAIL_BG}; color: {COLOR_FAIL_TEXT}; padding: 2px 10px; border-radius: 4px; font-weight: bold;">FAIL</span>'
     f" test failed (click cell to see error message)</span>"
+    f'<span style="margin-right: 24px;">'
+    f'<span style="background: {COLOR_HW_INCOMPATIBLE_BG}; color: {COLOR_HW_INCOMPATIBLE_TEXT}; padding: 2px 10px; border-radius: 4px; font-weight: bold;">HW</span>'
+    f" GPU does not support model datatype</span>"
     f"</div>"
 )
 
@@ -62,9 +67,10 @@ def get_latest_supported_version(df, huggingface_id, system, backend):
         return (None, False, None)
 
     # Get all versions with their statuses and error messages
-    # For each version, track if it has any FAIL entries and collect error messages
+    # For each version, track PASS/FAIL/HW_INCOMPATIBLE entries and collect messages
     version_has_fail = {}
     version_has_pass = {}
+    version_has_hw_incompatible = {}
     version_error_msgs = {}  # Store error messages for failed versions
 
     for _, row in subset.iterrows():
@@ -96,14 +102,26 @@ def get_latest_supported_version(df, huggingface_id, system, backend):
                     version_error_msgs[version] = error_msg
         elif status == "PASS":
             version_has_pass[version] = True
+        elif status == "HW_INCOMPATIBLE":
+            version_has_hw_incompatible[version] = True
+            if error_msg:
+                if version in version_error_msgs:
+                    existing = version_error_msgs[version]
+                    if existing and existing != error_msg:
+                        version_error_msgs[version] = f"{existing} | {error_msg}"
+                else:
+                    version_error_msgs[version] = error_msg
 
-    if len(version_has_fail) == 0 and len(version_has_pass) == 0:
+    if len(version_has_fail) == 0 and len(version_has_pass) == 0 and len(version_has_hw_incompatible) == 0:
         return (None, False, None)
 
     backend_versions = df[(df["System"] == system) & (df["Backend"] == backend)]["Version"].dropna().unique()
     latest_version = max((str(version) for version in backend_versions), key=parse_version, default=None)
     if latest_version in version_has_pass:
         return (latest_version, True, None)
+    if latest_version in version_has_hw_incompatible and latest_version not in version_has_fail:
+        error_msg = version_error_msgs.get(latest_version, "Hardware is incompatible with model datatype")
+        return ("HW_INCOMPATIBLE", False, error_msg)
     if latest_version in version_has_fail:
         error_msg = version_error_msgs.get(latest_version, "No error message available")
         return ("FAIL", False, error_msg)
@@ -113,14 +131,23 @@ def get_latest_supported_version(df, huggingface_id, system, backend):
     if passing_versions:
         v = passing_versions[0]
         return (v, False, None)
-    else:
-        # No passing version exists - collect error messages from all failed versions
-        all_error_msgs = []
-        for version in sorted(version_has_fail.keys(), key=parse_version, reverse=True):
-            if version in version_error_msgs:
-                all_error_msgs.append(f"{version}: {version_error_msgs[version]}")
+    # No passing version exists - prefer real failures over hardware-incompatible rows.
+    all_error_msgs = []
+    for version in sorted(version_has_fail.keys(), key=parse_version, reverse=True):
+        if version in version_error_msgs:
+            all_error_msgs.append(f"{version}: {version_error_msgs[version]}")
+    if all_error_msgs or version_has_fail:
         error_msg = " | ".join(all_error_msgs) if all_error_msgs else "No error message available"
         return ("FAIL", False, error_msg)
+
+    hw_error_msgs = []
+    for version in sorted(version_has_hw_incompatible.keys(), key=parse_version, reverse=True):
+        if version in version_error_msgs:
+            error_msg = version_error_msgs[version]
+            if error_msg not in hw_error_msgs:
+                hw_error_msgs.append(error_msg)
+    error_msg = " | ".join(hw_error_msgs) if hw_error_msgs else "Hardware is incompatible with model datatype"
+    return ("HW_INCOMPATIBLE", False, error_msg)
 
 
 def create_system_matrix(df, system_name, mode_filter="all"):
@@ -164,7 +191,7 @@ def create_system_matrix(df, system_name, mode_filter="all"):
             else:
                 row.append(latest_version)
                 matrix_is_latest[(row_idx, col_idx)] = is_latest
-                if latest_version == "FAIL":
+                if latest_version in ("FAIL", "HW_INCOMPATIBLE"):
                     matrix_error_msgs[(row_idx, col_idx)] = error_msg
                 else:
                     matrix_error_msgs[(row_idx, col_idx)] = None
@@ -183,6 +210,11 @@ def create_system_matrix(df, system_name, mode_filter="all"):
             row_idx = row.name
             if cell_value == "FAIL":
                 styles[col_idx] = f"background-color: {COLOR_FAIL_BG}; color: {COLOR_FAIL_TEXT}; font-weight: bold;"
+            elif cell_value == "HW_INCOMPATIBLE":
+                styles[col_idx] = (
+                    f"background-color: {COLOR_HW_INCOMPATIBLE_BG}; "
+                    f"color: {COLOR_HW_INCOMPATIBLE_TEXT}; font-weight: bold;"
+                )
             elif (row_idx, col_idx - 1) in matrix_is_latest:
                 is_latest = matrix_is_latest.get((row_idx, col_idx - 1), True)
                 if not is_latest:
@@ -349,12 +381,21 @@ def create_support_matrix_tab(app_config):
                                         else:
                                             backend = ""
 
+                                        cell_value = ""
+                                        if hasattr(evt, "row_value") and evt.row_value and len(evt.row_value) > col_idx:
+                                            cell_value = str(evt.row_value[col_idx])
+
                                         # Format error message - convert escaped newlines to actual newlines
                                         formatted_msg = str(error_msg)
                                         # Replace double-escaped newlines first, then single-escaped
                                         formatted_msg = formatted_msg.replace("\\\\n", "\n").replace("\\n", "\n")
 
-                                        title = f"Error Details - {model} / {backend}"
+                                        title_prefix = (
+                                            "Hardware Incompatibility"
+                                            if cell_value == "HW_INCOMPATIBLE"
+                                            else "Error Details"
+                                        )
+                                        title = f"{title_prefix} - {model} / {backend}"
                                         # gr.Info renders HTML. Use scrollable container so long messages stay on screen.
                                         escaped_msg = html_module.escape(formatted_msg)
                                         html_message = (

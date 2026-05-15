@@ -23,11 +23,17 @@ from tqdm import tqdm
 
 from aiconfigurator.generator.naive import _estimate_model_weight_bytes
 from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk import config as sdk_config
 from aiconfigurator.sdk.models import _get_model_info
+from aiconfigurator.sdk.models.helpers import _apply_model_quant_defaults
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 logger = logging.getLogger(__name__)
 
+STATUS_PASS = "PASS"
+STATUS_FAIL = "FAIL"
+STATUS_HW_INCOMPATIBLE = "HW_INCOMPATIBLE"
+VALID_STATUSES = frozenset({STATUS_PASS, STATUS_FAIL, STATUS_HW_INCOMPATIBLE})
 _BYTES_PER_PARAM = 2
 DEFAULT_ENGINE_STEP_COMPARISON_RTOL = 0.05
 DEFAULT_ENGINE_STEP_COMPARISON_ATOL = 1e-3
@@ -56,6 +62,9 @@ _FRONTIER_ENVELOPE_COLUMNS = {
     "tpot": "min",
     "request_latency": "min",
 }
+_FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
+_NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
+_FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
 
 
 def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[str, str, str, str]:
@@ -76,6 +85,12 @@ class TestConstraints:
     prefix: int
     ttft: float
     tpot: float
+
+
+@dataclass(frozen=True)
+class HardwareIncompatibility:
+    missing_datatypes: tuple[str, ...]
+    reason: str
 
 
 # Tiered constraints by model size (parameter count)
@@ -110,6 +125,92 @@ def _get_test_constraints(model_path: str) -> TestConstraints:
         _DEFAULT_TIER,
     )
     return _DEFAULT_TIER
+
+
+def _enum_name(value: object | None) -> str | None:
+    if value is None:
+        return None
+    return value.name if hasattr(value, "name") else str(value)
+
+
+def _format_datatype_list(datatypes: tuple[str, ...]) -> str:
+    if len(datatypes) == 1:
+        return datatypes[0]
+    return ", ".join(datatypes[:-1]) + f" or {datatypes[-1]}"
+
+
+def _gpu_label(system: str, system_spec: dict) -> str:
+    sm_version = (system_spec.get("gpu") or {}).get("sm_version")
+    if sm_version is None:
+        return system
+    return f"{system} (SM{sm_version})"
+
+
+def _gpu_supports_datatype(system: str, system_spec: dict, datatype: str) -> bool:
+    gpu_spec = system_spec.get("gpu") or {}
+    sm_version = gpu_spec.get("sm_version")
+    if datatype == "FP8":
+        # Intel Arc Pro B60 can run FP8 PyTorch/vLLM model paths by converting
+        # FP8 to BF16. Do not model it as native FP8 throughput in b60.yaml.
+        if system.lower() in _FP8_SOFTWARE_FALLBACK_SYSTEMS:
+            return True
+        return "fp8_tc_flops" in gpu_spec or (sm_version is not None and sm_version >= 89)
+    if datatype == "FP4":
+        return "fp4_tc_flops" in gpu_spec or (sm_version is not None and sm_version >= 100)
+    return True
+
+
+def _required_datatypes_for_model(model: str, backend: str) -> tuple[str, ...]:
+    """Infer hardware datatypes required by a model's quantization metadata."""
+    model_info = dict(_get_model_info(model))
+    raw_config = model_info.get("raw_config", {}) or {}
+    architecture = model_info["architecture"]
+    model_config = sdk_config.ModelConfig(tp_size=1, moe_tp_size=1, moe_ep_size=1)
+    _apply_model_quant_defaults(model_config, raw_config, architecture, backend)
+
+    quant_mode_names = {
+        _enum_name(model_config.gemm_quant_mode),
+        _enum_name(model_config.moe_quant_mode),
+        _enum_name(model_config.kvcache_quant_mode),
+        _enum_name(model_config.fmha_quant_mode),
+    }
+    quant_mode_names.discard(None)
+
+    raw_quant_algo = str(raw_config.get("quant_algo") or "").lower()
+    raw_kv_cache_algo = str(raw_config.get("kv_cache_quant_algo") or "").lower()
+    expert_dtype = str(raw_config.get("expert_dtype") or "").lower()
+
+    required: set[str] = set()
+    if quant_mode_names & _NATIVE_FP4_QUANT_MODE_NAMES or raw_quant_algo == "nvfp4" or expert_dtype == "fp4":
+        required.add("FP4")
+    if quant_mode_names & _FP8_QUANT_MODE_NAMES or raw_quant_algo in {"fp8", "fp8_block"}:
+        required.add("FP8")
+    if raw_kv_cache_algo == "fp8":
+        required.add("FP8")
+
+    # Keep FP4 first so FP4 model failures on older GPUs read as FP4 incompatibility
+    # even when the model also uses FP8 scales or KV cache.
+    return tuple(datatype for datatype in ("FP4", "FP8") if datatype in required)
+
+
+def get_hardware_incompatibility(
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    system_spec: dict,
+) -> HardwareIncompatibility | None:
+    """Return a deterministic hardware/model datatype incompatibility, if any."""
+    required_datatypes = _required_datatypes_for_model(model, backend)
+    missing = tuple(dt for dt in required_datatypes if not _gpu_supports_datatype(system, system_spec, dt))
+    if not missing:
+        return None
+
+    datatype_text = _format_datatype_list(missing)
+    return HardwareIncompatibility(
+        missing_datatypes=missing,
+        reason=f"{_gpu_label(system, system_spec)} does not support {datatype_text} required by {model}",
+    )
 
 
 @contextmanager
@@ -284,14 +385,14 @@ _worker_matrix: "SupportMatrix | None" = None
 
 def _process_combination_worker(
     combo: tuple[str, str, str, str],
-) -> list[tuple[str, str, str, str, str, str, bool, str | None]]:
+) -> list[tuple[str, str, str, str, str, str, str, str | None]]:
     """
     Run a single combination in a worker process. Uses the process-local SupportMatrix.
     Must be a module-level function for pickling by ProcessPoolExecutor.
     """
     assert _worker_matrix is not None  # this only works in linux, not in windows/macos
     model, system, backend, version = combo
-    success_dict, error_dict = _worker_matrix.run_single_test(
+    status_dict, error_dict = _worker_matrix.run_single_test(
         model=model,
         system=system,
         backend=backend,
@@ -304,8 +405,8 @@ def _process_combination_worker(
     )
     architecture = _worker_matrix.get_architecture(model)
     return [
-        (model, architecture, system, backend, version, mode, success_dict[mode], error_dict[mode])
-        for mode in success_dict
+        (model, architecture, system, backend, version, mode, status_dict[mode], error_dict[mode])
+        for mode in status_dict
     ]
 
 
@@ -437,12 +538,13 @@ class SupportMatrix:
         backend: str,
         version: str,
         *,
+        system_spec: dict | None = None,
         compare_engine_step_backends: bool = False,
         engine_step_comparison_rtol: float = DEFAULT_ENGINE_STEP_COMPARISON_RTOL,
         engine_step_comparison_atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
         engine_step_frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
         engine_step_frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
-    ) -> tuple[dict[str, bool], dict[str, str | None]]:
+    ) -> tuple[dict[str, str], dict[str, str | None]]:
         """
         Run a single configuration test for both agg and disagg modes.
 
@@ -451,6 +553,7 @@ class SupportMatrix:
             system: System/hardware name
             backend: Backend name
             version: Backend version
+            system_spec: Optional system spec to avoid reloading the database for hardware preflight.
             compare_engine_step_backends: When True, run both Python and Rust engine-step backends.
             engine_step_comparison_rtol: Relative tolerance for Python-vs-Rust Pareto metrics.
             engine_step_comparison_atol: Absolute tolerance for Python-vs-Rust Pareto metrics.
@@ -458,13 +561,37 @@ class SupportMatrix:
             engine_step_frontier_atol: Loose absolute tolerance when frontiers choose different rows.
 
         Returns:
-            Tuple of (dict with results, dict with error messages)
-            Both dicts have keys "agg" and "disagg"
+            Tuple of (dict with statuses, dict with error messages).
+            Status values are PASS, FAIL, or HW_INCOMPATIBLE.
+            Both dicts have keys "agg" and "disagg".
         """
-        constraints = _get_test_constraints(model)
         modes_to_test = ["agg", "disagg"]
-        results = {}
+        statuses: dict[str, str] = {}
         error_messages = {}
+
+        if system_spec is None:
+            database = perf_database.get_database(system, backend, version)
+            system_spec = database.system_spec if database is not None else None
+
+        if system_spec is not None:
+            try:
+                incompatibility = get_hardware_incompatibility(
+                    model=model,
+                    system=system,
+                    backend=backend,
+                    system_spec=system_spec,
+                )
+            except Exception:
+                logger.exception("Hardware compatibility preflight failed for %s on %s/%s", model, system, backend)
+                incompatibility = None
+            if incompatibility is not None:
+                reason = _format_exception_for_csv(incompatibility.reason)
+                return (
+                    dict.fromkeys(modes_to_test, STATUS_HW_INCOMPATIBLE),
+                    dict.fromkeys(modes_to_test, reason),
+                )
+
+        constraints = _get_test_constraints(model)
 
         for mode in modes_to_test:
             try:
@@ -489,7 +616,7 @@ class SupportMatrix:
                         version,
                         mode,
                     )
-                    results[mode] = False
+                    statuses[mode] = STATUS_FAIL
                     error_messages[mode] = "Configuration returned no results, failed to catch traceback"
                     continue
 
@@ -505,7 +632,7 @@ class SupportMatrix:
                             engine_step_backend="rust",
                         )
                     if rust_pareto_df is None or rust_pareto_df.empty:
-                        results[mode] = False
+                        statuses[mode] = STATUS_FAIL
                         error_messages[mode] = "Rust engine-step backend returned no results"
                         continue
 
@@ -518,11 +645,11 @@ class SupportMatrix:
                         frontier_atol=engine_step_frontier_atol,
                     )
                     if mismatch:
-                        results[mode] = False
+                        statuses[mode] = STATUS_FAIL
                         error_messages[mode] = mismatch
                         continue
 
-                results[mode] = True
+                statuses[mode] = STATUS_PASS
                 error_messages[mode] = None
 
             except Exception as e:
@@ -535,12 +662,12 @@ class SupportMatrix:
                     mode,
                     str(e),
                 )
-                results[mode] = False
+                statuses[mode] = STATUS_FAIL
                 error_messages[mode] = traceback.format_exc()
             finally:
                 error_messages[mode] = _format_exception_for_csv(error_messages[mode])
                 perf_database.clear_database_runtime_caches(system, backend, version)
-        return results, error_messages
+        return statuses, error_messages
 
     def _run_parallel_combinations(
         self,
@@ -594,7 +721,7 @@ class SupportMatrix:
 
     def test_support_matrix(
         self, max_workers: int | None = None
-    ) -> list[tuple[str, str, str, str, str, str, bool, str | None]]:
+    ) -> list[tuple[str, str, str, str, str, str, str, str | None]]:
         """
         Test whether each combination is supported by AIC.
         Tests both agg and disagg modes for each combination and captures error messages.
@@ -609,7 +736,7 @@ class SupportMatrix:
                          Defaults to None, which uses os.cpu_count() or 1.
 
         Returns:
-            List of tuples (huggingface_id, architecture, system, backend, version, mode, success, err_msg)
+            List of tuples (huggingface_id, architecture, system, backend, version, mode, status, err_msg)
             Returns separate entries for agg and disagg modes
         """
         # Print configuration
@@ -643,7 +770,7 @@ class SupportMatrix:
 
         combinations = self.generate_combinations()
         print(f"Total combinations to test: {len(combinations)}")
-        results: list[tuple[str, str, str, str, str, str, bool, str | None]] = []
+        results: list[tuple[str, str, str, str, str, str, str, str | None]] = []
         retry_combos: set[tuple[str, str, str, str]] = set()
 
         global _worker_matrix
@@ -668,8 +795,8 @@ class SupportMatrix:
                     perf_database.unload_database(system, backend, version)
 
         # Also collect combos whose Phase 1 results had any failure
-        for model, _arch, system, backend, version, _mode, success, _err in results:
-            if not success:
+        for model, _arch, system, backend, version, _mode, status, _err in results:
+            if status == STATUS_FAIL:
                 retry_combos.add((model, system, backend, version))
 
         # -- Phase 2: sequential single-process retry of all failures --
@@ -687,7 +814,7 @@ class SupportMatrix:
                         for combo in group_iter:
                             model, system, backend, version = combo
                             try:
-                                success_dict, error_dict = self.run_single_test(
+                                status_dict, error_dict = self.run_single_test(
                                     model=model,
                                     system=system,
                                     backend=backend,
@@ -699,7 +826,7 @@ class SupportMatrix:
                                     engine_step_frontier_atol=self.engine_step_frontier_atol,
                                 )
                                 architecture = self.get_architecture(model)
-                                for mode in success_dict:
+                                for mode in status_dict:
                                     results.append(
                                         (
                                             model,
@@ -708,7 +835,7 @@ class SupportMatrix:
                                             backend,
                                             version,
                                             mode,
-                                            success_dict[mode],
+                                            status_dict[mode],
                                             error_dict[mode],
                                         )
                                     )
@@ -730,7 +857,7 @@ class SupportMatrix:
                                             backend,
                                             version,
                                             mode,
-                                            False,
+                                            STATUS_FAIL,
                                             traceback.format_exc().replace("\n", "\\n"),
                                         )
                                     )
@@ -747,11 +874,12 @@ class SupportMatrix:
 
         return results
 
-    def _print_results_summary(self, results: list[tuple[str, str, str, str, str, str, bool, str | None]]) -> None:
+    def _print_results_summary(self, results: list[tuple[str, str, str, str, str, str, str, str | None]]) -> None:
         """Print summary of test results."""
         total_tests = len(results)
-        passed = sum(1 for _, _, _, _, _, _, success, _ in results if success)
-        failed = total_tests - passed
+        passed = sum(1 for _, _, _, _, _, _, status, _ in results if status == STATUS_PASS)
+        failed = sum(1 for _, _, _, _, _, _, status, _ in results if status == STATUS_FAIL)
+        hw_incompatible = sum(1 for _, _, _, _, _, _, status, _ in results if status == STATUS_HW_INCOMPATIBLE)
 
         print("\n" + "=" * 80)
         print("Test Results Summary")
@@ -759,18 +887,22 @@ class SupportMatrix:
         print(f"Total configurations tested: {total_tests}")
         print(f"✓ Passed: {passed} ({100 * passed / total_tests:.1f}%)")
         print(f"✗ Failed: {failed} ({100 * failed / total_tests:.1f}%)")
+        print(f"⚪ Hardware incompatible: {hw_incompatible} ({100 * hw_incompatible / total_tests:.1f}%)")
         print("=" * 80)
 
         # Group results by status
         passed_configs = []
         failed_configs = []
+        hw_incompatible_configs = []
 
-        for huggingface_id, architecture, system, backend, version, mode, success, _ in results:
+        for huggingface_id, architecture, system, backend, version, mode, status, _ in results:
             config = (huggingface_id, architecture, system, backend, version, mode)
-            if success:
+            if status == STATUS_PASS:
                 passed_configs.append(config)
-            else:
+            elif status == STATUS_FAIL:
                 failed_configs.append(config)
+            elif status == STATUS_HW_INCOMPATIBLE:
+                hw_incompatible_configs.append(config)
 
         # Print passed configurations
         if passed_configs:
@@ -784,14 +916,19 @@ class SupportMatrix:
             for huggingface_id, architecture, system, backend, version, mode in sorted(failed_configs):
                 print(f"  • {huggingface_id} ({architecture}) on {system} with {backend} v{version} ({mode})")
 
+        if hw_incompatible_configs:
+            print(f"\n⚪ Hardware-Incompatible Configurations ({len(hw_incompatible_configs)}):")
+            for huggingface_id, architecture, system, backend, version, mode in sorted(hw_incompatible_configs):
+                print(f"  • {huggingface_id} ({architecture}) on {system} with {backend} v{version} ({mode})")
+
     def save_results_to_csv(
-        self, results: list[tuple[str, str, str, str, str, str, bool, str | None]], output_file: str
+        self, results: list[tuple[str, str, str, str, str, str, str, str | None]], output_file: str
     ) -> None:
         """
         Save test results to a CSV file.
 
         Args:
-            results: List of tuples (huggingface_id, architecture, system, backend, version, mode, success, err_msg)
+            results: List of tuples (huggingface_id, architecture, system, backend, version, mode, status, err_msg)
             output_file: Path to the output CSV file
         """
 
@@ -799,7 +936,8 @@ class SupportMatrix:
             writer = csv.writer(f)
             header = ["HuggingFaceID", "Architecture", "System", "Backend", "Version", "Mode", "Status", "ErrMsg"]
             writer.writerow(header)
-            for huggingface_id, architecture, system, backend, version, mode, success, err_msg in results:
-                status = "PASS" if success else "FAIL"
+            for huggingface_id, architecture, system, backend, version, mode, status, err_msg in results:
+                if status not in VALID_STATUSES:
+                    raise ValueError(f"Invalid support-matrix status: {status}")
                 writer.writerow([huggingface_id, architecture, system, backend, version, mode, status, err_msg or ""])
         print(f"\nResults saved to: {output_file}")

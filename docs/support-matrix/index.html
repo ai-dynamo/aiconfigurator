@@ -57,11 +57,16 @@ tailwind.config = {
     font-size: 0.72rem;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     line-height: 1.4;
-    white-space: pre;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
     border-radius: 4px;
     box-shadow: 0 2px 8px rgba(0,0,0,.25);
     pointer-events: none;
-    max-width: 480px;
+    width: max-content;
+    max-width: min(480px, calc(100vw - 2rem));
+    box-sizing: border-box;
+    text-align: left;
   }
   html.dark td[data-tip]:hover::after {
     background: rgb(30 41 59);
@@ -79,6 +84,7 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
 // ── Constants ───────────────────────────────────────────────────────
 const REPO = 'ai-dynamo/aiconfigurator';
 const CSV_PATH = 'src/aiconfigurator/systems/support_matrix.csv';
+const STATUS_HW_INCOMPATIBLE = 'HW_INCOMPATIBLE';
 const PREFERRED_DEFAULT_SYSTEM = 'b200_sxm';
 const SYSTEM_ORDER = ['b200', 'gb200', 'gb300', 'h100', 'h200', '__other__', 'a100', 'l40s'];
 
@@ -167,6 +173,7 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
 
   const versionHasFail = {};
   const versionHasPass = {};
+  const versionHasHwIncompatible = {};
   const versionErrorMsgs = {};
 
   for (const row of subset) {
@@ -188,10 +195,22 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
       }
     } else if (status === 'PASS') {
       versionHasPass[version] = true;
+    } else if (status === STATUS_HW_INCOMPATIBLE) {
+      versionHasHwIncompatible[version] = true;
+      if (errorMsg) {
+        if (version in versionErrorMsgs) {
+          const existing = versionErrorMsgs[version];
+          if (existing && existing !== errorMsg) {
+            versionErrorMsgs[version] = `${existing} | ${errorMsg}`;
+          }
+        } else {
+          versionErrorMsgs[version] = errorMsg;
+        }
+      }
     }
   }
 
-  if (!Object.keys(versionHasFail).length && !Object.keys(versionHasPass).length) {
+  if (!Object.keys(versionHasFail).length && !Object.keys(versionHasPass).length && !Object.keys(versionHasHwIncompatible).length) {
     return { version: null, isLatest: false, error: null };
   }
 
@@ -202,6 +221,9 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
   const latestVersion = testedVersions[0] || null;
   if (latestVersion && versionHasPass[latestVersion]) {
     return { version: latestVersion, isLatest: true, error: null };
+  }
+  if (latestVersion && versionHasHwIncompatible[latestVersion] && !versionHasFail[latestVersion]) {
+    return { version: STATUS_HW_INCOMPATIBLE, isLatest: false, error: versionErrorMsgs[latestVersion] || 'Hardware is incompatible with model datatype' };
   }
   if (latestVersion && versionHasFail[latestVersion]) {
     return { version: 'FAIL', isLatest: false, error: versionErrorMsgs[latestVersion] || 'No error message available' };
@@ -219,7 +241,17 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
   for (const ver of failVersions) {
     if (versionErrorMsgs[ver]) allMsgs.push(`${ver}: ${versionErrorMsgs[ver]}`);
   }
-  return { version: 'FAIL', isLatest: false, error: allMsgs.length ? allMsgs.join(' | ') : 'No error message available' };
+  if (allMsgs.length || failVersions.length) {
+    return { version: 'FAIL', isLatest: false, error: allMsgs.length ? allMsgs.join(' | ') : 'No error message available' };
+  }
+
+  const hwVersions = Object.keys(versionHasHwIncompatible)
+    .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
+  const hwMsgs = [];
+  for (const ver of hwVersions) {
+    if (versionErrorMsgs[ver]) hwMsgs.push(`${ver}: ${versionErrorMsgs[ver]}`);
+  }
+  return { version: STATUS_HW_INCOMPATIBLE, isLatest: false, error: hwMsgs.length ? hwMsgs.join(' | ') : 'Hardware is incompatible with model datatype' };
 }
 
 // Aggregate per-version statuses into a single (model, backend) cell. Each
@@ -229,12 +261,21 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
 //   pass:    every tested version fully passes
 //   fail:    every tested version fully fails
 //   partial: any mix (includes per-version agg/disagg splits)
+//   hw_incompatible: latest tested version is impossible on this GPU
 //   missing: no rows tested for this (model, backend)
 function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilter) {
   const passVersions = [];
   const partialVersions = [];
   const failVersions = [];
+  const hwVersions = [];
   const errors = [];
+
+  const statusFromResult = (result) => {
+    if (result.version === null) return 'missing';
+    if (result.version === 'FAIL') return 'fail';
+    if (result.version === STATUS_HW_INCOMPATIBLE) return 'hw_incompatible';
+    return 'pass';
+  };
 
   // Per-version status uses the existing agg-vs-disagg split inside
   // `getLatestSupportedVersion`, restricted to one version at a time.
@@ -243,11 +284,11 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
     const { version: v, error } = getLatestSupportedVersion(verRows, modelId, system, backend);
     if (v === null) continue; // missing for this version
 
-    let verStatus = v === 'FAIL' ? 'fail' : 'pass';
-    let verError = v === 'FAIL' ? error : null;
+    let verStatus = statusFromResult({ version: v });
+    let verError = verStatus === 'pass' ? null : error;
 
     // Within-version agg/disagg split (only meaningful when viewing "all").
-    if (modeFilter === 'all' && verStatus === 'pass') {
+    if (modeFilter === 'all') {
       const aggRows = verRows.filter(r => r.Mode === 'agg');
       const disaggRows = verRows.filter(r => r.Mode === 'disagg');
       const aggResult = aggRows.length
@@ -256,36 +297,62 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
       const disaggResult = disaggRows.length
         ? getLatestSupportedVersion(disaggRows, modelId, system, backend)
         : { version: null, error: null };
-      const aggPass = aggResult.version !== null && aggResult.version !== 'FAIL';
-      const disaggPass = disaggResult.version !== null && disaggResult.version !== 'FAIL';
-      if (aggPass !== disaggPass) {
+      const aggStatus = statusFromResult(aggResult);
+      const disaggStatus = statusFromResult(disaggResult);
+      const modeStatuses = [aggStatus, disaggStatus].filter(s => s !== 'missing');
+      const hasPass = modeStatuses.includes('pass');
+      const hasFail = modeStatuses.includes('fail');
+      const hasHw = modeStatuses.includes('hw_incompatible');
+
+      if (hasPass && (hasFail || hasHw || modeStatuses.length < 2)) {
         verStatus = 'partial';
-        verError = !aggPass
-          ? `[agg FAIL] ${aggResult.error || 'No error message available'}`
-          : `[disagg FAIL] ${disaggResult.error || 'No error message available'}`;
+        if (aggStatus !== 'pass') {
+          verError = `[agg ${aggStatus === 'hw_incompatible' ? STATUS_HW_INCOMPATIBLE : 'FAIL'}] ${aggResult.error || 'No error message available'}`;
+        } else {
+          verError = `[disagg ${disaggStatus === 'hw_incompatible' ? STATUS_HW_INCOMPATIBLE : 'FAIL'}] ${disaggResult.error || 'No error message available'}`;
+        }
+      } else if (!hasPass && hasFail) {
+        verStatus = 'fail';
+        verError = aggStatus === 'fail'
+          ? (aggResult.error || 'No error message available')
+          : (disaggResult.error || 'No error message available');
+      } else if (!hasPass && hasHw) {
+        verStatus = 'hw_incompatible';
+        verError = aggStatus === 'hw_incompatible'
+          ? (aggResult.error || 'Hardware is incompatible with model datatype')
+          : (disaggResult.error || 'Hardware is incompatible with model datatype');
       }
     }
 
     if (verStatus === 'pass') passVersions.push(version);
     else if (verStatus === 'partial') partialVersions.push(version);
+    else if (verStatus === 'hw_incompatible') hwVersions.push(version);
     else failVersions.push(version);
 
-    if (verError) errors.push(`[${version}] ${verError}`);
+    if (verError) {
+      if (verStatus === 'hw_incompatible') {
+        if (!errors.includes(verError)) errors.push(verError);
+      } else {
+        errors.push(`[${version}] ${verError}`);
+      }
+    }
   }
 
-  if (!passVersions.length && !partialVersions.length && !failVersions.length) {
-    return { status: 'missing', passVersions: [], partialVersions: [], failVersions: [], error: null };
+  if (!passVersions.length && !partialVersions.length && !failVersions.length && !hwVersions.length) {
+    return { status: 'missing', passVersions: [], partialVersions: [], failVersions: [], hwVersions: [], error: null };
   }
 
   // Color is driven by the **latest tested version** for this (model, backend):
   //   - latest is strictly pass               -> green
   //   - latest is fail/partial but any older  -> orange (regression)
   //   - everything failed                     -> red
+  //   - latest is hardware-incompatible       -> gray
   const sortDesc = (a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a));
-  const allTested = [...passVersions, ...partialVersions, ...failVersions].sort(sortDesc);
+  const allTested = [...passVersions, ...partialVersions, ...failVersions, ...hwVersions].sort(sortDesc);
   const newest = allTested[0];
   let status;
   if (passVersions.includes(newest)) status = 'pass';
+  else if (hwVersions.includes(newest)) status = 'hw_incompatible';
   else if (partialVersions.includes(newest)) status = 'partial';
   else if (passVersions.length || partialVersions.length) status = 'partial';
   else status = 'fail';
@@ -295,6 +362,7 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
     passVersions: passVersions.slice().sort(sortDesc),
     partialVersions: partialVersions.slice().sort(sortDesc),
     failVersions: failVersions.slice().sort(sortDesc),
+    hwVersions: hwVersions.slice().sort(sortDesc),
     error: errors.length ? errors.join(' | ') : null,
   };
 }
@@ -682,6 +750,10 @@ function Legend() {
         <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-red-100 dark:bg-red-950"></span>
         All versions fail (click for details)
       </div>
+      <div className="flex items-center gap-1.5">
+        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-slate-200 dark:bg-slate-700"></span>
+        GPU does not support model datatype
+      </div>
       <a href={buildFileIssueUrl()} target="_blank" rel="noopener"
         className="ml-auto px-3 py-1.5 bg-indigo-500 hover:bg-indigo-600 dark:bg-indigo-400 dark:hover:bg-indigo-500
                    text-white text-xs font-semibold rounded transition-colors no-underline whitespace-nowrap">
@@ -706,10 +778,10 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
   // Sort by status rank first (pass < partial < fail < missing), then by
   // the concatenated version lists so rows with the same status cluster by
   // their supported-version set.
-  const STATUS_RANK = { pass: 0, partial: 1, fail: 2, missing: 3 };
+  const STATUS_RANK = { pass: 0, partial: 1, fail: 2, hw_incompatible: 3, missing: 4 };
   const cellSortKey = (c) => {
     if (!c) return '99|';
-    const versions = (c.passVersions || []).concat(c.partialVersions || [], c.failVersions || []).join(',');
+    const versions = (c.passVersions || []).concat(c.partialVersions || [], c.failVersions || [], c.hwVersions || []).join(',');
     return String(STATUS_RANK[c.status] ?? 99) + '|' + versions;
   };
 
@@ -735,6 +807,7 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
       case 'pass': return 'bg-green-100 dark:bg-green-950 text-green-800 dark:text-green-300 font-medium';
       case 'partial': return 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 font-medium cursor-pointer hover:brightness-95 dark:hover:brightness-125';
       case 'fail': return 'bg-red-100 dark:bg-red-950 text-red-700 dark:text-red-300 font-semibold cursor-pointer hover:brightness-95 dark:hover:brightness-125';
+      case 'hw_incompatible': return 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-medium';
       default: return '';
     }
   };
@@ -750,16 +823,19 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
     const pushPass = (v) => chips.push(<span key={`p-${v}`}>{v}</span>);
     const pushPartial = (v) => chips.push(<span key={`m-${v}`} title="Partial (agg or disagg only)">~{v}</span>);
     const pushFail = (v) => chips.push(<span key={`f-${v}`} className="line-through opacity-75">{v}</span>);
+    const pushHw = (v) => chips.push(<span key={`h-${v}`}>{v}</span>);
 
     if (showAllVersions) {
       const all = [
         ...(cell.passVersions || []).map(v => ({ version: v, status: 'pass' })),
         ...(cell.partialVersions || []).map(v => ({ version: v, status: 'partial' })),
         ...(cell.failVersions || []).map(v => ({ version: v, status: 'fail' })),
+        ...(cell.hwVersions || []).map(v => ({ version: v, status: 'hw_incompatible' })),
       ].sort((a, b) => compareVersionTuples(versionSortKey(a.version), versionSortKey(b.version)));
       all.forEach(({ version, status }) => {
         if (status === 'pass') pushPass(version);
         else if (status === 'partial') pushPartial(version);
+        else if (status === 'hw_incompatible') pushHw(version);
         else pushFail(version);
       });
     } else {
@@ -779,6 +855,8 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
       } else if (cell.status === 'fail') {
         if (cell.failVersions && cell.failVersions.length) pushFail(cell.failVersions[0]);
         else if (cell.partialVersions && cell.partialVersions.length) pushPartial(cell.partialVersions[0]);
+      } else if (cell.status === 'hw_incompatible') {
+        if (cell.hwVersions && cell.hwVersions.length) pushHw(cell.hwVersions[0]);
       }
     }
     return <span className="inline-flex flex-wrap gap-x-2 gap-y-0.5 font-mono text-xs">{chips}</span>;
@@ -838,7 +916,10 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
                 if (cell.passVersions && cell.passVersions.length) tooltipParts.push(`Pass: ${cell.passVersions.join(', ')}`);
                 if (cell.partialVersions && cell.partialVersions.length) tooltipParts.push(`Partial: ${cell.partialVersions.join(', ')}`);
                 if (cell.failVersions && cell.failVersions.length) tooltipParts.push(`Fail: ${cell.failVersions.join(', ')}`);
-                const tooltip = `${c.backend}\n${tooltipParts.join('\n')}`;
+                if (cell.hwVersions && cell.hwVersions.length) tooltipParts.push(`Hardware incompatible: ${cell.hwVersions.join(', ')}`);
+                const tooltip = cell.status === 'hw_incompatible'
+                  ? (cell.error || 'Hardware is incompatible with model datatype')
+                  : `${c.backend}\n${tooltipParts.join('\n')}`;
                 return (
                   <td key={c.key}
                       data-tip={tooltip}

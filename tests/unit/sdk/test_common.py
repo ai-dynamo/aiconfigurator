@@ -186,3 +186,61 @@ class TestSupportMatrix:
         assert result.agg_supported is True
         assert result.disagg_supported is True
         assert result.exact_match is False
+
+    def test_check_support_ignores_hardware_incompatible_rows_for_architecture_fallback(self, monkeypatch):
+        """Hardware-incompatible quantized variants should not skew architecture majority voting."""
+        monkeypatch.setattr(
+            common,
+            "get_support_matrix",
+            lambda: [
+                {
+                    "HuggingFaceID": "Qwen/Qwen3-32B",
+                    "Architecture": "Qwen3ForCausalLM",
+                    "System": "a100_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.0.0",
+                    "Mode": "agg",
+                    "Status": "PASS",
+                },
+                {
+                    "HuggingFaceID": "Qwen/Qwen3-32B-FP8",
+                    "Architecture": "Qwen3ForCausalLM",
+                    "System": "a100_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.0.0",
+                    "Mode": "agg",
+                    "Status": "HW_INCOMPATIBLE",
+                },
+                {
+                    "HuggingFaceID": "Qwen/Qwen3-32B",
+                    "Architecture": "Qwen3ForCausalLM",
+                    "System": "a100_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.0.0",
+                    "Mode": "disagg",
+                    "Status": "PASS",
+                },
+                {
+                    "HuggingFaceID": "Qwen/Qwen3-32B-FP8",
+                    "Architecture": "Qwen3ForCausalLM",
+                    "System": "a100_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.0.0",
+                    "Mode": "disagg",
+                    "Status": "HW_INCOMPATIBLE",
+                },
+            ],
+        )
+
+        result = common.check_support(
+            "local-qwen-variant",
+            "a100_sxm",
+            backend="trtllm",
+            version="1.0.0",
+            architecture="Qwen3ForCausalLM",
+        )
+
+        assert result.agg_supported is True
+        assert result.disagg_supported is True
+        assert result.agg_pass_count == 1
+        assert result.agg_total_count == 1
