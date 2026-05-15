@@ -19,6 +19,7 @@ jobs:
       pull-requests: write
     env:
       TARGET_BRANCH: ${{ inputs.branch || github.ref_name }}
+      SUPPORT_MATRIX_DOCKER_MEMORY_LIMIT: ${{ vars.SUPPORT_MATRIX_DOCKER_MEMORY_LIMIT || '24g' }}
     steps:
       - name: Clean workspace
         run: |
@@ -45,6 +46,7 @@ jobs:
       - name: Generate new support matrix
         run: |
           docker run --rm \
+            --memory "${SUPPORT_MATRIX_DOCKER_MEMORY_LIMIT}" \
             -v ${{ github.workspace }}/src/aiconfigurator/systems:/app/src/aiconfigurator/systems \
             aiconfigurator:matrix \
             python3 tools/support_matrix/generate_support_matrix.py \
@@ -57,6 +59,7 @@ jobs:
 
           set +e
           docker run --rm \
+            --memory "${SUPPORT_MATRIX_DOCKER_MEMORY_LIMIT}" \
             -v ${{ github.workspace }}/src/aiconfigurator/systems:/app/src/aiconfigurator/systems \
             -v ${{ github.workspace }}/diff_output:/app/diff_output \
             aiconfigurator:matrix \

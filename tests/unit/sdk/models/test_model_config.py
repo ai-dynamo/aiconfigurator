@@ -745,3 +745,71 @@ class TestGetModelMOESGLangDispatch:
         model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "trtllm")
         assert isinstance(model, models.MOEModel)
         assert not isinstance(model, models.SGLangEPMOEModel)
+
+
+class TestDeepSeekTPAllReduce:
+    """vLLM TP allreduce coverage in DeepSeekModel context+generation ops."""
+
+    @staticmethod
+    def _build(hf_id: str, backend: str, tp_size: int):
+        model_config = config.ModelConfig(
+            tp_size=tp_size,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=tp_size,
+            attention_dp_size=1,
+        )
+        return models.get_model(hf_id, model_config, backend_name=backend)
+
+    def test_vllm_has_generation_tp_allreduce_scaled_by_2x_num_layers(self):
+        model = self._build("nvidia/Kimi-K2.5-NVFP4", "vllm", tp_size=4)
+        ar_ops = [op for op in model.generation_ops if op._name == "generation_tp_allreduce"]
+        assert len(ar_ops) == 1, "vLLM DeepSeekModel must emit one generation_tp_allreduce op"
+        ar = ar_ops[0]
+        assert ar._tp_size == 4
+        assert ar._h == model._hidden_size
+        assert ar._scale_factor == pytest.approx(2 * model._num_layers * model._mtp_scale_factor)
+
+    def test_vllm_deepseek_v3_also_emits_tp_allreduce(self):
+        # DEEPSEEK family (non-KIMIK25) goes through the create() fallback;
+        # confirm backend_name is threaded so DS-V3 + vLLM also emits the op.
+        # Also confirm the parser exposes v_head_dim (128 for the MLA arch) so
+        # the existing vLLM attention-swap doesn't silently use head_size=56.
+        model = self._build("deepseek-ai/DeepSeek-V3", "vllm", tp_size=4)
+        gen_ar = [op for op in model.generation_ops if op._name == "generation_tp_allreduce"]
+        ctx_ar = [op for op in model.context_ops if op._name == "context_tp_allreduce"]
+        assert len(gen_ar) == 1 and gen_ar[0]._tp_size == 4
+        assert len(ctx_ar) == 1 and ctx_ar[0]._tp_size == 4
+        assert model._vllm_head_size == 128
+
+    def test_vllm_has_context_tp_allreduce_scaled_by_2x_num_layers(self):
+        model = self._build("nvidia/Kimi-K2.5-NVFP4", "vllm", tp_size=4)
+        ar_ops = [op for op in model.context_ops if op._name == "context_tp_allreduce"]
+        assert len(ar_ops) == 1, "vLLM DeepSeekModel must emit one context_tp_allreduce op"
+        ar = ar_ops[0]
+        assert ar._tp_size == 4
+        assert ar._h == model._hidden_size
+        # context_ops are NOT mtp-scaled (matches the rest of context_ops).
+        assert ar._scale_factor == pytest.approx(2 * model._num_layers)
+
+    def test_vllm_tp1_keeps_op_but_query_is_zero(self):
+        # The op stays in the list for tp_size=1 (CustomAllReduce.query handles the
+        # short-circuit), so the model has uniform shape regardless of TP.
+        model = self._build("nvidia/Kimi-K2.5-NVFP4", "vllm", tp_size=1)
+        gen_ar = [op for op in model.generation_ops if op._name == "generation_tp_allreduce"]
+        ctx_ar = [op for op in model.context_ops if op._name == "context_tp_allreduce"]
+        assert len(gen_ar) == 1 and gen_ar[0]._tp_size == 1
+        assert len(ctx_ar) == 1 and ctx_ar[0]._tp_size == 1
+
+    def test_trtllm_narrow_ep_does_not_emit_op(self):
+        # Issue is scoped to vLLM; TRT-LLM narrow-EP path through DeepSeekModel
+        # must not gain a spurious tp_allreduce op (its allreduce is modeled
+        # elsewhere — or, like today, is a separate latent gap to be tracked).
+        model = self._build("deepseek-ai/DeepSeek-V3", "trtllm", tp_size=4)
+        assert not any(op._name == "generation_tp_allreduce" for op in model.generation_ops)
+        assert not any(op._name == "context_tp_allreduce" for op in model.context_ops)
+
+    def test_sglang_narrow_ep_does_not_emit_op(self):
+        model = self._build("deepseek-ai/DeepSeek-V3", "sglang", tp_size=4)
+        assert not any(op._name == "generation_tp_allreduce" for op in model.generation_ops)
+        assert not any(op._name == "context_tp_allreduce" for op in model.context_ops)

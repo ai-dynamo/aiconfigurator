@@ -66,7 +66,7 @@ def _derive_nemotronh_hybrid_pattern(config: dict) -> str:
 
     layer_blocks = config.get("layers_block_type")
     if not isinstance(layer_blocks, list):
-        raise ValueError("NemotronH config must define 'hybrid_override_pattern' or 'layers_block_type'.")
+        raise TypeError("NemotronH config must define 'hybrid_override_pattern' or 'layers_block_type'.")
 
     try:
         return "".join(_NEMOTRONH_LAYER_BLOCK_PATTERN[str(block)] for block in layer_blocks)
@@ -631,8 +631,11 @@ def _parse_hf_config_json(config: dict) -> dict:
         }
     elif architecture in {"DeepSeekForCausalLM", "DeepseekV3ForCausalLM"}:
         # DeepSeek V3 / R1 / Kimi K2: MLA latent geometry from config so the KV
-        # cache size is data-driven instead of hardcoded.
+        # cache size is data-driven instead of hardcoded. v_head_dim feeds the
+        # vLLM standard-attention path in DeepSeekModel (head_size=128 for the
+        # MLA architecture, not the generic hidden_size // n_heads = 56).
         extra_params = {
+            "v_head_dim": config.get("v_head_dim", 0),
             "kv_lora_rank": config.get("kv_lora_rank", 0),
             "qk_rope_head_dim": config.get("qk_rope_head_dim", 0),
         }

@@ -359,6 +359,27 @@ function csvUrl(branch) {
   return `https://raw.githubusercontent.com/${REPO}/refs/heads/${branch}/${CSV_PATH}`;
 }
 
+function readSearchQuery() {
+  return new URLSearchParams(window.location.search).get('q') || '';
+}
+
+function writeSearchQuery(query) {
+  const params = new URLSearchParams(window.location.search);
+  const normalized = query.trim();
+  if (normalized) {
+    params.set('q', normalized);
+  } else {
+    params.delete('q');
+  }
+
+  const nextSearch = params.toString();
+  const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
+  const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (nextUrl !== currentUrl) {
+    window.history.replaceState(null, '', nextUrl);
+  }
+}
+
 const HARDCODED_RELEASE_BRANCHES = [
   'release/0.8.0',
   'release/0.7.0',
@@ -948,7 +969,7 @@ function App() {
 
   const [activeSystem, setActiveSystem] = useState(null);
   const [activeMode, setActiveMode] = useState('all');
-  const [searchQuery, setSearchQuery] = useState(() => new URLSearchParams(window.location.search).get('q') || '');
+  const [searchQuery, setSearchQuery] = useState(readSearchQuery);
   const [sortCol, setSortCol] = useState(null);
   const [sortAsc, setSortAsc] = useState(true);
   const [showAllVersions, setShowAllVersions] = useState(false);
@@ -983,7 +1004,7 @@ function App() {
         }
         setSortCol(null);
         setSortAsc(true);
-        setSearchQuery(new URLSearchParams(window.location.search).get('q') || '');
+        setSearchQuery(readSearchQuery());
       })
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
@@ -1023,6 +1044,17 @@ function App() {
     if (branchName !== branch) loadCsv(branchName);
   }, [branch, loadCsv]);
 
+  const handleSetSearchQuery = useCallback((query) => {
+    setSearchQuery(query);
+    writeSearchQuery(query);
+  }, []);
+
+  useEffect(() => {
+    const handler = () => setSearchQuery(readSearchQuery());
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  }, []);
+
   useEffect(() => {
     const handler = (e) => { if (e.key === 'Escape') setModal(null); };
     document.addEventListener('keydown', handler);
@@ -1045,7 +1077,7 @@ function App() {
         <>
           <Controls
             activeMode={activeMode} onSetMode={(m) => { setActiveMode(m); setSortCol(null); setSortAsc(true); }}
-            searchQuery={searchQuery} onSetSearch={setSearchQuery}
+            searchQuery={searchQuery} onSetSearch={handleSetSearchQuery}
             totalPass={totalPass} totalFail={totalFail}
             showAllVersions={showAllVersions} onToggleShowAllVersions={setShowAllVersions}
           />

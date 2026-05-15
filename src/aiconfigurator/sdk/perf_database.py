@@ -27,6 +27,7 @@ databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
+_MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError)
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
@@ -541,6 +542,50 @@ def _store_loaded_database(
     system, backend, version, systems_root = ref
     database_dict[system][backend][version] = database
     databases_cache[(systems_root, system, False)][backend][version] = database
+
+
+def clear_database_runtime_caches(system: str, backend: str, version: str) -> None:
+    """Clear per-query/interpolation caches for one loaded database."""
+    seen_database_ids: set[int] = set()
+    for cache_key, systems_cache in databases_cache.items():
+        _, cached_system, _ = cache_key
+        if cached_system != system:
+            continue
+
+        backend_cache = systems_cache.get(backend)
+        if not backend_cache or version not in backend_cache:
+            continue
+
+        database = backend_cache[version]
+        database_id = id(database)
+        if database_id in seen_database_ids:
+            continue
+        seen_database_ids.add(database_id)
+        clear_runtime_caches = getattr(database, "clear_runtime_caches", None)
+        if callable(clear_runtime_caches):
+            clear_runtime_caches()
+
+
+def unload_database(system: str, backend: str, version: str) -> None:
+    """Remove one loaded database from every systems-root/shared-mode cache."""
+    for cache_key in list(databases_cache.keys()):
+        _, cached_system, _ = cache_key
+        if cached_system != system:
+            continue
+
+        systems_cache = databases_cache[cache_key]
+        backend_cache = systems_cache.get(backend)
+        if not backend_cache or version not in backend_cache:
+            continue
+
+        database = backend_cache.pop(version)
+        clear_runtime_caches = getattr(database, "clear_runtime_caches", None)
+        if callable(clear_runtime_caches):
+            clear_runtime_caches()
+        if not backend_cache:
+            systems_cache.pop(backend, None)
+        if not systems_cache:
+            databases_cache.pop(cache_key, None)
 
 
 def _load_database_ref_in_parent(ref: DatabaseRef) -> PerfDatabase | None:
@@ -3932,11 +3977,7 @@ class PerfDatabase:
         Set the default database mode
         """
         if mode != self._default_database_mode:
-            # Clear cached query methods since default database mode affects the results
-            for attr_name in dir(self):
-                attr = getattr(self, attr_name)
-                if hasattr(attr, "cache_clear") and callable(attr):
-                    attr.cache_clear()
+            self.clear_runtime_caches()
             self._default_database_mode = mode
 
     def get_default_database_mode(self) -> common.DatabaseMode:
@@ -3944,6 +3985,15 @@ class PerfDatabase:
         Get the default database mode
         """
         return self._default_database_mode
+
+    def clear_runtime_caches(self) -> None:
+        """Clear cached query/interpolation state while preserving loaded op data."""
+        self._extracted_metrics_cache.clear()
+        for attr_name in dir(self):
+            attr = getattr(self, attr_name)
+            cache_clear = getattr(attr, "cache_clear", None)
+            if callable(cache_clear):
+                cache_clear()
 
     def _query_silicon_or_hybrid(
         self,
@@ -3985,6 +4035,12 @@ class PerfDatabase:
             # get the full traceback via logger.exception.
             if isinstance(e, PerfDataNotAvailableError):
                 logger.warning(exception_msg)
+            elif isinstance(e, _MISSING_SILICON_DATA_EXCEPTIONS):
+                missing_data_error = PerfDataNotAvailableError(
+                    f"{exception_msg} Missing silicon data for the requested lookup."
+                )
+                logger.warning(str(missing_data_error))
+                raise missing_data_error from e
             else:
                 logger.exception(exception_msg)
             # Modify the original exception message
@@ -5615,6 +5671,24 @@ class PerfDatabase:
 
             return PerformanceResult(est_latency, energy=est_energy)
 
+        def _require_moe_token_points(
+            moe_dict: dict,
+            query_tokens: int,
+            used_workload_distribution: str,
+        ) -> list[int]:
+            token_points = sorted(moe_dict.keys())
+            if token_points:
+                return token_points
+
+            raise PerfDataNotAvailableError(
+                "No MoE silicon data points for requested shape. "
+                f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
+                f"num_tokens={query_tokens}, hidden_size={hidden_size}, inter_size={inter_size}, "
+                f"topk={topk}, num_experts={num_experts}, moe_tp_size={moe_tp_size}, "
+                f"moe_ep_size={moe_ep_size}, quant_mode={quant_mode}, "
+                f"workload_distribution='{used_workload_distribution}'."
+            )
+
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
@@ -5678,7 +5752,11 @@ class PerfDatabase:
                     moe_dict = moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
                         inter_size
                     ][moe_tp_size][moe_ep_size]
-                    token_points = sorted(moe_dict.keys())
+                    token_points = _require_moe_token_points(
+                        moe_dict,
+                        num_tokens_corrected,
+                        used_workload_distribution,
+                    )
                     if num_tokens_corrected > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
                             num_tokens_corrected,
@@ -5761,7 +5839,7 @@ class PerfDatabase:
                         moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
                             hidden_size
                         ][inter_size][moe_tp_size][moe_ep_size]
-                    token_points = sorted(moe_dict.keys())
+                    token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
                     if num_tokens > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
                             num_tokens,
@@ -5800,7 +5878,7 @@ class PerfDatabase:
                     moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
                         inter_size
                     ][moe_tp_size][moe_ep_size]
-                    token_points = sorted(moe_dict.keys())
+                    token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
                     if num_tokens > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
                             num_tokens,
