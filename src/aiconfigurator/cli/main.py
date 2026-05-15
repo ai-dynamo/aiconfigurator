@@ -636,31 +636,36 @@ def _add_estimate_mode_arguments(parser):
         "Example: --detail memory,time. Default: no extra detail. "
         "Use 'all' to print every section.",
     )
-    # Static-mode (and shared) extras
+    # Common workload extras — apply to agg / disagg / static / static_ctx / static_gen.
     parser.add_argument(
         "--prefix",
         type=int,
         default=0,
-        help="Prefix cache length (subset of ISL already cached per request). Default: 0.",
+        help="(common) Prefix cache length (subset of ISL already cached per request). Default: 0. "
+        "Applied to agg, disagg, and all static modes.",
     )
     parser.add_argument(
         "--nextn",
         type=int,
         default=0,
-        help="Number of MTP/speculative draft tokens. Default: 0 (disabled).",
+        help="(common) Number of MTP/speculative draft tokens. Default: 0 (disabled). "
+        "Applied to agg, disagg, and all static modes. "
+        "Note: unlike `cli default`, `cli estimate` does NOT auto-set nextn=1 for "
+        "DeepSeek/Qwen3.5 — pass --nextn 1 explicitly when you want MTP.",
     )
     parser.add_argument(
         "--nextn-accept-rates",
         type=str,
         default="0.85,0.3,0,0,0",
-        help="Comma-separated acceptance rates for the MTP draft tokens (only the first --nextn are used). "
-        "Default: '0.85,0.3,0,0,0'.",
+        help="(common) Comma-separated acceptance rates for the MTP draft tokens "
+        "(only the first --nextn are used). Default: '0.85,0.3,0,0,0'.",
     )
     parser.add_argument(
         "--stride",
         type=int,
         default=32,
-        help="Stride used by run_static to accelerate the OSL sweep (static modes only). Default: 32.",
+        help="(static-only) Stride used by run_static to accelerate the OSL sweep. "
+        "Ignored for agg / disagg modes. Default: 32.",
     )
     parser.add_argument(
         "--free-gpu-memory-fraction",
@@ -1848,6 +1853,14 @@ def _run_estimate_mode(args):
     print(f"  ISL:              {result.isl}")
     print(f"  OSL:              {result.osl}")
 
+    # ``--prefix`` and ``--nextn`` are common parameters applied to every
+    # mode (agg / disagg / static*), so surface them in the summary box for
+    # all modes rather than gating on mode.
+    if args.prefix:
+        print(f"  Prefix:           {args.prefix}")
+    if args.nextn:
+        print(f"  MTP nextn:        {args.nextn} (accept_rates={args.nextn_accept_rates})")
+
     if result.mode == "disagg":
         raw = result.raw
         print(f"  (p) TP:           {raw.get('(p)tp', 'N/A')}")
@@ -1864,10 +1877,6 @@ def _run_estimate_mode(args):
         print(f"  Batch Size:       {result.batch_size}")
         if result.mode == "agg":
             print(f"  Context Tokens:   {result.ctx_tokens}")
-        if args.prefix:
-            print(f"  Prefix:           {args.prefix}")
-        if args.nextn:
-            print(f"  MTP nextn:        {args.nextn} (accept_rates={args.nextn_accept_rates})")
         print(f"  TP Size:          {result.tp_size}")
         print(f"  PP Size:          {result.pp_size}")
         if args.attention_dp_size and args.attention_dp_size != 1:

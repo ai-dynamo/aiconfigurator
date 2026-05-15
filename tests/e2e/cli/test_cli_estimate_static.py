@@ -253,6 +253,41 @@ def test_static_estimate_source_tag_empirical_in_empirical_mode():
     )
 
 
+def test_agg_estimate_responds_to_common_prefix():
+    """Regression: ``--prefix`` is now a common param. With prefix > 0 the
+    effective TTFT should differ from prefix=0 because the context phase
+    sees fewer real tokens.
+    """
+    base = cli_estimate(mode="agg", prefix=0, **_common_kwargs())
+    with_prefix = cli_estimate(mode="agg", prefix=512, **_common_kwargs())
+    # Prefix caching strictly reduces context work, so TTFT should drop.
+    assert with_prefix.ttft < base.ttft, (
+        f"prefix did not reach the agg path: ttft@prefix=0 was {base.ttft:.3f}, "
+        f"ttft@prefix=512 was {with_prefix.ttft:.3f}"
+    )
+
+
+def test_agg_estimate_responds_to_common_nextn():
+    """Regression: ``--nextn`` is now a common param. Toggling MTP on must
+    visibly change the agg estimate; previously the kwarg was silently
+    dropped on the way to ``_run_agg_estimate``.
+    """
+    base = cli_estimate(mode="agg", nextn=0, **_common_kwargs())
+    with_mtp = cli_estimate(
+        mode="agg",
+        nextn=1,
+        nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+        **_common_kwargs(),
+    )
+    # Some metric must change — MTP affects activation memory, generation
+    # token count, and the inferred per-step latency. We don't assert a
+    # direction (the sign depends on speculation acceptance vs. extra cost),
+    # only that the parameter actually reached the underlying inference.
+    assert (
+        base.ttft != with_mtp.ttft or base.tpot != with_mtp.tpot or base.raw.get("memory") != with_mtp.raw.get("memory")
+    ), "nextn=1 produced an estimate identical to nextn=0; the kwarg was dropped"
+
+
 def test_static_estimate_source_tag_sol_in_sol_mode():
     """SOL database mode should tag ops as 'sol' (or non-silicon at minimum)."""
     result = cli_estimate(database_mode="SOL", mode="static", **_common_kwargs())
