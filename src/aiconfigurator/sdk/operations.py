@@ -51,7 +51,11 @@ class CustomAllReduce(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query custom allreduce latency with power data."""
         if self._tp_size == 1:
-            return PerformanceResult(0.0, 0.0)
+            # No-op short-circuit: tp_size=1 has no allreduce. Tag as
+            # ``empirical`` rather than letting the constructor default to
+            # ``silicon`` so EMPIRICAL/SOL modes don't get a spurious
+            # silicon leakage in the breakdown report.
+            return PerformanceResult(0.0, 0.0, source="empirical")
         # count, not size in bytes
         size = kwargs.get("x") * self._h
 
@@ -82,7 +86,9 @@ class P2P(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query P2P latency with power data."""
         if self._pp_size == 1:
-            return PerformanceResult(0.0, 0.0)
+            # No-op short-circuit: pp_size=1 has no P2P transfer. See note on
+            # CustomAllReduce.query for source-tag rationale.
+            return PerformanceResult(0.0, 0.0, source="empirical")
 
         size = kwargs.get("x") * self._h
         p2p_bytes = size * 2
@@ -467,8 +473,11 @@ class TrtLLMWideEPMoEDispatch(Operation):
             )
             comm_latency = float(combine_result)
 
-        # MoEDispatch returns no energy (communication ops don't track energy)
-        return PerformanceResult(comm_latency * self._scale_factor, energy=0.0)
+        # MoEDispatch returns no energy (communication ops don't track energy).
+        # ``comm_latency`` is composed from query_trtllm_alltoall results whose
+        # sources we can't recover here without more invasive refactoring; tag
+        # as ``empirical`` so the breakdown report doesn't mis-claim silicon.
+        return PerformanceResult(comm_latency * self._scale_factor, energy=0.0, source="empirical")
 
     def get_weights(self, **kwargs):
         """MoE dispatch has no weight memory."""
@@ -808,8 +817,10 @@ class MoEDispatch(Operation):
         else:  # other backends
             raise NotImplementedError(f"MoEDispatch: Not implemented for backend {database.backend}")
 
-        # MoEDispatch calculates latency rather than querying, so energy=0
-        return PerformanceResult(comm_latency * self._scale_factor, energy=0.0)
+        # MoEDispatch calculates latency rather than querying, so energy=0.
+        # ``comm_latency`` is computed from a mix of query_nccl results and
+        # plain SOL math; tag as ``empirical`` to be safe.
+        return PerformanceResult(comm_latency * self._scale_factor, energy=0.0, source="empirical")
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -1348,6 +1359,7 @@ class Mamba2Kernel(Operation):
         return PerformanceResult(
             latency=float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
         )
 
     def get_weights(self, **kwargs):
@@ -1412,6 +1424,7 @@ class GDNKernel(Operation):
         return PerformanceResult(
             latency=float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
         )
 
     def get_weights(self, **kwargs):
@@ -1560,9 +1573,18 @@ class Mamba2(Operation):
         total_latency += float(out_proj_result)
         total_energy += out_proj_result.energy
 
+        # Merge sources from every sub-result so the composite reflects mixed
+        # silicon/empirical/sol provenance instead of defaulting to silicon.
+        sub_sources = [
+            getattr(r, "source", "silicon")
+            for r in (in_proj_result, conv_result, ssm_result, norm_result, out_proj_result)
+        ]
+        merged_source = sub_sources[0] if all(s == sub_sources[0] for s in sub_sources) else "mixed"
+
         return PerformanceResult(
             latency=total_latency * self._scale_factor,
             energy=total_energy * self._scale_factor,
+            source=merged_source,
         )
 
     def get_weights(self, **kwargs):  # Mamba2 weights
@@ -1624,6 +1646,7 @@ class ContextDSAModule(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
         )
 
     def get_weights(self, **kwargs):
@@ -1675,6 +1698,7 @@ class GenerationDSAModule(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
         )
 
     def get_weights(self, **kwargs):
@@ -1716,7 +1740,11 @@ class DeepSeekV4MHCModule(Operation):
             op=self._op,
             quant_mode=self._quant_mode,
         )
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -1818,7 +1846,11 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             gemm_quant_mode=self._gemm_quant_mode,
             architecture=self._architecture,
         )
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
 
 class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
@@ -1848,7 +1880,11 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             gemm_quant_mode=self._gemm_quant_mode,
             architecture=self._architecture,
         )
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
 
 class MLAModule(Operation):
@@ -1910,6 +1946,7 @@ class MLAModule(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
         )
 
     def get_weights(self, **kwargs):
@@ -1983,11 +2020,14 @@ class FallbackOp(Operation):
 
         total_latency = 0.0
         total_energy = 0.0
+        sub_sources: list[str] = []
         for op in self._fallback:
             result = op.query(database, **kwargs)
             total_latency += float(result)
             total_energy += getattr(result, "energy", 0.0)
-        return PerformanceResult(total_latency, energy=total_energy)
+            sub_sources.append(getattr(result, "source", "silicon"))
+        merged_source = sub_sources[0] if sub_sources and all(s == sub_sources[0] for s in sub_sources) else "mixed"
+        return PerformanceResult(total_latency, energy=total_energy, source=merged_source)
 
     def get_weights(self, **kwargs):
         # Use primary weights if available, otherwise sum fallback weights.
@@ -2035,10 +2075,12 @@ class OverlapOp(Operation):
         """
         latency_a = 0.0
         energy_a = 0.0
+        sub_sources: list[str] = []
         for op in self._group_a:
             result = op.query(database, **kwargs)
             latency_a += float(result)
             energy_a += getattr(result, "energy", 0.0)
+            sub_sources.append(getattr(result, "source", "silicon"))
 
         latency_b = 0.0
         energy_b = 0.0
@@ -2046,10 +2088,13 @@ class OverlapOp(Operation):
             result = op.query(database, **kwargs)
             latency_b += float(result)
             energy_b += getattr(result, "energy", 0.0)
+            sub_sources.append(getattr(result, "source", "silicon"))
 
+        merged_source = sub_sources[0] if sub_sources and all(s == sub_sources[0] for s in sub_sources) else "mixed"
         return PerformanceResult(
             latency=max(latency_a, latency_b),
             energy=energy_a + energy_b,
+            source=merged_source,
         )
 
     def get_weights(self, **kwargs):

@@ -207,3 +207,58 @@ def test_cli_static_modes_in_choices():
             ]
         )
         assert ns.estimate_mode == mode
+
+
+def _flatten_sources(summary):
+    """Collect every source tag from both context + generation per-op dicts."""
+    src_ctx = summary.get_context_source_dict() or {}
+    src_gen = summary.get_generation_source_dict() or {}
+    return list(src_ctx.values()) + list(src_gen.values())
+
+
+def test_static_estimate_source_tag_silicon_default():
+    """SILICON database mode with table-covered config should tag ops as 'silicon'.
+
+    Regression guard for the source-tagging fix in perf_database.py: previously
+    interpolated and SOL/empirical-derived ops were silently labelled 'silicon';
+    now only direct table hits keep that tag.
+    """
+    result = cli_estimate(database_mode="SILICON", mode="static", **_common_kwargs())
+    sources = _flatten_sources(result.summary)
+    assert sources, "expected per-op source tags to be populated"
+    # At least one op should be a real table hit. (We don't require *all* to be
+    # silicon, since a few ops -- p2p, custom_allreduce when tp=1, etc. -- may
+    # legitimately be empirical-derived even in SILICON mode.)
+    assert any(s == "silicon" for s in sources), (
+        f"expected at least one 'silicon' tag in SILICON mode, got: {set(sources)}"
+    )
+    # No op should be 'sol' in SILICON mode (only SOL mode emits that tag).
+    assert "sol" not in sources, f"'sol' tag leaked in SILICON mode: {sources}"
+
+
+def test_static_estimate_source_tag_empirical_in_empirical_mode():
+    """EMPIRICAL database mode should never tag any op as 'silicon'."""
+    result = cli_estimate(database_mode="EMPIRICAL", mode="static", **_common_kwargs())
+    sources = _flatten_sources(result.summary)
+    assert sources, "expected per-op source tags to be populated"
+    # Every measurable op should be from the empirical formula path.
+    assert all(s != "silicon" for s in sources), (
+        f"'silicon' tag leaked in EMPIRICAL mode (sources should all be 'empirical'): {sources}"
+    )
+    # The bulk of ops should be tagged 'empirical' (a few might be 'sol' if
+    # certain operations only have an SOL fallback, but that's still not
+    # silicon).
+    assert any(s == "empirical" for s in sources), (
+        f"expected at least one 'empirical' tag in EMPIRICAL mode, got: {set(sources)}"
+    )
+
+
+def test_static_estimate_source_tag_sol_in_sol_mode():
+    """SOL database mode should tag ops as 'sol' (or non-silicon at minimum)."""
+    result = cli_estimate(database_mode="SOL", mode="static", **_common_kwargs())
+    sources = _flatten_sources(result.summary)
+    assert sources, "expected per-op source tags to be populated"
+    # No op should be tagged 'silicon' in SOL mode.
+    assert all(s != "silicon" for s in sources), (
+        f"'silicon' tag leaked in SOL mode (sources should be 'sol' or 'empirical'): {sources}"
+    )
