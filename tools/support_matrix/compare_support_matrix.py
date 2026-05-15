@@ -15,7 +15,7 @@ Exit codes:
     2: Validation errors (sanity or range check failures)
 
 Usage:
-    python compare_support_matrix.py --old <old_csv> --new <new_csv> [--output-diff <diff_file>]
+    python compare_support_matrix.py --old <old_matrix> --new <new_matrix> [--output-diff <diff_file>]
 """
 
 import argparse
@@ -23,6 +23,7 @@ import csv
 import json
 import os
 import sys
+from pathlib import Path
 
 # Ensure local repo paths are importable when running as a standalone script.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,8 +38,10 @@ from tools.support_matrix.support_matrix import (
     SupportMatrix,
 )
 
+EXPECTED_HEADER = ["HuggingFaceID", "Architecture", "System", "Backend", "Version", "Mode", "Status", "ErrMsg"]
 
-def read_csv(csv_path: str) -> tuple[list[str], list[list[str]]]:
+
+def _read_single_csv(csv_path: Path) -> tuple[list[str], list[list[str]]]:
     """
     Read a CSV file and return header and data rows.
 
@@ -64,6 +67,43 @@ def read_csv(csv_path: str) -> tuple[list[str], list[list[str]]]:
     return header, data_rows
 
 
+def read_csv(matrix_path: str) -> tuple[list[str], list[list[str]]]:
+    """
+    Read either a legacy support matrix CSV or a split support matrix directory.
+
+    Split support matrix directories are expected to contain one CSV per system,
+    named ``<system>.csv``.
+    """
+    path = Path(matrix_path)
+    if not path.is_dir():
+        return _read_single_csv(path)
+
+    csv_paths = sorted(path.glob("*.csv"))
+    if not csv_paths:
+        raise FileNotFoundError(f"No support matrix CSV files found in directory: {matrix_path}")
+
+    combined_header: list[str] | None = None
+    combined_rows: list[list[str]] = []
+    for csv_path in csv_paths:
+        header, data_rows = _read_single_csv(csv_path)
+        if combined_header is None:
+            combined_header = header
+        elif header != combined_header:
+            raise ValueError(f"Inconsistent CSV header in {csv_path}: expected {combined_header}, got {header}")
+
+        systems = {row[2] for row in data_rows if len(row) >= 3}
+        if len(systems) != 1:
+            raise ValueError(f"{csv_path} must contain rows for exactly one system, found {sorted(systems)}")
+
+        [system] = systems
+        if csv_path.stem != system:
+            raise ValueError(f"{csv_path} filename must match its System value '{system}'")
+
+        combined_rows.extend(data_rows)
+
+    return combined_header or [], combined_rows
+
+
 def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]:
     """
     Validate CSV structure and data.
@@ -76,10 +116,8 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
         List of error messages (empty if all checks pass)
     """
     errors = []
-    expected_header = ["HuggingFaceID", "Architecture", "System", "Backend", "Version", "Mode", "Status", "ErrMsg"]
-
-    if header != expected_header:
-        errors.append(f"Invalid header: expected {expected_header}, got {header}")
+    if header != EXPECTED_HEADER:
+        errors.append(f"Invalid header: expected {EXPECTED_HEADER}, got {header}")
         return errors  # Can't continue without valid header
 
     if len(data_rows) == 0:
@@ -87,8 +125,8 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
         return errors
 
     for i, row in enumerate(data_rows, start=2):
-        if len(row) != len(expected_header):
-            errors.append(f"Row {i} has {len(row)} columns, expected {len(expected_header)}")
+        if len(row) != len(EXPECTED_HEADER):
+            errors.append(f"Row {i} has {len(row)} columns, expected {len(EXPECTED_HEADER)}")
             continue
 
         mode = row[5]
@@ -247,7 +285,7 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     reclassified_hw = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_HW_INCOMPATIBLE]
 
     lines = [
-        "This PR updates aiconfigurator/systems/support_matrix.csv with the following changes:",
+        "This PR updates the split support matrix CSV files with the following changes:",
         "",
         "### Summary",
         "",
@@ -370,13 +408,13 @@ def main():
         "--old",
         type=str,
         required=True,
-        help="Path to the old support matrix CSV",
+        help="Path to the old support matrix CSV or split support matrix directory",
     )
     parser.add_argument(
         "--new",
         type=str,
         required=True,
-        help="Path to the new support matrix CSV",
+        help="Path to the new support matrix CSV or split support matrix directory",
     )
     parser.add_argument(
         "--output-diff",
@@ -389,23 +427,23 @@ def main():
     print("=" * 80)
     print("Support Matrix Comparison")
     print("=" * 80)
-    print(f"Old CSV: {args.old}")
-    print(f"New CSV: {args.new}")
+    print(f"Old support matrix: {args.old}")
+    print(f"New support matrix: {args.new}")
     print()
 
     # Read both CSVs
     try:
         old_header, old_data_rows = read_csv(args.old)
-        print(f"✓ Old CSV loaded: {len(old_data_rows)} rows")
+        print(f"✓ Old support matrix loaded: {len(old_data_rows)} rows")
     except Exception as e:
-        print(f"✗ Failed to read old CSV: {e}")
+        print(f"✗ Failed to read old support matrix: {e}")
         sys.exit(2)
 
     try:
         new_header, new_data_rows = read_csv(args.new)
-        print(f"✓ New CSV loaded: {len(new_data_rows)} rows")
+        print(f"✓ New support matrix loaded: {len(new_data_rows)} rows")
     except Exception as e:
-        print(f"✗ Failed to read new CSV: {e}")
+        print(f"✗ Failed to read new support matrix: {e}")
         sys.exit(2)
 
     print()
@@ -413,7 +451,7 @@ def main():
     # Run validation checks on new CSV
     validation_errors = []
 
-    print("Running validation checks on new CSV...")
+    print("Running validation checks on new support matrix...")
     print("-" * 40)
 
     # 1. CSV sanity check
@@ -439,7 +477,7 @@ def main():
     print()
 
     # Compare CSVs
-    print("Comparing old and new CSVs...")
+    print("Comparing old and new support matrices...")
     print("-" * 40)
 
     added_rows, removed_rows, changed_rows = compare_csv_files(old_data_rows, new_data_rows)

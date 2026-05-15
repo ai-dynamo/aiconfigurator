@@ -83,7 +83,9 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 // ── Constants ───────────────────────────────────────────────────────
 const REPO = 'ai-dynamo/aiconfigurator';
-const CSV_PATH = 'src/aiconfigurator/systems/support_matrix.csv';
+const SUPPORT_MATRIX_PATH = 'src/aiconfigurator/systems/support_matrix';
+const SUPPORT_MATRIX_INDEX_PATH = `${SUPPORT_MATRIX_PATH}/index.json`;
+const LEGACY_CSV_PATH = 'src/aiconfigurator/systems/support_matrix.csv';
 const STATUS_HW_INCOMPATIBLE = 'HW_INCOMPATIBLE';
 const PREFERRED_DEFAULT_SYSTEM = 'b200_sxm';
 const SYSTEM_ORDER = ['b200', 'gb200', 'gb300', 'h100', 'h200', '__other__', 'a100', 'l40s'];
@@ -422,9 +424,9 @@ function isLocalPreview() {
   return ['localhost', '127.0.0.1', '0.0.0.0'].includes(window.location.hostname);
 }
 
-function csvUrl(branch) {
-  if (isLocalPreview()) return `/${CSV_PATH}`;
-  return `https://raw.githubusercontent.com/${REPO}/refs/heads/${branch}/${CSV_PATH}`;
+function rawUrl(branch, path) {
+  if (isLocalPreview()) return `/${path}`;
+  return `https://raw.githubusercontent.com/${REPO}/refs/heads/${branch}/${path}`;
 }
 
 function readSearchQuery() {
@@ -499,14 +501,30 @@ async function fetchBranchList() {
   }
 }
 
-async function fetchCsv(branch) {
-  const res = await fetch(csvUrl(branch));
+async function fetchOneCsv(branch, path) {
+  const res = await fetch(rawUrl(branch, path));
   if (!res.ok) throw new Error(`Failed to fetch CSV (HTTP ${res.status}) from branch "${branch}"`);
   const text = await res.text();
   // Support generated updates that mix historical CRLF rows with LF rows.
   const normalizedText = text.replace(/\r\n?/g, '\n');
   const result = Papa.parse(normalizedText, { header: true, skipEmptyLines: true });
   return result.data;
+}
+
+async function fetchCsv(branch) {
+  const indexRes = await fetch(rawUrl(branch, SUPPORT_MATRIX_INDEX_PATH));
+  if (!indexRes.ok) {
+    return fetchOneCsv(branch, LEGACY_CSV_PATH);
+  }
+
+  const index = await indexRes.json();
+  const files = Array.isArray(index.files) ? index.files : [];
+  if (!files.length) throw new Error(`Support matrix index is empty on branch "${branch}"`);
+
+  const chunks = await Promise.all(
+    files.map(file => fetchOneCsv(branch, `${SUPPORT_MATRIX_PATH}/${file}`))
+  );
+  return chunks.flat();
 }
 
 // ── React Components ────────────────────────────────────────────────
@@ -1032,7 +1050,7 @@ function ErrorBanner({ message, onRetry }) {
 function Footer() {
   return (
     <div className="text-center py-6 text-xs text-slate-400 dark:text-slate-500 border-t border-slate-200 dark:border-slate-700 mt-8">
-      AI Configurator Support Matrix &middot; Data from <code className="text-xs">support_matrix.csv</code>
+      AI Configurator Support Matrix &middot; Data from <code className="text-xs">support_matrix/*.csv</code>
     </div>
   );
 }

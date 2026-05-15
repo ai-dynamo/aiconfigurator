@@ -10,6 +10,7 @@ the model/system/backend/version support matrix for AIConfigurator.
 """
 
 import csv
+import json
 import logging
 import os
 import traceback
@@ -17,6 +18,7 @@ from concurrent.futures import BrokenExecutor, ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import groupby
+from pathlib import Path
 
 import pandas as pd
 from tqdm import tqdm
@@ -925,19 +927,57 @@ class SupportMatrix:
         self, results: list[tuple[str, str, str, str, str, str, str, str | None]], output_file: str
     ) -> None:
         """
-        Save test results to a CSV file.
+        Save test results to split CSV files, one per system.
+
+        Passing a path ending in ``.csv`` preserves the legacy single-file output
+        for ad hoc comparisons.
 
         Args:
             results: List of tuples (huggingface_id, architecture, system, backend, version, mode, status, err_msg)
-            output_file: Path to the output CSV file
+            output_file: Path to the output directory, or a legacy output CSV file
         """
+        output_path = Path(output_file)
+        header = ["HuggingFaceID", "Architecture", "System", "Backend", "Version", "Mode", "Status", "ErrMsg"]
 
-        with open(output_file, "w", newline="") as f:
-            writer = csv.writer(f)
-            header = ["HuggingFaceID", "Architecture", "System", "Backend", "Version", "Mode", "Status", "ErrMsg"]
-            writer.writerow(header)
-            for huggingface_id, architecture, system, backend, version, mode, status, err_msg in results:
-                if status not in VALID_STATUSES:
-                    raise ValueError(f"Invalid support-matrix status: {status}")
-                writer.writerow([huggingface_id, architecture, system, backend, version, mode, status, err_msg or ""])
+        if output_path.suffix == ".csv":
+            with open(output_path, "w", newline="") as f:
+                writer = csv.writer(f, lineterminator="\n")
+                writer.writerow(header)
+                for huggingface_id, architecture, system, backend, version, mode, status, err_msg in results:
+                    if status not in VALID_STATUSES:
+                        raise ValueError(f"Invalid support-matrix status: {status}")
+                    writer.writerow(
+                        [huggingface_id, architecture, system, backend, version, mode, status, err_msg or ""]
+                    )
+            print(f"\nResults saved to: {output_file}")
+            return
+
+        output_path.mkdir(parents=True, exist_ok=True)
+        for stale_csv in output_path.glob("*.csv"):
+            stale_csv.unlink()
+
+        sorted_results = sorted(results, key=lambda x: (x[2], x[0], x[1], x[3], x[4], x[5]))
+        grouped_results = {
+            system: list(system_results) for system, system_results in groupby(sorted_results, key=lambda x: x[2])
+        }
+
+        manifest = {"files": []}
+        for system, system_results in grouped_results.items():
+            csv_path = output_path / f"{system}.csv"
+            manifest["files"].append(csv_path.name)
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.writer(f, lineterminator="\n")
+                writer.writerow(header)
+                for huggingface_id, architecture, system, backend, version, mode, status, err_msg in system_results:
+                    if status not in VALID_STATUSES:
+                        raise ValueError(f"Invalid support-matrix status: {status}")
+                    writer.writerow(
+                        [huggingface_id, architecture, system, backend, version, mode, status, err_msg or ""]
+                    )
+
+        with open(output_path / "index.json", "w") as f:
+            json.dump(manifest, f, indent=2)
+            f.write("\n")
+
         print(f"\nResults saved to: {output_file}")
+        print(f"Split support matrix files: {len(manifest['files'])}")
