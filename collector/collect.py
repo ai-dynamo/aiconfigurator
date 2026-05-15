@@ -759,6 +759,10 @@ def collect_ops(
     shuffle_seed: int = 42,
     backend: str = "unknown",
     resume_options: dict | None = None,
+    target_spec=None,
+    target_gpu: str | None = None,
+    target_models: list[str] | None = None,
+    target_mode: str = "targeted",
 ) -> list[dict]:
     """Run collection for a list of resolved collection entries.
 
@@ -781,6 +785,22 @@ def collect_ops(
 
     for collection in collections:
         try:
+            if target_spec is not None:
+                from collector.targeted_collection import TargetContext
+
+                context = TargetContext(
+                    backend=backend,
+                    op=collection["type"],
+                    target_gpu=target_gpu,
+                    target_models=tuple(target_models or ()),
+                    mode=target_mode,
+                )
+                if not target_spec.collection_selected(context):
+                    logger.info(
+                        f"Target spec skipped {collection['name']}.{collection['type']}: no selected data points"
+                    )
+                    continue
+
             module_name = collection["module"]
             get_module = __import__(module_name, fromlist=[collection["get_func"]])
             run_module = __import__(module_name, fromlist=[collection["run_func"]])
@@ -807,10 +827,35 @@ def collect_ops(
 
             get_func = getattr(get_module, collection["get_func"])
             run_func = getattr(run_module, collection["run_func"])
+            run_func_name = getattr(run_func, "__name__", None) or getattr(run_func, "func", run_func).__name__
             run_func = functools.partial(run_func, perf_filename=collection["perf_filename"])
 
-            def get_func_with_limit(get_func=get_func):
+            def get_func_with_limit(get_func=get_func, collection=collection, run_func_name=run_func_name):
                 cases = get_func()
+                if target_spec is not None:
+                    from collector.targeted_collection import TargetContext
+
+                    context = TargetContext(
+                        backend=backend,
+                        op=collection["type"],
+                        target_gpu=target_gpu,
+                        target_models=tuple(target_models or ()),
+                        mode=target_mode,
+                    )
+                    full_name = f"{collection['name']}.{collection['type']}"
+                    result = target_spec.filter_cases(
+                        cases,
+                        context,
+                        task_id_factory=lambda case: create_test_case_id(case, run_func_name, full_name),
+                    )
+                    logger.info(
+                        "Target spec filtered "
+                        f"{full_name}: {result.original_count} generated, "
+                        f"{result.selected_count} selected, "
+                        f"{result.skipped_by_exception} GPU exceptions, "
+                        f"{len(result.cases)} runnable"
+                    )
+                    cases = result.cases
                 if shuffle:
                     rng = random.Random(shuffle_seed)
                     rng.shuffle(cases)
@@ -849,6 +894,10 @@ def collect_sglang(
     limit: int | None = None,
     shuffle: bool = False,
     resume_options: dict | None = None,
+    target_spec=None,
+    target_gpu: str | None = None,
+    target_models: list[str] | None = None,
+    target_mode: str = "targeted",
 ):
     """Collect performance data for SGLang with enhanced error tracking"""
     from collector.sglang.registry import REGISTRY
@@ -874,6 +923,10 @@ def collect_sglang(
         shuffle=shuffle,
         backend="sglang",
         resume_options=resume_options,
+        target_spec=target_spec,
+        target_gpu=target_gpu,
+        target_models=target_models,
+        target_mode=target_mode,
     )
 
     generate_collection_summary(all_errors, "sglang", version)
@@ -885,6 +938,10 @@ def collect_vllm(
     limit: int | None = None,
     shuffle: bool = False,
     resume_options: dict | None = None,
+    target_spec=None,
+    target_gpu: str | None = None,
+    target_models: list[str] | None = None,
+    target_mode: str = "targeted",
 ):
     """Collect performance data for vLLM"""
     from collector.version_resolver import build_collections
@@ -906,7 +963,17 @@ def collect_vllm(
 
     collections = build_collections(REGISTRY, "vllm", version, ops, logger=logger)
     all_errors = collect_ops(
-        num_processes, collections, version, limit=limit, shuffle=shuffle, backend="vllm", resume_options=resume_options
+        num_processes,
+        collections,
+        version,
+        limit=limit,
+        shuffle=shuffle,
+        backend="vllm",
+        resume_options=resume_options,
+        target_spec=target_spec,
+        target_gpu=target_gpu,
+        target_models=target_models,
+        target_mode=target_mode,
     )
 
     generate_collection_summary(all_errors, "vllm", version)
@@ -918,6 +985,10 @@ def collect_trtllm(
     limit: int | None = None,
     shuffle: bool = False,
     resume_options: dict | None = None,
+    target_spec=None,
+    target_gpu: str | None = None,
+    target_models: list[str] | None = None,
+    target_mode: str = "targeted",
 ):
     """Collect performance data for TensorRT LLM with enhanced error tracking"""
     from collector.trtllm.registry import REGISTRY
@@ -949,6 +1020,10 @@ def collect_trtllm(
         shuffle=shuffle,
         backend="trtllm",
         resume_options=resume_options,
+        target_spec=target_spec,
+        target_gpu=target_gpu,
+        target_models=target_models,
+        target_mode=target_mode,
     )
 
     generate_collection_summary(all_errors, "trtllm", version)
@@ -1082,6 +1157,32 @@ def main():
         "Default: collect all models.",
     )
     parser.add_argument(
+        "--target-spec",
+        type=str,
+        default=None,
+        help="JSON/YAML file with data_points and gpu_exceptions for targeted support-matrix healing.",
+    )
+    parser.add_argument(
+        "--target-gpu",
+        type=str,
+        default=None,
+        help="GPU key for targeted collection and GPU exception matching (e.g. b200_sxm).",
+    )
+    parser.add_argument(
+        "--target-model",
+        action="append",
+        default=None,
+        help="Model key for targeted collection. Can be repeated. A single target model also activates "
+        "the existing model-path generator filter.",
+    )
+    parser.add_argument(
+        "--target-mode",
+        choices=["targeted", "full"],
+        default="targeted",
+        help="With --target-spec, 'targeted' runs selected data points; 'full' aggregates all spec data points. "
+        "Both modes apply matching GPU exceptions.",
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         help="Profile the collector run and save output ",
@@ -1089,16 +1190,37 @@ def main():
     args = parser.parse_args()
     ops = args.ops
     _dsv4_auto_expand = False
+    target_spec = None
 
+    if args.target_spec:
+        from collector.targeted_collection import load_target_collection_spec
+
+        try:
+            target_spec = load_target_collection_spec(args.target_spec)
+        except (TypeError, ValueError) as e:
+            parser.error(str(e))
+
+    target_models = list(args.target_model or [])
     if args.model_path:
+        if target_models and any(model != args.model_path for model in target_models):
+            parser.error("--model-path and --target-model must refer to the same model when both are provided")
+        if args.model_path not in target_models:
+            target_models.append(args.model_path)
+
+    if target_models:
         from collector.common_test_cases import get_all_model_names
 
         all_models = get_all_model_names()
-        if args.model_path not in all_models:
+        unknown_models = [model for model in target_models if model not in all_models]
+        if unknown_models:
             parser.error(
-                f"Model '{args.model_path}' not found. Available models:\n" + "\n".join(f"  - {m}" for m in all_models)
+                f"Unknown target model(s): {', '.join(unknown_models)}. Available models:\n"
+                + "\n".join(f"  - {m}" for m in all_models)
             )
-        os.environ["COLLECTOR_MODEL_PATH"] = args.model_path
+        if len(target_models) == 1:
+            os.environ["COLLECTOR_MODEL_PATH"] = target_models[0]
+        else:
+            os.environ.pop("COLLECTOR_MODEL_PATH", None)
 
         # V4-Flash special-case: when the model is V4-Flash and no explicit
         # ``--ops`` is given, scope to the ops consumed by the V4-Flash
@@ -1106,7 +1228,7 @@ def main():
         # MoE, and mHC.  All other models keep the default behaviour: run
         # every op and let each get_func's ``_filter_model_config_list``
         # filter cases at the test-case level.
-        if args.ops is None and args.model_path == "sgl-project/DeepSeek-V4-Flash-FP8":
+        if args.ops is None and len(target_models) == 1 and target_models[0] == "sgl-project/DeepSeek-V4-Flash-FP8":
             dsv4_flash_ops = [name for name in _all_op_names() if name.startswith("dsv4_flash_")]
             ops = dsv4_flash_ops + ["gemm", "moe", "mhc_module"]
             _dsv4_auto_expand = True
@@ -1126,10 +1248,17 @@ def main():
         # Update log level if debug flag changed
         setup_logging(debug=args.debug)
 
-    if args.model_path:
-        logger.info(f"Model filter active: collecting only for '{args.model_path}'")
+    if target_models:
+        logger.info(f"Model filter active: collecting only for {target_models}")
         if ops and args.ops is None:
             logger.info(f"  expanded to model-specific ops: {ops}")
+    if target_spec is not None:
+        logger.info(
+            "Target spec active: "
+            f"{len(target_spec.data_points)} data points, "
+            f"{len(target_spec.gpu_exceptions)} GPU exceptions, "
+            f"mode={args.target_mode}, gpu={args.target_gpu or 'all'}"
+        )
 
     resume_options = {
         "resume": args.resume,
@@ -1189,11 +1318,41 @@ def main():
     # Use profiling context manager
     with ProfilerContext(args.backend, enabled=args.profile):
         if args.backend == "trtllm":
-            collect_trtllm(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
+            collect_trtllm(
+                num_processes,
+                ops,
+                limit=limit,
+                shuffle=shuffle,
+                resume_options=resume_options,
+                target_spec=target_spec,
+                target_gpu=args.target_gpu,
+                target_models=target_models,
+                target_mode=args.target_mode,
+            )
         elif args.backend == "sglang":
-            collect_sglang(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
+            collect_sglang(
+                num_processes,
+                ops,
+                limit=limit,
+                shuffle=shuffle,
+                resume_options=resume_options,
+                target_spec=target_spec,
+                target_gpu=args.target_gpu,
+                target_models=target_models,
+                target_mode=args.target_mode,
+            )
         elif args.backend == "vllm":
-            collect_vllm(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
+            collect_vllm(
+                num_processes,
+                ops,
+                limit=limit,
+                shuffle=shuffle,
+                resume_options=resume_options,
+                target_spec=target_spec,
+                target_gpu=args.target_gpu,
+                target_models=target_models,
+                target_mode=args.target_mode,
+            )
 
 
 if __name__ == "__main__":

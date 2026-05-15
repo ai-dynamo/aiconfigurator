@@ -171,6 +171,31 @@ python3 collect.py --backend sglang --smoke
 python3 collect.py --backend trtllm --ops moe --smoke
 ```
 
+## Targeted Support-Matrix Healing
+
+Use `--target-spec` when a support-matrix heal only needs a few missing data points instead of a smoke sample or the full generated collector space. The spec keeps desired data points and GPU-specific exceptions in separate sections:
+
+```bash
+python3 collect.py \
+  --backend sglang \
+  --ops gdn \
+  --target-spec targeted_collection.example.json \
+  --target-gpu b200_sxm \
+  --target-model Qwen/Qwen3.5-27B
+```
+
+`data_points` entries are allowlist selectors. `gpu_exceptions` entries remove matching cases after the allowlist is applied. Selectors support:
+- `backend` / `framework`: `sglang`, `trtllm`, or `vllm`
+- `op` / `operation`: registry op name such as `gdn`, `moe`, or `mhc_module`
+- `models` / `model`: model metadata used with `--target-model`
+- `gpus` / `gpu`: GPU keys such as `b200_sxm`
+- `match`: exact generated-case fields. For list-shaped cases, use string indexes like `"0"` or `"9"`; for dataclass/dict cases, use field names.
+- `contains`: values that must appear somewhere in the generated case
+- `case_ids` / `task_ids`: exact task IDs, using the same stable ID format as resume checkpoints
+- `id_contains`: substrings that must appear in the stable task ID
+
+When a target spec has `data_points`, only selected entries run. When it has no `data_points`, all generated cases remain eligible and only `gpu_exceptions` are applied. `--target-mode full` is available for callers that want to aggregate all data points in the spec while still applying GPU exceptions.
+
 ## Power Monitoring (Optional)
 
 The collector supports GPU power monitoring during kernel execution using NVML. This feature is optional and disabled by default.

@@ -1,0 +1,39 @@
+{
+  "data_points": [
+    {
+      "name": "Qwen3.5 27B GDN context rows on B200",
+      "backend": "sglang",
+      "op": "gdn",
+      "models": ["Qwen/Qwen3.5-27B"],
+      "gpus": ["b200_sxm"],
+      "match": {
+        "0": "context",
+        "1": 5120,
+        "9": "Qwen/Qwen3.5-27B"
+      }
+    },
+    {
+      "name": "DeepSeek V4 Flash mHC module rows",
+      "backend": "sglang",
+      "op": "mhc_module",
+      "models": ["deepseek-ai/DeepSeek-V4-Flash"],
+      "gpus": ["b200_sxm", "b300_sxm"],
+      "contains": ["deepseek-ai/DeepSeek-V4-Flash"]
+    }
+  ],
+  "gpu_exceptions": [
+    {
+      "name": "Skip B200 GDN generation row while the kernel is blocked",
+      "backend": "sglang",
+      "op": "gdn",
+      "gpus": ["b200_sxm"],
+      "models": ["Qwen/Qwen3.5-27B"],
+      "match": {
+        "0": "generation",
+        "1": 5120,
+        "9": "Qwen/Qwen3.5-27B"
+      },
+      "reason": "Known unsupported generation row on this GPU"
+    }
+  ]
+}
