@@ -341,3 +341,18 @@ class TestRenderingNameFallback:
         }
         ctx = prepare_template_context(params, "vllm")
         assert ctx["frontend_replicas"] == 0
+
+    def test_benchmark_prefix_preserves_explicit_model_zero(self):
+        from aiconfigurator.generator.rendering.engine import prepare_template_context
+
+        params = {
+            "K8sConfig": {"name_prefix": "test"},
+            "ServiceConfig": {"model_path": "test", "prefix": 1024},
+            "ModelConfig": {"prefix": 0},
+            "BenchConfig": {},
+            "DynConfig": {"mode": "agg"},
+            "params": {"agg": {}},
+            "WorkerConfig": {},
+        }
+        ctx = prepare_template_context(params, "vllm")
+        assert ctx["BenchConfig"]["prefix"] == 0

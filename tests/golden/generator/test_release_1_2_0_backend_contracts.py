@@ -278,6 +278,24 @@ def test_vllm_0_20_1_cli_args_golden_contract():
     assert speculative == {"method": "mtp", "num_speculative_tokens": 2}
 
 
+def test_vllm_0_20_1_k8s_router_contract():
+    k8s = yaml.safe_load(_render("vllm")["k8s_deploy.yaml"])
+    services = k8s["spec"]["services"]
+
+    frontend_env = {item["name"]: item["value"] for item in services["Frontend"]["envs"]}
+    assert frontend_env["DYN_ROUTER_MODE"] == "kv"
+
+    worker_args = services["VllmWorker"]["extraPodSpec"]["mainContainer"]["args"]
+    assert "--kv-events-config" in worker_args
+    kv_events = json.loads(_value_after(worker_args, "--kv-events-config"))
+    assert kv_events == {
+        "publisher": "zmq",
+        "topic": "kv-events",
+        "endpoint": "tcp://*:20081",
+        "enable_kv_cache_events": True,
+    }
+
+
 def test_sglang_0_5_11_cli_args_golden_contract():
     tokens = _split_cli(_render("sglang")["cli_args_agg"])
     flags = _flag_set(tokens)
@@ -295,6 +313,29 @@ def test_sglang_0_5_11_cli_args_golden_contract():
     assert _value_after(tokens, "--speculative-num-steps") == "2"
     assert "--disable-cuda-graph" in flags
     assert "--moe-dense-tp-size" not in flags
+
+
+def test_sglang_0_5_11_k8s_router_contract():
+    k8s = yaml.safe_load(_render("sglang")["k8s_deploy.yaml"])
+    services = k8s["spec"]["services"]
+
+    frontend_env = {item["name"]: item["value"] for item in services["Frontend"]["envs"]}
+    assert frontend_env["DYN_ROUTER_MODE"] == "kv"
+
+    worker_script = services["SGLangWorker"]["extraPodSpec"]["mainContainer"]["args"][0]
+    assert "--kv-events-config" in worker_script
+    assert '"publisher":"zmq"' in worker_script
+    assert '"topic":"kv-events"' in worker_script
+    assert '"endpoint":"tcp://*:5557"' in worker_script
+
+
+def test_sglang_0_5_11_run_router_contract():
+    run_sh = _render("sglang")["run_0.sh"]
+
+    assert "SGLANG_KV_EVENT_PORT_BASE=${SGLANG_KV_EVENT_PORT_BASE:-5557}" in run_sh
+    assert "python3 -m dynamo.frontend --router-mode kv --http-port" in run_sh
+    assert "--kv-events-config" in run_sh
+    assert "tcp://*:${EVENT_PORT}" in run_sh
 
 
 def test_sglang_0_5_11_optional_cli_args_golden_contract():
@@ -359,9 +400,19 @@ def test_trtllm_1_3_0rc14_extra_engine_args_golden_contract():
     assert engine_args["kv_cache_config"]["free_gpu_memory_fraction"] == 0.82
     assert engine_args["kv_cache_config"]["dtype"] == "auto"
     assert engine_args["kv_cache_config"]["tokens_per_block"] == 32
+    assert engine_args["kv_cache_config"]["enable_block_reuse"] is True
     assert engine_args["cuda_graph_config"]["enable_padding"] is True
     assert engine_args["cuda_graph_config"]["batch_sizes"][-1] == 72
     assert engine_args["speculative_config"] == {
         "decoding_type": "MTP",
         "num_nextn_predict_layers": 2,
     }
+
+
+def test_benchmark_prefix_defaults_from_model_config():
+    bench = _render("trtllm")["bench_run.sh"]
+
+    assert 'BENCH_PREFIX="${AICONFIGURATOR_BENCH_PREFIX:-1024}"' in bench
+    assert 'BENCH_PREFIX_PROMPTS="${AICONFIGURATOR_BENCH_PREFIX_PROMPTS:-1}"' in bench
+    assert "--prefix-prompt-length" in bench
+    assert "--num-prefix-prompts" in bench

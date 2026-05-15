@@ -41,6 +41,10 @@ inputs:
     required: false
     default: 20097
     backends: ["vllm"]
+  - key: ServiceConfig.sglang_kv_event_port
+    required: false
+    default: 5557
+    backends: ["sglang"]
 
   # Generator-level defaults
   - key: generator_dynamo_version
@@ -180,6 +184,11 @@ inputs:
   - key: BenchConfig.osl_stddev
     required: false
     default: 0
+  - key: BenchConfig.prefix
+    required: false
+  - key: BenchConfig.prefix_prompt_pool_size
+    required: false
+    default: 1
   - key: BenchConfig.concurrency
     required: false
     default: "[1, 2, 4, 8, 32, 64, 128, 256]"

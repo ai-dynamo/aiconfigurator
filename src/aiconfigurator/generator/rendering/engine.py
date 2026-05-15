@@ -392,6 +392,11 @@ def render_backend_templates(
         _set_nested("cuda_graph_config", "batch_sizes", "cuda_graph_batch_sizes")
         _set_nested("cache_transceiver_config", "max_tokens_in_buffer", "cache_transceiver_max_tokens_in_buffer")
 
+        if wc.get("disable_prefix_cache") is False:
+            kv_cache_config = dict(wc.get("kv_cache_config") or {})
+            kv_cache_config.setdefault("enable_block_reuse", True)
+            wc["kv_cache_config"] = kv_cache_config
+
         if wc.get("cache_transceiver_config"):
             cache_transceiver_config = dict(wc["cache_transceiver_config"])
             cache_transceiver_config.setdefault("backend", "DEFAULT")
@@ -736,7 +741,10 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context = {}
 
     # Extract ModelConfig (is_moe, nextn, etc.)
-    model_config = param_values.get("ModelConfig", {})
+    model_config = param_values.get("ModelConfig") or {}
+    if not isinstance(model_config, dict):
+        model_config = {}
+    context["ModelConfig"] = dict(model_config)
     if model_config.get("is_moe"):
         context["is_moe"] = model_config["is_moe"]
 
@@ -817,7 +825,19 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
         context["SlaConfig"] = dict(sla_config)
     bench_config = param_values.get("BenchConfig", {}) or {}
     if isinstance(bench_config, dict):
-        context["BenchConfig"] = dict(bench_config)
+        bench_context = dict(bench_config)
+        if bench_context.get("prefix") is None:
+            model_prefix = model_config.get("prefix")
+            service_prefix = service_config.get("prefix")
+            if model_prefix is not None:
+                bench_context["prefix"] = model_prefix
+            elif service_prefix is not None:
+                bench_context["prefix"] = service_prefix
+            else:
+                bench_context["prefix"] = 0
+        if bench_context.get("prefix_prompt_pool_size") is None:
+            bench_context["prefix_prompt_pool_size"] = 1
+        context["BenchConfig"] = bench_context
 
     # Load backend_config_mapping.yaml to understand parameter mappings
     mapping_data = load_yaml_mapping(_BACKEND_MAPPING_FILE)

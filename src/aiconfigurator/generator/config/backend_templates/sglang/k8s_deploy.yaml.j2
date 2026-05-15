@@ -64,6 +64,9 @@
               {% elif role == 'decode' %}
               args+=(--disaggregation-mode decode)
               {% endif %}
+              {% if enable_router %}
+              args+=(--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{{ ServiceConfig.sglang_kv_event_port | default(5557, true) }}"}')
+              {% endif %}
               exec python3 -m dynamo.sglang "${args[@]}"
 {%- endmacro %}
 
