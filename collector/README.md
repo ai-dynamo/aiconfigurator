@@ -55,7 +55,7 @@ The generated files are nccl_perf.txt, oneccl_perf.txt, and custom_allreduce_per
 Collector v2 is model-centric. A healing run should collect cases for a specific
 model/GPU pair, with hardware exceptions resolved by SM version, instead of
 running every op bucket and hoping the support matrix improves. Full collection
-for a new framework version is still supported.
+for a new framework version is the default when no model filter is provided.
 
 ```bash
 # Heal one model on one GPU type.
@@ -78,8 +78,8 @@ python3 collect.py --backend trtllm \
 # Aggregate all model case YAML files for a full model-centric run.
 python3 collect.py --backend trtllm --model-cases-full
 
-# New framework version mode: bypass model/SM cases and collect the full backend registry.
-python3 collect.py --backend trtllm --new-framework-version
+# Full backend registry collection, useful after upgrading a framework version.
+python3 collect.py --backend trtllm
 ```
 
 Case files:
