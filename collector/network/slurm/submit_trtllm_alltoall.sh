@@ -37,7 +37,7 @@ Examples:
 EOF
 }
 
-SCRIPT_DIR="${HOME}/repo/aiconfigurator/collector/slurm_comm_collector"
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc5}"
 CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-${HOME}/repo/aiconfigurator:${HOME}/repo/aiconfigurator}"
 ACCOUNT="${ACCOUNT:-coreai_tritoninference_triton3}"

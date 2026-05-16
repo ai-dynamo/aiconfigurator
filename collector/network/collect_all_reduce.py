@@ -14,29 +14,32 @@ supporting TensorRT-LLM, vLLM, and SGLang backends.
 
 Usage:
     # With MPI for TensorRT-LLM
-    mpirun -n 4 python collect_all_reduce.py --backend trtllm
+    mpirun -n 4 python collector/network/collect_all_reduce.py --backend trtllm
 
     # With vLLM (requires appropriate environment setup)
-    torchrun --nproc_per_node=8 collect_all_reduce.py --backend vllm
+    torchrun --nproc_per_node=8 collector/network/collect_all_reduce.py --backend vllm
 
     # With SGLang (requires appropriate environment setup)
-    torchrun --nproc_per_node=8 collect_all_reduce.py --backend sglang
+    torchrun --nproc_per_node=8 collector/network/collect_all_reduce.py --backend sglang
 
     # With SLURM
-    python collect_all_reduce.py --use-slurm
+    python collector/network/collect_all_reduce.py --use-slurm
 
     # Custom range and output file
-    python collect_all_reduce.py --range "128,1000000,2" --perf-filename "my_perf.txt"
+    python collector/network/collect_all_reduce.py --range "128,1000000,2" --perf-filename "my_perf.txt"
 """
 
 import inspect
 import os
 import sys
 from argparse import ArgumentParser
+from pathlib import Path
 from typing import Optional
 
 import torch
 import torch.distributed as dist
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from helper import PowerMonitor, get_device_module, get_device_str, log_perf
 

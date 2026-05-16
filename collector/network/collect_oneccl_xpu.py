@@ -15,17 +15,21 @@ Prerequisites:
   - Intel GPU (XPU) devices available
 
 Usage:
-  python collect_oneccl_xpu.py --oneccl_op all_gather --dtype half --num_gpus 4
-  python collect_oneccl_xpu.py --oneccl_op reduce_scatter --dtype half --num_gpus 4
-  python collect_oneccl_xpu.py --oneccl_op all_reduce --dtype half --num_gpus 4
-  python collect_oneccl_xpu.py --oneccl_op alltoall --dtype half --num_gpus 4
+  python collector/network/collect_oneccl_xpu.py --oneccl_op all_gather --dtype half --num_gpus 4
+  python collector/network/collect_oneccl_xpu.py --oneccl_op reduce_scatter --dtype half --num_gpus 4
+  python collector/network/collect_oneccl_xpu.py --oneccl_op all_reduce --dtype half --num_gpus 4
+  python collector/network/collect_oneccl_xpu.py --oneccl_op alltoall --dtype half --num_gpus 4
 """
 
 import csv
 import os
 import subprocess
+import sys
 import tempfile
 from argparse import ArgumentParser
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from helper import log_perf
 

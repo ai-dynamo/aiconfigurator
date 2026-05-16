@@ -1,6 +1,6 @@
 # oneCCL Communication Benchmarking for Intel XPU
 
-This guide explains how to set up and run oneCCL collective communication benchmarks on Intel XPU (GPU) devices using `collect_oneccl_xpu.py` or `collect_comm.sh --device xpu`.
+This guide explains how to set up and run oneCCL collective communication benchmarks on Intel XPU (GPU) devices using `collector/network/collect_oneccl_xpu.py` or `collector/network/collect_comm.sh --device xpu`.
 
 ## Prerequisites
 
@@ -79,14 +79,14 @@ The following environment variables must be set at runtime (the script sets them
 This runs all collective operations (`all_gather`, `alltoall`, `reduce_scatter`, `all_reduce`) with both `half` and `int8` data types across all detected GPU counts:
 
 ```bash
-cd collector/
+cd collector/network/
 bash collect_comm.sh --device xpu
 ```
 
 ### Option B: Run Individual Operations via `collect_oneccl_xpu.py`
 
 ```bash
-cd collector/
+cd collector/network/
 
 # all_gather with 2 GPUs, half precision, default range (512B to 512MB)
 python collect_oneccl_xpu.py --oneccl_op all_gather --dtype half --num_gpus 2

@@ -2,9 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import subprocess
+import sys
 from argparse import ArgumentParser
+from pathlib import Path
 
 import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from helper import PowerMonitor, log_perf
 
