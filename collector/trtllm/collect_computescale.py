@@ -3,7 +3,7 @@
 
 import tensorrt_llm
 import torch
-from common_test_cases import get_compute_scale_common_test_cases
+from case_specs import get_compute_scale_case_specs
 
 from helper import benchmark_with_power, get_sm_version, log_perf
 
@@ -14,7 +14,7 @@ def get_computescale_test_cases():
         return []
 
     test_cases = []
-    for compute_scale_common_testcase in get_compute_scale_common_test_cases():
+    for compute_scale_common_testcase in get_compute_scale_case_specs():
         test_cases.append([compute_scale_common_testcase.m, compute_scale_common_testcase.k])
 
     return test_cases

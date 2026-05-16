@@ -39,6 +39,31 @@ framework_specific_op_cases:
       cases: all
 ```
 
+Model-specific op dimensions live in `model_case_values`. These values replace
+the old Python config lists:
+
+```yaml
+model_case_values:
+  moe:
+    - model_path: Qwen/Qwen3-235B-A22B
+      hidden_size: 4096
+      inter_size: 1536
+      topk: 8
+      num_experts: 128
+  mla:
+    - model_path: deepseek-ai/DeepSeek-V3
+      num_heads: 128
+      q_lora_rank: 1536
+      kv_lora_rank: 512
+      qk_nope_head_dim: 128
+      qk_rope_head_dim: 64
+      v_head_dim: 128
+```
+
+The collector loads these model-specific values by op name and honors
+`COLLECTOR_MODEL_PATH`, so support-matrix healing can request cases for one
+model without editing Python.
+
 For simple common ops, `cases` can hold exact generator specs instead of opaque
 case IDs. Base GEMM and attention use readable shape names:
 

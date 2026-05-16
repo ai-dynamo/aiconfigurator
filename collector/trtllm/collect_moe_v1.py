@@ -12,7 +12,7 @@ from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 from torch.nn.parameter import Parameter
 
-from collector.common_test_cases import get_common_moe_test_cases
+from collector.case_specs import get_common_moe_test_cases
 from collector.helper import (
     balanced_logits,
     benchmark_with_power,

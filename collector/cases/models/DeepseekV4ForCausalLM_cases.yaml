@@ -15,6 +15,157 @@ description: >
   cases only for the Flash model path; shared mHC and MoE cases cover the V4
   family.
 
+model_case_values:
+  moe:
+    - model_path: deepseek-ai/DeepSeek-V4-Flash
+      hidden_size: 4096
+      inter_size: 2048
+      topk: 6
+      num_experts: 256
+      wideep: true
+    - model_path: deepseek-ai/DeepSeek-V4-Pro
+      hidden_size: 7168
+      inter_size: 3072
+      topk: 6
+      num_experts: 384
+      wideep: true
+    - model_path: sgl-project/DeepSeek-V4-Flash-FP8
+      hidden_size: 4096
+      inter_size: 2048
+      topk: 6
+      num_experts: 256
+      wideep: true
+    - model_path: sgl-project/DeepSeek-V4-Pro-FP8
+      hidden_size: 7168
+      inter_size: 3072
+      topk: 6
+      num_experts: 384
+      wideep: true
+  mhc:
+    - model_path: deepseek-ai/DeepSeek-V4-Flash
+      hidden_size: 4096
+      hc_mult: 4
+    - model_path: deepseek-ai/DeepSeek-V4-Pro
+      hidden_size: 7168
+      hc_mult: 4
+    - model_path: sgl-project/DeepSeek-V4-Flash-FP8
+      hidden_size: 4096
+      hc_mult: 4
+    - model_path: sgl-project/DeepSeek-V4-Pro-FP8
+      hidden_size: 7168
+      hc_mult: 4
+  dsv4_flash:
+    model_path: sgl-project/DeepSeek-V4-Flash-FP8
+    attention_kinds:
+      - csa
+      - hca
+    module_batch_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+    module_sequence_lengths:
+      - 1
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 1536
+      - 2048
+      - 3072
+      - 4096
+      - 6144
+      - 8192
+      - 10240
+      - 12288
+      - 16384
+      - 32768
+      - 65536
+      - 131072
+      - 262144
+      - 524288
+      - 1048575
+    module_tp_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+    sparse_batch_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+    sparse_input_lengths:
+      - 1
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 1536
+      - 2048
+      - 3072
+      - 4096
+      - 6144
+      - 8192
+    sparse_past_kv_lengths:
+      - 0
+      - 1
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 1536
+      - 2048
+      - 3072
+      - 4096
+      - 6144
+      - 8192
+      - 10240
+      - 12288
+      - 16384
+      - 32768
+      - 65536
+      - 131072
+      - 262144
+      - 524288
+      - 1048575
+    sparse_chunk_prefill_size: 8192
+    sparse_max_full_sequence_length: 1048576
+    sparse_tp_sizes:
+      hca_attn:
+        - 1
+      paged_mqa_logits:
+        - 1
+
 all_frameworks_op_cases:
   moe:
     cases: all
@@ -37,4 +188,3 @@ framework_specific_op_cases:
       cases: all
     wideep_moe:
       cases: all
-

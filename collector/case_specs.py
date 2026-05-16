@@ -12,6 +12,7 @@ import yaml
 
 COLLECTOR_ROOT = Path(__file__).resolve().parent
 BASE_CASES_PATH = COLLECTOR_ROOT / "cases" / "base_model_cases.yaml"
+MODEL_CASES_DIR = COLLECTOR_ROOT / "cases" / "models"
 
 
 def _load_base_cases_data() -> dict:
@@ -51,169 +52,76 @@ def _get_model_path_filter() -> str | None:
     return val if val else None
 
 
-def _filter_model_config_list(model_config_list: list[list]) -> list[list]:
-    """Filter a model_config_list to only the entry matching COLLECTOR_MODEL_PATH.
-
-    Each entry's last element is assumed to be the model name.
-    Returns the full list when no filter is set.
-    Returns an empty list when the filter doesn't match any entry in this
-    particular list (the model may exist in a different op's list).
-    Upfront validation against all known models is done in collect.py.
-    """
-    model_path = _get_model_path_filter()
-    if model_path is None:
-        return model_config_list
-    return [cfg for cfg in model_config_list if cfg[-1] == model_path]
+def _load_model_cases_data() -> list[dict]:
+    data = []
+    for path in sorted(MODEL_CASES_DIR.glob("*_cases.yaml")):
+        with open(path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        if not isinstance(raw, dict):
+            raise TypeError(f"{path}: top-level YAML value must be a mapping")
+        data.append(raw)
+    return data
 
 
-_WIDEEP_MOE_MODEL_NAMES: set[str] = {
-    "deepseek-ai/DeepSeek-R1",
-    "deepseek-ai/DeepSeek-V3",
-    "nvidia/DeepSeek-V3.1-NVFP4",
-    "deepseek-ai/DeepSeek-V3.2",
-    "deepseek-ai/DeepSeek-V4-Flash",
-    "deepseek-ai/DeepSeek-V4-Pro",
-    "sgl-project/DeepSeek-V4-Flash-FP8",
-    "sgl-project/DeepSeek-V4-Pro-FP8",
-    "zai-org/GLM-5",
-    "zai-org/GLM-5-FP8",
-    "nvidia/GLM-5-NVFP4",
-    "MiniMaxAI/MiniMax-M2.5",
-    "MiniMaxAI/MiniMax-M2.7",
-    "nvidia/MiniMax-M2.5-NVFP4",
-    "nvidia/MiniMax-M2.7-NVFP4",
-    "moonshotai/Kimi-K2-Instruct",
-    "moonshotai/Kimi-K2.5",
-    "nvidia/Kimi-K2.5-NVFP4",
-}
+def _model_case_values(op_name: str, *, apply_model_filter: bool = True) -> list[dict]:
+    values = []
+    for data in _load_model_cases_data():
+        op_values = data.get("model_case_values", {}).get(op_name, [])
+        if op_values is None:
+            continue
+        if isinstance(op_values, dict):
+            values.append(dict(op_values))
+            continue
+        if not isinstance(op_values, list):
+            raise TypeError(f"model_case_values.{op_name} must be a list or mapping")
+        values.extend(dict(item) for item in op_values)
+
+    model_path = _get_model_path_filter() if apply_model_filter else None
+    if model_path:
+        values = [value for value in values if value.get("model_path") == model_path]
+    return values
 
 
 def is_wideep_moe_model(model_name: str) -> bool:
-    """Return True if *model_name* needs wideep MoE collection (DEEPSEEK / DEEPSEEKV32 family)."""
-    return model_name in _WIDEEP_MOE_MODEL_NAMES
-
-
-# Raw model config lists — module-level so get_all_model_names() can read them
-# without instantiating test case objects or calling generator functions.
-
-# MoE: [hidden_size, inter_size, topk, num_experts, model_name]
-_MOE_MODEL_CONFIGS: list[list] = [
-    [4096, 14336, 2, 8, "mistralai/Mixtral-8x7B-v0.1"],  # mixtral_8x7b
-    [6144, 16384, 2, 8, "mistralai/Mixtral-8x22B-v0.1"],  # mixtral_8x22b
-    [7168, 2048, 8, 256, "deepseek-ai/DeepSeek-V3"],  # deepseekv3, will have 1 shared expert, dsv32
-    [7168, 2048, 8, 256, "deepseek-ai/DeepSeek-R1"],  # deepseekv3/r1, 1 shared expert
-    [7168, 2048, 8, 256, "nvidia/DeepSeek-V3.1-NVFP4"],  # deepseekv3.1 nvfp4, 1 shared expert
-    [7168, 2048, 8, 256, "deepseek-ai/DeepSeek-V3.2"],  # deepseekv3.2, 1 shared expert
-    [4096, 2048, 6, 256, "deepseek-ai/DeepSeek-V4-Flash"],  # deepseekv4, 1 shared expert
-    [7168, 3072, 6, 384, "deepseek-ai/DeepSeek-V4-Pro"],  # deepseekv4, 1 shared expert
-    [4096, 2048, 6, 256, "sgl-project/DeepSeek-V4-Flash-FP8"],  # deepseekv4, 1 shared expert
-    [7168, 3072, 6, 384, "sgl-project/DeepSeek-V4-Pro-FP8"],  # deepseekv4, 1 shared expert
-    [6144, 2048, 8, 256, "zai-org/GLM-5"],  # glm-5 (DEEPSEEKV32 family, different hidden_size)
-    [6144, 2048, 8, 256, "zai-org/GLM-5-FP8"],  # glm-5 fp8
-    [6144, 2048, 8, 256, "nvidia/GLM-5-NVFP4"],  # glm-5 nvfp4
-    [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B"],  # qwen3-moe, 30b-a3b
-    [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B-FP8"],  # qwen3-moe, 30b-a3b fp8
-    [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B"],  # qwen3-moe, 235b-a22b
-    [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B-FP8"],  # qwen3-moe, 235b-a22b fp8
-    [4096, 1536, 8, 128, "nvidia/Qwen3-235B-A22B-NVFP4"],  # qwen3-moe, 235b-a22b nvfp4
-    [6144, 2560, 8, 160, "Qwen/Qwen3-Coder-480B-A35B-Instruct"],  # qwen3-moe, 480b-a35b
-    [7168, 2048, 8, 384, "moonshotai/Kimi-K2-Instruct"],  # kimi k2
-    [7168, 2048, 8, 384, "moonshotai/Kimi-K2.5"],  # kimi k2.5
-    [7168, 2048, 8, 384, "nvidia/Kimi-K2.5-NVFP4"],  # kimi k2.5 nvfp4 (same shape, separate collection for fp4 kernels)
-    [3072, 1536, 8, 256, "MiniMaxAI/MiniMax-M2.5"],  # minimax m2.5
-    [3072, 1536, 8, 256, "MiniMaxAI/MiniMax-M2.7"],  # minimax m2.7
-    [3072, 1536, 8, 256, "nvidia/MiniMax-M2.5-NVFP4"],  # minimax m2.5 nvfp4
-    [3072, 1536, 8, 256, "nvidia/MiniMax-M2.7-NVFP4"],  # minimax m2.7 nvfp4
-    [2880, 2880, 4, 128, "openai/gpt-oss-120b"],
-    [2880, 2880, 4, 32, "openai/gpt-oss-20b"],
-    [2688, 1856, 6, 128, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"],  # nemotron-3 nano (uses relu2, non-gated)
-    [
-        4096,
-        2688,
-        22,
-        512,
-        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
-    ],  # nemotron-3 super (uses relu2, non-gated)
-    [8192, 5120, 22, 512, "nvidia/nemotron-ultra-rl-050826"],  # nemotron ultra
-    [2048, 512, 8, 256, "Qwen/Qwen3.5-35B-A3B"],  # qwen3.5-moe, 35b-a3b
-    [4096, 1024, 10, 512, "Qwen/Qwen3.5-397B-A17B"],  # qwen3.5-moe, 397b-a17b
-]
-
-# MLA: [num_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, model_name]
-_MLA_MODEL_CONFIGS: list[list] = [
-    [128, 1536, 512, 128, 64, 128, "deepseek-ai/DeepSeek-V3"],
-    [128, 1536, 512, 128, 64, 128, "deepseek-ai/DeepSeek-R1"],
-    [128, 1536, 512, 128, 64, 128, "nvidia/DeepSeek-V3.1-NVFP4"],
-    [64, 1536, 512, 128, 64, 128, "moonshotai/Kimi-K2.5"],  # kimi k2.5: same MLA dims as DSV3 except num_heads=64
-    [64, 1536, 512, 128, 64, 128, "nvidia/Kimi-K2.5-NVFP4"],  # kimi k2.5 nvfp4
-]
-
-# MLA module: models from collect_mla_module.py's SUPPORTED_MODELS that are not
-# already covered by _MLA_MODEL_CONFIGS above.
-_MLA_MODULE_MODEL_NAMES: list[str] = [
-    "deepseek-ai/DeepSeek-V3.2",
-    "deepseek-ai/DeepSeek-V4-Flash",
-    "zai-org/GLM-5",
-    "zai-org/GLM-5-FP8",
-    "nvidia/GLM-5-NVFP4",
-]
-
-# MHC (DeepSeek-V4 Hash-Compressed attention) module:
-# [hidden_size, hc_mult, model_name]
-# Only AIC-cached model_configs/<id>_config.json are usable; both sgl-project
-# FP8 and deepseek-ai non-FP8 namespaces point at the same pre/post kernels.
-_MHC_MODEL_CONFIGS: list[list] = [
-    [4096, 4, "deepseek-ai/DeepSeek-V4-Flash"],
-    [7168, 4, "deepseek-ai/DeepSeek-V4-Pro"],
-    [4096, 4, "sgl-project/DeepSeek-V4-Flash-FP8"],
-    [7168, 4, "sgl-project/DeepSeek-V4-Pro-FP8"],
-]
-
-# GDN (Gated DeltaNet): [d_model, d_conv, num_k_heads, head_k_dim, num_v_heads, head_v_dim, model_name]
-# Covers all 8 unique dimension sets across the full Qwen3.5 collection.
-# d_conv=4, head_k_dim=128, head_v_dim=128, num_k_heads=16 are constant across all models.
-_GDN_MODEL_CONFIGS: list[list] = [
-    [1024, 4, 16, 128, 16, 128, "Qwen/Qwen3.5-0.8B"],
-    [2048, 4, 16, 128, 16, 128, "Qwen/Qwen3.5-2B"],
-    [2560, 4, 16, 128, 32, 128, "Qwen/Qwen3.5-4B"],
-    [4096, 4, 16, 128, 32, 128, "Qwen/Qwen3.5-9B"],
-    [5120, 4, 16, 128, 48, 128, "Qwen/Qwen3.5-27B"],
-    [2048, 4, 16, 128, 32, 128, "Qwen/Qwen3.5-35B-A3B"],  # same d_model as 2B, different num_v_heads
-    [3072, 4, 16, 128, 64, 128, "Qwen/Qwen3.5-122B-A10B"],
-    [4096, 4, 16, 128, 64, 128, "Qwen/Qwen3.5-397B-A17B"],  # same d_model as 9B, different num_v_heads
-]
-
-# Mamba2: [d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size, model_name]
-_MAMBA2_MODEL_CONFIGS: list[list] = [
-    # Nemotron-H 3-Nano
-    # hidden_size=2688, ssm_state_size=128, conv_kernel=4,
-    # mamba_num_heads=64, mamba_head_dim=64, n_groups=8, chunk_size=128
-    [2688, 128, 4, 64, 64, 8, 128, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"],
-    # Nemotron-H 3-Super
-    # hidden_size=4096, ssm_state_size=128, conv_kernel=4,
-    # mamba_num_heads=128, mamba_head_dim=64, n_groups=8, chunk_size=128
-    [4096, 128, 4, 128, 64, 8, 128, "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"],
-    # Nemotron Ultra
-    [8192, 128, 4, 256, 64, 8, 128, "nvidia/nemotron-ultra-rl-050826"],
-    # Nemotron-H 56B
-    [8192, 256, 4, 256, 64, 8, 128, "nvidia/Nemotron-H-56B-Base-8K"],
-    # Generic Mamba2 configuration for interpolation coverage
-    [8192, 128, 4, 64, 64, 8, 256, "MAMBA2_GENERIC_4K"],
-    [1024, 64, 4, 16, 64, 4, 128, "MAMBA2_GENERIC_1K"],
-]
+    """Return True if *model_name* needs WideEP MoE collection."""
+    return any(
+        value.get("model_path") == model_name and value.get("wideep")
+        for value in _model_case_values("moe", apply_model_filter=False)
+    )
 
 
 def get_all_model_names() -> list[str]:
     """Return all known model names across all op types.
 
-    Reads directly from the raw config list data — does not instantiate test
+    Reads directly from model case YAML — does not instantiate test
     case objects or call generator functions, so pruning logic in the generators
     cannot accidentally exclude models from the allowlist.
     """
-    all_configs = (
-        _MOE_MODEL_CONFIGS + _MLA_MODEL_CONFIGS + _MAMBA2_MODEL_CONFIGS + _GDN_MODEL_CONFIGS + _MHC_MODEL_CONFIGS
-    )
-    return [cfg[-1] for cfg in all_configs] + _MLA_MODULE_MODEL_NAMES
+    model_names = []
+    for data in _load_model_cases_data():
+        primary = data.get("model_path")
+        if primary and primary != "__base__":
+            model_names.append(str(primary))
+        model_names.extend(str(path) for path in data.get("model_paths", []) or [])
+        for values in (data.get("model_case_values") or {}).values():
+            if isinstance(values, dict):
+                value_model_path = values.get("model_path")
+                if value_model_path:
+                    model_names.append(str(value_model_path))
+                continue
+            if isinstance(values, list):
+                model_names.extend(
+                    str(value["model_path"]) for value in values if isinstance(value, dict) and value.get("model_path")
+                )
+
+    deduped = []
+    seen = set()
+    for model_name in model_names:
+        if model_name in seen:
+            continue
+        seen.add(model_name)
+        deduped.append(model_name)
+    return deduped
 
 
 @dataclasses.dataclass
@@ -270,15 +178,7 @@ def get_common_moe_test_cases():
         ("power_law", 1.2),
     ]
 
-    # alpha_list = [1.01, 1.2]
-    # hidden_size,inter_s,topk,num_expert, gated act
-    # [15360,30720,2,16],# GPT-MOE-1.8T
-    # [15360,3840,16,128],# GPT-MOE-1.8T-FineGrained
-    # [3584,2560,8,64],# Qwen2-57B
-    # [2048,1408,4,60], #qwen1.5_moe
-    # [2048,1408,6,64], #deepseekv1_moe
-    # [5120,1536,6,160], #deepseekv2
-    model_config_list = _filter_model_config_list(_MOE_MODEL_CONFIGS)
+    model_config_list = _model_case_values("moe")
 
     test_cases: list[MoeCommonTestCase] = []
 
@@ -295,10 +195,14 @@ def get_common_moe_test_cases():
         ep_list,
         token_distributions,
     ):
-        hs, inter_s, topk, num_experts, model_name = model_config
+        hs = int(model_config["hidden_size"])
+        inter_s = int(model_config["inter_size"])
+        topk = int(model_config["topk"])
+        num_experts = int(model_config["num_experts"])
+        model_name = str(model_config["model_path"])
 
-        # Qwen3-30B-A3B: exclude tp >= 8 as they are not used for actual deployments
-        if model_name == "Qwen/Qwen3-30B-A3B" and tp >= 8:
+        max_tp_exclusive = model_config.get("max_tp_exclusive")
+        if max_tp_exclusive is not None and tp >= int(max_tp_exclusive):
             continue
 
         if tp * ep != num_gpu:
@@ -392,7 +296,7 @@ def _get_base_gemm_shape_sweeps() -> list[dict[str, object]]:
     return shape_sweeps or _legacy_gemm_shape_sweep()
 
 
-def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
+def get_gemm_case_specs() -> list[GemmCommonTestCase]:
     test_cases = []
     for shape_sweep in _get_base_gemm_shape_sweeps():
         token_counts = _as_int_list(shape_sweep.get("token_counts"), field_name="gemm.token_counts")
@@ -427,12 +331,12 @@ class ComputeScaleCommonTestCase:
     k: int
 
 
-def get_compute_scale_common_test_cases() -> list[ComputeScaleCommonTestCase]:
+def get_compute_scale_case_specs() -> list[ComputeScaleCommonTestCase]:
     shape_sweeps = get_base_framework_op_case_specs("trtllm", "compute_scale")
     if not shape_sweeps:
         seen_mk = set()
         test_cases = []
-        for gemm_common_testcase in get_gemm_common_test_cases():
+        for gemm_common_testcase in get_gemm_case_specs():
             key = (gemm_common_testcase.x, gemm_common_testcase.k)
             if key in seen_mk:
                 continue
@@ -469,11 +373,10 @@ class MLACommonTestCase:
     model_name: str
 
 
-def _get_mla_common_test_cases(is_context: bool):
+def _get_mla_case_specs(is_context: bool):
     test_cases = []
 
-    # num_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim
-    model_config_list = _filter_model_config_list(_MLA_MODEL_CONFIGS)
+    model_config_list = _model_case_values("mla")
 
     if is_context:
         b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
@@ -521,29 +424,29 @@ def _get_mla_common_test_cases(is_context: bool):
 
         test_cases.append(
             MLACommonTestCase(
-                num_heads=model_config[0],
+                num_heads=int(model_config["num_heads"]),
                 input_len=s if is_context else s - 1,
                 batch_size=b,
                 is_context_phase=is_context,
                 kv_cache_block_size=kv_cache_block_size,
-                q_lora_rank=model_config[1],
-                kv_lora_rank=model_config[2],
-                qk_nope_head_dim=model_config[3],
-                qk_rope_head_dim=model_config[4],
-                v_head_dim=model_config[5],
-                model_name=model_config[6],
+                q_lora_rank=int(model_config["q_lora_rank"]),
+                kv_lora_rank=int(model_config["kv_lora_rank"]),
+                qk_nope_head_dim=int(model_config["qk_nope_head_dim"]),
+                qk_rope_head_dim=int(model_config["qk_rope_head_dim"]),
+                v_head_dim=int(model_config["v_head_dim"]),
+                model_name=str(model_config["model_path"]),
             )
         )
 
     return test_cases
 
 
-def get_context_mla_common_test_cases():
-    return _get_mla_common_test_cases(is_context=True)
+def get_context_mla_case_specs():
+    return _get_mla_case_specs(is_context=True)
 
 
-def get_generation_mla_common_test_cases():
-    return _get_mla_common_test_cases(is_context=False)
+def get_generation_mla_case_specs():
+    return _get_mla_case_specs(is_context=False)
 
 
 # =============================================================================
@@ -628,12 +531,17 @@ def get_common_mamba2_test_cases() -> list[Mamba2CommonTestCase]:
         1024,
     ]
 
-    # Model configurations:
-    # [d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size, model_name]
-    model_config_list = _filter_model_config_list(_MAMBA2_MODEL_CONFIGS)
+    model_config_list = _model_case_values("mamba2")
 
     for model_config in model_config_list:
-        d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size, model_name = model_config
+        d_model = int(model_config["d_model"])
+        d_state = int(model_config["d_state"])
+        d_conv = int(model_config["d_conv"])
+        nheads = int(model_config["nheads"])
+        head_dim = int(model_config["head_dim"])
+        n_groups = int(model_config["n_groups"])
+        chunk_size = int(model_config["chunk_size"])
+        model_name = str(model_config["model_path"])
 
         # Context (prefill) test case
         test_cases.append(
@@ -751,11 +659,13 @@ def get_common_mhc_test_cases() -> list[MhcCommonTestCase]:
         524288,
     ]
 
-    model_config_list = _filter_model_config_list(_MHC_MODEL_CONFIGS)
+    model_config_list = _model_case_values("mhc")
 
     test_cases: list[MhcCommonTestCase] = []
     for model_config in model_config_list:
-        hidden_size, hc_mult, model_name = model_config
+        hidden_size = int(model_config["hidden_size"])
+        hc_mult = int(model_config["hc_mult"])
+        model_name = str(model_config["model_path"])
         for phase in ("pre", "post"):
             test_cases.append(
                 MhcCommonTestCase(
@@ -824,10 +734,16 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
         1024,
     ]
 
-    model_config_list = _filter_model_config_list(_GDN_MODEL_CONFIGS)
+    model_config_list = _model_case_values("gdn")
 
     for model_config in model_config_list:
-        d_model, d_conv, num_k_heads, head_k_dim, num_v_heads, head_v_dim, model_name = model_config
+        d_model = int(model_config["d_model"])
+        d_conv = int(model_config["d_conv"])
+        num_k_heads = int(model_config["num_k_heads"])
+        head_k_dim = int(model_config["head_k_dim"])
+        num_v_heads = int(model_config["num_v_heads"])
+        head_v_dim = int(model_config["head_v_dim"])
+        model_name = str(model_config["model_path"])
 
         # Context (prefill) test case
         test_cases.append(
@@ -872,8 +788,31 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
 # Both backends re-export the relevant ``get_*`` functions so collect.py
 # can resolve them via getattr on each per-backend module.
 
-_DSV4_FLASH_MODEL_PATH = "sgl-project/DeepSeek-V4-Flash-FP8"
-DSV4_FLASH_ATTN_KINDS = ("csa", "hca")
+
+def _dsv4_flash_config() -> dict:
+    configs = _model_case_values("dsv4_flash", apply_model_filter=False)
+    if not configs:
+        raise RuntimeError("model_case_values.dsv4_flash is missing from model case YAML")
+    return configs[0]
+
+
+def _dsv4_flash_attention_kinds() -> tuple[str, ...]:
+    return tuple(str(kind) for kind in _dsv4_flash_config().get("attention_kinds", ["csa", "hca"]))
+
+
+_DSV4_FLASH_CONFIG = _dsv4_flash_config()
+_DSV4_FLASH_MODEL_PATH = str(_DSV4_FLASH_CONFIG["model_path"])
+DSV4_FLASH_ATTN_KINDS = _dsv4_flash_attention_kinds()
+_DSV4_FLASH_MODULE_BATCH_SIZES = list(_DSV4_FLASH_CONFIG["module_batch_sizes"])
+_DSV4_FLASH_MODULE_SEQ_LENGTHS = list(_DSV4_FLASH_CONFIG["module_sequence_lengths"])
+_DSV4_FLASH_MODULE_TP_SIZES = list(_DSV4_FLASH_CONFIG["module_tp_sizes"])
+_DSV4_FLASH_SPARSE_BS_LIST = list(_DSV4_FLASH_CONFIG["sparse_batch_sizes"])
+_DSV4_FLASH_SPARSE_ISL_LIST = list(_DSV4_FLASH_CONFIG["sparse_input_lengths"])
+_DSV4_FLASH_SPARSE_PAST_KV_LIST = list(_DSV4_FLASH_CONFIG["sparse_past_kv_lengths"])
+_DSV4_FLASH_SPARSE_CHUNK_PREFILL_SIZE = int(_DSV4_FLASH_CONFIG["sparse_chunk_prefill_size"])
+_DSV4_FLASH_SPARSE_MAX_FULL_S = int(_DSV4_FLASH_CONFIG["sparse_max_full_sequence_length"])
+_DSV4_FLASH_SPARSE_TP_LIST_ATTN = list(_DSV4_FLASH_CONFIG["sparse_tp_sizes"]["hca_attn"])
+_DSV4_FLASH_SPARSE_TP_LIST_INDEXER = list(_DSV4_FLASH_CONFIG["sparse_tp_sizes"]["paged_mqa_logits"])
 
 
 def _dsv4_flash_active() -> bool:
@@ -884,53 +823,12 @@ def _dsv4_flash_active() -> bool:
     cases so the collector skips it.
     """
     filt = _get_model_path_filter()
-    return filt is None or filt == _DSV4_FLASH_MODEL_PATH
+    return filt is None or filt == _dsv4_flash_config()["model_path"]
 
 
 def _dsv4_flash_model_path() -> str:
     filt = _get_model_path_filter()
-    return filt if filt is not None else _DSV4_FLASH_MODEL_PATH
-
-
-# --- Module-level (full self_attn) sweep ---
-_DSV4_FLASH_MODULE_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-
-# V4-Flash supports max_position_embeddings=1048576 (1M).  In generation
-# mode the position of the new token equals the history length, so the max
-# valid seq_len is 1048575 (= 1M - 1); using 1048576 indexes one past the
-# rope tables and triggers cudaErrorIllegalAddress in fused_rope.
-_DSV4_FLASH_MODULE_SEQ_LENGTHS = [
-    1,
-    4,
-    8,
-    16,
-    32,
-    64,
-    128,
-    256,
-    512,
-    1024,
-    1536,
-    2048,
-    3072,
-    4096,
-    6144,
-    8192,
-    10240,
-    12288,
-    16384,
-    32768,
-    65536,
-    131072,
-    262144,
-    524288,
-    1048575,
-]
-
-# TP sizes — single-process simulation via _tp_load_model_patch in
-# collect_dsv4_flash_attn.  Projection ColumnParallel/RowParallel weights
-# allocate at 1/N shards; FMLA always sees h_q=64 because V4 zero-pads Q.
-_DSV4_FLASH_MODULE_TP_SIZES = [1, 2, 4, 8]
+    return filt if filt is not None else str(_dsv4_flash_config()["model_path"])
 
 
 def _has_native_fp4_experts() -> bool:
@@ -1022,7 +920,7 @@ def _dsv4_flash_module_filter_pairs(mode: str, batch_sizes, seq_lens):
     return pairs
 
 
-def _build_dsv4_flash_module_test_cases(mode: str, attn_kinds=DSV4_FLASH_ATTN_KINDS):
+def _build_dsv4_flash_module_test_cases(mode: str, attn_kinds=None):
     """One case per ``(attn_kind, tp_size, gemm_type, batch_size)``.
 
     Test case shape (9 elements; ``perf_filename`` is bound by collect.py
@@ -1034,14 +932,20 @@ def _build_dsv4_flash_module_test_cases(mode: str, attn_kinds=DSV4_FLASH_ATTN_KI
     Each spawned subprocess builds ONE ``ModelRunner`` for ``(bs, max_sl)``
     and sweeps every valid sl for that bs internally.
     """
-    pairs = _dsv4_flash_module_filter_pairs(mode, _DSV4_FLASH_MODULE_BATCH_SIZES, _DSV4_FLASH_MODULE_SEQ_LENGTHS)
+    config = _dsv4_flash_config()
+    attn_kinds = tuple(attn_kinds) if attn_kinds is not None else _dsv4_flash_attention_kinds()
+    pairs = _dsv4_flash_module_filter_pairs(
+        mode,
+        config["module_batch_sizes"],
+        config["module_sequence_lengths"],
+    )
     bs_set = sorted({bs for bs, _ in pairs})
     model_path = _dsv4_flash_model_path()
 
     cases: list[list] = []
     for attn_kind in attn_kinds:
         for compute_dtype, kv_dtype, gemm_type in _dsv4_flash_module_precision_combos(mode):
-            for tp_size in _DSV4_FLASH_MODULE_TP_SIZES:
+            for tp_size in config["module_tp_sizes"]:
                 for bs in bs_set:
                     cases.append(
                         [
@@ -1083,71 +987,6 @@ def get_dsv4_flash_hca_generation_test_cases():
     return _build_dsv4_flash_module_test_cases("generation", ("hca",))
 
 
-# --- Sparse-kernel sweep (paged_mqa_logits / hca_attn) ---
-# Strict superset of the module collector's (bs, sl) coverage.  Every
-# (bs, isl) the module collector exercises is included with past_kv=0;
-# on top of that we add past_kv>0 variants for kernel-level Δ correction.
-_DSV4_FLASH_SPARSE_BS_LIST = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-_DSV4_FLASH_SPARSE_ISL_LIST = [
-    1,
-    4,
-    8,
-    16,
-    32,
-    64,
-    128,
-    256,
-    512,
-    1024,
-    1536,
-    2048,
-    3072,
-    4096,
-    6144,
-    8192,
-]
-_DSV4_FLASH_SPARSE_PAST_KV_LIST = [
-    0,
-    1,
-    4,
-    8,
-    16,
-    32,
-    64,
-    128,
-    256,
-    512,
-    1024,
-    1536,
-    2048,
-    3072,
-    4096,
-    6144,
-    8192,
-    10240,
-    12288,
-    16384,
-    32768,
-    65536,
-    131072,
-    262144,
-    524288,
-    1048575,
-]
-_DSV4_FLASH_SPARSE_CHUNK_PREFILL_SIZE = 8192  # bs x isl per-chunk new-token budget
-_DSV4_FLASH_SPARSE_MAX_FULL_S = 1048576  # max_position_embeddings
-# Sparse kernels are TP-invariant:
-#   * paged_mqa_logits: ReplicatedLinear indexer (no sharding)
-#   * hca_attn:       FlashMLA gets h_q=64 on every rank (sglang zero-pads
-#                     Q to N_HEADS_Q before the kernel call), no GEMM in
-#                     the bench path → kernel time is identical across TP
-# Module-level ops still sweep all 4 TP values because their projections
-# (q_a/q_b/o_proj) are 1/N sharded by ColumnParallel/RowParallel.
-_DSV4_FLASH_SPARSE_TP_LIST_ATTN = [1]
-_DSV4_FLASH_SPARSE_TP_LIST_INDEXER = [1]
-
-# Bench-sampled sparse kernels.  topk_512 + csa_attn are modeled analytically
-# in perf_database — see KERNELS comment in deepseekv4_sparse_modules.py.
 DSV4_FLASH_SPARSE_KERNELS = ("paged_mqa_logits", "hca_attn")
 
 
@@ -1165,11 +1004,17 @@ def _build_dsv4_flash_sparse_test_cases(
       * bs x isl ≤ chunked_prefill_size = 8192   — new-token budget per chunk
       * bs x (isl + past_kv) ≤ 1M                — model context cap
     """
-    bs_list = list(bs_list) if bs_list is not None else list(_DSV4_FLASH_SPARSE_BS_LIST)
-    isl_list = list(isl_list) if isl_list is not None else list(_DSV4_FLASH_SPARSE_ISL_LIST)
-    past_kv_list = list(past_kv_list) if past_kv_list is not None else list(_DSV4_FLASH_SPARSE_PAST_KV_LIST)
-    tp_list_attn = list(tp_list_attn) if tp_list_attn is not None else list(_DSV4_FLASH_SPARSE_TP_LIST_ATTN)
-    tp_list_indexer = list(tp_list_indexer) if tp_list_indexer is not None else list(_DSV4_FLASH_SPARSE_TP_LIST_INDEXER)
+    config = _dsv4_flash_config()
+    sparse_tp_sizes = config["sparse_tp_sizes"]
+    bs_list = list(bs_list) if bs_list is not None else list(config["sparse_batch_sizes"])
+    isl_list = list(isl_list) if isl_list is not None else list(config["sparse_input_lengths"])
+    past_kv_list = list(past_kv_list) if past_kv_list is not None else list(config["sparse_past_kv_lengths"])
+    tp_list_attn = list(tp_list_attn) if tp_list_attn is not None else list(sparse_tp_sizes["hca_attn"])
+    tp_list_indexer = (
+        list(tp_list_indexer) if tp_list_indexer is not None else list(sparse_tp_sizes["paged_mqa_logits"])
+    )
+    sparse_chunk_prefill_size = int(config["sparse_chunk_prefill_size"])
+    sparse_max_full_s = int(config["sparse_max_full_sequence_length"])
     model_path = _dsv4_flash_model_path()
 
     cases = []
@@ -1178,10 +1023,10 @@ def _build_dsv4_flash_sparse_test_cases(
         for tp_size in tp_list:
             for bs in bs_list:
                 for isl in isl_list:
-                    if bs * isl > _DSV4_FLASH_SPARSE_CHUNK_PREFILL_SIZE:
+                    if bs * isl > sparse_chunk_prefill_size:
                         continue
                     for past_kv in past_kv_list:
-                        if bs * (isl + past_kv) > _DSV4_FLASH_SPARSE_MAX_FULL_S:
+                        if bs * (isl + past_kv) > sparse_max_full_s:
                             continue
                         full_s = isl + past_kv
                         if kernel == "paged_mqa_logits" and full_s < 4:

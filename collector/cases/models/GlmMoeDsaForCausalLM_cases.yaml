@@ -12,6 +12,27 @@ include_base: true
 description: >
   GLM-5 DSA/MoE model-centric collection plan.
 
+model_case_values:
+  moe:
+    - model_path: zai-org/GLM-5
+      hidden_size: 6144
+      inter_size: 2048
+      topk: 8
+      num_experts: 256
+      wideep: true
+    - model_path: zai-org/GLM-5-FP8
+      hidden_size: 6144
+      inter_size: 2048
+      topk: 8
+      num_experts: 256
+      wideep: true
+    - model_path: nvidia/GLM-5-NVFP4
+      hidden_size: 6144
+      inter_size: 2048
+      topk: 8
+      num_experts: 256
+      wideep: true
+
 all_frameworks_op_cases:
   moe:
     cases: all

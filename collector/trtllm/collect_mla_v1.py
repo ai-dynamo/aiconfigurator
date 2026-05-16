@@ -22,7 +22,7 @@ from tensorrt_llm.models.modeling_utils import QuantConfig
 from collector.helper import benchmark_with_power, log_perf
 
 
-# TODO: refactor to use common_test_cases.py
+# TODO: refactor to use case_specs.py
 def get_context_mla_test_cases():
     dtype_list = [tensorrt_llm.bindings.DataType.BF16]  # not support f8 for trt < v1.1
     test_cases = []
@@ -56,7 +56,7 @@ def get_context_mla_test_cases():
     return test_cases
 
 
-# TODO: refactor to use common_test_cases.py
+# TODO: refactor to use case_specs.py
 def get_generation_mla_test_cases():
     dtype_list = [tensorrt_llm.bindings.DataType.BF16]  # not support f8 for trt < v1.1
     test_cases = []

@@ -8,7 +8,7 @@ from collections import defaultdict
 import tensorrt_llm
 import torch
 import torch.nn.functional as F
-from common_test_cases import get_gemm_common_test_cases
+from case_specs import get_gemm_case_specs
 from tensorrt_llm._torch.modules.linear import Linear
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
@@ -117,7 +117,7 @@ def get_gemm_test_cases():
     # weight shape run consecutively.  This allows the per-process weight cache
     # in run_gemm to amortise the expensive torch.randn weight allocation across
     # all 75 x values instead of reallocating on every call.
-    all_cases = get_gemm_common_test_cases()
+    all_cases = get_gemm_case_specs()
     nk_to_x: dict = defaultdict(list)
     for c in all_cases:
         nk_to_x[(c.n, c.k)].append(c.x)
