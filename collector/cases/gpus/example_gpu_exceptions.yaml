@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+gpu_type: example_gpu
+description: >
+  Template for GPU-centric collector v2 exceptions. Create one file per GPU
+  type, for example b200_sxm_exceptions.yaml. Exceptions remove op cases from
+  the already merged base/model plan.
+
+all_frameworks_op_exceptions:
+  # Drop a whole op for this GPU:
+  # attention_generation:
+  #   drop: true
+  #
+  # Or remove a subset after the op generated model-specific cases:
+  # moe:
+  #   contains:
+  #     - "tp=32"
+  #   case_ids:
+  #     - "sglang.moe:run_moe_torch:MoeCommonTestCase(...)"
+
+framework_specific_op_exceptions:
+  sglang:
+    # wideep_moe:
+    #   drop: true
+  trtllm: {}
+  vllm: {}
