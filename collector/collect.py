@@ -3,7 +3,7 @@
 
 """Top-level collector entrypoint.
 
-This script resolves the requested backend, framework version, model/GPU case
+This script resolves the requested backend, framework version, model/SM case
 plan, and op registry entry, then runs the selected collector functions and
 writes perf files. It is the orchestration layer for collector v2; individual
 modules own benchmark setup, while `model_cases.py` and YAML own case selection.
@@ -1230,21 +1230,34 @@ def main():
         "--gpu",
         type=str,
         default=None,
-        help="GPU type for collector v2 exceptions, for example b200_sxm. "
-        "Defaults to no GPU exception file unless --gpu-exceptions is provided.",
+        help="GPU type for resolving collector v2 SM exceptions, for example b200_sxm. "
+        "The SM version is read from src/aiconfigurator/systems/<gpu>.yaml unless --sm is provided.",
+    )
+    parser.add_argument(
+        "--sm",
+        type=int,
+        default=None,
+        help="Explicit SM version for collector v2 exceptions, for example 100. Overrides --gpu SM resolution.",
+    )
+    parser.add_argument(
+        "--sm-exceptions",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to an SM exceptions YAML file. Defaults to collector/cases/sms/sm<version>_exceptions.yaml."
+        ),
     )
     parser.add_argument(
         "--gpu-exceptions",
         type=str,
         default=None,
-        help="Optional path to a GPU exceptions YAML file. Defaults to collector/cases/gpus/<gpu>_exceptions.yaml.",
+        help="Deprecated alias for --sm-exceptions.",
     )
     parser.add_argument(
         "--new-framework-version",
         action="store_true",
         help=(
-            "Collect full backend registry for a new framework version. "
-            "This bypasses collector v2 model/GPU case plans."
+            "Collect full backend registry for a new framework version. This bypasses collector v2 model/SM case plans."
         ),
     )
     parser.add_argument(
@@ -1282,8 +1295,9 @@ def main():
             model_path=args.model_path,
             model_architecture=args.model_architecture,
             gpu_type=args.gpu,
+            sm_version=args.sm,
             model_cases_path=args.model_cases,
-            gpu_exceptions_path=args.gpu_exceptions,
+            sm_exceptions_path=args.sm_exceptions or args.gpu_exceptions,
             full=args.model_cases_full,
         )
         if case_plan.model_path:

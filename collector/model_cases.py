@@ -3,15 +3,15 @@
 
 """Model-centric collector case planning.
 
-Collector v2 keeps model/GPU intent in YAML and leaves kernel collectors focused
+Collector v2 keeps model/SM intent in YAML and leaves kernel collectors focused
 on generating runnable test cases. The planner merges:
 
 1. shared base op cases,
 2. one model's extra cases or all model case files for full mode,
-3. optional GPU-centric exceptions.
+3. optional SM-centric exceptions.
 
 The resulting per-op plan is consumed by ``collector.collect`` to run only the
-cases needed for a model/GPU healing pass.
+cases needed for a model/SM healing pass.
 """
 
 from __future__ import annotations
@@ -32,7 +32,8 @@ COLLECTOR_ROOT = Path(__file__).resolve().parent
 CASE_ROOT = COLLECTOR_ROOT / "cases"
 BASE_OP_CASES_PATH = CASE_ROOT / "base_op_cases.yaml"
 MODEL_CASES_DIR = CASE_ROOT / "models"
-GPU_EXCEPTIONS_DIR = CASE_ROOT / "gpus"
+SM_EXCEPTIONS_DIR = CASE_ROOT / "sms"
+SYSTEMS_DIR = COLLECTOR_ROOT.parent / "src" / "aiconfigurator" / "systems"
 
 
 SECTION_ALIASES = {
@@ -98,10 +99,11 @@ class CollectionCasePlan:
     model_path: str | None
     model_architecture: str | None
     gpu_type: str | None
+    sm_version: int | None
     op_cases: dict[str, OpCasePlan]
     base_cases_path: Path
     model_cases_paths: list[Path] = field(default_factory=list)
-    gpu_exceptions_path: Path | None = None
+    sm_exceptions_path: Path | None = None
     requested_model_path: str | None = None
 
     @property
@@ -115,10 +117,11 @@ class CollectionCasePlan:
             "model_architecture": self.model_architecture,
             "requested_model_path": self.requested_model_path,
             "gpu_type": self.gpu_type,
+            "sm_version": self.sm_version,
             "ops": self.ops,
             "base_cases_path": str(self.base_cases_path),
             "model_cases_paths": [str(path) for path in self.model_cases_paths],
-            "gpu_exceptions_path": str(self.gpu_exceptions_path) if self.gpu_exceptions_path else None,
+            "sm_exceptions_path": str(self.sm_exceptions_path) if self.sm_exceptions_path else None,
         }
 
 
@@ -143,8 +146,12 @@ def default_architecture_cases_path(model_architecture: str) -> Path:
     return MODEL_CASES_DIR / f"{sanitize_case_filename(model_architecture)}_cases.yaml"
 
 
-def default_gpu_exceptions_path(gpu_type: str) -> Path:
-    return GPU_EXCEPTIONS_DIR / f"{sanitize_case_filename(gpu_type)}_exceptions.yaml"
+def default_sm_exceptions_path(sm_version: int) -> Path:
+    return SM_EXCEPTIONS_DIR / f"sm{int(sm_version)}_exceptions.yaml"
+
+
+def default_system_spec_path(gpu_type: str) -> Path:
+    return SYSTEMS_DIR / f"{sanitize_case_filename(gpu_type)}.yaml"
 
 
 def load_yaml_file(path: Path) -> dict[str, Any]:
@@ -153,6 +160,22 @@ def load_yaml_file(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise TypeError(f"{path}: top-level YAML value must be a mapping")
     return data
+
+
+def resolve_sm_version(*, gpu_type: str | None = None, sm_version: int | str | None = None) -> int | None:
+    """Return the explicit SM version, or infer it from a system YAML file."""
+    if sm_version is not None:
+        return int(sm_version)
+    if not gpu_type:
+        return None
+    path = default_system_spec_path(gpu_type)
+    if not path.exists():
+        return None
+    data = load_yaml_file(path)
+    gpu = data.get("gpu", {})
+    if not isinstance(gpu, dict) or gpu.get("sm_version") is None:
+        return None
+    return int(gpu["sm_version"])
 
 
 def _section(data: dict[str, Any], canonical_name: str) -> dict[str, Any]:
@@ -363,12 +386,14 @@ def build_collection_case_plan(
     model_path: str | None = None,
     model_architecture: str | None = None,
     gpu_type: str | None = None,
+    sm_version: int | str | None = None,
     base_cases_path: str | None = None,
     model_cases_path: str | None = None,
+    sm_exceptions_path: str | None = None,
     gpu_exceptions_path: str | None = None,
     full: bool = False,
 ) -> CollectionCasePlan:
-    """Build a model/GPU-aware op and case plan for one backend."""
+    """Build a model/SM-aware op and case plan for one backend."""
     base_path = Path(base_cases_path).expanduser().resolve() if base_cases_path else BASE_OP_CASES_PATH
     base_data = load_yaml_file(base_path)
     requested_model_path = model_path
@@ -389,16 +414,18 @@ def build_collection_case_plan(
     for data in model_data:
         _merge_case_file(op_cases, data, backend)
 
-    resolved_gpu_exceptions_path = None
-    if gpu_exceptions_path:
-        resolved_gpu_exceptions_path = Path(gpu_exceptions_path).expanduser().resolve()
-    elif gpu_type:
-        default_path = default_gpu_exceptions_path(gpu_type)
+    resolved_sm_version = resolve_sm_version(gpu_type=gpu_type, sm_version=sm_version)
+    resolved_sm_exceptions_path = None
+    explicit_exceptions_path = sm_exceptions_path or gpu_exceptions_path
+    if explicit_exceptions_path:
+        resolved_sm_exceptions_path = Path(explicit_exceptions_path).expanduser().resolve()
+    elif resolved_sm_version is not None:
+        default_path = default_sm_exceptions_path(resolved_sm_version)
         if default_path.exists():
-            resolved_gpu_exceptions_path = default_path
+            resolved_sm_exceptions_path = default_path
 
-    if resolved_gpu_exceptions_path:
-        _merge_exception_file(op_cases, load_yaml_file(resolved_gpu_exceptions_path), backend)
+    if resolved_sm_exceptions_path:
+        _merge_exception_file(op_cases, load_yaml_file(resolved_sm_exceptions_path), backend)
 
     op_cases = {op: plan for op, plan in op_cases.items() if not plan.drop}
     return CollectionCasePlan(
@@ -406,10 +433,11 @@ def build_collection_case_plan(
         model_path=model_path,
         model_architecture=model_architecture,
         gpu_type=gpu_type,
+        sm_version=resolved_sm_version,
         op_cases=op_cases,
         base_cases_path=base_path,
         model_cases_paths=model_paths,
-        gpu_exceptions_path=resolved_gpu_exceptions_path,
+        sm_exceptions_path=resolved_sm_exceptions_path,
         requested_model_path=requested_model_path,
     )
 

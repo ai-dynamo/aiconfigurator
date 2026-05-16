@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
-gpu_type: example_gpu
+sm_version: 100
 description: >
-  Template for GPU-centric collector v2 exceptions. Create one file per GPU
-  type, for example b200_sxm_exceptions.yaml. Exceptions remove op cases from
+  Template for SM-centric collector v2 exceptions. Create one file per SM
+  version, for example sm100_exceptions.yaml. Exceptions remove op cases from
   the already merged base/model plan.
 
 all_frameworks_op_exceptions:
