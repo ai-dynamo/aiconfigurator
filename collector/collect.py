@@ -1414,13 +1414,6 @@ def main():
         help="Deprecated alias for --sm-exceptions.",
     )
     parser.add_argument(
-        "--new-framework-version",
-        action="store_true",
-        help=(
-            "Collect full backend registry for a new framework version. This bypasses collector v2 model/SM case plans."
-        ),
-    )
-    parser.add_argument(
         "--plan-only",
         action="store_true",
         help="Print the collector v2 case plan and exit without running collectors.",
@@ -1436,13 +1429,7 @@ def main():
     logger_message = None
     if args.plan_only and not (args.model_path or args.model_architecture or args.model_cases or args.model_cases_full):
         parser.error("--plan-only requires --model-path, --model-architecture, --model-cases, or --model-cases-full")
-    if args.new_framework_version:
-        os.environ.pop("COLLECTOR_MODEL_PATH", None)
-        if args.model_path or args.model_architecture or args.model_cases or args.model_cases_full:
-            logger_message = (
-                "--new-framework-version active: ignoring collector v2 model case filters for full collection"
-            )
-    elif args.model_path or args.model_architecture or args.model_cases or args.model_cases_full:
+    if args.model_path or args.model_architecture or args.model_cases or args.model_cases_full:
         from collector.model_cases import build_collection_case_plan
 
         if args.model_path:
