@@ -433,6 +433,44 @@ def get_generation_mla_case_specs():
     return _get_mla_case_specs(is_context=False)
 
 
+@dataclasses.dataclass
+class MLABMMCommonTestCase:
+    num_tokens: int
+    num_heads: int
+    dtype: str
+    num_warmups: int
+    num_runs: int
+
+
+def get_mla_bmm_case_specs(backend: str, op_name: str) -> list[MLABMMCommonTestCase]:
+    """Return YAML-backed MLA generation BMM helper shapes."""
+    shape_sweeps = get_merged_base_op_case_specs(backend, op_name)
+    if not shape_sweeps:
+        raise RuntimeError(f"{BASE_OP_CASES_PATH} is missing all_frameworks_op_cases.{op_name}.cases")
+
+    test_cases = []
+    for shape_sweep in shape_sweeps:
+        token_counts = _as_int_list(shape_sweep.get("token_counts"), field_name=f"{op_name}.token_counts")
+        head_counts = _as_int_list(shape_sweep.get("head_counts"), field_name=f"{op_name}.head_counts")
+        dtypes = shape_sweep.get("dtypes")
+        if not isinstance(dtypes, list):
+            raise TypeError(f"{op_name}.dtypes must be a list")
+        num_warmups = int(shape_sweep.get("num_warmups", 2))
+        num_runs = int(shape_sweep.get("num_runs", 10))
+
+        for num_tokens, num_heads, dtype in itertools.product(token_counts, head_counts, dtypes):
+            test_cases.append(
+                MLABMMCommonTestCase(
+                    num_tokens=num_tokens,
+                    num_heads=num_heads,
+                    dtype=str(dtype),
+                    num_warmups=num_warmups,
+                    num_runs=num_runs,
+                )
+            )
+    return test_cases
+
+
 # =============================================================================
 # Mamba2 SSM Test Cases
 # =============================================================================
