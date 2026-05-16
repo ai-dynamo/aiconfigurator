@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""YAML-backed collector case expansion.
+"""YAML-backed collector case generation.
 
 This module is the bridge between collector v2 YAML files and runnable
 per-framework test cases. Base op YAML owns shared sweeps, model YAML owns

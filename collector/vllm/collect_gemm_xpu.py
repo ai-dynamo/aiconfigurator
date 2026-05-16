@@ -26,7 +26,7 @@ except Exception:
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.version import __version__ as vllm_version
 
-from collector.case_specs import GemmCommonTestCase
+from collector.case_generator import GemmCommonTestCase
 from collector.helper import benchmark_with_power, get_device_module, log_perf
 from collector.vllm.utils import create_vllm_config, setup_distributed, with_exit_stack
 
