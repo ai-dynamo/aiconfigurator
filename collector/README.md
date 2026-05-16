@@ -85,9 +85,10 @@ python3 collect.py --backend trtllm --new-framework-version
 Case files:
 
 ```
-cases/base_op_cases.yaml             — shared common case values and op cases
+cases/base_op_cases.yaml             — catalog for shared base op files
+cases/base_ops/<op>.yaml             — shared common case values and op cases
 cases/models/<architecture>_cases.yaml — architecture-specific all/framework op cases
-cases/sms/sm<version>_exceptions.yaml — SM-specific all/framework op exceptions
+cases/sm_exceptions/sm<version>_exceptions.yaml — SM-specific all/framework op exceptions
 model_cases.py                       — merges base op + model + SM exceptions
 ```
 
@@ -151,10 +152,11 @@ being migrated.
 
 To add a new architecture, create one `cases/models/<architecture>_cases.yaml`
 file. To add a new model in an existing architecture, add the model path to that
-architecture's `model_paths` list. Add a new op collector only when the existing
+architecture's `model_paths` list. Add shared op sweeps to the matching
+`cases/base_ops/<op>.yaml` file. Add a new op collector only when the existing
 ops cannot generate the needed data points. To add a new hardware exception,
-create one `cases/sms/sm<version>_exceptions.yaml` file instead of editing every
-model case. `--gpu b200_sxm` resolves the SM version from
+create one `cases/sm_exceptions/sm<version>_exceptions.yaml` file instead of
+editing every model case. `--gpu b200_sxm` resolves the SM version from
 `src/aiconfigurator/systems/b200_sxm.yaml`; use `--sm 100` when collecting on an
 unregistered GPU with a known SM version.
 

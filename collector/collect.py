@@ -1225,7 +1225,7 @@ def main():
     parser.add_argument(
         "--model-cases-full",
         action="store_true",
-        help="Collector v2 full mode: aggregate base_op_cases.yaml plus every model cases YAML file.",
+        help="Collector v2 full mode: aggregate base op cases plus every model cases YAML file.",
     )
     parser.add_argument(
         "--gpu",
@@ -1245,7 +1245,8 @@ def main():
         type=str,
         default=None,
         help=(
-            "Optional path to an SM exceptions YAML file. Defaults to collector/cases/sms/sm<version>_exceptions.yaml."
+            "Optional path to an SM exceptions YAML file. "
+            "Defaults to collector/cases/sm_exceptions/sm<version>_exceptions.yaml."
         ),
     )
     parser.add_argument(

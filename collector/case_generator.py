@@ -21,15 +21,57 @@ import yaml
 
 COLLECTOR_ROOT = Path(__file__).resolve().parent
 BASE_OP_CASES_PATH = COLLECTOR_ROOT / "cases" / "base_op_cases.yaml"
+BASE_OP_CASES_DIR = COLLECTOR_ROOT / "cases" / "base_ops"
 MODEL_CASES_DIR = COLLECTOR_ROOT / "cases" / "models"
 
 
-def _load_base_cases_data() -> dict:
-    with open(BASE_OP_CASES_PATH, encoding="utf-8") as f:
+def _load_yaml_mapping(path: Path) -> dict:
+    with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
-        raise TypeError(f"{BASE_OP_CASES_PATH}: top-level YAML value must be a mapping")
+        raise TypeError(f"{path}: top-level YAML value must be a mapping")
     return data
+
+
+def _base_ops_dir(base_data: dict) -> Path:
+    raw_dir = base_data.get("base_ops_dir", BASE_OP_CASES_DIR.name)
+    path = Path(str(raw_dir))
+    if path.is_absolute():
+        return path
+    return BASE_OP_CASES_PATH.parent / path
+
+
+def _merge_base_case_data(target: dict, source: dict) -> None:
+    target.setdefault("model_ops", [])
+    target["model_ops"].extend(source.get("model_ops") or [])
+    target.setdefault("common_case_values", {}).update(source.get("common_case_values") or {})
+    target.setdefault("all_frameworks_op_cases", {}).update(source.get("all_frameworks_op_cases") or {})
+
+    target_framework_cases = target.setdefault("framework_specific_op_cases", {})
+    for backend, backend_cases in (source.get("framework_specific_op_cases") or {}).items():
+        target_framework_cases.setdefault(backend, {}).update(backend_cases or {})
+
+
+def _load_base_cases_data() -> dict:
+    base_data = _load_yaml_mapping(BASE_OP_CASES_PATH)
+    merged: dict = {}
+    _merge_base_case_data(merged, base_data)
+
+    base_ops_dir = _base_ops_dir(base_data)
+    if not base_ops_dir.exists():
+        return merged
+
+    configured_files = base_data.get("base_ops")
+    if configured_files is None:
+        paths = sorted(base_ops_dir.glob("*.yaml"))
+    elif isinstance(configured_files, list):
+        paths = [base_ops_dir / str(filename) for filename in configured_files]
+    else:
+        raise TypeError("base_ops must be a list")
+
+    for path in paths:
+        _merge_base_case_data(merged, _load_yaml_mapping(path))
+    return merged
 
 
 def get_base_op_case_specs(op_name: str) -> list[dict[str, object]]:
@@ -82,7 +124,7 @@ def get_attention_generation_shape_sweeps(backend: str) -> list[dict[str, object
 
 
 def get_base_common_case_values(name: str) -> dict[str, object]:
-    """Return shared scalar/list values from base_op_cases.yaml."""
+    """Return shared scalar/list values from base op case YAML files."""
     try:
         values = _load_base_cases_data().get("common_case_values", {}).get(name, {})
     except FileNotFoundError:
