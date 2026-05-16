@@ -511,16 +511,16 @@ def _as_int_list(value, *, field_name: str) -> list[int]:
     return [int(item) for item in value]
 
 
-def _get_base_gemm_shape_sweeps() -> list[dict[str, object]]:
-    shape_sweeps = get_base_op_case_specs("gemm")
+def _get_base_gemm_shape_sweeps(backend: str | None = None) -> list[dict[str, object]]:
+    shape_sweeps = get_merged_base_op_case_specs(backend, "gemm") if backend else get_base_op_case_specs("gemm")
     if not shape_sweeps:
         raise RuntimeError(f"{BASE_OP_CASES_PATH} is missing all_frameworks_op_cases.gemm.cases")
     return shape_sweeps
 
 
-def get_gemm_case_specs() -> list[GemmCommonTestCase]:
+def get_gemm_case_specs(backend: str | None = None) -> list[GemmCommonTestCase]:
     test_cases = []
-    for shape_sweep in _get_base_gemm_shape_sweeps():
+    for shape_sweep in _get_base_gemm_shape_sweeps(backend):
         token_counts = _as_int_list(shape_sweep.get("token_counts"), field_name="gemm.token_counts")
         feature_sizes = shape_sweep.get("feature_sizes")
         input_feature_sizes = _as_int_list(
@@ -545,6 +545,21 @@ def get_gemm_case_specs() -> list[GemmCommonTestCase]:
                     test_cases.append(GemmCommonTestCase(x=token_count, n=output_features, k=input_features))
 
     return test_cases
+
+
+def get_gemm_type_specs(backend: str) -> list[str]:
+    """Return YAML-backed GEMM dtype/quantization labels for a backend."""
+
+    gemm_types = []
+    seen = set()
+    for shape_sweep in _get_base_gemm_shape_sweeps(backend):
+        for gemm_type in shape_sweep.get("gemm_types", []):
+            gemm_type = str(gemm_type)
+            if gemm_type in seen:
+                continue
+            seen.add(gemm_type)
+            gemm_types.append(gemm_type)
+    return gemm_types
 
 
 @dataclasses.dataclass

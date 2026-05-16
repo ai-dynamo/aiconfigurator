@@ -116,3 +116,54 @@ all_frameworks_op_cases:
       - input_features: 65536
         output_features: 65536
         reason: avoid the single 65536 x 65536 weight matrix
+framework_specific_op_cases:
+  vllm_xpu:
+    gemm:
+      cases:
+      - id: base_transformer_gemm_shape_sweep
+        description: XPU-narrowed GEMM sweep for vLLM RowParallelLinear.
+        token_counts:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 16
+        - 32
+        - 48
+        - 64
+        - 80
+        - 96
+        - 128
+        - 160
+        - 192
+        - 256
+        - 384
+        - 512
+        - 768
+        - 1024
+        - 2048
+        - 4096
+        - 8192
+        feature_sizes:
+        - 32
+        - 64
+        - 128
+        - 256
+        - 512
+        - 768
+        - 1024
+        - 1536
+        - 2048
+        - 2560
+        - 3072
+        - 3584
+        - 4096
+        - 5120
+        - 6144
+        - 7168
+        - 8192
+        - 10240
+        - 12288
+        gemm_types:
+        - bfloat16
+        - fp8
