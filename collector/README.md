@@ -228,9 +228,9 @@ from collector.registry_types import OpEntry, VersionRoute
 OpEntry(op="gemm", module="collector.trtllm.collect_gemm", get_func="...", run_func="...")
 
 # Versioned (has forks) — VersionRoutes in descending min_version order:
-OpEntry(op="moe", get_func="...", run_func="...", versions=(
-    VersionRoute("0.17.0", "collector.vllm.collect_moe_v2"),
-    VersionRoute("0.0.0", "collector.vllm.collect_moe_v1"),
+OpEntry(op="myop", get_func="...", run_func="...", versions=(
+    VersionRoute("X.Y.Z", "collector.<backend>.collect_myop_v2"),
+    VersionRoute("0.0.0", "collector.<backend>.collect_myop_v1"),
 ))
 ```
 
