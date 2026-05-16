@@ -42,13 +42,13 @@ Prepare a clean env with the target framework and nccl lib installed.
 # Collect comm data
 ```bash
 export PATH=$PATH:${NCCL_TEST_BIN_PATH}/
-collect_comm.sh #all_reduce data will be collected using default trtllm backend
-collect_comm.sh --all_reduce_backend vllm #all_reduce data will be collected using vllm backend
-collect_comm.sh --all_reduce_backend vllm --device xpu #all_reduce data will be collected using vllm backend on XPU
+network/collect_comm.sh #all_reduce data will be collected using default trtllm backend
+network/collect_comm.sh --all_reduce_backend vllm #all_reduce data will be collected using vllm backend
+network/collect_comm.sh --all_reduce_backend vllm --device xpu #all_reduce data will be collected using vllm backend on XPU
 ```
 Today we only collect intra-node comm. This script will collect custom allreduce data for trtllm within a node.
-It will also collect nccl allreudce, all_gather, all2all, reduce_scatter using nccl.
-The generated file is comm_perf.txt and custom_all_reduce.txt.
+It will also collect nccl allreduce, all_gather, all2all, reduce_scatter using nccl.
+The generated files are nccl_perf.txt, oneccl_perf.txt, and custom_allreduce_perf.txt.
 
 # Version Management
 
@@ -64,6 +64,7 @@ version_resolver.py  — routes runtime version → module (packaging.version)
 collect.py/collect_ops — validates __compat__ and fails incompatible ops
 __compat__           — per-file metadata declaring supported framework versions
 wideep/              — WideEP collector namespace for special images/runtimes
+network/             — collective communication collectors and Slurm network jobs
 ```
 
 WideEP entries in `framework_manifest.json` must keep the same framework version
