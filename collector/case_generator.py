@@ -9,6 +9,7 @@ model-specific dimensions, and these helpers mechanically expand them into the
 legacy tuple/dataclass shapes consumed by collector modules.
 """
 
+import copy
 import dataclasses
 import itertools
 import os
@@ -52,6 +53,32 @@ def get_base_framework_op_case_specs(backend: str, op_name: str) -> list[dict[st
     if not isinstance(cases, list):
         return []
     return [case for case in cases if isinstance(case, dict)]
+
+
+def get_merged_base_op_case_specs(backend: str, op_name: str) -> list[dict[str, object]]:
+    """Return base op specs with backend-specific overrides applied by case id."""
+    merged_cases = [copy.deepcopy(case) for case in get_base_op_case_specs(op_name)]
+    index_by_id = {case.get("id"): index for index, case in enumerate(merged_cases) if case.get("id")}
+
+    for override in get_base_framework_op_case_specs(backend, op_name):
+        override = copy.deepcopy(override)
+        case_id = override.get("id")
+        if case_id in index_by_id:
+            merged_cases[index_by_id[case_id]].update(override)
+        else:
+            merged_cases.append(override)
+
+    return merged_cases
+
+
+def get_attention_context_shape_sweeps(backend: str) -> list[dict[str, object]]:
+    """Return YAML-backed context attention shape sweeps for one backend."""
+    return get_merged_base_op_case_specs(backend, "attention_context")
+
+
+def get_attention_generation_shape_sweeps(backend: str) -> list[dict[str, object]]:
+    """Return YAML-backed generation attention shape sweeps for one backend."""
+    return get_merged_base_op_case_specs(backend, "attention_generation")
 
 
 def get_base_common_case_values(name: str) -> dict[str, object]:

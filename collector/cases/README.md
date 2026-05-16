@@ -116,6 +116,12 @@ all_frameworks_op_cases:
 size list for both input and output features. For attention, `kv_head_options:
 self` means `num_key_value_heads` equals `query_head_count`.
 
+Framework-specific common op overrides live under `framework_specific_op_cases`
+with the same case `id`. For example, TRT-LLM adds attention `head_dims: [64,
+128, 256]`, while vLLM narrows head-count and window-size sweeps. The Python
+collectors should read these YAML-backed specs and only keep backend runtime
+filters in code.
+
 SM exception files use matching exception sections:
 
 ```yaml

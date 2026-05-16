@@ -44,6 +44,7 @@ from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
+from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
@@ -157,51 +158,96 @@ def create_req_to_token_pool(batch_size, total_len, page_size, torch_device, dev
     return pool, token_matrix.contiguous()
 
 
+def _int_list(values):
+    return [int(value) for value in values]
+
+
+def _kv_head_options(values, num_heads):
+    return [num_heads if value == "self" else int(value) for value in values]
+
+
 def get_context_attention_test_cases():
     test_cases = []
-    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 262144]
-    n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64, 96]
-    n_kv_list = [0, 1, 2, 4, 8]
-    head_dim_list = [128, 256]
 
     # FP8 attention requires SM90+ (Hopper)
     sm_version = get_sm_version()
     skip_fp8 = sm_version < 90
 
-    for head_dim in head_dim_list:
-        for n in sorted(n_list, reverse=True):
-            for s in sorted(s_list, reverse=True):
-                for b in sorted(b_list, reverse=True):
-                    for n_kv in n_kv_list:
-                        if n_kv != 0 and (n_kv >= n or n % n_kv != 0):
-                            continue
-                        num_kv_heads = n_kv if n_kv != 0 else n
+    for shape_sweep in get_attention_context_shape_sweeps("sglang"):
+        batch_sizes = _int_list(shape_sweep["batch_sizes"])
+        sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
+        query_head_counts = _int_list(shape_sweep["query_head_counts"])
+        kv_head_options = shape_sweep["kv_head_options"]
+        head_dims = _int_list(shape_sweep["head_dims"])
+        max_tokens_self_attention = int(shape_sweep["max_tokens_self_attention"])
+        max_tokens_grouped_query_attention = int(shape_sweep["max_tokens_grouped_query_attention"])
+        max_batch_size_self_attention = int(shape_sweep["max_batch_size_self_attention"])
+        max_kv_elements = int(shape_sweep["max_kv_elements"])
 
-                        if num_kv_heads == n:
-                            if b * s > 65536 or b > 128:
+        for head_dim in head_dims:
+            for n in sorted(query_head_counts, reverse=True):
+                for s in sorted(sequence_lengths, reverse=True):
+                    for b in sorted(batch_sizes, reverse=True):
+                        for num_kv_heads in _kv_head_options(kv_head_options, n):
+                            if num_kv_heads != n and (num_kv_heads >= n or n % num_kv_heads != 0):
                                 continue
-                        else:
-                            if b * s > 131072:
+
+                            if num_kv_heads == n:
+                                if b * s > max_tokens_self_attention or b > max_batch_size_self_attention:
+                                    continue
+                            else:
+                                if b * s > max_tokens_grouped_query_attention:
+                                    continue
+                            if b * s * num_kv_heads * head_dim * 2 >= max_kv_elements:
                                 continue
-                        if b * s * num_kv_heads * head_dim * 2 >= 2147483647:
-                            continue
-                        # SGLang's SM120 Triton context attention path uses
-                        # 32-bit indexing for large Q/O tensors.  Shapes at or
-                        # above this element boundary crash with an illegal
-                        # memory access and poison the worker CUDA context.
-                        if sm_version >= 120 and b * s * n * head_dim >= 2147483647:
-                            continue
+                            # SGLang's SM120 Triton context attention path uses
+                            # 32-bit indexing for large Q/O tensors.  Shapes at or
+                            # above this element boundary crash with an illegal
+                            # memory access and poison the worker CUDA context.
+                            if sm_version >= 120 and b * s * n * head_dim >= max_kv_elements:
+                                continue
 
-                        # BF16 attention - works on all GPUs
-                        test_cases.append([b, s, n, num_kv_heads, head_dim, False, False, True])
-
-                        # FP8 attention - requires SM90+ (Hopper)
-                        if not skip_fp8:
-                            test_cases.append([b, s, n, num_kv_heads, head_dim, True, False, True])
-                            test_cases.append([b, s, n, num_kv_heads, head_dim, True, True, True])
+                            for precision_case in shape_sweep["precision_cases"]:
+                                use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                                use_fp8_context_fmha = bool(precision_case["fp8_context_fmha"])
+                                if skip_fp8 and use_fp8_kv_cache:
+                                    continue
+                                test_cases.append(
+                                    [
+                                        b,
+                                        s,
+                                        n,
+                                        num_kv_heads,
+                                        head_dim,
+                                        use_fp8_kv_cache,
+                                        use_fp8_context_fmha,
+                                        True,
+                                    ]
+                                )
 
     return test_cases
+
+
+def _generation_target_sequence_lengths(batch_sizes, sequence_lengths, num_heads, head_dim, max_tokens, shape_sweep):
+    b_s_dict = {}
+    s_b_dict = {}
+    for s in sequence_lengths:
+        max_b = max_tokens // s // num_heads * 128 // head_dim
+        for b in batch_sizes:
+            if b > max_b:
+                break
+            if s not in s_b_dict:
+                s_b_dict[s] = {b}
+            else:
+                s_b_dict[s].add(b)
+    for s, b_set in s_b_dict.items():
+        if len(b_set) < int(shape_sweep["min_batch_options_per_sequence"]):
+            continue
+        for b in b_set:
+            if b not in b_s_dict:
+                b_s_dict[b] = {s - 1}
+            b_s_dict[b].add(s - 1)
+    return b_s_dict
 
 
 def get_generation_attention_test_cases():
@@ -211,83 +257,58 @@ def get_generation_attention_test_cases():
     sm_version = get_sm_version()
     skip_fp8 = sm_version < 90
 
-    # generation
-    b_list = [1, 2, 4, 64, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
-    s_list = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
-    n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
-    n_list_xqa = [1, 2, 4, 8, 16, 32, 64, 96, 128]
-    n_kv_list = [1, 2, 4, 8]
-    head_dim_list = [128, 256]
+    for shape_sweep in get_attention_generation_shape_sweeps("sglang"):
+        batch_sizes = _int_list(shape_sweep["batch_sizes"])
+        sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
+        head_dims = _int_list(shape_sweep["head_dims"])
+        min_drop_batch = int(shape_sweep["drop_largest_sequence_for_batch_at_least"])
 
-    # MHA
-    max_bsn = 8192 * 1024
-    for head_dim in head_dim_list:
-        for n in sorted(n_list, reverse=True):
-            b_s_dict = {}
-            s_b_dict = {}
-            for s in s_list:
-                max_b = max_bsn // s // n * 128 // head_dim
-                for b in b_list:
-                    if b > max_b:
-                        break
-                    if s not in s_b_dict:
-                        s_b_dict[s] = {b}
-                    else:
-                        s_b_dict[s].add(b)
-            for s, b_set in s_b_dict.items():
-                if len(b_set) < 4:
-                    continue
-                for b in b_set:
-                    if b not in b_s_dict:
-                        b_s_dict[b] = {s - 1}
-                    b_s_dict[b].add(s - 1)
+        for head_dim in head_dims:
+            for n in sorted(_int_list(shape_sweep["mha_query_head_counts"]), reverse=True):
+                b_s_dict = _generation_target_sequence_lengths(
+                    batch_sizes,
+                    sequence_lengths,
+                    n,
+                    head_dim,
+                    int(shape_sweep["max_mha_tokens_per_step"]),
+                    shape_sweep,
+                )
 
-            for b, s_list_limited in b_s_dict.items():
-                target_s_list = sorted(s_list_limited)
-                if b >= 256:
-                    target_s_list = target_s_list[:-1]
-                for s in target_s_list:
-                    # BF16 attention - works on all GPUs
-                    test_cases.append([b, s, n, n, head_dim, False, False, False])
-                    if not skip_fp8:
-                        test_cases.append([b, s, n, n, head_dim, True, False, False])
-
-    # XQA
-    max_bsn = 8192 * 1024 * 2
-    for head_dim in head_dim_list:
-        for n in sorted(n_list_xqa, reverse=True):
-            b_s_dict = {}
-            s_b_dict = {}
-            for s in s_list:
-                max_b = max_bsn // s // n * 128 // head_dim
-                for b in b_list:
-                    if b > max_b:
-                        break
-                    if s not in s_b_dict:
-                        s_b_dict[s] = {b}
-                    else:
-                        s_b_dict[s].add(b)
-            for s, b_set in s_b_dict.items():
-                if len(b_set) < 4:
-                    continue
-                for b in b_set:
-                    if b not in b_s_dict:
-                        b_s_dict[b] = {s - 1}
-                    b_s_dict[b].add(s - 1)
-
-            for b, s_list_limited in b_s_dict.items():
-                target_s_list = sorted(s_list_limited)
-                if b >= 256:
-                    target_s_list = target_s_list[:-1]
-                for n_kv in n_kv_list:
-                    if n_kv >= n:
-                        continue
+                for b, s_list_limited in b_s_dict.items():
+                    target_s_list = sorted(s_list_limited)
+                    if b >= min_drop_batch:
+                        target_s_list = target_s_list[:-1]
                     for s in target_s_list:
-                        # BF16 attention - works on all GPUs
-                        test_cases.append([b, s, n, n_kv, head_dim, False, False, False])
-                        # FP8 attention - requires SM90+ (Hopper)
-                        if not skip_fp8:
-                            test_cases.append([b, s, n, n_kv, head_dim, True, False, False])
+                        for precision_case in shape_sweep["precision_cases"]:
+                            use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                            if skip_fp8 and use_fp8_kv_cache:
+                                continue
+                            test_cases.append([b, s, n, n, head_dim, use_fp8_kv_cache, False, False])
+
+        for head_dim in head_dims:
+            for n in sorted(_int_list(shape_sweep["xqa_query_head_counts"]), reverse=True):
+                b_s_dict = _generation_target_sequence_lengths(
+                    batch_sizes,
+                    sequence_lengths,
+                    n,
+                    head_dim,
+                    int(shape_sweep["max_xqa_tokens_per_step"]),
+                    shape_sweep,
+                )
+
+                for b, s_list_limited in b_s_dict.items():
+                    target_s_list = sorted(s_list_limited)
+                    if b >= min_drop_batch:
+                        target_s_list = target_s_list[:-1]
+                    for n_kv in _int_list(shape_sweep["kv_head_counts"]):
+                        if n_kv >= n:
+                            continue
+                        for s in target_s_list:
+                            for precision_case in shape_sweep["precision_cases"]:
+                                use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                                if skip_fp8 and use_fp8_kv_cache:
+                                    continue
+                                test_cases.append([b, s, n, n_kv, head_dim, use_fp8_kv_cache, False, False])
     return test_cases
 
 

@@ -56,6 +56,26 @@ def test_base_gemm_cases_are_readable_shape_specs():
     assert filtered == ["case0", "case1"]
 
 
+def test_attention_shape_specs_are_yaml_backed_with_backend_overrides():
+    from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
+
+    sglang_context = get_attention_context_shape_sweeps("sglang")[0]
+    trtllm_context = get_attention_context_shape_sweeps("trtllm")[0]
+    vllm_context = get_attention_context_shape_sweeps("vllm")[0]
+    vllm_xpu_context = get_attention_context_shape_sweeps("vllm_xpu")[0]
+    vllm_generation = get_attention_generation_shape_sweeps("vllm")[0]
+
+    assert sglang_context["head_dims"] == [128, 256]
+    assert trtllm_context["head_dims"] == [64, 128, 256]
+    assert vllm_context["head_dims"] == [128, 64]
+    assert vllm_context["query_head_counts"][-1] == 64
+    assert vllm_context["window_sizes"] == [0, 128]
+    assert vllm_xpu_context["batch_sizes"] == [1, 2, 4, 8, 16, 32]
+    assert vllm_xpu_context["kv_head_options"] == [1, 2, 4, 8]
+    assert vllm_generation["mha_query_head_counts"][-1] == 64
+    assert vllm_generation["xqa_query_head_counts"][-1] == 64
+
+
 def test_gemm_common_cases_expand_from_base_op_yaml_shape_specs():
     from collector.case_generator import (
         ComputeScaleCommonTestCase,
