@@ -14,6 +14,37 @@ COLLECTOR_ROOT = Path(__file__).resolve().parent
 BASE_CASES_PATH = COLLECTOR_ROOT / "cases" / "base_model_cases.yaml"
 
 
+def _load_base_cases_data() -> dict:
+    with open(BASE_CASES_PATH, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise TypeError(f"{BASE_CASES_PATH}: top-level YAML value must be a mapping")
+    return data
+
+
+def get_base_op_case_specs(op_name: str) -> list[dict[str, object]]:
+    """Return dict-style case specs for a framework-agnostic base op."""
+    try:
+        cases = _load_base_cases_data().get("all_frameworks_op_cases", {}).get(op_name, {}).get("cases")
+    except FileNotFoundError:
+        return []
+    if not isinstance(cases, list):
+        return []
+    return [case for case in cases if isinstance(case, dict)]
+
+
+def get_base_framework_op_case_specs(backend: str, op_name: str) -> list[dict[str, object]]:
+    """Return dict-style case specs for a backend-specific base op."""
+    try:
+        framework_cases = _load_base_cases_data().get("framework_specific_op_cases", {})
+    except FileNotFoundError:
+        return []
+    cases = framework_cases.get(backend, {}).get(op_name, {}).get("cases")
+    if not isinstance(cases, list):
+        return []
+    return [case for case in cases if isinstance(case, dict)]
+
+
 def _get_model_path_filter() -> str | None:
     """Return the model-path filter from the environment, or None for 'all'."""
     val = os.environ.get("COLLECTOR_MODEL_PATH", "").strip()
@@ -357,17 +388,7 @@ def _as_int_list(value, *, field_name: str) -> list[int]:
 
 
 def _get_base_gemm_shape_sweeps() -> list[dict[str, object]]:
-    try:
-        with open(BASE_CASES_PATH, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        return _legacy_gemm_shape_sweep()
-
-    cases = data.get("all_frameworks_op_cases", {}).get("gemm", {}).get("cases")
-    if not isinstance(cases, list):
-        return _legacy_gemm_shape_sweep()
-
-    shape_sweeps = [case for case in cases if isinstance(case, dict)]
+    shape_sweeps = get_base_op_case_specs("gemm")
     return shape_sweeps or _legacy_gemm_shape_sweep()
 
 
@@ -396,6 +417,39 @@ def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
                     if output_features * input_features == 65536 * 65536:
                         continue
                     test_cases.append(GemmCommonTestCase(x=token_count, n=output_features, k=input_features))
+
+    return test_cases
+
+
+@dataclasses.dataclass
+class ComputeScaleCommonTestCase:
+    m: int
+    k: int
+
+
+def get_compute_scale_common_test_cases() -> list[ComputeScaleCommonTestCase]:
+    shape_sweeps = get_base_framework_op_case_specs("trtllm", "compute_scale")
+    if not shape_sweeps:
+        seen_mk = set()
+        test_cases = []
+        for gemm_common_testcase in get_gemm_common_test_cases():
+            key = (gemm_common_testcase.x, gemm_common_testcase.k)
+            if key in seen_mk:
+                continue
+            seen_mk.add(key)
+            test_cases.append(ComputeScaleCommonTestCase(m=key[0], k=key[1]))
+        return test_cases
+
+    test_cases = []
+    for shape_sweep in shape_sweeps:
+        token_counts = _as_int_list(shape_sweep.get("token_counts"), field_name="compute_scale.token_counts")
+        input_feature_sizes = _as_int_list(
+            shape_sweep.get("input_feature_sizes"),
+            field_name="compute_scale.input_feature_sizes",
+        )
+        for token_count in sorted(token_counts, reverse=True):
+            for input_features in input_feature_sizes:
+                test_cases.append(ComputeScaleCommonTestCase(m=token_count, k=input_features))
 
     return test_cases
 

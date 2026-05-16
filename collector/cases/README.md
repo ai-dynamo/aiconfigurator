@@ -40,7 +40,7 @@ framework_specific_op_cases:
 ```
 
 For simple common ops, `cases` can hold exact generator specs instead of opaque
-case IDs. GEMM uses readable shape names:
+case IDs. Base GEMM and attention use readable shape names:
 
 ```yaml
 all_frameworks_op_cases:
@@ -52,11 +52,20 @@ all_frameworks_op_cases:
         skip_shapes:
           - input_features: 65536
             output_features: 65536
+  attention_context:
+    cases:
+      - id: base_attention_context_shape_sweep
+        batch_sizes: [1, 2, 4, 8]
+        sequence_lengths: [1, 16, 32, 64]
+        query_head_counts: [1, 2, 4, 8]
+        kv_head_options: [self, 1, 2, 4]
+        head_dims: [128, 256]
 ```
 
 `token_counts` is the GEMM M dimension, `input_features` is K, and
 `output_features` is N. `feature_sizes` is shorthand for using the same explicit
-size list for both input and output features.
+size list for both input and output features. For attention, `kv_head_options:
+self` means `num_key_value_heads` equals `query_head_count`.
 
 GPU exception files use matching exception sections:
 

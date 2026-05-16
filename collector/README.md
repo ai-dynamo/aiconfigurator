@@ -136,7 +136,9 @@ framework_specific_op_exceptions:
 For simple common ops, `cases` can also contain exact generator specs. The base
 GEMM sweep uses `token_counts` for the GEMM M dimension, `input_feature_sizes`
 for K, and `output_feature_sizes` for N; `feature_sizes` is shorthand when K and
-N use the same explicit size list.
+N use the same explicit size list. Base attention specs use `batch_sizes`,
+`sequence_lengths`, `query_head_counts`, `kv_head_options`, and `head_dims`;
+`kv_head_options: self` means the KV head count equals the query head count.
 
 For targeted support-matrix healing, a case selector can run a subset using
 exact `case_ids`, string `contains` matches, `indices`, `ranges`, or `limit`.
