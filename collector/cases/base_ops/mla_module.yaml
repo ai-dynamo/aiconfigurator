@@ -134,3 +134,123 @@ common_case_values:
       max_tokens: 131072
     generation:
       max_tokens: 33554432
+  mla_module_vllm:
+    description: Exact vLLM full MLA/DSA module micro-benchmark sweep for the current vLLM collector.
+    context_batch_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+    context_sequence_lengths:
+      - 1
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 1536
+      - 2048
+      - 3072
+      - 4096
+      - 6144
+      - 8192
+      - 10240
+      - 12288
+      - 16384
+      - 32768
+    generation_batch_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+    generation_sequence_lengths:
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 2048
+      - 4096
+      - 8192
+      - 16384
+      - 32768
+      - 65536
+      - 131072
+    head_counts:
+      - 128
+      - 64
+      - 32
+      - 16
+      - 8
+      - 4
+      - 2
+      - 1
+    module_precision_combos:
+      - compute_dtype: bfloat16
+        kv_cache_dtype: bfloat16
+        gemm_type: bfloat16
+        phases: [context, generation]
+      - compute_dtype: bfloat16
+        kv_cache_dtype: fp8
+        gemm_type: bfloat16
+        min_sm: 90
+        phases: [context, generation]
+      - compute_dtype: fp8
+        kv_cache_dtype: fp8
+        gemm_type: bfloat16
+        min_sm: 100
+        phases: [context]
+      - compute_dtype: bfloat16
+        kv_cache_dtype: bfloat16
+        gemm_type: fp8_block
+        min_sm: 89
+        phases: [context, generation]
+      - compute_dtype: bfloat16
+        kv_cache_dtype: fp8
+        gemm_type: fp8_block
+        min_sm: 90
+        phases: [context, generation]
+      - compute_dtype: fp8
+        kv_cache_dtype: fp8
+        gemm_type: fp8_block
+        min_sm: 100
+        phases: [context]
+      - compute_dtype: bfloat16
+        kv_cache_dtype: bfloat16
+        gemm_type: nvfp4
+        min_sm: 100
+        phases: [context, generation]
+      - compute_dtype: bfloat16
+        kv_cache_dtype: fp8
+        gemm_type: nvfp4
+        min_sm: 100
+        phases: [context, generation]
+      - compute_dtype: fp8
+        kv_cache_dtype: fp8
+        gemm_type: nvfp4
+        min_sm: 100
+        phases: [context]
+    context:
+      max_tokens: 131072
+    generation:
+      max_tokens: 33554432
+      large_cache_tokens: 16777216

@@ -209,6 +209,18 @@ class MLAModuleSweepSpec:
     generation_max_tokens: int
     generation_large_sequence_min: int
     generation_large_sequence_max_batch_size: int
+    generation_large_cache_tokens: int
+
+
+@dataclasses.dataclass(frozen=True)
+class MLAModulePrecisionSpec:
+    """Precision combo metadata for full MLA/DSA module collectors."""
+
+    compute_dtype: str
+    kv_cache_dtype: str
+    gemm_type: str
+    phases: tuple[str, ...]
+    min_sm: int
 
 
 def get_mla_module_model_specs(
@@ -270,9 +282,7 @@ def _optional_int_list(value: object, *, field_name: str, default: list[int]) ->
     return _as_int_list(value, field_name=field_name)
 
 
-def get_mla_module_sweep_spec(backend: str | None = None) -> MLAModuleSweepSpec:
-    """Return YAML-backed shared micro-sweep values for module collectors."""
-
+def _merged_mla_module_values(backend: str | None = None) -> dict[str, object]:
     values = _required_base_common_case_values("mla_module")
     if backend:
         override = get_base_common_case_values(f"mla_module_{backend}")
@@ -287,24 +297,61 @@ def get_mla_module_sweep_spec(backend: str | None = None) -> MLAModuleSweepSpec:
                 merged.pop("inner_sweep_head_counts", None)
                 merged.pop("top_level_head_counts", None)
             values = merged
+    return values
 
-    context = _required_mapping(values.get("context"), field_name="mla_module.context")
-    generation = _required_mapping(values.get("generation"), field_name="mla_module.generation")
+
+def get_mla_module_precision_specs(
+    backend: str | None = None,
+    *,
+    phase: str | None = None,
+    sm_version: int | None = None,
+) -> list[MLAModulePrecisionSpec]:
+    """Return YAML-backed precision combos for module collectors."""
+
+    values = _merged_mla_module_values(backend)
     raw_precision_combos = values.get("module_precision_combos")
     if not isinstance(raw_precision_combos, list):
         raise TypeError("mla_module.module_precision_combos must be a list")
 
-    precision_combos = []
+    precision_specs = []
     for combo in raw_precision_combos:
         if not isinstance(combo, dict):
             raise TypeError("mla_module.module_precision_combos entries must be mappings")
-        precision_combos.append(
-            (
-                str(combo["compute_dtype"]),
-                str(combo["kv_cache_dtype"]),
-                str(combo["gemm_type"]),
+        phases = combo.get("phases", ("context", "generation"))
+        if isinstance(phases, str):
+            phases = (phases,)
+        elif isinstance(phases, list):
+            phases = tuple(str(item) for item in phases)
+        elif not isinstance(phases, tuple):
+            raise TypeError("mla_module.module_precision_combos phases must be a string or list")
+
+        min_sm = int(combo.get("min_sm", 0))
+        if phase is not None and phase not in phases:
+            continue
+        if sm_version is not None and sm_version < min_sm:
+            continue
+        precision_specs.append(
+            MLAModulePrecisionSpec(
+                compute_dtype=str(combo["compute_dtype"]),
+                kv_cache_dtype=str(combo["kv_cache_dtype"]),
+                gemm_type=str(combo["gemm_type"]),
+                phases=phases,
+                min_sm=min_sm,
             )
         )
+    return precision_specs
+
+
+def get_mla_module_sweep_spec(backend: str | None = None) -> MLAModuleSweepSpec:
+    """Return YAML-backed shared micro-sweep values for module collectors."""
+
+    values = _merged_mla_module_values(backend)
+
+    context = _required_mapping(values.get("context"), field_name="mla_module.context")
+    generation = _required_mapping(values.get("generation"), field_name="mla_module.generation")
+    precision_combos = [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type) for spec in get_mla_module_precision_specs(backend)
+    ]
 
     batch_sizes = _optional_int_list(values.get("batch_sizes"), field_name="mla_module.batch_sizes", default=[])
     sequence_lengths = _optional_int_list(
@@ -359,6 +406,7 @@ def get_mla_module_sweep_spec(backend: str | None = None) -> MLAModuleSweepSpec:
         generation_max_tokens=int(generation["max_tokens"]),
         generation_large_sequence_min=_optional_int(generation.get("large_sequence_min")),
         generation_large_sequence_max_batch_size=_optional_int(generation.get("large_sequence_max_batch_size")),
+        generation_large_cache_tokens=_optional_int(generation.get("large_cache_tokens")),
     )
 
 

@@ -15,9 +15,10 @@ MLA vs DSA is determined by the presence of `index_topk` in the HF config.
 Op names and data schema are aligned with TRT-LLM's collect_mla_module.py
 so that queries can be reused across frameworks.
 
-Supported models and their attention types are defined in SUPPORTED_MODELS.
-The collector reads a real HF config, overrides the layer-local shape fields
-in-memory, and then instantiates just the attention module.
+Supported models, attention types, and micro-sweeps are defined in collector v2
+YAML and loaded through collector.case_generator. The collector reads a real HF
+config, overrides the layer-local shape fields in-memory, and then instantiates
+just the attention module.
 
 Usage:
     # MLA context phase (DeepSeek-V3 style)
@@ -57,6 +58,11 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.config import _CONFIG_REGISTRY
 from vllm.version import __version__ as vllm_version
 
+from collector.case_generator import (
+    get_mla_module_model_specs,
+    get_mla_module_precision_specs,
+    get_mla_module_sweep_spec,
+)
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.registry_types import PerfFile
 from collector.vllm.utils import (
@@ -122,21 +128,6 @@ def _resolve_model_path(model_name: str) -> str:
     return tmp_dir
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Supported Models — model_path → attention type
-# ═══════════════════════════════════════════════════════════════════════
-
-SUPPORTED_MODELS: dict[str, str] = {
-    "deepseek-ai/DeepSeek-V3": "mla",
-    "deepseek-ai/DeepSeek-R1": "mla",
-    "nvidia/DeepSeek-V3.1-NVFP4": "mla",
-    "deepseek-ai/DeepSeek-V3.2": "dsa",
-    "zai-org/GLM-5": "dsa",
-    "zai-org/GLM-5-FP8": "dsa",
-    "nvidia/GLM-5-NVFP4": "dsa",
-}
-
-
 def _is_sm120_or_newer() -> bool:
     return get_sm_version() >= 120
 
@@ -172,41 +163,12 @@ def _is_vllm_sm120_mla_generation_nvfp4_large_cache_unsupported() -> bool:
 
 
 def _get_precision_combos(phase: str):
-    """Return (compute_dtype, kv_cache_dtype, gemm_type) triples for a phase.
+    """Return YAML-backed (compute_dtype, kv_cache_dtype, gemm_type) triples."""
 
-    Each triple describes the full quantisation configuration for one
-    benchmark sweep.  GPU capability (SM version) determines which
-    combos are available.
-
-    Precision axes:
-      gemm_type    — linear-layer GEMMs (projections inside the module)
-        bfloat16:  always
-        fp8_block: SM >= 89 (Ada / Hopper / Blackwell)
-        nvfp4:     SM >= 100 (Blackwell)
-
-      (compute_dtype, kv_cache_dtype) — attention compute + KV cache
-        context:    (bf16, bf16) always;  (bf16, fp8) SM >= 90;  (fp8, fp8) SM >= 100
-        generation: (bf16, bf16) always;  (bf16, fp8) SM >= 90
-    """
-    sm = get_sm_version()
-
-    gemm_types = ["bfloat16"]
-    if sm >= 89:
-        gemm_types.append("fp8_block")
-    if sm >= 100:
-        gemm_types.append("nvfp4")
-
-    attn_combos = [("bfloat16", "bfloat16")]
-    if phase == "context":
-        if sm >= 90:
-            attn_combos.append(("bfloat16", "fp8"))
-        if sm >= 100:
-            attn_combos.append(("fp8", "fp8"))
-    else:
-        if sm >= 90:
-            attn_combos.append(("bfloat16", "fp8"))
-
-    return [(c, kv, g) for g in gemm_types for c, kv in attn_combos]
+    return [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("vllm", phase=phase, sm_version=get_sm_version())
+    ]
 
 
 def get_context_test_cases(attn_type: str):
@@ -216,17 +178,16 @@ def get_context_test_cases(attn_type: str):
                      compute_dtype, gemm_type].
     """
     cases = []
-    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 32768]
+    sweep = get_mla_module_sweep_spec("vllm")
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context"):
         if attn_type == "mla" and gemm_type == "fp8_block" and _is_vllm_sm120_mla_module_fp8_block_unsupported():
             # vLLM 0.19.0 routes these module GEMMs through CUTLASS
             # cutlass_scaled_mm on SM120 and returns "Invalid status".
             continue
-        for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
-            for b in b_list:
-                for s in s_list:
-                    if b * s > 131072:
+        for num_heads in sweep.inner_sweep_head_counts:
+            for b in sweep.context_batch_sizes:
+                for s in sweep.context_sequence_lengths:
+                    if b * s > sweep.context_max_tokens:
                         continue
                     cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
@@ -239,18 +200,15 @@ def get_generation_test_cases(attn_type: str):
                      compute_dtype, gemm_type].
     """
     cases = []
-    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-    s_list = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
-    max_tokens = 1024 * 4096 * 2 * 2 * 2
-    max_fp8_kv_tokens_sm120 = 1024 * 4096 * 2 * 2
+    sweep = get_mla_module_sweep_spec("vllm")
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation"):
         if attn_type == "mla" and gemm_type == "fp8_block" and _is_vllm_sm120_mla_module_fp8_block_unsupported():
             # Same vLLM/CUTLASS SM120 failure as context MLA module.
             continue
-        for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
-            for b in b_list:
-                for s in s_list:
-                    if b * s > max_tokens:
+        for num_heads in sweep.inner_sweep_head_counts:
+            for b in sweep.generation_batch_sizes:
+                for s in sweep.generation_sequence_lengths:
+                    if b * s > sweep.generation_max_tokens:
                         continue
                     if (
                         attn_type == "mla"
@@ -265,7 +223,7 @@ def get_generation_test_cases(attn_type: str):
                     if (
                         attn_type == "mla"
                         and gemm_type == "nvfp4"
-                        and b * s >= max_fp8_kv_tokens_sm120
+                        and b * s >= sweep.generation_large_cache_tokens
                         and _is_vllm_sm120_mla_generation_nvfp4_large_cache_unsupported()
                     ):
                         # NVFP4 module GEMMs hit the same illegal access at
@@ -274,7 +232,7 @@ def get_generation_test_cases(attn_type: str):
                     if (
                         attn_type == "mla"
                         and kv_dtype == "fp8"
-                        and b * s >= max_fp8_kv_tokens_sm120
+                        and b * s >= sweep.generation_large_cache_tokens
                         and _is_vllm_sm120_mla_generation_fp8_large_cache_unsupported()
                     ):
                         # vLLM 0.19.0's SM120 MLA generation kernel can pass
@@ -292,14 +250,10 @@ def _build_module_test_cases(attn_type: str, mode: str):
                     compute_dtype, gemm_type, model_path, attn_type]
     """
     base_cases = get_context_test_cases(attn_type) if mode == "context" else get_generation_test_cases(attn_type)
-    requested_model_path = os.environ.get("COLLECTOR_MODEL_PATH", "").strip()
-    model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
-    if requested_model_path:
-        model_paths = [m for m in model_paths if m == requested_model_path]
     cases = []
-    for model_path in model_paths:
+    for model_spec in get_mla_module_model_specs(attention_type=attn_type):
         for s, b, h, kv_dtype, compute_dtype, gemm_type in base_cases:
-            cases.append([s, b, h, kv_dtype, compute_dtype, gemm_type, model_path, attn_type])
+            cases.append([s, b, h, kv_dtype, compute_dtype, gemm_type, model_spec.model_path, attn_type])
     return cases
 
 
@@ -1070,8 +1024,13 @@ def _cleanup():
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _supported_model_map() -> dict[str, str]:
+    return {spec.model_path: spec.attention_type for spec in get_mla_module_model_specs(apply_model_filter=False)}
+
+
 def main():
-    model_names = list(SUPPORTED_MODELS.keys())
+    supported_models = _supported_model_map()
+    model_names = list(supported_models.keys())
 
     parser = argparse.ArgumentParser(
         description="MLA/DSA module-level collector for vLLM",
@@ -1114,9 +1073,9 @@ def main():
 
     # Select models to run
     if args.model:
-        models_to_run = {args.model: SUPPORTED_MODELS[args.model]}
+        models_to_run = {args.model: supported_models[args.model]}
     else:
-        models_to_run = SUPPORTED_MODELS
+        models_to_run = supported_models
 
     for model_path, attn_type in models_to_run.items():
         print(f"\n{'=' * 60}")

@@ -159,7 +159,11 @@ def test_mla_bmm_cases_expand_from_base_op_yaml():
 
 
 def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
-    from collector.case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
+    from collector.case_generator import (
+        get_mla_module_model_specs,
+        get_mla_module_precision_specs,
+        get_mla_module_sweep_spec,
+    )
 
     sweep = get_mla_module_sweep_spec()
     dsa_specs = get_mla_module_model_specs(attention_type="dsa", apply_model_filter=False)
@@ -177,6 +181,22 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
     assert trtllm_sweep.generation_sequence_lengths[-1] == 131072
     assert trtllm_sweep.inner_sweep_head_counts == [128, 64, 32, 16, 8, 4, 2, 1]
     assert trtllm_sweep.generation_max_tokens == 33554432
+
+    vllm_sweep = get_mla_module_sweep_spec("vllm")
+    assert vllm_sweep.context_sequence_lengths[-1] == 32768
+    assert vllm_sweep.generation_sequence_lengths[-1] == 131072
+    assert vllm_sweep.inner_sweep_head_counts == [128, 64, 32, 16, 8, 4, 2, 1]
+    assert vllm_sweep.generation_max_tokens == 33554432
+    assert vllm_sweep.generation_large_cache_tokens == 16777216
+    assert [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("vllm", phase="generation", sm_version=90)
+    ] == [
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+    ]
 
     assert {spec.model_path for spec in dsa_specs} == {
         "deepseek-ai/DeepSeek-V3.2",
