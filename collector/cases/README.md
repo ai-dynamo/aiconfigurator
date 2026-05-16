@@ -1,12 +1,12 @@
 # Collector v2 Case Files
 
-Collector v2 plans collection from model/GPU YAML instead of treating the
+Collector v2 plans collection from model/SM YAML instead of treating the
 collector as a flat op list.
 
 - `base_op_cases.yaml`: shared common case values and op cases every model can include.
 - `models/<architecture>_cases.yaml`: architecture-specific op cases and model
   path aliases.
-- `gpus/*_exceptions.yaml`: GPU-specific exceptions applied after base-op/model
+- `sms/sm<version>_exceptions.yaml`: SM-specific exceptions applied after base-op/model
   cases are merged.
 
 Model files are keyed by HuggingFace architecture name and list every model path
@@ -116,7 +116,7 @@ all_frameworks_op_cases:
 size list for both input and output features. For attention, `kv_head_options:
 self` means `num_key_value_heads` equals `query_head_count`.
 
-GPU exception files use matching exception sections:
+SM exception files use matching exception sections:
 
 ```yaml
 all_frameworks_op_exceptions:
@@ -137,5 +137,5 @@ created by `helper.create_test_case_id(test_case, run_func_name, full_module_nam
 Add one architecture file for a new architecture, or add a model path alias to
 an existing architecture file when the model uses the same case plan. Add a new
 op collector only when no existing op can generate the needed points. Add one
-GPU exception file for a new GPU so model intent and hardware exclusions stay
+SM exception file for a new SM version so model intent and hardware exclusions stay
 separate.

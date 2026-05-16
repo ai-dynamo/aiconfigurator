@@ -53,8 +53,9 @@ The generated files are nccl_perf.txt, oneccl_perf.txt, and custom_allreduce_per
 # Collector v2: model-centric cases
 
 Collector v2 is model-centric. A healing run should collect cases for a specific
-model/GPU pair instead of running every op bucket and hoping the support matrix
-improves. Full collection for a new framework version is still supported.
+model/GPU pair, with hardware exceptions resolved by SM version, instead of
+running every op bucket and hoping the support matrix improves. Full collection
+for a new framework version is still supported.
 
 ```bash
 # Heal one model on one GPU type.
@@ -62,7 +63,7 @@ python3 collect.py --backend sglang \
   --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
   --gpu b200_sxm
 
-# Inspect the resolved model/GPU plan without collecting.
+# Inspect the resolved model/SM plan without collecting.
 python3 collect.py --backend sglang \
   --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
   --gpu b200_sxm \
@@ -77,7 +78,7 @@ python3 collect.py --backend trtllm \
 # Aggregate all model case YAML files for a full model-centric run.
 python3 collect.py --backend trtllm --model-cases-full
 
-# New framework version mode: bypass model/GPU cases and collect the full backend registry.
+# New framework version mode: bypass model/SM cases and collect the full backend registry.
 python3 collect.py --backend trtllm --new-framework-version
 ```
 
@@ -86,8 +87,8 @@ Case files:
 ```
 cases/base_op_cases.yaml             — shared common case values and op cases
 cases/models/<architecture>_cases.yaml — architecture-specific all/framework op cases
-cases/gpus/<gpu>_exceptions.yaml     — GPU-specific all/framework op exceptions
-model_cases.py                       — merges base op + model + GPU exceptions
+cases/sms/sm<version>_exceptions.yaml — SM-specific all/framework op exceptions
+model_cases.py                       — merges base op + model + SM exceptions
 ```
 
 Each model file is named after the HuggingFace architecture and lists the model
@@ -119,7 +120,7 @@ framework_specific_op_cases:
       cases: all
 ```
 
-GPU exceptions are separate and GPU-centric:
+SM exceptions are separate and hardware-centric:
 
 ```yaml
 all_frameworks_op_exceptions:
@@ -151,8 +152,11 @@ being migrated.
 To add a new architecture, create one `cases/models/<architecture>_cases.yaml`
 file. To add a new model in an existing architecture, add the model path to that
 architecture's `model_paths` list. Add a new op collector only when the existing
-ops cannot generate the needed data points. To add a new GPU, create one
-`cases/gpus/<gpu>_exceptions.yaml` file instead of editing every model case.
+ops cannot generate the needed data points. To add a new hardware exception,
+create one `cases/sms/sm<version>_exceptions.yaml` file instead of editing every
+model case. `--gpu b200_sxm` resolves the SM version from
+`src/aiconfigurator/systems/b200_sxm.yaml`; use `--sm 100` when collecting on an
+unregistered GPU with a known SM version.
 
 # Version Management
 
@@ -163,12 +167,12 @@ Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps
 ```
 framework_manifest.yaml — current collector framework versions and images
 framework_manifest.py   — manifest loader/validator
-model_cases.py       — collector v2 model/GPU case planner
+model_cases.py       — collector v2 model/SM case planner
 registry.py          — declares which module handles which version range
 version_resolver.py  — routes runtime version → module (packaging.version)
 collect.py/collect_ops — validates __compat__ and fails incompatible ops
 __compat__           — per-file metadata declaring supported framework versions
-cases/               — model-centric case manifests and GPU exceptions
+cases/               — model-centric case manifests and SM exceptions
 wideep/              — WideEP collector namespace for special images/runtimes
 wideep/*/registry.py — WideEP-only ops appended when the v2 plan requests them
 network/             — collective communication collectors and Slurm network jobs

@@ -10,6 +10,7 @@ from collector.model_cases import (
     OpCasePlan,
     build_collection_case_plan,
     default_architecture_cases_path,
+    default_sm_exceptions_path,
     filter_test_cases,
 )
 
@@ -176,12 +177,12 @@ def test_support_matrix_mamba_alias_generates_targeted_cases(monkeypatch):
     assert {case.model_name for case in cases} == {"nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"}
 
 
-def test_gpu_exceptions_can_drop_framework_specific_op(tmp_path: Path):
-    exceptions = tmp_path / "b200_sxm_exceptions.yaml"
+def test_sm_exceptions_can_drop_framework_specific_op(tmp_path: Path):
+    exceptions = tmp_path / "sm100_exceptions.yaml"
     exceptions.write_text(
         """
 schema_version: 1
-gpu_type: b200_sxm
+sm_version: 100
 framework_specific_op_exceptions:
   sglang:
     wideep_moe:
@@ -193,12 +194,44 @@ framework_specific_op_exceptions:
     plan = build_collection_case_plan(
         backend="sglang",
         model_path="deepseek-ai/DeepSeek-V3",
-        gpu_type="b200_sxm",
-        gpu_exceptions_path=str(exceptions),
+        sm_version=100,
+        sm_exceptions_path=str(exceptions),
     )
 
+    assert plan.sm_version == 100
+    assert plan.sm_exceptions_path == exceptions.resolve()
     assert "wideep_moe" not in plan.op_cases
     assert "wideep_mla_context" in plan.op_cases
+
+
+def test_gpu_type_resolves_default_sm_exception_file(tmp_path: Path, monkeypatch):
+    from collector import model_cases as model_case_module
+
+    exceptions = tmp_path / "sm100_exceptions.yaml"
+    exceptions.write_text(
+        """
+schema_version: 1
+sm_version: 100
+framework_specific_op_exceptions:
+  sglang:
+    wideep_moe:
+      drop: true
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(model_case_module, "SM_EXCEPTIONS_DIR", tmp_path)
+
+    plan = model_case_module.build_collection_case_plan(
+        backend="sglang",
+        model_path="deepseek-ai/DeepSeek-V3",
+        gpu_type="b200_sxm",
+    )
+
+    assert plan.gpu_type == "b200_sxm"
+    assert plan.sm_version == 100
+    assert plan.sm_exceptions_path == default_sm_exceptions_path(100)
+    assert plan.sm_exceptions_path == exceptions
+    assert "wideep_moe" not in plan.op_cases
 
 
 def test_filter_test_cases_supports_case_ids_contains_and_indices():
