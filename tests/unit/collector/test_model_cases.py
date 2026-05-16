@@ -274,3 +274,106 @@ def test_filter_test_cases_supports_index_ranges_and_limit():
     filtered = filter_test_cases(cases, plan=plan, full_module_name="vllm.gemm", run_func_name="run_gemm")
 
     assert filtered == ["case1", "case2"]
+
+
+def test_filter_test_cases_supports_structured_exception_rules():
+    cases = [
+        ["bfloat16", 1, 65536, 65536],
+        ["fp8", 1, 65536, 65536],
+        ["fp8", 16, 65536, 65536],
+    ]
+    plan = OpCasePlan(
+        exclude=CaseSelector(
+            rules=[
+                {
+                    "reason_type": "framework_version_unsupported",
+                    "version_prefixes": ["1.3.0rc10"],
+                    "fields": ["gemm_type", "token_count", "output_features", "input_features"],
+                    "match": {
+                        "gemm_type": "fp8",
+                        "token_count": {"lte": 8},
+                        "output_features": {"gte": 51200},
+                        "input_features": {"gte": 51200},
+                    },
+                }
+            ]
+        )
+    )
+
+    filtered = filter_test_cases(
+        cases,
+        plan=plan,
+        full_module_name="trtllm.gemm",
+        run_func_name="run_gemm",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert filtered == [cases[0], cases[2]]
+
+
+def test_filter_test_cases_supports_computed_rule_conditions():
+    cases = [
+        [1, 4096, 64, 4, 128, False, False, False],
+        [1, 4096, 64, 2, 128, False, False, False],
+        [2, 8192, 96, 96, 128, True, True, True],
+    ]
+    plan = OpCasePlan(
+        exclude=CaseSelector(
+            rules=[
+                {
+                    "reason_type": "hardware_unsupported",
+                    "fields": [
+                        "batch_size",
+                        "sequence_length",
+                        "num_heads",
+                        "num_key_value_heads",
+                        "head_dim",
+                        "use_fp8_kv_cache",
+                        "use_fp8_context_fmha",
+                        "is_context_phase",
+                    ],
+                    "conditions": [
+                        {
+                            "ratio": {
+                                "numerator": "num_heads",
+                                "denominator": "num_key_value_heads",
+                                "gt": 16,
+                            }
+                        }
+                    ],
+                },
+                {
+                    "reason_type": "framework_version_unsupported",
+                    "fields": [
+                        "batch_size",
+                        "sequence_length",
+                        "num_heads",
+                        "num_key_value_heads",
+                        "head_dim",
+                        "use_fp8_kv_cache",
+                        "use_fp8_context_fmha",
+                        "is_context_phase",
+                    ],
+                    "match": {"use_fp8_context_fmha": True},
+                    "conditions": [
+                        {
+                            "product": {
+                                "fields": ["batch_size", "sequence_length"],
+                                "gte": 16384,
+                            }
+                        }
+                    ],
+                },
+            ]
+        )
+    )
+
+    filtered = filter_test_cases(
+        cases,
+        plan=plan,
+        full_module_name="trtllm.attention_context",
+        run_func_name="run_attention_torch",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert filtered == [cases[0]]

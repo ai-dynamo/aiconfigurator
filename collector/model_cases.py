@@ -62,6 +62,7 @@ class CaseSelector:
 
     all_cases: bool = False
     case_specs: list[dict[str, Any]] = field(default_factory=list)
+    rules: list[dict[str, Any]] = field(default_factory=list)
     case_ids: set[str] = field(default_factory=set)
     contains: set[str] = field(default_factory=set)
     indices: set[int] = field(default_factory=set)
@@ -71,6 +72,7 @@ class CaseSelector:
     def merge(self, other: CaseSelector) -> None:
         self.all_cases = self.all_cases or other.all_cases
         self.case_specs.extend(other.case_specs)
+        self.rules.extend(other.rules)
         self.case_ids.update(other.case_ids)
         self.contains.update(other.contains)
         self.indices.update(other.indices)
@@ -79,7 +81,7 @@ class CaseSelector:
             self.limit = other.limit if self.limit is None else min(self.limit, other.limit)
 
     def has_specific_selectors(self) -> bool:
-        return bool(self.case_ids or self.contains or self.indices or self.index_ranges)
+        return bool(self.rules or self.case_ids or self.contains or self.indices or self.index_ranges)
 
 
 @dataclass(slots=True)
@@ -245,6 +247,10 @@ def _parse_selector(raw: Any, *, default_all: bool) -> CaseSelector:
     selector.case_ids.update(str(item) for item in _as_list(raw.get("case_ids"), field_name="case_ids"))
     selector.contains.update(str(item) for item in _as_list(raw.get("contains"), field_name="contains"))
     selector.indices.update(int(item) for item in _as_list(raw.get("indices"), field_name="indices"))
+    for rule in _as_list(raw.get("rules"), field_name="rules"):
+        if not isinstance(rule, dict):
+            raise TypeError("selector rules must be mappings")
+        selector.rules.append(rule)
     selector.index_ranges.extend(_parse_index_ranges(raw.get("ranges")))
     if raw.get("limit") is not None:
         selector.limit = int(raw["limit"])
@@ -446,7 +452,173 @@ def _index_matches(index: int, selector: CaseSelector) -> bool:
     return index in selector.indices or any(start <= index <= end for start, end in selector.index_ranges)
 
 
-def _case_matches(test_case: Any, case_id: str, index: int, selector: CaseSelector) -> bool:
+_MISSING = object()
+
+
+def _field_names(rule: dict[str, Any]) -> list[str]:
+    raw_fields = rule.get("fields", [])
+    if isinstance(raw_fields, dict):
+        return [str(field) for field, _index in sorted(raw_fields.items(), key=lambda item: int(item[1]))]
+    if not isinstance(raw_fields, list):
+        raise TypeError("rule fields must be a list or mapping")
+    return [str(field) for field in raw_fields]
+
+
+def _case_field_value(test_case: Any, field_name: str, fields: list[str]) -> Any:
+    if isinstance(test_case, dict):
+        return test_case.get(field_name, _MISSING)
+    if hasattr(test_case, field_name):
+        return getattr(test_case, field_name)
+    if isinstance(test_case, list | tuple) and field_name in fields:
+        index = fields.index(field_name)
+        if index < len(test_case):
+            return test_case[index]
+    return _MISSING
+
+
+def _comparison_matches(value: Any, op: str, expected: Any, fields: list[str], test_case: Any) -> bool:
+    if value is _MISSING:
+        return False
+    if op.endswith("_field"):
+        op = op.removesuffix("_field")
+        expected = _case_field_value(test_case, str(expected), fields)
+        if expected is _MISSING:
+            return False
+    if op.startswith("any_"):
+        inner_op = op.removeprefix("any_")
+        values = value if isinstance(value, list | tuple | set) else [value]
+        return any(_comparison_matches(item, inner_op, expected, fields, test_case) for item in values)
+    if op.startswith("all_"):
+        inner_op = op.removeprefix("all_")
+        values = value if isinstance(value, list | tuple | set) else [value]
+        return all(_comparison_matches(item, inner_op, expected, fields, test_case) for item in values)
+
+    if op == "eq":
+        return value == expected
+    if op == "ne":
+        return value != expected
+    if op == "in":
+        return value in expected
+    if op == "not_in":
+        return value not in expected
+    if op == "lt":
+        return value < expected
+    if op == "lte":
+        return value <= expected
+    if op == "gt":
+        return value > expected
+    if op == "gte":
+        return value >= expected
+    if op == "contains":
+        return expected in value
+    if op == "not_contains":
+        return expected not in value
+    if op == "prefix":
+        return str(value).startswith(str(expected))
+    if op == "suffix":
+        return str(value).endswith(str(expected))
+    if op in {"mod_eq", "mod_ne"}:
+        if isinstance(expected, dict):
+            divisor = int(expected["divisor"])
+            remainder = int(expected.get("remainder", 0))
+        else:
+            divisor = int(expected[0])
+            remainder = int(expected[1])
+        matches = value % divisor == remainder
+        return matches if op == "mod_eq" else not matches
+    raise ValueError(f"Unsupported rule comparison operator {op!r}")
+
+
+def _field_condition_matches(value: Any, condition: Any, fields: list[str], test_case: Any) -> bool:
+    if isinstance(condition, dict):
+        return all(
+            _comparison_matches(value, str(op), expected, fields, test_case) for op, expected in condition.items()
+        )
+    if isinstance(condition, list):
+        return value in condition
+    return value == condition
+
+
+def _numeric_condition_matches(value: Any, condition: dict[str, Any], fields: list[str], test_case: Any) -> bool:
+    return all(
+        _comparison_matches(value, str(op), expected, fields, test_case)
+        for op, expected in condition.items()
+        if op not in {"fields", "numerator", "denominator", "field"}
+    )
+
+
+def _computed_condition_matches(condition: dict[str, Any], fields: list[str], test_case: Any) -> bool:
+    if "product" in condition:
+        product_spec = condition["product"]
+        value = 1
+        for field_name in _as_list(product_spec.get("fields"), field_name="product.fields"):
+            field_value = _case_field_value(test_case, str(field_name), fields)
+            if field_value is _MISSING:
+                return False
+            value *= field_value
+        return _numeric_condition_matches(value, product_spec, fields, test_case)
+
+    if "ratio" in condition:
+        ratio_spec = condition["ratio"]
+        numerator = _case_field_value(test_case, str(ratio_spec["numerator"]), fields)
+        denominator = _case_field_value(test_case, str(ratio_spec["denominator"]), fields)
+        if numerator is _MISSING or denominator in (_MISSING, 0):
+            return False
+        return _numeric_condition_matches(numerator / denominator, ratio_spec, fields, test_case)
+
+    if "floor_div" in condition:
+        div_spec = condition["floor_div"]
+        numerator = _case_field_value(test_case, str(div_spec["numerator"]), fields)
+        denominator = _case_field_value(test_case, str(div_spec["denominator"]), fields)
+        if numerator is _MISSING or denominator in (_MISSING, 0):
+            return False
+        return _numeric_condition_matches(numerator // denominator, div_spec, fields, test_case)
+
+    if "field" in condition:
+        field_name = str(condition["field"])
+        value = _case_field_value(test_case, field_name, fields)
+        return _numeric_condition_matches(value, condition, fields, test_case)
+
+    raise ValueError(f"Unsupported computed rule condition {condition!r}")
+
+
+def _version_matches(rule: dict[str, Any], runtime_version: str | None) -> bool:
+    prefixes = rule.get("version_prefixes")
+    if prefixes is None:
+        return True
+    if runtime_version is None:
+        return False
+    return any(runtime_version.startswith(str(prefix)) for prefix in _as_list(prefixes, field_name="version_prefixes"))
+
+
+def _rule_matches(test_case: Any, rule: dict[str, Any], *, runtime_version: str | None) -> bool:
+    if not _version_matches(rule, runtime_version):
+        return False
+    fields = _field_names(rule)
+    match_spec = rule.get("match") or rule.get("where") or {}
+    if not isinstance(match_spec, dict):
+        raise TypeError("rule match/where must be a mapping")
+    for field_name, condition in match_spec.items():
+        value = _case_field_value(test_case, str(field_name), fields)
+        if not _field_condition_matches(value, condition, fields, test_case):
+            return False
+    conditions = _as_list(rule.get("conditions"), field_name="conditions")
+    for condition in conditions:
+        if not isinstance(condition, dict):
+            raise TypeError("rule conditions must be mappings")
+        if not _computed_condition_matches(condition, fields, test_case):
+            return False
+    return bool(match_spec or conditions)
+
+
+def _case_matches(
+    test_case: Any,
+    case_id: str,
+    index: int,
+    selector: CaseSelector,
+    *,
+    runtime_version: str | None,
+) -> bool:
     if selector.all_cases:
         return True
     case_text = str(test_case)
@@ -454,6 +626,7 @@ def _case_matches(test_case: Any, case_id: str, index: int, selector: CaseSelect
         case_id in selector.case_ids
         or any(fragment in case_text or fragment in case_id for fragment in selector.contains)
         or _index_matches(index, selector)
+        or any(_rule_matches(test_case, rule, runtime_version=runtime_version) for rule in selector.rules)
     )
 
 
@@ -463,6 +636,7 @@ def filter_test_cases(
     plan: OpCasePlan | None,
     full_module_name: str,
     run_func_name: str,
+    runtime_version: str | None = None,
 ) -> list[Any]:
     """Apply an op case plan to generated collector cases."""
     if plan is None:
@@ -474,10 +648,10 @@ def filter_test_cases(
     for index, test_case in enumerate(test_cases):
         case_id = create_test_case_id(test_case, run_func_name, full_module_name)
         if (include.has_specific_selectors() or not include.all_cases) and not _case_matches(
-            test_case, case_id, index, include
+            test_case, case_id, index, include, runtime_version=runtime_version
         ):
             continue
-        if exclude.all_cases or _case_matches(test_case, case_id, index, exclude):
+        if exclude.all_cases or _case_matches(test_case, case_id, index, exclude, runtime_version=runtime_version):
             continue
         filtered.append(test_case)
 

@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+sm_version: 89
+description: >
+  SM89 Ada exceptions extracted from collector SM gates. L4/L40S can run many
+  FP8 paths but miss Hopper TMA paths and Blackwell-only NVFP4 paths.
+
+framework_specific_op_exceptions:
+  sglang:
+    gemm:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: SGLang block-FP8 GEMM uses DeepGEMM/TMA and requires SM90+; NVFP4 requires Blackwell.
+          fields: [gemm_type, token_count, output_features, input_features]
+          match:
+            gemm_type:
+              in: [fp8_block, nvfp4]
+    moe:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: SGLang block-FP8 MoE needs about 144 KiB shared memory/TMA and requires SM90+; NVFP4 requires Blackwell.
+          fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
+          match:
+            moe_type:
+              in: [fp8_block, nvfp4]
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.10"]
+          reason: SGLang 0.5.10 MoE collector does not support GPT-OSS MoE cases.
+          fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
+          match:
+            model_path:
+              in: [openai/gpt-oss-20b, openai/gpt-oss-120b]
+    attention_context:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: SGLang FP8 KV-cache attention requires SM90+.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            use_fp8_kv_cache: true
+    attention_generation:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: SGLang FP8 KV-cache attention requires SM90+.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            use_fp8_kv_cache: true
+    dsa_context_module:
+      drop: true
+      reason_type: hardware_unsupported
+      reason: SGLang DSA/NSA module collectors require SM90+.
+    dsa_generation_module:
+      drop: true
+      reason_type: hardware_unsupported
+      reason: SGLang DSA/NSA module collectors require SM90+.
+  trtllm:
+    gemm:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: TRT-LLM NVFP4 GEMM is Blackwell-only.
+          fields: [gemm_type, token_count, output_features, input_features]
+          match:
+            gemm_type: nvfp4
+    moe:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: TRT-LLM NVFP4 and W4A8-MXFP4/MXFP8 MoE modes require Blackwell.
+          fields: [moe_type, num_tokens_list, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, min_latency_mode, model_path, token_expert_distribution, power_law_alpha]
+          match:
+            moe_type:
+              in: [nvfp4, w4a8_mxfp4_mxfp8]
+    mla_context_module:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: TRT-LLM module NVFP4 GEMMs require Blackwell.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            gemm_type: nvfp4
+    mla_generation_module:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: TRT-LLM module NVFP4 GEMMs require Blackwell.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            gemm_type: nvfp4
+  vllm:
+    gemm:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: vLLM block-FP8 GEMM is emitted for SM90+; NVFP4 GEMM is Blackwell-only.
+          fields: [gemm_type, token_count, output_features, input_features]
+          match:
+            gemm_type:
+              in: [fp8_block, nvfp4]
+    moe:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: vLLM block-FP8 MoE is emitted for SM90+; NVFP4 MoE is Blackwell-only.
+          fields: [moe_type, num_tokens_list, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha]
+          match:
+            moe_type:
+              in: [fp8_block, nvfp4]
+    mla_context_module:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: vLLM module NVFP4 GEMMs and FP8 attention/KV combos are not emitted before SM90/Blackwell.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            gemm_type: nvfp4
+        - reason_type: hardware_unsupported
+          reason: vLLM module FP8 KV-cache combos require SM90+.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            kv_cache_dtype: fp8
+    mla_generation_module:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: vLLM module NVFP4 GEMMs and FP8 attention/KV combos are not emitted before SM90/Blackwell.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            gemm_type: nvfp4
+        - reason_type: hardware_unsupported
+          reason: vLLM module FP8 KV-cache combos require SM90+.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            kv_cache_dtype: fp8

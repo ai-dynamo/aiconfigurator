@@ -12,6 +12,8 @@ all_frameworks_op_exceptions:
   # Drop a whole op for this GPU:
   # attention_generation:
   #   drop: true
+  #   reason_type: hardware_unsupported
+  #   reason: This SM cannot run the op.
   #
   # Or remove a subset after the op generated model-specific cases:
   # moe:
@@ -19,6 +21,16 @@ all_frameworks_op_exceptions:
   #     - "tp=32"
   #   case_ids:
   #     - "sglang.moe:run_moe_torch:MoeCommonTestCase(...)"
+  #
+  # Or use structured rules for positional collector test cases:
+  # gemm:
+  #   rules:
+  #     - reason_type: hardware_unsupported
+  #       reason: Example quantization mode is unavailable on this SM.
+  #       fields: [gemm_type, token_count, output_features, input_features]
+  #       match:
+  #         gemm_type:
+  #           in: [fp8_block, nvfp4]
 
 framework_specific_op_exceptions:
   sglang:
@@ -26,3 +38,13 @@ framework_specific_op_exceptions:
     #   drop: true
   trtllm: {}
   vllm: {}
+
+known_exceptions:
+  # Use this section for extracted skips that happen inside an op subprocess
+  # after top-level case filtering. These are documented here so hardware and
+  # framework-version gaps stay SM-centric, but they are not applied directly
+  # by collector.model_cases.filter_test_cases.
+  # - framework: sglang
+  #   op: dsa_generation_module
+  #   reason_type: framework_version_unsupported
+  #   reason: Inner sweep drops only a subset of seq_len values.
