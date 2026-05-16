@@ -128,7 +128,8 @@ reduced top-level ModelRunner subprocess sweep; framework-specific variants such
 as `common_case_values.mla_module_trtllm` can override only the sweep metadata
 without creating a new collectable op. Their per-model attention type, native
 head count, WideEP eligibility, and architecture come from
-`model_case_values.mla_module`.
+`model_case_values.mla_module`. Precision combinations can include `min_sm` and
+`phases` when a backend has hardware-gated context/generation support.
 
 Framework-specific common op overrides live under `framework_specific_op_cases`
 with the same case `id`. For example, TRT-LLM adds attention `head_dims: [64,
