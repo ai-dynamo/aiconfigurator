@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""SGLang GEMM collector.
+
+Benchmarks SGLang/sgl-kernel matrix multiplication paths for shared GEMM case
+specs, including BF16, FP8, FP8 block/DeepGEMM, and FP4-capable kernels where
+available. The module owns SGLang-specific kernel selection, quantization
+helpers, SM filters, and perf logging.
+"""
+
 __compat__ = "sglang>=0.5.10rc0"
 
 import os

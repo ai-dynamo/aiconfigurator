@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""TensorRT-LLM dense attention collector.
+
+Constructs a single TRT-LLM torch-flow attention layer and synthetic metadata to
+benchmark context and generation attention. This file owns TRT-LLM cache manager
+setup, quantization flags, SM/version-specific skips, and perf-row formatting.
+"""
+
 import os
 
 import tensorrt_llm

@@ -1,5 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+"""SGLang MoE collector.
+
+Benchmarks SGLang fused MoE kernels across BF16, FP8 block, NVFP4, and INT4
+paths when supported. Shared MoE model/sweep cases come from YAML; this module
+owns SGLang kernel compatibility, server-args mocking, routing-logit synthesis,
+rank-local workload construction, quantized weight setup, and perf logging.
+"""
+
 import inspect
 import itertools
 import os

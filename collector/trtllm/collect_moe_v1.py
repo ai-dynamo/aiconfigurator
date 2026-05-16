@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""TensorRT-LLM MoE collector for the 0.20 torch-flow API.
+
+This version route benchmarks the older FusedMoE module construction path with
+YAML-backed model/sweep cases. It creates synthetic hidden states and router
+logits, applies TRT-LLM quantization constraints, and logs per-case MoE perf.
+"""
+
 __compat__ = "trtllm>=0.20.0,<0.21.0"
 
 

@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""TensorRT-LLM GEMM collector.
+
+Expands shared GEMM case specs into TRT-LLM Linear-layer benchmarks across BF16,
+FP8, FP8 block, and related quantization modes. Shape policy comes from
+`case_specs.py`/YAML; this file owns TRT-LLM layer construction, padding,
+quantized-weight setup, and perf logging.
+"""
+
 import ctypes
 import math
 from collections import defaultdict

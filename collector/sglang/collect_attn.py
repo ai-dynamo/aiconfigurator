@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""SGLang dense attention collector.
+
+Builds lightweight RadixAttention/ForwardBatch mocks to benchmark context and
+generation attention without launching a full SGLang server. Shared attention
+shape intent should live in YAML; this file owns SGLang backend construction,
+KV-cache setup, SM-specific skips, and perf logging for the SGLang runtime.
+"""
+
 __compat__ = "sglang>=0.5.10rc0"
 
 import math

@@ -1,5 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+"""DeepEP benchmark support utilities.
+
+Provides distributed initialization, timing wrappers, correctness checks,
+FP8 packing/unpacking helpers, grouped-score generation, and log formatting for
+the standalone DeepEP intra-node, inter-node, and low-latency benchmark scripts.
+"""
+
 import inspect
 import json
 import os

@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""TensorRT-LLM MLA generation BMM micro-collector.
+
+Benchmarks the auxiliary MLA generation BMM shapes used by TRT-LLM modeling.
+This file owns the synthetic shape grid, BF16/FP8 setup, benchmark calls, and
+MLA BMM perf logging for pre/post generation operations.
+"""
 
 import tensorrt_llm
 import torch

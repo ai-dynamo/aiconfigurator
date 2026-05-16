@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Convert Slurm network benchmark logs into perf text rows.
+
+The Slurm network collectors emit raw NCCL-style logs grouped by machine
+shape. This helper slices those logs by collective operation, normalizes the GPU
+count, dtype, payload size, and latency fields, and appends the results to the
+collector perf text file format used downstream.
+"""
+
 
 class NCCLProfiler:
     def __init__(self, perf_filename="nccl_gb200.txt", prefix=""):

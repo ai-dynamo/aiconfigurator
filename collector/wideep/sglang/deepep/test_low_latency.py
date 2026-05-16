@@ -1,5 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+"""Standalone DeepEP low-latency benchmark.
+
+Measures the low-latency dispatch/combine path used by expert-parallel serving,
+including optional logfmt output for collector ingestion. It creates synthetic
+token/expert assignments, verifies correctness, and reports per-rank timings.
+"""
+
 import argparse
 import random
 from functools import partial

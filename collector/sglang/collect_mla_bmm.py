@@ -1,5 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+"""SGLang MLA generation BMM micro-collector.
+
+Benchmarks the small FP8/BF16 batched-matrix-multiply kernels used around MLA
+generation pre/post processing. It supplies synthetic tensor shapes, selects
+SGLang kernel helpers, and logs the resulting MLA BMM perf rows.
+"""
+
 import pkg_resources
 import torch
 from sgl_kernel import bmm_fp8

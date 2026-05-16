@@ -1,5 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+"""Standalone DeepEP intra-node benchmark.
+
+Exercises DeepEP dispatch/combine paths across ranks on one node, validates
+outputs against reference tensors, and reports bandwidth/latency numbers. The
+collector wrapper can reuse this script to generate WideEP DeepEP evidence.
+"""
+
 import argparse
 import time
 

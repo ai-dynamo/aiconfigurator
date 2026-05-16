@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""vLLM MoE collector for older vLLM fused-experts APIs.
+
+Version route v1 benchmarks vLLM fused_experts with the pre-0.17 API surface.
+It combines YAML-backed MoE model/sweep cases with vLLM quantization support,
+expert-map setup, synthetic routing logits, and perf logging.
+"""
+
 __compat__ = "vllm>=0.14.0"
 
 import os

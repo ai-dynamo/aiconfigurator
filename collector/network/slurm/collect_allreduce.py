@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Run the Slurm-launched TensorRT-LLM all-reduce sweep.
+
+This script is the per-rank worker used by the Slurm network collector. It
+derives world size, rank, local rank, and GPUs-per-node from the Slurm
+environment, runs TensorRT-LLM custom all-reduce for increasing payload sizes,
+and writes latency rows in the same perf text shape consumed by the support
+matrix pipeline.
+"""
 
 import os
 

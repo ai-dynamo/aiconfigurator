@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Measure TensorRT-LLM FP8 compute-scale overhead.
+
+The compute-scale collector compares dynamic FP8 quantization against static
+quantization for each YAML-backed shape. The reported latency isolates the
+scale-computation portion so support matrix data can track the cost separately
+from the static quantize kernel.
+"""
+
 import tensorrt_llm
 import torch
 from case_specs import get_compute_scale_case_specs
