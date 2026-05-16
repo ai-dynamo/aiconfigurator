@@ -10,6 +10,8 @@ import pytest
 from collector.framework_manifest import get_collector_runtime, load_manifest, validate_manifest
 from collector.sglang.registry import REGISTRY as SGLANG_REGISTRY
 from collector.trtllm.registry import REGISTRY as TRTLLM_REGISTRY
+from collector.wideep.sglang.registry import REGISTRY as WIDEEP_SGLANG_REGISTRY
+from collector.wideep.trtllm.registry import REGISTRY as WIDEEP_TRTLLM_REGISTRY
 
 
 def test_manifest_exposes_current_framework_versions_and_images():
@@ -46,11 +48,17 @@ def test_manifest_validation_rejects_wideep_version_drift():
         validate_manifest(manifest)
 
 
-def test_wideep_registry_entries_use_wideep_namespace():
+def test_wideep_registry_entries_are_separate_from_stock_backend_registries():
     sglang_modules = {entry.op: entry.module for entry in SGLANG_REGISTRY}
     trtllm_modules = {entry.op: entry.module for entry in TRTLLM_REGISTRY}
+    wideep_sglang_modules = {entry.op: entry.module for entry in WIDEEP_SGLANG_REGISTRY}
+    wideep_trtllm_modules = {entry.op: entry.module for entry in WIDEEP_TRTLLM_REGISTRY}
 
-    assert sglang_modules["wideep_mla_context"].startswith("collector.wideep.sglang.")
-    assert sglang_modules["wideep_mla_generation"].startswith("collector.wideep.sglang.")
-    assert sglang_modules["wideep_moe"].startswith("collector.wideep.sglang.")
-    assert trtllm_modules["trtllm_moe_wideep"].startswith("collector.wideep.trtllm.")
+    assert "wideep_mla_context" not in sglang_modules
+    assert "wideep_mla_generation" not in sglang_modules
+    assert "wideep_moe" not in sglang_modules
+    assert "trtllm_moe_wideep" not in trtllm_modules
+    assert wideep_sglang_modules["wideep_mla_context"].startswith("collector.wideep.sglang.")
+    assert wideep_sglang_modules["wideep_mla_generation"].startswith("collector.wideep.sglang.")
+    assert wideep_sglang_modules["wideep_moe"].startswith("collector.wideep.sglang.")
+    assert wideep_trtllm_modules["trtllm_moe_wideep"].startswith("collector.wideep.trtllm.")

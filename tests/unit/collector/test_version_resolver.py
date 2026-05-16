@@ -298,11 +298,18 @@ class TestRegistryIntegrity:
     """Validate structural invariants of all backend registries."""
 
     @pytest.fixture(
-        params=["trtllm", "vllm", "sglang"],
+        params=[
+            ("collector.trtllm.registry", "trtllm"),
+            ("collector.vllm.registry", "vllm"),
+            ("collector.sglang.registry", "sglang"),
+            ("collector.wideep.trtllm.registry", "wideep.trtllm"),
+            ("collector.wideep.sglang.registry", "wideep.sglang"),
+        ],
     )
     def registry(self, request):
-        mod = __import__(f"collector.{request.param}.registry", fromlist=["REGISTRY"])
-        return mod.REGISTRY, request.param
+        module_name, backend = request.param
+        mod = __import__(module_name, fromlist=["REGISTRY"])
+        return mod.REGISTRY, backend
 
     def test_every_entry_is_opentry(self, registry):
         reg, backend = registry

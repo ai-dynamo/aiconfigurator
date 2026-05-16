@@ -59,6 +59,8 @@ setup_warning_filters()
 
 import argparse
 import cProfile
+import importlib
+import importlib.util
 import io
 import json
 import multiprocessing as mp
@@ -89,6 +91,32 @@ def _cuda_available() -> bool:
 
 def _xpu_available() -> bool:
     return torch is not None and hasattr(torch, "xpu") and torch.xpu.is_available()
+
+
+def _wideep_registry_for_backend(backend: str) -> list:
+    module_name = f"collector.wideep.{backend}.registry"
+    try:
+        spec = importlib.util.find_spec(module_name)
+    except ModuleNotFoundError:
+        return []
+    if spec is None:
+        return []
+    return list(importlib.import_module(module_name).REGISTRY)
+
+
+def _registry_with_requested_wideep(registry: list, backend: str, ops: list[str] | None, case_plan=None) -> list:
+    wideep_registry = _wideep_registry_for_backend(backend)
+    if not wideep_registry:
+        return registry
+
+    requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
+    requested_wideep_ops = requested_ops & {entry.op for entry in wideep_registry}
+    if not requested_wideep_ops:
+        return registry
+
+    if logger is not None:
+        logger.info(f"WideEP registry active for {backend}: {sorted(requested_wideep_ops)}")
+    return [*registry, *wideep_registry]
 
 
 class ResumeCheckpoint:
@@ -930,7 +958,8 @@ def collect_sglang(
         logger.exception("SGLang is not installed")
         return
 
-    collections = build_collections(REGISTRY, "sglang", version, ops, logger=logger)
+    registry = _registry_with_requested_wideep(REGISTRY, "sglang", ops, case_plan)
+    collections = build_collections(registry, "sglang", version, ops, logger=logger)
     all_errors = collect_ops(
         num_processes,
         collections,
@@ -973,7 +1002,8 @@ def collect_vllm(
         logger.exception("vLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
         return
 
-    collections = build_collections(REGISTRY, "vllm", version, ops, logger=logger)
+    registry = _registry_with_requested_wideep(REGISTRY, "vllm", ops, case_plan)
+    collections = build_collections(registry, "vllm", version, ops, logger=logger)
     all_errors = collect_ops(
         num_processes,
         collections,
@@ -1019,7 +1049,8 @@ def collect_trtllm(
         logger.exception("TensorRT LLM is not installed")
         return
 
-    collections = build_collections(REGISTRY, "trtllm", version, ops, logger=logger)
+    registry = _registry_with_requested_wideep(REGISTRY, "trtllm", ops, case_plan)
+    collections = build_collections(registry, "trtllm", version, ops, logger=logger)
     all_errors = collect_ops(
         num_processes,
         collections,
@@ -1080,14 +1111,22 @@ def generate_collection_summary(all_errors, backend, version):
 
 
 def _all_op_names() -> list[str]:
-    """Collect all unique op names across all backend registries."""
+    """Collect all unique op names across normal and WideEP registries."""
     from collector.sglang.registry import REGISTRY as SGLANG_REG
     from collector.trtllm.registry import REGISTRY as TRTLLM_REG
     from collector.vllm.registry import REGISTRY as VLLM_REG
 
     seen = set()
     ops = []
-    for reg in (TRTLLM_REG, VLLM_REG, SGLANG_REG):
+    registries = [
+        TRTLLM_REG,
+        VLLM_REG,
+        SGLANG_REG,
+        _wideep_registry_for_backend("trtllm"),
+        _wideep_registry_for_backend("vllm"),
+        _wideep_registry_for_backend("sglang"),
+    ]
+    for reg in registries:
         for entry in reg:
             if entry.op not in seen:
                 seen.add(entry.op)
