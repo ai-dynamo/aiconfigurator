@@ -4,7 +4,7 @@
 """WideEP collector registry for SGLang.
 
 These ops require the WideEP/SGLang runtime declared in
-``collector/framework_manifest.json``. They stay out of the stock SGLang
+``collector/framework_manifest.yaml``. They stay out of the stock SGLang
 registry so normal SGLang collection does not accidentally use a special image.
 """
 

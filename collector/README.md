@@ -127,10 +127,10 @@ instead of editing every model case.
 
 ## Overview
 
-Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps ops to collector modules, and a **version resolver** (`version_resolver.py`) that picks the right module at runtime. Individual collector files declare their compatibility via `__compat__`. The current collector framework versions and runtime images are declared in `framework_manifest.json`.
+Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps ops to collector modules, and a **version resolver** (`version_resolver.py`) that picks the right module at runtime. Individual collector files declare their compatibility via `__compat__`. The current collector framework versions and runtime images are declared in `framework_manifest.yaml`.
 
 ```
-framework_manifest.json — current collector framework versions and images
+framework_manifest.yaml — current collector framework versions and images
 framework_manifest.py   — manifest loader/validator
 model_cases.py       — collector v2 model/GPU case planner
 registry.py          — declares which module handles which version range
@@ -143,7 +143,7 @@ wideep/*/registry.py — WideEP-only ops appended when the v2 plan requests them
 network/             — collective communication collectors and Slurm network jobs
 ```
 
-WideEP entries in `framework_manifest.json` must keep the same framework version
+WideEP entries in `framework_manifest.yaml` must keep the same framework version
 as their non-WideEP framework entry. If a WideEP collector needs a special image,
 put only the image override in the WideEP entry and keep the version aligned.
 
