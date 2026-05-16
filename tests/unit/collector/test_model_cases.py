@@ -17,7 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SUPPORT_MATRIX_ROOT = REPO_ROOT / "src" / "aiconfigurator" / "systems" / "support_matrix"
 
 
-def test_model_case_plan_merges_base_model_and_framework_specific_ops():
+def test_model_case_plan_merges_base_op_and_framework_specific_ops():
     plan = build_collection_case_plan(backend="sglang", model_path="deepseek-ai/DeepSeek-V3")
 
     assert plan.model_architecture == "DeepseekV3ForCausalLM"
@@ -55,7 +55,7 @@ def test_base_gemm_cases_are_readable_shape_specs():
     assert filtered == ["case0", "case1"]
 
 
-def test_gemm_common_cases_expand_from_base_yaml_shape_specs():
+def test_gemm_common_cases_expand_from_base_op_yaml_shape_specs():
     from collector.case_specs import (
         ComputeScaleCommonTestCase,
         GemmCommonTestCase,
@@ -76,7 +76,7 @@ def test_gemm_common_cases_expand_from_base_yaml_shape_specs():
     assert compute_scale_cases[-1] == ComputeScaleCommonTestCase(m=1, k=65536)
 
 
-def test_cross_model_common_cases_expand_from_base_yaml_sweeps(monkeypatch):
+def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     from collector.case_specs import (
         get_common_gdn_test_cases,
         get_common_mamba2_test_cases,
