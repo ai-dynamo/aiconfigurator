@@ -40,14 +40,14 @@ framework_specific_op_exceptions:
       rules:
         - reason_type: hardware_unsupported
           reason: SGLang FP8 KV-cache attention requires SM90+.
-          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
           match:
             use_fp8_kv_cache: true
     attention_generation:
       rules:
         - reason_type: hardware_unsupported
           reason: SGLang FP8 KV-cache attention requires SM90+.
-          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
           match:
             use_fp8_kv_cache: true
     dsa_context_module:

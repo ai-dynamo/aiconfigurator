@@ -251,6 +251,10 @@ def run_attention_torch(
         # For FlashInfer default to HND layout
         kv_cache = kv_cache.transpose(2, 3).contiguous().transpose(2, 3)
         set_kv_cache_layout("HND")
+    elif backend_name_str == "TRITON_ATTN":
+        # Triton attention unbinds the K/V axis at dim=1, while the helper
+        # builds the cache as [2, blocks, ...].
+        kv_cache = kv_cache.transpose(0, 1)
 
     # Handle special case for FLEX_ATTENTION_SLOW
     actual_backend = backend_name

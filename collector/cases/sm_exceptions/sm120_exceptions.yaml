@@ -41,7 +41,7 @@ framework_specific_op_exceptions:
         - reason_type: framework_version_unsupported
           version_prefixes: ["0.5.10"]
           reason: SGLang SM120 Triton context attention uses 32-bit indexing and crashes at this large Q/O element boundary.
-          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
           conditions:
             - product:
                 fields: [batch_size, sequence_length, num_heads, head_dim]
