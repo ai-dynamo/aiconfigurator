@@ -65,8 +65,9 @@ The collector loads these model-specific values by op name and honors
 model without editing Python.
 
 Shared sweep recipes live in `base_model_cases.yaml` under
-`common_case_values`. For MoE, the base file owns the token counts,
-parallelism sizes, routing distributions, and generator constraints:
+`common_case_values`. For cross-model ops such as MoE, MLA, Mamba2, GDN, and
+MHC, the base file owns the token counts, batch/sequence sweeps, parallelism
+sizes, routing distributions, and generator constraints:
 
 ```yaml
 common_case_values:
@@ -83,7 +84,9 @@ common_case_values:
 ```
 
 The MoE Python generator only combines those shared sweep values with each
-model's `hidden_size`, `inter_size`, `topk`, and `num_experts`.
+model's `hidden_size`, `inter_size`, `topk`, and `num_experts`. The same pattern
+applies to MLA, Mamba2, GDN, and MHC: model YAML stores model dimensions, while
+base YAML stores the reusable sweep policy.
 
 For simple common ops, `cases` can hold exact generator specs instead of opaque
 case IDs. Base GEMM and attention use readable shape names:

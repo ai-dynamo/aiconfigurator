@@ -76,6 +76,26 @@ def test_gemm_common_cases_expand_from_base_yaml_shape_specs():
     assert compute_scale_cases[-1] == ComputeScaleCommonTestCase(m=1, k=65536)
 
 
+def test_cross_model_common_cases_expand_from_base_yaml_sweeps(monkeypatch):
+    from collector.case_specs import (
+        get_common_gdn_test_cases,
+        get_common_mamba2_test_cases,
+        get_common_mhc_test_cases,
+        get_common_moe_test_cases,
+        get_context_mla_case_specs,
+        get_generation_mla_case_specs,
+    )
+
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+
+    assert len(get_common_moe_test_cases()) == 3654
+    assert len(get_context_mla_case_specs()) == 550
+    assert len(get_generation_mla_case_specs()) == 885
+    assert len(get_common_mamba2_test_cases()) == 8
+    assert len(get_common_gdn_test_cases()) == 16
+    assert len(get_common_mhc_test_cases()) == 8
+
+
 def test_model_cases_path_can_infer_model_path():
     model_cases_path = default_architecture_cases_path("DeepseekV4ForCausalLM")
 
