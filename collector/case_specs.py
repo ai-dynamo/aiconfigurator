@@ -339,32 +339,23 @@ def _get_mla_case_specs(is_context: bool):
     test_cases = []
 
     model_config_list = _model_case_values("mla")
+    mla_sweep = _required_base_common_case_values("mla")
 
     if is_context:
-        b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-        s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 32768]
+        b_list = _as_int_list(mla_sweep.get("context_batch_sizes"), field_name="mla.context_batch_sizes")
+        s_list = _as_int_list(mla_sweep.get("context_sequence_lengths"), field_name="mla.context_sequence_lengths")
+        max_tokens = int(mla_sweep["max_context_tokens"])
     else:
-        b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-        s_list = [
-            2,
-            4,
-            8,
-            16,
-            32,
-            64,
-            128,
-            256,
-            512,
-            1024,
-            2048,
-            4096,
-            8192,
-            16384,
-            32768,
-            65536,
-            131072,
-        ]  # [target token s] is equivalent to [in: s-1, step=1]
-    kv_cache_block_size_list = [64]
+        b_list = _as_int_list(mla_sweep.get("generation_batch_sizes"), field_name="mla.generation_batch_sizes")
+        s_list = _as_int_list(
+            mla_sweep.get("generation_target_sequence_lengths"),
+            field_name="mla.generation_target_sequence_lengths",
+        )
+        max_tokens = int(mla_sweep["max_generation_tokens"])
+    kv_cache_block_size_list = _as_int_list(
+        mla_sweep.get("kv_cache_block_sizes"),
+        field_name="mla.kv_cache_block_sizes",
+    )
 
     for (
         s,
@@ -377,12 +368,8 @@ def _get_mla_case_specs(is_context: bool):
         kv_cache_block_size_list,
         model_config_list,
     ):
-        if is_context:
-            if b * s > 65536:
-                continue
-        else:
-            if b * s > 1024 * 4096 * 2 * 2:
-                continue
+        if b * s > max_tokens:
+            continue
 
         test_cases.append(
             MLACommonTestCase(
@@ -446,52 +433,19 @@ def get_common_mamba2_test_cases() -> list[Mamba2CommonTestCase]:
         List of Mamba2CommonTestCase configurations
     """
     test_cases: list[Mamba2CommonTestCase] = []
-
-    # Sequence lengths for context (prefill) phase
-    context_seq_lens = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-        2048,
-        4096,
-        8192,
-        16384,
-        32768,
-    ]
-
-    # Batch sizes for context phase
-    context_batch_sizes = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-    ]
-
-    # Batch sizes for generation (decode) phase
-    generation_batch_sizes = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-    ]
+    mamba2_sweep = _required_base_common_case_values("mamba2")
+    context_seq_lens = _as_int_list(
+        mamba2_sweep.get("context_sequence_lengths"),
+        field_name="mamba2.context_sequence_lengths",
+    )
+    context_batch_sizes = _as_int_list(
+        mamba2_sweep.get("context_batch_sizes"),
+        field_name="mamba2.context_batch_sizes",
+    )
+    generation_batch_sizes = _as_int_list(
+        mamba2_sweep.get("generation_batch_sizes"),
+        field_name="mamba2.generation_batch_sizes",
+    )
 
     model_config_list = _model_case_values("mamba2")
 
@@ -583,43 +537,8 @@ class MhcCommonTestCase:
 
 def get_common_mhc_test_cases() -> list[MhcCommonTestCase]:
     """Generate common test cases for mHC (pre/post) kernel benchmarking."""
-    num_tokens_list = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        320,
-        384,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-        12288,
-        16384,
-        20480,
-        32768,
-        49152,
-        65536,
-        98304,
-        131072,
-        262144,
-        524288,
-    ]
+    mhc_sweep = _required_base_common_case_values("mhc")
+    num_tokens_list = _as_int_list(mhc_sweep.get("token_counts"), field_name="mhc.token_counts")
 
     model_config_list = _model_case_values("mhc")
 
@@ -649,52 +568,19 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
     for both context (prefill) and generation (decode) phases.
     """
     test_cases: list[GdnCommonTestCase] = []
-
-    # Sequence lengths for context (prefill) phase
-    context_seq_lens = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-        2048,
-        4096,
-        8192,
-        16384,
-        32768,
-    ]
-
-    # Batch sizes for context phase
-    context_batch_sizes = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-    ]
-
-    # Batch sizes for generation (decode) phase
-    generation_batch_sizes = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-    ]
+    gdn_sweep = _required_base_common_case_values("gdn")
+    context_seq_lens = _as_int_list(
+        gdn_sweep.get("context_sequence_lengths"),
+        field_name="gdn.context_sequence_lengths",
+    )
+    context_batch_sizes = _as_int_list(
+        gdn_sweep.get("context_batch_sizes"),
+        field_name="gdn.context_batch_sizes",
+    )
+    generation_batch_sizes = _as_int_list(
+        gdn_sweep.get("generation_batch_sizes"),
+        field_name="gdn.generation_batch_sizes",
+    )
 
     model_config_list = _model_case_values("gdn")
 
