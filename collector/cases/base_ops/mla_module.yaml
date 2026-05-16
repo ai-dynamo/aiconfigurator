@@ -60,3 +60,77 @@ common_case_values:
       - 'generation: batch_size * sequence_length <= 262144'
       - 'generation: sequence_length >= 8192 requires batch_size <= 16'
       - top_level_head_counts keep ModelRunner-loading subprocess counts manageable.
+  mla_module_trtllm:
+    description: Exact TRT-LLM full MLA/DSA module micro-benchmark sweep.
+    context_batch_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+    context_sequence_lengths:
+      - 1
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 1536
+      - 2048
+      - 3072
+      - 4096
+      - 6144
+      - 8192
+      - 10240
+      - 12288
+      - 16384
+      - 32768
+    generation_batch_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+    generation_sequence_lengths:
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 2048
+      - 4096
+      - 8192
+      - 16384
+      - 32768
+      - 65536
+      - 131072
+    head_counts:
+      - 128
+      - 64
+      - 32
+      - 16
+      - 8
+      - 4
+      - 2
+      - 1
+    context:
+      max_tokens: 131072
+    generation:
+      max_tokens: 33554432

@@ -164,6 +164,13 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
     assert sweep.top_level_head_counts == [128, 64]
     assert sweep.module_precision_combos == [("bfloat16", "bfloat16", "bfloat16")]
 
+    trtllm_sweep = get_mla_module_sweep_spec("trtllm")
+    assert trtllm_sweep.context_batch_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    assert trtllm_sweep.context_sequence_lengths[-1] == 32768
+    assert trtllm_sweep.generation_sequence_lengths[-1] == 131072
+    assert trtllm_sweep.inner_sweep_head_counts == [128, 64, 32, 16, 8, 4, 2, 1]
+    assert trtllm_sweep.generation_max_tokens == 33554432
+
     assert {spec.model_path for spec in dsa_specs} == {
         "deepseek-ai/DeepSeek-V3.2",
         "zai-org/GLM-5",
@@ -196,6 +203,7 @@ def test_model_architecture_can_select_case_file():
     assert plan.model_architecture == "Qwen3MoeForCausalLM"
     assert plan.model_cases_paths == [default_architecture_cases_path("Qwen3MoeForCausalLM")]
     assert "moe" in plan.op_cases
+    assert "mla_module" not in plan.op_cases
 
 
 def test_model_path_alias_resolves_architecture_case_file():
