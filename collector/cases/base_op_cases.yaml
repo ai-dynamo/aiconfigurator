@@ -520,6 +520,20 @@ all_frameworks_op_cases:
 
 framework_specific_op_cases:
   trtllm:
+    attention_context:
+      cases:
+        - id: base_attention_context_shape_sweep
+          head_dims:
+            - 64
+            - 128
+            - 256
+    attention_generation:
+      cases:
+        - id: base_attention_generation_shape_sweep
+          head_dims:
+            - 64
+            - 128
+            - 256
     compute_scale:
       cases:
         - id: trtllm_fp8_compute_scale_shape_sweep
@@ -551,4 +565,143 @@ framework_specific_op_cases:
             - 32
             - 65536
   sglang: {}
-  vllm: {}
+  vllm:
+    attention_context:
+      cases:
+        - id: base_attention_context_shape_sweep
+          query_head_counts:
+            - 1
+            - 2
+            - 4
+            - 8
+            - 12
+            - 16
+            - 24
+            - 32
+            - 40
+            - 48
+            - 64
+          head_dims:
+            - 128
+            - 64
+          window_sizes:
+            - 0
+            - 128
+    attention_generation:
+      cases:
+        - id: base_attention_generation_shape_sweep
+          mha_query_head_counts:
+            - 1
+            - 2
+            - 4
+            - 8
+            - 12
+            - 16
+            - 24
+            - 32
+            - 40
+            - 48
+            - 64
+          xqa_query_head_counts:
+            - 1
+            - 2
+            - 4
+            - 8
+            - 12
+            - 16
+            - 24
+            - 32
+            - 40
+            - 48
+            - 64
+          head_dims:
+            - 128
+            - 64
+          window_sizes:
+            - 0
+            - 128
+  vllm_xpu:
+    attention_context:
+      cases:
+        - id: base_attention_context_shape_sweep
+          batch_sizes:
+            - 1
+            - 2
+            - 4
+            - 8
+            - 16
+            - 32
+          sequence_lengths:
+            - 1
+            - 16
+            - 32
+            - 64
+            - 128
+            - 256
+            - 512
+            - 1024
+            - 1536
+            - 2048
+            - 3072
+            - 4096
+            - 6144
+            - 8192
+            - 10240
+            - 12288
+            - 16384
+          query_head_counts:
+            - 1
+            - 2
+            - 4
+            - 8
+            - 12
+            - 16
+            - 24
+            - 32
+            - 40
+            - 48
+            - 64
+          kv_head_options:
+            - 1
+            - 2
+            - 4
+            - 8
+          head_dims:
+            - 128
+            - 64
+          window_sizes:
+            - 0
+            - 128
+    attention_generation:
+      cases:
+        - id: base_attention_generation_shape_sweep
+          mha_query_head_counts:
+            - 1
+            - 2
+            - 4
+            - 8
+            - 12
+            - 16
+            - 24
+            - 32
+            - 40
+            - 48
+            - 64
+          xqa_query_head_counts:
+            - 1
+            - 2
+            - 4
+            - 8
+            - 12
+            - 16
+            - 24
+            - 32
+            - 40
+            - 48
+            - 64
+          head_dims:
+            - 128
+            - 64
+          window_sizes:
+            - 0
+            - 128
