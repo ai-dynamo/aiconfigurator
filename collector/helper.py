@@ -12,12 +12,14 @@ case files; this file should stay focused on reusable execution mechanics.
 
 import csv
 import functools
+import hashlib
 import heapq
 import json
 import logging
 import math
 import multiprocessing as mp
 import os
+import re
 import signal
 import sys
 import threading
@@ -448,6 +450,23 @@ def setup_signal_handlers(worker_id):
 # Global tracking
 _LOGGING_CONFIGURED = False
 _LOG_DIR = None
+_MAX_LOG_SCOPE_NAME_BYTES = 180
+
+
+def _log_scope_dir_name(scope):
+    parts = [str(part) for part in scope] if scope else ["all"]
+    scope_name = "+".join(parts)
+    safe_scope_name = re.sub(r"[^A-Za-z0-9_.+-]+", "_", scope_name).strip("._-+")
+    safe_scope_name = safe_scope_name or "all"
+    if len(safe_scope_name.encode("utf-8")) <= _MAX_LOG_SCOPE_NAME_BYTES:
+        return safe_scope_name
+
+    digest = hashlib.sha1(safe_scope_name.encode("utf-8")).hexdigest()[:12]
+    first_part = re.sub(r"[^A-Za-z0-9_.+-]+", "_", parts[0]).strip("._-+") or "scope"
+    suffix = f"+{len(parts)}ops+{digest}" if len(parts) > 1 else f"+{digest}"
+    available_prefix_bytes = _MAX_LOG_SCOPE_NAME_BYTES - len(suffix.encode("utf-8"))
+    prefix = first_part[:available_prefix_bytes].rstrip("._-+") or "scope"
+    return f"{prefix}{suffix}"
 
 
 def setup_logging(scope=["all"], debug=False, worker_id=None):
@@ -534,7 +553,7 @@ def setup_logging(scope=["all"], debug=False, worker_id=None):
 
     # Create log directory
     time_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    _LOG_DIR = Path(f"{'+'.join(scope)}_{time_stamp}")
+    _LOG_DIR = Path(f"{_log_scope_dir_name(scope)}_{time_stamp}")
     if not _LOG_DIR.is_dir():
         _LOG_DIR.mkdir()
 
