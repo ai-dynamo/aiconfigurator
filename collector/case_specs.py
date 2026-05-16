@@ -46,6 +46,26 @@ def get_base_framework_op_case_specs(backend: str, op_name: str) -> list[dict[st
     return [case for case in cases if isinstance(case, dict)]
 
 
+def get_base_common_case_values(name: str) -> dict[str, object]:
+    """Return shared scalar/list values from base_model_cases.yaml."""
+    try:
+        values = _load_base_cases_data().get("common_case_values", {}).get(name, {})
+    except FileNotFoundError:
+        return {}
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise TypeError(f"common_case_values.{name} must be a mapping")
+    return values
+
+
+def _required_base_common_case_values(name: str) -> dict[str, object]:
+    values = get_base_common_case_values(name)
+    if not values:
+        raise RuntimeError(f"{BASE_CASES_PATH} is missing common_case_values.{name}")
+    return values
+
+
 def _get_model_path_filter() -> str | None:
     """Return the model-path filter from the environment, or None for 'all'."""
     val = os.environ.get("COLLECTOR_MODEL_PATH", "").strip()
@@ -138,45 +158,30 @@ class MoeCommonTestCase:
     power_law_alpha: Optional[float]
 
 
-def get_common_moe_test_cases():
-    num_tokens = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        320,
-        384,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-        12288,
-        16384,
-    ]
-    tp_list = [1, 2, 4, 8, 16, 32]
-    ep_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    num_gpu_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+def _moe_token_expert_distributions(moe_sweep: dict[str, object]) -> list[tuple[str, Optional[float]]]:
+    raw_distributions = moe_sweep.get("token_expert_distributions")
+    if not isinstance(raw_distributions, list):
+        raise TypeError("common_case_values.moe.token_expert_distributions must be a list")
 
-    token_distributions = [
-        ("balanced", 0.0),
-        ("power_law", 1.01),
-        ("power_law", 1.2),
-    ]
+    distributions = []
+    for item in raw_distributions:
+        if not isinstance(item, dict):
+            raise TypeError("common_case_values.moe.token_expert_distributions entries must be mappings")
+        name = item.get("name") or item.get("distribution")
+        if not name:
+            raise ValueError("MoE token expert distribution entries need a name")
+        alpha = item.get("power_law_alpha")
+        distributions.append((str(name), None if alpha is None else float(alpha)))
+    return distributions
+
+
+def get_common_moe_test_cases():
+    moe_sweep = _required_base_common_case_values("moe")
+    num_tokens = _as_int_list(moe_sweep.get("token_counts"), field_name="moe.token_counts")
+    tp_list = _as_int_list(moe_sweep.get("tensor_parallel_sizes"), field_name="moe.tensor_parallel_sizes")
+    ep_list = _as_int_list(moe_sweep.get("expert_parallel_sizes"), field_name="moe.expert_parallel_sizes")
+    num_gpu_list = _as_int_list(moe_sweep.get("gpu_counts"), field_name="moe.gpu_counts")
+    token_distributions = _moe_token_expert_distributions(moe_sweep)
 
     model_config_list = _model_case_values("moe")
 
@@ -240,51 +245,6 @@ class GemmCommonTestCase:
     k: int
 
 
-def _legacy_gemm_shape_sweep() -> list[dict[str, object]]:
-    token_counts = list(range(1, 16))
-    token_counts += list(range(16, 128, 16)) + [i + 1 for i in range(16, 128, 16)]
-    token_counts += list(range(128, 256, 32)) + [i + 1 for i in range(128, 256, 32)]
-    for x in range(256, 4096 + 257, 256):
-        token_counts.append(x)
-        token_counts.append(x + 1)
-        # after 4096, the zig-zag pattern can be ignored
-
-    x = 8192
-    while x <= 32768:
-        token_counts.append(x)
-        x *= 2
-    token_counts.sort()  # sort the token count list to make it easier to debug
-    feature_sizes = [
-        32,
-        64,
-        128,
-        256,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        2560,
-        3072,
-        3584,
-        4096,
-        5120,
-        6144,
-        7168,
-        8192,
-        10240,
-        12288,
-    ]
-    feature_sizes += [16384, 51200, 65536]  # for coverage and interp purpose
-    return [
-        {
-            "token_counts": token_counts,
-            "feature_sizes": feature_sizes,
-            "skip_shapes": [{"input_features": 65536, "output_features": 65536}],
-        }
-    ]
-
-
 def _as_int_list(value, *, field_name: str) -> list[int]:
     if not isinstance(value, list):
         raise TypeError(f"{field_name} must be a list")
@@ -293,7 +253,9 @@ def _as_int_list(value, *, field_name: str) -> list[int]:
 
 def _get_base_gemm_shape_sweeps() -> list[dict[str, object]]:
     shape_sweeps = get_base_op_case_specs("gemm")
-    return shape_sweeps or _legacy_gemm_shape_sweep()
+    if not shape_sweeps:
+        raise RuntimeError(f"{BASE_CASES_PATH} is missing all_frameworks_op_cases.gemm.cases")
+    return shape_sweeps
 
 
 def get_gemm_case_specs() -> list[GemmCommonTestCase]:

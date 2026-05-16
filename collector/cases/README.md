@@ -64,6 +64,27 @@ The collector loads these model-specific values by op name and honors
 `COLLECTOR_MODEL_PATH`, so support-matrix healing can request cases for one
 model without editing Python.
 
+Shared sweep recipes live in `base_model_cases.yaml` under
+`common_case_values`. For MoE, the base file owns the token counts,
+parallelism sizes, routing distributions, and generator constraints:
+
+```yaml
+common_case_values:
+  moe:
+    token_counts: [1, 2, 4, 8, 16]
+    tensor_parallel_sizes: [1, 2, 4, 8]
+    expert_parallel_sizes: [1, 2, 4, 8]
+    gpu_counts: [1, 2, 4, 8]
+    token_expert_distributions:
+      - name: balanced
+        power_law_alpha: 0.0
+      - name: power_law
+        power_law_alpha: 1.01
+```
+
+The MoE Python generator only combines those shared sweep values with each
+model's `hidden_size`, `inter_size`, `topk`, and `num_experts`.
+
 For simple common ops, `cases` can hold exact generator specs instead of opaque
 case IDs. Base GEMM and attention use readable shape names:
 
