@@ -99,7 +99,7 @@ try:
 except Exception:
     pass
 
-from collector.common_test_cases import get_common_moe_test_cases
+from collector.case_specs import get_common_moe_test_cases
 from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112

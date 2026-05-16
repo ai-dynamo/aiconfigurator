@@ -43,7 +43,7 @@ if COLLECTOR_ROOT not in sys.path:
     sys.path.append(COLLECTOR_ROOT)
 
 try:
-    from common_test_cases import get_common_moe_test_cases, is_wideep_moe_model
+    from case_specs import get_common_moe_test_cases, is_wideep_moe_model
 
     from helper import (
         EXIT_CODE_RESTART,
@@ -55,7 +55,7 @@ try:
     )
 except ModuleNotFoundError:
     sys.path.append(COLLECTOR_ROOT)
-    from common_test_cases import get_common_moe_test_cases, is_wideep_moe_model
+    from case_specs import get_common_moe_test_cases, is_wideep_moe_model
 
     from helper import (
         EXIT_CODE_RESTART,

@@ -11,6 +11,15 @@ description: >
   DeepSeek-V3.2 DSA model-centric collection plan. DSA module data is
   framework-specific while MoE and base attention/GEMM cases stay shared.
 
+model_case_values:
+  moe:
+    - model_path: deepseek-ai/DeepSeek-V3.2
+      hidden_size: 7168
+      inter_size: 2048
+      topk: 8
+      num_experts: 256
+      wideep: true
+
 all_frameworks_op_cases:
   moe:
     cases: all

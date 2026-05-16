@@ -15,7 +15,40 @@ include_base: true
 description: >
   Qwen3 MoE model-centric collection plan.
 
+model_case_values:
+  moe:
+    - model_path: Qwen/Qwen3-30B-A3B
+      hidden_size: 2048
+      inter_size: 768
+      topk: 8
+      num_experts: 128
+      max_tp_exclusive: 8
+    - model_path: Qwen/Qwen3-30B-A3B-FP8
+      hidden_size: 2048
+      inter_size: 768
+      topk: 8
+      num_experts: 128
+    - model_path: Qwen/Qwen3-235B-A22B
+      hidden_size: 4096
+      inter_size: 1536
+      topk: 8
+      num_experts: 128
+    - model_path: Qwen/Qwen3-235B-A22B-FP8
+      hidden_size: 4096
+      inter_size: 1536
+      topk: 8
+      num_experts: 128
+    - model_path: nvidia/Qwen3-235B-A22B-NVFP4
+      hidden_size: 4096
+      inter_size: 1536
+      topk: 8
+      num_experts: 128
+    - model_path: Qwen/Qwen3-Coder-480B-A35B-Instruct
+      hidden_size: 6144
+      inter_size: 2560
+      topk: 8
+      num_experts: 160
+
 all_frameworks_op_cases:
   moe:
     cases: all
-

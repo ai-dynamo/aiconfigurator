@@ -11,7 +11,19 @@ include_base: true
 description: >
   GPT-OSS MoE model-centric collection plan.
 
+model_case_values:
+  moe:
+    - model_path: openai/gpt-oss-120b
+      hidden_size: 2880
+      inter_size: 2880
+      topk: 4
+      num_experts: 128
+    - model_path: openai/gpt-oss-20b
+      hidden_size: 2880
+      inter_size: 2880
+      topk: 4
+      num_experts: 32
+
 all_frameworks_op_cases:
   moe:
     cases: all
-

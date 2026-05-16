@@ -75,7 +75,7 @@ except ImportError:
     pass
 
 try:
-    from common_test_cases import get_common_moe_test_cases
+    from case_specs import get_common_moe_test_cases
 
     from helper import (
         balanced_logits,
@@ -90,7 +90,7 @@ except ModuleNotFoundError:
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from common_test_cases import get_common_moe_test_cases
+    from case_specs import get_common_moe_test_cases
 
     from helper import (
         balanced_logits,

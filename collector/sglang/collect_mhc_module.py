@@ -29,13 +29,13 @@ if THIS_DIR not in sys.path:
     sys.path.append(THIS_DIR)
 
 try:
-    from common_test_cases import get_common_mhc_test_cases
+    from case_specs import get_common_mhc_test_cases
     from registry_types import PerfFile
 
     from helper import EXIT_CODE_RESTART, benchmark_with_power, log_perf
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from common_test_cases import get_common_mhc_test_cases
+    from case_specs import get_common_mhc_test_cases
     from registry_types import PerfFile
 
     from helper import EXIT_CODE_RESTART, benchmark_with_power, log_perf
@@ -75,10 +75,10 @@ def _read_model_config(model_id: str) -> dict:
 
 
 def _default_num_tokens(model_path: str) -> list[int]:
-    """Return the default num_tokens sweep for ``model_path`` from common_test_cases.
+    """Return the default num_tokens sweep for ``model_path`` from case_specs.
 
     Falls back to the first registered mHC test case when ``model_path`` is not
-    listed in ``common_test_cases.py`` (e.g. custom / local model ids). All
+    listed in ``case_specs.py`` (e.g. custom / local model ids). All
     registered models share the same sweep, so the fallback is equivalent.
     """
     cases = get_common_mhc_test_cases()
