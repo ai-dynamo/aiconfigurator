@@ -155,7 +155,7 @@ def get_context_attention_test_cases():
     s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 262144]
     n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64, 96]
     n_kv_list = [0, 1, 2, 4, 8]
-    head_dim_list = [128, 256]
+    head_dim_list = [128, 192, 256]
 
     # FP8 attention requires SM90+ (Hopper)
     sm_version = get_sm_version()
@@ -209,7 +209,7 @@ def get_generation_attention_test_cases():
     n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
     n_list_xqa = [1, 2, 4, 8, 16, 32, 64, 96, 128]
     n_kv_list = [1, 2, 4, 8]
-    head_dim_list = [128, 256]
+    head_dim_list = [128, 192, 256]
 
     # MHA
     max_bsn = 8192 * 1024
@@ -292,6 +292,7 @@ def run_attention_torch(
     use_fp8_kv_cache,
     use_fp8_context_fmha,
     is_context_phase,
+    window_size=0,
     *,
     perf_filename,
     device="cuda:0",
@@ -313,6 +314,7 @@ def run_attention_torch(
         head_dim=head_dim,
     )
     model_runner.kv_cache_dtype = kvtype
+    model_runner.sliding_window_size = window_size if window_size > 0 else None
 
     total_len = input_len if is_context_phase else input_len + 1
     req_to_token_pool, token_matrix = create_req_to_token_pool(
@@ -342,9 +344,11 @@ def run_attention_torch(
     model_runner.token_to_kv_pool = kv_pool
 
     sm_version = get_sm_version()
-    if sm_version >= 110:
+    use_triton_attention = sm_version >= 110 or (sm_version >= 100 and head_dim == 192)
+    if use_triton_attention:
         # SM120+ (workstation Blackwell): TRTLLM prefill (TllmGenFmhaRunner) is unsupported;
-        # FA3 is not compiled for SM120. Use Triton JIT-compiled backend instead.
+        # FA3 is not compiled for SM120. B200/SM100 TRTLLM also lacks head-dim 192
+        # kernels, which MiMo-style models need. Use Triton JIT-compiled backend instead.
         from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
 
         attn_backend = TritonAttnBackend(model_runner)
@@ -373,6 +377,7 @@ def run_attention_torch(
         num_kv_heads=num_key_value_heads,
         layer_id=0,
     ).to(torch_device)
+    layer.sliding_window_size = window_size if window_size > 0 else None
 
     seqlen_q = input_len if is_context_phase else 1
     q = torch.randn(
@@ -530,6 +535,7 @@ def run_attention_torch(
                 "attn_dtype": "fp8" if use_fp8_context_fmha else "bfloat16",
                 "kv_cache_dtype": "fp8" if use_fp8_kv_cache else "bfloat16",
                 "step": step,
+                "window_size": window_size,
                 "latency": latency,
             }
         ],
