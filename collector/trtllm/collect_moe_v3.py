@@ -36,7 +36,7 @@ from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 # supported in trtllm 1.3.0rc1, please expect failures for these models if using trtllm < 1.3.0rc1
 NON_GATED_MOE_MODELS = ["Nemotron-3"]
 
-from collector.case_specs import get_common_moe_test_cases
+from collector.case_generator import get_common_moe_test_cases
 from collector.helper import (
     EXIT_CODE_RESTART,
     balanced_logits,

@@ -22,7 +22,7 @@ from sgl_kernel import (
     sgl_per_token_quant_fp8,
 )
 
-from collector.case_specs import get_gemm_case_specs
+from collector.case_generator import get_gemm_case_specs
 
 try:
     from flashinfer import fp4_quantize as flashinfer_fp4_quantize

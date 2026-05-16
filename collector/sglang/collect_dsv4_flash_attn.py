@@ -65,36 +65,36 @@ except ModuleNotFoundError:
 # collect.py's registry (``module="collector.sglang.collect_dsv4_flash_attn"``)
 # can resolve them via getattr.
 try:
-    from collector.case_specs import (
+    from collector.case_generator import (
         _DSV4_FLASH_MODULE_BATCH_SIZES as _BATCH_SIZES,
     )
-    from collector.case_specs import (
+    from collector.case_generator import (
         _DSV4_FLASH_MODULE_SEQ_LENGTHS as _SEQ_LENGTHS,
     )
-    from collector.case_specs import (
+    from collector.case_generator import (
         _DSV4_FLASH_MODULE_TP_SIZES as _TP_SIZES,
     )
-    from collector.case_specs import (
+    from collector.case_generator import (
         DSV4_FLASH_ATTN_KINDS as ATTN_KINDS,
     )
-    from collector.case_specs import (
+    from collector.case_generator import (
         _dsv4_flash_module_filter_pairs as _filter_pairs,
     )
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from case_specs import (
+    from case_generator import (
         _DSV4_FLASH_MODULE_BATCH_SIZES as _BATCH_SIZES,
     )
-    from case_specs import (
+    from case_generator import (
         _DSV4_FLASH_MODULE_SEQ_LENGTHS as _SEQ_LENGTHS,
     )
-    from case_specs import (
+    from case_generator import (
         _DSV4_FLASH_MODULE_TP_SIZES as _TP_SIZES,
     )
-    from case_specs import (
+    from case_generator import (
         DSV4_FLASH_ATTN_KINDS as ATTN_KINDS,
     )
-    from case_specs import (
+    from case_generator import (
         _dsv4_flash_module_filter_pairs as _filter_pairs,
     )
 
@@ -105,25 +105,25 @@ def _expand_grid():
 
 
 def get_dsv4_flash_csa_context_test_cases():
-    from collector.case_specs import get_dsv4_flash_csa_context_test_cases as _impl
+    from collector.case_generator import get_dsv4_flash_csa_context_test_cases as _impl
 
     return _impl()
 
 
 def get_dsv4_flash_csa_generation_test_cases():
-    from collector.case_specs import get_dsv4_flash_csa_generation_test_cases as _impl
+    from collector.case_generator import get_dsv4_flash_csa_generation_test_cases as _impl
 
     return _impl()
 
 
 def get_dsv4_flash_hca_context_test_cases():
-    from collector.case_specs import get_dsv4_flash_hca_context_test_cases as _impl
+    from collector.case_generator import get_dsv4_flash_hca_context_test_cases as _impl
 
     return _impl()
 
 
 def get_dsv4_flash_hca_generation_test_cases():
-    from collector.case_specs import get_dsv4_flash_hca_generation_test_cases as _impl
+    from collector.case_generator import get_dsv4_flash_hca_generation_test_cases as _impl
 
     return _impl()
 

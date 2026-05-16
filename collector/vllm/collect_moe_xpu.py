@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
-from collector.case_specs import MoeCommonTestCase
+from collector.case_generator import MoeCommonTestCase
 from collector.helper import (
     balanced_logits,
     benchmark_with_power,

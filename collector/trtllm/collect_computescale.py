@@ -11,7 +11,7 @@ from the static quantize kernel.
 
 import tensorrt_llm
 import torch
-from case_specs import get_compute_scale_case_specs
+from case_generator import get_compute_scale_case_specs
 
 from helper import benchmark_with_power, get_sm_version, log_perf
 

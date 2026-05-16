@@ -56,7 +56,7 @@ def test_base_gemm_cases_are_readable_shape_specs():
 
 
 def test_gemm_common_cases_expand_from_base_op_yaml_shape_specs():
-    from collector.case_specs import (
+    from collector.case_generator import (
         ComputeScaleCommonTestCase,
         GemmCommonTestCase,
         get_compute_scale_case_specs,
@@ -77,7 +77,7 @@ def test_gemm_common_cases_expand_from_base_op_yaml_shape_specs():
 
 
 def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
-    from collector.case_specs import (
+    from collector.case_generator import (
         get_common_gdn_test_cases,
         get_common_mamba2_test_cases,
         get_common_mhc_test_cases,
@@ -155,7 +155,7 @@ def test_support_matrix_models_have_model_case_aliases():
 
 
 def test_support_matrix_moe_alias_generates_targeted_cases(monkeypatch):
-    from collector.case_specs import get_common_moe_test_cases
+    from collector.case_generator import get_common_moe_test_cases
 
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "Qwen/Qwen3-235B-A22B-FP8")
 
@@ -166,7 +166,7 @@ def test_support_matrix_moe_alias_generates_targeted_cases(monkeypatch):
 
 
 def test_support_matrix_mamba_alias_generates_targeted_cases(monkeypatch):
-    from collector.case_specs import get_common_mamba2_test_cases
+    from collector.case_generator import get_common_mamba2_test_cases
 
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4")
 

@@ -5,7 +5,7 @@
 
 Expands shared GEMM case specs into TRT-LLM Linear-layer benchmarks across BF16,
 FP8, FP8 block, and related quantization modes. Shape policy comes from
-`case_specs.py`/YAML; this file owns TRT-LLM layer construction, padding,
+`case_generator.py`/YAML; this file owns TRT-LLM layer construction, padding,
 quantized-weight setup, and perf logging.
 """
 
@@ -16,7 +16,7 @@ from collections import defaultdict
 import tensorrt_llm
 import torch
 import torch.nn.functional as F
-from case_specs import get_gemm_case_specs
+from case_generator import get_gemm_case_specs
 from tensorrt_llm._torch.modules.linear import Linear
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 

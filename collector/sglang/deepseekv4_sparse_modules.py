@@ -48,57 +48,57 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from helper import benchmark_with_power, log_perf
 
-# Re-export test case generators from the centralised case_specs
+# Re-export test case generators from the centralized case generator
 # module so collect.py's registry can resolve them via getattr on this module.
 try:
-    from collector.case_specs import (
+    from collector.case_generator import (
         _DSV4_FLASH_MODEL_PATH as DEFAULT_MODEL,
     )
-    from collector.case_specs import (
+    from collector.case_generator import (
         _DSV4_FLASH_SPARSE_BS_LIST as DEFAULT_BS_LIST,
     )
-    from collector.case_specs import (
+    from collector.case_generator import (
         _DSV4_FLASH_SPARSE_ISL_LIST as DEFAULT_ISL_LIST,
     )
-    from collector.case_specs import (
+    from collector.case_generator import (
         _DSV4_FLASH_SPARSE_PAST_KV_LIST as DEFAULT_PAST_KV_LIST,
     )
-    from collector.case_specs import (
+    from collector.case_generator import (
         _DSV4_FLASH_SPARSE_TP_LIST_ATTN as DEFAULT_TP_LIST_ATTN,
     )
-    from collector.case_specs import (
+    from collector.case_generator import (
         DSV4_FLASH_SPARSE_KERNELS as KERNELS,
     )
-    from collector.case_specs import (
+    from collector.case_generator import (
         _build_dsv4_flash_sparse_test_cases as _build_sparse_test_cases,
     )
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from case_specs import (
+    from case_generator import (
         _DSV4_FLASH_MODEL_PATH as DEFAULT_MODEL,
     )
-    from case_specs import (
+    from case_generator import (
         _DSV4_FLASH_SPARSE_BS_LIST as DEFAULT_BS_LIST,
     )
-    from case_specs import (
+    from case_generator import (
         _DSV4_FLASH_SPARSE_ISL_LIST as DEFAULT_ISL_LIST,
     )
-    from case_specs import (
+    from case_generator import (
         _DSV4_FLASH_SPARSE_PAST_KV_LIST as DEFAULT_PAST_KV_LIST,
     )
-    from case_specs import (
+    from case_generator import (
         _DSV4_FLASH_SPARSE_TP_LIST_ATTN as DEFAULT_TP_LIST_ATTN,
     )
-    from case_specs import (
+    from case_generator import (
         DSV4_FLASH_SPARSE_KERNELS as KERNELS,
     )
-    from case_specs import (
+    from case_generator import (
         _build_dsv4_flash_sparse_test_cases as _build_sparse_test_cases,
     )
 
 
 def get_dsv4_flash_paged_mqa_logits_test_cases():
-    from collector.case_specs import get_dsv4_flash_paged_mqa_logits_test_cases as _impl
+    from collector.case_generator import get_dsv4_flash_paged_mqa_logits_test_cases as _impl
 
     if not _dsv4_sparse_kernel_supported("paged_mqa_logits"):
         return []
@@ -106,7 +106,7 @@ def get_dsv4_flash_paged_mqa_logits_test_cases():
 
 
 def get_dsv4_flash_hca_attn_test_cases():
-    from collector.case_specs import get_dsv4_flash_hca_attn_test_cases as _impl
+    from collector.case_generator import get_dsv4_flash_hca_attn_test_cases as _impl
 
     if not _dsv4_sparse_kernel_supported("hca_attn"):
         return []

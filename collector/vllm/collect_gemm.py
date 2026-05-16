@@ -5,7 +5,7 @@
 
 Builds vLLM RowParallelLinear layers with synthetic weights to benchmark BF16,
 FP8, FP8 block, and FP4-style paths where available. Shared GEMM shapes come
-from `case_specs.py`; this file handles vLLM config contexts, distributed setup,
+from `case_generator.py`; this file handles vLLM config contexts, distributed setup,
 quantized-weight preparation, and backend-specific skips.
 """
 
@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.version import __version__ as vllm_version
 
-from collector.case_specs import get_gemm_case_specs
+from collector.case_generator import get_gemm_case_specs
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.vllm.utils import setup_distributed, with_exit_stack
 
