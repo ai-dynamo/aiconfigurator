@@ -196,6 +196,10 @@ class MLAModuleSweepSpec:
 
     batch_sizes: list[int]
     sequence_lengths: list[int]
+    context_batch_sizes: list[int]
+    context_sequence_lengths: list[int]
+    generation_batch_sizes: list[int]
+    generation_sequence_lengths: list[int]
     inner_sweep_head_counts: list[int]
     top_level_head_counts: list[int]
     module_precision_combos: list[tuple[str, str, str]]
@@ -256,10 +260,34 @@ def _required_mapping(value: object, *, field_name: str) -> dict[str, object]:
     return value
 
 
-def get_mla_module_sweep_spec() -> MLAModuleSweepSpec:
+def _optional_int(value: object, *, default: int = 0) -> int:
+    return default if value is None else int(value)
+
+
+def _optional_int_list(value: object, *, field_name: str, default: list[int]) -> list[int]:
+    if value is None:
+        return list(default)
+    return _as_int_list(value, field_name=field_name)
+
+
+def get_mla_module_sweep_spec(backend: str | None = None) -> MLAModuleSweepSpec:
     """Return YAML-backed shared micro-sweep values for module collectors."""
 
     values = _required_base_common_case_values("mla_module")
+    if backend:
+        override = get_base_common_case_values(f"mla_module_{backend}")
+        if override:
+            merged = copy.deepcopy(values)
+            merged.update(override)
+            if "context_batch_sizes" in override or "generation_batch_sizes" in override:
+                merged.pop("batch_sizes", None)
+            if "context_sequence_lengths" in override or "generation_sequence_lengths" in override:
+                merged.pop("sequence_lengths", None)
+            if "head_counts" in override:
+                merged.pop("inner_sweep_head_counts", None)
+                merged.pop("top_level_head_counts", None)
+            values = merged
+
     context = _required_mapping(values.get("context"), field_name="mla_module.context")
     generation = _required_mapping(values.get("generation"), field_name="mla_module.generation")
     raw_precision_combos = values.get("module_precision_combos")
@@ -278,24 +306,59 @@ def get_mla_module_sweep_spec() -> MLAModuleSweepSpec:
             )
         )
 
+    batch_sizes = _optional_int_list(values.get("batch_sizes"), field_name="mla_module.batch_sizes", default=[])
+    sequence_lengths = _optional_int_list(
+        values.get("sequence_lengths"),
+        field_name="mla_module.sequence_lengths",
+        default=[],
+    )
+    context_batch_sizes = _optional_int_list(
+        values.get("context_batch_sizes"),
+        field_name="mla_module.context_batch_sizes",
+        default=batch_sizes,
+    )
+    context_sequence_lengths = _optional_int_list(
+        values.get("context_sequence_lengths"),
+        field_name="mla_module.context_sequence_lengths",
+        default=sequence_lengths,
+    )
+    generation_batch_sizes = _optional_int_list(
+        values.get("generation_batch_sizes"),
+        field_name="mla_module.generation_batch_sizes",
+        default=batch_sizes,
+    )
+    generation_sequence_lengths = _optional_int_list(
+        values.get("generation_sequence_lengths"),
+        field_name="mla_module.generation_sequence_lengths",
+        default=sequence_lengths,
+    )
+    inner_sweep_head_counts = _optional_int_list(
+        values.get("inner_sweep_head_counts", values.get("head_counts")),
+        field_name="mla_module.inner_sweep_head_counts",
+        default=[],
+    )
+    top_level_head_counts = _optional_int_list(
+        values.get("top_level_head_counts"),
+        field_name="mla_module.top_level_head_counts",
+        default=inner_sweep_head_counts,
+    )
+
     return MLAModuleSweepSpec(
-        batch_sizes=_as_int_list(values.get("batch_sizes"), field_name="mla_module.batch_sizes"),
-        sequence_lengths=_as_int_list(values.get("sequence_lengths"), field_name="mla_module.sequence_lengths"),
-        inner_sweep_head_counts=_as_int_list(
-            values.get("inner_sweep_head_counts"),
-            field_name="mla_module.inner_sweep_head_counts",
-        ),
-        top_level_head_counts=_as_int_list(
-            values.get("top_level_head_counts"),
-            field_name="mla_module.top_level_head_counts",
-        ),
+        batch_sizes=batch_sizes or context_batch_sizes,
+        sequence_lengths=sequence_lengths or context_sequence_lengths,
+        context_batch_sizes=context_batch_sizes,
+        context_sequence_lengths=context_sequence_lengths,
+        generation_batch_sizes=generation_batch_sizes,
+        generation_sequence_lengths=generation_sequence_lengths,
+        inner_sweep_head_counts=inner_sweep_head_counts,
+        top_level_head_counts=top_level_head_counts,
         module_precision_combos=precision_combos,
         context_max_tokens=int(context["max_tokens"]),
-        context_large_sequence_min=int(context["large_sequence_min"]),
-        context_large_sequence_max_batch_size=int(context["large_sequence_max_batch_size"]),
+        context_large_sequence_min=_optional_int(context.get("large_sequence_min")),
+        context_large_sequence_max_batch_size=_optional_int(context.get("large_sequence_max_batch_size")),
         generation_max_tokens=int(generation["max_tokens"]),
-        generation_large_sequence_min=int(generation["large_sequence_min"]),
-        generation_large_sequence_max_batch_size=int(generation["large_sequence_max_batch_size"]),
+        generation_large_sequence_min=_optional_int(generation.get("large_sequence_min")),
+        generation_large_sequence_max_batch_size=_optional_int(generation.get("large_sequence_max_batch_size")),
     )
 
 
