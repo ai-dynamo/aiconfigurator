@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
-model_path: __base__
 description: >
-  Base collector v2 cases shared by model-centric collection runs. Model case
-  files can include this file, then add model-specific ops such as MoE, MLA,
-  Mamba, GDN, mHC, or framework-only kernels.
+  Base collector v2 op cases shared by model-centric collection runs. This file
+  owns common case values and shared op selectors; model case files include it,
+  then add model-specific dimensions or framework-only kernels.
 
 common_case_values:
   transformer_token_counts: &base_transformer_token_counts

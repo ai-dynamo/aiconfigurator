@@ -4,7 +4,7 @@
 """YAML-backed collector case expansion.
 
 This module is the bridge between collector v2 YAML files and runnable
-per-framework test cases. Base YAML owns shared sweeps, model YAML owns
+per-framework test cases. Base op YAML owns shared sweeps, model YAML owns
 model-specific dimensions, and these helpers mechanically expand them into the
 legacy tuple/dataclass shapes consumed by collector modules.
 """
@@ -19,15 +19,15 @@ from typing import Optional
 import yaml
 
 COLLECTOR_ROOT = Path(__file__).resolve().parent
-BASE_CASES_PATH = COLLECTOR_ROOT / "cases" / "base_model_cases.yaml"
+BASE_OP_CASES_PATH = COLLECTOR_ROOT / "cases" / "base_op_cases.yaml"
 MODEL_CASES_DIR = COLLECTOR_ROOT / "cases" / "models"
 
 
 def _load_base_cases_data() -> dict:
-    with open(BASE_CASES_PATH, encoding="utf-8") as f:
+    with open(BASE_OP_CASES_PATH, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
-        raise TypeError(f"{BASE_CASES_PATH}: top-level YAML value must be a mapping")
+        raise TypeError(f"{BASE_OP_CASES_PATH}: top-level YAML value must be a mapping")
     return data
 
 
@@ -55,7 +55,7 @@ def get_base_framework_op_case_specs(backend: str, op_name: str) -> list[dict[st
 
 
 def get_base_common_case_values(name: str) -> dict[str, object]:
-    """Return shared scalar/list values from base_model_cases.yaml."""
+    """Return shared scalar/list values from base_op_cases.yaml."""
     try:
         values = _load_base_cases_data().get("common_case_values", {}).get(name, {})
     except FileNotFoundError:
@@ -70,7 +70,7 @@ def get_base_common_case_values(name: str) -> dict[str, object]:
 def _required_base_common_case_values(name: str) -> dict[str, object]:
     values = get_base_common_case_values(name)
     if not values:
-        raise RuntimeError(f"{BASE_CASES_PATH} is missing common_case_values.{name}")
+        raise RuntimeError(f"{BASE_OP_CASES_PATH} is missing common_case_values.{name}")
     return values
 
 
@@ -128,7 +128,7 @@ def get_all_model_names() -> list[str]:
     model_names = []
     for data in _load_model_cases_data():
         primary = data.get("model_path")
-        if primary and primary != "__base__":
+        if primary:
             model_names.append(str(primary))
         model_names.extend(str(path) for path in data.get("model_paths", []) or [])
         for values in (data.get("model_case_values") or {}).values():
@@ -262,7 +262,7 @@ def _as_int_list(value, *, field_name: str) -> list[int]:
 def _get_base_gemm_shape_sweeps() -> list[dict[str, object]]:
     shape_sweeps = get_base_op_case_specs("gemm")
     if not shape_sweeps:
-        raise RuntimeError(f"{BASE_CASES_PATH} is missing all_frameworks_op_cases.gemm.cases")
+        raise RuntimeError(f"{BASE_OP_CASES_PATH} is missing all_frameworks_op_cases.gemm.cases")
     return shape_sweeps
 
 

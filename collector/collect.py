@@ -1224,7 +1224,7 @@ def main():
     parser.add_argument(
         "--model-cases-full",
         action="store_true",
-        help="Collector v2 full mode: aggregate base_model_cases.yaml plus every model cases YAML file.",
+        help="Collector v2 full mode: aggregate base_op_cases.yaml plus every model cases YAML file.",
     )
     parser.add_argument(
         "--gpu",
@@ -1308,7 +1308,7 @@ def main():
             logger_message = (
                 "No collector v2 model cases YAML found for "
                 f"model_path={args.model_path!r}, model_architecture={args.model_architecture!r}; "
-                "using base cases only plus legacy model filtering."
+                "using base op cases only plus legacy model filtering."
             )
         else:
             logger_message = None

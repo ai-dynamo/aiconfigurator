@@ -84,10 +84,10 @@ python3 collect.py --backend trtllm --new-framework-version
 Case files:
 
 ```
-cases/base_model_cases.yaml          — shared base cases for model-centric runs
+cases/base_op_cases.yaml             — shared common case values and op cases
 cases/models/<architecture>_cases.yaml — architecture-specific all/framework op cases
 cases/gpus/<gpu>_exceptions.yaml     — GPU-specific all/framework op exceptions
-model_cases.py                       — merges base + model + GPU exceptions
+model_cases.py                       — merges base op + model + GPU exceptions
 ```
 
 Each model file is named after the HuggingFace architecture and lists the model
@@ -103,7 +103,7 @@ model_paths:
 include_base: true
 ```
 
-It can include base cases with `include_base: true`, then add:
+It can include shared base op cases with `include_base: true`, then add:
 
 ```yaml
 model_ops:

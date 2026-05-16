@@ -10,7 +10,7 @@ model_paths:
   - nvidia/DeepSeek-V3.1-NVFP4
 include_base: true
 description: >
-  DeepSeek-V3-family model-centric collection plan. Includes shared base cases
+  DeepSeek-V3-family model-centric collection plan. Includes shared base op cases
   plus MoE, MLA, and DeepSeek-V3 WideEP cases.
 
 model_case_values:

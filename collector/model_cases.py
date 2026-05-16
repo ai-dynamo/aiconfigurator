@@ -6,7 +6,7 @@
 Collector v2 keeps model/GPU intent in YAML and leaves kernel collectors focused
 on generating runnable test cases. The planner merges:
 
-1. base model cases,
+1. shared base op cases,
 2. one model's extra cases or all model case files for full mode,
 3. optional GPU-centric exceptions.
 
@@ -30,7 +30,7 @@ except ModuleNotFoundError:
 
 COLLECTOR_ROOT = Path(__file__).resolve().parent
 CASE_ROOT = COLLECTOR_ROOT / "cases"
-BASE_CASES_PATH = CASE_ROOT / "base_model_cases.yaml"
+BASE_OP_CASES_PATH = CASE_ROOT / "base_op_cases.yaml"
 MODEL_CASES_DIR = CASE_ROOT / "models"
 GPU_EXCEPTIONS_DIR = CASE_ROOT / "gpus"
 
@@ -286,7 +286,7 @@ def _model_case_architecture(data: dict[str, Any]) -> str | None:
 def _model_case_paths(data: dict[str, Any]) -> list[str]:
     values = []
     primary = data.get("model_path")
-    if primary and primary != "__base__":
+    if primary:
         values.append(str(primary))
     aliases = data.get("model_paths", [])
     if aliases is None:
@@ -369,7 +369,7 @@ def build_collection_case_plan(
     full: bool = False,
 ) -> CollectionCasePlan:
     """Build a model/GPU-aware op and case plan for one backend."""
-    base_path = Path(base_cases_path).expanduser().resolve() if base_cases_path else BASE_CASES_PATH
+    base_path = Path(base_cases_path).expanduser().resolve() if base_cases_path else BASE_OP_CASES_PATH
     base_data = load_yaml_file(base_path)
     requested_model_path = model_path
     model_paths = _load_model_case_files(model_path, model_architecture, model_cases_path, full)
