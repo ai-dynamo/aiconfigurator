@@ -54,14 +54,21 @@ The generated file is comm_perf.txt and custom_all_reduce.txt.
 
 ## Overview
 
-Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps ops to collector modules, and a **version resolver** (`version_resolver.py`) that picks the right module at runtime. Individual collector files declare their compatibility via `__compat__`.
+Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps ops to collector modules, and a **version resolver** (`version_resolver.py`) that picks the right module at runtime. Individual collector files declare their compatibility via `__compat__`. The current collector framework versions and runtime images are declared in `framework_manifest.json`.
 
 ```
+framework_manifest.json — current collector framework versions and images
+framework_manifest.py   — manifest loader/validator
 registry.py          — declares which module handles which version range
 version_resolver.py  — routes runtime version → module (packaging.version)
 collect.py/collect_ops — validates __compat__ and fails incompatible ops
 __compat__           — per-file metadata declaring supported framework versions
+wideep/              — WideEP collector namespace for special images/runtimes
 ```
+
+WideEP entries in `framework_manifest.json` must keep the same framework version
+as their non-WideEP framework entry. If a WideEP collector needs a special image,
+put only the image override in the WideEP entry and keep the version aligned.
 
 ## File Naming Convention
 
