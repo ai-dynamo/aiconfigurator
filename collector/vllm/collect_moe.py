@@ -86,7 +86,13 @@ except Exception:
 
 from vllm.forward_context import get_forward_context, set_forward_context
 
-from collector.case_generator import get_common_moe_test_cases
+from collector.case_generator import (
+    get_common_moe_test_cases,
+    get_moe_quantization_modes,
+    get_moe_quantization_module_config,
+    moe_model_allows_quantization,
+    moe_shape_satisfies_constraints,
+)
 from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
@@ -96,22 +102,16 @@ def get_moe_test_cases():
     """Generate MoE test cases"""
 
     sm = get_sm_version()
-
-    # Quantization types supported by vLLM
-    moe_list = ["bfloat16", "int4_wo"]
-    if sm > 86:
-        moe_list += ["fp8"]
-    if sm >= 90 and per_block_cast_to_fp8 is not None:
-        moe_list += ["fp8_block"]
-    # vLLM 0.19.0's FlashInfer TRTLLM FP4 MoE path is not compiled for
-    # RTX PRO 6000 Blackwell Server (SM120); it fails before benchmarking
-    # with "No supported CUDA architectures found for major versions [10]."
-    if sm >= 100 and _nvfp4_available and not (sm >= 120 and vllm_version.startswith("0.19.0")):
-        moe_list += ["nvfp4"]
-    if _mxfp4_available:
-        moe_list += ["w4a16_mxfp4"]
-
-    _gpt_oss_models = {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
+    enabled_moe_types = get_moe_quantization_modes(
+        "vllm",
+        sm_version=sm,
+        runtime_version=vllm_version,
+        runtime_features={
+            "per_block_fp8": per_block_cast_to_fp8 is not None,
+            "nvfp4": _nvfp4_available,
+            "mxfp4": _mxfp4_available,
+        },
+    )
 
     test_cases = []
 
@@ -122,46 +122,16 @@ def get_moe_test_cases():
         if common_moe_testcase.tp > 1 and common_moe_testcase.ep > 1:
             continue
 
-        for moe_type in moe_list:
-            # GPT-OSS models only use mxfp4 quantization in production;
-            # skip them for other quant types.
-            if model_name in _gpt_oss_models and moe_type != "w4a16_mxfp4":
+        for moe_type in enabled_moe_types:
+            if not moe_model_allows_quantization("vllm", model_name, moe_type):
                 continue
-            # Conversely, mxfp4 is only collected for GPT-OSS models.
-            if moe_type == "w4a16_mxfp4" and model_name not in _gpt_oss_models:
-                continue
-
-            # fp8_block requires hidden_size divisible by block group_size (128)
-            if moe_type == "fp8_block" and (
-                common_moe_testcase.hidden_size % 128 != 0
-                or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 128 != 0
-            ):
-                continue
-
-            # nvfp4 uses TRTLLM FP4 kernel which has stricter constraints:
-            # - hidden_size must be divisible by 512 (GEMM tiling requirement)
-            # - local_inter_size (inter_size // tp) must be divisible by 64
-            #   (GEMM1 N = 2*local_inter must be multiple of 128, GEMM2 K must be multiple of 64)
-            # - topk must be <= 10 (MaxNumTopExperts in routing kernel)
-            if moe_type == "nvfp4" and (
-                common_moe_testcase.hidden_size % 512 != 0
-                or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 64 != 0
-                or common_moe_testcase.topk > 10
-            ):
-                continue
-
-            # w4a16_mxfp4 requires dimensions aligned to group_size (32)
-            if moe_type == "w4a16_mxfp4" and (
-                common_moe_testcase.hidden_size % 32 != 0
-                or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 32 != 0
-            ):
-                continue
-
-            # int4_wo (W4A16 Marlin): requires dims divisible by group_size (128).
-            # Scales are indexed over original (unpacked) K — no packing factor needed here.
-            if moe_type == "int4_wo" and (
-                common_moe_testcase.hidden_size % 128 != 0
-                or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 128 != 0
+            if not moe_shape_satisfies_constraints(
+                "vllm",
+                moe_type,
+                hidden_size=common_moe_testcase.hidden_size,
+                inter_size=common_moe_testcase.inter_size,
+                tensor_parallel_size=common_moe_testcase.tp,
+                topk=common_moe_testcase.topk,
             ):
                 continue
 
@@ -284,6 +254,7 @@ def run_moe_torch(
             raise ImportError("MXFP4 MoE requires vllm >= 0.17.0 with Mxfp4Config support.")
 
         mxfp4_quant_config = Mxfp4Config()
+        mxfp4_module_config = get_moe_quantization_module_config("vllm", moe_type)
 
         # pcp_size=1: vLLM 0.17.0 added prefill context parallel to FusedMoE
         # (vllm-project/vllm#32344); without it, __init__ calls get_pcp_group()
@@ -302,8 +273,8 @@ def run_moe_torch(
                 dp_size=1,
                 ep_size=moe_ep_size,
                 prefix="",
-                has_bias=True,  # GPT-OSS uses bias
-                activation="swigluoai",  # GPT-OSS activation
+                has_bias=bool(mxfp4_module_config.get("has_bias", False)),
+                activation=str(mxfp4_module_config.get("activation", "silu")),
                 pcp_size=1,
             )
         moe_module.to(device)

@@ -127,6 +127,67 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     assert len(get_common_mhc_test_cases()) == 8
 
 
+def test_vllm_moe_quantization_metadata_is_yaml_backed():
+    from collector.case_generator import (
+        get_moe_quantization_modes,
+        get_moe_quantization_module_config,
+        moe_model_allows_quantization,
+        moe_shape_satisfies_constraints,
+    )
+
+    assert get_moe_quantization_modes("vllm", sm_version=90, runtime_features={"per_block_fp8": True}) == [
+        "bfloat16",
+        "int4_wo",
+        "fp8",
+        "fp8_block",
+    ]
+    assert get_moe_quantization_modes(
+        "vllm",
+        sm_version=100,
+        runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
+    ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "nvfp4", "w4a16_mxfp4"]
+    assert get_moe_quantization_modes(
+        "vllm",
+        sm_version=120,
+        runtime_version="0.19.0",
+        runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
+    ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "w4a16_mxfp4"]
+
+    assert moe_model_allows_quantization("vllm", "openai/gpt-oss-20b", "w4a16_mxfp4")
+    assert not moe_model_allows_quantization("vllm", "openai/gpt-oss-20b", "bfloat16")
+    assert not moe_model_allows_quantization("vllm", "Qwen/Qwen3-235B-A22B", "w4a16_mxfp4")
+    assert moe_model_allows_quantization("vllm", "Qwen/Qwen3-235B-A22B", "bfloat16")
+    assert get_moe_quantization_module_config("vllm", "w4a16_mxfp4") == {
+        "has_bias": True,
+        "activation": "swigluoai",
+    }
+
+    assert moe_shape_satisfies_constraints(
+        "vllm",
+        "fp8_block",
+        hidden_size=4096,
+        inter_size=1536,
+        tensor_parallel_size=1,
+        topk=8,
+    )
+    assert not moe_shape_satisfies_constraints(
+        "vllm",
+        "fp8_block",
+        hidden_size=4100,
+        inter_size=1536,
+        tensor_parallel_size=1,
+        topk=8,
+    )
+    assert not moe_shape_satisfies_constraints(
+        "vllm",
+        "nvfp4",
+        hidden_size=4096,
+        inter_size=1536,
+        tensor_parallel_size=1,
+        topk=22,
+    )
+
+
 def test_mla_bmm_cases_expand_from_base_op_yaml():
     from collector.case_generator import MLABMMCommonTestCase, get_mla_bmm_case_specs
 
