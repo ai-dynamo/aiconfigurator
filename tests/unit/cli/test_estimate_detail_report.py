@@ -124,3 +124,24 @@ def test_format_estimate_detail_report_uses_per_ops_data(
     assert "SOL%" in report
     for line in expected:
         assert line in report
+
+
+def test_format_estimate_detail_report_uses_raw_per_ops_source() -> None:
+    result = _estimate_result(
+        mode="disagg",
+        raw={"ttft": 100.0, "tpot": 10.0, "request_latency": 250.0},
+        per_ops_source={
+            "prefill": {"context_attention": "silicon"},
+            "decode": {"generation_attention": "empirical"},
+        },
+    )
+
+    report = format_estimate_detail_report(result, detail="source")
+
+    assert "Data Source Breakdown (per-op)" in report
+    assert "Prefill (static_ctx)" in report
+    assert "context_attention" in report
+    assert "silicon" in report
+    assert "Decode (static_gen)" in report
+    assert "generation_attention" in report
+    assert "empirical" in report

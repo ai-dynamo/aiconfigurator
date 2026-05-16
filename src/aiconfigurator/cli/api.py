@@ -1342,6 +1342,7 @@ def _run_disagg_estimate(
         raw=result_dict,
         mode="disagg",
         per_ops_data=summary.get_per_ops_data(),
+        per_ops_source=summary.get_per_ops_source(),
     )
 
 

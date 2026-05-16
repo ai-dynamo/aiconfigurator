@@ -96,6 +96,8 @@ def format_estimate_detail_report(
                 width=width,
                 top_n_ops=top_n_ops,
             ).splitlines()
+        elif section == "source":
+            section_lines = _format_raw_source_from_per_ops(result.per_ops_source or {})
         elif section == "summary":
             section_lines = _format_raw_summary(result)
 
@@ -330,23 +332,49 @@ def _format_source_section(summary: InferenceSummary) -> list[str]:
     if not ctx and not gen:
         return ["Data Source Breakdown", "  <no source data>"]
 
-    def _summarize(d: dict[str, str]) -> str:
-        counts: dict[str, int] = {}
-        for v in d.values():
-            counts[v] = counts.get(v, 0) + 1
-        ordered = sorted(counts.items(), key=lambda kv: -kv[1])
-        return ", ".join(f"{k}={v}" for k, v in ordered)
-
     lines = ["Data Source Breakdown (per-op)"]
     if ctx:
-        lines.append(f"  context     {_summarize(ctx)}")
+        lines.append(f"  context     {_summarize_source_dict(ctx)}")
         for op, src in sorted(ctx.items()):
             lines.append(f"    {op:<30s} {src}")
     if gen:
-        lines.append(f"  generation  {_summarize(gen)}")
+        lines.append(f"  generation  {_summarize_source_dict(gen)}")
         for op, src in sorted(gen.items()):
             lines.append(f"    {op:<30s} {src}")
     return lines
+
+
+def _format_raw_source_from_per_ops(per_ops_source: dict) -> list[str]:
+    if not per_ops_source:
+        return ["Data Source Breakdown", "  <no source data>"]
+
+    phase_titles = {
+        "mix_step": "Mix Step",
+        "genonly_step": "Gen-Only Step",
+        "prefill": "Prefill (static_ctx)",
+        "decode": "Decode (static_gen)",
+    }
+    ordered_keys = [key for key in phase_titles if per_ops_source.get(key)]
+    ordered_keys.extend(sorted(key for key in per_ops_source if key not in phase_titles and per_ops_source.get(key)))
+    if not ordered_keys:
+        return ["Data Source Breakdown", "  <no source data>"]
+
+    lines = ["Data Source Breakdown (per-op)"]
+    for key in ordered_keys:
+        sources = dict(per_ops_source.get(key) or {})
+        title = phase_titles.get(key, key)
+        lines.append(f"  {title:<20s} {_summarize_source_dict(sources)}")
+        for op, src in sorted(sources.items()):
+            lines.append(f"    {op:<30s} {src}")
+    return lines
+
+
+def _summarize_source_dict(d: dict[str, str]) -> str:
+    counts: dict[str, int] = {}
+    for v in d.values():
+        counts[v] = counts.get(v, 0) + 1
+    ordered = sorted(counts.items(), key=lambda kv: -kv[1])
+    return ", ".join(f"{k}={v}" for k, v in ordered)
 
 
 def _format_time_detail(
