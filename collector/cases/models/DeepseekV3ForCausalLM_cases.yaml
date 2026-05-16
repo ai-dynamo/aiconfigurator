@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: DeepseekV3ForCausalLM
+model_path: deepseek-ai/DeepSeek-V3
+model_paths:
+  - deepseek-ai/DeepSeek-R1
+  - deepseek-ai/DeepSeek-V3
+  - nvidia/DeepSeek-V3.1-NVFP4
+include_base: true
+description: >
+  DeepSeek-V3-family model-centric collection plan. Includes shared base cases
+  plus MoE, MLA, and DeepSeek-V3 WideEP cases.
+
+all_frameworks_op_cases:
+  moe:
+    cases: all
+  mla_context:
+    cases: all
+  mla_generation:
+    cases: all
+  mla_bmm_gen_pre:
+    cases: all
+  mla_bmm_gen_post:
+    cases: all
+
+framework_specific_op_cases:
+  trtllm:
+    mla_context_module:
+      cases: all
+    mla_generation_module:
+      cases: all
+    trtllm_moe_wideep:
+      cases: all
+  vllm:
+    mla_context_module:
+      cases: all
+    mla_generation_module:
+      cases: all
+  sglang:
+    wideep_mla_context:
+      cases: all
+    wideep_mla_generation:
+      cases: all
+    wideep_moe:
+      cases: all
+

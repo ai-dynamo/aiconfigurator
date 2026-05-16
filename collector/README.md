@@ -68,6 +68,12 @@ python3 collect.py --backend sglang \
   --gpu b200_sxm \
   --plan-only
 
+# Select the architecture case file directly.
+python3 collect.py --backend trtllm \
+  --model-architecture Qwen3MoeForCausalLM \
+  --gpu b200_sxm \
+  --plan-only
+
 # Aggregate all model case YAML files for a full model-centric run.
 python3 collect.py --backend trtllm --model-cases-full
 
@@ -79,12 +85,25 @@ Case files:
 
 ```
 cases/base_model_cases.yaml          — shared base cases for model-centric runs
-cases/models/<model>_cases.yaml      — model-specific all/framework op cases
+cases/models/<architecture>_cases.yaml — architecture-specific all/framework op cases
 cases/gpus/<gpu>_exceptions.yaml     — GPU-specific all/framework op exceptions
 model_cases.py                       — merges base + model + GPU exceptions
 ```
 
-Each model file can include base cases with `include_base: true`, then add:
+Each model file is named after the HuggingFace architecture and lists the model
+paths that should resolve to it:
+
+```yaml
+schema_version: 1
+architecture: Qwen3MoeForCausalLM
+model_path: Qwen/Qwen3-235B-A22B
+model_paths:
+  - Qwen/Qwen3-30B-A3B
+  - Qwen/Qwen3-235B-A22B
+include_base: true
+```
+
+It can include base cases with `include_base: true`, then add:
 
 ```yaml
 all_frameworks_op_cases:
@@ -118,10 +137,11 @@ model, so every op collector gets subset support through the central planner.
 Collectors that accept `model_path` receive it directly; legacy collectors use
 the same value through `COLLECTOR_MODEL_PATH` while they are being migrated.
 
-To add a new model, create one `cases/models/<model>_cases.yaml` file and add a
-new op collector only when the existing ops cannot generate the needed data
-points. To add a new GPU, create one `cases/gpus/<gpu>_exceptions.yaml` file
-instead of editing every model case.
+To add a new architecture, create one `cases/models/<architecture>_cases.yaml`
+file. To add a new model in an existing architecture, add the model path to that
+architecture's `model_paths` list. Add a new op collector only when the existing
+ops cannot generate the needed data points. To add a new GPU, create one
+`cases/gpus/<gpu>_exceptions.yaml` file instead of editing every model case.
 
 # Version Management
 

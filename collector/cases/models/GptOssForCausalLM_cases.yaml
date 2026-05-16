@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: GptOssForCausalLM
+model_path: openai/gpt-oss-120b
+model_paths:
+  - openai/gpt-oss-120b
+  - openai/gpt-oss-20b
+include_base: true
+description: >
+  GPT-OSS MoE model-centric collection plan.
+
+all_frameworks_op_cases:
+  moe:
+    cases: all
+

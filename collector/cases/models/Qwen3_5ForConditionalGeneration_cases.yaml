@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: Qwen3_5ForConditionalGeneration
+model_path: Qwen/Qwen3.5-27B
+model_paths:
+  - Qwen/Qwen3.5-27B
+include_base: true
+description: >
+  Qwen3.5 dense/GDN model-centric collection plan.
+
+all_frameworks_op_cases:
+  gdn:
+    cases: all
+

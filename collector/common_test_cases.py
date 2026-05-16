@@ -29,14 +29,21 @@ def _filter_model_config_list(model_config_list: list[list]) -> list[list]:
 
 
 _WIDEEP_MOE_MODEL_NAMES: set[str] = {
+    "deepseek-ai/DeepSeek-R1",
     "deepseek-ai/DeepSeek-V3",
+    "nvidia/DeepSeek-V3.1-NVFP4",
     "deepseek-ai/DeepSeek-V3.2",
     "deepseek-ai/DeepSeek-V4-Flash",
     "deepseek-ai/DeepSeek-V4-Pro",
     "sgl-project/DeepSeek-V4-Flash-FP8",
     "sgl-project/DeepSeek-V4-Pro-FP8",
     "zai-org/GLM-5",
+    "zai-org/GLM-5-FP8",
+    "nvidia/GLM-5-NVFP4",
     "MiniMaxAI/MiniMax-M2.5",
+    "MiniMaxAI/MiniMax-M2.7",
+    "nvidia/MiniMax-M2.5-NVFP4",
+    "nvidia/MiniMax-M2.7-NVFP4",
     "moonshotai/Kimi-K2-Instruct",
     "moonshotai/Kimi-K2.5",
     "nvidia/Kimi-K2.5-NVFP4",
@@ -56,17 +63,29 @@ _MOE_MODEL_CONFIGS: list[list] = [
     [4096, 14336, 2, 8, "mistralai/Mixtral-8x7B-v0.1"],  # mixtral_8x7b
     [6144, 16384, 2, 8, "mistralai/Mixtral-8x22B-v0.1"],  # mixtral_8x22b
     [7168, 2048, 8, 256, "deepseek-ai/DeepSeek-V3"],  # deepseekv3, will have 1 shared expert, dsv32
+    [7168, 2048, 8, 256, "deepseek-ai/DeepSeek-R1"],  # deepseekv3/r1, 1 shared expert
+    [7168, 2048, 8, 256, "nvidia/DeepSeek-V3.1-NVFP4"],  # deepseekv3.1 nvfp4, 1 shared expert
+    [7168, 2048, 8, 256, "deepseek-ai/DeepSeek-V3.2"],  # deepseekv3.2, 1 shared expert
     [4096, 2048, 6, 256, "deepseek-ai/DeepSeek-V4-Flash"],  # deepseekv4, 1 shared expert
     [7168, 3072, 6, 384, "deepseek-ai/DeepSeek-V4-Pro"],  # deepseekv4, 1 shared expert
     [4096, 2048, 6, 256, "sgl-project/DeepSeek-V4-Flash-FP8"],  # deepseekv4, 1 shared expert
     [7168, 3072, 6, 384, "sgl-project/DeepSeek-V4-Pro-FP8"],  # deepseekv4, 1 shared expert
     [6144, 2048, 8, 256, "zai-org/GLM-5"],  # glm-5 (DEEPSEEKV32 family, different hidden_size)
+    [6144, 2048, 8, 256, "zai-org/GLM-5-FP8"],  # glm-5 fp8
+    [6144, 2048, 8, 256, "nvidia/GLM-5-NVFP4"],  # glm-5 nvfp4
     [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B"],  # qwen3-moe, 30b-a3b
+    [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B-FP8"],  # qwen3-moe, 30b-a3b fp8
     [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B"],  # qwen3-moe, 235b-a22b
+    [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B-FP8"],  # qwen3-moe, 235b-a22b fp8
+    [4096, 1536, 8, 128, "nvidia/Qwen3-235B-A22B-NVFP4"],  # qwen3-moe, 235b-a22b nvfp4
     [6144, 2560, 8, 160, "Qwen/Qwen3-Coder-480B-A35B-Instruct"],  # qwen3-moe, 480b-a35b
     [7168, 2048, 8, 384, "moonshotai/Kimi-K2-Instruct"],  # kimi k2
+    [7168, 2048, 8, 384, "moonshotai/Kimi-K2.5"],  # kimi k2.5
     [7168, 2048, 8, 384, "nvidia/Kimi-K2.5-NVFP4"],  # kimi k2.5 nvfp4 (same shape, separate collection for fp4 kernels)
-    [3072, 1536, 8, 256, "MiniMaxAI/MiniMax-M2.5"],  # minimax m2.5 (also covers nvidia/MiniMax-M2.5-NVFP4)
+    [3072, 1536, 8, 256, "MiniMaxAI/MiniMax-M2.5"],  # minimax m2.5
+    [3072, 1536, 8, 256, "MiniMaxAI/MiniMax-M2.7"],  # minimax m2.7
+    [3072, 1536, 8, 256, "nvidia/MiniMax-M2.5-NVFP4"],  # minimax m2.5 nvfp4
+    [3072, 1536, 8, 256, "nvidia/MiniMax-M2.7-NVFP4"],  # minimax m2.7 nvfp4
     [2880, 2880, 4, 128, "openai/gpt-oss-120b"],
     [2880, 2880, 4, 32, "openai/gpt-oss-20b"],
     [2688, 1856, 6, 128, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"],  # nemotron-3 nano (uses relu2, non-gated)
@@ -77,13 +96,18 @@ _MOE_MODEL_CONFIGS: list[list] = [
         512,
         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
     ],  # nemotron-3 super (uses relu2, non-gated)
+    [8192, 5120, 22, 512, "nvidia/nemotron-ultra-rl-050826"],  # nemotron ultra
+    [2048, 512, 8, 256, "Qwen/Qwen3.5-35B-A3B"],  # qwen3.5-moe, 35b-a3b
     [4096, 1024, 10, 512, "Qwen/Qwen3.5-397B-A17B"],  # qwen3.5-moe, 397b-a17b
 ]
 
 # MLA: [num_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, model_name]
 _MLA_MODEL_CONFIGS: list[list] = [
     [128, 1536, 512, 128, 64, 128, "deepseek-ai/DeepSeek-V3"],
+    [128, 1536, 512, 128, 64, 128, "deepseek-ai/DeepSeek-R1"],
+    [128, 1536, 512, 128, 64, 128, "nvidia/DeepSeek-V3.1-NVFP4"],
     [64, 1536, 512, 128, 64, 128, "moonshotai/Kimi-K2.5"],  # kimi k2.5: same MLA dims as DSV3 except num_heads=64
+    [64, 1536, 512, 128, 64, 128, "nvidia/Kimi-K2.5-NVFP4"],  # kimi k2.5 nvfp4
 ]
 
 # MLA module: models from collect_mla_module.py's SUPPORTED_MODELS that are not
@@ -92,6 +116,8 @@ _MLA_MODULE_MODEL_NAMES: list[str] = [
     "deepseek-ai/DeepSeek-V3.2",
     "deepseek-ai/DeepSeek-V4-Flash",
     "zai-org/GLM-5",
+    "zai-org/GLM-5-FP8",
+    "nvidia/GLM-5-NVFP4",
 ]
 
 # MHC (DeepSeek-V4 Hash-Compressed attention) module:
@@ -124,11 +150,15 @@ _MAMBA2_MODEL_CONFIGS: list[list] = [
     # Nemotron-H 3-Nano
     # hidden_size=2688, ssm_state_size=128, conv_kernel=4,
     # mamba_num_heads=64, mamba_head_dim=64, n_groups=8, chunk_size=128
-    [2688, 128, 4, 64, 64, 8, 128, "NEMOTRON_H_3_Nano"],
+    [2688, 128, 4, 64, 64, 8, 128, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"],
     # Nemotron-H 3-Super
     # hidden_size=4096, ssm_state_size=128, conv_kernel=4,
     # mamba_num_heads=128, mamba_head_dim=64, n_groups=8, chunk_size=128
-    [4096, 128, 4, 128, 64, 8, 128, "NEMOTRON_H_3_Super"],
+    [4096, 128, 4, 128, 64, 8, 128, "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"],
+    # Nemotron Ultra
+    [8192, 128, 4, 256, 64, 8, 128, "nvidia/nemotron-ultra-rl-050826"],
+    # Nemotron-H 56B
+    [8192, 256, 4, 256, 64, 8, 128, "nvidia/Nemotron-H-56B-Base-8K"],
     # Generic Mamba2 configuration for interpolation coverage
     [8192, 128, 4, 64, 64, 8, 256, "MAMBA2_GENERIC_4K"],
     [1024, 64, 4, 16, 64, 4, 128, "MAMBA2_GENERIC_1K"],

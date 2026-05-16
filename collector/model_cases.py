@@ -94,11 +94,13 @@ class CollectionCasePlan:
 
     backend: str
     model_path: str | None
+    model_architecture: str | None
     gpu_type: str | None
     op_cases: dict[str, OpCasePlan]
     base_cases_path: Path
     model_cases_paths: list[Path] = field(default_factory=list)
     gpu_exceptions_path: Path | None = None
+    requested_model_path: str | None = None
 
     @property
     def ops(self) -> list[str]:
@@ -108,6 +110,8 @@ class CollectionCasePlan:
         return {
             "backend": self.backend,
             "model_path": self.model_path,
+            "model_architecture": self.model_architecture,
+            "requested_model_path": self.requested_model_path,
             "gpu_type": self.gpu_type,
             "ops": self.ops,
             "base_cases_path": str(self.base_cases_path),
@@ -131,6 +135,10 @@ def sanitize_case_filename(value: str) -> str:
 
 def default_model_cases_path(model_path: str) -> Path:
     return MODEL_CASES_DIR / f"{sanitize_case_filename(model_path)}_cases.yaml"
+
+
+def default_architecture_cases_path(model_architecture: str) -> Path:
+    return MODEL_CASES_DIR / f"{sanitize_case_filename(model_architecture)}_cases.yaml"
 
 
 def default_gpu_exceptions_path(gpu_type: str) -> Path:
@@ -249,11 +257,79 @@ def _merge_exception_file(op_cases: dict[str, OpCasePlan], data: dict[str, Any],
     _merge_exception_section(op_cases, backend_exceptions)
 
 
-def _load_model_case_files(model_path: str | None, model_cases_path: str | None, full: bool) -> list[Path]:
+def _model_case_architecture(data: dict[str, Any]) -> str | None:
+    value = data.get("architecture") or data.get("model_architecture")
+    return str(value) if value else None
+
+
+def _model_case_paths(data: dict[str, Any]) -> list[str]:
+    values = []
+    primary = data.get("model_path")
+    if primary and primary != "__base__":
+        values.append(str(primary))
+    aliases = data.get("model_paths", [])
+    if aliases is None:
+        aliases = []
+    if not isinstance(aliases, list):
+        raise TypeError("model_paths must be a list")
+    values.extend(str(alias) for alias in aliases)
+
+    deduped = []
+    seen = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _primary_model_path(data: dict[str, Any]) -> str | None:
+    values = _model_case_paths(data)
+    return values[0] if values else None
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    deduped = []
+    seen = set()
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        deduped.append(path)
+    return deduped
+
+
+def _matching_model_case_files(*, model_path: str | None, model_architecture: str | None) -> list[Path]:
+    matches = []
+    for path in sorted(MODEL_CASES_DIR.glob("*_cases.yaml")):
+        data = load_yaml_file(path)
+        if model_architecture and _model_case_architecture(data) == model_architecture:
+            matches.append(path)
+            continue
+        if model_path and model_path in _model_case_paths(data):
+            matches.append(path)
+    return _dedupe_paths(matches)
+
+
+def _load_model_case_files(
+    model_path: str | None,
+    model_architecture: str | None,
+    model_cases_path: str | None,
+    full: bool,
+) -> list[Path]:
     if model_cases_path:
         return [Path(model_cases_path).expanduser().resolve()]
     if full:
         return sorted(MODEL_CASES_DIR.glob("*_cases.yaml"))
+    matches = _matching_model_case_files(model_path=model_path, model_architecture=model_architecture)
+    if matches:
+        return matches
+    if model_architecture:
+        path = default_architecture_cases_path(model_architecture)
+        if path.exists():
+            return [path]
     if model_path:
         path = default_model_cases_path(model_path)
         return [path] if path.exists() else []
@@ -264,6 +340,7 @@ def build_collection_case_plan(
     *,
     backend: str,
     model_path: str | None = None,
+    model_architecture: str | None = None,
     gpu_type: str | None = None,
     base_cases_path: str | None = None,
     model_cases_path: str | None = None,
@@ -273,12 +350,13 @@ def build_collection_case_plan(
     """Build a model/GPU-aware op and case plan for one backend."""
     base_path = Path(base_cases_path).expanduser().resolve() if base_cases_path else BASE_CASES_PATH
     base_data = load_yaml_file(base_path)
-    model_paths = _load_model_case_files(model_path, model_cases_path, full)
+    requested_model_path = model_path
+    model_paths = _load_model_case_files(model_path, model_architecture, model_cases_path, full)
     model_data = [load_yaml_file(path) for path in model_paths]
     if model_path is None and len(model_data) == 1:
-        inferred_model_path = model_data[0].get("model_path")
-        if inferred_model_path and inferred_model_path != "__base__":
-            model_path = str(inferred_model_path)
+        model_path = _primary_model_path(model_data[0])
+    if model_architecture is None and len(model_data) == 1:
+        model_architecture = _model_case_architecture(model_data[0])
 
     include_base = True
     if len(model_data) == 1:
@@ -305,11 +383,13 @@ def build_collection_case_plan(
     return CollectionCasePlan(
         backend=backend,
         model_path=model_path,
+        model_architecture=model_architecture,
         gpu_type=gpu_type,
         op_cases=op_cases,
         base_cases_path=base_path,
         model_cases_paths=model_paths,
         gpu_exceptions_path=resolved_gpu_exceptions_path,
+        requested_model_path=requested_model_path,
     )
 
 

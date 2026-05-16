@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: NemotronHForCausalLM
+model_path: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+model_paths:
+  - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+  - nvidia/nemotron-ultra-rl-050826
+  - nvidia/Nemotron-H-56B-Base-8K
+include_base: true
+description: >
+  Nemotron-H hybrid Mamba/MoE model-centric collection plan.
+
+all_frameworks_op_cases:
+  mamba2:
+    cases: all
+  moe:
+    cases: all
+
