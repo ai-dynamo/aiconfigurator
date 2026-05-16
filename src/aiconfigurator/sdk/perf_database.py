@@ -4201,9 +4201,9 @@ class PerfDatabase:
                 def _to_performance_result(result, *, source: str = "silicon"):
                     """Normalize GEMM table entries into a PerformanceResult.
 
-                    ``source`` defaults to ``"silicon"`` (exact key match). Pass
-                    ``source="empirical"`` for interpolated/extrapolated values
-                    so callers can distinguish measured-from-table vs computed.
+                    Interpolated/extrapolated GEMM values are still derived from
+                    silicon table data; only explicit formula fallbacks are
+                    tagged as empirical.
                     """
                     if isinstance(result, dict):
                         return PerformanceResult(result["latency"], energy=result.get("energy", 0.0), source=source)
@@ -4229,10 +4229,10 @@ class PerfDatabase:
                 if len(m_values) >= 2:
                     m_left, m_right = self._nearest_1d_point_helper(m, m_values, inner_only=False)
                     result = self._interp_1d([m_left, m_right], [gemm_data[m_left][n][k], gemm_data[m_right][n][k]], m)
-                    return _to_performance_result(result, source="empirical")
+                    return _to_performance_result(result)
 
                 result = self._interp_3d(m, n, k, gemm_data, "cubic")
-                return _to_performance_result(result, source="empirical")
+                return _to_performance_result(result)
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,

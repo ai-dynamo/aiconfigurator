@@ -90,6 +90,7 @@ def test_query_gemm_interpolates_only_on_m_when_nk_match(comprehensive_perf_db, 
     assert math.isclose(float(observed), expected)
     assert calls["x"] == [8, 16]
     assert calls["value"] == m
+    assert observed.source == "silicon"
 
 
 def test_query_gemm_fast_paths_support_legacy_scalar_leaves(mutable_comprehensive_perf_db):
@@ -108,6 +109,7 @@ def test_query_gemm_fast_paths_support_legacy_scalar_leaves(mutable_comprehensiv
     assert math.isclose(float(interp), 0.7)
     assert exact.energy == 0.0
     assert interp.energy == 0.0
+    assert interp.source == "silicon"
 
 
 def test_query_trtllm_alltoall_normalizes_fp8_block_lookup(stub_perf_db):
