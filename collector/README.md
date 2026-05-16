@@ -50,6 +50,79 @@ Today we only collect intra-node comm. This script will collect custom allreduce
 It will also collect nccl allreduce, all_gather, all2all, reduce_scatter using nccl.
 The generated files are nccl_perf.txt, oneccl_perf.txt, and custom_allreduce_perf.txt.
 
+# Collector v2: model-centric cases
+
+Collector v2 is model-centric. A healing run should collect cases for a specific
+model/GPU pair instead of running every op bucket and hoping the support matrix
+improves. Full collection for a new framework version is still supported.
+
+```bash
+# Heal one model on one GPU type.
+python3 collect.py --backend sglang \
+  --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
+  --gpu b200_sxm
+
+# Inspect the resolved model/GPU plan without collecting.
+python3 collect.py --backend sglang \
+  --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
+  --gpu b200_sxm \
+  --plan-only
+
+# Aggregate all model case YAML files for a full model-centric run.
+python3 collect.py --backend trtllm --model-cases-full
+
+# New framework version mode: bypass model/GPU cases and collect the full backend registry.
+python3 collect.py --backend trtllm --new-framework-version
+```
+
+Case files:
+
+```
+cases/base_model_cases.yaml          — shared base cases for model-centric runs
+cases/models/<model>_cases.yaml      — model-specific all/framework op cases
+cases/gpus/<gpu>_exceptions.yaml     — GPU-specific all/framework op exceptions
+model_cases.py                       — merges base + model + GPU exceptions
+```
+
+Each model file can include base cases with `include_base: true`, then add:
+
+```yaml
+all_frameworks_op_cases:
+  moe:
+    cases: all
+
+framework_specific_op_cases:
+  sglang:
+    wideep_moe:
+      cases: all
+```
+
+GPU exceptions are separate and GPU-centric:
+
+```yaml
+all_frameworks_op_exceptions:
+  attention_generation:
+    drop: true
+
+framework_specific_op_exceptions:
+  sglang:
+    wideep_moe:
+      contains:
+        - "tp=32"
+```
+
+For targeted support-matrix healing, a case spec can run a subset using exact
+`case_ids`, string `contains` matches, `indices`, `ranges`, or `limit`. These
+filters are applied after the op collector generates cases for the selected
+model, so every op collector gets subset support through the central planner.
+Collectors that accept `model_path` receive it directly; legacy collectors use
+the same value through `COLLECTOR_MODEL_PATH` while they are being migrated.
+
+To add a new model, create one `cases/models/<model>_cases.yaml` file and add a
+new op collector only when the existing ops cannot generate the needed data
+points. To add a new GPU, create one `cases/gpus/<gpu>_exceptions.yaml` file
+instead of editing every model case.
+
 # Version Management
 
 ## Overview
@@ -59,10 +132,12 @@ Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps
 ```
 framework_manifest.json — current collector framework versions and images
 framework_manifest.py   — manifest loader/validator
+model_cases.py       — collector v2 model/GPU case planner
 registry.py          — declares which module handles which version range
 version_resolver.py  — routes runtime version → module (packaging.version)
 collect.py/collect_ops — validates __compat__ and fails incompatible ops
 __compat__           — per-file metadata declaring supported framework versions
+cases/               — model-centric case manifests and GPU exceptions
 wideep/              — WideEP collector namespace for special images/runtimes
 network/             — collective communication collectors and Slurm network jobs
 ```

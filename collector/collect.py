@@ -48,8 +48,12 @@ def setup_warning_filters():
 import random
 import resource
 
-import torch
 from tqdm import tqdm
+
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
 
 setup_warning_filters()
 
@@ -63,6 +67,7 @@ import signal
 import time
 import traceback
 from datetime import datetime
+from inspect import Parameter, signature
 from pathlib import Path
 
 from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, setup_logging, setup_signal_handlers
@@ -70,6 +75,20 @@ from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, se
 logger = None
 RESUME_SCHEMA_VERSION = "collector-resume-v1"
 STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before stall bailout
+
+
+def _require_torch():
+    if torch is None:
+        raise RuntimeError("PyTorch is required to run collectors. Use --plan-only to inspect collector v2 YAML plans.")
+    return torch
+
+
+def _cuda_available() -> bool:
+    return torch is not None and torch.cuda.is_available()
+
+
+def _xpu_available() -> bool:
+    return torch is not None and hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
 class ResumeCheckpoint:
@@ -333,7 +352,8 @@ def worker(
     setup_signal_handlers(device_id)
 
     # Setup device
-    device = torch.device(f"{get_device_str()}:{device_id}")
+    torch_mod = _require_torch()
+    device = torch_mod.device(f"{get_device_str()}:{device_id}")
     get_device_module().set_device(device)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
 
@@ -420,7 +440,7 @@ def worker(
 
             # These errors are fatal and require a process restart to
             # reset the GPU CUDA context.
-            is_cuda_fatal = isinstance(e, torch.AcceleratorError)
+            is_cuda_fatal = isinstance(e, torch_mod.AcceleratorError)
             if not is_cuda_fatal:
                 # DSLCudaRuntimeError from CUTLASS DSL also corrupts CUDA
                 # context but isn't a torch.AcceleratorError subclass.
@@ -600,8 +620,9 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
         if num_processes == 0:
             # Special handling for --profile
             # Run tasks sequentially in main process
-            device = torch.device("cuda:0")
-            torch.cuda.set_device(0)
+            torch_mod = _require_torch()
+            device = torch_mod.device("cuda:0")
+            torch_mod.cuda.set_device(0)
 
             for task_info in task_infos:
                 task_id = task_info["id"]
@@ -759,6 +780,8 @@ def collect_ops(
     shuffle_seed: int = 42,
     backend: str = "unknown",
     resume_options: dict | None = None,
+    model_path: str | None = None,
+    case_plan=None,
 ) -> list[dict]:
     """Run collection for a list of resolved collection entries.
 
@@ -777,10 +800,37 @@ def collect_ops(
     if runtime_version:
         from collector.version_resolver import _check_compat as check_compat
 
+    @contextlib.contextmanager
+    def _collector_model_path(model_path: str | None):
+        previous = os.environ.get("COLLECTOR_MODEL_PATH")
+        if model_path:
+            os.environ["COLLECTOR_MODEL_PATH"] = model_path
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop("COLLECTOR_MODEL_PATH", None)
+            else:
+                os.environ["COLLECTOR_MODEL_PATH"] = previous
+
+    def _get_test_cases(get_func, model_path: str | None):
+        if not model_path:
+            return get_func()
+        with _collector_model_path(model_path):
+            sig = signature(get_func)
+            params = sig.parameters
+            if "model_path" in params or any(param.kind == Parameter.VAR_KEYWORD for param in params.values()):
+                return get_func(model_path=model_path)
+            return get_func()
+
     all_errors = []
 
     for collection in collections:
         try:
+            op_plan = case_plan.op_cases.get(collection["type"]) if case_plan is not None else None
+            if case_plan is not None and op_plan is None:
+                logger.info(f"Skipping {collection['name']}.{collection['type']} — not in collector v2 case plan")
+                continue
             module_name = collection["module"]
             get_module = __import__(module_name, fromlist=[collection["get_func"]])
             run_module = __import__(module_name, fromlist=[collection["run_func"]])
@@ -791,7 +841,7 @@ def collect_ops(
                 if declared:
                     try:
                         if not check_compat(declared, runtime_version):
-                            if torch.xpu.is_available():
+                            if _xpu_available():
                                 # Disable vllm xpu runtime version check for now
                                 logger.warning(
                                     f"module {module_name} declares __compat__={declared!r}, \
@@ -810,7 +860,20 @@ def collect_ops(
             run_func = functools.partial(run_func, perf_filename=collection["perf_filename"])
 
             def get_func_with_limit(get_func=get_func):
-                cases = get_func()
+                cases = _get_test_cases(get_func, model_path)
+                if op_plan is not None:
+                    from collector.model_cases import filter_test_cases
+
+                    full_module_name = f"{collection['name']}.{collection['type']}"
+                    run_func_name = getattr(run_func, "__name__", None) or getattr(run_func, "func", run_func).__name__
+                    before_count = len(cases)
+                    cases = filter_test_cases(
+                        cases,
+                        plan=op_plan,
+                        full_module_name=full_module_name,
+                        run_func_name=run_func_name,
+                    )
+                    logger.info(f"{full_module_name}: collector v2 case plan kept {len(cases)}/{before_count} cases")
                 if shuffle:
                     rng = random.Random(shuffle_seed)
                     rng.shuffle(cases)
@@ -849,6 +912,8 @@ def collect_sglang(
     limit: int | None = None,
     shuffle: bool = False,
     resume_options: dict | None = None,
+    model_path: str | None = None,
+    case_plan=None,
 ):
     """Collect performance data for SGLang with enhanced error tracking"""
     from collector.sglang.registry import REGISTRY
@@ -874,6 +939,8 @@ def collect_sglang(
         shuffle=shuffle,
         backend="sglang",
         resume_options=resume_options,
+        model_path=model_path,
+        case_plan=case_plan,
     )
 
     generate_collection_summary(all_errors, "sglang", version)
@@ -885,13 +952,15 @@ def collect_vllm(
     limit: int | None = None,
     shuffle: bool = False,
     resume_options: dict | None = None,
+    model_path: str | None = None,
+    case_plan=None,
 ):
     """Collect performance data for vLLM"""
     from collector.version_resolver import build_collections
 
-    if torch.cuda.is_available():
+    if _cuda_available():
         from collector.vllm.registry import REGISTRY
-    elif torch.xpu.is_available():
+    elif _xpu_available():
         from collector.vllm.registry import REGISTRY_XPU as REGISTRY
     else:
         raise RuntimeError("No supported hardware detected. Neither CUDA nor XPU is available.")
@@ -906,7 +975,15 @@ def collect_vllm(
 
     collections = build_collections(REGISTRY, "vllm", version, ops, logger=logger)
     all_errors = collect_ops(
-        num_processes, collections, version, limit=limit, shuffle=shuffle, backend="vllm", resume_options=resume_options
+        num_processes,
+        collections,
+        version,
+        limit=limit,
+        shuffle=shuffle,
+        backend="vllm",
+        resume_options=resume_options,
+        model_path=model_path,
+        case_plan=case_plan,
     )
 
     generate_collection_summary(all_errors, "vllm", version)
@@ -918,6 +995,8 @@ def collect_trtllm(
     limit: int | None = None,
     shuffle: bool = False,
     resume_options: dict | None = None,
+    model_path: str | None = None,
+    case_plan=None,
 ):
     """Collect performance data for TensorRT LLM with enhanced error tracking"""
     from collector.trtllm.registry import REGISTRY
@@ -949,6 +1028,8 @@ def collect_trtllm(
         shuffle=shuffle,
         backend="trtllm",
         resume_options=resume_options,
+        model_path=model_path,
+        case_plan=case_plan,
     )
 
     generate_collection_summary(all_errors, "trtllm", version)
@@ -1075,11 +1156,46 @@ def main():
         "--model-path",
         type=str,
         default=None,
-        help="Filter collection to a single model (e.g. 'MiniMaxAI/MiniMax-M2.5'). "
-        "Must match a model name in the test case config lists exactly. "
-        "Best used together with --ops to target a specific op, since a model "
-        "may only appear in one op's config list (e.g. MoE but not MLA). "
-        "Default: collect all models.",
+        help="Collector v2 model path (for example 'MiniMaxAI/MiniMax-M2.5'). "
+        "When set, collect.py loads collector/cases/base_model_cases.yaml plus the model's "
+        "collector/cases/models/<model>_cases.yaml file, then runs only the planned ops/cases.",
+    )
+    parser.add_argument(
+        "--model-cases",
+        type=str,
+        default=None,
+        help="Optional path to a model cases YAML file. Defaults to collector/cases/models/<model>_cases.yaml.",
+    )
+    parser.add_argument(
+        "--model-cases-full",
+        action="store_true",
+        help="Collector v2 full mode: aggregate base_model_cases.yaml plus every model cases YAML file.",
+    )
+    parser.add_argument(
+        "--gpu",
+        type=str,
+        default=None,
+        help="GPU type for collector v2 exceptions, for example b200_sxm. "
+        "Defaults to no GPU exception file unless --gpu-exceptions is provided.",
+    )
+    parser.add_argument(
+        "--gpu-exceptions",
+        type=str,
+        default=None,
+        help="Optional path to a GPU exceptions YAML file. Defaults to collector/cases/gpus/<gpu>_exceptions.yaml.",
+    )
+    parser.add_argument(
+        "--new-framework-version",
+        action="store_true",
+        help=(
+            "Collect full backend registry for a new framework version. "
+            "This bypasses collector v2 model/GPU case plans."
+        ),
+    )
+    parser.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Print the collector v2 case plan and exit without running collectors.",
     )
     parser.add_argument(
         "--profile",
@@ -1088,48 +1204,76 @@ def main():
     )
     args = parser.parse_args()
     ops = args.ops
-    _dsv4_auto_expand = False
-
-    if args.model_path:
-        from collector.common_test_cases import get_all_model_names
-
-        all_models = get_all_model_names()
-        if args.model_path not in all_models:
-            parser.error(
-                f"Model '{args.model_path}' not found. Available models:\n" + "\n".join(f"  - {m}" for m in all_models)
+    case_plan = None
+    logger_message = None
+    if args.plan_only and not (args.model_path or args.model_cases or args.model_cases_full):
+        parser.error("--plan-only requires --model-path, --model-cases, or --model-cases-full")
+    if args.new_framework_version:
+        os.environ.pop("COLLECTOR_MODEL_PATH", None)
+        if args.model_path or args.model_cases or args.model_cases_full:
+            logger_message = (
+                "--new-framework-version active: ignoring collector v2 model case filters for full collection"
             )
-        os.environ["COLLECTOR_MODEL_PATH"] = args.model_path
+    elif args.model_path or args.model_cases or args.model_cases_full:
+        from collector.model_cases import build_collection_case_plan
 
-        # V4-Flash special-case: when the model is V4-Flash and no explicit
-        # ``--ops`` is given, scope to the ops consumed by the V4-Flash
-        # perf model: V4 Flash attention/sparse kernels plus generic GEMM,
-        # MoE, and mHC.  All other models keep the default behaviour: run
-        # every op and let each get_func's ``_filter_model_config_list``
-        # filter cases at the test-case level.
-        if args.ops is None and args.model_path == "sgl-project/DeepSeek-V4-Flash-FP8":
-            dsv4_flash_ops = [name for name in _all_op_names() if name.startswith("dsv4_flash_")]
-            ops = dsv4_flash_ops + ["gemm", "moe", "mhc_module"]
-            _dsv4_auto_expand = True
+        if args.model_path:
+            os.environ["COLLECTOR_MODEL_PATH"] = args.model_path
+        else:
+            os.environ.pop("COLLECTOR_MODEL_PATH", None)
+
+        case_plan = build_collection_case_plan(
+            backend=args.backend,
+            model_path=args.model_path,
+            gpu_type=args.gpu,
+            model_cases_path=args.model_cases,
+            gpu_exceptions_path=args.gpu_exceptions,
+            full=args.model_cases_full,
+        )
+        if case_plan.model_path:
+            os.environ["COLLECTOR_MODEL_PATH"] = case_plan.model_path
+        if args.plan_only:
+            print(json.dumps(case_plan.to_log_dict(), indent=2))
+            return
+
+        planned_ops = case_plan.ops
+        if args.ops is None:
+            ops = planned_ops
+        else:
+            requested_ops = set(args.ops)
+            ops = [op for op in planned_ops if op in requested_ops]
+            missing_ops = requested_ops - set(ops)
+            if missing_ops:
+                parser.error(
+                    "Requested ops are not present in the collector v2 case plan: " + ", ".join(sorted(missing_ops))
+                )
+
+        if args.model_path and not case_plan.model_cases_paths:
+            logger_message = (
+                f"No collector v2 model cases YAML found for {args.model_path}; "
+                "using base cases only plus legacy model filtering."
+            )
+        else:
+            logger_message = None
     else:
         os.environ.pop("COLLECTOR_MODEL_PATH", None)
 
     # Setup logging - debug flag is handled inside setup_logging
     if logger is None:
-        # Use short label when V4-Flash auto-expanded ops to several names
-        # (the joined scope may exceed Linux filename length limit).
-        if _dsv4_auto_expand:
-            log_scope = ["dsv4_flash"]
-        else:
-            log_scope = ops if ops else ["all"]
+        log_scope = ops if ops else ["all"]
         logger = setup_logging(scope=log_scope, debug=args.debug)
     elif args.debug:
         # Update log level if debug flag changed
         setup_logging(debug=args.debug)
 
-    if args.model_path:
-        logger.info(f"Model filter active: collecting only for '{args.model_path}'")
-        if ops and args.ops is None:
-            logger.info(f"  expanded to model-specific ops: {ops}")
+    if logger_message:
+        logger.warning(logger_message)
+    if case_plan is not None:
+        logger.info("Collector v2 case plan active:")
+        for key, value in case_plan.to_log_dict().items():
+            logger.info(f"  {key}: {value}")
+    elif args.model_path:
+        logger.info(f"Legacy model filter active: collecting only for '{args.model_path}'")
 
     resume_options = {
         "resume": args.resume,
@@ -1143,6 +1287,8 @@ def main():
             f"Resume enabled: dir={Path(args.checkpoint_dir).expanduser()}"
             + (" (retrying previously failed tasks)" if args.resume_retry_failed else "")
         )
+
+    _require_torch()
 
     # Determine number of processes (0 = sequential mode for profiling)
     if args.profile:
@@ -1189,11 +1335,35 @@ def main():
     # Use profiling context manager
     with ProfilerContext(args.backend, enabled=args.profile):
         if args.backend == "trtllm":
-            collect_trtllm(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
+            collect_trtllm(
+                num_processes,
+                ops,
+                limit=limit,
+                shuffle=shuffle,
+                resume_options=resume_options,
+                model_path=case_plan.model_path if case_plan is not None else None,
+                case_plan=case_plan,
+            )
         elif args.backend == "sglang":
-            collect_sglang(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
+            collect_sglang(
+                num_processes,
+                ops,
+                limit=limit,
+                shuffle=shuffle,
+                resume_options=resume_options,
+                model_path=case_plan.model_path if case_plan is not None else None,
+                case_plan=case_plan,
+            )
         elif args.backend == "vllm":
-            collect_vllm(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
+            collect_vllm(
+                num_processes,
+                ops,
+                limit=limit,
+                shuffle=shuffle,
+                resume_options=resume_options,
+                model_path=case_plan.model_path if case_plan is not None else None,
+                case_plan=case_plan,
+            )
 
 
 if __name__ == "__main__":

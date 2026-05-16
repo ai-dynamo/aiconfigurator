@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+model_path: __base__
+description: >
+  Base collector v2 cases shared by model-centric collection runs. Model case
+  files can include this file, then add model-specific ops such as MoE, MLA,
+  Mamba, GDN, mHC, or framework-only kernels.
+
+all_frameworks_op_cases:
+  gemm:
+    cases: all
+  attention_context:
+    cases: all
+  attention_generation:
+    cases: all
+
+framework_specific_op_cases:
+  trtllm:
+    compute_scale:
+      cases: all
+  sglang: {}
+  vllm: {}

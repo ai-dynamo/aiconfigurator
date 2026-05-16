@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+model_path: sgl-project/DeepSeek-V4-Flash-FP8
+include_base: true
+description: >
+  DeepSeek-V4-Flash FP8 model-centric collection plan. This replaces the old
+  collect.py hard-coded V4-Flash op expansion with an explicit model case file.
+
+all_frameworks_op_cases:
+  moe:
+    cases: all
+
+framework_specific_op_cases:
+  sglang:
+    dsv4_flash_csa_context_module:
+      cases: all
+    dsv4_flash_hca_context_module:
+      cases: all
+    dsv4_flash_csa_generation_module:
+      cases: all
+    dsv4_flash_hca_generation_module:
+      cases: all
+    dsv4_flash_paged_mqa_logits_module:
+      cases: all
+    dsv4_flash_hca_attn_module:
+      cases: all
+    mhc_module:
+      cases: all
+    wideep_moe:
+      cases: all
