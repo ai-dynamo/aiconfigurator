@@ -76,12 +76,52 @@ def get_base_framework_op_case_specs(backend: str, op_name: str) -> list[dict[st
     return [case for case in cases if isinstance(case, dict)]
 
 
+def _model_cases_match_path(data: dict, model_path: str) -> bool:
+    candidates = []
+    primary_path = data.get("model_path")
+    if primary_path:
+        candidates.append(str(primary_path))
+    model_paths = data.get("model_paths") or []
+    if isinstance(model_paths, list):
+        candidates.extend(str(path) for path in model_paths)
+    return model_path in candidates
+
+
+def _op_case_specs_from_section(section: object, op_name: str) -> list[dict[str, object]]:
+    if not isinstance(section, dict):
+        return []
+    raw_cases = section.get(op_name, {})
+    if not isinstance(raw_cases, dict):
+        return []
+    cases = raw_cases.get("cases")
+    if not isinstance(cases, list):
+        return []
+    return [case for case in cases if isinstance(case, dict)]
+
+
+def get_model_op_case_specs(backend: str, op_name: str) -> list[dict[str, object]]:
+    """Return model-specific dict-style case specs for the active model filter."""
+    model_path = _get_model_path_filter()
+    if not model_path:
+        return []
+
+    specs = []
+    for data in _load_model_cases_data():
+        if not _model_cases_match_path(data, model_path):
+            continue
+        specs.extend(_op_case_specs_from_section(data.get("all_frameworks_op_cases"), op_name))
+        framework_cases = data.get("framework_specific_op_cases") or {}
+        if isinstance(framework_cases, dict):
+            specs.extend(_op_case_specs_from_section(framework_cases.get(backend), op_name))
+    return specs
+
+
 def get_merged_base_op_case_specs(backend: str, op_name: str) -> list[dict[str, object]]:
-    """Return base op specs with backend-specific overrides applied by case id."""
+    """Return base op specs with backend/model-specific overrides applied by case id."""
     merged_cases = [copy.deepcopy(case) for case in get_base_op_case_specs(op_name)]
     index_by_id = {case.get("id"): index for index, case in enumerate(merged_cases) if case.get("id")}
 
-    for override in get_base_framework_op_case_specs(backend, op_name):
+    for override in [*get_base_framework_op_case_specs(backend, op_name), *get_model_op_case_specs(backend, op_name)]:
         override = copy.deepcopy(override)
         case_id = override.get("id")
         if case_id in index_by_id:

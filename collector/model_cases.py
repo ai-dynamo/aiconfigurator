@@ -281,7 +281,11 @@ def _merge_model_ops(op_cases: dict[str, OpCasePlan], data: dict[str, Any]) -> N
 
 def _merge_case_section(op_cases: dict[str, OpCasePlan], section: dict[str, Any]) -> None:
     for op, raw_selector in section.items():
-        _ensure_op_plan(op_cases, str(op)).include.merge(_parse_selector(raw_selector, default_all=True))
+        selector = _parse_selector(raw_selector, default_all=True)
+        plan = _ensure_op_plan(op_cases, str(op))
+        if plan.include.all_cases and not plan.include.has_specific_selectors() and selector.has_specific_selectors():
+            plan.include.all_cases = False
+        plan.include.merge(selector)
 
 
 def _merge_exception_section(op_cases: dict[str, OpCasePlan], section: dict[str, Any]) -> None:

@@ -166,6 +166,10 @@ def _kv_head_options(values, num_heads):
     return [num_heads if value == "self" else int(value) for value in values]
 
 
+def _window_size_options(shape_sweep):
+    return _int_list(shape_sweep.get("window_sizes", [0]))
+
+
 def get_context_attention_test_cases():
     test_cases = []
 
@@ -179,6 +183,7 @@ def get_context_attention_test_cases():
         query_head_counts = _int_list(shape_sweep["query_head_counts"])
         kv_head_options = shape_sweep["kv_head_options"]
         head_dims = _int_list(shape_sweep["head_dims"])
+        window_sizes = _window_size_options(shape_sweep)
         max_tokens_self_attention = int(shape_sweep["max_tokens_self_attention"])
         max_tokens_grouped_query_attention = int(shape_sweep["max_tokens_grouped_query_attention"])
         max_batch_size_self_attention = int(shape_sweep["max_batch_size_self_attention"])
@@ -207,23 +212,25 @@ def get_context_attention_test_cases():
                             if sm_version >= 120 and b * s * n * head_dim >= max_kv_elements:
                                 continue
 
-                            for precision_case in shape_sweep["precision_cases"]:
-                                use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
-                                use_fp8_context_fmha = bool(precision_case["fp8_context_fmha"])
-                                if skip_fp8 and use_fp8_kv_cache:
-                                    continue
-                                test_cases.append(
-                                    [
-                                        b,
-                                        s,
-                                        n,
-                                        num_kv_heads,
-                                        head_dim,
-                                        use_fp8_kv_cache,
-                                        use_fp8_context_fmha,
-                                        True,
-                                    ]
-                                )
+                            for window_size in window_sizes:
+                                for precision_case in shape_sweep["precision_cases"]:
+                                    use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                                    use_fp8_context_fmha = bool(precision_case["fp8_context_fmha"])
+                                    if skip_fp8 and use_fp8_kv_cache:
+                                        continue
+                                    test_cases.append(
+                                        [
+                                            b,
+                                            s,
+                                            n,
+                                            num_kv_heads,
+                                            head_dim,
+                                            window_size,
+                                            use_fp8_kv_cache,
+                                            use_fp8_context_fmha,
+                                            True,
+                                        ]
+                                    )
 
     return test_cases
 
@@ -261,6 +268,7 @@ def get_generation_attention_test_cases():
         batch_sizes = _int_list(shape_sweep["batch_sizes"])
         sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
         head_dims = _int_list(shape_sweep["head_dims"])
+        window_sizes = _window_size_options(shape_sweep)
         min_drop_batch = int(shape_sweep["drop_largest_sequence_for_batch_at_least"])
 
         for head_dim in head_dims:
@@ -279,11 +287,12 @@ def get_generation_attention_test_cases():
                     if b >= min_drop_batch:
                         target_s_list = target_s_list[:-1]
                     for s in target_s_list:
-                        for precision_case in shape_sweep["precision_cases"]:
-                            use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
-                            if skip_fp8 and use_fp8_kv_cache:
-                                continue
-                            test_cases.append([b, s, n, n, head_dim, use_fp8_kv_cache, False, False])
+                        for window_size in window_sizes:
+                            for precision_case in shape_sweep["precision_cases"]:
+                                use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                                if skip_fp8 and use_fp8_kv_cache:
+                                    continue
+                                test_cases.append([b, s, n, n, head_dim, window_size, use_fp8_kv_cache, False, False])
 
         for head_dim in head_dims:
             for n in sorted(_int_list(shape_sweep["xqa_query_head_counts"]), reverse=True):
@@ -304,11 +313,14 @@ def get_generation_attention_test_cases():
                         if n_kv >= n:
                             continue
                         for s in target_s_list:
-                            for precision_case in shape_sweep["precision_cases"]:
-                                use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
-                                if skip_fp8 and use_fp8_kv_cache:
-                                    continue
-                                test_cases.append([b, s, n, n_kv, head_dim, use_fp8_kv_cache, False, False])
+                            for window_size in window_sizes:
+                                for precision_case in shape_sweep["precision_cases"]:
+                                    use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                                    if skip_fp8 and use_fp8_kv_cache:
+                                        continue
+                                    test_cases.append(
+                                        [b, s, n, n_kv, head_dim, window_size, use_fp8_kv_cache, False, False]
+                                    )
     return test_cases
 
 
@@ -318,6 +330,7 @@ def run_attention_torch(
     num_heads,
     num_key_value_heads,
     head_dim,
+    attention_window_size,
     use_fp8_kv_cache,
     use_fp8_context_fmha,
     is_context_phase,
@@ -341,6 +354,7 @@ def run_attention_torch(
         num_kv_heads=num_key_value_heads,
         head_dim=head_dim,
     )
+    model_runner.sliding_window_size = attention_window_size if attention_window_size > 0 else None
     model_runner.kv_cache_dtype = kvtype
 
     total_len = input_len if is_context_phase else input_len + 1
@@ -401,6 +415,7 @@ def run_attention_torch(
         scaling=head_dim**-0.5,
         num_kv_heads=num_key_value_heads,
         layer_id=0,
+        sliding_window_size=attention_window_size if attention_window_size > 0 else -1,
     ).to(torch_device)
 
     seqlen_q = input_len if is_context_phase else 1
@@ -555,6 +570,7 @@ def run_attention_torch(
                 "num_heads": num_heads,
                 "num_key_value_heads": num_key_value_heads,
                 "head_dim": head_dim,
+                "window_size": attention_window_size,
                 "beam_width": 1,
                 "attn_dtype": "fp8" if use_fp8_context_fmha else "bfloat16",
                 "kv_cache_dtype": "fp8" if use_fp8_kv_cache else "bfloat16",
