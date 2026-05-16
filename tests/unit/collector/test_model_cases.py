@@ -188,6 +188,50 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
     )
 
 
+def test_vllm_xpu_moe_metadata_is_yaml_backed(monkeypatch):
+    from collector.case_generator import (
+        get_moe_backend_model_activation,
+        get_moe_backend_test_cases,
+        get_moe_quantization_modes,
+        moe_model_allows_quantization,
+    )
+
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+
+    cases = get_moe_backend_test_cases("vllm_xpu")
+
+    assert len(cases) == 327
+    assert {case.model_name for case in cases} == {
+        "Qwen/Qwen1.5-MoE-A2.7B",
+        "Qwen/Qwen3-30B-A3B",
+        "Qwen/Qwen3-235B-A22B-Instruct-2507",
+        "meta-llama/Llama-4-Scout-17B-16E",
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+    }
+    assert not any(case.model_name == "Qwen/Qwen3-30B-A3B" and case.tp >= 8 for case in cases)
+    assert get_moe_backend_model_activation("vllm_xpu", "openai/gpt-oss-20b") == "swigluoai"
+    assert get_moe_backend_model_activation("vllm_xpu", "Qwen/Qwen1.5-MoE-A2.7B") == "silu"
+
+    assert get_moe_quantization_modes("vllm_xpu", sm_version=0, runtime_features={}) == [
+        "bfloat16",
+        "w4a16_mxfp4",
+    ]
+    assert get_moe_quantization_modes(
+        "vllm_xpu",
+        sm_version=0,
+        runtime_features={"torch_fp8_e4m3fn": True},
+    ) == ["bfloat16", "fp8", "w4a16_mxfp4"]
+    assert moe_model_allows_quantization("vllm_xpu", "openai/gpt-oss-20b", "w4a16_mxfp4")
+    assert not moe_model_allows_quantization("vllm_xpu", "openai/gpt-oss-20b", "bfloat16")
+    assert not moe_model_allows_quantization("vllm_xpu", "Qwen/Qwen1.5-MoE-A2.7B", "w4a16_mxfp4")
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "openai/gpt-oss-20b")
+    targeted_cases = get_moe_backend_test_cases("vllm_xpu")
+    assert targeted_cases
+    assert {case.model_name for case in targeted_cases} == {"openai/gpt-oss-20b"}
+
+
 def test_mla_bmm_cases_expand_from_base_op_yaml():
     from collector.case_generator import MLABMMCommonTestCase, get_mla_bmm_case_specs
 
