@@ -179,6 +179,126 @@ def _model_case_values(op_name: str, *, apply_model_filter: bool = True) -> list
     return values
 
 
+@dataclasses.dataclass(frozen=True)
+class MLAModuleModelSpec:
+    """Model metadata used by full MLA/DSA module collectors."""
+
+    model_path: str
+    attention_type: str
+    architecture: str
+    native_num_heads: int
+    wideep_mla: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class MLAModuleSweepSpec:
+    """Shared micro-sweep values for full MLA/DSA module collectors."""
+
+    batch_sizes: list[int]
+    sequence_lengths: list[int]
+    inner_sweep_head_counts: list[int]
+    top_level_head_counts: list[int]
+    module_precision_combos: list[tuple[str, str, str]]
+    context_max_tokens: int
+    context_large_sequence_min: int
+    context_large_sequence_max_batch_size: int
+    generation_max_tokens: int
+    generation_large_sequence_min: int
+    generation_large_sequence_max_batch_size: int
+
+
+def get_mla_module_model_specs(
+    attention_type: str | None = None,
+    *,
+    wideep_mla: bool | None = None,
+    apply_model_filter: bool = True,
+) -> list[MLAModuleModelSpec]:
+    """Return YAML-backed model metadata for full MLA/DSA module collectors."""
+
+    values = []
+    model_path_filter = _get_model_path_filter() if apply_model_filter else None
+    for data in _load_model_cases_data():
+        raw_values = (data.get("model_case_values") or {}).get("mla_module", [])
+        if raw_values is None:
+            continue
+        if isinstance(raw_values, dict):
+            raw_values = [raw_values]
+        if not isinstance(raw_values, list):
+            raise TypeError("model_case_values.mla_module must be a list or mapping")
+
+        architecture = data.get("architecture")
+        for raw_value in raw_values:
+            if not isinstance(raw_value, dict):
+                raise TypeError("model_case_values.mla_module entries must be mappings")
+            value = dict(raw_value)
+            value.setdefault("architecture", architecture)
+            if model_path_filter and value.get("model_path") != model_path_filter:
+                continue
+            if attention_type is not None and value.get("attention_type") != attention_type:
+                continue
+            if wideep_mla is not None and bool(value.get("wideep_mla", False)) != wideep_mla:
+                continue
+            values.append(
+                MLAModuleModelSpec(
+                    model_path=str(value["model_path"]),
+                    attention_type=str(value["attention_type"]),
+                    architecture=str(value["architecture"]),
+                    native_num_heads=int(value["native_num_heads"]),
+                    wideep_mla=bool(value.get("wideep_mla", False)),
+                )
+            )
+    return values
+
+
+def _required_mapping(value: object, *, field_name: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise TypeError(f"{field_name} must be a mapping")
+    return value
+
+
+def get_mla_module_sweep_spec() -> MLAModuleSweepSpec:
+    """Return YAML-backed shared micro-sweep values for module collectors."""
+
+    values = _required_base_common_case_values("mla_module")
+    context = _required_mapping(values.get("context"), field_name="mla_module.context")
+    generation = _required_mapping(values.get("generation"), field_name="mla_module.generation")
+    raw_precision_combos = values.get("module_precision_combos")
+    if not isinstance(raw_precision_combos, list):
+        raise TypeError("mla_module.module_precision_combos must be a list")
+
+    precision_combos = []
+    for combo in raw_precision_combos:
+        if not isinstance(combo, dict):
+            raise TypeError("mla_module.module_precision_combos entries must be mappings")
+        precision_combos.append(
+            (
+                str(combo["compute_dtype"]),
+                str(combo["kv_cache_dtype"]),
+                str(combo["gemm_type"]),
+            )
+        )
+
+    return MLAModuleSweepSpec(
+        batch_sizes=_as_int_list(values.get("batch_sizes"), field_name="mla_module.batch_sizes"),
+        sequence_lengths=_as_int_list(values.get("sequence_lengths"), field_name="mla_module.sequence_lengths"),
+        inner_sweep_head_counts=_as_int_list(
+            values.get("inner_sweep_head_counts"),
+            field_name="mla_module.inner_sweep_head_counts",
+        ),
+        top_level_head_counts=_as_int_list(
+            values.get("top_level_head_counts"),
+            field_name="mla_module.top_level_head_counts",
+        ),
+        module_precision_combos=precision_combos,
+        context_max_tokens=int(context["max_tokens"]),
+        context_large_sequence_min=int(context["large_sequence_min"]),
+        context_large_sequence_max_batch_size=int(context["large_sequence_max_batch_size"]),
+        generation_max_tokens=int(generation["max_tokens"]),
+        generation_large_sequence_min=int(generation["large_sequence_min"]),
+        generation_large_sequence_max_batch_size=int(generation["large_sequence_max_batch_size"]),
+    )
+
+
 def is_wideep_moe_model(model_name: str) -> bool:
     """Return True if *model_name* needs WideEP MoE collection."""
     return any(

@@ -120,7 +120,11 @@ self` means `num_key_value_heads` equals `query_head_count`.
 For `mla_bmm_gen_pre` and `mla_bmm_gen_post`, `token_counts`, `head_counts`,
 `dtypes`, `num_warmups`, and `num_runs` define the auxiliary MLA generation BMM
 micro-collector grids shared by SGLang and TRT-LLM; each collector still filters
-runtime-unsupported dtypes before benchmarking.
+runtime-unsupported dtypes before benchmarking. Full MLA/DSA module collectors
+read `common_case_values.mla_module` for the inner batch/sequence/head sweeps and
+reduced top-level ModelRunner subprocess sweep. Their per-model attention type,
+native head count, WideEP eligibility, and architecture come from
+`model_case_values.mla_module`.
 
 Framework-specific common op overrides live under `framework_specific_op_cases`
 with the same case `id`. For example, TRT-LLM adds attention `head_dims: [64,
