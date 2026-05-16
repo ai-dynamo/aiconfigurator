@@ -139,6 +139,7 @@ collect.py/collect_ops — validates __compat__ and fails incompatible ops
 __compat__           — per-file metadata declaring supported framework versions
 cases/               — model-centric case manifests and GPU exceptions
 wideep/              — WideEP collector namespace for special images/runtimes
+wideep/*/registry.py — WideEP-only ops appended when the v2 plan requests them
 network/             — collective communication collectors and Slurm network jobs
 ```
 
