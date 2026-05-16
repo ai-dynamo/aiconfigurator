@@ -432,7 +432,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
         )
         logger.debug(f"TrtLLMWideEPMoEDispatch: {phase} with {precision}")
 
-        comm_latency = 0.0
+        comm_latency = PerformanceResult(0.0, energy=0.0, source="empirical")
 
         if self._pre_dispatch:
             prepare_result = database.query_trtllm_alltoall(
@@ -457,7 +457,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 moe_backend="wideep",
                 node_num=self._node_num,
             )
-            comm_latency = float(prepare_result) + float(dispatch_result)
+            comm_latency = prepare_result + dispatch_result
         else:
             combine_op = "alltoall_combine_low_precision" if self._use_low_precision_combine else "alltoall_combine"
             combine_result = database.query_trtllm_alltoall(
@@ -471,13 +471,14 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 moe_backend="wideep",
                 node_num=self._node_num,
             )
-            comm_latency = float(combine_result)
+            comm_latency = combine_result
 
-        # MoEDispatch returns no energy (communication ops don't track energy).
-        # ``comm_latency`` is composed from query_trtllm_alltoall results whose
-        # sources we can't recover here without more invasive refactoring; tag
-        # as ``empirical`` so the breakdown report doesn't mis-claim silicon.
-        return PerformanceResult(comm_latency * self._scale_factor, energy=0.0, source="empirical")
+        scaled = comm_latency * self._scale_factor
+        return PerformanceResult(
+            float(scaled),
+            energy=getattr(scaled, "energy", 0.0),
+            source=getattr(scaled, "source", "empirical"),
+        )
 
     def get_weights(self, **kwargs):
         """MoE dispatch has no weight memory."""
@@ -817,10 +818,12 @@ class MoEDispatch(Operation):
         else:  # other backends
             raise NotImplementedError(f"MoEDispatch: Not implemented for backend {database.backend}")
 
-        # MoEDispatch calculates latency rather than querying, so energy=0.
-        # ``comm_latency`` is computed from a mix of query_nccl results and
-        # plain SOL math; tag as ``empirical`` to be safe.
-        return PerformanceResult(comm_latency * self._scale_factor, energy=0.0, source="empirical")
+        scaled = comm_latency * self._scale_factor
+        return PerformanceResult(
+            float(scaled),
+            energy=getattr(scaled, "energy", 0.0),
+            source=getattr(scaled, "source", "empirical"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -2022,16 +2025,10 @@ class FallbackOp(Operation):
                     database._default_database_mode = prev_mode
                 perf_db_logger.setLevel(prev_log_level)
 
-        total_latency = 0.0
-        total_energy = 0.0
-        sub_sources: list[str] = []
+        total = PerformanceResult(0.0, energy=0.0, source="empirical")
         for op in self._fallback:
-            result = op.query(database, **kwargs)
-            total_latency += float(result)
-            total_energy += getattr(result, "energy", 0.0)
-            sub_sources.append(getattr(result, "source", "silicon"))
-        merged_source = sub_sources[0] if sub_sources and all(s == sub_sources[0] for s in sub_sources) else "hybrid"
-        return PerformanceResult(total_latency, energy=total_energy, source=merged_source)
+            total += op.query(database, **kwargs)
+        return total
 
     def get_weights(self, **kwargs):
         # Use primary weights if available, otherwise sum fallback weights.
@@ -2077,28 +2074,19 @@ class OverlapOp(Operation):
             PerformanceResult with latency = max(group_a, group_b)
             and energy = sum of all ops.
         """
-        latency_a = 0.0
-        energy_a = 0.0
-        sub_sources: list[str] = []
+        total_a = PerformanceResult(0.0, energy=0.0, source="empirical")
         for op in self._group_a:
-            result = op.query(database, **kwargs)
-            latency_a += float(result)
-            energy_a += getattr(result, "energy", 0.0)
-            sub_sources.append(getattr(result, "source", "silicon"))
+            total_a += op.query(database, **kwargs)
 
-        latency_b = 0.0
-        energy_b = 0.0
+        total_b = PerformanceResult(0.0, energy=0.0, source="empirical")
         for op in self._group_b:
-            result = op.query(database, **kwargs)
-            latency_b += float(result)
-            energy_b += getattr(result, "energy", 0.0)
-            sub_sources.append(getattr(result, "source", "silicon"))
+            total_b += op.query(database, **kwargs)
 
-        merged_source = sub_sources[0] if sub_sources and all(s == sub_sources[0] for s in sub_sources) else "hybrid"
+        merged = total_a + total_b
         return PerformanceResult(
-            latency=max(latency_a, latency_b),
-            energy=energy_a + energy_b,
-            source=merged_source,
+            latency=max(float(total_a), float(total_b)),
+            energy=total_a.energy + total_b.energy,
+            source=merged.source,
         )
 
     def get_weights(self, **kwargs):

@@ -516,18 +516,40 @@ def _format_op_rows(
     shown = items[:top_n]
     rest = items[top_n:]
     name_w = min(32, max(len(op) for op, _ in shown))
+    show_source = source_dict is not None
 
-    header = f"  {'op':<{name_w}s}  {'latency':>13s}  {'share':>6s}"
+    header = f"  {'op':<{name_w}s}  {'latency':>13s}"
     if sol_ops:
         header += f"  {'SOL':>13s}  {'SOL%':>7s}"
-    header += "  bar"
-    lines = [header, *[_format_op_row(op, lat, total, name_w, bar_width, sol_ops, source_dict) for op, lat in shown]]
+    share_w = bar_width + 8
+    header += f"  {'share (%)':<{share_w}s}"
+    if show_source:
+        header += "  source"
+    lines = [
+        header,
+        *[
+            _format_op_row(op, lat, total, name_w, bar_width, sol_ops, source_dict, show_source=show_source)
+            for op, lat in shown
+        ],
+    ]
 
     if rest:
         rest_name = f"... (others, {len(rest)} items)"
         rest_lat = sum(lat for _, lat in rest)
         rest_sol = sum(float(sol_ops.get(op, 0.0) or 0.0) for op, _ in rest) if sol_ops else None
-        lines.append(_format_op_row(rest_name, rest_lat, total, name_w, bar_width, None, None, sol_latency=rest_sol))
+        lines.append(
+            _format_op_row(
+                rest_name,
+                rest_lat,
+                total,
+                name_w,
+                bar_width,
+                None,
+                source_dict,
+                sol_latency=rest_sol,
+                show_source=show_source,
+            )
+        )
     return lines
 
 
@@ -541,17 +563,19 @@ def _format_op_row(
     source_dict: dict[str, str] | None,
     *,
     sol_latency: float | None = None,
+    show_source: bool = False,
 ) -> str:
     pct = latency / total * 100.0 if total > 0.0 else 0.0
     bar = _ascii_bar(latency / total if total > 0.0 else 0.0, width=bar_width)
+    share = f"{bar}  {pct:>5.1f}%"
+    share_w = bar_width + 8
     sol_suffix = ""
     if sol_ops is not None or sol_latency is not None:
         sol_value = sol_latency if sol_latency is not None else float(sol_ops.get(op, 0.0) or 0.0)
         sol_pct = sol_value / latency * 100.0 if latency > 0.0 else 0.0
         sol_suffix = f"  {sol_value:>10.3f} ms  {sol_pct:>6.1f}%"
     src_suffix = ""
-    if source_dict:
+    if show_source:
         src = source_dict.get(op)
-        if src:
-            src_suffix = f" [{src}]"
-    return f"  {op:<{name_w}s}  {latency:>10.3f} ms  {pct:>5.1f}%{sol_suffix}  {bar}{src_suffix}"
+        src_suffix = f"  [{src}]" if src else "  "
+    return f"  {op:<{name_w}s}  {latency:>10.3f} ms{sol_suffix}  {share:<{share_w}s}{src_suffix}"

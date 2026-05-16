@@ -318,15 +318,11 @@ def test_disagg_estimate_responds_to_common_nextn():
     ), "nextn=1 produced a disagg estimate identical to nextn=0; the kwarg was dropped"
 
 
-def test_static_estimate_source_tag_empirical_in_sol_mode():
-    """SOL database mode should report formula-based ops as empirical."""
+def test_static_estimate_source_tag_sol_in_sol_mode():
+    """SOL database mode should report SOL-derived ops as sol."""
     result = cli_estimate(database_mode="SOL", mode="static", **_common_kwargs())
     sources = _flatten_sources(result.summary)
     assert sources, "expected per-op source tags to be populated"
     # No op should be tagged 'silicon' in SOL mode.
-    assert all(s != "silicon" for s in sources), (
-        f"'silicon' tag leaked in SOL mode (sources should be empirical/hybrid): {sources}"
-    )
-    assert any(s == "empirical" for s in sources), (
-        f"expected at least one 'empirical' tag in SOL mode, got: {set(sources)}"
-    )
+    assert all(s != "silicon" for s in sources), f"'silicon' tag leaked in SOL mode: {sources}"
+    assert any(s == "sol" for s in sources), f"expected at least one 'sol' tag in SOL mode, got: {set(sources)}"

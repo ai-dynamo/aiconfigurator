@@ -177,7 +177,7 @@ class TestFallbackOp:
 
         def _query(database, **kwargs):
             seen_modes.append(database._default_database_mode)
-            return PerformanceResult(4.0, energy=0.0, source="empirical")
+            return PerformanceResult(4.0, energy=0.0, source="sol")
 
         primary.query.side_effect = _query
         fallback_1 = _make_mock_op(5.0, 50.0)
@@ -187,7 +187,7 @@ class TestFallbackOp:
 
         assert seen_modes == [common.DatabaseMode.SOL]
         assert float(result) == 4.0
-        assert result.source == "empirical"
+        assert result.source == "sol"
         assert mock_db._default_database_mode == common.DatabaseMode.SOL
 
     def test_database_mode_restored_after_primary_failure(self):

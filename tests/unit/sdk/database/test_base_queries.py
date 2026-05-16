@@ -29,6 +29,7 @@ def test_query_gemm_exact_match(stub_perf_db):
     # Also test that SOL mode works
     sol_value = stub_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
     assert sol_value > 0, f"Expected positive SOL value, got {sol_value}"
+    assert sol_value.source == "sol"
 
 
 def test_query_gemm_empirical_mode(stub_perf_db):

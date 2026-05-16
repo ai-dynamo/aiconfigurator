@@ -52,7 +52,7 @@ class TestConstruction:
 
 
 class TestMergeSource:
-    @pytest.mark.parametrize("src", ["silicon", "empirical", "hybrid"])
+    @pytest.mark.parametrize("src", ["silicon", "empirical", "sol", "hybrid"])
     def test_same_source_preserved(self, src):
         assert PerformanceResult._merge_source(src, src) == src
 

@@ -477,11 +477,11 @@ class EstimateResult:
             },
         }
 
-    Values are ``"silicon"`` (table data), ``"empirical"`` (formula estimate),
-    or ``"hybrid"`` (a sum of values from both
-    sources). The ``scheduling`` section of ``per_ops_data`` is intentionally
-    omitted here -- those entries are scheduling math / aggregate sums, not
-    DB queries.
+    Values are ``"silicon"`` (table data), ``"empirical"`` (formula fallback),
+    ``"sol"`` (explicit SOL estimate), or ``"hybrid"`` (a sum of values from
+    different sources). The ``scheduling`` section of ``per_ops_data`` is
+    intentionally omitted here -- those entries are scheduling math / aggregate
+    sums, not DB queries.
     """
 
     kv_cache_warning: str | None = None
