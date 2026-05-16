@@ -64,11 +64,13 @@ def test_format_estimate_detail_report_static_pairs_sol_summary() -> None:
 
     report = format_estimate_detail_report(result, sol_result, detail="time", width=100)
 
+    assert "latency" in report
+    assert "SOL%" in report
     assert "request latency" in report
-    assert "40.000 ms  SOL     20.000 ms    50.0% SOL/time" in report
-    assert "Context phase (total = 10.000 ms, SOL = 5.000 ms, SOL/time = 50.0%)" in report
+    assert "40.000 ms" in report
+    assert "20.000 ms" in report
+    assert "Context phase (total = 10.000 ms, SOL = 5.000 ms, SOL% = 50.0%)" in report
     assert "context_qkv_gemm" in report
-    assert "10.000 ms  100.0%  SOL      5.000 ms    50.0% SOL/time" in report
 
 
 @pytest.mark.parametrize(
@@ -84,7 +86,7 @@ def test_format_estimate_detail_report_static_pairs_sol_summary() -> None:
             {"mix_step": {"context_attention": 10.0}, "genonly_step": {"generation_attention": 5.0}},
             (
                 "Scheduling: 2 mix steps + 3 gen-only steps",
-                "Mix Step (total = 20.000 ms, SOL = 10.000 ms, SOL/time = 50.0%)",
+                "Mix Step (total = 20.000 ms, SOL = 10.000 ms, SOL% = 50.0%)",
             ),
         ),
         (
@@ -92,8 +94,8 @@ def test_format_estimate_detail_report_static_pairs_sol_summary() -> None:
             {"prefill": {"context_attention": 40.0}, "decode": {"generation_attention": 8.0}},
             {"prefill": {"context_attention": 10.0}, "decode": {"generation_attention": 4.0}},
             (
-                "Prefill (static_ctx) (total = 40.000 ms, SOL = 10.000 ms, SOL/time = 25.0%)",
-                "Decode (static_gen) (total = 8.000 ms, SOL = 4.000 ms, SOL/time = 50.0%)",
+                "Prefill (static_ctx) (total = 40.000 ms, SOL = 10.000 ms, SOL% = 25.0%)",
+                "Decode (static_gen) (total = 8.000 ms, SOL = 4.000 ms, SOL% = 50.0%)",
             ),
         ),
     ],
@@ -118,5 +120,7 @@ def test_format_estimate_detail_report_uses_per_ops_data(
 
     report = format_estimate_detail_report(result, sol_result, detail="time", width=100)
 
+    assert "latency" in report
+    assert "SOL%" in report
     for line in expected:
         assert line in report

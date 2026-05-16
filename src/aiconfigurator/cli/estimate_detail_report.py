@@ -403,14 +403,19 @@ def _format_latency_metrics(result: EstimateResult, sol_result: EstimateResult |
         if latency <= 0.0 and sol_latency <= 0.0:
             continue
         rows.append(_format_latency_row(label, latency, sol_latency if sol_raw else None))
-    return ["Latency Summary", *rows] if rows else []
+    if not rows:
+        return []
+    header = f"  {'metric':<16s} {'latency':>13s}"
+    if sol_raw:
+        header += f"  {'SOL':>13s}  {'SOL%':>7s}"
+    return ["Latency Summary", header, *rows]
 
 
 def _format_latency_row(label: str, latency: float, sol_latency: float | None) -> str:
     if sol_latency is None:
         return f"  {label:<16s} {latency:>10.3f} ms"
     sol_pct = sol_latency / latency * 100.0 if latency > 0.0 else 0.0
-    return f"  {label:<16s} {latency:>10.3f} ms  SOL {sol_latency:>10.3f} ms  {sol_pct:>6.1f}% SOL/time"
+    return f"  {label:<16s} {latency:>10.3f} ms  {sol_latency:>10.3f} ms  {sol_pct:>6.1f}%"
 
 
 def _time_sections(
@@ -487,7 +492,7 @@ def _section_header(title: str, ops: dict[str, float], sol_ops: dict[str, float]
     if sol_ops:
         sol_total = sum(float(v) for v in sol_ops.values())
         sol_pct = sol_total / total * 100.0 if total > 0.0 else 0.0
-        header += f", SOL = {sol_total:.3f} ms, SOL/time = {sol_pct:.1f}%"
+        header += f", SOL = {sol_total:.3f} ms, SOL% = {sol_pct:.1f}%"
     header += ")"
     return header
 
@@ -512,7 +517,11 @@ def _format_op_rows(
     rest = items[top_n:]
     name_w = min(32, max(len(op) for op, _ in shown))
 
-    lines = [_format_op_row(op, lat, total, name_w, bar_width, sol_ops, source_dict) for op, lat in shown]
+    header = f"  {'op':<{name_w}s}  {'latency':>13s}  {'share':>6s}"
+    if sol_ops:
+        header += f"  {'SOL':>13s}  {'SOL%':>7s}"
+    header += "  bar"
+    lines = [header, *[_format_op_row(op, lat, total, name_w, bar_width, sol_ops, source_dict) for op, lat in shown]]
 
     if rest:
         rest_name = f"... (others, {len(rest)} items)"
@@ -539,7 +548,7 @@ def _format_op_row(
     if sol_ops is not None or sol_latency is not None:
         sol_value = sol_latency if sol_latency is not None else float(sol_ops.get(op, 0.0) or 0.0)
         sol_pct = sol_value / latency * 100.0 if latency > 0.0 else 0.0
-        sol_suffix = f"  SOL {sol_value:>10.3f} ms  {sol_pct:>6.1f}% SOL/time"
+        sol_suffix = f"  {sol_value:>10.3f} ms  {sol_pct:>6.1f}%"
     src_suffix = ""
     if source_dict:
         src = source_dict.get(op)
