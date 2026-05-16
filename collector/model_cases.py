@@ -37,26 +37,6 @@ SM_EXCEPTIONS_DIR = CASE_ROOT / "sm_exceptions"
 SYSTEMS_DIR = COLLECTOR_ROOT.parent / "src" / "aiconfigurator" / "systems"
 
 
-SECTION_ALIASES = {
-    "all_frameworks_op_cases": ("all_frameworks_op_cases", "all_frameworks_Op_cases", "All_frameworks_Op_cases"),
-    "framework_specific_op_cases": (
-        "framework_specific_op_cases",
-        "framework_specific_Op_cases",
-        "Framework_specific_Op_cases",
-    ),
-    "all_frameworks_op_exceptions": (
-        "all_frameworks_op_exceptions",
-        "all_frameworks_Op_exceptions",
-        "All_frameworks_Op_exceptions",
-    ),
-    "framework_specific_op_exceptions": (
-        "framework_specific_op_exceptions",
-        "framework_specific_Op_exceptions",
-        "Framework_specific_Op_exceptions",
-    ),
-}
-
-
 @dataclass(slots=True)
 class CaseSelector:
     """A selector for either included cases or excluded cases."""
@@ -209,14 +189,12 @@ def resolve_sm_version(*, gpu_type: str | None = None, sm_version: int | str | N
 
 
 def _section(data: dict[str, Any], canonical_name: str) -> dict[str, Any]:
-    for name in SECTION_ALIASES[canonical_name]:
-        value = data.get(name)
-        if value is None:
-            continue
-        if not isinstance(value, dict):
-            raise TypeError(f"{canonical_name} must be a mapping")
-        return value
-    return {}
+    value = data.get(canonical_name)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError(f"{canonical_name} must be a mapping")
+    return value
 
 
 def _as_list(value: Any, *, field_name: str) -> list[Any]:
