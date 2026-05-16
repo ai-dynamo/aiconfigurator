@@ -3,6 +3,10 @@
 
 schema_version: 1
 sm_version: 90
+gpu_types:
+  - h100_pcie
+  - h100_sxm
+  - h200_sxm
 description: >
   SM90 Hopper exceptions extracted from collector SM gates. Hopper supports
   FP8/block-FP8 paths but not Blackwell NVFP4 paths.
