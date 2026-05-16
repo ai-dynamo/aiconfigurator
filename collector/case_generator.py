@@ -466,6 +466,19 @@ class MoeCommonTestCase:
     power_law_alpha: Optional[float]
 
 
+@dataclasses.dataclass(frozen=True)
+class MoeQuantizationSpec:
+    """YAML-backed MoE quantization mode selection metadata."""
+
+    name: str
+    min_sm: Optional[int]
+    min_sm_exclusive: Optional[int]
+    requires_runtime_feature: Optional[str]
+    allowed_model_paths: tuple[str, ...]
+    excluded_runtime_versions: tuple[dict[str, object], ...]
+    module_config: dict[str, object]
+
+
 def _moe_token_expert_distributions(moe_sweep: dict[str, object]) -> list[tuple[str, Optional[float]]]:
     raw_distributions = moe_sweep.get("token_expert_distributions")
     if not isinstance(raw_distributions, list):
@@ -481,6 +494,189 @@ def _moe_token_expert_distributions(moe_sweep: dict[str, object]) -> list[tuple[
         alpha = item.get("power_law_alpha")
         distributions.append((str(name), None if alpha is None else float(alpha)))
     return distributions
+
+
+def _moe_backend_values(backend: str) -> dict[str, object]:
+    return get_base_common_case_values(f"moe_{backend}")
+
+
+def get_moe_quantization_specs(backend: str) -> list[MoeQuantizationSpec]:
+    """Return YAML-backed MoE quantization mode metadata for one backend."""
+
+    values = _moe_backend_values(backend)
+    raw_modes = values.get("quantization_modes", [])
+    if not isinstance(raw_modes, list):
+        raise TypeError(f"common_case_values.moe_{backend}.quantization_modes must be a list")
+
+    specs = []
+    for raw_mode in raw_modes:
+        if not isinstance(raw_mode, dict):
+            raise TypeError(f"common_case_values.moe_{backend}.quantization_modes entries must be mappings")
+        exclusions = raw_mode.get("excluded_runtime_versions", [])
+        if not isinstance(exclusions, list):
+            raise TypeError(
+                f"common_case_values.moe_{backend}.quantization_modes excluded_runtime_versions must be a list"
+            )
+        module_config = raw_mode.get("module_config", {})
+        if not isinstance(module_config, dict):
+            raise TypeError(f"common_case_values.moe_{backend}.quantization_modes module_config must be a mapping")
+        specs.append(
+            MoeQuantizationSpec(
+                name=str(raw_mode["name"]),
+                min_sm=None if raw_mode.get("min_sm") is None else int(raw_mode["min_sm"]),
+                min_sm_exclusive=(
+                    None if raw_mode.get("min_sm_exclusive") is None else int(raw_mode["min_sm_exclusive"])
+                ),
+                requires_runtime_feature=(
+                    None
+                    if raw_mode.get("requires_runtime_feature") is None
+                    else str(raw_mode["requires_runtime_feature"])
+                ),
+                allowed_model_paths=tuple(
+                    _as_str_list(
+                        raw_mode.get("allowed_model_paths", []),
+                        field_name=f"moe_{backend}.quantization_modes.allowed_model_paths",
+                    )
+                ),
+                excluded_runtime_versions=tuple(dict(item) for item in exclusions if isinstance(item, dict)),
+                module_config=dict(module_config),
+            )
+        )
+    return specs
+
+
+def _moe_runtime_version_excluded(
+    spec: MoeQuantizationSpec,
+    *,
+    sm_version: int,
+    runtime_version: str,
+) -> bool:
+    for exclusion in spec.excluded_runtime_versions:
+        version_prefix = exclusion.get("version_prefix")
+        if version_prefix is not None and not runtime_version.startswith(str(version_prefix)):
+            continue
+        min_sm = exclusion.get("min_sm")
+        if min_sm is not None and sm_version < int(min_sm):
+            continue
+        max_sm = exclusion.get("max_sm")
+        if max_sm is not None and sm_version > int(max_sm):
+            continue
+        return True
+    return False
+
+
+def get_moe_quantization_modes(
+    backend: str,
+    *,
+    sm_version: int,
+    runtime_version: str = "",
+    runtime_features: dict[str, bool] | None = None,
+) -> list[str]:
+    """Return enabled MoE quantization modes after YAML SM/runtime filtering."""
+
+    features = runtime_features or {}
+    modes = []
+    for spec in get_moe_quantization_specs(backend):
+        if spec.min_sm is not None and sm_version < spec.min_sm:
+            continue
+        if spec.min_sm_exclusive is not None and sm_version <= spec.min_sm_exclusive:
+            continue
+        if spec.requires_runtime_feature and not features.get(spec.requires_runtime_feature, False):
+            continue
+        if _moe_runtime_version_excluded(spec, sm_version=sm_version, runtime_version=runtime_version):
+            continue
+        modes.append(spec.name)
+    return modes
+
+
+def get_moe_quantization_module_config(backend: str, moe_type: str) -> dict[str, object]:
+    """Return optional framework module config for a MoE quantization mode."""
+
+    for spec in get_moe_quantization_specs(backend):
+        if spec.name == moe_type:
+            return dict(spec.module_config)
+    return {}
+
+
+def moe_model_allows_quantization(backend: str, model_name: str, moe_type: str) -> bool:
+    """Return whether backend YAML allows a MoE quantization mode for a model."""
+
+    for spec in get_moe_quantization_specs(backend):
+        if spec.name == moe_type and spec.allowed_model_paths and model_name not in spec.allowed_model_paths:
+            return False
+
+    values = _moe_backend_values(backend)
+    raw_policies = values.get("model_quantization_policies", [])
+    if not isinstance(raw_policies, list):
+        raise TypeError(f"common_case_values.moe_{backend}.model_quantization_policies must be a list")
+
+    for raw_policy in raw_policies:
+        if not isinstance(raw_policy, dict):
+            raise TypeError(f"common_case_values.moe_{backend}.model_quantization_policies entries must be mappings")
+        model_paths = _as_str_list(
+            raw_policy.get("model_paths", []),
+            field_name=f"moe_{backend}.model_quantization_policies.model_paths",
+        )
+        if model_name not in model_paths:
+            continue
+        allowed_modes = raw_policy.get("allowed_modes")
+        if allowed_modes is not None and moe_type not in _as_str_list(
+            allowed_modes,
+            field_name=f"moe_{backend}.model_quantization_policies.allowed_modes",
+        ):
+            return False
+        excluded_modes = raw_policy.get("excluded_modes")
+        if excluded_modes is not None and moe_type in _as_str_list(
+            excluded_modes,
+            field_name=f"moe_{backend}.model_quantization_policies.excluded_modes",
+        ):
+            return False
+    return True
+
+
+def moe_shape_satisfies_constraints(
+    backend: str,
+    moe_type: str,
+    *,
+    hidden_size: int,
+    inter_size: int,
+    tensor_parallel_size: int,
+    topk: int,
+) -> bool:
+    """Return whether a MoE shape satisfies backend YAML quantization limits."""
+
+    values = _moe_backend_values(backend)
+    raw_constraints = values.get("shape_constraints", [])
+    if not isinstance(raw_constraints, list):
+        raise TypeError(f"common_case_values.moe_{backend}.shape_constraints must be a list")
+
+    local_inter_size = inter_size // tensor_parallel_size
+    fields = {
+        "hidden_size": hidden_size,
+        "inter_size": inter_size,
+        "local_inter_size": local_inter_size,
+        "topk": topk,
+    }
+    for raw_constraint in raw_constraints:
+        if not isinstance(raw_constraint, dict):
+            raise TypeError(f"common_case_values.moe_{backend}.shape_constraints entries must be mappings")
+        if str(raw_constraint.get("mode")) != moe_type:
+            continue
+
+        divisible_by = raw_constraint.get("divisible_by", {})
+        if not isinstance(divisible_by, dict):
+            raise TypeError(f"common_case_values.moe_{backend}.shape_constraints.divisible_by must be a mapping")
+        for field_name, divisor in divisible_by.items():
+            if field_name not in fields:
+                raise ValueError(f"Unknown MoE shape constraint field: {field_name}")
+            if fields[field_name] % int(divisor) != 0:
+                return False
+
+        max_topk = raw_constraint.get("max_topk")
+        if max_topk is not None and topk > int(max_topk):
+            return False
+
+    return True
 
 
 def get_common_moe_test_cases():
@@ -557,6 +753,12 @@ def _as_int_list(value, *, field_name: str) -> list[int]:
     if not isinstance(value, list):
         raise TypeError(f"{field_name} must be a list")
     return [int(item) for item in value]
+
+
+def _as_str_list(value, *, field_name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise TypeError(f"{field_name} must be a list")
+    return [str(item) for item in value]
 
 
 def _get_base_gemm_shape_sweeps(backend: str | None = None) -> list[dict[str, object]]:
