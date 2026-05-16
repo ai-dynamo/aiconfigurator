@@ -198,6 +198,75 @@ common_case_values:
   attention_head_dims: &base_attention_head_dims
     - 128
     - 256
+  moe:
+    token_counts:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 48
+      - 64
+      - 80
+      - 96
+      - 128
+      - 160
+      - 192
+      - 256
+      - 320
+      - 384
+      - 512
+      - 768
+      - 1024
+      - 1536
+      - 2048
+      - 3072
+      - 4096
+      - 6144
+      - 8192
+      - 12288
+      - 16384
+    tensor_parallel_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+    expert_parallel_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+    gpu_counts:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+    token_expert_distributions:
+      - name: balanced
+        power_law_alpha: 0.0
+      - name: power_law
+        power_law_alpha: 1.01
+      - name: power_law
+        power_law_alpha: 1.2
+    constraints:
+      - "tensor_parallel_size * expert_parallel_size == gpu_count"
+      - "expert_parallel_size <= num_experts"
+      - "num_experts % expert_parallel_size == 0"
+      - "inter_size % tensor_parallel_size == 0"
+      - "tensor_parallel_size < max_tp_exclusive when max_tp_exclusive is set"
 
 model_ops:
   - gemm
