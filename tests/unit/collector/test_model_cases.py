@@ -34,12 +34,19 @@ def test_model_case_plan_merges_base_model_and_framework_specific_ops():
 def test_base_gemm_cases_are_readable_shape_specs():
     plan = build_collection_case_plan(backend="sglang", model_path="deepseek-ai/DeepSeek-V3")
     gemm_plan = plan.op_cases["gemm"]
+    context_plan = plan.op_cases["attention_context"]
+    generation_plan = plan.op_cases["attention_generation"]
 
     assert len(gemm_plan.include.case_specs) == 1
     spec = gemm_plan.include.case_specs[0]
     assert spec["id"] == "base_transformer_gemm_shape_sweep"
     assert spec["token_counts"][:5] == [1, 2, 3, 4, 5]
     assert spec["feature_sizes"][:3] == [32, 64, 128]
+
+    assert context_plan.include.case_specs[0]["id"] == "base_attention_context_shape_sweep"
+    assert context_plan.include.case_specs[0]["kv_head_options"] == ["self", 1, 2, 4, 8]
+    assert generation_plan.include.case_specs[0]["id"] == "base_attention_generation_shape_sweep"
+    assert generation_plan.include.case_specs[0]["xqa_query_head_counts"][-1] == 128
 
     filtered = filter_test_cases(
         ["case0", "case1"], plan=gemm_plan, full_module_name="sglang.gemm", run_func_name="run_gemm"
@@ -49,7 +56,12 @@ def test_base_gemm_cases_are_readable_shape_specs():
 
 
 def test_gemm_common_cases_expand_from_base_yaml_shape_specs():
-    from collector.common_test_cases import GemmCommonTestCase, get_gemm_common_test_cases
+    from collector.common_test_cases import (
+        ComputeScaleCommonTestCase,
+        GemmCommonTestCase,
+        get_compute_scale_common_test_cases,
+        get_gemm_common_test_cases,
+    )
 
     cases = get_gemm_common_test_cases()
 
@@ -57,6 +69,11 @@ def test_gemm_common_cases_expand_from_base_yaml_shape_specs():
     assert cases[0] == GemmCommonTestCase(x=32768, n=65536, k=51200)
     assert cases[-1] == GemmCommonTestCase(x=1, n=32, k=32)
     assert not any(case.n == 65536 and case.k == 65536 for case in cases)
+
+    compute_scale_cases = get_compute_scale_common_test_cases()
+    assert len(compute_scale_cases) == 1628
+    assert compute_scale_cases[0] == ComputeScaleCommonTestCase(m=32768, k=51200)
+    assert compute_scale_cases[-1] == ComputeScaleCommonTestCase(m=1, k=65536)
 
 
 def test_model_cases_path_can_infer_model_path():

@@ -3,7 +3,7 @@
 
 import tensorrt_llm
 import torch
-from common_test_cases import get_gemm_common_test_cases
+from common_test_cases import get_compute_scale_common_test_cases
 
 from helper import benchmark_with_power, get_sm_version, log_perf
 
@@ -14,14 +14,8 @@ def get_computescale_test_cases():
         return []
 
     test_cases = []
-    seen_mk = set()
-    for gemm_common_testcase in get_gemm_common_test_cases():
-        m = gemm_common_testcase.x
-        k = gemm_common_testcase.k
-        if (m, k) in seen_mk:
-            continue
-        seen_mk.add((m, k))
-        test_cases.append([m, k])
+    for compute_scale_common_testcase in get_compute_scale_common_test_cases():
+        test_cases.append([compute_scale_common_testcase.m, compute_scale_common_testcase.k])
 
     return test_cases
 
