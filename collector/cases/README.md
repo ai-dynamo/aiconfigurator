@@ -25,6 +25,10 @@ include_base: true
 They use two case sections:
 
 ```yaml
+model_ops:
+  - gemm
+  - moe
+
 all_frameworks_op_cases:
   moe:
     cases: all
@@ -34,6 +38,25 @@ framework_specific_op_cases:
     wideep_moe:
       cases: all
 ```
+
+For simple common ops, `cases` can hold exact generator specs instead of opaque
+case IDs. GEMM uses readable shape names:
+
+```yaml
+all_frameworks_op_cases:
+  gemm:
+    cases:
+      - id: base_transformer_gemm_shape_sweep
+        token_counts: [1, 2, 4, 8, 16]
+        feature_sizes: [128, 256, 512]
+        skip_shapes:
+          - input_features: 65536
+            output_features: 65536
+```
+
+`token_counts` is the GEMM M dimension, `input_features` is K, and
+`output_features` is N. `feature_sizes` is shorthand for using the same explicit
+size list for both input and output features.
 
 GPU exception files use matching exception sections:
 
