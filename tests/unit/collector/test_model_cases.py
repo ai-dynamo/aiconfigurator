@@ -85,14 +85,21 @@ def test_gemm_common_cases_expand_from_base_op_yaml_shape_specs():
         GemmCommonTestCase,
         get_compute_scale_case_specs,
         get_gemm_case_specs,
+        get_gemm_type_specs,
     )
 
     cases = get_gemm_case_specs()
+    xpu_cases = get_gemm_case_specs("vllm_xpu")
 
     assert len(cases) == 35742
     assert cases[0] == GemmCommonTestCase(x=32768, n=65536, k=51200)
     assert cases[-1] == GemmCommonTestCase(x=1, n=32, k=32)
     assert not any(case.n == 65536 and case.k == 65536 for case in cases)
+
+    assert len(xpu_cases) == 7581
+    assert xpu_cases[0] == GemmCommonTestCase(x=8192, n=12288, k=12288)
+    assert xpu_cases[-1] == GemmCommonTestCase(x=1, n=32, k=32)
+    assert get_gemm_type_specs("vllm_xpu") == ["bfloat16", "fp8"]
 
     compute_scale_cases = get_compute_scale_case_specs()
     assert len(compute_scale_cases) == 1628

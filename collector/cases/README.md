@@ -115,7 +115,9 @@ all_frameworks_op_cases:
 
 `token_counts` is the GEMM M dimension, `input_features` is K, and
 `output_features` is N. `feature_sizes` is shorthand for using the same explicit
-size list for both input and output features. For attention, `kv_head_options:
+size list for both input and output features. Framework-specific GEMM overrides
+can narrow those shape sweeps and, when the backend does not derive precision
+cases from runtime capability, set `gemm_types`. For attention, `kv_head_options:
 self` means `num_key_value_heads` equals `query_head_count`.
 For `mla_bmm_gen_pre` and `mla_bmm_gen_post`, `token_counts`, `head_counts`,
 `dtypes`, `num_warmups`, and `num_runs` define the auxiliary MLA generation BMM
