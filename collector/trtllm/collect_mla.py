@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""TensorRT-LLM MLA collector for 1.1+ attention APIs.
+"""TensorRT-LLM MLA collector for the current attention APIs.
 
 Uses the newer TRT-LLM attention backend and MLAParams interfaces to benchmark
 context/generation MLA kernels. The module adapts shared MLA cases to current

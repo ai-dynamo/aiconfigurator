@@ -229,9 +229,8 @@ OpEntry(op="gemm", module="collector.trtllm.collect_gemm", get_func="...", run_f
 
 # Versioned (has forks) — VersionRoutes in descending min_version order:
 OpEntry(op="moe", get_func="...", run_func="...", versions=(
-    VersionRoute("1.1.0", "collector.trtllm.collect_moe_v3"),
-    VersionRoute("0.21.0", "collector.trtllm.collect_moe_v2"),
-    VersionRoute("0.20.0", "collector.trtllm.collect_moe_v1"),
+    VersionRoute("0.17.0", "collector.vllm.collect_moe_v2"),
+    VersionRoute("0.0.0", "collector.vllm.collect_moe_v1"),
 ))
 ```
 
@@ -263,8 +262,8 @@ When upstream framework `X.Y.Z` changes an API that a collector depends on:
 
    # After (versioned — all forks carry explicit _vN suffix):
    OpEntry(op="gemm", versions=(
-       VersionRoute("X.Y.Z", "collector.trtllm.collect_gemm_v2"),
-       VersionRoute("0.0.0", "collector.trtllm.collect_gemm_v1"),
+       VersionRoute("X.Y.Z", "collector.<backend>.collect_gemm_v2"),
+       VersionRoute("0.0.0", "collector.<backend>.collect_gemm_v1"),
    ), ...)
    ```
 6. Run tests to validate
