@@ -9,8 +9,6 @@ model_paths:
   - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
   - nvidia/nemotron-ultra-rl-050826
   - nvidia/Nemotron-H-56B-Base-8K
-  - MAMBA2_GENERIC_4K
-  - MAMBA2_GENERIC_1K
 include_base: true
 description: >
   Nemotron-H hybrid Mamba/MoE model-centric collection plan.
@@ -64,22 +62,6 @@ model_case_values:
       nheads: 256
       head_dim: 64
       n_groups: 8
-      chunk_size: 128
-    - model_path: MAMBA2_GENERIC_4K
-      d_model: 8192
-      d_state: 128
-      d_conv: 4
-      nheads: 64
-      head_dim: 64
-      n_groups: 8
-      chunk_size: 256
-    - model_path: MAMBA2_GENERIC_1K
-      d_model: 1024
-      d_state: 64
-      d_conv: 4
-      nheads: 16
-      head_dim: 64
-      n_groups: 4
       chunk_size: 128
 
 all_frameworks_op_cases:
