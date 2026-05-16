@@ -679,6 +679,111 @@ def moe_shape_satisfies_constraints(
     return True
 
 
+def _moe_backend_model_cases(backend: str) -> list[dict[str, object]]:
+    values = _moe_backend_values(backend)
+    raw_cases = values.get("model_cases", [])
+    if not isinstance(raw_cases, list):
+        raise TypeError(f"common_case_values.moe_{backend}.model_cases must be a list")
+
+    model_path_filter = _get_model_path_filter()
+    cases = []
+    for raw_case in raw_cases:
+        if not isinstance(raw_case, dict):
+            raise TypeError(f"common_case_values.moe_{backend}.model_cases entries must be mappings")
+        case = dict(raw_case)
+        if model_path_filter and case.get("model_path") != model_path_filter:
+            continue
+        cases.append(case)
+    return cases
+
+
+def get_moe_backend_model_activation(backend: str, model_name: str, *, default: str = "silu") -> str:
+    """Return YAML-backed activation metadata for a backend-specific MoE model."""
+
+    for model_case in _moe_backend_model_cases(backend):
+        if model_case.get("model_path") == model_name:
+            return str(model_case.get("activation", default))
+    return default
+
+
+def _moe_backend_token_expert_distributions(backend_values: dict[str, object]) -> list[tuple[str, Optional[float]]]:
+    raw_distributions = backend_values.get("token_expert_distributions")
+    if raw_distributions is None:
+        raw_distributions = _required_base_common_case_values("moe").get("token_expert_distributions")
+    return _moe_token_expert_distributions({"token_expert_distributions": raw_distributions})
+
+
+def get_moe_backend_test_cases(backend: str) -> list[MoeCommonTestCase]:
+    """Return YAML-backed backend-specific MoE model/sweep cases."""
+
+    values = _moe_backend_values(backend)
+    token_counts = _as_int_list(values.get("token_counts"), field_name=f"moe_{backend}.token_counts")
+    raw_sweeps = values.get("sweeps")
+    if not isinstance(raw_sweeps, dict):
+        raise TypeError(f"common_case_values.moe_{backend}.sweeps must be a mapping")
+    token_distributions = _moe_backend_token_expert_distributions(values)
+
+    test_cases: list[MoeCommonTestCase] = []
+    for model_config in _moe_backend_model_cases(backend):
+        sweep_name = str(model_config.get("sweep", "default"))
+        sweep = raw_sweeps.get(sweep_name)
+        if not isinstance(sweep, dict):
+            raise TypeError(f"common_case_values.moe_{backend}.sweeps.{sweep_name} must be a mapping")
+
+        tp_list = _as_int_list(
+            sweep.get("tensor_parallel_sizes"),
+            field_name=f"moe_{backend}.sweeps.{sweep_name}.tensor_parallel_sizes",
+        )
+        ep_list = _as_int_list(
+            sweep.get("expert_parallel_sizes"),
+            field_name=f"moe_{backend}.sweeps.{sweep_name}.expert_parallel_sizes",
+        )
+        num_gpu_list = _as_int_list(
+            sweep.get("gpu_counts"),
+            field_name=f"moe_{backend}.sweeps.{sweep_name}.gpu_counts",
+        )
+
+        hs = int(model_config["hidden_size"])
+        inter_s = int(model_config["inter_size"])
+        topk = int(model_config["topk"])
+        num_experts = int(model_config["num_experts"])
+        model_name = str(model_config["model_path"])
+        max_tp_exclusive = model_config.get("max_tp_exclusive")
+
+        for num_gpu, tp, ep, (token_distribution, power_law_alpha) in itertools.product(
+            num_gpu_list,
+            tp_list,
+            ep_list,
+            token_distributions,
+        ):
+            if max_tp_exclusive is not None and tp >= int(max_tp_exclusive):
+                continue
+            if tp * ep != num_gpu:
+                continue
+            if ep > num_experts:
+                continue
+            if num_experts % ep != 0:
+                continue
+            if inter_s % tp != 0:
+                continue
+
+            test_cases.append(
+                MoeCommonTestCase(
+                    num_tokens_list=token_counts,
+                    hidden_size=hs,
+                    inter_size=inter_s,
+                    topk=topk,
+                    num_experts=num_experts,
+                    tp=tp,
+                    ep=ep,
+                    model_name=model_name,
+                    token_expert_distribution=token_distribution,
+                    power_law_alpha=power_law_alpha,
+                )
+            )
+    return test_cases
+
+
 def get_common_moe_test_cases():
     moe_sweep = _required_base_common_case_values("moe")
     num_tokens = _as_int_list(moe_sweep.get("token_counts"), field_name="moe.token_counts")
