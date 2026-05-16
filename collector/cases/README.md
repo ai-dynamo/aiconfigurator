@@ -89,7 +89,7 @@ applies to MLA, Mamba2, GDN, and MHC: model YAML stores model dimensions, while
 base op YAML stores the reusable sweep policy.
 
 For simple common ops, `cases` can hold exact generator specs instead of opaque
-case IDs. Base GEMM and attention use readable shape names:
+case IDs. Base GEMM, attention, and MLA BMM use readable shape names:
 
 ```yaml
 all_frameworks_op_cases:
@@ -115,6 +115,10 @@ all_frameworks_op_cases:
 `output_features` is N. `feature_sizes` is shorthand for using the same explicit
 size list for both input and output features. For attention, `kv_head_options:
 self` means `num_key_value_heads` equals `query_head_count`.
+For `mla_bmm_gen_pre` and `mla_bmm_gen_post`, `token_counts`, `head_counts`,
+`dtypes`, `num_warmups`, and `num_runs` define the auxiliary MLA generation BMM
+micro-collector grids shared by SGLang and TRT-LLM; each collector still filters
+runtime-unsupported dtypes before benchmarking.
 
 Framework-specific common op overrides live under `framework_specific_op_cases`
 with the same case `id`. For example, TRT-LLM adds attention `head_dims: [64,

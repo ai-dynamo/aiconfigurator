@@ -117,6 +117,37 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     assert len(get_common_mhc_test_cases()) == 8
 
 
+def test_mla_bmm_cases_expand_from_base_op_yaml():
+    from collector.case_generator import MLABMMCommonTestCase, get_mla_bmm_case_specs
+
+    pre_cases = get_mla_bmm_case_specs("sglang", "mla_bmm_gen_pre")
+    post_cases = get_mla_bmm_case_specs("sglang", "mla_bmm_gen_post")
+
+    assert len(pre_cases) == 400
+    assert len(post_cases) == 448
+    assert pre_cases[0] == MLABMMCommonTestCase(
+        num_tokens=1,
+        num_heads=128,
+        dtype="bfloat16",
+        num_warmups=2,
+        num_runs=10,
+    )
+    assert pre_cases[1] == MLABMMCommonTestCase(
+        num_tokens=1,
+        num_heads=128,
+        dtype="fp8",
+        num_warmups=2,
+        num_runs=10,
+    )
+    assert post_cases[-1] == MLABMMCommonTestCase(
+        num_tokens=20480,
+        num_heads=1,
+        dtype="fp8",
+        num_warmups=2,
+        num_runs=10,
+    )
+
+
 def test_model_cases_path_can_infer_model_path():
     model_cases_path = default_architecture_cases_path("DeepseekV4ForCausalLM")
 
