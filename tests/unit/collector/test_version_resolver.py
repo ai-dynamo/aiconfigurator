@@ -417,7 +417,7 @@ class TestRegistryIntegrity:
         """For each module base name, _vN suffixes must be v1, v2, ..., vN with no gaps.
 
         Checked across the entire registry because different ops may share
-        the same versioned module (e.g. multiple vLLM module ops use collect_mla_module_v3).
+        the same versioned module (e.g. multiple vLLM module ops can share one versioned collector).
         """
         reg, backend = registry
         # Collect all version numbers grouped by module base name

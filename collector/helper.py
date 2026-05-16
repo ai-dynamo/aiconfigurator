@@ -182,7 +182,7 @@ def benchmark_with_power(
     power_min_duration: float | None = None,  # Auto-detect from environment if None
     allow_graph_fail: bool = False,  # Enable graceful fallback on graph capture failure
     use_cuda_graph: bool = True,  # set False to force eager execution (ops whose captured
-    # private pools retain memory across tasks — see collect_mla_module_v3 DSA context).
+    # private pools retain memory across tasks — see collect_mla_module DSA context).
 ):
     """
     Context manager that handles warmup, graph capture, timing, and power monitoring.
