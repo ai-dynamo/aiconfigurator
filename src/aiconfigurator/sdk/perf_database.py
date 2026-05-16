@@ -5736,8 +5736,9 @@ class PerfDatabase:
             elif last_energy > 0:
                 est_energy = last_energy * (est_latency / last_latency)
 
-            # Heuristic overflow estimate: silicon util scaled by SOL ratio. Not a
-            # direct table hit, so report as empirical for the breakdown report.
+            # Overflow estimate anchored on the last silicon point's utilization
+            # and scaled by SOL ratio. It is still silicon-derived, not a pure
+            # formula fallback, so keep the source tag aligned with _interp_pr.
             return self._interp_pr(est_latency, energy=est_energy)
 
         def _require_moe_token_points(
