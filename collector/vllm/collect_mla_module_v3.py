@@ -128,8 +128,12 @@ def _resolve_model_path(model_name: str) -> str:
 
 SUPPORTED_MODELS: dict[str, str] = {
     "deepseek-ai/DeepSeek-V3": "mla",
+    "deepseek-ai/DeepSeek-R1": "mla",
+    "nvidia/DeepSeek-V3.1-NVFP4": "mla",
     "deepseek-ai/DeepSeek-V3.2": "dsa",
     "zai-org/GLM-5": "dsa",
+    "zai-org/GLM-5-FP8": "dsa",
+    "nvidia/GLM-5-NVFP4": "dsa",
 }
 
 
@@ -288,7 +292,10 @@ def _build_module_test_cases(attn_type: str, mode: str):
                     compute_dtype, gemm_type, model_path, attn_type]
     """
     base_cases = get_context_test_cases(attn_type) if mode == "context" else get_generation_test_cases(attn_type)
+    requested_model_path = os.environ.get("COLLECTOR_MODEL_PATH", "").strip()
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
+    if requested_model_path:
+        model_paths = [m for m in model_paths if m == requested_model_path]
     cases = []
     for model_path in model_paths:
         for s, b, h, kv_dtype, compute_dtype, gemm_type in base_cases:

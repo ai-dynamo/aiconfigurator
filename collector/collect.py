@@ -1196,14 +1196,21 @@ def main():
         type=str,
         default=None,
         help="Collector v2 model path (for example 'MiniMaxAI/MiniMax-M2.5'). "
-        "When set, collect.py loads collector/cases/base_model_cases.yaml plus the model's "
-        "collector/cases/models/<model>_cases.yaml file, then runs only the planned ops/cases.",
+        "When set, collect.py resolves collector/cases/models/<architecture>_cases.yaml by model alias, "
+        "then runs only the planned ops/cases.",
+    )
+    parser.add_argument(
+        "--model-architecture",
+        type=str,
+        default=None,
+        help="Collector v2 model architecture (for example 'Qwen3MoeForCausalLM'). "
+        "Defaults to resolving the architecture case file from --model-path aliases.",
     )
     parser.add_argument(
         "--model-cases",
         type=str,
         default=None,
-        help="Optional path to a model cases YAML file. Defaults to collector/cases/models/<model>_cases.yaml.",
+        help="Optional path to a model cases YAML file. Defaults to collector/cases/models/<architecture>_cases.yaml.",
     )
     parser.add_argument(
         "--model-cases-full",
@@ -1245,15 +1252,15 @@ def main():
     ops = args.ops
     case_plan = None
     logger_message = None
-    if args.plan_only and not (args.model_path or args.model_cases or args.model_cases_full):
-        parser.error("--plan-only requires --model-path, --model-cases, or --model-cases-full")
+    if args.plan_only and not (args.model_path or args.model_architecture or args.model_cases or args.model_cases_full):
+        parser.error("--plan-only requires --model-path, --model-architecture, --model-cases, or --model-cases-full")
     if args.new_framework_version:
         os.environ.pop("COLLECTOR_MODEL_PATH", None)
-        if args.model_path or args.model_cases or args.model_cases_full:
+        if args.model_path or args.model_architecture or args.model_cases or args.model_cases_full:
             logger_message = (
                 "--new-framework-version active: ignoring collector v2 model case filters for full collection"
             )
-    elif args.model_path or args.model_cases or args.model_cases_full:
+    elif args.model_path or args.model_architecture or args.model_cases or args.model_cases_full:
         from collector.model_cases import build_collection_case_plan
 
         if args.model_path:
@@ -1264,6 +1271,7 @@ def main():
         case_plan = build_collection_case_plan(
             backend=args.backend,
             model_path=args.model_path,
+            model_architecture=args.model_architecture,
             gpu_type=args.gpu,
             model_cases_path=args.model_cases,
             gpu_exceptions_path=args.gpu_exceptions,
@@ -1287,9 +1295,10 @@ def main():
                     "Requested ops are not present in the collector v2 case plan: " + ", ".join(sorted(missing_ops))
                 )
 
-        if args.model_path and not case_plan.model_cases_paths:
+        if (args.model_path or args.model_architecture) and not case_plan.model_cases_paths:
             logger_message = (
-                f"No collector v2 model cases YAML found for {args.model_path}; "
+                "No collector v2 model cases YAML found for "
+                f"model_path={args.model_path!r}, model_architecture={args.model_architecture!r}; "
                 "using base cases only plus legacy model filtering."
             )
         else:

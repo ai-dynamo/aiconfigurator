@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import csv
 from pathlib import Path
 
 from collector.helper import create_test_case_id
@@ -8,14 +9,19 @@ from collector.model_cases import (
     CaseSelector,
     OpCasePlan,
     build_collection_case_plan,
-    default_model_cases_path,
+    default_architecture_cases_path,
     filter_test_cases,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SUPPORT_MATRIX_ROOT = REPO_ROOT / "src" / "aiconfigurator" / "systems" / "support_matrix"
 
 
 def test_model_case_plan_merges_base_model_and_framework_specific_ops():
     plan = build_collection_case_plan(backend="sglang", model_path="deepseek-ai/DeepSeek-V3")
 
+    assert plan.model_architecture == "DeepseekV3ForCausalLM"
+    assert plan.model_cases_paths == [default_architecture_cases_path("DeepseekV3ForCausalLM")]
     assert "gemm" in plan.op_cases
     assert "attention_context" in plan.op_cases
     assert "moe" in plan.op_cases
@@ -26,22 +32,83 @@ def test_model_case_plan_merges_base_model_and_framework_specific_ops():
 
 
 def test_model_cases_path_can_infer_model_path():
-    model_cases_path = default_model_cases_path("sgl-project/DeepSeek-V4-Flash-FP8")
+    model_cases_path = default_architecture_cases_path("DeepseekV4ForCausalLM")
 
     plan = build_collection_case_plan(backend="sglang", model_cases_path=str(model_cases_path))
 
     assert plan.model_path == "sgl-project/DeepSeek-V4-Flash-FP8"
+    assert plan.model_architecture == "DeepseekV4ForCausalLM"
     assert "dsv4_flash_csa_context_module" in plan.op_cases
     assert "mhc_module" in plan.op_cases
+
+
+def test_model_architecture_can_select_case_file():
+    plan = build_collection_case_plan(backend="trtllm", model_architecture="Qwen3MoeForCausalLM")
+
+    assert plan.model_path == "Qwen/Qwen3-235B-A22B"
+    assert plan.model_architecture == "Qwen3MoeForCausalLM"
+    assert plan.model_cases_paths == [default_architecture_cases_path("Qwen3MoeForCausalLM")]
+    assert "moe" in plan.op_cases
+
+
+def test_model_path_alias_resolves_architecture_case_file():
+    plan = build_collection_case_plan(backend="trtllm", model_path="Qwen/Qwen3-235B-A22B-FP8")
+
+    assert plan.model_path == "Qwen/Qwen3-235B-A22B-FP8"
+    assert plan.model_architecture == "Qwen3MoeForCausalLM"
+    assert plan.model_cases_paths == [default_architecture_cases_path("Qwen3MoeForCausalLM")]
+    assert "moe" in plan.op_cases
 
 
 def test_full_mode_aggregates_all_model_case_files():
     plan = build_collection_case_plan(backend="sglang", full=True)
 
     assert plan.model_path is None
-    assert len(plan.model_cases_paths) >= 2
+    assert len(plan.model_cases_paths) >= 18
     assert "wideep_mla_context" in plan.op_cases
     assert "dsv4_flash_csa_context_module" in plan.op_cases
+    assert "gdn" in plan.op_cases
+
+
+def test_support_matrix_models_have_model_case_aliases():
+    case_aliases = set()
+    for path in (REPO_ROOT / "collector" / "cases" / "models").glob("*_cases.yaml"):
+        data = path.read_text(encoding="utf-8")
+        for line in data.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("model_path: "):
+                case_aliases.add(stripped.removeprefix("model_path: ").strip())
+            elif stripped.startswith("- "):
+                case_aliases.add(stripped.removeprefix("- ").strip())
+
+    support_matrix_models = set()
+    for path in SUPPORT_MATRIX_ROOT.glob("*.csv"):
+        with path.open(encoding="utf-8") as f:
+            support_matrix_models.update(row["HuggingFaceID"] for row in csv.DictReader(f))
+
+    assert support_matrix_models <= case_aliases
+
+
+def test_support_matrix_moe_alias_generates_targeted_cases(monkeypatch):
+    from collector.common_test_cases import get_common_moe_test_cases
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "Qwen/Qwen3-235B-A22B-FP8")
+
+    cases = get_common_moe_test_cases()
+
+    assert cases
+    assert {case.model_name for case in cases} == {"Qwen/Qwen3-235B-A22B-FP8"}
+
+
+def test_support_matrix_mamba_alias_generates_targeted_cases(monkeypatch):
+    from collector.common_test_cases import get_common_mamba2_test_cases
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4")
+
+    cases = get_common_mamba2_test_cases()
+
+    assert cases
+    assert {case.model_name for case in cases} == {"nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"}
 
 
 def test_gpu_exceptions_can_drop_framework_specific_op(tmp_path: Path):

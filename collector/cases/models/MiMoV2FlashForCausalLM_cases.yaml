@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: MiMoV2FlashForCausalLM
+model_path: XiaomiMiMo/MiMo-V2-Flash
+model_paths:
+  - XiaomiMiMo/MiMo-V2-Flash
+include_base: true
+description: >
+  MiMo-V2-Flash hybrid model-centric collection plan. Starts with shared base
+  cases; hybrid-MoE-specific collectors can be added here when they land.
+

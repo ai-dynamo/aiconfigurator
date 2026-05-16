@@ -2,11 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
+architecture: DeepseekV4ForCausalLM
 model_path: sgl-project/DeepSeek-V4-Flash-FP8
+model_paths:
+  - deepseek-ai/DeepSeek-V4-Flash
+  - deepseek-ai/DeepSeek-V4-Pro
+  - sgl-project/DeepSeek-V4-Flash-FP8
+  - sgl-project/DeepSeek-V4-Pro-FP8
 include_base: true
 description: >
-  DeepSeek-V4-Flash FP8 model-centric collection plan. This replaces the old
-  collect.py hard-coded V4-Flash op expansion with an explicit model case file.
+  DeepSeek-V4 model-centric collection plan. Flash-only sparse SGLang ops emit
+  cases only for the Flash model path; shared mHC and MoE cases cover the V4
+  family.
 
 all_frameworks_op_cases:
   moe:
@@ -30,3 +37,4 @@ framework_specific_op_cases:
       cases: all
     wideep_moe:
       cases: all
+

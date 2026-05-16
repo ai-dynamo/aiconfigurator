@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: KimiK25ForConditionalGeneration
+model_path: moonshotai/Kimi-K2.5
+model_paths:
+  - moonshotai/Kimi-K2.5
+  - nvidia/Kimi-K2.5-NVFP4
+include_base: true
+description: >
+  Kimi-K2.5 hybrid MLA/MoE model-centric collection plan.
+
+all_frameworks_op_cases:
+  moe:
+    cases: all
+  mla_context:
+    cases: all
+  mla_generation:
+    cases: all
+
+framework_specific_op_cases:
+  trtllm:
+    trtllm_moe_wideep:
+      cases: all
+

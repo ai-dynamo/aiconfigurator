@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: Qwen3MoeForCausalLM
+model_path: Qwen/Qwen3-235B-A22B
+model_paths:
+  - Qwen/Qwen3-30B-A3B
+  - Qwen/Qwen3-30B-A3B-FP8
+  - Qwen/Qwen3-235B-A22B
+  - Qwen/Qwen3-235B-A22B-FP8
+  - Qwen/Qwen3-Coder-480B-A35B-Instruct
+  - nvidia/Qwen3-235B-A22B-NVFP4
+include_base: true
+description: >
+  Qwen3 MoE model-centric collection plan.
+
+all_frameworks_op_cases:
+  moe:
+    cases: all
+

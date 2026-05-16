@@ -2,41 +2,36 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
-model_path: deepseek-ai/DeepSeek-V3
+architecture: DeepseekV32ForCausalLM
+model_path: deepseek-ai/DeepSeek-V3.2
+model_paths:
+  - deepseek-ai/DeepSeek-V3.2
 include_base: true
 description: >
-  DeepSeek-V3 model-centric collection plan. Includes the shared base cases and
-  adds MoE/MLA cases needed by this model across frameworks.
+  DeepSeek-V3.2 DSA model-centric collection plan. DSA module data is
+  framework-specific while MoE and base attention/GEMM cases stay shared.
 
 all_frameworks_op_cases:
   moe:
     cases: all
-  mla_context:
-    cases: all
-  mla_generation:
-    cases: all
-  mla_bmm_gen_pre:
-    cases: all
-  mla_bmm_gen_post:
-    cases: all
 
 framework_specific_op_cases:
   trtllm:
-    mla_context_module:
+    dsa_context_module:
       cases: all
-    mla_generation_module:
+    dsa_generation_module:
       cases: all
     trtllm_moe_wideep:
       cases: all
   vllm:
-    mla_context_module:
+    dsa_context_module:
       cases: all
-    mla_generation_module:
+    dsa_generation_module:
       cases: all
   sglang:
-    wideep_mla_context:
+    dsa_context_module:
       cases: all
-    wideep_mla_generation:
+    dsa_generation_module:
       cases: all
     wideep_moe:
       cases: all

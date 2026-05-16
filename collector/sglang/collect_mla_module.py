@@ -47,22 +47,34 @@ except ModuleNotFoundError:
 
 SUPPORTED_MODELS: dict[str, str] = {
     "deepseek-ai/DeepSeek-V3": "mla",
+    "deepseek-ai/DeepSeek-R1": "mla",
+    "nvidia/DeepSeek-V3.1-NVFP4": "mla",
     "deepseek-ai/DeepSeek-V3.2": "dsa",
     "zai-org/GLM-5": "dsa",
+    "zai-org/GLM-5-FP8": "dsa",
+    "nvidia/GLM-5-NVFP4": "dsa",
 }
 
 MODEL_ARCHITECTURE: dict[str, str] = {
     "deepseek-ai/DeepSeek-V3": "DeepseekV3ForCausalLM",
+    "deepseek-ai/DeepSeek-R1": "DeepseekV3ForCausalLM",
+    "nvidia/DeepSeek-V3.1-NVFP4": "DeepseekV3ForCausalLM",
     "deepseek-ai/DeepSeek-V3.2": "DeepseekV32ForCausalLM",
     "zai-org/GLM-5": "GlmMoeDsaForCausalLM",
+    "zai-org/GLM-5-FP8": "GlmMoeDsaForCausalLM",
+    "nvidia/GLM-5-NVFP4": "GlmMoeDsaForCausalLM",
 }
 
 # Native num_attention_heads per model — used to filter TP-sim head counts
 # and to always override correctly when head_num != native.
 MODEL_NATIVE_HEADS: dict[str, int] = {
     "deepseek-ai/DeepSeek-V3": 128,
+    "deepseek-ai/DeepSeek-R1": 128,
+    "nvidia/DeepSeek-V3.1-NVFP4": 128,
     "deepseek-ai/DeepSeek-V3.2": 128,
     "zai-org/GLM-5": 64,
+    "zai-org/GLM-5-FP8": 64,
+    "nvidia/GLM-5-NVFP4": 64,
 }
 
 # Perf-database-compatible dtype strings → SGLang ServerArgs kv_cache_dtype values.
@@ -319,7 +331,10 @@ def _build_module_test_cases(attn_type: str, mode: str):
     """
     if attn_type == "dsa" and _skip_sm120_deepgemm_attention_modules():
         return []
+    requested_model_path = os.environ.get("COLLECTOR_MODEL_PATH", "").strip()
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
+    if requested_model_path:
+        model_paths = [m for m in model_paths if m == requested_model_path]
     cases = []
     for model_path in model_paths:
         native_heads = MODEL_NATIVE_HEADS.get(model_path, 128)
@@ -360,7 +375,10 @@ def _build_wideep_mla_test_cases(mode: str):
     """
     if _skip_sm120_deepgemm_attention_modules():
         return []
+    requested_model_path = os.environ.get("COLLECTOR_MODEL_PATH", "").strip()
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == "mla"]
+    if requested_model_path:
+        model_paths = [m for m in model_paths if m == requested_model_path]
     backends = _get_mla_backend_list()
     cases = []
     for model_path in model_paths:
