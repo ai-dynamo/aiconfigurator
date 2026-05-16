@@ -11,6 +11,7 @@ base_ops:
   - compute_scale.yaml
   - mla_bmm_gen_pre.yaml
   - mla_bmm_gen_post.yaml
+  - mla_module.yaml
   - moe.yaml
   - mla.yaml
   - mamba2.yaml

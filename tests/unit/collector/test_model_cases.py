@@ -151,6 +151,33 @@ def test_mla_bmm_cases_expand_from_base_op_yaml():
     )
 
 
+def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
+    from collector.case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
+
+    sweep = get_mla_module_sweep_spec()
+    dsa_specs = get_mla_module_model_specs(attention_type="dsa", apply_model_filter=False)
+    wideep_specs = get_mla_module_model_specs(attention_type="mla", wideep_mla=True, apply_model_filter=False)
+
+    assert sweep.batch_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+    assert sweep.sequence_lengths[-2:] == [8192, 16384]
+    assert sweep.inner_sweep_head_counts == [128, 64, 32, 16, 8]
+    assert sweep.top_level_head_counts == [128, 64]
+    assert sweep.module_precision_combos == [("bfloat16", "bfloat16", "bfloat16")]
+
+    assert {spec.model_path for spec in dsa_specs} == {
+        "deepseek-ai/DeepSeek-V3.2",
+        "zai-org/GLM-5",
+        "zai-org/GLM-5-FP8",
+        "nvidia/GLM-5-NVFP4",
+    }
+    assert {spec.native_num_heads for spec in dsa_specs if spec.architecture == "GlmMoeDsaForCausalLM"} == {64}
+    assert {spec.model_path for spec in wideep_specs} == {
+        "deepseek-ai/DeepSeek-R1",
+        "deepseek-ai/DeepSeek-V3",
+        "nvidia/DeepSeek-V3.1-NVFP4",
+    }
+
+
 def test_model_cases_path_can_infer_model_path():
     model_cases_path = default_architecture_cases_path("DeepseekV4ForCausalLM")
 

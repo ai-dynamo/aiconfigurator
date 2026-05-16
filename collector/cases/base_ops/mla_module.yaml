@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+op: mla_module
+description: Shared collector v2 micro-sweeps for full MLA/DSA module collectors.
+common_case_values:
+  mla_module:
+    batch_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+    sequence_lengths:
+      - 1
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 2048
+      - 4096
+      - 8192
+      - 16384
+    inner_sweep_head_counts:
+      - 128
+      - 64
+      - 32
+      - 16
+      - 8
+    top_level_head_counts:
+      - 128
+      - 64
+    module_precision_combos:
+      - compute_dtype: bfloat16
+        kv_cache_dtype: bfloat16
+        gemm_type: bfloat16
+    context:
+      max_tokens: 131072
+      large_sequence_min: 8192
+      large_sequence_max_batch_size: 8
+    generation:
+      max_tokens: 262144
+      large_sequence_min: 8192
+      large_sequence_max_batch_size: 16
+    constraints:
+      - 'context: batch_size * sequence_length <= 131072'
+      - 'context: sequence_length >= 8192 requires batch_size <= 8'
+      - 'generation: batch_size * sequence_length <= 262144'
+      - 'generation: sequence_length >= 8192 requires batch_size <= 16'
+      - top_level_head_counts keep ModelRunner-loading subprocess counts manageable.

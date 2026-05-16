@@ -19,6 +19,10 @@ model_case_values:
       topk: 8
       num_experts: 256
       wideep: true
+  mla_module:
+    - model_path: deepseek-ai/DeepSeek-V3.2
+      attention_type: dsa
+      native_num_heads: 128
 
 all_frameworks_op_cases:
   moe:

@@ -32,6 +32,16 @@ model_case_values:
       topk: 8
       num_experts: 256
       wideep: true
+  mla_module:
+    - model_path: zai-org/GLM-5
+      attention_type: dsa
+      native_num_heads: 64
+    - model_path: zai-org/GLM-5-FP8
+      attention_type: dsa
+      native_num_heads: 64
+    - model_path: nvidia/GLM-5-NVFP4
+      attention_type: dsa
+      native_num_heads: 64
 
 all_frameworks_op_cases:
   moe:
