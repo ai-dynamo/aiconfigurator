@@ -10,3 +10,10 @@ when the collector-v2 plan or explicit `--ops` requests those ops.
 The authoritative framework versions and collector images are in
 `collector/framework_manifest.yaml`. WideEP entries must use the same framework
 version as their non-WideEP framework entry.
+
+Layout:
+
+- `sglang/collect_mla_module.py`: SGLang WideEP MLA entrypoints.
+- `sglang/collect_deepep_moe.py`: SGLang DeepEP MoE entrypoint.
+- `sglang/deepep/`: multi-node DeepEP log collection and extraction scripts.
+- `trtllm/collect_moe_compute.py`: TensorRT-LLM WideEP MoE compute entrypoint.

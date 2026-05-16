@@ -432,9 +432,9 @@ This collects all SGLang ops in a single pass, including:
 ### DeepEP multi-node collector
 For **DeepSeek V3** models with DeepEP MoE, inter-node communication data requires a separate multi-node setup:
 ```bash
-# Follow instructions in deep_collector/README.md
+# Follow instructions in wideep/sglang/deepep/README.md
 ```
-See `deep_collector/README.md` for complete multi-node setup instructions.
+See `wideep/sglang/deepep/README.md` for complete multi-node setup instructions.
 
 # Test
 Rebuild and install the new aiconfigurator. Please make sure you have your new system definition file prepared. It's src/aiconfigurator/systems/xxx.yaml

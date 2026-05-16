@@ -28,7 +28,7 @@ Unit tests are added for `query_moe` SILICON path (within-range interpolation, o
 - **`collector/trtllm/collect_moe_v3.py`**
   - `load_cache`: use `inspect.signature(load_cache).parameters` to pass `rank` only when supported (trtllm >= 1.3).
   - Docstrings added for `gc_collect`, `cleanup_empty_json_files`, `get_moe_test_cases`, `run_moe_torch`.
-- **`collector/trtllm/collect_wideep_moe_compute.py`**
+- **`collector/wideep/trtllm/collect_moe_compute.py`**
   - Same `load_cache` rank check; docstrings for `cleanup_empty_json_files` and `moe_op` property.
 - **`collector/collect.py`**
   - Use `getattr(torch, "AcceleratorError", None)` before `isinstance(e, ...)` so older PyTorch without `AcceleratorError` does not raise.
