@@ -432,7 +432,19 @@ class TrtLLMWideEPMoEDispatch(Operation):
         )
         logger.debug(f"TrtLLMWideEPMoEDispatch: {phase} with {precision}")
 
-        comm_latency = PerformanceResult(0.0, energy=0.0, source="empirical")
+        def _as_performance_result(result) -> PerformanceResult:
+            if isinstance(result, PerformanceResult):
+                return result
+
+            energy = getattr(result, "energy", 0.0)
+            if not isinstance(energy, int | float):
+                energy = 0.0
+
+            source = getattr(result, "source", "silicon")
+            if not isinstance(source, str):
+                source = "silicon"
+
+            return PerformanceResult(float(result), energy=energy, source=source)
 
         if self._pre_dispatch:
             prepare_result = database.query_trtllm_alltoall(
@@ -457,7 +469,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 moe_backend="wideep",
                 node_num=self._node_num,
             )
-            comm_latency = prepare_result + dispatch_result
+            comm_latency = _as_performance_result(prepare_result) + _as_performance_result(dispatch_result)
         else:
             combine_op = "alltoall_combine_low_precision" if self._use_low_precision_combine else "alltoall_combine"
             combine_result = database.query_trtllm_alltoall(
@@ -471,7 +483,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 moe_backend="wideep",
                 node_num=self._node_num,
             )
-            comm_latency = combine_result
+            comm_latency = _as_performance_result(combine_result)
 
         scaled = comm_latency * self._scale_factor
         return PerformanceResult(
