@@ -11,7 +11,9 @@ from collector.model_cases import (
     build_collection_case_plan,
     default_architecture_cases_path,
     default_sm_exceptions_path,
+    expected_failure_for_test_case,
     filter_test_cases,
+    filter_test_cases_with_report,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -342,6 +344,44 @@ def test_filter_test_cases_supports_structured_exception_rules():
     assert filtered == [cases[0], cases[2]]
 
 
+def test_filter_test_cases_reports_expected_sm_exception_reasons():
+    cases = [
+        ["bfloat16", 1, 65536, 65536],
+        ["fp8", 1, 65536, 65536],
+    ]
+    plan = OpCasePlan(
+        exclude=CaseSelector(
+            rules=[
+                {
+                    "reason_type": "framework_version_unsupported",
+                    "reason": "tiny-M FP8 large GEMM crashes on this framework build",
+                    "fields": ["gemm_type", "token_count", "output_features", "input_features"],
+                    "match": {"gemm_type": "fp8"},
+                }
+            ]
+        )
+    )
+
+    filtered, skipped = filter_test_cases_with_report(
+        cases,
+        plan=plan,
+        full_module_name="trtllm.gemm",
+        run_func_name="run_gemm",
+    )
+
+    assert filtered == [cases[0]]
+    assert skipped == [
+        {
+            "case_id": create_test_case_id(cases[1], "run_gemm", "trtllm.gemm"),
+            "index": 1,
+            "source": "sm_exception",
+            "selector": "rule",
+            "reason_type": "framework_version_unsupported",
+            "reason": "tiny-M FP8 large GEMM crashes on this framework build",
+        }
+    ]
+
+
 def test_filter_test_cases_supports_computed_rule_conditions():
     cases = [
         [1, 4096, 64, 4, 128, False, False, False],
@@ -408,3 +448,59 @@ def test_filter_test_cases_supports_computed_rule_conditions():
     )
 
     assert filtered == [cases[0]]
+
+
+def test_known_exceptions_classify_runtime_failures(tmp_path: Path):
+    exceptions = tmp_path / "sm120_exceptions.yaml"
+    exceptions.write_text(
+        """
+schema_version: 1
+sm_version: 120
+known_exceptions:
+  - framework: sglang
+    op: moe
+    reason_type: framework_version_unsupported
+    source: collector/sglang/collect_moe.py
+    case_fields:
+      - moe_type
+      - num_tokens
+      - hidden_size
+      - inter_size
+      - topk
+      - num_experts
+      - tensor_parallel_size
+      - expert_parallel_size
+      - model_path
+    reason: expected SM120 shared-memory overflow
+    threshold_groups:
+      - label: Qwen3
+        match: {hidden_size: 2048, inter_size: 768, topk: 8, num_experts: 128}
+        thresholds:
+          - {tensor_parallel_size: 4, expert_parallel_size: 16, num_tokens_gte: 16}
+""",
+        encoding="utf-8",
+    )
+    plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="Qwen/Qwen3-30B-A3B",
+        sm_exceptions_path=str(exceptions),
+    )
+    case = ["fp8_block", 32, 2048, 768, 8, 128, 4, 16, "Qwen/Qwen3-30B-A3B"]
+
+    expected = expected_failure_for_test_case(
+        case,
+        plan=plan.op_cases["moe"],
+        full_module_name="sglang.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="0.5.10",
+    )
+
+    assert expected == {
+        "case_id": create_test_case_id(case, "run_moe_torch", "sglang.moe"),
+        "source": "known_exception",
+        "selector": "rule",
+        "reason_type": "framework_version_unsupported",
+        "reason": "expected SM120 shared-memory overflow",
+        "reference_source": "collector/sglang/collect_moe.py",
+        "label": "Qwen3",
+    }

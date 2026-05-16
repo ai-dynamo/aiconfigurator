@@ -42,8 +42,10 @@ framework_specific_op_exceptions:
 known_exceptions:
   # Use this section for extracted skips that happen inside an op subprocess
   # after top-level case filtering. These are documented here so hardware and
-  # framework-version gaps stay SM-centric, but they are not applied directly
-  # by collector.model_cases.filter_test_cases.
+  # framework-version gaps stay SM-centric. They do not pre-filter top-level
+  # cases; collect.py uses them to classify matching runtime failures as
+  # expected, logs the reason, records the task as expected_failed, and
+  # continues the collector.
   # - framework: sglang
   #   op: dsa_generation_module
   #   reason_type: framework_version_unsupported

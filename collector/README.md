@@ -135,6 +135,13 @@ framework_specific_op_exceptions:
         - "tp=32"
 ```
 
+Collector v2 applies those exception selectors before running an op, so known
+unsupported cases are skipped instead of sent to workers. The optional
+`known_exceptions` section in the same SM file is used as a runtime safety net
+for failures that happen inside a collector after top-level filtering: matching
+failures are logged and stored as `expected_failed` in the resume checkpoint
+instead of failing the full collector run.
+
 For simple common ops, `cases` can also contain exact generator specs. The base
 GEMM sweep uses `token_counts` for the GEMM M dimension, `input_feature_sizes`
 for K, and `output_feature_sizes` for N; `feature_sizes` is shorthand when K and
