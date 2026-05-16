@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-MANIFEST_PATH = Path(__file__).with_name("framework_manifest.json")
+import yaml
+
+MANIFEST_PATH = Path(__file__).with_name("framework_manifest.yaml")
 
 
 @dataclass(frozen=True)
@@ -29,7 +30,9 @@ class CollectorRuntime:
 def load_manifest(path: str | Path = MANIFEST_PATH) -> dict[str, Any]:
     manifest_path = Path(path)
     with manifest_path.open(encoding="utf-8") as manifest_file:
-        manifest = json.load(manifest_file)
+        manifest = yaml.safe_load(manifest_file) or {}
+    if not isinstance(manifest, dict):
+        raise TypeError("collector framework manifest must be a mapping")
     validate_manifest(manifest)
     return manifest
 
@@ -74,7 +77,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
 
     wideep = manifest.get("wideep", {})
     if not isinstance(wideep, dict):
-        raise TypeError("collector framework manifest wideep section must be an object")
+        raise TypeError("collector framework manifest wideep section must be a mapping")
     for framework, spec in wideep.items():
         if framework not in frameworks:
             raise ValueError(f"wideep.{framework} does not have a matching framework entry")
@@ -90,7 +93,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
 
 def _validate_runtime_spec(name: str, spec: object) -> None:
     if not isinstance(spec, dict):
-        raise TypeError(f"{name} must be an object")
+        raise TypeError(f"{name} must be a mapping")
     if not isinstance(spec.get("version"), str) or not spec["version"]:
         raise ValueError(f"{name}.version is required")
     images = spec.get("images")
