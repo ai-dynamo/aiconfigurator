@@ -909,6 +909,7 @@ def collect_ops(
                         plan=op_plan,
                         full_module_name=full_module_name,
                         run_func_name=run_func_name,
+                        runtime_version=runtime_version,
                     )
                     logger.info(f"{full_module_name}: collector v2 case plan kept {len(cases)}/{before_count} cases")
                 if shuffle:

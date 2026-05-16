@@ -139,6 +139,29 @@ framework_specific_op_exceptions:
 Case selectors can use `cases: all`, exact `case_ids`, string `contains`
 matches, `indices`, `ranges`, and `limit`. Exact case IDs are the stable IDs
 created by `helper.create_test_case_id(test_case, run_func_name, full_module_name)`.
+They can also use structured `rules` for positional collector test cases:
+
+```yaml
+framework_specific_op_exceptions:
+  vllm:
+    gemm:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: Blackwell vLLM block-FP8 GEMM requires token_count to be divisible by 4.
+          fields: [gemm_type, token_count, output_features, input_features]
+          match:
+            gemm_type: fp8_block
+            token_count:
+              mod_ne: [4, 0]
+```
+
+`reason_type` should be `hardware_unsupported` for SM capability/kernel-shape
+limits and `framework_version_unsupported` for a known runtime or framework
+version gap. Version-scoped rules can add `version_prefixes`, and computed
+conditions can use `product`, `ratio`, `floor_div`, or `field` comparisons.
+For skips that happen inside a subprocess after the top-level case is selected,
+record the extracted skip under `known_exceptions` instead of over-dropping the
+whole top-level case.
 
 Add one architecture file for a new architecture, or add a model path alias to
 an existing architecture file when the model uses the same case plan. Add a new
