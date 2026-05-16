@@ -91,6 +91,7 @@ class OpCasePlan:
 
     include: CaseSelector = field(default_factory=lambda: CaseSelector(all_cases=True))
     exclude: CaseSelector = field(default_factory=CaseSelector)
+    expected_failures: CaseSelector = field(default_factory=CaseSelector)
     drop: bool = False
 
 
@@ -311,6 +312,103 @@ def _merge_exception_section(op_cases: dict[str, OpCasePlan], section: dict[str,
         plan.exclude.merge(_parse_selector(raw_selector, default_all=False))
 
 
+_MATCH_OPERATOR_SUFFIXES = {
+    "_lt": "lt",
+    "_lte": "lte",
+    "_gt": "gt",
+    "_gte": "gte",
+    "_ne": "ne",
+}
+
+
+def _normalize_match_spec(match_spec: dict[str, Any]) -> dict[str, Any]:
+    """Normalize shorthand fields such as num_tokens_gte into rule operators."""
+    normalized: dict[str, Any] = {}
+    for key, value in match_spec.items():
+        field_name = str(key)
+        op_name = None
+        for suffix, candidate_op in _MATCH_OPERATOR_SUFFIXES.items():
+            if field_name.endswith(suffix):
+                field_name = field_name[: -len(suffix)]
+                op_name = candidate_op
+                break
+        if op_name is None:
+            normalized[field_name] = value
+            continue
+        existing = normalized.setdefault(field_name, {})
+        if isinstance(existing, dict):
+            existing[op_name] = value
+        else:
+            normalized[field_name] = {"eq": existing, op_name: value}
+    return normalized
+
+
+def _merge_match_specs(*match_specs: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for match_spec in match_specs:
+        for field_name, condition in _normalize_match_spec(match_spec).items():
+            existing = merged.get(field_name)
+            if isinstance(existing, dict) and isinstance(condition, dict):
+                existing.update(condition)
+            else:
+                merged[field_name] = condition
+    return merged
+
+
+def _known_exception_rule(raw_exception: dict[str, Any], match_spec: dict[str, Any]) -> dict[str, Any]:
+    rule = {
+        "reason_type": raw_exception.get("reason_type", "known_exception"),
+        "reason": raw_exception.get("reason"),
+        "source": raw_exception.get("source"),
+        "fields": raw_exception.get("fields") or raw_exception.get("case_fields") or [],
+        "match": match_spec,
+    }
+    if raw_exception.get("version_prefixes") is not None:
+        rule["version_prefixes"] = raw_exception["version_prefixes"]
+    if raw_exception.get("conditions") is not None:
+        rule["conditions"] = raw_exception["conditions"]
+    return rule
+
+
+def _known_exception_rules(raw_exception: dict[str, Any]) -> list[dict[str, Any]]:
+    rules: list[dict[str, Any]] = []
+    base_match = raw_exception.get("match") or raw_exception.get("where") or {}
+    if not isinstance(base_match, dict):
+        raise TypeError("known_exceptions match/where must be a mapping")
+    if base_match or raw_exception.get("conditions"):
+        rules.append(_known_exception_rule(raw_exception, _normalize_match_spec(base_match)))
+
+    for group in _as_list(raw_exception.get("threshold_groups"), field_name="known_exceptions.threshold_groups"):
+        if not isinstance(group, dict):
+            raise TypeError("known_exceptions threshold_groups entries must be mappings")
+        group_match = group.get("match") or {}
+        if not isinstance(group_match, dict):
+            raise TypeError("known_exceptions threshold_groups.match must be a mapping")
+        for threshold in _as_list(group.get("thresholds"), field_name="known_exceptions.threshold_groups.thresholds"):
+            if not isinstance(threshold, dict):
+                raise TypeError("known_exceptions threshold entries must be mappings")
+            rule = _known_exception_rule(raw_exception, _merge_match_specs(group_match, threshold))
+            if group.get("label"):
+                rule["label"] = str(group["label"])
+            rules.append(rule)
+    return rules
+
+
+def _merge_known_exception_section(op_cases: dict[str, OpCasePlan], data: dict[str, Any], backend: str) -> None:
+    for raw_exception in _as_list(data.get("known_exceptions"), field_name="known_exceptions"):
+        if not isinstance(raw_exception, dict):
+            raise TypeError("known_exceptions entries must be mappings")
+        framework = raw_exception.get("framework")
+        if framework is not None and str(framework) != backend:
+            continue
+        op = raw_exception.get("op")
+        if not op:
+            raise ValueError("known_exceptions entries must include op")
+        selector = _parse_selector(raw_exception, default_all=False)
+        selector.rules.extend(_known_exception_rules(raw_exception))
+        _ensure_op_plan(op_cases, str(op)).expected_failures.merge(selector)
+
+
 def _merge_case_file(op_cases: dict[str, OpCasePlan], data: dict[str, Any], backend: str) -> None:
     _merge_model_ops(op_cases, data)
     _merge_case_section(op_cases, _section(data, "all_frameworks_op_cases"))
@@ -332,6 +430,7 @@ def _merge_exception_file(op_cases: dict[str, OpCasePlan], data: dict[str, Any],
     if not isinstance(backend_exceptions, dict):
         raise TypeError(f"framework_specific_op_exceptions.{backend} must be a mapping")
     _merge_exception_section(op_cases, backend_exceptions)
+    _merge_known_exception_section(op_cases, data, backend)
 
 
 def _model_case_architecture(data: dict[str, Any]) -> str | None:
@@ -647,15 +746,79 @@ def _case_matches(
     *,
     runtime_version: str | None,
 ) -> bool:
-    if selector.all_cases:
-        return True
-    case_text = str(test_case)
     return (
-        case_id in selector.case_ids
-        or any(fragment in case_text or fragment in case_id for fragment in selector.contains)
-        or _index_matches(index, selector)
-        or any(_rule_matches(test_case, rule, runtime_version=runtime_version) for rule in selector.rules)
+        _selector_match_details(
+            test_case,
+            case_id,
+            index,
+            selector,
+            runtime_version=runtime_version,
+        )
+        is not None
     )
+
+
+def _rule_match_details(rule: dict[str, Any]) -> dict[str, Any]:
+    details = {
+        "selector": "rule",
+        "reason_type": str(rule.get("reason_type") or "expected_exception"),
+    }
+    if rule.get("source") is not None:
+        details["reference_source"] = str(rule["source"])
+    for field_name in ("reason", "label"):
+        if rule.get(field_name) is not None:
+            details[field_name] = str(rule[field_name])
+    return details
+
+
+def _selector_match_details(
+    test_case: Any,
+    case_id: str,
+    index: int,
+    selector: CaseSelector,
+    *,
+    runtime_version: str | None,
+) -> dict[str, Any] | None:
+    if selector.all_cases:
+        return {"selector": "all", "reason_type": "expected_exception"}
+    if case_id in selector.case_ids:
+        return {"selector": "case_id", "reason_type": "expected_exception"}
+    case_text = str(test_case)
+    for fragment in selector.contains:
+        if fragment in case_text or fragment in case_id:
+            return {"selector": "contains", "reason_type": "expected_exception", "contains": fragment}
+    if _index_matches(index, selector):
+        return {"selector": "index", "reason_type": "expected_exception"}
+    for rule in selector.rules:
+        if _rule_matches(test_case, rule, runtime_version=runtime_version):
+            return _rule_match_details(rule)
+    return None
+
+
+def expected_failure_for_test_case(
+    test_case: Any,
+    *,
+    plan: OpCasePlan | None,
+    full_module_name: str,
+    run_func_name: str,
+    runtime_version: str | None = None,
+    index: int = 0,
+) -> dict[str, Any] | None:
+    """Return expected-failure metadata when an SM exception covers a failed case."""
+    if plan is None:
+        return None
+    case_id = create_test_case_id(test_case, run_func_name, full_module_name)
+    for source, selector in (("sm_exception", plan.exclude), ("known_exception", plan.expected_failures)):
+        details = _selector_match_details(
+            test_case,
+            case_id,
+            index,
+            selector,
+            runtime_version=runtime_version,
+        )
+        if details is not None:
+            return {"case_id": case_id, "source": source, **details}
+    return None
 
 
 def filter_test_cases(
@@ -667,9 +830,29 @@ def filter_test_cases(
     runtime_version: str | None = None,
 ) -> list[Any]:
     """Apply an op case plan to generated collector cases."""
+    filtered, _skipped = filter_test_cases_with_report(
+        test_cases,
+        plan=plan,
+        full_module_name=full_module_name,
+        run_func_name=run_func_name,
+        runtime_version=runtime_version,
+    )
+    return filtered
+
+
+def filter_test_cases_with_report(
+    test_cases: list[Any],
+    *,
+    plan: OpCasePlan | None,
+    full_module_name: str,
+    run_func_name: str,
+    runtime_version: str | None = None,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """Apply an op case plan and return cases skipped by expected SM exceptions."""
     if plan is None:
-        return test_cases
+        return test_cases, []
     filtered = []
+    skipped = []
     include = plan.include
     exclude = plan.exclude
 
@@ -679,10 +862,18 @@ def filter_test_cases(
             test_case, case_id, index, include, runtime_version=runtime_version
         ):
             continue
-        if exclude.all_cases or _case_matches(test_case, case_id, index, exclude, runtime_version=runtime_version):
+        exclude_details = _selector_match_details(
+            test_case,
+            case_id,
+            index,
+            exclude,
+            runtime_version=runtime_version,
+        )
+        if exclude_details is not None:
+            skipped.append({"case_id": case_id, "index": index, "source": "sm_exception", **exclude_details})
             continue
         filtered.append(test_case)
 
     if include.limit is not None:
         filtered = filtered[: include.limit]
-    return filtered
+    return filtered, skipped

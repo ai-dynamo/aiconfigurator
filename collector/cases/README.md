@@ -167,7 +167,12 @@ version gap. Version-scoped rules can add `version_prefixes`, and computed
 conditions can use `product`, `ratio`, `floor_div`, or `field` comparisons.
 For skips that happen inside a subprocess after the top-level case is selected,
 record the extracted skip under `known_exceptions` instead of over-dropping the
-whole top-level case.
+whole top-level case. Normal op exception rules are applied before collection,
+so matching top-level cases are never queued. `known_exceptions` is a runtime
+safety net: if a queued case still fails and matches one of those records,
+`collect.py` logs the SM/framework reason, records the task as
+`expected_failed` in the resume checkpoint, and continues without counting it as
+a collector error.
 
 Add one architecture file for a new architecture, or add a model path alias to
 an existing architecture file when the model uses the same case plan. Add or
