@@ -9,11 +9,11 @@ Notes:
 
 # Build Docker
 
-Note: The test files under `deep_collector/` are sourced from [DeepEP](https://github.com/deepseek-ai/DeepEP/tree/main/tests) with some modifications applied.
+Note: The test files under `collector/wideep/sglang/deepep/` are sourced from [DeepEP](https://github.com/deepseek-ai/DeepEP/tree/main/tests) with some modifications applied.
 
-```bashzai
+```bash
 docker build -t deepep:latest -f docker/Dockerfile.deepep .
-docker run -it --network host --gpus all  -v aiconfigurator/collector/deep_collector:/new_workspace --privileged deepep:latest bash
+docker run -it --network host --gpus all -v aiconfigurator/collector/wideep/sglang/deepep:/new_workspace --privileged deepep:latest bash
 ```
 
 # Two-node configuration
@@ -97,5 +97,5 @@ python /new_workspace/test_internode.py  --test-ll-compatibility
 Save the processed deepep data under path path/to/aiconfigurator/src/aiconfigurator/systems/data/xxx/sglang/0.5.0/.
 Replace xxx with the GPU type (e.g., A100). Point --log-dir to that directory.
 ```bash
-python aiconfigurator/collector/deep_collector/extract_data.py --log-dir path/to/aiconfigurator/src/aiconfigurator/systems/data/xxx/sglang/0.5.0/
+python aiconfigurator/collector/wideep/sglang/deepep/extract_data.py --log-dir path/to/aiconfigurator/src/aiconfigurator/systems/data/xxx/sglang/0.5.0/
 ```

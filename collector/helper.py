@@ -1406,7 +1406,7 @@ def build_rank0_local_workload(rank0_info: dict) -> dict[str, object]:
 def power_law_deepep_prefill(num_tokens, num_experts, topk, ep, alpha):
     """Generate power law distribution for DeepEP MoE prefill phase.
 
-    Used by: sglang/collect_wideep_deepep_moe.py
+    Used by: wideep/sglang/collect_deepep_moe.py
 
     Args:
         num_tokens: Number of tokens
@@ -1450,7 +1450,7 @@ def power_law_deepep_decode(num_tokens, num_experts, topk, ep, alpha):
     Creates a power law token distribution across all experts, then returns
     the distribution for the EP rank that has the highest total token count.
 
-    Used by: sglang/collect_wideep_deepep_moe.py
+    Used by: wideep/sglang/collect_deepep_moe.py
 
     Args:
         num_tokens: Number of tokens
