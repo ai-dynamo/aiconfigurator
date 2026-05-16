@@ -4,13 +4,12 @@
 """
 Declarative registry mapping ops to collector modules for vLLM.
 
-For versioned entries, ``versions`` is a tuple of :class:`VersionRoute` in
-**descending** order. The resolver picks the first route whose min_version
-is <= the runtime version. To add support for a new vLLM version:
-  add a new VersionRoute at the top of the versions tuple.
+Collector-v2 keeps active entries aligned with the current framework manifest.
+Only add a versioned route when the manifest intentionally supports multiple
+live framework APIs for the same op.
 """
 
-from collector.registry_types import OpEntry, PerfFile, VersionRoute
+from collector.registry_types import OpEntry, PerfFile
 
 REGISTRY: list[OpEntry] = [
     OpEntry(
@@ -36,13 +35,10 @@ REGISTRY: list[OpEntry] = [
     ),
     OpEntry(
         op="moe",
+        module="collector.vllm.collect_moe",
         get_func="get_moe_test_cases",
         run_func="run_moe_torch",
         perf_filename=PerfFile.MOE,
-        versions=(
-            VersionRoute("0.17.0", "collector.vllm.collect_moe_v2"),
-            VersionRoute("0.0.0", "collector.vllm.collect_moe_v1"),
-        ),
     ),
     OpEntry(
         op="mla_context_module",

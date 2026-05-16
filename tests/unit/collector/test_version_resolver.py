@@ -142,8 +142,8 @@ class TestResolveModule:
         run_func="run_moe_torch",
         perf_filename=PerfFile.MOE,
         versions=(
-            VersionRoute("0.17.0", "collector.vllm.collect_moe_v2"),
-            VersionRoute("0.15.0", "collector.vllm.collect_moe_v1"),
+            VersionRoute("0.17.0", "collector.example.collect_versioned_op_v2"),
+            VersionRoute("0.15.0", "collector.example.collect_versioned_op_v1"),
         ),
     )
 
@@ -161,10 +161,10 @@ class TestResolveModule:
     @pytest.mark.parametrize(
         "runtime,expected_module",
         [
-            ("0.18.0", "collector.vllm.collect_moe_v2"),
-            ("0.17.0", "collector.vllm.collect_moe_v2"),
-            ("0.16.0", "collector.vllm.collect_moe_v1"),
-            ("0.15.0", "collector.vllm.collect_moe_v1"),
+            ("0.18.0", "collector.example.collect_versioned_op_v2"),
+            ("0.17.0", "collector.example.collect_versioned_op_v2"),
+            ("0.16.0", "collector.example.collect_versioned_op_v1"),
+            ("0.15.0", "collector.example.collect_versioned_op_v1"),
         ],
     )
     def test_versioned_routing(self, runtime, expected_module):
@@ -175,15 +175,15 @@ class TestResolveModule:
 
     def test_rc_routes_to_previous(self):
         """0.17.0rc2 < 0.17.0, so it should fall through to v1."""
-        assert resolve_module(self.VERSIONED_ENTRY, "0.17.0rc2") == "collector.vllm.collect_moe_v1"
+        assert resolve_module(self.VERSIONED_ENTRY, "0.17.0rc2") == "collector.example.collect_versioned_op_v1"
 
     def test_post_routes_to_current(self):
         """0.17.0.post1 >= 0.17.0, so it should match v2."""
-        assert resolve_module(self.VERSIONED_ENTRY, "0.17.0.post1") == "collector.vllm.collect_moe_v2"
+        assert resolve_module(self.VERSIONED_ENTRY, "0.17.0.post1") == "collector.example.collect_versioned_op_v2"
 
     def test_short_version_routes_to_current(self):
         """0.17 should be treated as 0.17.0."""
-        assert resolve_module(self.VERSIONED_ENTRY, "0.17") == "collector.vllm.collect_moe_v2"
+        assert resolve_module(self.VERSIONED_ENTRY, "0.17") == "collector.example.collect_versioned_op_v2"
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +207,8 @@ class TestBuildCollections:
             run_func="run_moe_torch",
             perf_filename=PerfFile.MOE,
             versions=(
-                VersionRoute("0.17.0", "collector.vllm.collect_moe_v2"),
-                VersionRoute("0.15.0", "collector.vllm.collect_moe_v1"),
+                VersionRoute("0.17.0", "collector.example.collect_versioned_op_v2"),
+                VersionRoute("0.15.0", "collector.example.collect_versioned_op_v1"),
             ),
         ),
     ]
@@ -232,11 +232,11 @@ class TestBuildCollections:
 
     def test_resolved_module_in_output(self):
         colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.17.0", ops=["moe"])
-        assert colls[0]["module"] == "collector.vllm.collect_moe_v2"
+        assert colls[0]["module"] == "collector.example.collect_versioned_op_v2"
 
     def test_resolved_module_old_version(self):
         colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.15.0", ops=["moe"])
-        assert colls[0]["module"] == "collector.vllm.collect_moe_v1"
+        assert colls[0]["module"] == "collector.example.collect_versioned_op_v1"
 
     def test_output_dict_shape(self):
         colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.17.0", ops=["gemm"])

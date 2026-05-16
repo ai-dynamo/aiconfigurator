@@ -3,10 +3,10 @@
 
 """vLLM MoE collector for current fused-experts APIs.
 
-Version route v2 benchmarks vLLM fused MoE kernels across BF16, FP8, FP8 block,
-NVFP4, MXFP4, and INT4 paths when supported. Shared MoE cases come from YAML;
-this file owns vLLM API compatibility, quant config creation, kernel filters,
-synthetic routing logits, and perf logging.
+Benchmarks vLLM fused MoE kernels across BF16, FP8, FP8 block, NVFP4, MXFP4,
+and INT4 paths when supported. Shared MoE cases come from YAML; this file owns
+vLLM API compatibility, quant config creation, kernel filters, synthetic routing
+logits, and perf logging.
 """
 
 __compat__ = "vllm>=0.17.0"
