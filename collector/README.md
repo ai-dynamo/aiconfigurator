@@ -106,6 +106,9 @@ include_base: true
 It can include base cases with `include_base: true`, then add:
 
 ```yaml
+model_ops:
+  - moe
+
 all_frameworks_op_cases:
   moe:
     cases: all
@@ -130,12 +133,18 @@ framework_specific_op_exceptions:
         - "tp=32"
 ```
 
-For targeted support-matrix healing, a case spec can run a subset using exact
-`case_ids`, string `contains` matches, `indices`, `ranges`, or `limit`. These
-filters are applied after the op collector generates cases for the selected
-model, so every op collector gets subset support through the central planner.
-Collectors that accept `model_path` receive it directly; legacy collectors use
-the same value through `COLLECTOR_MODEL_PATH` while they are being migrated.
+For simple common ops, `cases` can also contain exact generator specs. The base
+GEMM sweep uses `token_counts` for the GEMM M dimension, `input_feature_sizes`
+for K, and `output_feature_sizes` for N; `feature_sizes` is shorthand when K and
+N use the same explicit size list.
+
+For targeted support-matrix healing, a case selector can run a subset using
+exact `case_ids`, string `contains` matches, `indices`, `ranges`, or `limit`.
+These filters are applied after the op collector generates cases for the
+selected model, so every op collector gets subset support through the central
+planner. Collectors that accept `model_path` receive it directly; legacy
+collectors use the same value through `COLLECTOR_MODEL_PATH` while they are
+being migrated.
 
 To add a new architecture, create one `cases/models/<architecture>_cases.yaml`
 file. To add a new model in an existing architecture, add the model path to that

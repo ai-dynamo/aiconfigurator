@@ -60,6 +60,7 @@ class CaseSelector:
     """A selector for either included cases or excluded cases."""
 
     all_cases: bool = False
+    case_specs: list[dict[str, Any]] = field(default_factory=list)
     case_ids: set[str] = field(default_factory=set)
     contains: set[str] = field(default_factory=set)
     indices: set[int] = field(default_factory=set)
@@ -68,6 +69,7 @@ class CaseSelector:
 
     def merge(self, other: CaseSelector) -> None:
         self.all_cases = self.all_cases or other.all_cases
+        self.case_specs.extend(other.case_specs)
         self.case_ids.update(other.case_ids)
         self.contains.update(other.contains)
         self.indices.update(other.indices)
@@ -193,7 +195,14 @@ def _parse_selector(raw: Any, *, default_all: bool) -> CaseSelector:
     if raw is False:
         return CaseSelector(all_cases=False)
     if isinstance(raw, list):
-        return CaseSelector(case_ids={str(item) for item in raw})
+        selector = CaseSelector()
+        for item in raw:
+            if isinstance(item, dict):
+                selector.case_specs.append(item)
+            else:
+                selector.case_ids.add(str(item))
+        selector.all_cases = bool(selector.case_specs and not selector.case_ids)
+        return selector
     if not isinstance(raw, dict):
         raise TypeError(f"case selector must be 'all', a list, or a mapping; got {type(raw).__name__}")
 
@@ -201,8 +210,14 @@ def _parse_selector(raw: Any, *, default_all: bool) -> CaseSelector:
     selector = CaseSelector(all_cases=cases == "all" or cases is True)
     if cases not in (None, "all", True):
         if not isinstance(cases, list):
-            raise ValueError("'cases' must be 'all' or a list of case ids")
-        selector.case_ids.update(str(case_id) for case_id in cases)
+            raise ValueError("'cases' must be 'all' or a list of case ids/case specs")
+        for case in cases:
+            if isinstance(case, dict):
+                selector.case_specs.append(case)
+            else:
+                selector.case_ids.add(str(case))
+        if selector.case_specs and not selector.case_ids:
+            selector.all_cases = True
 
     selector.case_ids.update(str(item) for item in _as_list(raw.get("case_ids"), field_name="case_ids"))
     selector.contains.update(str(item) for item in _as_list(raw.get("contains"), field_name="contains"))
@@ -217,6 +232,11 @@ def _ensure_op_plan(op_cases: dict[str, OpCasePlan], op: str) -> OpCasePlan:
     if op not in op_cases:
         op_cases[op] = OpCasePlan()
     return op_cases[op]
+
+
+def _merge_model_ops(op_cases: dict[str, OpCasePlan], data: dict[str, Any]) -> None:
+    for op in _as_list(data.get("model_ops"), field_name="model_ops"):
+        _ensure_op_plan(op_cases, str(op))
 
 
 def _merge_case_section(op_cases: dict[str, OpCasePlan], section: dict[str, Any]) -> None:
@@ -236,6 +256,7 @@ def _merge_exception_section(op_cases: dict[str, OpCasePlan], section: dict[str,
 
 
 def _merge_case_file(op_cases: dict[str, OpCasePlan], data: dict[str, Any], backend: str) -> None:
+    _merge_model_ops(op_cases, data)
     _merge_case_section(op_cases, _section(data, "all_frameworks_op_cases"))
     framework_cases = _section(data, "framework_specific_op_cases")
     backend_cases = framework_cases.get(backend, {})

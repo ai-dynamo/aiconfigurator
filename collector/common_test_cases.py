@@ -1,10 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 import itertools
 import os
 import sys
+from pathlib import Path
 from typing import Optional
+
+import yaml
+
+COLLECTOR_ROOT = Path(__file__).resolve().parent
+BASE_CASES_PATH = COLLECTOR_ROOT / "cases" / "base_model_cases.yaml"
 
 
 def _get_model_path_filter() -> str | None:
@@ -298,21 +305,21 @@ class GemmCommonTestCase:
     k: int
 
 
-def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
-    x_list = list(range(1, 16))
-    x_list += list(range(16, 128, 16)) + [i + 1 for i in range(16, 128, 16)]
-    x_list += list(range(128, 256, 32)) + [i + 1 for i in range(128, 256, 32)]
+def _legacy_gemm_shape_sweep() -> list[dict[str, object]]:
+    token_counts = list(range(1, 16))
+    token_counts += list(range(16, 128, 16)) + [i + 1 for i in range(16, 128, 16)]
+    token_counts += list(range(128, 256, 32)) + [i + 1 for i in range(128, 256, 32)]
     for x in range(256, 4096 + 257, 256):
-        x_list.append(x)
-        x_list.append(x + 1)
+        token_counts.append(x)
+        token_counts.append(x + 1)
         # after 4096, the zig-zag pattern can be ignored
 
     x = 8192
     while x <= 32768:
-        x_list.append(x)
+        token_counts.append(x)
         x *= 2
-    x_list.sort()  # sort the x_list to make it easier to debug
-    nk_list = [
+    token_counts.sort()  # sort the token count list to make it easier to debug
+    feature_sizes = [
         32,
         64,
         128,
@@ -333,16 +340,62 @@ def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
         10240,
         12288,
     ]
-    nk_list_ext = [16384, 51200, 65536]  # for coverage and interp purpose
+    feature_sizes += [16384, 51200, 65536]  # for coverage and interp purpose
+    return [
+        {
+            "token_counts": token_counts,
+            "feature_sizes": feature_sizes,
+            "skip_shapes": [{"input_features": 65536, "output_features": 65536}],
+        }
+    ]
 
+
+def _as_int_list(value, *, field_name: str) -> list[int]:
+    if not isinstance(value, list):
+        raise TypeError(f"{field_name} must be a list")
+    return [int(item) for item in value]
+
+
+def _get_base_gemm_shape_sweeps() -> list[dict[str, object]]:
+    try:
+        with open(BASE_CASES_PATH, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return _legacy_gemm_shape_sweep()
+
+    cases = data.get("all_frameworks_op_cases", {}).get("gemm", {}).get("cases")
+    if not isinstance(cases, list):
+        return _legacy_gemm_shape_sweep()
+
+    shape_sweeps = [case for case in cases if isinstance(case, dict)]
+    return shape_sweeps or _legacy_gemm_shape_sweep()
+
+
+def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
     test_cases = []
-    # x_list_orig+add+ext  <==> nk_list+ext
-    for x in sorted(x_list, reverse=True):
-        for n in sorted(nk_list + nk_list_ext, reverse=True):
-            for k in sorted(nk_list + nk_list_ext, reverse=True):
-                if n * k == 65536 * 65536:
-                    continue
-                test_cases.append(GemmCommonTestCase(x=x, n=n, k=k))
+    for shape_sweep in _get_base_gemm_shape_sweeps():
+        token_counts = _as_int_list(shape_sweep.get("token_counts"), field_name="gemm.token_counts")
+        feature_sizes = shape_sweep.get("feature_sizes")
+        input_feature_sizes = _as_int_list(
+            shape_sweep.get("input_feature_sizes", feature_sizes),
+            field_name="gemm.input_feature_sizes",
+        )
+        output_feature_sizes = _as_int_list(
+            shape_sweep.get("output_feature_sizes", feature_sizes),
+            field_name="gemm.output_feature_sizes",
+        )
+        skip_shapes = {
+            (int(skip["output_features"]), int(skip["input_features"])) for skip in shape_sweep.get("skip_shapes", [])
+        }
+
+        for token_count in sorted(token_counts, reverse=True):
+            for output_features in sorted(output_feature_sizes, reverse=True):
+                for input_features in sorted(input_feature_sizes, reverse=True):
+                    if (output_features, input_features) in skip_shapes:
+                        continue
+                    if output_features * input_features == 65536 * 65536:
+                        continue
+                    test_cases.append(GemmCommonTestCase(x=token_count, n=output_features, k=input_features))
 
     return test_cases
 
