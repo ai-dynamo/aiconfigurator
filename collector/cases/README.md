@@ -3,10 +3,11 @@
 Collector v2 plans collection from model/SM YAML instead of treating the
 collector as a flat op list.
 
-- `base_op_cases.yaml`: shared common case values and op cases every model can include.
+- `base_op_cases.yaml`: catalog for shared base op files.
+- `base_ops/<op>.yaml`: shared common case values and op cases every model can include.
 - `models/<architecture>_cases.yaml`: architecture-specific op cases and model
   path aliases.
-- `sms/sm<version>_exceptions.yaml`: SM-specific exceptions applied after base-op/model
+- `sm_exceptions/sm<version>_exceptions.yaml`: SM-specific exceptions applied after base-op/model
   cases are merged.
 
 Model files are keyed by HuggingFace architecture name and list every model path
@@ -64,10 +65,10 @@ The collector loads these model-specific values by op name and honors
 `COLLECTOR_MODEL_PATH`, so support-matrix healing can request cases for one
 model without editing Python.
 
-Shared sweep recipes live in `base_op_cases.yaml` under
-`common_case_values`. For cross-model ops such as MoE, MLA, Mamba2, GDN, and
-MHC, the base op file owns the token counts, batch/sequence sweeps, parallelism
-sizes, routing distributions, and generator constraints:
+Shared sweep recipes live in per-op files under `base_ops/<op>.yaml`. For
+cross-model ops such as MoE, MLA, Mamba2, GDN, and MHC, the base op file owns
+the token counts, batch/sequence sweeps, parallelism sizes, routing
+distributions, and generator constraints:
 
 ```yaml
 common_case_values:
@@ -89,7 +90,8 @@ applies to MLA, Mamba2, GDN, and MHC: model YAML stores model dimensions, while
 base op YAML stores the reusable sweep policy.
 
 For simple common ops, `cases` can hold exact generator specs instead of opaque
-case IDs. Base GEMM, attention, and MLA BMM use readable shape names:
+case IDs. Base GEMM, attention, and MLA BMM keep readable shape names in their
+own `base_ops/<op>.yaml` files:
 
 ```yaml
 all_frameworks_op_cases:
@@ -168,7 +170,8 @@ record the extracted skip under `known_exceptions` instead of over-dropping the
 whole top-level case.
 
 Add one architecture file for a new architecture, or add a model path alias to
-an existing architecture file when the model uses the same case plan. Add a new
-op collector only when no existing op can generate the needed points. Add one
-SM exception file for a new SM version so model intent and hardware exclusions stay
+an existing architecture file when the model uses the same case plan. Add or
+edit one `base_ops/<op>.yaml` file when common op sweeps change. Add a new op
+collector only when no existing op can generate the needed points. Add one SM
+exception file for a new SM version so model intent and hardware exclusions stay
 separate.

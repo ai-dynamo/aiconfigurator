@@ -31,8 +31,9 @@ except ModuleNotFoundError:
 COLLECTOR_ROOT = Path(__file__).resolve().parent
 CASE_ROOT = COLLECTOR_ROOT / "cases"
 BASE_OP_CASES_PATH = CASE_ROOT / "base_op_cases.yaml"
+BASE_OP_CASES_DIR = CASE_ROOT / "base_ops"
 MODEL_CASES_DIR = CASE_ROOT / "models"
-SM_EXCEPTIONS_DIR = CASE_ROOT / "sms"
+SM_EXCEPTIONS_DIR = CASE_ROOT / "sm_exceptions"
 SYSTEMS_DIR = COLLECTOR_ROOT.parent / "src" / "aiconfigurator" / "systems"
 
 
@@ -161,6 +162,32 @@ def load_yaml_file(path: Path) -> dict[str, Any]:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
         raise TypeError(f"{path}: top-level YAML value must be a mapping")
+    return data
+
+
+def _base_ops_dir(base_data: dict[str, Any], base_path: Path) -> Path:
+    raw_dir = base_data.get("base_ops_dir", BASE_OP_CASES_DIR.name)
+    path = Path(str(raw_dir))
+    if path.is_absolute():
+        return path
+    return base_path.parent / path
+
+
+def _load_base_case_files(base_path: Path) -> list[dict[str, Any]]:
+    """Load the base catalog plus per-op base case YAML files."""
+    base_data = load_yaml_file(base_path)
+    data = [base_data]
+    base_ops_dir = _base_ops_dir(base_data, base_path)
+    if not base_ops_dir.exists():
+        return data
+
+    configured_files = base_data.get("base_ops")
+    if configured_files is None:
+        paths = sorted(base_ops_dir.glob("*.yaml"))
+    else:
+        paths = [base_ops_dir / str(filename) for filename in _as_list(configured_files, field_name="base_ops")]
+
+    data.extend(load_yaml_file(path) for path in paths)
     return data
 
 
@@ -401,7 +428,7 @@ def build_collection_case_plan(
 ) -> CollectionCasePlan:
     """Build a model/SM-aware op and case plan for one backend."""
     base_path = Path(base_cases_path).expanduser().resolve() if base_cases_path else BASE_OP_CASES_PATH
-    base_data = load_yaml_file(base_path)
+    base_data_files = _load_base_case_files(base_path)
     requested_model_path = model_path
     model_paths = _load_model_case_files(model_path, model_architecture, model_cases_path, full)
     model_data = [load_yaml_file(path) for path in model_paths]
@@ -416,7 +443,8 @@ def build_collection_case_plan(
 
     op_cases: dict[str, OpCasePlan] = {}
     if include_base:
-        _merge_case_file(op_cases, base_data, backend)
+        for base_data in base_data_files:
+            _merge_case_file(op_cases, base_data, backend)
     for data in model_data:
         _merge_case_file(op_cases, data, backend)
 
