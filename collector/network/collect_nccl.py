@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Collect NCCL collective latency with nccl-tests binaries.
+
+This collector wraps the standard nccl-tests command-line tools for all-gather,
+all-to-all, reduce-scatter, and all-reduce sweeps. It translates the benchmark
+output into AIC perf rows and optionally samples representative GPU power while
+each collective size is measured.
+"""
+
 import subprocess
 import sys
 from argparse import ArgumentParser

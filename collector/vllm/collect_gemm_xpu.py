@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""vLLM GEMM collector for XPU devices.
+
+This is the XPU counterpart to the CUDA vLLM GEMM collector. It builds
+RowParallelLinear layers, prepares supported FP8 paths, benchmarks synthetic
+matrix shapes, and logs perf rows using XPU-aware device helpers.
+"""
+
 __compat__ = "vllm>=0.11.0"
 
 import os

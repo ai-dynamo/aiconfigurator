@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""vLLM dense attention collector for CUDA backends.
+
+Creates minimal vLLM configs, KV-cache specs, attention metadata, and mock
+layers so context/generation attention kernels can be timed in isolation. The
+file adapts across vLLM backend-selector API changes while shared shape policy
+comes from collector case specs/YAML.
+"""
+
 __compat__ = "vllm>=0.11.0"
 
 import os

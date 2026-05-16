@@ -1,6 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Shared collector runtime helpers.
+
+This module is intentionally broad: collectors use it for benchmark timing,
+power sampling, subprocess/restart control, device detection, perf logging,
+case IDs, routing-logit synthesis, and small distributed-workload utilities.
+Keep collector-specific policy in the per-framework collector modules or YAML
+case files; this file should stay focused on reusable execution mechanics.
+"""
+
 import csv
 import functools
 import heapq

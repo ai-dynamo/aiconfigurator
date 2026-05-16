@@ -1,5 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+"""SGLang WideEP DeepEP MoE collector.
+
+Runs distributed DeepEP dispatch/combine and MoE-compute benchmarks through a
+minimal SGLang engine setup. The module owns process-group initialization,
+rank-local model runner construction, DeepEP buffer sizing, warmup/measurement,
+and perf-row aggregation for WideEP MoE cases.
+"""
+
 import json
 import logging
 import os

@@ -1,5 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+"""Top-level collector entrypoint.
+
+This script resolves the requested backend, framework version, model/GPU case
+plan, and op registry entry, then runs the selected collector functions and
+writes perf files. It is the orchestration layer for collector v2; individual
+modules own benchmark setup, while `model_cases.py` and YAML own case selection.
+"""
+
 import contextlib
 import functools
 import os

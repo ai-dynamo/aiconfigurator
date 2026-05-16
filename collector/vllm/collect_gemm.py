@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""vLLM GEMM collector for CUDA backends.
+
+Builds vLLM RowParallelLinear layers with synthetic weights to benchmark BF16,
+FP8, FP8 block, and FP4-style paths where available. Shared GEMM shapes come
+from `case_specs.py`; this file handles vLLM config contexts, distributed setup,
+quantized-weight preparation, and backend-specific skips.
+"""
+
 __compat__ = "vllm>=0.14.0"
 
 import os

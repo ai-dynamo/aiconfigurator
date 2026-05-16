@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""TensorRT-LLM MoE collector for the 1.1+ torch-flow API.
+
+This route handles the current create_moe/autotuner stack, newer activation and
+FP4 paths, optional rank-local workload synthesis, and per-shape tuning caches.
+Shared MoE shapes come from YAML; this file owns TRT-LLM version quirks and
+kernel-specific filters.
+"""
+
 __compat__ = "trtllm>=1.1.0,<=1.3.0rc10"
 
 import gc

@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""vLLM dense attention collector for XPU devices.
+
+This mirrors the CUDA vLLM attention collector but routes tensor allocation,
+backend setup, and perf logging through XPU-capable helper paths. It benchmarks
+isolated context/generation attention kernels with synthetic KV-cache state.
+"""
+
 __compat__ = "vllm>=0.11.0"
 
 import os
