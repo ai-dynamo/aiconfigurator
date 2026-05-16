@@ -3,6 +3,8 @@
 
 schema_version: 1
 sm_version: 120
+gpu_types:
+  - rtx_pro_6000_server
 description: >
   SM120 workstation Blackwell exceptions extracted from collector version/SM
   guards. Rules distinguish hardware/kernel shape limits from current

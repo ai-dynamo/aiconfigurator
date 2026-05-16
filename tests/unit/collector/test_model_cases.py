@@ -14,6 +14,7 @@ from collector.model_cases import (
     expected_failure_for_test_case,
     filter_test_cases,
     filter_test_cases_with_report,
+    load_yaml_file,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -285,6 +286,24 @@ framework_specific_op_exceptions:
     assert plan.sm_exceptions_path == default_sm_exceptions_path(100)
     assert plan.sm_exceptions_path == exceptions
     assert "wideep_moe" not in plan.op_cases
+
+
+def test_sm_exception_files_list_matching_gpu_types():
+    systems_dir = REPO_ROOT / "src" / "aiconfigurator" / "systems"
+    expected_gpu_types_by_sm = {}
+    for system_path in sorted(systems_dir.glob("*.yaml")):
+        system_data = load_yaml_file(system_path)
+        gpu = system_data.get("gpu", {})
+        if not isinstance(gpu, dict) or gpu.get("sm_version") is None:
+            continue
+        expected_gpu_types_by_sm.setdefault(int(gpu["sm_version"]), []).append(system_path.stem)
+
+    for sm_version, gpu_types in expected_gpu_types_by_sm.items():
+        exception_path = default_sm_exceptions_path(sm_version)
+        if not exception_path.exists():
+            continue
+        exception_data = load_yaml_file(exception_path)
+        assert exception_data.get("gpu_types") == gpu_types
 
 
 def test_filter_test_cases_supports_case_ids_contains_and_indices():

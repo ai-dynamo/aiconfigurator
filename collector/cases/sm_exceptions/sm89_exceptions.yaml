@@ -3,6 +3,9 @@
 
 schema_version: 1
 sm_version: 89
+gpu_types:
+  - l4
+  - l40s
 description: >
   SM89 Ada exceptions extracted from collector SM gates. L4/L40S can run many
   FP8 paths but miss Hopper TMA paths and Blackwell-only NVFP4 paths.

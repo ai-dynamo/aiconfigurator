@@ -3,6 +3,10 @@
 
 schema_version: 1
 sm_version: 80
+gpu_types:
+  - a100_pcie
+  - a100_sxm
+  - a30
 description: >
   SM80 Ampere exceptions extracted from collector SM gates. These rules mark
   quantized paths that current collectors intentionally do not emit on A100/A30.

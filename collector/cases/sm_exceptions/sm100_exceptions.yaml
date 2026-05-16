@@ -3,6 +3,9 @@
 
 schema_version: 1
 sm_version: 100
+gpu_types:
+  - b200_sxm
+  - gb200
 description: >
   SM100 datacenter Blackwell exceptions extracted from collector shape guards.
   Most quantized paths are supported; remaining skips are kernel-shape limits.
