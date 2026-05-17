@@ -465,7 +465,7 @@ class EstimateResult:
 
         {
             "mix_step": {
-                "context_attention (scaled)": "hybrid",
+                "context_attention (scaled)": "mixed",
                 "context_full_moe":           "empirical",
                 "context_qkv_gemm":           "silicon",
                 ...
@@ -478,7 +478,7 @@ class EstimateResult:
         }
 
     Values are ``"silicon"`` (table data), ``"empirical"`` (formula fallback),
-    ``"sol"`` (explicit SOL estimate), or ``"hybrid"`` (a sum of values from
+    ``"sol"`` (explicit SOL estimate), or ``"mixed"`` (a sum of values from
     different sources). The ``scheduling`` section of ``per_ops_data`` is
     intentionally omitted here -- those entries are scheduling math / aggregate
     sums, not DB queries.

@@ -23,14 +23,14 @@ class PerformanceResult(float):
         - energy: watt-milliseconds (W·ms) = millijoules (mJ)
         - power: watts (W) - derived property
         - source: ``"silicon"`` (table data) | ``"empirical"`` (empirical
-          formula fallback) | ``"sol"`` (explicit SOL estimate) | ``"hybrid"``
+          formula fallback) | ``"sol"`` (explicit SOL estimate) | ``"mixed"``
           (sum of values from different sources)
 
     Note: 1 W·ms = 1 mJ. We use W·ms to match latency units (ms).
           To convert to Joules: divide by 1000 (J = W·s = W·ms / 1000)
 
     Source propagation:
-        - ``__add__``: sources merged (same -> same; mismatch -> ``"hybrid"``)
+        - ``__add__``: sources merged (same -> same; mismatch -> ``"mixed"``)
         - ``__mul__`` / ``__rmul__`` / ``__truediv__``: scalar operand has no
           provenance, so the left operand's source is preserved unchanged.
         - ``__abs__``: source preserved.
@@ -50,7 +50,7 @@ class PerformanceResult(float):
         results = [result1, result2, result3]
         total = sum(results)  # __radd__ handles sum() start value
         print(total.energy)   # Energy is preserved
-        print(total.source)   # "silicon" if all were silicon, else "hybrid"
+        print(total.source)   # "silicon" if all were silicon, else "mixed"
 
         # Sorting works based on latency
         sorted_results = sorted(results)
@@ -70,7 +70,7 @@ class PerformanceResult(float):
             energy: The energy value in watt-milliseconds (W·ms)
             source: Where this measurement came from -- "silicon" (table data),
                 "empirical" (empirical formula fallback), "sol" (explicit SOL
-                estimate), or "hybrid"
+                estimate), or "mixed"
                 (sum of values from different sources).
         """
         instance = float.__new__(cls, latency)
@@ -112,8 +112,8 @@ class PerformanceResult(float):
 
     @staticmethod
     def _merge_source(a: str, b: str) -> str:
-        """Combine source tags during arithmetic. Same -> same; mismatch -> 'hybrid'."""
-        return a if a == b else "hybrid"
+        """Combine source tags during arithmetic. Same -> same; mismatch -> 'mixed'."""
+        return a if a == b else "mixed"
 
     def __add__(self, other):
         """Add two PerformanceResults or a PerformanceResult and a number."""

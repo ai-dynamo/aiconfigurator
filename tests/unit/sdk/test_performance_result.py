@@ -33,9 +33,9 @@ class TestConstruction:
         r = pr(10.0, source="empirical")
         assert r.source == "empirical"
 
-    def test_explicit_source_hybrid(self):
-        r = pr(10.0, source="hybrid")
-        assert r.source == "hybrid"
+    def test_explicit_source_mixed(self):
+        r = pr(10.0, source="mixed")
+        assert r.source == "mixed"
 
     def test_float_value_is_latency(self):
         r = pr(7.5, energy=100.0)
@@ -52,7 +52,7 @@ class TestConstruction:
 
 
 class TestMergeSource:
-    @pytest.mark.parametrize("src", ["silicon", "empirical", "sol", "hybrid"])
+    @pytest.mark.parametrize("src", ["silicon", "empirical", "sol", "mixed"])
     def test_same_source_preserved(self, src):
         assert PerformanceResult._merge_source(src, src) == src
 
@@ -61,12 +61,12 @@ class TestMergeSource:
         [
             ("silicon", "empirical"),
             ("empirical", "silicon"),
-            ("silicon", "hybrid"),
-            ("hybrid", "empirical"),
+            ("silicon", "mixed"),
+            ("mixed", "empirical"),
         ],
     )
-    def test_different_sources_become_hybrid(self, a, b):
-        assert PerformanceResult._merge_source(a, b) == "hybrid"
+    def test_different_sources_become_mixed(self, a, b):
+        assert PerformanceResult._merge_source(a, b) == "mixed"
 
 
 # -------------------------------------------------------------------------
@@ -98,9 +98,9 @@ class TestAddPerformanceResult:
         result = pr(2.0, source="silicon") + pr(0.0, energy=0.0, source="empirical")
         assert result.source == "silicon"
 
-    def test_different_sources_become_hybrid(self):
+    def test_different_sources_become_mixed(self):
         result = pr(1.0, source="silicon") + pr(2.0, source="empirical")
-        assert result.source == "hybrid"
+        assert result.source == "mixed"
 
     def test_result_is_performance_result(self):
         result = pr(1.0) + pr(2.0)
@@ -147,10 +147,10 @@ class TestRadd:
         total = sum(results)
         assert total.source == "empirical"
 
-    def test_sum_hybrid_sources_become_hybrid(self):
+    def test_sum_mixed_sources_become_mixed(self):
         results = [pr(1.0, source="silicon"), pr(2.0, source="empirical")]
         total = sum(results)
-        assert total.source == "hybrid"
+        assert total.source == "mixed"
 
 
 # -------------------------------------------------------------------------

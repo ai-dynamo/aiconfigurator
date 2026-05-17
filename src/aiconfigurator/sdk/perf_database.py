@@ -7616,7 +7616,7 @@ class PerfDatabase:
                 pre_result = _lookup_single("pre")
                 post_result = _lookup_single("post")
                 # Use PerformanceResult's __add__ to merge sources correctly
-                # (silicon + silicon -> silicon, mismatch -> hybrid) instead of
+                # (silicon + silicon -> silicon, mismatch -> mixed) instead of
                 # constructing a new PR that would default-tag as silicon.
                 return pre_result + post_result
 

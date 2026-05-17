@@ -194,14 +194,14 @@ class GEMM(Operation):
             energy -= compute_scale_result.energy
             sub_src = getattr(compute_scale_result, "source", "silicon")
             if sub_src != source:
-                source = "hybrid"
+                source = "mixed"
             if self._low_precision_input:
                 scale_matrix_result = database.query_scale_matrix(x, self._k, quant_mode)
                 latency -= float(scale_matrix_result)
                 energy -= scale_matrix_result.energy
                 sub_src = getattr(scale_matrix_result, "source", "silicon")
                 if sub_src != source:
-                    source = "hybrid"
+                    source = "mixed"
 
         # Ensure non-negative latency and energy
         latency_clamped = max(0.0, latency)
@@ -1588,13 +1588,13 @@ class Mamba2(Operation):
         total_latency += float(out_proj_result)
         total_energy += out_proj_result.energy
 
-        # Merge sources from every sub-result so the composite reflects hybrid
+        # Merge sources from every sub-result so the composite reflects mixed
         # silicon/empirical provenance instead of defaulting to silicon.
         sub_sources = [
             getattr(r, "source", "silicon")
             for r in (in_proj_result, conv_result, ssm_result, norm_result, out_proj_result)
         ]
-        merged_source = sub_sources[0] if all(s == sub_sources[0] for s in sub_sources) else "hybrid"
+        merged_source = sub_sources[0] if all(s == sub_sources[0] for s in sub_sources) else "mixed"
 
         return PerformanceResult(
             latency=total_latency * self._scale_factor,
