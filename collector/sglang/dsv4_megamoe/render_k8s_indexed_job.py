@@ -76,32 +76,13 @@ def _parse_node_selector(value: str) -> list[tuple[str, str]]:
     return pairs
 
 
-def _parse_int_list(value: str) -> list[int]:
-    return [int(item.strip()) for item in value.split(",") if item.strip()]
-
-
-def _infer_num_max_tokens_per_rank(args: argparse.Namespace) -> int:
-    if args.num_max_tokens_per_rank > 0:
-        return args.num_max_tokens_per_rank
-
-    phases = {item.strip() for item in args.phases.split(",") if item.strip()}
-    tokens: list[int] = []
-    if "context" in phases:
-        tokens.extend(_parse_int_list(args.prefill_tokens))
-    if "generation" in phases:
-        tokens.extend(_parse_int_list(args.decode_tokens))
-    if not tokens:
-        raise SystemExit("--num-max-tokens-per-rank could not be inferred because no known phases were selected")
-    return max(tokens)
-
-
 def render(args: argparse.Namespace) -> str:
     gpus_per_node = args.gpus_per_node or _default_gpus_per_node(args.system_name)
     image = args.image or _default_image(args.system_name)
     if args.ep_size % gpus_per_node != 0:
         raise SystemExit("--ep-size must be divisible by --gpus-per-node")
     nnodes = args.ep_size // gpus_per_node
-    num_max_tokens_per_rank = _infer_num_max_tokens_per_rank(args)
+    num_max_tokens_per_rank = args.num_max_tokens_per_rank
     master_addr = f"{args.job_name}-0.{args.job_name}.{args.namespace}.svc.cluster.local"
     compute_domain_name = args.compute_domain_name or f"{args.job_name}-compute-domain"
     compute_domain_channel = args.compute_domain_channel or f"{args.job_name}-compute-domain-channel"
@@ -312,7 +293,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--renormalize-topk-weights", type=int, choices=[0, 1], default=1)
     parser.add_argument("--num-warmup", type=int, default=5)
     parser.add_argument("--num-iterations", type=int, default=20)
-    parser.add_argument("--num-max-tokens-per-rank", type=int, default=0)
+    parser.add_argument("--num-max-tokens-per-rank", type=int, required=True)
     parser.add_argument("--env", action="append", default=[])
     parser.add_argument("--priority-class-name", default="")
     parser.add_argument("--compute-domain", action="store_true")

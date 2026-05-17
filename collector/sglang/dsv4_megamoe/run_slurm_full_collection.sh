@@ -76,17 +76,6 @@ _csv_items() {
   done
 }
 
-_phase_abbrev() {
-  case "$1" in
-    context) printf 'p' ;;
-    generation) printf 'd' ;;
-    *)
-      echo "unsupported phase: $1" >&2
-      return 1
-      ;;
-  esac
-}
-
 _write_cancel_script() {
   cat >"${LOCAL_RESULT_DIR}/cancel_jobs.sh" <<EOF
 #!/usr/bin/env bash
@@ -231,14 +220,14 @@ for phase in $(_csv_items "${PHASE_ORDER}"); do
   case "${phase}" in
     context)
       for ep in $(_csv_items "${PREFILL_EP_SIZES}"); do
-        job="${JOB_TAG}-$(_phase_abbrev "${phase}")-e${ep}"
+        job="${JOB_TAG}-p-e${ep}"
         _render_job "${job}" "${ep}" context "${PREFILL_TOKENS}" "1" "${PREFILL_NUM_MAX_TOKENS_PER_RANK}"
         JOBS+=("${job}")
       done
       ;;
     generation)
       for ep in $(_csv_items "${DECODE_EP_SIZES}"); do
-        job="${JOB_TAG}-$(_phase_abbrev "${phase}")-e${ep}"
+        job="${JOB_TAG}-d-e${ep}"
         _render_job "${job}" "${ep}" generation "1024" "${DECODE_TOKENS}" "${DECODE_NUM_MAX_TOKENS_PER_RANK}"
         JOBS+=("${job}")
       done

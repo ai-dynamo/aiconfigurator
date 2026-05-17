@@ -10,39 +10,6 @@ from collector.sglang.dsv4_megamoe.validate_perf import merge_perf_files, valida
 pytestmark = pytest.mark.unit
 
 
-FIELDNAMES = [
-    "framework",
-    "version",
-    "device",
-    "op_name",
-    "kernel_source",
-    "phase",
-    "moe_dtype",
-    "kernel_dtype",
-    "num_tokens",
-    "global_num_tokens",
-    "hidden_size",
-    "inter_size",
-    "topk",
-    "num_experts",
-    "num_fused_shared_experts",
-    "moe_tp_size",
-    "moe_ep_size",
-    "distribution",
-    "source_policy",
-    "pre_dispatch",
-    "num_max_tokens_per_rank",
-    "effective_num_max_tokens_per_rank",
-    "routed_scaling_factor",
-    "includes_routed_scale",
-    "includes_gate_topk",
-    "buffer_policy",
-    "includes_buffer_init",
-    "used_cuda_graph",
-    "latency",
-]
-
-
 def _row(**overrides):
     row = {
         "framework": "SGLang",
@@ -81,8 +48,11 @@ def _row(**overrides):
 
 def _write_perf(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = list(_row().keys())
+    for row in rows:
+        fieldnames.extend(field for field in row if field not in fieldnames)
     with path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 

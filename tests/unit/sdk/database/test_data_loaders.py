@@ -422,39 +422,6 @@ def test_load_moe_data_basic(tmp_path):
     assert data[qm]["uniform"][2][4][16][32][2][2][1]["latency"] == pytest.approx(1.23)
 
 
-_DSV4_MEGAMOE_FIELDS = [
-    "framework",
-    "version",
-    "device",
-    "op_name",
-    "kernel_source",
-    "phase",
-    "moe_dtype",
-    "kernel_dtype",
-    "num_tokens",
-    "global_num_tokens",
-    "hidden_size",
-    "inter_size",
-    "topk",
-    "num_experts",
-    "num_fused_shared_experts",
-    "moe_tp_size",
-    "moe_ep_size",
-    "distribution",
-    "source_policy",
-    "pre_dispatch",
-    "num_max_tokens_per_rank",
-    "effective_num_max_tokens_per_rank",
-    "routed_scaling_factor",
-    "includes_routed_scale",
-    "includes_gate_topk",
-    "buffer_policy",
-    "includes_buffer_init",
-    "used_cuda_graph",
-    "latency",
-]
-
-
 def _dsv4_megamoe_row(
     *,
     phase: str = "context",
@@ -500,9 +467,11 @@ def _dsv4_megamoe_row(
 
 
 def _write_dsv4_megamoe_perf(csv_file, *rows: dict[str, str], include_phase: bool = True) -> None:
-    fields = [field for field in _DSV4_MEGAMOE_FIELDS if include_phase or field != "phase"]
-    if any("power" in row for row in rows):
-        fields.append("power")
+    fields = list(_dsv4_megamoe_row().keys())
+    for row in rows:
+        fields.extend(field for field in row if field not in fields)
+    if not include_phase:
+        fields = [field for field in fields if field != "phase"]
     csv_file.write_text(
         ",".join(fields) + "\n" + "".join(",".join(row.get(field, "") for field in fields) + "\n" for row in rows)
     )
