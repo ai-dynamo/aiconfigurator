@@ -13,14 +13,6 @@ description: >
 
 framework_specific_op_exceptions:
   sglang:
-    gemm:
-      rules:
-        - reason_type: framework_version_unsupported
-          version_prefixes: ["0.5.10"]
-          reason: SGLang 0.5.10 has no DeepGEMM block-FP8 GEMM recipe for SM120.
-          fields: [gemm_type, token_count, output_features, input_features]
-          match:
-            gemm_type: fp8_block
     moe:
       rules:
         - reason_type: framework_version_unsupported

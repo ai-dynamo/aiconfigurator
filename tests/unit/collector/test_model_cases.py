@@ -97,16 +97,17 @@ def test_model_specific_attention_shape_specs_override_base_when_model_filter_se
 
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "XiaomiMiMo/MiMo-V2-Flash")
 
-    mimo_context = get_attention_context_shape_sweeps("vllm")[0]
-    mimo_generation = get_attention_generation_shape_sweeps("vllm")[0]
+    for backend in ("sglang", "vllm"):
+        mimo_context = get_attention_context_shape_sweeps(backend)[0]
+        mimo_generation = get_attention_generation_shape_sweeps(backend)[0]
 
-    assert mimo_context["batch_sizes"] == [1, 2]
-    assert mimo_context["head_dims"] == [192]
-    assert mimo_context["sequence_lengths"] == [128, 256]
-    assert mimo_context["window_sizes"] == [0, 128]
-    assert mimo_generation["head_dims"] == [192]
-    assert mimo_generation["sequence_lengths"] == [2, 129, 257, 385]
-    assert mimo_generation["window_sizes"] == [0, 128]
+        assert mimo_context["batch_sizes"] == [1, 2]
+        assert mimo_context["head_dims"] == [192]
+        assert mimo_context["sequence_lengths"] == [128, 256]
+        assert mimo_context["window_sizes"] == [0, 128]
+        assert mimo_generation["head_dims"] == [192]
+        assert mimo_generation["sequence_lengths"] == [2, 129, 257, 385]
+        assert mimo_generation["window_sizes"] == [0, 128]
 
 
 def test_gemm_common_cases_expand_from_base_op_yaml_shape_specs():
@@ -598,6 +599,28 @@ framework_specific_op_exceptions:
     assert plan.sm_exceptions_path == default_sm_exceptions_path(100)
     assert plan.sm_exceptions_path == exceptions
     assert "wideep_moe" not in plan.op_cases
+
+
+def test_sm120_sglang_gemm_keeps_fp8_block_cases():
+    plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="Qwen/Qwen3-32B-FP8",
+        gpu_type="rtx_pro_6000_server",
+    )
+    cases = [
+        ["fp8_block", 128, 512, 512],
+        ["fp8", 128, 512, 512],
+    ]
+
+    filtered = filter_test_cases(
+        cases,
+        plan=plan.op_cases["gemm"],
+        full_module_name="sglang.gemm",
+        run_func_name="run_gemm",
+        runtime_version="0.5.10",
+    )
+
+    assert filtered == cases
 
 
 def test_sm_exception_files_list_matching_gpu_types():
