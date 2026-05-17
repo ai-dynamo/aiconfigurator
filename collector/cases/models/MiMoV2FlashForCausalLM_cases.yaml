@@ -24,6 +24,27 @@ all_frameworks_op_cases:
     cases: all
 
 framework_specific_op_cases:
+  sglang:
+    attention_context:
+      cases:
+        - id: base_attention_context_shape_sweep
+          batch_sizes: [1, 2]
+          sequence_lengths: [128, 256]
+          query_head_counts: [8, 16, 32, 64]
+          kv_head_options: [1, 2, 4, 8]
+          head_dims: [192]
+          window_sizes: [0, 128]
+    attention_generation:
+      cases:
+        - id: base_attention_generation_shape_sweep
+          batch_sizes: [1, 2, 4, 8]
+          sequence_lengths: [2, 129, 257, 385]
+          mha_query_head_counts: [8, 16, 32, 64]
+          xqa_query_head_counts: [8, 16, 32, 64]
+          kv_head_counts: [1, 2, 4, 8]
+          head_dims: [192]
+          window_sizes: [0, 128]
+          min_batch_options_per_sequence: 1
   vllm:
     attention_context:
       cases:

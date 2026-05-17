@@ -142,9 +142,10 @@ def _patched_model_dir(model_id: str) -> str:
     config["num_hidden_layers"] = num_layers  # shrink depth to speed up collector init
     if config.get("architectures") != ["DeepseekV4ForCausalLM"]:
         config["architectures"] = ["DeepseekV4ForCausalLM"]
-    # Match collect_dsv4_attn.py: current Transformers does not know a
-    # native deepseek_v4 config, while SGLang selects the V4 model class from
-    # the architectures field.
+
+    # Transformers does not register SGLang's DeepSeek-V4-only
+    # ``deepseek_ref`` model type.  Match the V4 Flash attention collector:
+    # keep the V4 architecture tag and use the DeepSeek-V3 config loader.
     config["model_type"] = "deepseek_v3"
 
     tmp_dir = os.path.join(

@@ -18,6 +18,7 @@ import pkg_resources
 import torch
 import torch.nn.functional as F
 from sgl_kernel import (
+    fp8_blockwise_scaled_mm,
     fp8_scaled_mm,
     sgl_per_token_quant_fp8,
 )
@@ -37,7 +38,7 @@ from sglang.srt.layers.deep_gemm_wrapper import (
     DEEPGEMM_SCALE_UE8M0,
     gemm_nt_f8f8bf16,
 )
-from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
+from sglang.srt.layers.quantization.fp8_kernel import per_token_group_quant_fp8, sglang_per_token_group_quant_fp8
 
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
@@ -63,8 +64,9 @@ def get_gemm_test_cases():
         # SM100/SM103 (B100/B200 datacenter Blackwell): fp8_block + nvfp4
         gemm_list = ["fp8_block", "bfloat16", "fp8", "nvfp4"]
     else:
-        # SM120+ (RTX PRO 6000 Blackwell workstation): no DeepGEMM recipe for fp8_block
-        gemm_list = ["bfloat16", "fp8", "nvfp4"]
+        # SM120+ (RTX PRO 6000 Blackwell workstation): block FP8 is supported
+        # by the SGLang/CUTLASS fp8_blockwise_scaled_mm path.
+        gemm_list = ["fp8_block", "bfloat16", "fp8", "nvfp4"]
 
     for gemm_common_testcase in get_gemm_case_specs():
         x = gemm_common_testcase.x
@@ -200,17 +202,29 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
             b_fp8 = b_fp32.clamp(min=fp8_info.min, max=fp8_info.max).to(torch.float8_e4m3fn)
             del b_fp32
             scale_b = torch.randn(scale_shape(b_fp8.shape, (128, 128)), device=device, dtype=torch.float32)
-            out = torch.empty((M, N), device=device, dtype=dtype)
 
-            def gemm_op():
-                a_fp8, scale_a = sglang_per_token_group_quant_fp8(
-                    a_bf16,
-                    group_size=128,
-                    column_major_scales=True,
-                    scale_tma_aligned=True,
-                    scale_ue8m0=DEEPGEMM_SCALE_UE8M0,
-                )
-                return fp8_gemm_deepgemm(a_fp8, scale_a, b_fp8, scale_b, out, M, N, K)
+            if get_sm_version() >= 110:
+
+                def gemm_op():
+                    a_fp8, scale_a = per_token_group_quant_fp8(
+                        a_bf16,
+                        group_size=128,
+                        column_major_scales=True,
+                    )
+                    return fp8_blockwise_scaled_mm(a_fp8, b_fp8.t(), scale_a, scale_b.t(), dtype)
+
+            else:
+                out = torch.empty((M, N), device=device, dtype=dtype)
+
+                def gemm_op():
+                    a_fp8, scale_a = sglang_per_token_group_quant_fp8(
+                        a_bf16,
+                        group_size=128,
+                        column_major_scales=True,
+                        scale_tma_aligned=True,
+                        scale_ue8m0=DEEPGEMM_SCALE_UE8M0,
+                    )
+                    return fp8_gemm_deepgemm(a_fp8, scale_a, b_fp8, scale_b, out, M, N, K)
 
             return gemm_op
 
