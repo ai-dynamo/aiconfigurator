@@ -1542,9 +1542,7 @@ def _resolve_local_model_path(model_id: str) -> str:
                 "expected a directory containing config.json"
             )
         if not os.path.exists(os.path.join(model_id, "config.json")):
-            raise FileNotFoundError(
-                f"model_id '{model_id}' is a directory but does not contain config.json"
-            )
+            raise FileNotFoundError(f"model_id '{model_id}' is a directory but does not contain config.json")
         return model_id
 
     # Step 2: AIC bundled cache.

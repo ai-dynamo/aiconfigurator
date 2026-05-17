@@ -66,11 +66,7 @@ def _make_scale_tensor(num_tokens: int, hidden_size: int, device) -> torch.Tenso
 # a local directory (containing config.json) or a HuggingFace model id like
 # "deepseek-ai/DeepSeek-V3" / "Qwen/Qwen3-235B-A22B". DEEPSEEK_MODEL_PATH is
 # honored for backward compatibility. Defaults to DeepSeek-V3.
-_MOE_MODEL_ID = (
-    os.environ.get("MOE_MODEL_PATH")
-    or os.environ.get("DEEPSEEK_MODEL_PATH")
-    or "deepseek-ai/DeepSeek-V3"
-)
+_MOE_MODEL_ID = os.environ.get("MOE_MODEL_PATH") or os.environ.get("DEEPSEEK_MODEL_PATH") or "deepseek-ai/DeepSeek-V3"
 MOE_MODEL_PATH = _resolve_local_model_path(_MOE_MODEL_ID)
 
 
