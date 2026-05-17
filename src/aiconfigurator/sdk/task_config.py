@@ -5,22 +5,24 @@
 TaskConfig — flat user-facing config for sweep_agg / sweep_disagg.
 
 Replaces the legacy ``sdk.task.TaskConfig`` (V1) and the orphaned
-``sdk.task_v2.TaskConfig`` (V2).
+``sdk.task_v2.TaskConfig`` (V2).  The legacy YAML format is NOT supported;
+new YAML uses field names that map 1:1 to this dataclass.
 
 Design:
-- Flat dataclass, SGLang-style. No nested DefaultMunch, no deep_merge.
+- Flat dataclass, SGLang-style.  No nested DefaultMunch, no deep_merge.
 - ``__post_init__`` resolves model identity, backend version, quant modes,
-  search candidates. After construction, every active field has a
+  search candidates.  After construction, every active field has a
   concrete value.
 - Strict prefix discipline: in disagg mode, top-level worker-spec fields
   (model_path, system_name, backend_name, quant_*, enable_wideep, ...)
-  are not used and must not silently shadow prefill_/decode_ values.
-- ``from_yaml`` accepts both flat YAML and the legacy nested form
-  (``config.worker_config``, ``config.prefill_worker_config``, etc.) so
-  existing experiment files can drive the new sweep path unchanged.
+  are not used and setting them raises ValueError.  Use prefill_* /
+  decode_* fields explicitly.
+- ``from_yaml`` is a thin pass-through: YAML keys must equal field names.
 - ``sweep_agg_kwargs()`` / ``sweep_disagg_kwargs()`` build the exact
   kwargs needed by :mod:`aiconfigurator.sdk.sweep` — no caller
   marshalling required.
+
+See ``cli/exps/example_new.yaml`` for the canonical YAML format.
 """
 
 from __future__ import annotations
@@ -104,7 +106,14 @@ _QUANT_FALLBACKS: dict[str, object] = {
 
 
 def _resolve_quant_str(key: str, value: Any) -> Any:
-    enum_cls = _QUANT_ENUM_TABLES.get(key)
+    # Accept role-prefixed keys (e.g. "prefill_gemm_quant_mode") by stripping
+    # the prefix before looking up the enum table.
+    bare = key
+    for role in ("prefill_", "decode_"):
+        if bare.startswith(role):
+            bare = bare[len(role) :]
+            break
+    enum_cls = _QUANT_ENUM_TABLES.get(bare)
     if enum_cls is not None and isinstance(value, str):
         return enum_cls[value]
     return value
@@ -376,11 +385,20 @@ class TaskConfig:
 
     @classmethod
     def from_yaml(cls, yaml_data: dict, **overrides: Any) -> TaskConfig:
-        """Construct from a YAML dict.  Accepts both flat keys and the
-        legacy nested form (``config.worker_config`` etc.).  ``overrides``
-        win over both.
+        """Construct from a flat YAML dict.
+
+        YAML keys must match TaskConfig field names directly.  String values
+        for quant_mode fields are converted to the matching enum.  Unknown
+        keys are warned about but ignored.  ``overrides`` (kwargs) win over
+        YAML values.
         """
-        kwargs = cls._flatten_yaml(yaml_data)
+        valid_keys = {f.name for f in dataclasses.fields(cls) if f.init and not f.name.startswith("_")}
+        kwargs: dict[str, Any] = {}
+        for k, v in yaml_data.items():
+            if k not in valid_keys:
+                logger.warning("from_yaml: ignoring unknown key %r", k)
+                continue
+            kwargs[k] = _resolve_quant_str(k, v) if k.endswith("quant_mode") else v
         kwargs.update({k: v for k, v in overrides.items() if v is not None})
         return cls(**kwargs)
 
@@ -388,113 +406,6 @@ class TaskConfig:
     def from_cli(cls, **kwargs: Any) -> TaskConfig:
         """Construct from CLI kwargs.  Filters None to let __post_init__ defaults run."""
         return cls(**{k: v for k, v in kwargs.items() if v is not None})
-
-    @classmethod
-    def _flatten_yaml(cls, yaml_data: dict) -> dict:
-        """Flatten a legacy nested YAML into the flat field set this dataclass expects."""
-        valid_keys = {f.name for f in dataclasses.fields(cls) if f.init and not f.name.startswith("_")}
-        out: dict[str, Any] = {k: v for k, v in yaml_data.items() if k in valid_keys}
-
-        # V1 compat: profiles=[fp8] -> quant_preset="fp8"
-        profiles = yaml_data.get("profiles") or []
-        if profiles and "quant_preset" not in out:
-            out["quant_preset"] = profiles[0] if isinstance(profiles, list) else profiles
-
-        # V1 compat: in disagg mode, legacy YAML uses shared top-level model_path /
-        # system_name / backend_name / backend_version / enable_* for both roles.
-        # Mirror them to prefill_/decode_ fields and clear the top-level slots so
-        # strict prefix discipline does not fire.
-        if out.get("serving_mode") == "disagg":
-            decode_system = out.pop("decode_system_name", None) or out.get("system_name")
-            shared_to_role: dict[str, str] = {
-                "model_path": "model_path",
-                "system_name": "system_name",
-                "backend_name": "backend_name",
-                "backend_version": "backend_version",
-                "enable_wideep": "enable_wideep",
-                "enable_chunked_prefill": "enable_chunked_prefill",
-                "enable_eplb": "enable_eplb",
-                "quant_preset": "quant_preset",
-            }
-            for src, role_attr in shared_to_role.items():
-                if src in out and out[src] is not None and out[src] != "":
-                    val = out.pop(src)
-                    out.setdefault(f"prefill_{role_attr}", val)
-                    out.setdefault(f"decode_{role_attr}", val)
-                else:
-                    out.pop(src, None)
-            if decode_system:
-                out["decode_system_name"] = decode_system
-            # Quant modes at top level mirror similarly.
-            for q in _QUANT_ENUM_TABLES:
-                if q in out and out[q] is not None:
-                    val = out.pop(q)
-                    out.setdefault(f"prefill_{q}", val)
-                    out.setdefault(f"decode_{q}", val)
-
-        # V1 compat: nested `config` section
-        cfg_block = yaml_data.get("config") or {}
-        for k, v in cfg_block.items():
-            if k in valid_keys:
-                out.setdefault(k, _resolve_quant_str(k, v))
-
-        # V1 compat: nested `worker_config` (agg)
-        worker_block = cfg_block.get("worker_config") or {}
-        cls._absorb_worker_block(worker_block, out, prefix="agg_", quant_prefix="")
-        # V1 compat: nested `prefill_worker_config` / `decode_worker_config`
-        for role in ("prefill", "decode"):
-            block = cfg_block.get(f"{role}_worker_config") or {}
-            cls._absorb_worker_block(block, out, prefix=f"{role}_", quant_prefix=f"{role}_")
-
-        # V1 compat: nested `replica_config`
-        replica_block = cfg_block.get("replica_config") or {}
-        for k, v in replica_block.items():
-            mapping = {
-                "num_gpu_per_replica": "num_gpu_per_replica",
-                "max_gpu_per_replica": "max_gpu_per_replica",
-                "max_prefill_worker": "max_prefill_workers",
-                "max_decode_worker": "max_decode_workers",
-            }
-            if k in mapping:
-                out.setdefault(mapping[k], v)
-
-        # V1 compat: nested `advanced_tuning_config`
-        adv_block = cfg_block.get("advanced_tuning_config") or {}
-        mapping_adv = {
-            "prefill_latency_correction_scale": "prefill_latency_correction",
-            "decode_latency_correction_scale": "decode_latency_correction",
-            "prefill_max_batch_size": "prefill_max_batch_size",
-            "decode_max_batch_size": "decode_max_batch_size",
-        }
-        for k, v in adv_block.items():
-            if k in mapping_adv:
-                out.setdefault(mapping_adv[k], v)
-
-        return out
-
-    @staticmethod
-    def _absorb_worker_block(block: dict, out: dict, *, prefix: str, quant_prefix: str) -> None:
-        """Translate a legacy nested worker_config block into flat fields.
-
-        ``prefix`` is the search-space prefix ("agg_" / "prefill_" / "decode_").
-        ``quant_prefix`` is empty for agg (top-level quant fields) and "prefill_"/
-        "decode_" for disagg.
-        """
-        list_map = {
-            "num_gpu_per_worker": f"{prefix}num_gpu_candidates",
-            "tp_list": f"{prefix}tp_candidates",
-            "pp_list": f"{prefix}pp_candidates",
-            "dp_list": f"{prefix}dp_candidates",
-            "moe_tp_list": f"{prefix}moe_tp_candidates",
-            "moe_ep_list": f"{prefix}moe_ep_candidates",
-        }
-        for src, dst in list_map.items():
-            if src in block:
-                out.setdefault(dst, block[src])
-
-        for q in _QUANT_ENUM_TABLES:
-            if q in block:
-                out.setdefault(f"{quant_prefix}{q}", _resolve_quant_str(q, block[q]))
 
     # =====================================================================
     # __post_init__
