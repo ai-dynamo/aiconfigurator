@@ -29,7 +29,7 @@ RENORMALIZE_TOPK_WEIGHTS="${RENORMALIZE_TOPK_WEIGHTS:-1}"
 NUM_WARMUP="${NUM_WARMUP:-5}"
 NUM_ITERATIONS="${NUM_ITERATIONS:-20}"
 NUM_MAX_TOKENS_PER_RANK="${NUM_MAX_TOKENS_PER_RANK:-}"
-CAP_POLICY="${CAP_POLICY:-fixed}"
+CAP_POLICY="${CAP_POLICY:-case_tokens}"
 PERF_FILE="${PERF_FILE:-dsv4_megamoe_module_perf.txt}"
 AIC_WAIT_FOR_ALL_NODES="${AIC_WAIT_FOR_ALL_NODES:-0}"
 AIC_WAIT_FOR_ALL_NODES_MAX_ATTEMPTS="${AIC_WAIT_FOR_ALL_NODES_MAX_ATTEMPTS:-60}"
@@ -38,6 +38,13 @@ if ! [[ "${NUM_MAX_TOKENS_PER_RANK}" =~ ^[0-9]+$ ]] || (( NUM_MAX_TOKENS_PER_RAN
   echo "NUM_MAX_TOKENS_PER_RANK must be set to a positive integer by the renderer or runner." >&2
   exit 1
 fi
+case "${CAP_POLICY}" in
+  fixed|case_tokens) ;;
+  *)
+    echo "CAP_POLICY must be fixed or case_tokens." >&2
+    exit 1
+    ;;
+esac
 
 if [[ -z "${GPUS_PER_NODE}" ]]; then
   case "${SYSTEM_NAME^^}" in

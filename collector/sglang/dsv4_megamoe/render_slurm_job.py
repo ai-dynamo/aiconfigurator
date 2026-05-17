@@ -250,7 +250,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-warmup", type=int, default=5)
     parser.add_argument("--num-iterations", type=int, default=20)
     parser.add_argument("--num-max-tokens-per-rank", type=int, required=True)
-    parser.add_argument("--cap-policy", default="fixed")
+    parser.add_argument("--cap-policy", choices=["fixed", "case_tokens"], default="case_tokens")
     parser.add_argument("--env", action="append", default=[])
     return parser.parse_args()
 
