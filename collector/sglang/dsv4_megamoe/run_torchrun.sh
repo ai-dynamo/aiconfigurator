@@ -28,29 +28,14 @@ INCLUDE_ROUTED_SCALE="${INCLUDE_ROUTED_SCALE:-1}"
 RENORMALIZE_TOPK_WEIGHTS="${RENORMALIZE_TOPK_WEIGHTS:-1}"
 NUM_WARMUP="${NUM_WARMUP:-5}"
 NUM_ITERATIONS="${NUM_ITERATIONS:-20}"
-NUM_MAX_TOKENS_PER_RANK="${NUM_MAX_TOKENS_PER_RANK:-0}"
+NUM_MAX_TOKENS_PER_RANK="${NUM_MAX_TOKENS_PER_RANK:-}"
 CAP_POLICY="${CAP_POLICY:-fixed}"
 PERF_FILE="${PERF_FILE:-dsv4_megamoe_module_perf.txt}"
 AIC_WAIT_FOR_ALL_NODES="${AIC_WAIT_FOR_ALL_NODES:-0}"
 AIC_WAIT_FOR_ALL_NODES_MAX_ATTEMPTS="${AIC_WAIT_FOR_ALL_NODES_MAX_ATTEMPTS:-60}"
 
-MAX_CASE_TOKENS=0
-PHASES_COMPACT="${PHASES//[[:space:]]/}"
-if [[ ",${PHASES_COMPACT}," == *",context,"* ]]; then
-  for token in ${PREFILL_TOKENS//,/ }; do
-    (( token > MAX_CASE_TOKENS )) && MAX_CASE_TOKENS="${token}"
-  done
-fi
-if [[ ",${PHASES_COMPACT}," == *",generation,"* ]]; then
-  for token in ${DECODE_TOKENS//,/ }; do
-    (( token > MAX_CASE_TOKENS )) && MAX_CASE_TOKENS="${token}"
-  done
-fi
-if (( NUM_MAX_TOKENS_PER_RANK <= 0 )); then
-  NUM_MAX_TOKENS_PER_RANK="${MAX_CASE_TOKENS}"
-fi
-if (( NUM_MAX_TOKENS_PER_RANK <= 0 )); then
-  echo "NUM_MAX_TOKENS_PER_RANK could not be inferred from PHASES=${PHASES}" >&2
+if ! [[ "${NUM_MAX_TOKENS_PER_RANK}" =~ ^[0-9]+$ ]] || (( NUM_MAX_TOKENS_PER_RANK <= 0 )); then
+  echo "NUM_MAX_TOKENS_PER_RANK must be set to a positive integer by the renderer or runner." >&2
   exit 1
 fi
 

@@ -73,8 +73,8 @@ loader keys.
 Each row records both `num_max_tokens_per_rank` and
 `effective_num_max_tokens_per_rank`.  The effective value is read from the
 DeepGEMM symmetric buffer after DeepGEMM applies its internal token alignment.
-If `NUM_MAX_TOKENS_PER_RANK` or `--num-max-tokens-per-rank` is left at `0`, the
-wrapper/renderer uses the largest token count in the selected phase list.
+The launch runners/renderers set `NUM_MAX_TOKENS_PER_RANK`; `run_torchrun.sh`
+requires it to be a positive integer.
 
 The committed perf schema follows the existing SGLang WideEP MoE tables and
 keeps only query keys plus required boundary/topology fields:
@@ -166,6 +166,7 @@ SYSTEM_NAME=b200_sxm \
 EP_SIZE=8 \
 GPUS_PER_NODE=8 \
 SOURCE_POLICY=random \
+NUM_MAX_TOKENS_PER_RANK=32768 \
 OUTPUT_PATH=/workspace/results/dsv4_megamoe_b200_ep8 \
 bash collector/sglang/dsv4_megamoe/run_torchrun.sh
 ```
@@ -181,6 +182,7 @@ NNODES=4 \
 NODE_RANK=${NODE_RANK} \
 MASTER_ADDR=${MASTER_ADDR} \
 MASTER_PORT=29500 \
+NUM_MAX_TOKENS_PER_RANK=32768 \
 OUTPUT_PATH=/workspace/results/dsv4_megamoe_gb200_ep16 \
 bash collector/sglang/dsv4_megamoe/run_torchrun.sh
 ```
