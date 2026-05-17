@@ -635,6 +635,30 @@ def test_sm90_skips_sglang_dsv4_flash_modules_for_0510():
     assert "DeepSeek-V4-Flash" in skipped[0]["reason"]
 
 
+def test_sm90_skips_sglang_mhc_module_for_0510():
+    plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="sgl-project/DeepSeek-V4-Flash-FP8",
+        sm_version=90,
+    )
+
+    filtered, skipped = filter_test_cases_with_report(
+        [
+            {"id": "mhc_pre_all", "params": ["pre"]},
+            {"id": "mhc_post_all", "params": ["post"]},
+        ],
+        plan=plan.op_cases["mhc_module"],
+        full_module_name="sglang.mhc_module",
+        run_func_name="run_mhc_module_worker",
+        runtime_version="0.5.10",
+    )
+
+    assert filtered == []
+    assert len(skipped) == 2
+    assert {item["reason_type"] for item in skipped} == {"framework_version_unsupported"}
+    assert all("deepseek_ref" in item["reason"] for item in skipped)
+
+
 def test_filter_test_cases_supports_computed_rule_conditions():
     cases = [
         [1, 4096, 64, 4, 128, False, False, False],
