@@ -58,6 +58,38 @@ framework_specific_op_exceptions:
           fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type, attention_backend]
           match:
             gemm_type: nvfp4
+    dsv4_flash_csa_context_module:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.10"]
+          reason: SGLang 0.5.10 cannot load DeepSeek-V4-Flash module collectors because DeepseekV4ForCausalLM is not registered in the framework image.
+          fields: [seq_len, batch_size, tp_size, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_kind, attention_backend]
+          match:
+            model_path: sgl-project/DeepSeek-V4-Flash-FP8
+    dsv4_flash_hca_context_module:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.10"]
+          reason: SGLang 0.5.10 cannot load DeepSeek-V4-Flash module collectors because DeepseekV4ForCausalLM is not registered in the framework image.
+          fields: [seq_len, batch_size, tp_size, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_kind, attention_backend]
+          match:
+            model_path: sgl-project/DeepSeek-V4-Flash-FP8
+    dsv4_flash_csa_generation_module:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.10"]
+          reason: SGLang 0.5.10 cannot load DeepSeek-V4-Flash module collectors because DeepseekV4ForCausalLM is not registered in the framework image.
+          fields: [seq_len, batch_size, tp_size, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_kind, attention_backend]
+          match:
+            model_path: sgl-project/DeepSeek-V4-Flash-FP8
+    dsv4_flash_hca_generation_module:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.10"]
+          reason: SGLang 0.5.10 cannot load DeepSeek-V4-Flash module collectors because DeepseekV4ForCausalLM is not registered in the framework image.
+          fields: [seq_len, batch_size, tp_size, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_kind, attention_backend]
+          match:
+            model_path: sgl-project/DeepSeek-V4-Flash-FP8
   trtllm:
     moe:
       rules:

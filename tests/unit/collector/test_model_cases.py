@@ -603,6 +603,38 @@ def test_sm90_skips_fp4_only_nemotron_moe_shapes():
     assert "FP4-only Nemotron" in skipped[0]["reason"]
 
 
+def test_sm90_skips_sglang_dsv4_flash_modules_for_0510():
+    plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="sgl-project/DeepSeek-V4-Flash-FP8",
+        sm_version=90,
+    )
+    case = [
+        0,
+        1,
+        1,
+        "fp8",
+        "bfloat16",
+        "bfloat16",
+        "sgl-project/DeepSeek-V4-Flash-FP8",
+        "csa",
+        None,
+    ]
+
+    filtered, skipped = filter_test_cases_with_report(
+        [case],
+        plan=plan.op_cases["dsv4_flash_csa_context_module"],
+        full_module_name="sglang.dsv4_flash_csa_context_module",
+        run_func_name="run_dsv4_flash_attn_worker",
+        runtime_version="0.5.10",
+    )
+
+    assert filtered == []
+    assert len(skipped) == 1
+    assert skipped[0]["reason_type"] == "framework_version_unsupported"
+    assert "DeepSeek-V4-Flash" in skipped[0]["reason"]
+
+
 def test_filter_test_cases_supports_computed_rule_conditions():
     cases = [
         [1, 4096, 64, 4, 128, False, False, False],
