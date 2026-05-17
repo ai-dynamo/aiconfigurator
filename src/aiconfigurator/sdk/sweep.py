@@ -25,6 +25,7 @@ Output DataFrame schema is ``common.ColumnsAgg`` for agg and
 from __future__ import annotations
 
 import copy
+import functools
 import logging
 from typing import Any
 
@@ -36,7 +37,7 @@ from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
-from aiconfigurator.sdk.predict import predict_agg_worker
+from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_phase
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,21 @@ logger = logging.getLogger(__name__)
 # (locked in via parity test; do not change without updating picking.py too).
 _RATE_MATCH_PREFILL_DEGRADATION = 0.9
 _RATE_MATCH_DECODE_DEGRADATION = 0.92
+
+# TTFT pre-correction for queueing under concurrency, sourced from
+# picking._AUTOSCALE_TTFT_CORRECTION_FACTOR (locked by integration parity test).
+_AUTOSCALE_TTFT_CORRECTION_FACTOR = 1.8
+
+# Disagg search shape constants (mirror inference_session.py module-level).
+_DECODE_FILTER_RATIO_MIN = 0.0
+_DECODE_FILTER_RATIO_MAX = 1.0
+_MAX_DECODE_WORKERS_PER_CATEGORY = 16
+_MAX_PREFILL_WORKERS = 32
+
+# Default decode batch-size schedule for disagg worker enumeration.
+_DEFAULT_DECODE_BATCH_SCHEDULE: list[int] = (
+    list(range(1, 16, 1)) + list(range(16, 32, 2)) + list(range(32, 128, 4)) + list(range(128, 512, 8)) + [512]
+)
 
 # Default batch-size schedule used by sweep_agg.  Mirrors the schedule in
 # the legacy ``backend.find_best_agg_result_under_constraints`` so results
@@ -473,20 +489,392 @@ def sweep_agg(
 
 
 # ---------------------------------------------------------------------------
-# Disagg sweep — DEFERRED to Pass 2
+# Disagg sweep
 # ---------------------------------------------------------------------------
 
 
-def sweep_disagg(*args, **kwargs):  # pragma: no cover - placeholder
+def _get_disagg_worker_candidates(
+    *,
+    model_path: str,
+    model_config: config.ModelConfig,
+    parallel_config_list: list[tuple[int, int, int, int, int]] | list[list[int]],
+    b_list: list[int] | range,
+    runtime_config: config.RuntimeConfig,
+    role: str,
+    database: PerfDatabase,
+    backend_name: str,
+    latency_correction: float,
+) -> pd.DataFrame:
+    """Enumerate (parallel, batch_size) worker candidates for a disagg role.
+
+    Returns a DataFrame in ``common.ColumnsStatic`` schema, one row per
+    (parallel, batch_size) that fits in memory.  Replaces the body of
+    ``DisaggInferenceSession.get_worker_candidates``.
+    """
+    backend = get_backend(backend_name)
+    summary_df = pd.DataFrame(columns=common.ColumnsStatic)
+    exceptions: list[Exception] = []
+    all_configs_oom = True
+
+    for parallel_config in parallel_config_list:
+        tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
+        logger.debug(
+            "sweep_disagg/%s: candidate parallel tp=%s pp=%s dp=%s moe_tp=%s moe_ep=%s",
+            role,
+            tp_size,
+            pp_size,
+            dp_size,
+            moe_tp_size,
+            moe_ep_size,
+        )
+        try:
+            point_mc = copy.deepcopy(model_config)
+            point_mc.tp_size = tp_size
+            point_mc.pp_size = pp_size
+            point_mc.moe_tp_size = moe_tp_size
+            point_mc.moe_ep_size = moe_ep_size
+            point_mc.attention_dp_size = dp_size
+
+            model = get_model(model_path=model_path, model_config=point_mc, backend_name=backend_name)
+
+            for b in b_list:
+                point_rt = copy.deepcopy(runtime_config)
+                point_rt.batch_size = b
+                summary = predict_disagg_phase(
+                    model=model,
+                    backend=backend,
+                    database=database,
+                    runtime_config=point_rt,
+                    role=role,  # type: ignore[arg-type]
+                    latency_correction=latency_correction,
+                )
+                if not summary.check_oom():
+                    all_configs_oom = False
+                    summary_df = pd.concat(
+                        [summary_df, summary.get_summary_df()],
+                        axis=0,
+                        ignore_index=True,
+                    )
+                else:
+                    break
+        except Exception as e:
+            logger.warning(
+                "sweep_disagg/%s: error at parallel tp=%s pp=%s dp=%s moe_tp=%s moe_ep=%s; skipping. err=%s",
+                role,
+                tp_size,
+                pp_size,
+                dp_size,
+                moe_tp_size,
+                moe_ep_size,
+                e,
+            )
+            exceptions.append(e)
+            continue
+
+    if summary_df.empty:
+        if exceptions:
+            raise RuntimeError(
+                f"sweep_disagg/{role}: no results for any parallel config. Last exception: {exceptions[-1]}"
+            ) from exceptions[-1]
+        if all_configs_oom:
+            raise RuntimeError(
+                f"sweep_disagg/{role}: no results — model does not fit in GPU memory for any parallel config. "
+                "Try increasing GPU budget, using a quantized model, or a system with more VRAM per GPU."
+            )
+        raise NoFeasibleConfigError(
+            f"sweep_disagg/{role}: no parallel configuration met TTFT/TPOT or request-latency constraints."
+        )
+    return summary_df
+
+
+def _find_best_disagg_under_constraint(
+    *,
+    ttft_target: float,
+    tpot_target: float,
+    prefill_summary_df: pd.DataFrame,
+    decode_summary_df: pd.DataFrame,
+    return_top_k: int,
+    num_gpu_set: set[int],
+    prefill_num_worker_list: list[int],
+    decode_num_worker_list: list[int],
+    max_prefill_gpus: int | None,
+    max_decode_gpus: int | None,
+    require_same_tp: bool,
+    prefill_degradation: float,
+    decode_degradation: float,
+) -> pd.DataFrame | None:
+    """For one (ttft, tpot) pair, filter + rate-match + pick best per decode parallel.
+
+    Mirrors ``_find_best_result_under_constraints`` in
+    DisaggInferenceSession.find_best_disagg_result_under_constraints.
+    """
+
+    @functools.lru_cache(maxsize=8192)
+    def _match_workers(
+        prefill_throughput: float,
+        prefill_gpus: int,
+        decode_throughput: float,
+        decode_gpus: int,
+        prefill_deg: float,
+        decode_deg: float,
+    ) -> tuple[int, int]:
+        prefill_opt, decode_opt = -1, -1
+        throughput_per_gpu_max = 0.0
+        for d_num in decode_num_worker_list:
+            for p_num in prefill_num_worker_list:
+                num_gpu = prefill_gpus * p_num + decode_gpus * d_num
+                if num_gpu_set and num_gpu not in num_gpu_set:
+                    continue
+                if max_prefill_gpus is not None and max_decode_gpus is not None:
+                    if prefill_gpus * p_num > max_prefill_gpus:
+                        continue
+                    if decode_gpus * d_num > max_decode_gpus:
+                        continue
+                p_corrected = prefill_throughput * p_num * prefill_deg
+                d_corrected = decode_throughput * d_num * decode_deg
+                tpg = min(p_corrected, d_corrected) / num_gpu
+                if tpg > throughput_per_gpu_max:
+                    throughput_per_gpu_max = tpg
+                    prefill_opt, decode_opt = p_num, d_num
+        return prefill_opt, decode_opt
+
+    p_corrected = prefill_summary_df.assign(ttft=prefill_summary_df["ttft"] * _AUTOSCALE_TTFT_CORRECTION_FACTOR)
+    p_candidates = p_corrected[p_corrected["ttft"] < ttft_target]
+    if len(p_candidates) == 0:
+        logger.debug("sweep_disagg: no prefill candidates meet ttft<%sms", ttft_target)
+        return None
+    p_candidates = (
+        p_candidates.sort_values(by=["seq/s/gpu", "global_bs"], ascending=[False, True])
+        .reset_index(drop=True)
+        .head(_MAX_PREFILL_WORKERS)
+    )
+
+    d_candidates = decode_summary_df[
+        (decode_summary_df["tpot"] < tpot_target * _DECODE_FILTER_RATIO_MAX)
+        & (decode_summary_df["tpot"] > tpot_target * _DECODE_FILTER_RATIO_MIN)
+    ].copy()
+    if len(d_candidates) == 0:
+        logger.debug("sweep_disagg: no decode candidates meet tpot<%sms", tpot_target)
+        return None
+
+    all_category_results: list[dict] = []
+    p_records = p_candidates.to_dict("records")
+
+    for parallel_value, parallel_group in d_candidates.groupby("parallel"):
+        group_sorted = (
+            parallel_group.sort_values(by=["seq/s/gpu"], ascending=[False])
+            .reset_index(drop=True)
+            .head(_MAX_DECODE_WORKERS_PER_CATEGORY)
+        )
+        decode_records = group_sorted.to_dict("records")
+        category_results: list[dict] = []
+        for d_worker in decode_records:
+            d_throughput = float(d_worker["seq/s"])
+            d_gpus = d_worker["num_total_gpus"]
+            for p_worker in p_records:
+                if require_same_tp and p_worker["tp"] != d_worker["tp"]:
+                    continue
+                p_throughput = float(p_worker["seq/s"])
+                p_gpus = p_worker["num_total_gpus"]
+                p_num, d_num = _match_workers(
+                    prefill_throughput=p_throughput,
+                    prefill_gpus=p_gpus,
+                    decode_throughput=d_throughput,
+                    decode_gpus=d_gpus,
+                    prefill_deg=prefill_degradation,
+                    decode_deg=decode_degradation,
+                )
+                if p_num == -1 or d_num == -1:
+                    continue
+                disagg_dict = _rate_match_dict(
+                    p_worker,
+                    p_num,
+                    d_worker,
+                    d_num,
+                    prefill_degradation=prefill_degradation,
+                    decode_degradation=decode_degradation,
+                )
+                category_results.append(disagg_dict)
+        if category_results:
+            best = max(category_results, key=lambda x: (x["tokens/s/gpu"], -x["num_total_gpus"]))
+            all_category_results.append(best)
+        else:
+            logger.debug("sweep_disagg: no matched result for decode parallel %s", parallel_value)
+
+    if not all_category_results:
+        logger.debug("sweep_disagg: no disagg summary after constraints")
+        return None
+
+    df = pd.DataFrame(all_category_results, columns=common.ColumnsDisagg).round(3)
+    df = df.sort_values(by=["tokens/s/gpu"], ascending=[False]).head(return_top_k).reset_index(drop=True)
+    return df
+
+
+def sweep_disagg(
+    *,
+    model_path: str,
+    runtime_config: config.RuntimeConfig,
+    prefill_database: PerfDatabase,
+    prefill_backend_name: str,
+    prefill_model_config: config.ModelConfig,
+    prefill_parallel_config_list: list[tuple[int, int, int, int, int]] | list[list[int]],
+    prefill_latency_correction: float,
+    decode_database: PerfDatabase,
+    decode_backend_name: str,
+    decode_model_config: config.ModelConfig,
+    decode_parallel_config_list: list[tuple[int, int, int, int, int]] | list[list[int]],
+    decode_latency_correction: float,
+    prefill_max_num_tokens: int = 16384,
+    decode_max_num_tokens: int = 512,
+    prefill_num_worker_list: list[int] | None = None,
+    decode_num_worker_list: list[int] | None = None,
+    num_gpu_list: list[int] | None = None,
+    max_prefill_gpus: int | None = None,
+    max_decode_gpus: int | None = None,
+    require_same_tp: bool = False,
+    autoscale: bool = False,
+    target_tpot: float | None = None,
+    rate_matching_prefill_degradation: float | None = None,
+    rate_matching_decode_degradation: float | None = None,
+) -> pd.DataFrame:
     """Sweep prefill_parallel x decode_parallel x batches x workers with rate matching.
 
-    NOT YET IMPLEMENTED.  Pass 1 of the sweep.py refactor covers agg only.
-    Pass 2 will inline the 334-line disagg search logic currently in
+    Replaces ``pareto_analysis.disagg_pareto`` ->
     ``DisaggInferenceSession.find_best_disagg_result_under_constraints``.
+    Output schema is ``common.ColumnsDisagg``, sorted by ``tokens/s/gpu``.
 
-    Until then, callers needing disagg should keep using the legacy path
-    (``DisaggInferenceSession`` is still in the tree and used by webapp).
+    The two databases / backends are accepted independently to support
+    hetero-disagg (prefill and decode on different systems).
+
+    Returns:
+        DataFrame (possibly empty) with schema ``common.ColumnsDisagg``.
+
+    Raises:
+        ValueError: invalid GPU bounds.
+        RuntimeError: no feasible worker candidates.
+        NoFeasibleConfigError: no point satisfies the SLA.
     """
-    raise NotImplementedError(
-        "sweep_disagg is not implemented yet — Pass 2 of the sweep refactor. Use pareto_analysis.disagg_pareto for now."
+    if max_prefill_gpus is not None and max_prefill_gpus <= 0:
+        raise ValueError(f"max_prefill_gpus must be > 0, got {max_prefill_gpus}")
+    if max_decode_gpus is not None and max_decode_gpus <= 0:
+        raise ValueError(f"max_decode_gpus must be > 0, got {max_decode_gpus}")
+
+    p_deg = (
+        rate_matching_prefill_degradation
+        if rate_matching_prefill_degradation is not None
+        else _RATE_MATCH_PREFILL_DEGRADATION
     )
+    d_deg = (
+        rate_matching_decode_degradation
+        if rate_matching_decode_degradation is not None
+        else _RATE_MATCH_DECODE_DEGRADATION
+    )
+    p_num_workers = prefill_num_worker_list or []
+    d_num_workers = decode_num_worker_list or []
+    num_gpu_set: set[int] = set(num_gpu_list) if num_gpu_list else set()
+
+    if decode_max_num_tokens < 1:
+        logger.warning("decode_max_num_tokens < 1, clamping to 1")
+        decode_max_num_tokens = 1
+    if decode_max_num_tokens > max(_DEFAULT_DECODE_BATCH_SCHEDULE):
+        decode_batch_range: list[int] | range = _DEFAULT_DECODE_BATCH_SCHEDULE + [decode_max_num_tokens]
+    else:
+        decode_batch_range = [b for b in _DEFAULT_DECODE_BATCH_SCHEDULE if b <= decode_max_num_tokens]
+
+    if prefill_max_num_tokens < runtime_config.isl:
+        logger.warning("prefill_max_num_tokens < runtime_config.isl, clamping to isl")
+        prefill_max_num_tokens = runtime_config.isl
+    max_prefill_batch_size = prefill_max_num_tokens // runtime_config.isl
+    prefill_batch_range = range(1, max_prefill_batch_size + 1)
+
+    prefill_summary_df = _get_disagg_worker_candidates(
+        model_path=model_path,
+        model_config=prefill_model_config,
+        parallel_config_list=prefill_parallel_config_list,
+        b_list=prefill_batch_range,
+        runtime_config=runtime_config,
+        role="prefill",
+        database=prefill_database,
+        backend_name=prefill_backend_name,
+        latency_correction=prefill_latency_correction,
+    )
+    decode_summary_df = _get_disagg_worker_candidates(
+        model_path=model_path,
+        model_config=decode_model_config,
+        parallel_config_list=decode_parallel_config_list,
+        b_list=decode_batch_range,
+        runtime_config=runtime_config,
+        role="decode",
+        database=decode_database,
+        backend_name=decode_backend_name,
+        latency_correction=decode_latency_correction,
+    )
+
+    if len(prefill_summary_df) == 0 or len(decode_summary_df) == 0:
+        logger.debug("sweep_disagg: no prefill or decode worker candidates")
+        return pd.DataFrame(columns=common.ColumnsDisagg)
+
+    if autoscale:
+        from aiconfigurator.sdk.picking import pick_autoscale
+
+        target_ttft_v = runtime_config.ttft
+        if target_tpot is None:
+            tpot_values = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
+            target_tpot_v = max(tpot_values)
+        else:
+            target_tpot_v = target_tpot
+        result = pick_autoscale(
+            prefill_df=prefill_summary_df,
+            decode_df=decode_summary_df,
+            target_ttft=target_ttft_v,
+            target_tpot=target_tpot_v,
+            top_n=5,
+        )
+        df = result["best_config_df"]
+        if df is None or df.empty:
+            return pd.DataFrame(columns=common.ColumnsDisagg)
+        return df
+
+    constraint_pairs: list[tuple[float, float]] = []
+    if runtime_config.request_latency is not None and runtime_config.request_latency > 0:
+        constraint_pairs = enumerate_ttft_tpot_constraints(
+            runtime_config.osl,
+            runtime_config.request_latency,
+            runtime_config.ttft,
+        )
+        if not constraint_pairs:
+            logger.debug(
+                "sweep_disagg: no (ttft, tpot) pairs for request_latency=%s",
+                runtime_config.request_latency,
+            )
+    else:
+        tpot_values = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
+        constraint_pairs = [(runtime_config.ttft, tpot) for tpot in tpot_values]
+
+    disagg_df = pd.DataFrame(columns=common.ColumnsDisagg)
+    for ttft_c, tpot_c in constraint_pairs:
+        logger.debug("sweep_disagg: finding best for ttft=%sms tpot=%sms", ttft_c, tpot_c)
+        partial = _find_best_disagg_under_constraint(
+            ttft_target=ttft_c,
+            tpot_target=tpot_c,
+            prefill_summary_df=prefill_summary_df,
+            decode_summary_df=decode_summary_df,
+            return_top_k=5,
+            num_gpu_set=num_gpu_set,
+            prefill_num_worker_list=p_num_workers,
+            decode_num_worker_list=d_num_workers,
+            max_prefill_gpus=max_prefill_gpus,
+            max_decode_gpus=max_decode_gpus,
+            require_same_tp=require_same_tp,
+            prefill_degradation=p_deg,
+            decode_degradation=d_deg,
+        )
+        if partial is not None:
+            disagg_df = pd.concat([disagg_df, partial], axis=0, ignore_index=True)
+
+    if len(disagg_df) == 0:
+        logger.debug("sweep_disagg: no disagg result satisfies any constraint")
+        return pd.DataFrame(columns=common.ColumnsDisagg)
+
+    disagg_df = disagg_df.drop_duplicates(ignore_index=True)
+    return disagg_df
