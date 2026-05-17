@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Unit tests for sweep.py helpers and sweep_disagg placeholder.
+
+sweep_agg end-to-end correctness is validated by the integration
+parity test (tests/integration/test_old_vs_new_parity.py) against the
+legacy CLI path; mocking it at unit level provides little signal.
+"""
+
+import pytest
+
+from aiconfigurator.sdk.sweep import (
+    _DEFAULT_AGG_BATCH_SCHEDULE,
+    _agg_ctx_tokens_list,
+    sweep_disagg,
+)
+
+pytestmark = pytest.mark.unit
+
+
+# ---------------------------------------------------------------------------
+# _agg_ctx_tokens_list — parity with legacy base_backend._get_ctx_tokens_list_for_agg_sweep
+# ---------------------------------------------------------------------------
+
+
+def _legacy_ctx_tokens_list(isl: int, ctx_stride: int, enable_chunked_prefill: bool) -> list[int]:
+    """Wrap the legacy helper on BaseBackend for parity comparison."""
+    from aiconfigurator.sdk.backends.factory import get_backend
+
+    legacy = get_backend("trtllm")  # any backend exposes the helper, it's on BaseBackend
+    return legacy._get_ctx_tokens_list_for_agg_sweep(
+        isl=isl,
+        ctx_stride=ctx_stride,
+        enable_chunked_prefill=enable_chunked_prefill,
+    )
+
+
+@pytest.mark.parametrize("isl", [1024, 2048, 4000, 8000, 16384])
+@pytest.mark.parametrize("ctx_stride", [128, 256, 512, 1024])
+@pytest.mark.parametrize("enable_chunked_prefill", [True, False])
+def test_agg_ctx_tokens_list_matches_legacy(isl, ctx_stride, enable_chunked_prefill):
+    new = _agg_ctx_tokens_list(isl, ctx_stride, enable_chunked_prefill)
+    old = _legacy_ctx_tokens_list(isl, ctx_stride, enable_chunked_prefill)
+    assert new == old, (
+        f"Mismatch for isl={isl}, ctx_stride={ctx_stride}, "
+        f"enable_chunked_prefill={enable_chunked_prefill}\nnew={new}\nold={old}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Batch schedule shape
+# ---------------------------------------------------------------------------
+
+
+def test_default_agg_batch_schedule_is_monotonic_and_capped():
+    assert sorted(_DEFAULT_AGG_BATCH_SCHEDULE) == _DEFAULT_AGG_BATCH_SCHEDULE
+    assert _DEFAULT_AGG_BATCH_SCHEDULE[0] == 1
+    assert _DEFAULT_AGG_BATCH_SCHEDULE[-1] == 1024
+
+
+# ---------------------------------------------------------------------------
+# sweep_disagg placeholder
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_disagg_is_not_implemented_yet():
+    with pytest.raises(NotImplementedError, match="Pass 2"):
+        sweep_disagg()
