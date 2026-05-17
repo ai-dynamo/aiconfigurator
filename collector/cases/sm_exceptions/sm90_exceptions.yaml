@@ -36,6 +36,14 @@ framework_specific_op_exceptions:
           match:
             model_path:
               in: [openai/gpt-oss-20b, openai/gpt-oss-120b]
+        - reason_type: hardware_unsupported
+          reason: SM90 H100/H200 does not support the FP4-only Nemotron MoE checkpoints, so their MoE silicon cases are not runnable for support-matrix healing.
+          fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
+          match:
+            model_path:
+              in:
+                - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+                - nvidia/nemotron-ultra-rl-050826
     dsa_context_module:
       rules:
         - reason_type: hardware_unsupported
@@ -59,6 +67,14 @@ framework_specific_op_exceptions:
           match:
             moe_type:
               in: [nvfp4, w4a8_mxfp4_mxfp8]
+        - reason_type: hardware_unsupported
+          reason: SM90 H100/H200 does not support the FP4-only Nemotron MoE checkpoints, so their MoE silicon cases are not runnable for support-matrix healing.
+          fields: [moe_type, num_tokens_list, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, min_latency_mode, model_path, token_expert_distribution, power_law_alpha]
+          match:
+            model_path:
+              in:
+                - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+                - nvidia/nemotron-ultra-rl-050826
     mla_context_module:
       rules:
         - reason_type: hardware_unsupported
@@ -95,6 +111,14 @@ framework_specific_op_exceptions:
           fields: [moe_type, num_tokens_list, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha]
           match:
             moe_type: nvfp4
+        - reason_type: hardware_unsupported
+          reason: SM90 H100/H200 does not support the FP4-only Nemotron MoE checkpoints, so their MoE silicon cases are not runnable for support-matrix healing.
+          fields: [moe_type, num_tokens_list, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha]
+          match:
+            model_path:
+              in:
+                - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+                - nvidia/nemotron-ultra-rl-050826
     mla_context_module:
       rules:
         - reason_type: hardware_unsupported

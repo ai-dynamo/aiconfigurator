@@ -568,6 +568,41 @@ def test_filter_test_cases_reports_expected_sm_exception_reasons():
     ]
 
 
+def test_sm90_skips_fp4_only_nemotron_moe_shapes():
+    plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="nvidia/nemotron-ultra-rl-050826",
+        sm_version=90,
+    )
+    case = [
+        "bfloat16",
+        128,
+        8192,
+        5120,
+        22,
+        512,
+        1,
+        1,
+        "nvidia/nemotron-ultra-rl-050826",
+        "balanced",
+        0.0,
+        None,
+    ]
+
+    filtered, skipped = filter_test_cases_with_report(
+        [case],
+        plan=plan.op_cases["moe"],
+        full_module_name="sglang.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="0.5.10",
+    )
+
+    assert filtered == []
+    assert len(skipped) == 1
+    assert skipped[0]["reason_type"] == "hardware_unsupported"
+    assert "FP4-only Nemotron" in skipped[0]["reason"]
+
+
 def test_filter_test_cases_supports_computed_rule_conditions():
     cases = [
         [1, 4096, 64, 4, 128, False, False, False],

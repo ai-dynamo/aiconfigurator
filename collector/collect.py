@@ -195,6 +195,22 @@ class ResumeCheckpoint:
         By default, skips both passed and failed tasks. With retry_failed=True,
         previously failed tasks are retried.
         """
+        current_ids = {task_info["id"] for task_info in task_infos}
+        stale_done = self._done - current_ids
+        stale_failed = self._failed - current_ids
+        stale_expected_failed = self._expected_failed - current_ids
+        if stale_done or stale_failed or stale_expected_failed:
+            logger.info(
+                f"{self.module_name}: pruning checkpoint entries outside current case plan "
+                f"(done={len(stale_done)}, failed={len(stale_failed)}, "
+                f"expected_failed={len(stale_expected_failed)})"
+            )
+            self._done.intersection_update(current_ids)
+            self._failed.intersection_update(current_ids)
+            self._expected_failed.intersection_update(current_ids)
+            self._dirty = True
+            self.flush(force=True)
+
         skip_set = (
             (self._done | self._expected_failed)
             if retry_failed
