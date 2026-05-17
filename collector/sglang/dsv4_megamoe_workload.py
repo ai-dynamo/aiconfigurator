@@ -10,7 +10,6 @@ placement layer needed by real EP collection.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -44,36 +43,8 @@ class RoutingPlan:
     distribution: str
     source_policy: str
     global_num_tokens: int
-    tokens_per_rank: tuple[int, ...]
-    routed_num_experts: int
-    routed_topk: int
-    ep_size: int
-    rank: int
     local_topk_ids: torch.Tensor
     local_topk_weights: torch.Tensor
-    routed_expert_counts: tuple[int, ...]
-    dst_rank_loads: tuple[int, ...]
-    src_dst_matrix: tuple[tuple[int, ...], ...]
-    local_selection_ratio: float
-    remote_selection_ratio: float
-    bottleneck_rank: int
-    routing_seed: int
-    norm_topk_prob: bool
-
-    def metadata(self) -> dict[str, object]:
-        return {
-            "distribution": self.distribution,
-            "source_policy": self.source_policy,
-            "global_num_tokens": self.global_num_tokens,
-            "tokens_per_rank": json.dumps(list(self.tokens_per_rank), separators=(",", ":")),
-            "routing_seed": self.routing_seed,
-            "rank_loads": json.dumps(list(self.dst_rank_loads), separators=(",", ":")),
-            "src_dst_matrix": json.dumps([list(row) for row in self.src_dst_matrix], separators=(",", ":")),
-            "local_selection_ratio": f"{self.local_selection_ratio:.6f}",
-            "remote_selection_ratio": f"{self.remote_selection_ratio:.6f}",
-            "bottleneck_rank": self.bottleneck_rank,
-            "norm_topk_prob": str(self.norm_topk_prob).lower(),
-        }
 
 
 def parse_distribution(distribution: str) -> DistributionSpec:
@@ -222,23 +193,6 @@ def sampled_power_law_logits(num_tokens: int, num_experts: int, topk: int, ep: i
     return F.softmax(expert_map.bfloat16(), dim=1)
 
 
-def _route_matrix(
-    topk_ids_by_rank: Sequence[torch.Tensor],
-    *,
-    routed_num_experts: int,
-    ep_size: int,
-) -> list[list[int]]:
-    experts_per_rank = routed_num_experts // ep_size
-    matrix = [[0 for _ in range(ep_size)] for _ in range(ep_size)]
-    for src_rank, topk_ids in enumerate(topk_ids_by_rank):
-        owner = torch.div(topk_ids.to(dtype=torch.int64), experts_per_rank, rounding_mode="floor")
-        if torch.any(owner < 0) or torch.any(owner >= ep_size):
-            raise ValueError("topk_ids contain expert ids outside routed expert range")
-        counts = torch.bincount(owner.reshape(-1), minlength=ep_size).tolist()
-        matrix[src_rank] = [int(value) for value in counts[:ep_size]]
-    return matrix
-
-
 def _validate_plan(
     *,
     topk_ids_by_rank: Sequence[torch.Tensor],
@@ -350,35 +304,12 @@ def build_routing_plan(
         expected_expert_counts=expected_expert_counts[:routed_num_experts],
     )
 
-    matrix = _route_matrix(topk_ids_by_rank, routed_num_experts=routed_num_experts, ep_size=ep_size)
-    experts_per_rank = routed_num_experts // ep_size
-    dst_rank_loads = tuple(
-        int(expected_expert_counts[dst * experts_per_rank : (dst + 1) * experts_per_rank].sum().item())
-        for dst in range(ep_size)
-    )
-    local_selections = sum(matrix[src][src] for src in range(ep_size))
-    total_selections = global_num_tokens * routed_topk
-    local_ratio = local_selections / total_selections if total_selections else 0.0
-
     return RoutingPlan(
         distribution=distribution,
         source_policy=source_policy,
         global_num_tokens=global_num_tokens,
-        tokens_per_rank=tokens_per_rank,
-        routed_num_experts=int(routed_num_experts),
-        routed_topk=int(routed_topk),
-        ep_size=int(ep_size),
-        rank=int(rank),
         local_topk_ids=topk_ids_by_rank[rank],
         local_topk_weights=topk_weights_by_rank[rank],
-        routed_expert_counts=tuple(int(value) for value in expected_expert_counts[:routed_num_experts].tolist()),
-        dst_rank_loads=dst_rank_loads,
-        src_dst_matrix=tuple(tuple(int(value) for value in row) for row in matrix),
-        local_selection_ratio=float(local_ratio),
-        remote_selection_ratio=float(1.0 - local_ratio),
-        bottleneck_rank=int(max(range(ep_size), key=lambda idx: dst_rank_loads[idx])),
-        routing_seed=int(routing_seed),
-        norm_topk_prob=bool(norm_topk_prob),
     )
 
 

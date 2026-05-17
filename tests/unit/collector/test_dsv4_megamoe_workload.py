@@ -62,15 +62,13 @@ def test_random_routing_plan_is_deterministic_and_preserves_counts():
     )
 
     assert plan.source_policy == "random"
+    assert plan.global_num_tokens == sum(tokens_per_rank)
     assert tuple(plan.local_topk_ids.shape) == (tokens_per_rank[0], routed_topk)
     assert tuple(plan.local_topk_weights.shape) == (tokens_per_rank[0], routed_topk)
     assert torch.equal(plan.local_topk_ids, plan_again.local_topk_ids)
     assert torch.equal(plan.local_topk_weights, plan_again.local_topk_weights)
-    assert sum(plan.routed_expert_counts) == sum(tokens_per_rank) * routed_topk
-    assert sum(plan.dst_rank_loads) == sum(tokens_per_rank) * routed_topk
-    for src_rank, row in enumerate(plan.src_dst_matrix):
-        assert sum(row) == tokens_per_rank[src_rank] * routed_topk
-    assert plan.local_selection_ratio + plan.remote_selection_ratio == pytest.approx(1.0)
+    assert torch.all(plan.local_topk_ids >= 0)
+    assert torch.all(plan.local_topk_ids < routed_num_experts)
 
 
 @pytest.mark.unit
@@ -101,10 +99,10 @@ def test_sampled_power_law_builds_valid_routing_plan():
     )
 
     assert plan.distribution == "power_law_sampled_1.9"
+    assert plan.global_num_tokens == 16 * 8
     assert tuple(plan.local_topk_ids.shape) == (16, 6)
-    assert sum(plan.routed_expert_counts) == 16 * 8 * 6
-    assert sum(plan.dst_rank_loads) == 16 * 8 * 6
-    assert max(plan.routed_expert_counts) <= 16 * 8
+    assert torch.all(plan.local_topk_ids >= 0)
+    assert torch.all(plan.local_topk_ids < 384)
 
 
 @pytest.mark.unit
