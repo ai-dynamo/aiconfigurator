@@ -659,6 +659,31 @@ def test_sm90_skips_sglang_mhc_module_for_0510():
     assert all("deepseek_ref" in item["reason"] for item in skipped)
 
 
+def test_sm90_skips_trtllm_attention_context_high_token_gqa_for_130rc10():
+    plan = build_collection_case_plan(
+        backend="trtllm",
+        model_path="deepseek-ai/DeepSeek-V3",
+        sm_version=90,
+    )
+    below_threshold_gqa = [64, 1024, 96, 8, 128, 0, False, False, True]
+    high_token_gqa_bf16 = [64, 1536, 96, 8, 128, 0, False, False, True]
+    high_token_gqa_fp8 = [64, 1536, 96, 8, 128, 0, True, False, True]
+    high_token_mha = [128, 1024, 96, 96, 128, 0, False, False, True]
+
+    filtered, skipped = filter_test_cases_with_report(
+        [below_threshold_gqa, high_token_gqa_bf16, high_token_gqa_fp8, high_token_mha],
+        plan=plan.op_cases["attention_context"],
+        full_module_name="trtllm.attention_context",
+        run_func_name="run_attention_torch",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert filtered == [below_threshold_gqa, high_token_mha]
+    assert len(skipped) == 2
+    assert {item["reason_type"] for item in skipped} == {"framework_version_unsupported"}
+    assert all("high-token GQA" in item["reason"] for item in skipped)
+
+
 def test_sm90_skips_trtllm_mla_generation_fp8_for_130rc10():
     plan = build_collection_case_plan(
         backend="trtllm",
