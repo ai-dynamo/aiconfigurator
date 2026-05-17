@@ -51,7 +51,11 @@ class CustomAllReduce(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query custom allreduce latency with power data."""
         if self._tp_size == 1:
-            return PerformanceResult(0.0, 0.0)
+            # No-op short-circuit: tp_size=1 has no allreduce. Tag as
+            # ``empirical`` rather than letting the constructor default to
+            # ``silicon`` so EMPIRICAL/SOL modes don't get a spurious
+            # silicon leakage in the breakdown report.
+            return PerformanceResult(0.0, 0.0, source="empirical")
         # count, not size in bytes
         size = kwargs.get("x") * self._h
 
@@ -82,7 +86,9 @@ class P2P(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query P2P latency with power data."""
         if self._pp_size == 1:
-            return PerformanceResult(0.0, 0.0)
+            # No-op short-circuit: pp_size=1 has no P2P transfer. See note on
+            # CustomAllReduce.query for source-tag rationale.
+            return PerformanceResult(0.0, 0.0, source="empirical")
 
         size = kwargs.get("x") * self._h
         p2p_bytes = size * 2
@@ -426,7 +432,19 @@ class TrtLLMWideEPMoEDispatch(Operation):
         )
         logger.debug(f"TrtLLMWideEPMoEDispatch: {phase} with {precision}")
 
-        comm_latency = 0.0
+        def _as_performance_result(result) -> PerformanceResult:
+            if isinstance(result, PerformanceResult):
+                return result
+
+            energy = getattr(result, "energy", 0.0)
+            if not isinstance(energy, int | float):
+                energy = 0.0
+
+            source = getattr(result, "source", "silicon")
+            if not isinstance(source, str):
+                source = "silicon"
+
+            return PerformanceResult(float(result), energy=energy, source=source)
 
         if self._pre_dispatch:
             prepare_result = database.query_trtllm_alltoall(
@@ -451,7 +469,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 moe_backend="wideep",
                 node_num=self._node_num,
             )
-            comm_latency = float(prepare_result) + float(dispatch_result)
+            comm_latency = _as_performance_result(prepare_result) + _as_performance_result(dispatch_result)
         else:
             combine_op = "alltoall_combine_low_precision" if self._use_low_precision_combine else "alltoall_combine"
             combine_result = database.query_trtllm_alltoall(
@@ -465,10 +483,14 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 moe_backend="wideep",
                 node_num=self._node_num,
             )
-            comm_latency = float(combine_result)
+            comm_latency = _as_performance_result(combine_result)
 
-        # MoEDispatch returns no energy (communication ops don't track energy)
-        return PerformanceResult(comm_latency * self._scale_factor, energy=0.0)
+        scaled = comm_latency * self._scale_factor
+        return PerformanceResult(
+            float(scaled),
+            energy=getattr(scaled, "energy", 0.0),
+            source=getattr(scaled, "source", "empirical"),
+        )
 
     def get_weights(self, **kwargs):
         """MoE dispatch has no weight memory."""
@@ -808,8 +830,12 @@ class MoEDispatch(Operation):
         else:  # other backends
             raise NotImplementedError(f"MoEDispatch: Not implemented for backend {database.backend}")
 
-        # MoEDispatch calculates latency rather than querying, so energy=0
-        return PerformanceResult(comm_latency * self._scale_factor, energy=0.0)
+        scaled = comm_latency * self._scale_factor
+        return PerformanceResult(
+            float(scaled),
+            energy=getattr(scaled, "energy", 0.0),
+            source=getattr(scaled, "source", "empirical"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -1348,6 +1374,7 @@ class Mamba2Kernel(Operation):
         return PerformanceResult(
             latency=float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
         )
 
     def get_weights(self, **kwargs):
@@ -1412,6 +1439,7 @@ class GDNKernel(Operation):
         return PerformanceResult(
             latency=float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
         )
 
     def get_weights(self, **kwargs):
@@ -1560,9 +1588,18 @@ class Mamba2(Operation):
         total_latency += float(out_proj_result)
         total_energy += out_proj_result.energy
 
+        # Merge sources from every sub-result so the composite reflects mixed
+        # silicon/empirical provenance instead of defaulting to silicon.
+        sub_sources = [
+            getattr(r, "source", "silicon")
+            for r in (in_proj_result, conv_result, ssm_result, norm_result, out_proj_result)
+        ]
+        merged_source = sub_sources[0] if all(s == sub_sources[0] for s in sub_sources) else "mixed"
+
         return PerformanceResult(
             latency=total_latency * self._scale_factor,
             energy=total_energy * self._scale_factor,
+            source=merged_source,
         )
 
     def get_weights(self, **kwargs):  # Mamba2 weights
@@ -1624,6 +1661,7 @@ class ContextDSAModule(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
         )
 
     def get_weights(self, **kwargs):
@@ -1675,6 +1713,7 @@ class GenerationDSAModule(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
         )
 
     def get_weights(self, **kwargs):
@@ -1716,7 +1755,11 @@ class DeepSeekV4MHCModule(Operation):
             op=self._op,
             quant_mode=self._quant_mode,
         )
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -1818,7 +1861,11 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             gemm_quant_mode=self._gemm_quant_mode,
             architecture=self._architecture,
         )
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
 
 class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
@@ -1848,7 +1895,11 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             gemm_quant_mode=self._gemm_quant_mode,
             architecture=self._architecture,
         )
-        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
 
 
 class MLAModule(Operation):
@@ -1910,6 +1961,7 @@ class MLAModule(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
         )
 
     def get_weights(self, **kwargs):
@@ -1925,9 +1977,10 @@ class FallbackOp(Operation):
     profiling data (single op) while others still have granular per-kernel data
     (multiple ops). The fallback is symmetric: either group can be primary.
 
-    The primary is always queried in SILICON mode so that HYBRID does not
-    silently swallow a miss with an empirical estimate — the fallback ops
-    (which have real data) should be preferred over an empirical guess.
+    In HYBRID mode, the primary is queried in SILICON mode so that HYBRID does
+    not silently swallow a miss with an empirical estimate — the fallback ops
+    (which have real data) should be preferred over an empirical guess. In
+    explicit EMPIRICAL/SOL modes, the primary respects the requested mode.
 
     Once the primary fails on the first call, it is skipped on all subsequent
     calls to avoid redundant work.
@@ -1955,10 +2008,12 @@ class FallbackOp(Operation):
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
         if not self._primary_unavailable:
-            # Force SILICON mode on the primary so that HYBRID doesn't silently
-            # return an empirical estimate when module data is missing.
             prev_mode = database._default_database_mode
-            database._default_database_mode = common.DatabaseMode.SILICON
+            force_primary_silicon = prev_mode == common.DatabaseMode.HYBRID
+            if force_primary_silicon:
+                # Force SILICON mode on the primary so HYBRID does not silently
+                # return an empirical estimate when module data is missing.
+                database._default_database_mode = common.DatabaseMode.SILICON
 
             # Suppress ERROR-level logs from perf_database during the primary
             # attempt, since a failure here is expected and handled by fallback.
@@ -1978,16 +2033,14 @@ class FallbackOp(Operation):
                     e,
                 )
             finally:
-                database._default_database_mode = prev_mode
+                if force_primary_silicon:
+                    database._default_database_mode = prev_mode
                 perf_db_logger.setLevel(prev_log_level)
 
-        total_latency = 0.0
-        total_energy = 0.0
+        total = PerformanceResult(0.0, energy=0.0, source="empirical")
         for op in self._fallback:
-            result = op.query(database, **kwargs)
-            total_latency += float(result)
-            total_energy += getattr(result, "energy", 0.0)
-        return PerformanceResult(total_latency, energy=total_energy)
+            total += op.query(database, **kwargs)
+        return total
 
     def get_weights(self, **kwargs):
         # Use primary weights if available, otherwise sum fallback weights.
@@ -2033,23 +2086,19 @@ class OverlapOp(Operation):
             PerformanceResult with latency = max(group_a, group_b)
             and energy = sum of all ops.
         """
-        latency_a = 0.0
-        energy_a = 0.0
+        total_a = PerformanceResult(0.0, energy=0.0, source="empirical")
         for op in self._group_a:
-            result = op.query(database, **kwargs)
-            latency_a += float(result)
-            energy_a += getattr(result, "energy", 0.0)
+            total_a += op.query(database, **kwargs)
 
-        latency_b = 0.0
-        energy_b = 0.0
+        total_b = PerformanceResult(0.0, energy=0.0, source="empirical")
         for op in self._group_b:
-            result = op.query(database, **kwargs)
-            latency_b += float(result)
-            energy_b += getattr(result, "energy", 0.0)
+            total_b += op.query(database, **kwargs)
 
+        merged = total_a + total_b
         return PerformanceResult(
-            latency=max(latency_a, latency_b),
-            energy=energy_a + energy_b,
+            latency=max(float(total_a), float(total_b)),
+            energy=total_a.energy + total_b.energy,
+            source=merged.source,
         )
 
     def get_weights(self, **kwargs):

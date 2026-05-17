@@ -42,7 +42,10 @@ class InferenceSummary:
         set_generation_energy_wms_dict: set generation energy dict
         get_context_energy_wms_dict: get context energy dict
         get_generation_energy_wms_dict: get generation energy dict
-        get_static_info: get static info for static mode print
+        set_kv_per_seq: stash per-sequence KV cache footprint context (for capacity probing)
+        get_kv_per_seq: get per-sequence KV cache footprint context
+        get_mem_capacity_bytes: get the GPU memory capacity captured by set_memory_and_check_oom
+        get_static_info: legacy 4-tuple breakdown text used by webapp Static Tab
         set_summary_df: set summary dataframe
         get_summary_df: get summary dataframe
     """
@@ -59,7 +62,7 @@ class InferenceSummary:
         self._generation_latency_dict = {}  # ms
         self._context_energy_wms_dict = {}  # RENAMED from _context_power_dict, W·ms
         self._generation_energy_wms_dict = {}  # RENAMED from _generation_power_dict, W·ms
-        # Per-op data source ("silicon", "empirical", or "mixed") populated by
+        # Per-op data source ("silicon", "empirical", "sol", or "mixed") populated by
         # base_backend phase helpers from PerformanceResult.source.
         self._context_source_dict: dict[str, str] = {}
         self._generation_source_dict: dict[str, str] = {}
@@ -80,8 +83,19 @@ class InferenceSummary:
         # per-ops latency breakdown (populated by run_agg or run_disagg)
         self._per_ops_data: dict | None = None
         # per-ops data source breakdown, parallel to _per_ops_data: same key
-        # structure but values are "silicon" / "empirical" / "mixed" strings.
+        # structure but values are "silicon" / "empirical" / "sol" / "mixed" strings.
         self._per_ops_source: dict | None = None
+
+        # Capacity probing context. Populated by set_memory_and_check_oom
+        # (capacity) and by backends running static-mode estimation (kv per seq).
+        # Used by CLI detail reports to compute capacity-% / headroom /
+        # max-batch-size estimates.
+        self._mem_capacity_bytes: int | None = None
+        self._free_gpu_memory_fraction: float | None = None
+        self._kv_cache_reserved_fraction: float = 0.0
+        self._kv_cache_tolerance: float = 0.0
+        self._kv_bytes_per_seq: float | None = None
+        self._kv_seq_len_used: int | None = None
 
     def set_memory_and_check_oom(
         self,
@@ -104,6 +118,10 @@ class InferenceSummary:
         self._memory = memory_dict
         self._is_oom = self._memory["total"] >= (mem_capacity / (1 << 30))
         self._is_kv_cache_oom = False
+        self._mem_capacity_bytes = mem_capacity
+        self._free_gpu_memory_fraction = free_gpu_memory_fraction
+        self._kv_cache_reserved_fraction = kv_cache_reserved_fraction
+        self._kv_cache_tolerance = kv_cache_tolerance
         if free_gpu_memory_fraction is not None:
             self._check_and_set_kv_cache_oom(
                 mem_capacity,
@@ -370,7 +388,7 @@ class InferenceSummary:
         return self._per_ops_data
 
     def set_per_ops_source(self, per_ops_source: dict) -> None:
-        """Set per-operation data-source breakdown ("silicon"/"empirical"/"mixed")."""
+        """Set per-operation data-source breakdown ("silicon"/"empirical"/"sol"/"mixed")."""
         self._per_ops_source = per_ops_source
 
     def get_per_ops_source(self) -> dict | None:
@@ -392,6 +410,28 @@ class InferenceSummary:
     def get_generation_source_dict(self) -> dict:
         """Get the per-op data source dict for the generation (decode) phase."""
         return self._generation_source_dict
+
+    # --- Capacity / KV-per-seq probing context (used by CLI detail reports) ---
+
+    def set_kv_per_seq(self, kv_bytes_per_seq: float, seq_len_used: int) -> None:
+        """Stash per-sequence KV cache footprint context for capacity probing.
+
+        Args:
+            kv_bytes_per_seq: KV cache bytes consumed by a single sequence on
+                one GPU at the seq length actually used for memory estimation.
+            seq_len_used: The seq length used (typically ``isl + beam_width * osl``,
+                or ``max_seq_len`` when provided by the backend).
+        """
+        self._kv_bytes_per_seq = float(kv_bytes_per_seq)
+        self._kv_seq_len_used = int(seq_len_used)
+
+    def get_kv_per_seq(self) -> tuple[float | None, int | None]:
+        """Return the (kv_bytes_per_seq, seq_len_used) pair, or (None, None) if unset."""
+        return self._kv_bytes_per_seq, self._kv_seq_len_used
+
+    def get_mem_capacity_bytes(self) -> int | None:
+        """Return the GPU memory capacity (bytes) captured by set_memory_and_check_oom, or None."""
+        return self._mem_capacity_bytes
 
     def set_result_dict(self, result_dict: dict) -> None:
         """
