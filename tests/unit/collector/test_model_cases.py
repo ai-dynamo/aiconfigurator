@@ -659,6 +659,29 @@ def test_sm90_skips_sglang_mhc_module_for_0510():
     assert all("deepseek_ref" in item["reason"] for item in skipped)
 
 
+def test_sm90_skips_trtllm_mla_generation_fp8_for_130rc10():
+    plan = build_collection_case_plan(
+        backend="trtllm",
+        model_path="deepseek-ai/DeepSeek-V3",
+        sm_version=90,
+    )
+    bf16_case = [1, 1, 1, "DataType.BF16", 128, 1, 1, 32, 10, 6, False]
+    fp8_case = [1, 1, 1, "DataType.FP8", 128, 1, 1, 32, 10, 6, False]
+
+    filtered, skipped = filter_test_cases_with_report(
+        [bf16_case, fp8_case],
+        plan=plan.op_cases["mla_generation"],
+        full_module_name="trtllm.mla_generation",
+        run_func_name="run_mla",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert filtered == [bf16_case]
+    assert len(skipped) == 1
+    assert skipped[0]["reason_type"] == "framework_version_unsupported"
+    assert "FP8 KV-cache" in skipped[0]["reason"]
+
+
 def test_filter_test_cases_supports_computed_rule_conditions():
     cases = [
         [1, 4096, 64, 4, 128, False, False, False],
