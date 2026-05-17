@@ -759,6 +759,30 @@ def test_sm90_skips_trtllm_attention_context_qkv256_48_head_gqa_for_130rc10():
     assert all("qkv_256 high-token GQA" in item["reason"] for item in skipped)
 
 
+def test_sm90_skips_trtllm_attention_generation_fp8_kv_for_130rc10():
+    plan = build_collection_case_plan(
+        backend="trtllm",
+        model_path="deepseek-ai/DeepSeek-V3",
+        sm_version=90,
+    )
+    bf16_generation = [1, 1023, 48, 48, 128, 0, False, False, False]
+    fp8_generation = [1, 1023, 48, 48, 128, 0, True, False, False]
+    fp8_context = [1, 1024, 48, 48, 128, 0, True, False, True]
+
+    filtered, skipped = filter_test_cases_with_report(
+        [bf16_generation, fp8_generation, fp8_context],
+        plan=plan.op_cases["attention_generation"],
+        full_module_name="trtllm.attention_generation",
+        run_func_name="run_attention_torch",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert filtered == [bf16_generation, fp8_context]
+    assert len(skipped) == 1
+    assert skipped[0]["reason_type"] == "framework_version_unsupported"
+    assert "generation attention FP8 KV-cache" in skipped[0]["reason"]
+
+
 def test_sm90_skips_trtllm_mla_generation_fp8_for_130rc10():
     plan = build_collection_case_plan(
         backend="trtllm",
