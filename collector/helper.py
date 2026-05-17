@@ -1479,37 +1479,82 @@ _AIC_MODEL_CONFIG_DIR = os.path.join(
 )
 
 
+def _materialize_aic_cached_config(model_id: str, slug: str, cached_config: str) -> str:
+    """Copy a bundled AIC config into a deterministic per-model tempdir.
+
+    ``auto_map`` is stripped so that ``trust_remote_code=True`` consumers
+    (e.g. SGLang's ServerArgs) do not try to import ``configuration_*.py``
+    files that AIC does not ship. A deterministic path (no random suffix,
+    no pid) lets parallel subprocesses / pytest-xdist workers converge on
+    the same directory; the JSON write is atomic via ``os.replace``.
+    """
+    tmp_dir = os.path.join(tempfile.gettempdir(), f"aic_model_config_{slug}")
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    target = os.path.join(tmp_dir, "config.json")
+    if not os.path.exists(target):
+        with open(cached_config) as f:
+            config = json.load(f)
+        config.pop("auto_map", None)
+        tmp_target = f"{target}.{os.getpid()}.tmp"
+        with open(tmp_target, "w") as f:
+            json.dump(config, f)
+        os.replace(tmp_target, target)
+
+    quant_side_car = os.path.join(_AIC_MODEL_CONFIG_DIR, f"{slug}_hf_quant_config.json")
+    quant_target = os.path.join(tmp_dir, "hf_quant_config.json")
+    if os.path.exists(quant_side_car) and not os.path.exists(quant_target):
+        tmp_quant = f"{quant_target}.{os.getpid()}.tmp"
+        shutil.copy(quant_side_car, tmp_quant)
+        os.replace(tmp_quant, quant_target)
+
+    print(f"Resolved {model_id} from AIC model_configs cache: {tmp_dir}")
+    return tmp_dir
+
+
 def _resolve_local_model_path(model_id: str) -> str:
-    """Resolve a model identifier to a local directory containing config files.
+    """Resolve a model identifier to a local directory containing ``config.json``.
 
     Resolution order:
-        1. Existing local path (absolute or relative directory) — returned as-is.
+        1. Existing filesystem path. Must be a directory containing
+           ``config.json`` — a file path or a directory without ``config.json``
+           raises rather than silently falling through to HF download.
         2. AIC's bundled configs in ``src/aiconfigurator/model_configs/``
-           (``<owner>--<name>_config.json``, with an optional ``..._hf_quant_config.json``
-           side-car). The config is copied to a fresh tempdir as ``config.json``.
-        3. HuggingFace ``hf_hub_download`` for ``config.json`` and tokenizer files.
+           (``<owner>--<name>_config.json``, with an optional
+           ``..._hf_quant_config.json`` side-car).
+        3. HuggingFace ``hf_hub_download``: ``config.json`` is required
+           and downloaded first; tokenizer files are best-effort.
 
-    Raises ``FileNotFoundError`` if none of the above resolves. There is no
-    hardcoded ``/deepseek-v3`` (or any other model-specific) fallback — callers
-    must supply a real ``model_id``.
+    Raises ``FileNotFoundError`` if none of the above resolves. There is
+    no hardcoded ``/deepseek-v3`` (or any other model-specific) fallback —
+    callers must supply a real ``model_id``.
     """
     if not model_id:
         raise ValueError("_resolve_local_model_path requires a non-empty model_id")
 
-    if os.path.isdir(model_id):
+    # Step 1: existing filesystem path. Be strict about shape so a bogus
+    # MOE_MODEL_PATH (e.g. pointing at a single file) fails loudly here
+    # instead of silently triggering an HF download.
+    if os.path.exists(model_id):
+        if not os.path.isdir(model_id):
+            raise NotADirectoryError(
+                f"model_id '{model_id}' is an existing path but not a directory; "
+                "expected a directory containing config.json"
+            )
+        if not os.path.exists(os.path.join(model_id, "config.json")):
+            raise FileNotFoundError(
+                f"model_id '{model_id}' is a directory but does not contain config.json"
+            )
         return model_id
 
+    # Step 2: AIC bundled cache.
     slug = model_id.replace("/", "--")
     cached_config = os.path.join(_AIC_MODEL_CONFIG_DIR, f"{slug}_config.json")
     if os.path.exists(cached_config):
-        tmp_dir = tempfile.mkdtemp(prefix=f"aic_model_config_{slug}_")
-        shutil.copy(cached_config, os.path.join(tmp_dir, "config.json"))
-        quant_side_car = os.path.join(_AIC_MODEL_CONFIG_DIR, f"{slug}_hf_quant_config.json")
-        if os.path.exists(quant_side_car):
-            shutil.copy(quant_side_car, os.path.join(tmp_dir, "hf_quant_config.json"))
-        print(f"Resolved {model_id} from AIC model_configs cache: {tmp_dir}")
-        return tmp_dir
+        return _materialize_aic_cached_config(model_id, slug, cached_config)
 
+    # Step 3: HuggingFace download. config.json is mandatory and must
+    # succeed before we accept the resulting snapshot directory.
     try:
         from huggingface_hub import hf_hub_download
     except ImportError as e:
@@ -1518,22 +1563,21 @@ def _resolve_local_model_path(model_id: str) -> str:
             "huggingface_hub is not installed — cannot download config."
         ) from e
 
-    config_files = ["config.json", "tokenizer_config.json", "tokenizer.json"]
-    snapshot_dir = None
-    for filename in config_files:
-        try:
-            path = hf_hub_download(repo_id=model_id, filename=filename)
-            if snapshot_dir is None:
-                snapshot_dir = os.path.dirname(path)
-        except Exception as e:
-            # tokenizer files may be optional; only config.json failure is fatal.
-            print(f"Warning: failed to download {filename} for {model_id}: {e}")
-
-    if snapshot_dir is None:
+    try:
+        config_path = hf_hub_download(repo_id=model_id, filename="config.json")
+    except Exception as e:
         raise FileNotFoundError(
             f"Model '{model_id}' not found under {_AIC_MODEL_CONFIG_DIR} and "
-            "HuggingFace download failed for all required config files."
-        )
+            f"HuggingFace download of config.json failed: {e}"
+        ) from e
+    snapshot_dir = os.path.dirname(config_path)
+
+    for filename in ("tokenizer_config.json", "tokenizer.json"):
+        try:
+            hf_hub_download(repo_id=model_id, filename=filename)
+        except Exception as e:
+            # Tokenizer files are best-effort — many MoE configs ship without them.
+            print(f"Warning: failed to download {filename} for {model_id}: {e}")
 
     print(f"Resolved {model_id} from HuggingFace cache: {snapshot_dir}")
     return snapshot_dir
