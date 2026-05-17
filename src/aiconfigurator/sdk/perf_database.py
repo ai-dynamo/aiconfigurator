@@ -2106,24 +2106,14 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
         return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
     row_bool_invariants = [
-        (
-            "used_cuda_graph",
-            True,
-            None,
-            "DSv4 MegaMoE perf row was not collected with CUDA Graph",
-        ),
+        ("used_cuda_graph", True, None, "DSv4 MegaMoE perf row was not collected with CUDA Graph"),
         (
             "includes_gate_topk",
             False,
             "true",
             "DSv4 MegaMoE perf row includes gate/top-k outside the supported boundary",
         ),
-        (
-            "includes_routed_scale",
-            True,
-            None,
-            "DSv4 MegaMoE perf row does not include SGLang routed output scaling",
-        ),
+        ("includes_routed_scale", True, None, "DSv4 MegaMoE perf row does not include SGLang routed output scaling"),
     ]
 
     def _row_phase(row: dict[str, str]) -> str:
@@ -5496,9 +5486,6 @@ class PerfDatabase:
         num_fused_shared_experts: int = 0,
         kernel_source: str = "deepgemm_megamoe",
         kernel_dtype: str = "fp8_fp4",
-        system_name: str | None = None,
-        gpus_per_node: int | None = None,
-        num_nodes: int | None = None,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult:
         """
@@ -5540,8 +5527,7 @@ class PerfDatabase:
         result = self._interp_1d([num_left, num_right], [token_dict[num_left], token_dict[num_right]], num_tokens)
         if isinstance(result, dict):
             latency = float(result["latency"])
-            power = float(result.get("power", 0.0))
-            energy = float(result.get("energy", power * latency))
+            energy = float(result["energy"])
         else:
             latency = float(result)
             energy = 0.0

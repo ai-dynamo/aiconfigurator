@@ -2075,10 +2075,10 @@ class DeepSeekV4Model(BaseModel):
         attention_dp_size = self.config.attention_dp_size
         pp_size = self.config.pp_size
         moe_backend = self.config.moe_backend
-        use_megamoe = backend_name == common.BackendName.sglang.value and moe_backend == "megamoe"
-        if moe_backend == "megamoe" and backend_name != common.BackendName.sglang.value:
-            raise ValueError("DeepSeek-V4 MegaMoE modeling is only supported with the SGLang backend.")
+        use_megamoe = moe_backend == "megamoe"
         if use_megamoe:
+            if backend_name != common.BackendName.sglang.value:
+                raise ValueError("DeepSeek-V4 MegaMoE modeling is only supported with the SGLang backend.")
             if moe_tp_size != 1:
                 raise ValueError(f"DeepSeek-V4 MegaMoE requires moe_tp_size=1, got {moe_tp_size}.")
             if moe_ep_size <= 1:

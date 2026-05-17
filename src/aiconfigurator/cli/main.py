@@ -909,13 +909,9 @@ def build_default_task_configs(
     def _sglang_moe_backend_override(backend_name: str) -> str | None:
         if backend_name != common.BackendName.sglang.value:
             return None
-        if moe_backend is not None:
-            return moe_backend
         # Auto-set moe_backend for SGLang wideep, matching webapp behavior
         # (webapp/events/event_fn.py sets moe_backend="deepep_moe" when enable_wideep + sglang)
-        if enable_wideep:
-            return "deepep_moe"
-        return None
+        return moe_backend or ("deepep_moe" if enable_wideep else None)
 
     # Create yaml_config to pass nextn and nextn_accept_rates if specified
     yaml_config = None
