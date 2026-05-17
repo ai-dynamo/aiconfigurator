@@ -8,18 +8,12 @@ against the legacy CLI; these tests focus on construction, defaulting,
 prefix discipline, and the build_* helpers.
 """
 
-from pathlib import Path
-
 import pytest
-import yaml
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.task_config import TaskConfig
 
 pytestmark = pytest.mark.unit
-
-
-EXAMPLE_YAML = Path(__file__).parents[4] / "src" / "aiconfigurator" / "cli" / "example.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -147,77 +141,138 @@ def test_disagg_rejects_top_level_worker_field_leakage(field, value):
 
 
 # ---------------------------------------------------------------------------
-# from_yaml: legacy format compatibility
+# from_yaml: flat format (the new canonical YAML)
 # ---------------------------------------------------------------------------
 
 
-def _load_example(name: str) -> dict:
-    with EXAMPLE_YAML.open() as f:
-        return yaml.safe_load(f)[name]
-
-
-def test_from_yaml_legacy_agg_full():
-    t = TaskConfig.from_yaml(_load_example("exp_agg_full"))
+def test_from_yaml_flat_agg():
+    yaml_data = {
+        "serving_mode": "agg",
+        "model_path": "deepseek-ai/DeepSeek-V3",
+        "system_name": "h200_sxm",
+        "backend_name": "trtllm",
+        "backend_version": "1.2.0rc5",
+        "total_gpus": 8,
+        "isl": 4000,
+        "osl": 1000,
+        "ttft": 1000.0,
+        "tpot": 40.0,
+        "nextn": 1,
+        "gemm_quant_mode": "fp8_block",
+        "kvcache_quant_mode": "bfloat16",
+        "agg_num_gpu_candidates": [4, 8],
+        "agg_tp_candidates": [1, 2, 4, 8],
+        "agg_pp_candidates": [1],
+    }
+    t = TaskConfig.from_yaml(yaml_data)
     assert t.serving_mode == "agg"
     assert t.model_path == "deepseek-ai/DeepSeek-V3"
-    assert t.system_name == "h200_sxm"
-    assert t.backend_version == "1.2.0rc5"  # explicit in YAML
-    # quant from nested worker_config
+    assert t.backend_version == "1.2.0rc5"
     assert t.gemm_quant_mode == common.GEMMQuantMode.fp8_block
     assert t.kvcache_quant_mode == common.KVCacheQuantMode.bfloat16
-    # search candidates from nested worker_config
     assert t.agg_num_gpu_candidates == [4, 8]
     assert t.agg_tp_candidates == [1, 2, 4, 8]
-    # nextn from config block
     assert t.nextn == 1
 
 
-def test_from_yaml_legacy_agg_simplified():
-    t = TaskConfig.from_yaml(_load_example("exp_agg_simplified"))
+def test_from_yaml_flat_agg_minimal():
+    """Just model_path + system_name; everything else defaults."""
+    t = TaskConfig.from_yaml(
+        {
+            "serving_mode": "agg",
+            "model_path": "deepseek-ai/DeepSeek-V3",
+            "system_name": "h200_sxm",
+        }
+    )
     assert t.serving_mode == "agg"
-    assert t.model_path == "deepseek-ai/DeepSeek-V3"
-    assert t.system_name == "h200_sxm"
-    # No explicit backend_version; should resolve to latest
+    # Latest backend_version auto-resolved
     assert t.backend_version is not None
+    # Quant inferred from HF config
+    assert t.gemm_quant_mode == common.GEMMQuantMode.fp8_block
 
 
-def test_from_yaml_legacy_disagg_full_mirrors_shared_fields_to_roles():
-    t = TaskConfig.from_yaml(_load_example("exp_disagg_full"))
+def test_from_yaml_flat_disagg():
+    yaml_data = {
+        "serving_mode": "disagg",
+        "isl": 4000,
+        "osl": 1000,
+        "ttft": 1000.0,
+        "tpot": 40.0,
+        "total_gpus": 32,
+        "prefill_model_path": "deepseek-ai/DeepSeek-V3",
+        "prefill_system_name": "h200_sxm",
+        "prefill_backend_name": "trtllm",
+        "prefill_gemm_quant_mode": "fp8_block",
+        "prefill_kvcache_quant_mode": "bfloat16",
+        "decode_model_path": "deepseek-ai/DeepSeek-V3",
+        "decode_system_name": "h200_sxm",
+        "decode_backend_name": "trtllm",
+        "decode_gemm_quant_mode": "fp8_block",
+        "decode_kvcache_quant_mode": "bfloat16",
+        "num_gpu_per_replica": [8, 16, 32, 64, 128],
+        "max_gpu_per_replica": 128,
+        "max_prefill_workers": 32,
+        "max_decode_workers": 32,
+        "prefill_latency_correction": 1.1,
+        "decode_latency_correction": 1.08,
+        "prefill_max_batch_size": 1,
+        "decode_max_batch_size": 512,
+    }
+    t = TaskConfig.from_yaml(yaml_data)
     assert t.serving_mode == "disagg"
-    # Top-level model_path replicated to both roles
     assert t.prefill_model_path == "deepseek-ai/DeepSeek-V3"
     assert t.decode_model_path == "deepseek-ai/DeepSeek-V3"
-    # Top-level system_name replicated; decode_system_name preserved
-    assert t.prefill_system_name == "h200_sxm"
-    assert t.decode_system_name == "h200_sxm"
-    # Nested replica_config keys mapped
-    assert t.max_gpu_per_replica == 128
-    assert t.max_prefill_workers == 32
-    assert t.max_decode_workers == 32
-    # advanced_tuning_config
-    assert t.prefill_latency_correction == 1.1
-    assert t.decode_latency_correction == 1.08
-    assert t.decode_max_batch_size == 512
-    # Per-role quant from nested *_worker_config
     assert t.prefill_gemm_quant_mode == common.GEMMQuantMode.fp8_block
     assert t.decode_gemm_quant_mode == common.GEMMQuantMode.fp8_block
-
-
-def test_from_yaml_legacy_disagg_simplified_quant_from_hf():
-    t = TaskConfig.from_yaml(_load_example("exp_disagg_simplified"))
-    assert t.serving_mode == "disagg"
-    assert t.prefill_model_path == "nvidia/DeepSeek-V3.1-NVFP4"
-    # nvidia/DeepSeek-V3.1-NVFP4 should resolve to nvfp4 quant
-    assert t.prefill_gemm_quant_mode == common.GEMMQuantMode.nvfp4
-    assert t.decode_gemm_quant_mode == common.GEMMQuantMode.nvfp4
-    # nextn from config
-    assert t.nextn == 2
+    assert t.max_gpu_per_replica == 128
+    assert t.prefill_latency_correction == 1.1
 
 
 def test_from_yaml_with_cli_overrides():
-    t = TaskConfig.from_yaml(_load_example("exp_agg_simplified"), isl=8000, ttft=500.0)
+    t = TaskConfig.from_yaml(
+        {
+            "serving_mode": "agg",
+            "model_path": "deepseek-ai/DeepSeek-V3",
+            "system_name": "h200_sxm",
+            "isl": 4000,
+            "ttft": 1000.0,
+        },
+        isl=8000,
+        ttft=500.0,
+    )
     assert t.isl == 8000
     assert t.ttft == 500.0
+
+
+def test_from_yaml_warns_on_unknown_keys(caplog):
+    """Unknown keys are warned about but not silently swallowed."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        TaskConfig.from_yaml(
+            {
+                "serving_mode": "agg",
+                "model_path": "deepseek-ai/DeepSeek-V3",
+                "system_name": "h200_sxm",
+                "totally_made_up_field": 42,
+                "another_typo": "value",
+            }
+        )
+    assert "totally_made_up_field" in caplog.text
+    assert "another_typo" in caplog.text
+
+
+def test_from_yaml_disagg_rejects_legacy_shared_model_path():
+    """Legacy YAML shape with top-level model_path is not silently mirrored to roles."""
+    with pytest.raises(ValueError, match="top-level worker fields"):
+        TaskConfig.from_yaml(
+            {
+                "serving_mode": "disagg",
+                "model_path": "deepseek-ai/DeepSeek-V3",  # legacy shared form
+                "system_name": "h200_sxm",
+                "total_gpus": 32,
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
