@@ -74,7 +74,9 @@ Each row records both `num_max_tokens_per_rank` and
 `effective_num_max_tokens_per_rank`.  The effective value is read from the
 DeepGEMM symmetric buffer after DeepGEMM applies its internal token alignment.
 The launch runners/renderers set `NUM_MAX_TOKENS_PER_RANK`; `run_torchrun.sh`
-requires it to be a positive integer.
+requires it to be a positive integer.  The default cap policy is `case_tokens`,
+matching legacy baselines; set `CAP_POLICY=fixed` when you want one fixed buffer
+cap across the sweep.
 
 The committed perf schema follows the existing SGLang WideEP MoE tables and
 keeps only query keys plus required boundary/topology fields:
@@ -205,6 +207,7 @@ python3 collector/sglang/dsv4_megamoe/render_k8s_indexed_job.py \
   --toleration-key nvidia.com/gpu \
   --working-dir /mnt/shared/aiconfigurator \
   --output-path /mnt/shared/aiconfigurator/collector/sglang/dsv4_megamoe/results \
+  --num-max-tokens-per-rank 32768 \
   > /tmp/aic-dsv4-megamoe-gb200-ep16.yaml
 
 kubectl apply -f /tmp/aic-dsv4-megamoe-gb200-ep16.yaml
