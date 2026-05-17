@@ -60,10 +60,43 @@ def test_default_agg_batch_schedule_is_monotonic_and_capped():
 
 
 # ---------------------------------------------------------------------------
-# sweep_disagg placeholder
+# sweep_disagg validation
 # ---------------------------------------------------------------------------
 
 
-def test_sweep_disagg_is_not_implemented_yet():
-    with pytest.raises(NotImplementedError, match="Pass 2"):
-        sweep_disagg()
+def test_sweep_disagg_rejects_invalid_max_prefill_gpus():
+    with pytest.raises(ValueError, match="max_prefill_gpus must be > 0"):
+        sweep_disagg(
+            model_path="x",
+            runtime_config=None,
+            prefill_database=None,
+            prefill_backend_name="trtllm",
+            prefill_model_config=None,
+            prefill_parallel_config_list=[],
+            prefill_latency_correction=1.0,
+            decode_database=None,
+            decode_backend_name="trtllm",
+            decode_model_config=None,
+            decode_parallel_config_list=[],
+            decode_latency_correction=1.0,
+            max_prefill_gpus=0,
+        )
+
+
+def test_sweep_disagg_rejects_invalid_max_decode_gpus():
+    with pytest.raises(ValueError, match="max_decode_gpus must be > 0"):
+        sweep_disagg(
+            model_path="x",
+            runtime_config=None,
+            prefill_database=None,
+            prefill_backend_name="trtllm",
+            prefill_model_config=None,
+            prefill_parallel_config_list=[],
+            prefill_latency_correction=1.0,
+            decode_database=None,
+            decode_backend_name="trtllm",
+            decode_model_config=None,
+            decode_parallel_config_list=[],
+            decode_latency_correction=1.0,
+            max_decode_gpus=-5,
+        )
