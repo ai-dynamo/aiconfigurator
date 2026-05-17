@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import get_model
@@ -231,10 +232,9 @@ def _agg_ctx_tokens_list(isl: int, ctx_stride: int, enable_chunked_prefill: bool
 
 def _sweep_one_parallel_agg(
     *,
-    model_path: str,
-    backend_name: str,
+    model: Any,
+    backend: BaseBackend,
     database: PerfDatabase,
-    model_config: config.ModelConfig,
     runtime_config: config.RuntimeConfig,
     top_k: int,
     max_batch_size: int,
@@ -245,13 +245,16 @@ def _sweep_one_parallel_agg(
 ) -> tuple[pd.DataFrame, bool]:
     """Sweep batch_size x ctx_tokens for one fixed parallel choice.
 
+    Caller is responsible for constructing ``model`` and ``backend`` and
+    reusing them across multiple tpot iterations so the backend's internal
+    ``_agg_cache`` survives — recreating the backend per tpot would force
+    a full recomputation per tpot, ~80x slowdown for an 80-element tpot
+    sweep.
+
     Returns ``(rows_df, all_oom)``.  Logic faithfully reproduces the
     body of the legacy ``backend.find_best_agg_result_under_constraints``;
     parity is enforced by the integration test.
     """
-    backend = get_backend(backend_name)
-    model = get_model(model_path=model_path, model_config=model_config, backend_name=backend_name)
-
     isl = runtime_config.isl
     osl = runtime_config.osl
     ttft_target = runtime_config.ttft
@@ -398,6 +401,17 @@ def sweep_agg(
             point_model_config.moe_ep_size = moe_ep_size
             point_model_config.attention_dp_size = dp_size
 
+            # Build backend + model ONCE per parallel choice so the backend's
+            # internal _agg_cache survives across the tpot sweep below.
+            # Recreating per (parallel, tpot) destroys the cache and causes
+            # an ~80x slowdown for a wide tpot list.
+            backend = get_backend(backend_name)
+            model = get_model(
+                model_path=model_path,
+                model_config=point_model_config,
+                backend_name=backend_name,
+            )
+
             runtime_configs_to_evaluate: list[config.RuntimeConfig] = []
             if runtime_config.request_latency is not None and runtime_config.request_latency > 0:
                 pairs = enumerate_ttft_tpot_constraints(
@@ -426,10 +440,9 @@ def sweep_agg(
 
             for point_rt in runtime_configs_to_evaluate:
                 point_df, all_oom = _sweep_one_parallel_agg(
-                    model_path=model_path,
-                    backend_name=backend_name,
+                    model=model,
+                    backend=backend,
                     database=database,
-                    model_config=point_model_config,
                     runtime_config=point_rt,
                     top_k=top_k,
                     max_batch_size=max_batch_size,
