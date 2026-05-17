@@ -60,7 +60,7 @@ const SYSTEM_ORDER = ['b200', 'gb200', 'gb300', 'h100', 'h200', '__other__', 'a1
 
 function isFrameworkUnsupported(error) {
   if (!error) return false;
-  return /Unsupported [A-Za-z0-9_ -]*quant mode/.test(String(error));
+  return /\bUnsupported\s+[A-Za-z0-9_ -]*quant mode\b/i.test(String(error));
 }
 
 function isHardwareUnsupported(error) {
@@ -271,7 +271,9 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
 
   const statusFromResult = (result) => {
     if (result.version === null) return 'missing';
-    if (result.version === 'FAIL') return 'fail';
+    if (result.version === 'FAIL') {
+      return isFrameworkUnsupported(result.error) ? 'framework_unsupported' : 'fail';
+    }
     if (result.version === STATUS_HW_INCOMPATIBLE) return unsupportedStatusFromError(result.error);
     return 'pass';
   };
@@ -857,7 +859,7 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
     const gap = 8;
     const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
     const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-    const width = Math.min(520, Math.max(240, viewportWidth - margin * 2));
+    const width = Math.min(520, Math.max(0, viewportWidth - margin * 2));
     const maxLeft = Math.max(margin, viewportWidth - width - margin);
     const left = Math.min(
       Math.max(rect.left + rect.width / 2 - width / 2, margin),
