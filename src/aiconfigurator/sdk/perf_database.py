@@ -2105,6 +2105,27 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
     def _to_bool(value: object) -> bool:
         return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
+    row_bool_invariants = [
+        (
+            "used_cuda_graph",
+            True,
+            None,
+            "DSv4 MegaMoE perf row was not collected with CUDA Graph",
+        ),
+        (
+            "includes_gate_topk",
+            False,
+            "true",
+            "DSv4 MegaMoE perf row includes gate/top-k outside the supported boundary",
+        ),
+        (
+            "includes_routed_scale",
+            True,
+            None,
+            "DSv4 MegaMoE perf row does not include SGLang routed output scaling",
+        ),
+    ]
+
     def _row_phase(row: dict[str, str]) -> str:
         phase = row.get("phase", "").strip()
         if not phase:
@@ -2125,16 +2146,9 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
     dsv4_megamoe_data: dict = {}
     logger.debug(f"Loading DeepSeek-V4 MegaMoE module data from: {source_label}")
     for row in rows:
-        if not _to_bool(row.get("used_cuda_graph")):
-            raise ValueError(f"DSv4 MegaMoE perf row was not collected with CUDA Graph: {source_label} {row}")
-        if _to_bool(row.get("includes_gate_topk", "true")):
-            raise ValueError(
-                f"DSv4 MegaMoE perf row includes gate/top-k outside the supported boundary: {source_label} {row}"
-            )
-        if not _to_bool(row.get("includes_routed_scale")):
-            raise ValueError(
-                f"DSv4 MegaMoE perf row does not include SGLang routed output scaling: {source_label} {row}"
-            )
+        for field, expected_value, default, error in row_bool_invariants:
+            if _to_bool(row.get(field, default)) != expected_value:
+                raise ValueError(f"{error}: {source_label} {row}")
 
         kernel_source = row.get("kernel_source", "deepgemm_megamoe")
         kernel_dtype = row["kernel_dtype"]

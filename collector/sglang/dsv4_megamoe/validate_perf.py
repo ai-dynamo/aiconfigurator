@@ -27,6 +27,19 @@ LOADER_KEY_FIELDS = [
     "num_tokens",
 ]
 
+ROW_INVARIANTS = [
+    ("framework", "SGLang", "every row framework must be SGLang"),
+    ("op_name", "dsv4_megamoe_module", "every row op_name must be dsv4_megamoe_module"),
+    ("kernel_source", "deepgemm_megamoe", "every row kernel_source must be deepgemm_megamoe"),
+    ("used_cuda_graph", "true", "every row must use CUDA Graph"),
+    ("includes_gate_topk", "false", "rows must not include gate/topk latency"),
+    ("includes_routed_scale", "true", "rows must include routed scale"),
+]
+
+POSITIVE_FLOAT_FIELDS = [
+    ("latency", "every latency must be positive"),
+]
+
 
 def _csv_ints(value: str) -> list[int]:
     return [int(item.strip()) for item in value.split(",") if item.strip()]
@@ -165,20 +178,12 @@ def validate_perf_file(
     for key, value in sorted(counts.items(), key=lambda item: (_safe_int(item[0][0]) or -1, item[0][1], item[0][2])):
         summary.append(f"count ep={key[0]} phase={key[1]} distribution={key[2]} rows={value}")
 
-    if any(row.get("framework") != "SGLang" for row in rows):
-        errors.append("every row framework must be SGLang")
-    if any(row.get("op_name") != "dsv4_megamoe_module" for row in rows):
-        errors.append("every row op_name must be dsv4_megamoe_module")
-    if any(row.get("kernel_source") != "deepgemm_megamoe" for row in rows):
-        errors.append("every row kernel_source must be deepgemm_megamoe")
-    if any(row.get("used_cuda_graph") != "true" for row in rows):
-        errors.append("every row must use CUDA Graph")
-    if any(row.get("includes_gate_topk") != "false" for row in rows):
-        errors.append("rows must not include gate/topk latency")
-    if any(row.get("includes_routed_scale") != "true" for row in rows):
-        errors.append("rows must include routed scale")
-    if any(not _positive_float(row.get("latency")) for row in rows):
-        errors.append("every latency must be positive")
+    for field, expected_value, error in ROW_INVARIANTS:
+        if any(row.get(field) != expected_value for row in rows):
+            errors.append(error)
+    for field, error in POSITIVE_FLOAT_FIELDS:
+        if any(not _positive_float(row.get(field)) for row in rows):
+            errors.append(error)
 
     loader_key_counts = Counter(tuple(row.get(field, "") for field in LOADER_KEY_FIELDS) for row in rows)
     duplicate_loader_keys = sum(1 for count in loader_key_counts.values() if count > 1)
