@@ -161,12 +161,6 @@ spec:
         _env("NUM_WARMUP", str(args.num_warmup)),
         _env("NUM_ITERATIONS", str(args.num_iterations)),
         _env("NUM_MAX_TOKENS_PER_RANK", str(num_max_tokens_per_rank)),
-        _env("SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE", "1"),
-        _env("SGLANG_OPT_FIX_HASH_MEGA_MOE", "1"),
-        _env("SGLANG_OPT_FIX_MEGA_MOE_MEMORY", "1"),
-        _env("SGLANG_OPT_FIX_NEXTN_MEGA_MOE", "1"),
-        _env("SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK", str(num_max_tokens_per_rank)),
-        _env("SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK", "0"),
         "\n".join(
             [
                 "        - name: NODE_RANK",
