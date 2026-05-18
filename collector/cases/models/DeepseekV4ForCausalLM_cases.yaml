@@ -17,41 +17,31 @@ description: >
 
 model_case_values:
   moe:
-    - model_path: deepseek-ai/DeepSeek-V4-Flash
+    - model_paths:
+        - deepseek-ai/DeepSeek-V4-Flash
+        - sgl-project/DeepSeek-V4-Flash-FP8
       hidden_size: 4096
       inter_size: 2048
       topk: 6
       num_experts: 256
       wideep: true
-    - model_path: deepseek-ai/DeepSeek-V4-Pro
-      hidden_size: 7168
-      inter_size: 3072
-      topk: 6
-      num_experts: 384
-      wideep: true
-    - model_path: sgl-project/DeepSeek-V4-Flash-FP8
-      hidden_size: 4096
-      inter_size: 2048
-      topk: 6
-      num_experts: 256
-      wideep: true
-    - model_path: sgl-project/DeepSeek-V4-Pro-FP8
+    - model_paths:
+        - deepseek-ai/DeepSeek-V4-Pro
+        - sgl-project/DeepSeek-V4-Pro-FP8
       hidden_size: 7168
       inter_size: 3072
       topk: 6
       num_experts: 384
       wideep: true
   mhc:
-    - model_path: deepseek-ai/DeepSeek-V4-Flash
+    - model_paths:
+        - deepseek-ai/DeepSeek-V4-Flash
+        - sgl-project/DeepSeek-V4-Flash-FP8
       hidden_size: 4096
       hc_mult: 4
-    - model_path: deepseek-ai/DeepSeek-V4-Pro
-      hidden_size: 7168
-      hc_mult: 4
-    - model_path: sgl-project/DeepSeek-V4-Flash-FP8
-      hidden_size: 4096
-      hc_mult: 4
-    - model_path: sgl-project/DeepSeek-V4-Pro-FP8
+    - model_paths:
+        - deepseek-ai/DeepSeek-V4-Pro
+        - sgl-project/DeepSeek-V4-Pro-FP8
       hidden_size: 7168
       hc_mult: 4
   dsv4_flash:

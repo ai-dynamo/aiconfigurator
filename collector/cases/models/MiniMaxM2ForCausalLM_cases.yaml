@@ -15,25 +15,11 @@ description: >
 
 model_case_values:
   moe:
-    - model_path: MiniMaxAI/MiniMax-M2.5
-      hidden_size: 3072
-      inter_size: 1536
-      topk: 8
-      num_experts: 256
-      wideep: true
-    - model_path: MiniMaxAI/MiniMax-M2.7
-      hidden_size: 3072
-      inter_size: 1536
-      topk: 8
-      num_experts: 256
-      wideep: true
-    - model_path: nvidia/MiniMax-M2.5-NVFP4
-      hidden_size: 3072
-      inter_size: 1536
-      topk: 8
-      num_experts: 256
-      wideep: true
-    - model_path: nvidia/MiniMax-M2.7-NVFP4
+    - model_paths:
+        - MiniMaxAI/MiniMax-M2.5
+        - MiniMaxAI/MiniMax-M2.7
+        - nvidia/MiniMax-M2.5-NVFP4
+        - nvidia/MiniMax-M2.7-NVFP4
       hidden_size: 3072
       inter_size: 1536
       topk: 8

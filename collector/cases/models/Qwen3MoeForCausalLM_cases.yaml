@@ -33,17 +33,10 @@ model_case_values:
       inter_size: 768
       topk: 8
       num_experts: 128
-    - model_path: Qwen/Qwen3-235B-A22B
-      hidden_size: 4096
-      inter_size: 1536
-      topk: 8
-      num_experts: 128
-    - model_path: Qwen/Qwen3-235B-A22B-FP8
-      hidden_size: 4096
-      inter_size: 1536
-      topk: 8
-      num_experts: 128
-    - model_path: nvidia/Qwen3-235B-A22B-NVFP4
+    - model_paths:
+        - Qwen/Qwen3-235B-A22B
+        - Qwen/Qwen3-235B-A22B-FP8
+        - nvidia/Qwen3-235B-A22B-NVFP4
       hidden_size: 4096
       inter_size: 1536
       topk: 8

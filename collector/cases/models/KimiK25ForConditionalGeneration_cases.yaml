@@ -14,33 +14,19 @@ description: >
 
 model_case_values:
   moe:
-    - model_path: moonshotai/Kimi-K2-Instruct
-      hidden_size: 7168
-      inter_size: 2048
-      topk: 8
-      num_experts: 384
-      wideep: true
-    - model_path: moonshotai/Kimi-K2.5
-      hidden_size: 7168
-      inter_size: 2048
-      topk: 8
-      num_experts: 384
-      wideep: true
-    - model_path: nvidia/Kimi-K2.5-NVFP4
+    - model_paths:
+        - moonshotai/Kimi-K2-Instruct
+        - moonshotai/Kimi-K2.5
+        - nvidia/Kimi-K2.5-NVFP4
       hidden_size: 7168
       inter_size: 2048
       topk: 8
       num_experts: 384
       wideep: true
   mla:
-    - model_path: moonshotai/Kimi-K2.5
-      num_heads: 64
-      q_lora_rank: 1536
-      kv_lora_rank: 512
-      qk_nope_head_dim: 128
-      qk_rope_head_dim: 64
-      v_head_dim: 128
-    - model_path: nvidia/Kimi-K2.5-NVFP4
+    - model_paths:
+        - moonshotai/Kimi-K2.5
+        - nvidia/Kimi-K2.5-NVFP4
       num_heads: 64
       q_lora_rank: 1536
       kv_lora_rank: 512

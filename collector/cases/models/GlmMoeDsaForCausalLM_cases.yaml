@@ -14,32 +14,20 @@ description: >
 
 model_case_values:
   moe:
-    - model_path: zai-org/GLM-5
-      hidden_size: 6144
-      inter_size: 2048
-      topk: 8
-      num_experts: 256
-      wideep: true
-    - model_path: zai-org/GLM-5-FP8
-      hidden_size: 6144
-      inter_size: 2048
-      topk: 8
-      num_experts: 256
-      wideep: true
-    - model_path: nvidia/GLM-5-NVFP4
+    - model_paths:
+        - zai-org/GLM-5
+        - zai-org/GLM-5-FP8
+        - nvidia/GLM-5-NVFP4
       hidden_size: 6144
       inter_size: 2048
       topk: 8
       num_experts: 256
       wideep: true
   mla_module:
-    - model_path: zai-org/GLM-5
-      attention_type: dsa
-      native_num_heads: 64
-    - model_path: zai-org/GLM-5-FP8
-      attention_type: dsa
-      native_num_heads: 64
-    - model_path: nvidia/GLM-5-NVFP4
+    - model_paths:
+        - zai-org/GLM-5
+        - zai-org/GLM-5-FP8
+        - nvidia/GLM-5-NVFP4
       attention_type: dsa
       native_num_heads: 64
 
