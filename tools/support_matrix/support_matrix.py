@@ -26,7 +26,7 @@ from tqdm import tqdm
 from aiconfigurator.generator.naive import _estimate_model_weight_bytes
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk import config as sdk_config
-from aiconfigurator.sdk.models import _get_model_info
+from aiconfigurator.sdk.models import _get_model_info, check_is_moe
 from aiconfigurator.sdk.models.helpers import _apply_model_quant_defaults
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
@@ -105,6 +105,70 @@ _SIZE_TIERS: list[tuple[float, TestConstraints]] = [
     (100e9, _MEDIUM),  # 10B - 100B params
 ]
 _DEFAULT_TIER = _LARGE  # > 100B params
+
+
+def _powers_of_two_up_to(limit: int) -> list[int]:
+    """Return powers of two from 1 through *limit*."""
+    if limit < 1:
+        return []
+    values: list[int] = []
+    value = 1
+    while value <= limit:
+        values.append(value)
+        value *= 2
+    return values
+
+
+def _nested_get(mapping: object | None, *keys: str) -> object | None:
+    value = mapping
+    for key in keys:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            value = value.get(key)
+        else:
+            value = getattr(value, key, None)
+    return value
+
+
+def _apply_large_moe_pp_search_space(
+    task_config: TaskConfig,
+    *,
+    model: str,
+    constraints: TestConstraints,
+    system_spec: dict | None,
+) -> None:
+    """Let large MoE support-matrix probes use PP while keeping EP within one node."""
+    if system_spec is None or not check_is_moe(model):
+        return
+
+    num_gpus_per_node = _nested_get(system_spec, "node", "num_gpus_per_node")
+    if not isinstance(num_gpus_per_node, int) or num_gpus_per_node < 1:
+        return
+    if constraints.total_gpus <= num_gpus_per_node:
+        return
+
+    node_parallel_sizes = _powers_of_two_up_to(num_gpus_per_node)
+    total_parallel_sizes = _powers_of_two_up_to(constraints.total_gpus)
+    pp_sizes = _powers_of_two_up_to(max(1, constraints.total_gpus // num_gpus_per_node))
+    ep_cap = min(num_gpus_per_node, 8)
+    ep_sizes = _powers_of_two_up_to(ep_cap)
+
+    def _patch_worker(worker_config):
+        worker_config.num_gpu_per_worker = total_parallel_sizes
+        worker_config.tp_list = node_parallel_sizes
+        worker_config.pp_list = pp_sizes
+        worker_config.dp_list = [1]
+        worker_config.moe_tp_list = node_parallel_sizes
+        worker_config.moe_ep_list = ep_sizes
+
+    if task_config.config.serving_mode == "agg":
+        _patch_worker(task_config.config.worker_config)
+    elif task_config.config.serving_mode == "disagg":
+        _patch_worker(task_config.config.prefill_worker_config)
+        _patch_worker(task_config.config.decode_worker_config)
+        task_config.config.replica_config.max_gpu_per_replica = constraints.total_gpus
+        task_config.config.replica_config.num_gpu_per_replica = total_parallel_sizes
 
 
 def _get_test_constraints(model_path: str) -> TestConstraints:
@@ -491,6 +555,7 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         engine_step_backend: str | None,
+        system_spec: dict | None = None,
     ) -> TaskConfig:
         task_config_kwargs = {
             "serving_mode": mode,
@@ -508,7 +573,14 @@ class SupportMatrix:
         }
         if mode == "disagg":
             task_config_kwargs["decode_system_name"] = system
-        return TaskConfig(**task_config_kwargs)
+        task_config = TaskConfig(**task_config_kwargs)
+        _apply_large_moe_pp_search_space(
+            task_config,
+            model=model,
+            constraints=constraints,
+            system_spec=system_spec,
+        )
+        return task_config
 
     @staticmethod
     def _run_mode(
@@ -520,6 +592,7 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         engine_step_backend: str | None,
+        system_spec: dict | None = None,
     ) -> pd.DataFrame | None:
         task_config = SupportMatrix._create_task_config(
             mode=mode,
@@ -529,6 +602,7 @@ class SupportMatrix:
             version=version,
             constraints=constraints,
             engine_step_backend=engine_step_backend,
+            system_spec=system_spec,
         )
         result = TaskRunner().run(task_config)
         return result.get("pareto_df")
@@ -605,6 +679,7 @@ class SupportMatrix:
                     version=version,
                     constraints=constraints,
                     engine_step_backend="python" if compare_engine_step_backends else None,
+                    system_spec=system_spec,
                 )
 
                 # Note that we do not use pareto_frontier_df here because for the pareto_df
@@ -632,6 +707,7 @@ class SupportMatrix:
                             version=version,
                             constraints=constraints,
                             engine_step_backend="rust",
+                            system_spec=system_spec,
                         )
                     if rust_pareto_df is None or rust_pareto_df.empty:
                         statuses[mode] = STATUS_FAIL
