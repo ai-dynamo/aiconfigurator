@@ -9,6 +9,7 @@ output into AIC perf rows and optionally samples representative GPU power while
 each collective size is measured.
 """
 
+import ctypes
 import subprocess
 import sys
 from argparse import ArgumentParser
@@ -19,6 +20,20 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from helper import PowerMonitor, log_perf
+
+
+def _detect_nccl_version() -> str:
+    try:
+        version = ctypes.c_int()
+        nccl = ctypes.CDLL("libnccl.so.2")
+        if nccl.ncclGetVersion(ctypes.byref(version)) == 0:
+            encoded = version.value
+            return f"{encoded // 10000}.{encoded % 10000 // 100}.{encoded % 100}"
+    except Exception:
+        pass
+
+    major, minor, patch = torch.cuda.nccl.version()
+    return f"{major}.{minor}.{patch}"
 
 
 def nccl_benchmark(
@@ -42,8 +57,7 @@ def nccl_benchmark(
     min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
     size = min_size
 
-    major, minor, patch = torch.cuda.nccl.version()
-    nccl_version = f"{major}.{minor}.{patch}"
+    nccl_version = _detect_nccl_version()
 
     bytes_per_element = 2 if dtype == "half" else 1
 
@@ -64,7 +78,7 @@ def nccl_benchmark(
             str(size),
             "-e",
             str(size),
-            "-t",
+            "-g",
             str(num_gpus),
             "-d",
             dtype,

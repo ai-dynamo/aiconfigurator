@@ -7,6 +7,7 @@ from tools.support_matrix.support_matrix import (
     STATUS_HW_INCOMPATIBLE,
     STATUS_PASS,
     SupportMatrix,
+    TestConstraints,
     get_hardware_incompatibility,
 )
 
@@ -99,3 +100,41 @@ def test_run_single_test_short_circuits_hardware_incompatible_model(monkeypatch)
     assert status_dict == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
     assert "does not support FP8" in error_dict["agg"]
     assert STATUS_PASS not in status_dict.values()
+
+
+def test_large_moe_support_matrix_search_enables_pp_and_caps_ep():
+    task_config = SupportMatrix._create_task_config(
+        mode="agg",
+        model="Qwen/Qwen3-Coder-480B-A35B-Instruct",
+        system="rtx_pro_6000_server",
+        backend="vllm",
+        version="0.19.0",
+        constraints=TestConstraints(total_gpus=128, isl=256, osl=256, prefix=128, ttft=2000000.0, tpot=50000.0),
+        engine_step_backend=None,
+        system_spec={"node": {"num_gpus_per_node": 8}},
+    )
+
+    worker_config = task_config.config.worker_config
+    assert 16 in worker_config.num_gpu_per_worker
+    assert 2 in worker_config.pp_list
+    assert worker_config.dp_list == [1]
+    assert max(worker_config.moe_ep_list) == 8
+
+
+def test_large_moe_support_matrix_search_caps_ep_to_smaller_node():
+    task_config = SupportMatrix._create_task_config(
+        mode="disagg",
+        model="Qwen/Qwen3-Coder-480B-A35B-Instruct",
+        system="rtx_pro_6000_server",
+        backend="trtllm",
+        version="1.3.0rc10",
+        constraints=TestConstraints(total_gpus=128, isl=256, osl=256, prefix=128, ttft=2000000.0, tpot=50000.0),
+        engine_step_backend=None,
+        system_spec={"node": {"num_gpus_per_node": 4}},
+    )
+
+    prefill_config = task_config.config.prefill_worker_config
+    decode_config = task_config.config.decode_worker_config
+    assert max(prefill_config.moe_ep_list) == 4
+    assert max(decode_config.moe_ep_list) == 4
+    assert task_config.config.replica_config.max_gpu_per_replica == 128

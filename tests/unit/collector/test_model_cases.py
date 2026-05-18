@@ -79,6 +79,37 @@ def test_attention_shape_specs_are_yaml_backed_with_backend_overrides():
     assert vllm_generation["xqa_query_head_counts"][-1] == 64
 
 
+def test_model_specific_attention_shape_specs_override_base_when_model_filter_set(monkeypatch):
+    from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "meta-llama/Llama-4-Maverick-17B-128E-Instruct")
+
+    for backend in ("sglang", "trtllm", "vllm"):
+        llama4_context = get_attention_context_shape_sweeps(backend)[0]
+        llama4_generation = get_attention_generation_shape_sweeps(backend)[0]
+
+        assert llama4_context["batch_sizes"] == [1, 2]
+        assert llama4_context["query_head_counts"] == [5, 10, 20, 40]
+        assert llama4_context["sequence_lengths"] == [128, 256]
+        assert llama4_context["window_sizes"] == [8192]
+        assert llama4_generation["xqa_query_head_counts"] == [5, 10, 20, 40]
+        assert llama4_generation["window_sizes"] == [8192]
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "XiaomiMiMo/MiMo-V2-Flash")
+
+    for backend in ("sglang", "vllm"):
+        mimo_context = get_attention_context_shape_sweeps(backend)[0]
+        mimo_generation = get_attention_generation_shape_sweeps(backend)[0]
+
+        assert mimo_context["batch_sizes"] == [1, 2]
+        assert mimo_context["head_dims"] == [192]
+        assert mimo_context["sequence_lengths"] == [128, 256]
+        assert mimo_context["window_sizes"] == [0, 128]
+        assert mimo_generation["head_dims"] == [192]
+        assert mimo_generation["sequence_lengths"] == [2, 129, 257, 385]
+        assert mimo_generation["window_sizes"] == [0, 128]
+
+
 def test_gemm_common_cases_expand_from_base_op_yaml_shape_specs():
     from collector.case_generator import (
         ComputeScaleCommonTestCase,
@@ -119,7 +150,7 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
 
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
-    assert len(get_common_moe_test_cases()) == 3654
+    assert len(get_common_moe_test_cases()) == 3972
     assert len(get_context_mla_case_specs()) == 550
     assert len(get_generation_mla_case_specs()) == 885
     assert len(get_common_mamba2_test_cases()) == 8
@@ -328,6 +359,93 @@ def test_model_cases_path_can_infer_model_path():
     assert "mhc_module" in plan.op_cases
 
 
+def test_model_case_include_rules_narrow_default_all_cases(tmp_path):
+    model_cases_path = tmp_path / "Targeted_cases.yaml"
+    model_cases_path.write_text(
+        """
+schema_version: 1
+architecture: TargetedForCausalLM
+model_path: example/targeted
+include_base: false
+all_frameworks_op_cases:
+  moe:
+    cases: []
+    rules:
+      - fields: [moe_type, num_tokens, hidden_size]
+        match:
+          moe_type: bfloat16
+          num_tokens: 128
+""".strip()
+    )
+
+    plan = build_collection_case_plan(backend="sglang", model_cases_path=str(model_cases_path))
+    filtered = filter_test_cases(
+        [
+            ["bfloat16", 64, 2048],
+            ["bfloat16", 128, 2048],
+            ["fp8_block", 128, 2048],
+        ],
+        plan=plan.op_cases["moe"],
+        full_module_name="sglang.moe",
+        run_func_name="run_moe_torch",
+    )
+
+    assert filtered == [["bfloat16", 128, 2048]]
+
+
+def test_model_case_include_rules_narrow_default_case_specs(tmp_path):
+    base_cases_path = tmp_path / "base_cases.yaml"
+    model_cases_path = tmp_path / "Targeted_cases.yaml"
+    base_cases_path.write_text(
+        """
+schema_version: 1
+all_frameworks_op_cases:
+  attention_context:
+    - id: base_attention_context_shape_sweep
+      batch_sizes: [1]
+      sequence_lengths: [128]
+      query_head_counts: [16, 64]
+      kv_head_options: [4, 8]
+      head_dims: [192]
+      window_sizes: [128]
+""".strip()
+    )
+    model_cases_path.write_text(
+        """
+schema_version: 1
+architecture: TargetedForCausalLM
+model_path: example/targeted
+include_base: false
+all_frameworks_op_cases:
+  attention_context:
+    cases: []
+    rules:
+      - fields: [batch_size, isl, num_heads, num_key_value_heads, head_dim, attn_dtype, kv_cache_dtype, window_size]
+        match:
+          num_key_value_heads: 8
+          window_size: 128
+""".strip()
+    )
+
+    plan = build_collection_case_plan(
+        backend="vllm",
+        model_cases_path=str(model_cases_path),
+        base_cases_path=base_cases_path,
+    )
+    filtered = filter_test_cases(
+        [
+            [1, 128, 16, 4, 192, "bfloat16", "bfloat16", 128],
+            [1, 128, 16, 8, 192, "bfloat16", "bfloat16", 128],
+            [1, 128, 64, 8, 192, "bfloat16", "bfloat16", 0],
+        ],
+        plan=plan.op_cases["attention_context"],
+        full_module_name="vllm.attention_context",
+        run_func_name="run_vllm_context_attention",
+    )
+
+    assert filtered == [[1, 128, 16, 8, 192, "bfloat16", "bfloat16", 128]]
+
+
 def test_model_architecture_can_select_case_file():
     plan = build_collection_case_plan(backend="trtllm", model_architecture="Qwen3MoeForCausalLM")
 
@@ -385,6 +503,34 @@ def test_support_matrix_moe_alias_generates_targeted_cases(monkeypatch):
 
     assert cases
     assert {case.model_name for case in cases} == {"Qwen/Qwen3-235B-A22B-FP8"}
+
+
+def test_llama4_moe_alias_generates_targeted_cases(monkeypatch):
+    from collector.case_generator import get_common_moe_test_cases
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "meta-llama/Llama-4-Maverick-17B-128E-Instruct")
+
+    cases = get_common_moe_test_cases()
+
+    assert cases
+    assert {case.model_name for case in cases} == {"meta-llama/Llama-4-Maverick-17B-128E-Instruct"}
+    assert {(case.hidden_size, case.inter_size, case.topk, case.num_experts) for case in cases} == {
+        (5120, 8192, 1, 128)
+    }
+
+
+def test_mimo_v2_flash_moe_alias_generates_targeted_cases(monkeypatch):
+    from collector.case_generator import get_common_moe_test_cases
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "XiaomiMiMo/MiMo-V2-Flash")
+
+    cases = get_common_moe_test_cases()
+
+    assert cases
+    assert {case.model_name for case in cases} == {"XiaomiMiMo/MiMo-V2-Flash"}
+    assert {(case.hidden_size, case.inter_size, case.topk, case.num_experts) for case in cases} == {
+        (4096, 2048, 8, 256)
+    }
 
 
 def test_support_matrix_mamba_alias_generates_targeted_cases(monkeypatch):
@@ -453,6 +599,28 @@ framework_specific_op_exceptions:
     assert plan.sm_exceptions_path == default_sm_exceptions_path(100)
     assert plan.sm_exceptions_path == exceptions
     assert "wideep_moe" not in plan.op_cases
+
+
+def test_sm120_sglang_gemm_keeps_fp8_block_cases():
+    plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="Qwen/Qwen3-32B-FP8",
+        gpu_type="rtx_pro_6000_server",
+    )
+    cases = [
+        ["fp8_block", 128, 512, 512],
+        ["fp8", 128, 512, 512],
+    ]
+
+    filtered = filter_test_cases(
+        cases,
+        plan=plan.op_cases["gemm"],
+        full_module_name="sglang.gemm",
+        run_func_name="run_gemm",
+        runtime_version="0.5.10",
+    )
+
+    assert filtered == cases
 
 
 def test_sm_exception_files_list_matching_gpu_types():

@@ -20,7 +20,7 @@ gpu:
   sm_version: 120
 
 node:
-  num_gpus_per_node: 2
+  num_gpus_per_node: 8
   inter_node_bw: 50000000000  # Byte/s per GPU, single direction, conservative 400Gb/s placeholder
   intra_node_bw: 64000000000  # Byte/s per GPU, single direction, PCIe Gen5 x16
   pcie_bw: 64000000000  # Byte/s, single direction, PCIe Gen5 x16
@@ -33,4 +33,4 @@ misc:
     4: 411041792 # 392MB
     8: 411041792 # 392MB
   other_mem: 3758096384 # increase from 551MB to 3.5GB for safer deployment, this will cover part of the inaccurate mem calc.
-  nccl_version: '2.28.9'
+  nccl_version: '2.28.3'

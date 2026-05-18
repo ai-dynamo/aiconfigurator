@@ -3,7 +3,7 @@
 
 """Unit tests for MoEDispatch communication logic across SM versions."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 import torch
@@ -19,10 +19,10 @@ pytestmark = pytest.mark.unit
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_db(sm_version=100, num_gpus_per_node=8):
-    """Create a mock database configured as trtllm backend."""
+def _make_mock_db(sm_version=100, num_gpus_per_node=8, backend="trtllm"):
+    """Create a mock database configured for MoEDispatch tests."""
     db = MagicMock()
-    db.backend = "trtllm"
+    db.backend = backend
     db.system_spec = {
         "gpu": {"sm_version": sm_version},
         "node": {"num_gpus_per_node": num_gpus_per_node},
@@ -430,6 +430,59 @@ class TestSmLt100NoAlltoall:
         )
         dispatch.query(db, x=16)
         db.query_trtllm_alltoall.assert_not_called()
+
+
+@pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
+class TestSGLangNonDeepEPAttentionTpDp:
+    """Test SGLang non-DeepEP combined attention TPxDP communication."""
+
+    def test_pre_dispatch_uses_reduce_scatter_then_all_gather(self):
+        db = _make_mock_db(sm_version=90, backend="sglang")
+        db.query_nccl.side_effect = [PerformanceResult(2.0), PerformanceResult(3.0)]
+        dispatch = _make_dispatch(
+            moe_tp_size=4,
+            moe_ep_size=2,
+            attention_dp_size=2,
+            pre_dispatch=True,
+            hidden_size=1024,
+        )
+
+        result = dispatch.query(db, x=16)
+
+        volume = 16 * 1024
+        assert float(result) == 5.0
+        assert db.query_nccl.call_count == 2
+        db.query_nccl.assert_has_calls(
+            [
+                call(common.CommQuantMode.half, 4, "reduce_scatter", volume),
+                call(common.CommQuantMode.half, 8, "all_gather", volume * 2),
+            ]
+        )
+        db.query_custom_allreduce.assert_not_called()
+
+    def test_post_dispatch_uses_reduce_scatter_then_all_gather(self):
+        db = _make_mock_db(sm_version=90, backend="sglang")
+        db.query_nccl.side_effect = [PerformanceResult(2.0), PerformanceResult(3.0)]
+        dispatch = _make_dispatch(
+            moe_tp_size=4,
+            moe_ep_size=2,
+            attention_dp_size=2,
+            pre_dispatch=False,
+            hidden_size=1024,
+        )
+
+        result = dispatch.query(db, x=16)
+
+        volume = 16 * 1024
+        assert float(result) == 5.0
+        assert db.query_nccl.call_count == 2
+        db.query_nccl.assert_has_calls(
+            [
+                call(common.CommQuantMode.half, 8, "reduce_scatter", volume * 2),
+                call(common.CommQuantMode.half, 4, "all_gather", volume),
+            ]
+        )
+        db.query_custom_allreduce.assert_not_called()
 
 
 if __name__ == "__main__":

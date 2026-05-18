@@ -42,3 +42,31 @@ def test_slurm_network_docs_use_new_folder_name():
 
     for path in docs:
         assert "slurm_comm_collector" not in path.read_text(encoding="utf-8")
+
+
+def test_nccl_collector_uses_num_gpus_as_gpu_count():
+    source = (NETWORK_ROOT / "collect_nccl.py").read_text(encoding="utf-8")
+
+    assert '"-g",' in source
+    assert '"-t",\n            str(num_gpus),' not in source
+
+
+def test_nccl_collector_records_linked_nccl_version():
+    source = (NETWORK_ROOT / "collect_nccl.py").read_text(encoding="utf-8")
+
+    assert "ncclGetVersion" in source
+    assert 'ctypes.CDLL("libnccl.so.2")' in source
+
+
+def test_custom_allreduce_collector_maps_half_to_float16():
+    source = (NETWORK_ROOT / "collect_all_reduce.py").read_text(encoding="utf-8")
+
+    assert '"half": torch.float16' in source
+    assert '"float16": torch.float16' in source
+
+
+def test_trtllm_custom_allreduce_accepts_half_alias():
+    source = (NETWORK_ROOT / "collect_all_reduce.py").read_text(encoding="utf-8")
+
+    assert 'trtllm_dtype = "float16" if dtype == "half" else dtype' in source
+    assert "str_dtype_to_torch(trtllm_dtype)" in source

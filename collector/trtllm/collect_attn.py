@@ -323,6 +323,12 @@ def _tokens_per_block_options(head_dim: int) -> list[int]:
     return [128, 0] if head_dim == 64 else [0]
 
 
+def _attention_window_options(head_dim: int, shape_sweep: dict) -> list[int]:
+    if "window_sizes" in shape_sweep:
+        return _int_list(shape_sweep["window_sizes"])
+    return _tokens_per_block_options(head_dim)
+
+
 def get_context_attention_test_cases():
     has_fp8 = get_sm_version() > 86
     test_cases = []
@@ -373,7 +379,7 @@ def get_context_attention_test_cases():
                                 num_kv_heads,
                                 h,
                             )
-                            for tokens_per_block in _tokens_per_block_options(h):
+                            for attention_window_size in _attention_window_options(h, shape_sweep):
                                 for precision_case in shape_sweep["precision_cases"]:
                                     use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
                                     use_fp8_context_fmha = bool(precision_case["fp8_context_fmha"])
@@ -388,7 +394,7 @@ def get_context_attention_test_cases():
                                             n,
                                             num_kv_heads,
                                             h,
-                                            tokens_per_block,
+                                            attention_window_size,
                                             use_fp8_kv_cache,
                                             use_fp8_context_fmha,
                                             True,
@@ -428,6 +434,9 @@ def get_generation_attention_test_cases():
         batch_sizes = _int_list(shape_sweep["batch_sizes"])
         sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
         head_dims = _int_list(shape_sweep["head_dims"])
+        window_sizes_by_head_dim = {
+            head_dim: _attention_window_options(head_dim, shape_sweep) for head_dim in head_dims
+        }
         min_drop_batch = int(shape_sweep["drop_largest_sequence_for_batch_at_least"])
 
         # MHA
@@ -445,12 +454,14 @@ def get_generation_attention_test_cases():
                     if b >= min_drop_batch:
                         target_s_list = target_s_list[:-1]
                     for s in target_s_list:
-                        for tokens_per_block in _tokens_per_block_options(h):
+                        for attention_window_size in window_sizes_by_head_dim[h]:
                             for precision_case in shape_sweep["precision_cases"]:
                                 use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
                                 if not has_fp8 and use_fp8_kv_cache:
                                     continue
-                                test_cases.append([b, s, n, n, h, tokens_per_block, use_fp8_kv_cache, False, False])
+                                test_cases.append(
+                                    [b, s, n, n, h, attention_window_size, use_fp8_kv_cache, False, False]
+                                )
 
         # XQA
         for n in sorted(_int_list(shape_sweep["xqa_query_head_counts"]), reverse=True):
@@ -479,13 +490,13 @@ def get_generation_attention_test_cases():
                             ):
                                 continue
                         for s in target_s_list:
-                            for tokens_per_block in _tokens_per_block_options(h):
+                            for attention_window_size in window_sizes_by_head_dim[h]:
                                 for precision_case in shape_sweep["precision_cases"]:
                                     use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
                                     if not has_fp8 and use_fp8_kv_cache:
                                         continue
                                     test_cases.append(
-                                        [b, s, n, n_kv, h, tokens_per_block, use_fp8_kv_cache, False, False]
+                                        [b, s, n, n_kv, h, attention_window_size, use_fp8_kv_cache, False, False]
                                     )
     return test_cases
 
