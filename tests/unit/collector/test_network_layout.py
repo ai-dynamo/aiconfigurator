@@ -63,3 +63,10 @@ def test_custom_allreduce_collector_maps_half_to_float16():
 
     assert '"half": torch.float16' in source
     assert '"float16": torch.float16' in source
+
+
+def test_trtllm_custom_allreduce_accepts_half_alias():
+    source = (NETWORK_ROOT / "collect_all_reduce.py").read_text(encoding="utf-8")
+
+    assert 'trtllm_dtype = "float16" if dtype == "half" else dtype' in source
+    assert "str_dtype_to_torch(trtllm_dtype)" in source
