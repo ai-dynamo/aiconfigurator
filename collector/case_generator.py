@@ -179,6 +179,31 @@ def _model_case_values(op_name: str, *, apply_model_filter: bool = True) -> list
     return values
 
 
+def _framework_specific_model_case_values(op_name: str, backend: str, *, apply_model_filter: bool = True) -> list[dict]:
+    values = []
+    for data in _load_model_cases_data():
+        framework_values = data.get("framework_specific_model_case_values", {})
+        if not isinstance(framework_values, dict):
+            raise TypeError("framework_specific_model_case_values must be a mapping")
+        backend_values = framework_values.get(backend, {})
+        if not isinstance(backend_values, dict):
+            raise TypeError(f"framework_specific_model_case_values.{backend} must be a mapping")
+        op_values = backend_values.get(op_name, [])
+        if op_values is None:
+            continue
+        if isinstance(op_values, dict):
+            values.append(dict(op_values))
+            continue
+        if not isinstance(op_values, list):
+            raise TypeError(f"framework_specific_model_case_values.{backend}.{op_name} must be a list or mapping")
+        values.extend(dict(item) for item in op_values)
+
+    model_path = _get_model_path_filter() if apply_model_filter else None
+    if model_path:
+        values = [value for value in values if value.get("model_path") == model_path]
+    return values
+
+
 @dataclasses.dataclass(frozen=True)
 class MLAModuleModelSpec:
     """Model metadata used by full MLA/DSA module collectors."""
@@ -724,6 +749,28 @@ def _moe_backend_model_cases(backend: str) -> list[dict[str, object]]:
         if model_path_filter and case.get("model_path") != model_path_filter:
             continue
         cases.append(case)
+
+    for model_case in _model_case_values("moe"):
+        framework_cases = model_case.get("framework_cases", {})
+        if not isinstance(framework_cases, dict):
+            raise TypeError("model_case_values.moe.framework_cases must be a mapping")
+        backend_case = framework_cases.get(backend)
+        if backend_case is None:
+            continue
+        if not isinstance(backend_case, dict):
+            raise TypeError(f"model_case_values.moe.framework_cases.{backend} must be a mapping")
+        case = dict(model_case)
+        case.update(backend_case)
+        case.pop("framework_cases", None)
+        case.pop("framework_quantization", None)
+        cases.append(case)
+
+    for model_case in _framework_specific_model_case_values("moe", backend):
+        if "framework_cases" in model_case:
+            raise TypeError(
+                f"framework_specific_model_case_values.{backend}.moe entries cannot contain framework_cases"
+            )
+        cases.append(model_case)
     return cases
 
 

@@ -89,6 +89,23 @@ model's `hidden_size`, `inter_size`, `topk`, and `num_experts`. The same pattern
 applies to MLA, Mamba2, GDN, and MHC: model YAML stores model dimensions, while
 base op YAML stores the reusable sweep policy.
 
+Framework-specific model dimensions live in `framework_specific_model_case_values`.
+Use this when a case should be available to one backend without expanding the
+all-framework common generator:
+
+```yaml
+framework_specific_model_case_values:
+  vllm_xpu:
+    moe:
+      - model_path: Qwen/Qwen1.5-MoE-A2.7B
+        hidden_size: 2048
+        inter_size: 1408
+        topk: 4
+        num_experts: 60
+        sweep: small
+        activation: silu
+```
+
 For simple common ops, `cases` can hold exact generator specs instead of opaque
 case IDs. Base GEMM, attention, and MLA BMM keep readable shape names in their
 own `base_ops/<op>.yaml` files:

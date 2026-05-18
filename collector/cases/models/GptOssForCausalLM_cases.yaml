@@ -26,6 +26,13 @@ model_case_values:
             w4a16_mxfp4:
               has_bias: true
               activation: swigluoai
+        vllm_xpu:
+          allowed_modes:
+            - w4a16_mxfp4
+      framework_cases:
+        vllm_xpu:
+          sweep: full
+          activation: swigluoai
     - model_path: openai/gpt-oss-20b
       hidden_size: 2880
       inter_size: 2880
@@ -39,6 +46,13 @@ model_case_values:
             w4a16_mxfp4:
               has_bias: true
               activation: swigluoai
+        vllm_xpu:
+          allowed_modes:
+            - w4a16_mxfp4
+      framework_cases:
+        vllm_xpu:
+          sweep: full
+          activation: swigluoai
 
 all_frameworks_op_cases:
   moe:
