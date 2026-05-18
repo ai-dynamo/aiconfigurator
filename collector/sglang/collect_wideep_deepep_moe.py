@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import functools
 import json
 import logging
 import os
@@ -24,13 +25,13 @@ from sglang.srt.utils import (
 )
 
 try:
-    from helper import _get_moe_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
+    from helper import _resolve_local_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
 except ModuleNotFoundError:
     import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from helper import _get_moe_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
+    from helper import _resolve_local_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
 from importlib.metadata import version as get_version
 from math import ceil as _ceil
 
@@ -62,7 +63,23 @@ def _make_scale_tensor(num_tokens: int, hidden_size: int, device) -> torch.Tenso
     return torch.ones(num_tokens, scale_dim, device=device, dtype=torch.float32)
 
 
-MOE_MODEL_PATH = _get_moe_model_path()
+# MOE_MODEL_PATH env var selects the model to benchmark. It can be either
+# a local directory (containing config.json) or a HuggingFace model id like
+# "deepseek-ai/DeepSeek-V3" / "Qwen/Qwen3-235B-A22B". DEEPSEEK_MODEL_PATH is
+# honored for backward compatibility. Defaults to DeepSeek-V3.
+_MOE_MODEL_ID = os.environ.get("MOE_MODEL_PATH") or os.environ.get("DEEPSEEK_MODEL_PATH") or "deepseek-ai/DeepSeek-V3"
+
+
+@functools.lru_cache(maxsize=1)
+def _get_moe_model_path() -> str:
+    """Resolve MOE_MODEL_PATH lazily so that ``collect.py``'s registry import
+    of this module does not trigger tempdir / JSON I/O on every invocation.
+
+    Cached for the lifetime of the process; subprocess workers each get a
+    fresh interpreter and re-resolve on first call (which converges on the
+    same deterministic tempdir built by ``helper._resolve_local_model_path``).
+    """
+    return _resolve_local_model_path(_MOE_MODEL_ID)
 
 
 def get_moe_prefill_test_cases(rank):
@@ -969,7 +986,7 @@ def run_moe_benchmark(num_experts, gpu_id, output_path=None):
 
     server_port = 30000 + gpu_id * 100
     server_args = ServerArgs(
-        model_path=MOE_MODEL_PATH,
+        model_path=_get_moe_model_path(),
         dtype="auto",
         device="cuda",
         load_format="dummy",
@@ -1077,7 +1094,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-path", default=None, help="Output directory for perf files")
     args = parser.parse_args()
 
-    print(f"Model path: {MOE_MODEL_PATH}")
+    print(f"Model path: {_get_moe_model_path()}")
 
     # Run all MOE test cases
     for test_case in get_wideep_moe_test_cases():
