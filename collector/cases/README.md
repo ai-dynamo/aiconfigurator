@@ -156,13 +156,16 @@ ID. `token_counts` is the GEMM M dimension, `input_features` is K, and
 size list for both input and output features. For attention, `kv_head_options:
 self` means `num_key_value_heads` equals `query_head_count`.
 
-### Framework Overrides
+### Framework-Specific Additions
 
-Framework-specific common op overrides live under `framework_specific_op_cases`
-with the same case `id`. For example, TRT-LLM adds attention `head_dims: [64,
-128, 256]`, while vLLM narrows head-count and window-size sweeps.
-Framework-specific GEMM overrides can narrow shape sweeps and, when the backend
-does not derive precision cases from runtime capability, set `gemm_types`.
+Framework-specific common op additions live under `framework_specific_op_cases`.
+These cases are merged on top of the all-framework base cases for that backend.
+For example, TRT-LLM can add attention `head_dims: [64, 128, 256]`, while vLLM
+can add window-size sweeps. If a framework-specific case spec reuses the same
+`id` as an all-framework case spec, its fields are applied as an overlay for
+that backend. This lets a backend narrow a shared sweep without duplicating the
+whole base spec. Framework-specific GEMM entries can also set `gemm_types` when
+the backend does not derive precision cases from runtime capability.
 
 For `mla_bmm_gen_pre` and `mla_bmm_gen_post`, `token_counts`, `head_counts`,
 `dtypes`, `num_warmups`, and `num_runs` define the auxiliary MLA generation BMM
