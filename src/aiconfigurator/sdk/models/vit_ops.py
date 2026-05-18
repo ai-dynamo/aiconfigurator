@@ -152,10 +152,10 @@ def _projector_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> list:
         # always receive a full (non-sharded) input (row-parallel style).
         col_parallel = is_last and n_layers > 1
         if col_parallel:
-            M, K = out_d, in_d // tp_size
+            m, k = out_d, in_d // tp_size
         else:
-            M, K = out_d // tp_size, in_d
-        result.append(ops.GEMM(f"encoder_projector_fc{i}_gemm", n_inst, M, K, vit_gemm_mode))
+            m, k = out_d // tp_size, in_d
+        result.append(ops.GEMM(f"encoder_projector_fc{i}_gemm", n_inst, m, k, vit_gemm_mode))
         if not is_last:
             result.append(
                 ops.ElementWise(
@@ -174,8 +174,8 @@ def _projector_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> list:
 def build_encoder_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> list:
     """Build the complete list of encoder ops for a ViT-based vision encoder.
 
-    Combines ViT transformer ops (10 ops × depth repetitions) with projector ops
-    (2 × n_layers + 1 ops with AllReduce, or 0 if no projector configured).
+    Combines ViT transformer ops (10 ops x depth repetitions) with projector ops
+    (2 x n_layers + 1 ops with AllReduce, or 0 if no projector configured).
 
     Args:
         enc_cfg: VisionEncoderConfig populated with ViT and projector parameters.
