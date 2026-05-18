@@ -236,9 +236,14 @@ Supported generated-case selector fields:
 - `limit`: keeps only the first N cases after selection.
 - `rules`: structured matches over positional collector case fields.
 
-Inline mapping entries under `cases` are generator specs for include sections,
-such as GEMM or attention shape sweeps. They are not generated-case selectors
-and should not be used for SM exceptions.
+There is one important distinction: a dictionary under `cases` is a generation
+recipe, not a selector. For example, a GEMM shape sweep dictionary tells the
+collector to create many concrete GEMM cases. It should live in an include
+section such as `all_frameworks_op_cases` or `framework_specific_op_cases`.
+
+SM exceptions run after those concrete cases are generated. They should match
+the generated cases with `rules`, `contains`, `case_ids`, `indices`, or
+`ranges`, not by adding shape-sweep dictionaries under `cases`.
 
 ### Generated Case IDs
 
