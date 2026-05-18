@@ -85,7 +85,6 @@ python3 collect.py --backend trtllm
 Case files:
 
 ```
-cases/base_op_cases.yaml             — catalog for shared base op files
 cases/base_ops/<op>.yaml             — shared common case values and op cases
 cases/models/<architecture>_cases.yaml — architecture-specific all/framework op cases
 cases/sm_exceptions/sm<version>_exceptions.yaml — SM-specific all/framework op exceptions

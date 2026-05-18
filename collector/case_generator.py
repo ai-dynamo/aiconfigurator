@@ -20,7 +20,6 @@ from typing import Optional
 import yaml
 
 COLLECTOR_ROOT = Path(__file__).resolve().parent
-BASE_OP_CASES_PATH = COLLECTOR_ROOT / "cases" / "base_op_cases.yaml"
 BASE_OP_CASES_DIR = COLLECTOR_ROOT / "cases" / "base_ops"
 MODEL_CASES_DIR = COLLECTOR_ROOT / "cases" / "models"
 
@@ -31,14 +30,6 @@ def _load_yaml_mapping(path: Path) -> dict:
     if not isinstance(data, dict):
         raise TypeError(f"{path}: top-level YAML value must be a mapping")
     return data
-
-
-def _base_ops_dir(base_data: dict) -> Path:
-    raw_dir = base_data.get("base_ops_dir", BASE_OP_CASES_DIR.name)
-    path = Path(str(raw_dir))
-    if path.is_absolute():
-        return path
-    return BASE_OP_CASES_PATH.parent / path
 
 
 def _merge_base_case_data(target: dict, source: dict) -> None:
@@ -53,23 +44,11 @@ def _merge_base_case_data(target: dict, source: dict) -> None:
 
 
 def _load_base_cases_data() -> dict:
-    base_data = _load_yaml_mapping(BASE_OP_CASES_PATH)
     merged: dict = {}
-    _merge_base_case_data(merged, base_data)
-
-    base_ops_dir = _base_ops_dir(base_data)
-    if not base_ops_dir.exists():
+    if not BASE_OP_CASES_DIR.exists():
         return merged
 
-    configured_files = base_data.get("base_ops")
-    if configured_files is None:
-        paths = sorted(base_ops_dir.glob("*.yaml"))
-    elif isinstance(configured_files, list):
-        paths = [base_ops_dir / str(filename) for filename in configured_files]
-    else:
-        raise TypeError("base_ops must be a list")
-
-    for path in paths:
+    for path in sorted(BASE_OP_CASES_DIR.glob("*.yaml")):
         _merge_base_case_data(merged, _load_yaml_mapping(path))
     return merged
 
@@ -139,7 +118,7 @@ def get_base_common_case_values(name: str) -> dict[str, object]:
 def _required_base_common_case_values(name: str) -> dict[str, object]:
     values = get_base_common_case_values(name)
     if not values:
-        raise RuntimeError(f"{BASE_OP_CASES_PATH} is missing common_case_values.{name}")
+        raise RuntimeError(f"{BASE_OP_CASES_DIR} is missing common_case_values.{name}")
     return values
 
 
@@ -983,7 +962,7 @@ def _as_str_list(value, *, field_name: str) -> list[str]:
 def _get_base_gemm_shape_sweeps(backend: str | None = None) -> list[dict[str, object]]:
     shape_sweeps = get_merged_base_op_case_specs(backend, "gemm") if backend else get_base_op_case_specs("gemm")
     if not shape_sweeps:
-        raise RuntimeError(f"{BASE_OP_CASES_PATH} is missing all_frameworks_op_cases.gemm.cases")
+        raise RuntimeError(f"{BASE_OP_CASES_DIR} is missing all_frameworks_op_cases.gemm.cases")
     return shape_sweeps
 
 
@@ -1161,7 +1140,7 @@ def get_mla_bmm_case_specs(backend: str, op_name: str) -> list[MLABMMCommonTestC
     """Return YAML-backed MLA generation BMM helper shapes."""
     shape_sweeps = get_merged_base_op_case_specs(backend, op_name)
     if not shape_sweeps:
-        raise RuntimeError(f"{BASE_OP_CASES_PATH} is missing all_frameworks_op_cases.{op_name}.cases")
+        raise RuntimeError(f"{BASE_OP_CASES_DIR} is missing all_frameworks_op_cases.{op_name}.cases")
 
     test_cases = []
     for shape_sweep in shape_sweeps:

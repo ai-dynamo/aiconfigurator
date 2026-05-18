@@ -436,7 +436,6 @@ function slideNewCode() {
   model_cases.py
   case_generator.py
   cases/
-    base_op_cases.yaml
     base_ops/<op>.yaml
     models/<Architecture>_cases.yaml
     sm_exceptions/sm<version>_exceptions.yaml

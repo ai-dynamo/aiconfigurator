@@ -3,7 +3,6 @@
 Collector v2 plans collection from model/SM YAML instead of treating the
 collector as a flat op list.
 
-- `base_op_cases.yaml`: catalog for shared base op files.
 - `base_ops/<op>.yaml`: shared common case values and op cases every model can include.
 - `models/<architecture>_cases.yaml`: architecture-specific op cases and model
   path aliases.

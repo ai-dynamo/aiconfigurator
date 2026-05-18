@@ -30,7 +30,6 @@ except ModuleNotFoundError:
 
 COLLECTOR_ROOT = Path(__file__).resolve().parent
 CASE_ROOT = COLLECTOR_ROOT / "cases"
-BASE_OP_CASES_PATH = CASE_ROOT / "base_op_cases.yaml"
 BASE_OP_CASES_DIR = CASE_ROOT / "base_ops"
 MODEL_CASES_DIR = CASE_ROOT / "models"
 SM_EXCEPTIONS_DIR = CASE_ROOT / "sm_exceptions"
@@ -155,8 +154,14 @@ def _base_ops_dir(base_data: dict[str, Any], base_path: Path) -> Path:
 
 
 def _load_base_case_files(base_path: Path) -> list[dict[str, Any]]:
-    """Load the base catalog plus per-op base case YAML files."""
+    """Load per-op base case YAML files from a directory or legacy catalog."""
+    if base_path.is_dir():
+        return [load_yaml_file(path) for path in sorted(base_path.glob("*.yaml"))]
+
     base_data = load_yaml_file(base_path)
+    if "base_ops" not in base_data and "base_ops_dir" not in base_data:
+        return [base_data]
+
     data = [base_data]
     base_ops_dir = _base_ops_dir(base_data, base_path)
     if not base_ops_dir.exists():
@@ -504,7 +509,7 @@ def build_collection_case_plan(
     full: bool = False,
 ) -> CollectionCasePlan:
     """Build a model/SM-aware op and case plan for one backend."""
-    base_path = Path(base_cases_path).expanduser().resolve() if base_cases_path else BASE_OP_CASES_PATH
+    base_path = Path(base_cases_path).expanduser().resolve() if base_cases_path else BASE_OP_CASES_DIR
     base_data_files = _load_base_case_files(base_path)
     requested_model_path = model_path
     model_paths = _load_model_case_files(model_path, model_architecture, model_cases_path, full)
