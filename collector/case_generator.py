@@ -475,7 +475,6 @@ class MoeQuantizationSpec:
     min_sm_exclusive: Optional[int]
     requires_runtime_feature: Optional[str]
     allowed_model_paths: tuple[str, ...]
-    excluded_runtime_versions: tuple[dict[str, object], ...]
     module_config: dict[str, object]
 
 
@@ -512,11 +511,6 @@ def get_moe_quantization_specs(backend: str) -> list[MoeQuantizationSpec]:
     for raw_mode in raw_modes:
         if not isinstance(raw_mode, dict):
             raise TypeError(f"common_case_values.moe_{backend}.quantization_modes entries must be mappings")
-        exclusions = raw_mode.get("excluded_runtime_versions", [])
-        if not isinstance(exclusions, list):
-            raise TypeError(
-                f"common_case_values.moe_{backend}.quantization_modes excluded_runtime_versions must be a list"
-            )
         module_config = raw_mode.get("module_config", {})
         if not isinstance(module_config, dict):
             raise TypeError(f"common_case_values.moe_{backend}.quantization_modes module_config must be a mapping")
@@ -538,31 +532,10 @@ def get_moe_quantization_specs(backend: str) -> list[MoeQuantizationSpec]:
                         field_name=f"moe_{backend}.quantization_modes.allowed_model_paths",
                     )
                 ),
-                excluded_runtime_versions=tuple(dict(item) for item in exclusions if isinstance(item, dict)),
                 module_config=dict(module_config),
             )
         )
     return specs
-
-
-def _moe_runtime_version_excluded(
-    spec: MoeQuantizationSpec,
-    *,
-    sm_version: int,
-    runtime_version: str,
-) -> bool:
-    for exclusion in spec.excluded_runtime_versions:
-        version_prefix = exclusion.get("version_prefix")
-        if version_prefix is not None and not runtime_version.startswith(str(version_prefix)):
-            continue
-        min_sm = exclusion.get("min_sm")
-        if min_sm is not None and sm_version < int(min_sm):
-            continue
-        max_sm = exclusion.get("max_sm")
-        if max_sm is not None and sm_version > int(max_sm):
-            continue
-        return True
-    return False
 
 
 def get_moe_quantization_modes(
@@ -572,7 +545,7 @@ def get_moe_quantization_modes(
     runtime_version: str = "",
     runtime_features: dict[str, bool] | None = None,
 ) -> list[str]:
-    """Return enabled MoE quantization modes after YAML SM/runtime filtering."""
+    """Return enabled MoE quantization modes after YAML SM/runtime-feature filtering."""
 
     features = runtime_features or {}
     modes = []
@@ -582,8 +555,6 @@ def get_moe_quantization_modes(
         if spec.min_sm_exclusive is not None and sm_version <= spec.min_sm_exclusive:
             continue
         if spec.requires_runtime_feature and not features.get(spec.requires_runtime_feature, False):
-            continue
-        if _moe_runtime_version_excluded(spec, sm_version=sm_version, runtime_version=runtime_version):
             continue
         modes.append(spec.name)
     return modes
@@ -943,8 +914,14 @@ def get_compute_scale_case_specs() -> list[ComputeScaleCommonTestCase]:
             shape_sweep.get("input_feature_sizes"),
             field_name="compute_scale.input_feature_sizes",
         )
+        max_input_features = max(input_feature_sizes) if input_feature_sizes else None
+        # Keep the largest K case last so collection does not start with the heaviest allocation.
+        ordered_input_feature_sizes = sorted(
+            input_feature_sizes,
+            key=lambda input_features: (input_features == max_input_features, -input_features),
+        )
         for token_count in sorted(token_counts, reverse=True):
-            for input_features in input_feature_sizes:
+            for input_features in ordered_input_feature_sizes:
                 test_cases.append(ComputeScaleCommonTestCase(m=token_count, k=input_features))
 
     return test_cases

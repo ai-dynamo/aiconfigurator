@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import csv
+from itertools import pairwise
 from pathlib import Path
 
 from collector.helper import create_test_case_id
@@ -151,7 +152,7 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
         sm_version=120,
         runtime_version="0.19.0",
         runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
-    ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "w4a16_mxfp4"]
+    ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "nvfp4", "w4a16_mxfp4"]
 
     assert moe_model_allows_quantization("vllm", "openai/gpt-oss-20b", "w4a16_mxfp4")
     assert not moe_model_allows_quantization("vllm", "openai/gpt-oss-20b", "bfloat16")
@@ -186,6 +187,26 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
         tensor_parallel_size=1,
         topk=22,
     )
+
+
+def test_vllm_sm120_nvfp4_moe_gap_is_an_sm_exception():
+    plan = build_collection_case_plan(backend="vllm", model_path="Qwen/Qwen3-235B-A22B", sm_version=120)
+    cases = [
+        ["bfloat16", [1, 2], 4096, 1536, 8, 128, 1, 1, "Qwen/Qwen3-235B-A22B", "balanced", 0.0],
+        ["nvfp4", [1, 2], 4096, 1536, 8, 128, 1, 1, "Qwen/Qwen3-235B-A22B", "balanced", 0.0],
+    ]
+
+    filtered, skipped = filter_test_cases_with_report(
+        cases,
+        plan=plan.op_cases["moe"],
+        full_module_name="vllm.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="0.19.0",
+    )
+
+    assert filtered == [cases[0]]
+    assert skipped[0]["reason_type"] == "framework_version_unsupported"
+    assert "FlashInfer TRT-LLM FP4 MoE path" in skipped[0]["reason"]
 
 
 def test_vllm_xpu_moe_metadata_is_yaml_backed(monkeypatch):
@@ -471,6 +492,32 @@ def test_sm_exception_files_list_matching_gpu_types():
             continue
         exception_data = load_yaml_file(exception_path)
         assert exception_data.get("gpu_types") == gpu_types
+
+
+def test_collector_case_yaml_numeric_lists_are_sorted():
+    def is_number(value):
+        return isinstance(value, int | float) and not isinstance(value, bool)
+
+    def walk_numeric_lists(value, path):
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                yield from walk_numeric_lists(nested, (*path, str(key)))
+        elif isinstance(value, list):
+            if len(value) > 1 and all(is_number(item) for item in value):
+                yield path, value
+            for index, nested in enumerate(value):
+                yield from walk_numeric_lists(nested, (*path, str(index)))
+
+    violations = []
+    for path in sorted((REPO_ROOT / "collector" / "cases").glob("**/*.yaml")):
+        for yaml_path, values in walk_numeric_lists(load_yaml_file(path), ()):
+            adjacent_values = list(pairwise(values))
+            ascending = all(left <= right for left, right in adjacent_values)
+            descending = all(left >= right for left, right in adjacent_values)
+            if not (ascending or descending):
+                violations.append(f"{path.relative_to(REPO_ROOT)}:{'.'.join(yaml_path)} = {values}")
+
+    assert violations == []
 
 
 def test_filter_test_cases_supports_case_ids_contains_and_indices():

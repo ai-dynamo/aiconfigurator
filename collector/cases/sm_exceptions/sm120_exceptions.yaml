@@ -286,7 +286,7 @@ framework_specific_op_exceptions:
       rules:
         - reason_type: framework_version_unsupported
           version_prefixes: ["0.19.0"]
-          reason: vLLM 0.19.0 FlashInfer TRT-LLM FP4 MoE path is not compiled for SM120.
+          reason: vLLM 0.19.0 FlashInfer TRT-LLM FP4 MoE path is not compiled for RTX PRO 6000 Blackwell Server (SM120).
           fields: [moe_type, num_tokens_list, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha]
           match:
             moe_type: nvfp4
