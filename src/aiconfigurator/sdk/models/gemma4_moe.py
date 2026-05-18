@@ -17,19 +17,19 @@ class Gemma4MoEModel(BaseModel):
 
     Two layer-type recipes are emitted, driven by ``Gemma4MoEConfig.layer_types``:
 
-    - **sliding_attention (SWA)**: 16 Q heads × ``swa_head_dim``, ``swa_num_kv_heads``
+    - **sliding_attention (SWA)**: 16 Q heads x ``swa_head_dim``, ``swa_num_kv_heads``
       KV heads, separate K and V projections (standard GQA), token window =
       ``sliding_window_size``.
-    - **full_attention (global)**: 16 Q heads × ``global_head_dim``, ``global_num_kv_heads``
+    - **full_attention (global)**: 16 Q heads x ``global_head_dim``, ``global_num_kv_heads``
       KV heads, no window. When ``attention_k_eq_v`` is set, V is reused from the K
-      projection output — there is no v_proj weight or v_proj GEMM on these layers,
+      projection output -- there is no v_proj weight or v_proj GEMM on these layers,
       but K and V are still distinct tensors in the KV cache (post-norm/post-RoPE).
 
     Every layer (gated on global ``enable_moe_block`` at parse time) runs both:
 
     - a shared dense MLP at intermediate_size ``inter_size``, gated SwiGLU; and
     - a routed top-k MoE at expert intermediate ``moe_inter_size`` with ``num_experts``
-      experts and a router GEMM (the router GEMM is emitted only when num_experts ≥ 128,
+      experts and a router GEMM (the router GEMM is emitted only when num_experts >= 128,
       mirroring the MoEModel/HybridMoEModel convention).
 
     Outputs of the two FFN branches are summed before the post-feedforward norm.
@@ -60,16 +60,13 @@ class Gemma4MoEModel(BaseModel):
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
         assert (
-            self.config.tp_size * self.config.attention_dp_size
-            == self.config.moe_tp_size * self.config.moe_ep_size
+            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
         ), (
             f"tp_size ({self.config.tp_size}) * attention_dp_size "
             f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
             f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
-        assert num_experts >= self.config.moe_ep_size, (
-            f"ep size cannot be larger than num_experts {num_experts}"
-        )
+        assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
         self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size

@@ -26,7 +26,7 @@ pytestmark = pytest.mark.unit
 # runtime, so this is purely a test-environment shim.
 pytest.importorskip("gradio")
 
-from aiconfigurator.webapp.events.event_fn import EventFn  # noqa: E402
+from aiconfigurator.webapp.events.event_fn import EventFn
 
 
 class TestUpdateModelRelatedComponents:

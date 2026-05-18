@@ -111,9 +111,9 @@ class Gemma4MoEConfig:
     Every layer runs both a shared dense MLP (intermediate_size, ``Gemma4TextMLP``) and a
     routed top-k MoE branch in parallel, summed at the end of the block. Attention shape
     differs per layer type:
-      - sliding_attention (SWA): num_key_value_heads × head_dim, separate K and V projections,
+      - sliding_attention (SWA): num_key_value_heads x head_dim, separate K and V projections,
         token window = sliding_window_size.
-      - full_attention (global): num_global_key_value_heads × global_head_dim, K=V at the
+      - full_attention (global): num_global_key_value_heads x global_head_dim, K=V at the
         projection (no v_proj) when attention_k_eq_v is set, no window cap.
 
     Shared dense MLP intermediate is the model-level ``inter_size`` (HF ``intermediate_size``).

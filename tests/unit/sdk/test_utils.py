@@ -575,9 +575,7 @@ class TestParseHFConfig:
 
     def test_gemma4_invalid_layer_type_raises(self):
         """layer_types must contain only sliding_attention / full_attention."""
-        hf_config = self._gemma4_text_config(
-            ["sliding_attention", "linear_attention", "full_attention"]
-        )
+        hf_config = self._gemma4_text_config(["sliding_attention", "linear_attention", "full_attention"])
         with pytest.raises(ValueError, match="must contain only"):
             _parse_hf_config_json(hf_config)
 
@@ -660,9 +658,7 @@ class TestGemma4MoEModelBuilder:
 
     def test_global_qkv_includes_v_when_k_eq_v_false(self):
         """attention_k_eq_v=False (defensive default) keeps V in the global QKV-out width."""
-        model = self._make_model(
-            self._make_model_config(), layer_types=["full_attention"], attention_k_eq_v=False
-        )
+        model = self._make_model(self._make_model_config(), layer_types=["full_attention"], attention_k_eq_v=False)
         qkv = next(op for op in model.context_ops if op._name == "context_global_qkv_gemm")
         # With V re-enabled: Q + K + V = 16*512 + 2*512*2 = 10240.
         assert qkv._n == 16 * 512 + 2 * 512 * 2
@@ -670,6 +666,7 @@ class TestGemma4MoEModelBuilder:
     def test_kvcache_bytes_window_caps_swa(self):
         """SWA contribution caps at sliding_window_size; global grows linearly with seq_len."""
         model = self._make_model(self._make_model_config())
+
         # bf16, TP=1 hand derivation:
         #   per-token SWA layer = 8 KV * 256 dim * 2 (K+V) * 2 bytes = 8192
         #   per-token global layer = 2 KV * 512 dim * 2 (K+V) * 2 bytes = 4096
@@ -698,24 +695,52 @@ class TestGemma4MoEModelBuilder:
     def test_set_gemma4_config_rejects_wrong_type(self):
         """Passing a HybridMoEConfig (or any non-Gemma4MoEConfig) raises."""
         model = Gemma4MoEModel(
-            8, 128, 704, "test", "GEMMA4MOE", "Gemma4ForConditionalGeneration",
-            2, 16, 8, 256, 2816, 2112, 262144, 262144, self._make_model_config(), None,
+            8,
+            128,
+            704,
+            "test",
+            "GEMMA4MOE",
+            "Gemma4ForConditionalGeneration",
+            2,
+            16,
+            8,
+            256,
+            2816,
+            2112,
+            262144,
+            262144,
+            self._make_model_config(),
+            None,
         )
         with pytest.raises(ValueError, match="requires a Gemma4MoEConfig"):
-            model.set_gemma4_config(
-                common.HybridMoEConfig(attn_layer_pattern=(0, 1), moe_layer_freq=(1, 1))
-            )
+            model.set_gemma4_config(common.HybridMoEConfig(attn_layer_pattern=(0, 1), moe_layer_freq=(1, 1)))
 
     def test_set_gemma4_config_rejects_wrong_layer_count(self):
         """layer_types length must match num_layers passed at construction."""
         model = Gemma4MoEModel(
-            8, 128, 704, "test", "GEMMA4MOE", "Gemma4ForConditionalGeneration",
-            30, 16, 8, 256, 2816, 2112, 262144, 262144, self._make_model_config(), None,
+            8,
+            128,
+            704,
+            "test",
+            "GEMMA4MOE",
+            "Gemma4ForConditionalGeneration",
+            30,
+            16,
+            8,
+            256,
+            2816,
+            2112,
+            262144,
+            262144,
+            self._make_model_config(),
+            None,
         )
         bad_cfg = common.Gemma4MoEConfig(
             layer_types=("sliding_attention",) * 5,  # only 5, but num_layers=30
-            swa_num_kv_heads=8, swa_head_dim=256,
-            global_num_kv_heads=2, global_head_dim=512,
+            swa_num_kv_heads=8,
+            swa_head_dim=256,
+            global_num_kv_heads=2,
+            global_head_dim=512,
             sliding_window_size=1024,
         )
         with pytest.raises(ValueError, match="layer_types length"):

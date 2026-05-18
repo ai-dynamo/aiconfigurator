@@ -693,13 +693,9 @@ def _parse_hf_config_json(config: dict) -> dict:
         # layers may set attention_k_eq_v (no v_proj, V reuses K projection output).
         layer_types_raw = config.get("layer_types", [])
         if len(layer_types_raw) != layers:
-            raise ValueError(
-                f"Gemma 4 layer_types length {len(layer_types_raw)} != num_hidden_layers {layers}"
-            )
+            raise ValueError(f"Gemma 4 layer_types length {len(layer_types_raw)} != num_hidden_layers {layers}")
         if any(lt not in ("sliding_attention", "full_attention") for lt in layer_types_raw):
-            raise ValueError(
-                "Gemma 4 layer_types must contain only 'sliding_attention' or 'full_attention'"
-            )
+            raise ValueError("Gemma 4 layer_types must contain only 'sliding_attention' or 'full_attention'")
         extra_params = common.Gemma4MoEConfig(
             layer_types=tuple(layer_types_raw),
             swa_num_kv_heads=config["num_key_value_heads"],
