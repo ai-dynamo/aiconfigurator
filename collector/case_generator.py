@@ -160,6 +160,21 @@ def _load_model_cases_data() -> list[dict]:
     return data
 
 
+def _expand_model_case_entry(raw_value: object, *, field_name: str) -> list[dict]:
+    if not isinstance(raw_value, dict):
+        raise TypeError(f"{field_name} entries must be mappings")
+    value = dict(raw_value)
+    raw_model_paths = value.pop("model_paths", None)
+    if raw_model_paths is None:
+        return [value]
+    if value.get("model_path") is not None:
+        raise ValueError(f"{field_name} entries cannot set both model_path and model_paths")
+    return [
+        {**value, "model_path": model_path}
+        for model_path in _as_str_list(raw_model_paths, field_name=f"{field_name}.model_paths")
+    ]
+
+
 def _model_case_values(op_name: str, *, apply_model_filter: bool = True) -> list[dict]:
     values = []
     for data in _load_model_cases_data():
@@ -167,11 +182,12 @@ def _model_case_values(op_name: str, *, apply_model_filter: bool = True) -> list
         if op_values is None:
             continue
         if isinstance(op_values, dict):
-            values.append(dict(op_values))
+            values.extend(_expand_model_case_entry(op_values, field_name=f"model_case_values.{op_name}"))
             continue
         if not isinstance(op_values, list):
             raise TypeError(f"model_case_values.{op_name} must be a list or mapping")
-        values.extend(dict(item) for item in op_values)
+        for index, item in enumerate(op_values):
+            values.extend(_expand_model_case_entry(item, field_name=f"model_case_values.{op_name}[{index}]"))
 
     model_path = _get_model_path_filter() if apply_model_filter else None
     if model_path:
@@ -192,11 +208,22 @@ def _framework_specific_model_case_values(op_name: str, backend: str, *, apply_m
         if op_values is None:
             continue
         if isinstance(op_values, dict):
-            values.append(dict(op_values))
+            values.extend(
+                _expand_model_case_entry(
+                    op_values,
+                    field_name=f"framework_specific_model_case_values.{backend}.{op_name}",
+                )
+            )
             continue
         if not isinstance(op_values, list):
             raise TypeError(f"framework_specific_model_case_values.{backend}.{op_name} must be a list or mapping")
-        values.extend(dict(item) for item in op_values)
+        for index, item in enumerate(op_values):
+            values.extend(
+                _expand_model_case_entry(
+                    item,
+                    field_name=f"framework_specific_model_case_values.{backend}.{op_name}[{index}]",
+                )
+            )
 
     model_path = _get_model_path_filter() if apply_model_filter else None
     if model_path:
@@ -268,26 +295,24 @@ def get_mla_module_model_specs(
             raise TypeError("model_case_values.mla_module must be a list or mapping")
 
         architecture = data.get("architecture")
-        for raw_value in raw_values:
-            if not isinstance(raw_value, dict):
-                raise TypeError("model_case_values.mla_module entries must be mappings")
-            value = dict(raw_value)
-            value.setdefault("architecture", architecture)
-            if model_path_filter and value.get("model_path") != model_path_filter:
-                continue
-            if attention_type is not None and value.get("attention_type") != attention_type:
-                continue
-            if wideep_mla is not None and bool(value.get("wideep_mla", False)) != wideep_mla:
-                continue
-            values.append(
-                MLAModuleModelSpec(
-                    model_path=str(value["model_path"]),
-                    attention_type=str(value["attention_type"]),
-                    architecture=str(value["architecture"]),
-                    native_num_heads=int(value["native_num_heads"]),
-                    wideep_mla=bool(value.get("wideep_mla", False)),
+        for index, raw_value in enumerate(raw_values):
+            for value in _expand_model_case_entry(raw_value, field_name=f"model_case_values.mla_module[{index}]"):
+                value.setdefault("architecture", architecture)
+                if model_path_filter and value.get("model_path") != model_path_filter:
+                    continue
+                if attention_type is not None and value.get("attention_type") != attention_type:
+                    continue
+                if wideep_mla is not None and bool(value.get("wideep_mla", False)) != wideep_mla:
+                    continue
+                values.append(
+                    MLAModuleModelSpec(
+                        model_path=str(value["model_path"]),
+                        attention_type=str(value["attention_type"]),
+                        architecture=str(value["architecture"]),
+                        native_num_heads=int(value["native_num_heads"]),
+                        wideep_mla=bool(value.get("wideep_mla", False)),
+                    )
                 )
-            )
     return values
 
 
@@ -450,21 +475,33 @@ def get_all_model_names() -> list[str]:
     case objects or call generator functions, so pruning logic in the generators
     cannot accidentally exclude models from the allowlist.
     """
+
+    def append_case_value_model_names(raw_values: object, *, field_name: str) -> None:
+        if isinstance(raw_values, dict):
+            values = _expand_model_case_entry(raw_values, field_name=field_name)
+        elif isinstance(raw_values, list):
+            values = []
+            for index, item in enumerate(raw_values):
+                values.extend(_expand_model_case_entry(item, field_name=f"{field_name}[{index}]"))
+        else:
+            return
+        model_names.extend(str(value["model_path"]) for value in values if value.get("model_path"))
+
     model_names = []
     for data in _load_model_cases_data():
         primary = data.get("model_path")
         if primary:
             model_names.append(str(primary))
         model_names.extend(str(path) for path in data.get("model_paths", []) or [])
-        for values in (data.get("model_case_values") or {}).values():
-            if isinstance(values, dict):
-                value_model_path = values.get("model_path")
-                if value_model_path:
-                    model_names.append(str(value_model_path))
+        for op_name, values in (data.get("model_case_values") or {}).items():
+            append_case_value_model_names(values, field_name=f"model_case_values.{op_name}")
+        for backend, op_values in (data.get("framework_specific_model_case_values") or {}).items():
+            if not isinstance(op_values, dict):
                 continue
-            if isinstance(values, list):
-                model_names.extend(
-                    str(value["model_path"]) for value in values if isinstance(value, dict) and value.get("model_path")
+            for op_name, values in op_values.items():
+                append_case_value_model_names(
+                    values,
+                    field_name=f"framework_specific_model_case_values.{backend}.{op_name}",
                 )
 
     deduped = []

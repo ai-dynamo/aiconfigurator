@@ -46,7 +46,9 @@ the old Python config lists:
 ```yaml
 model_case_values:
   moe:
-    - model_path: Qwen/Qwen3-235B-A22B
+    - model_paths:
+        - Qwen/Qwen3-235B-A22B
+        - Qwen/Qwen3-235B-A22B-FP8
       hidden_size: 4096
       inter_size: 1536
       topk: 8
@@ -63,7 +65,8 @@ model_case_values:
 
 The collector loads these model-specific values by op name and honors
 `COLLECTOR_MODEL_PATH`, so support-matrix healing can request cases for one
-model without editing Python.
+model without editing Python. Use `model_paths` when aliases share the same
+dimensions, or `model_path` for a single model-specific entry.
 
 Shared sweep recipes live in per-op files under `base_ops/<op>.yaml`. For
 cross-model ops such as MoE, MLA, Mamba2, GDN, and MHC, the base op file owns

@@ -15,40 +15,20 @@ description: >
 
 model_case_values:
   moe:
-    - model_path: deepseek-ai/DeepSeek-R1
-      hidden_size: 7168
-      inter_size: 2048
-      topk: 8
-      num_experts: 256
-      wideep: true
-    - model_path: deepseek-ai/DeepSeek-V3
-      hidden_size: 7168
-      inter_size: 2048
-      topk: 8
-      num_experts: 256
-      wideep: true
-    - model_path: nvidia/DeepSeek-V3.1-NVFP4
+    - model_paths:
+        - deepseek-ai/DeepSeek-R1
+        - deepseek-ai/DeepSeek-V3
+        - nvidia/DeepSeek-V3.1-NVFP4
       hidden_size: 7168
       inter_size: 2048
       topk: 8
       num_experts: 256
       wideep: true
   mla:
-    - model_path: deepseek-ai/DeepSeek-R1
-      num_heads: 128
-      q_lora_rank: 1536
-      kv_lora_rank: 512
-      qk_nope_head_dim: 128
-      qk_rope_head_dim: 64
-      v_head_dim: 128
-    - model_path: deepseek-ai/DeepSeek-V3
-      num_heads: 128
-      q_lora_rank: 1536
-      kv_lora_rank: 512
-      qk_nope_head_dim: 128
-      qk_rope_head_dim: 64
-      v_head_dim: 128
-    - model_path: nvidia/DeepSeek-V3.1-NVFP4
+    - model_paths:
+        - deepseek-ai/DeepSeek-R1
+        - deepseek-ai/DeepSeek-V3
+        - nvidia/DeepSeek-V3.1-NVFP4
       num_heads: 128
       q_lora_rank: 1536
       kv_lora_rank: 512
@@ -56,15 +36,10 @@ model_case_values:
       qk_rope_head_dim: 64
       v_head_dim: 128
   mla_module:
-    - model_path: deepseek-ai/DeepSeek-R1
-      attention_type: mla
-      native_num_heads: 128
-      wideep_mla: true
-    - model_path: deepseek-ai/DeepSeek-V3
-      attention_type: mla
-      native_num_heads: 128
-      wideep_mla: true
-    - model_path: nvidia/DeepSeek-V3.1-NVFP4
+    - model_paths:
+        - deepseek-ai/DeepSeek-R1
+        - deepseek-ai/DeepSeek-V3
+        - nvidia/DeepSeek-V3.1-NVFP4
       attention_type: mla
       native_num_heads: 128
       wideep_mla: true
