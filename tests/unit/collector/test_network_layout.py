@@ -56,3 +56,10 @@ def test_nccl_collector_records_linked_nccl_version():
 
     assert "ncclGetVersion" in source
     assert 'ctypes.CDLL("libnccl.so.2")' in source
+
+
+def test_custom_allreduce_collector_maps_half_to_float16():
+    source = (NETWORK_ROOT / "collect_all_reduce.py").read_text(encoding="utf-8")
+
+    assert '"half": torch.float16' in source
+    assert '"float16": torch.float16' in source

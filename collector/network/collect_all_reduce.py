@@ -492,7 +492,7 @@ def benchmark_vllm_allreduce(
     min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
 
     # Map dtype string to torch dtype
-    dtype_map = {"float32": torch.float32, "bfloat16": torch.bfloat16}
+    dtype_map = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16, "half": torch.float16}
     torch_dtype = dtype_map.get(dtype, torch.bfloat16)
 
     # Benchmark parameters
@@ -725,7 +725,7 @@ def benchmark_sglang_allreduce(
     min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
 
     # Map dtype string to torch dtype
-    dtype_map = {"float32": torch.float32, "bfloat16": torch.bfloat16}
+    dtype_map = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16, "half": torch.float16}
     torch_dtype = dtype_map.get(dtype, torch.bfloat16)
 
     # Benchmark parameters
