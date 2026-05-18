@@ -568,6 +568,244 @@ def test_filter_test_cases_reports_expected_sm_exception_reasons():
     ]
 
 
+def test_sm90_skips_fp4_only_nemotron_moe_shapes():
+    plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="nvidia/nemotron-ultra-rl-050826",
+        sm_version=90,
+    )
+    case = [
+        "bfloat16",
+        128,
+        8192,
+        5120,
+        22,
+        512,
+        1,
+        1,
+        "nvidia/nemotron-ultra-rl-050826",
+        "balanced",
+        0.0,
+        None,
+    ]
+
+    filtered, skipped = filter_test_cases_with_report(
+        [case],
+        plan=plan.op_cases["moe"],
+        full_module_name="sglang.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="0.5.10",
+    )
+
+    assert filtered == []
+    assert len(skipped) == 1
+    assert skipped[0]["reason_type"] == "hardware_unsupported"
+    assert "FP4-only Nemotron" in skipped[0]["reason"]
+
+
+def test_sm90_skips_sglang_dsv4_flash_modules_for_0510():
+    plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="sgl-project/DeepSeek-V4-Flash-FP8",
+        sm_version=90,
+    )
+    case = [
+        0,
+        1,
+        1,
+        "fp8",
+        "bfloat16",
+        "bfloat16",
+        "sgl-project/DeepSeek-V4-Flash-FP8",
+        "csa",
+        None,
+    ]
+
+    filtered, skipped = filter_test_cases_with_report(
+        [case],
+        plan=plan.op_cases["dsv4_flash_csa_context_module"],
+        full_module_name="sglang.dsv4_flash_csa_context_module",
+        run_func_name="run_dsv4_flash_attn_worker",
+        runtime_version="0.5.10",
+    )
+
+    assert filtered == []
+    assert len(skipped) == 1
+    assert skipped[0]["reason_type"] == "framework_version_unsupported"
+    assert "DeepSeek-V4-Flash" in skipped[0]["reason"]
+
+
+def test_sm90_skips_sglang_mhc_module_for_0510():
+    plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="sgl-project/DeepSeek-V4-Flash-FP8",
+        sm_version=90,
+    )
+
+    filtered, skipped = filter_test_cases_with_report(
+        [
+            {"id": "mhc_pre_all", "params": ["pre"]},
+            {"id": "mhc_post_all", "params": ["post"]},
+        ],
+        plan=plan.op_cases["mhc_module"],
+        full_module_name="sglang.mhc_module",
+        run_func_name="run_mhc_module_worker",
+        runtime_version="0.5.10",
+    )
+
+    assert filtered == []
+    assert len(skipped) == 2
+    assert {item["reason_type"] for item in skipped} == {"framework_version_unsupported"}
+    assert all("deepseek_ref" in item["reason"] for item in skipped)
+
+
+def test_sm90_skips_trtllm_attention_context_high_token_gqa_for_130rc10():
+    plan = build_collection_case_plan(
+        backend="trtllm",
+        model_path="deepseek-ai/DeepSeek-V3",
+        sm_version=90,
+    )
+    below_threshold_gqa = [64, 1024, 96, 8, 128, 0, False, False, True]
+    high_token_gqa_bf16 = [64, 1536, 96, 8, 128, 0, False, False, True]
+    high_token_gqa_fp8 = [64, 1536, 96, 8, 128, 0, True, False, True]
+    high_token_mha = [128, 1024, 96, 96, 128, 0, False, False, True]
+
+    filtered, skipped = filter_test_cases_with_report(
+        [below_threshold_gqa, high_token_gqa_bf16, high_token_gqa_fp8, high_token_mha],
+        plan=plan.op_cases["attention_context"],
+        full_module_name="trtllm.attention_context",
+        run_func_name="run_attention_torch",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert filtered == [below_threshold_gqa, high_token_mha]
+    assert len(skipped) == 2
+    assert {item["reason_type"] for item in skipped} == {"framework_version_unsupported"}
+    assert all("high-token GQA" in item["reason"] for item in skipped)
+
+
+def test_sm90_skips_trtllm_attention_context_qkv256_high_token_gqa_for_130rc10():
+    plan = build_collection_case_plan(
+        backend="trtllm",
+        model_path="deepseek-ai/DeepSeek-V3",
+        sm_version=90,
+    )
+    below_threshold_gqa = [16, 2048, 96, 8, 256, 0, False, False, True]
+    high_token_gqa_bf16 = [16, 3072, 96, 8, 256, 0, False, False, True]
+    high_token_gqa_fp8 = [16, 3072, 96, 8, 256, 0, True, False, True]
+    high_token_mha = [16, 3072, 96, 96, 256, 0, False, False, True]
+
+    filtered, skipped = filter_test_cases_with_report(
+        [below_threshold_gqa, high_token_gqa_bf16, high_token_gqa_fp8, high_token_mha],
+        plan=plan.op_cases["attention_context"],
+        full_module_name="trtllm.attention_context",
+        run_func_name="run_attention_torch",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert filtered == [below_threshold_gqa, high_token_mha]
+    assert len(skipped) == 2
+    assert {item["reason_type"] for item in skipped} == {"framework_version_unsupported"}
+    assert all("qkv_256 high-token GQA" in item["reason"] for item in skipped)
+
+
+def test_sm90_skips_trtllm_attention_context_qkv256_64_head_gqa_for_130rc10():
+    plan = build_collection_case_plan(
+        backend="trtllm",
+        model_path="deepseek-ai/DeepSeek-V3",
+        sm_version=90,
+    )
+    below_threshold_gqa = [16, 4096, 64, 8, 256, 0, False, False, True]
+    high_token_gqa_bf16 = [8, 10240, 64, 8, 256, 0, False, False, True]
+    high_token_gqa_fp8 = [8, 10240, 64, 8, 256, 0, True, False, True]
+    high_token_mha = [8, 10240, 64, 64, 256, 0, False, False, True]
+
+    filtered, skipped = filter_test_cases_with_report(
+        [below_threshold_gqa, high_token_gqa_bf16, high_token_gqa_fp8, high_token_mha],
+        plan=plan.op_cases["attention_context"],
+        full_module_name="trtllm.attention_context",
+        run_func_name="run_attention_torch",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert filtered == [below_threshold_gqa, high_token_mha]
+    assert len(skipped) == 2
+    assert {item["reason_type"] for item in skipped} == {"framework_version_unsupported"}
+    assert all("qkv_256 high-token GQA" in item["reason"] for item in skipped)
+
+
+def test_sm90_skips_trtllm_attention_context_qkv256_48_head_gqa_for_130rc10():
+    plan = build_collection_case_plan(
+        backend="trtllm",
+        model_path="deepseek-ai/DeepSeek-V3",
+        sm_version=90,
+    )
+    below_threshold_gqa = [16, 4096, 48, 8, 256, 0, False, False, True]
+    high_token_gqa_bf16 = [16, 6144, 48, 8, 256, 0, False, False, True]
+    high_token_gqa_fp8 = [16, 6144, 48, 8, 256, 0, True, False, True]
+    high_token_mha = [16, 6144, 48, 48, 256, 0, False, False, True]
+
+    filtered, skipped = filter_test_cases_with_report(
+        [below_threshold_gqa, high_token_gqa_bf16, high_token_gqa_fp8, high_token_mha],
+        plan=plan.op_cases["attention_context"],
+        full_module_name="trtllm.attention_context",
+        run_func_name="run_attention_torch",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert filtered == [below_threshold_gqa, high_token_mha]
+    assert len(skipped) == 2
+    assert {item["reason_type"] for item in skipped} == {"framework_version_unsupported"}
+    assert all("qkv_256 high-token GQA" in item["reason"] for item in skipped)
+
+
+def test_sm90_skips_trtllm_attention_generation_fp8_kv_for_130rc10():
+    plan = build_collection_case_plan(
+        backend="trtllm",
+        model_path="deepseek-ai/DeepSeek-V3",
+        sm_version=90,
+    )
+    bf16_generation = [1, 1023, 48, 48, 128, 0, False, False, False]
+    fp8_generation = [1, 1023, 48, 48, 128, 0, True, False, False]
+    fp8_context = [1, 1024, 48, 48, 128, 0, True, False, True]
+
+    filtered, skipped = filter_test_cases_with_report(
+        [bf16_generation, fp8_generation, fp8_context],
+        plan=plan.op_cases["attention_generation"],
+        full_module_name="trtllm.attention_generation",
+        run_func_name="run_attention_torch",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert filtered == [bf16_generation, fp8_context]
+    assert len(skipped) == 1
+    assert skipped[0]["reason_type"] == "framework_version_unsupported"
+    assert "generation attention FP8 KV-cache" in skipped[0]["reason"]
+
+
+def test_sm90_skips_trtllm_mla_generation_fp8_for_130rc10():
+    plan = build_collection_case_plan(
+        backend="trtllm",
+        model_path="deepseek-ai/DeepSeek-V3",
+        sm_version=90,
+    )
+    bf16_case = [1, 1, 1, "DataType.BF16", 128, 1, 1, 32, 10, 6, False]
+    fp8_case = [1, 1, 1, "DataType.FP8", 128, 1, 1, 32, 10, 6, False]
+
+    filtered, skipped = filter_test_cases_with_report(
+        [bf16_case, fp8_case],
+        plan=plan.op_cases["mla_generation"],
+        full_module_name="trtllm.mla_generation",
+        run_func_name="run_mla",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert filtered == [bf16_case]
+    assert len(skipped) == 1
+    assert skipped[0]["reason_type"] == "framework_version_unsupported"
+    assert "FP8 KV-cache" in skipped[0]["reason"]
+
+
 def test_filter_test_cases_supports_computed_rule_conditions():
     cases = [
         [1, 4096, 64, 4, 128, False, False, False],

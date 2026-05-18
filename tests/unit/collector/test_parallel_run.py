@@ -118,6 +118,17 @@ def _run(tasks, num_processes, tmp_path, module_name="test", expected_failure_co
     )
 
 
+def _run_resume(tasks, num_processes, tmp_path, module_name="test", expected_failure_context=None):
+    return parallel_run(
+        tasks,
+        _task_fn,
+        num_processes=num_processes,
+        module_name=module_name,
+        resume_options={"checkpoint_dir": str(tmp_path / ".checkpoint"), "resume": True},
+        expected_failure_context=expected_failure_context,
+    )
+
+
 def _checkpoint_path(tmp_path, module_name, backend="unknown"):
     safe_name = module_name.replace("/", "_").replace(":", "_")
     return tmp_path / ".checkpoint" / backend / f"{safe_name}.json"
@@ -281,6 +292,19 @@ class TestTaskExceptions:
         assert _load_done_ids(tmp_path, "expected_failures") == {"a"}
         assert _load_failed_ids(tmp_path, "expected_failures") == {"c"}
         assert _load_expected_failed_ids(tmp_path, "expected_failures") == {"b", "d"}
+
+    def test_resume_prunes_checkpoint_entries_outside_current_plan(self, tmp_path):
+        tasks = _tasks([("a", "normal"), ("b", "error"), ("c", "normal")])
+        _run(tasks, 1, tmp_path, module_name="resume_prune")
+
+        assert _load_done_ids(tmp_path, "resume_prune") == {"a", "c"}
+        assert _load_failed_ids(tmp_path, "resume_prune") == {"b"}
+
+        _run_resume(_tasks([("a", "normal"), ("c", "normal")]), 1, tmp_path, module_name="resume_prune")
+
+        assert _load_done_ids(tmp_path, "resume_prune") == {"a", "c"}
+        assert _load_failed_ids(tmp_path, "resume_prune") == set()
+        assert _load_expected_failed_ids(tmp_path, "resume_prune") == set()
 
 
 class TestMixedFailureModes:
