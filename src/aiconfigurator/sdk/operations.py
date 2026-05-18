@@ -178,7 +178,6 @@ class GEMM(Operation):
         x //= self._scale_num_tokens
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
-        model_name = str(kwargs.get("model_name", ""))
         is_fp8_static = quant_mode == common.GEMMQuantMode.fp8_static
 
         # Query with energy
@@ -209,9 +208,8 @@ class GEMM(Operation):
         if latency_clamped != latency or energy_clamped != energy:
             logger.warning(
                 "GEMM.query clamped latency/energy to 0.0. "
-                "op=%s model=%s m=%s n=%s k=%s quant_mode=%s post_sub(lat=%.6f, eng=%.6f)",
+                "op=%s m=%s n=%s k=%s quant_mode=%s post_sub(lat=%.6f, eng=%.6f)",
                 self._name,
-                model_name,
                 x,
                 self._n,
                 self._k,
@@ -1773,6 +1771,8 @@ class _BaseDeepSeekV4AttentionModule(Operation):
         name: str,
         scale_factor: float,
         num_heads: int,
+        native_heads: int,
+        tp_size: int,
         hidden_size: int,
         q_lora_rank: int,
         o_lora_rank: int,
@@ -1787,10 +1787,11 @@ class _BaseDeepSeekV4AttentionModule(Operation):
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         gemm_quant_mode: common.GEMMQuantMode,
-        architecture: str = "DeepseekV4ForCausalLM",
     ) -> None:
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
+        self._native_heads = native_heads
+        self._tp_size = tp_size
         self._hidden_size = hidden_size
         self._q_lora_rank = q_lora_rank
         self._o_lora_rank = o_lora_rank
@@ -1805,7 +1806,6 @@ class _BaseDeepSeekV4AttentionModule(Operation):
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
         self._gemm_quant_mode = gemm_quant_mode
-        self._architecture = architecture
         self._weights = self._estimate_weights()
 
     def _estimate_weights(self) -> float:
@@ -1845,6 +1845,8 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             s=kwargs.get("s"),
             prefix=kwargs.get("prefix", 0),
             num_heads=self._num_heads,
+            native_heads=self._native_heads,
+            tp_size=self._tp_size,
             hidden_size=self._hidden_size,
             q_lora_rank=self._q_lora_rank,
             o_lora_rank=self._o_lora_rank,
@@ -1859,7 +1861,6 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             kvcache_quant_mode=self._kvcache_quant_mode,
             fmha_quant_mode=self._fmha_quant_mode,
             gemm_quant_mode=self._gemm_quant_mode,
-            architecture=self._architecture,
         )
         return PerformanceResult(
             float(result) * self._scale_factor,
@@ -1879,6 +1880,8 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             b=kwargs.get("batch_size"),
             s=kwargs.get("s"),
             num_heads=self._num_heads,
+            native_heads=self._native_heads,
+            tp_size=self._tp_size,
             hidden_size=self._hidden_size,
             q_lora_rank=self._q_lora_rank,
             o_lora_rank=self._o_lora_rank,
@@ -1893,7 +1896,6 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             kvcache_quant_mode=self._kvcache_quant_mode,
             fmha_quant_mode=self._fmha_quant_mode,
             gemm_quant_mode=self._gemm_quant_mode,
-            architecture=self._architecture,
         )
         return PerformanceResult(
             float(result) * self._scale_factor,
