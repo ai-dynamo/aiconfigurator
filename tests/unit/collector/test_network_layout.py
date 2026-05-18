@@ -49,3 +49,10 @@ def test_nccl_collector_uses_num_gpus_as_gpu_count():
 
     assert '"-g",' in source
     assert '"-t",\n            str(num_gpus),' not in source
+
+
+def test_nccl_collector_records_linked_nccl_version():
+    source = (NETWORK_ROOT / "collect_nccl.py").read_text(encoding="utf-8")
+
+    assert "ncclGetVersion" in source
+    assert 'ctypes.CDLL("libnccl.so.2")' in source
