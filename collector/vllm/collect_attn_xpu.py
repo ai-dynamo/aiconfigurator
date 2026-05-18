@@ -444,7 +444,10 @@ def get_context_attention_test_cases(if_unit_test=False):
             for s in sorted(sequence_lengths, reverse=True):
                 for b in sorted(batch_sizes, reverse=True):
                     for kv_head_option in kv_head_options:
-                        num_kv_heads = n if kv_head_option == "self" else int(kv_head_option)
+                        is_self_kv = kv_head_option in ("self", 0, "0", None)
+                        num_kv_heads = n if is_self_kv else int(kv_head_option)
+                        if num_kv_heads <= 0:
+                            continue
                         if num_kv_heads != n and (num_kv_heads > n or n % num_kv_heads != 0):
                             continue
                         # XPU paged flash attention only supports GQA ratio <= 16

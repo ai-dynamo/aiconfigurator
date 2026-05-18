@@ -9,4 +9,3 @@ model_paths:
 include_base: true
 description: >
   Nemotron NAS / DeciLM dense-family model-centric collection plan.
-

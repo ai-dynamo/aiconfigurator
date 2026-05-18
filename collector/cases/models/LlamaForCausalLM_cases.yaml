@@ -12,4 +12,3 @@ model_paths:
 include_base: true
 description: >
   Llama dense-family model-centric collection plan.
-

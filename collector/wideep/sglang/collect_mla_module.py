@@ -3,8 +3,6 @@
 
 """SGLang WideEP MLA collector entrypoints."""
 
-__compat__ = "sglang>=0.5.10"
-
 from collector.sglang.collect_mla_module import (
     get_wideep_mla_context_test_cases as _get_wideep_mla_context_test_cases,
 )

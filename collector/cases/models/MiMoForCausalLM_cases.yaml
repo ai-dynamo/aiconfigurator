@@ -9,4 +9,3 @@ model_paths:
 include_base: true
 description: >
   MiMo dense-family model-centric collection plan.
-

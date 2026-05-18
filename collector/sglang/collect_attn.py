@@ -233,7 +233,7 @@ def _generation_target_sequence_lengths(batch_sizes, sequence_lengths, num_heads
     s_b_dict = {}
     for s in sequence_lengths:
         max_b = max_tokens // s // num_heads * 128 // head_dim
-        for b in batch_sizes:
+        for b in sorted(batch_sizes):
             if b > max_b:
                 break
             if s not in s_b_dict:

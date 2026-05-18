@@ -72,4 +72,4 @@ common_case_values:
     constraints:
     - 'context: batch_size * sequence_length <= max_context_tokens'
     - 'generation: batch_size * target_sequence_length <= max_generation_tokens'
-    - generation input_length is target_sequence_length - 1
+    - 'generation: input_length == target_sequence_length - 1'

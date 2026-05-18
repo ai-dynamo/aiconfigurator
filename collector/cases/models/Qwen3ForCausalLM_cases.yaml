@@ -14,4 +14,3 @@ model_paths:
 include_base: true
 description: >
   Qwen3 dense-family model-centric collection plan.
-

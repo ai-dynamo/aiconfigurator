@@ -47,7 +47,7 @@ sbatch -N 1 ./slurm_custom_ar_4gpu.sh
 
 # 3. TensorRT-LLM MoE AlltoAll collection (NVLink)
 
-Benchmarks MoE alltoall **dispatch** and **combine** over NVLink. Supports two kernel sources: **NVLinkTwoSided** (WideEP/MNNVL) and **NVLinkOneSided** (CutlassFusedMoE). Results are written to `results/trtllm_alltoall_perf.txt`. Run from `collector/network/slurm/` and configure `CONTAINER_IMAGE`, `CONTAINER_MOUNTS`, `ACCOUNT`, `PARTITION`, `GPU_COUNTS`, and `GPUS_PER_NODE` in `submit_trtllm_alltoall.sh` before running.
+Benchmarks MoE alltoall **dispatch** and **combine** over NVLink. Supports two kernel sources: **NVLinkTwoSided** (WideEP/MNNVL) and **NVLinkOneSided** (CutlassFusedMoE). Results are written to `results/trtllm_alltoall_perf.txt`. Run from `collector/network/slurm/` and configure `CONTAINER_IMAGE`, `CONTAINER_MOUNTS`, `ACCOUNT`, `PARTITION`, `GPU_LIST`, and `GPUS_PER_NODE` in `submit_trtllm_alltoall.sh` before running.
 
 ## 3.1 Parameters (edit in `submit_trtllm_alltoall.sh`)
 

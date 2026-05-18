@@ -88,7 +88,7 @@ python3 collect.py --backend trtllm
 
 Case files:
 
-```
+```text
 cases/base_ops/<op>.yaml             — shared common case values and op cases
 cases/models/<architecture>_cases.yaml — architecture-specific all/framework op cases
 cases/sm_exceptions/sm<version>_exceptions.yaml — SM-specific all/framework op exceptions
@@ -176,7 +176,7 @@ unregistered GPU with a known SM version.
 
 Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps ops to collector modules, and a **version resolver** (`version_resolver.py`) that picks the right module at runtime. Individual collector files declare their compatibility via `__compat__`. The current collector framework versions and runtime images are declared in `framework_manifest.yaml`.
 
-```
+```text
 framework_manifest.yaml — current collector framework versions and images
 framework_manifest.py   — manifest loader/validator
 model_cases.py       — collector v2 model/SM case planner

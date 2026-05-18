@@ -374,7 +374,8 @@ def _expected_failure_label(details):
 
 
 def _is_cuda_fatal_exception(exc, torch_mod) -> bool:
-    is_cuda_fatal = isinstance(exc, torch_mod.AcceleratorError)
+    accelerator_error = getattr(torch_mod, "AcceleratorError", ())
+    is_cuda_fatal = isinstance(exc, accelerator_error) if accelerator_error else False
     if not is_cuda_fatal:
         # DSLCudaRuntimeError from CUTLASS DSL also corrupts CUDA context but
         # is not a torch.AcceleratorError subclass.
@@ -761,8 +762,8 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             # Special handling for --profile
             # Run tasks sequentially in main process
             torch_mod = _require_torch()
-            device = torch_mod.device("cuda:0")
-            torch_mod.cuda.set_device(0)
+            device = torch_mod.device(f"{get_device_str()}:0")
+            get_device_module().set_device(device)
 
             for task_info in task_infos:
                 task_id = task_info["id"]
