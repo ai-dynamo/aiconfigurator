@@ -423,6 +423,8 @@ DefaultHFModels = {
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
     "nvidia/nemotron-ultra-rl-050826",
     "nvidia/Nemotron-H-56B-Base-8K",
+    # Google Gemma 4 Models
+    "google/gemma-4-26B-A4B",
 }
 
 """
