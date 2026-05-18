@@ -55,6 +55,7 @@ class TestMoE:
         expected = max(sol_math, sol_mem)
 
         assert math.isclose(result, expected, rel_tol=1e-6)
+        assert result.source == "sol"
 
     def test_query_moe_sol_full_mode(self, comprehensive_perf_db):
         """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""

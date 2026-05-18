@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""DeepSeek-V4-Flash module-level attention collector for SGLang.
+"""DeepSeek-V4 module-level attention collector for SGLang.
 
 ONE file containing both:
 
@@ -9,17 +9,17 @@ ONE file containing both:
      attn_kind (CSA / HCA) layer and times CUDA-Graph replay of
      ``layer.self_attn(...)`` (Q/KV proj + norm/rope + cache store +
      compressor + C4 indexer/topk for CSA + final FlashMLA).
-  2. The registry-facing entrypoints — ``run_dsv4_flash_attn_worker``
+  2. The registry-facing entrypoints — ``run_dsv4_attn_worker``
      (per-(kind, tp, gemm, bs) test case) which spawns a subprocess that
      internally sweeps every valid sl for that bs.
 
 Test cases (sweep grids + ``get_*_test_cases`` functions) live in
-``dsv4_flash_test_cases`` and are re-exported below for registry use.
+``dsv4_test_cases`` and are re-exported below for registry use.
 
 Manual CLI use::
 
-    python collect_dsv4_flash_attn.py --mode generation --attn-kind csa
-    python collect_dsv4_flash_attn.py --mode context --attn-kind hca \
+    python collect_dsv4_attn.py --mode generation --attn-kind csa
+    python collect_dsv4_attn.py --mode context --attn-kind hca \
         --batch-sizes 1,4 --seq-lens 128,1024
 """
 
@@ -61,41 +61,41 @@ except ModuleNotFoundError:
     from helper import benchmark_with_power, log_perf
 
 
-# Re-export test case generators from the dedicated test_cases module so
-# collect.py's registry (``module="collector.sglang.collect_dsv4_flash_attn"``)
-# can resolve them via getattr.
+# Re-export test case generators from the centralized case generator module so
+# collect.py's registry (``module="collector.sglang.collect_dsv4_attn"``) can
+# resolve them via getattr.
 try:
     from collector.case_generator import (
-        _DSV4_FLASH_MODULE_BATCH_SIZES as _BATCH_SIZES,
+        _DSV4_MODULE_BATCH_SIZES as _BATCH_SIZES,
     )
     from collector.case_generator import (
-        _DSV4_FLASH_MODULE_SEQ_LENGTHS as _SEQ_LENGTHS,
+        _DSV4_MODULE_SEQ_LENGTHS as _SEQ_LENGTHS,
     )
     from collector.case_generator import (
-        _DSV4_FLASH_MODULE_TP_SIZES as _TP_SIZES,
+        _DSV4_MODULE_TP_SIZES as _TP_SIZES,
     )
     from collector.case_generator import (
-        DSV4_FLASH_ATTN_KINDS as ATTN_KINDS,
+        DSV4_ATTN_KINDS as ATTN_KINDS,
     )
     from collector.case_generator import (
-        _dsv4_flash_module_filter_pairs as _filter_pairs,
+        _dsv4_module_filter_pairs as _filter_pairs,
     )
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from case_generator import (
-        _DSV4_FLASH_MODULE_BATCH_SIZES as _BATCH_SIZES,
+        _DSV4_MODULE_BATCH_SIZES as _BATCH_SIZES,
     )
     from case_generator import (
-        _DSV4_FLASH_MODULE_SEQ_LENGTHS as _SEQ_LENGTHS,
+        _DSV4_MODULE_SEQ_LENGTHS as _SEQ_LENGTHS,
     )
     from case_generator import (
-        _DSV4_FLASH_MODULE_TP_SIZES as _TP_SIZES,
+        _DSV4_MODULE_TP_SIZES as _TP_SIZES,
     )
     from case_generator import (
-        DSV4_FLASH_ATTN_KINDS as ATTN_KINDS,
+        DSV4_ATTN_KINDS as ATTN_KINDS,
     )
     from case_generator import (
-        _dsv4_flash_module_filter_pairs as _filter_pairs,
+        _dsv4_module_filter_pairs as _filter_pairs,
     )
 
 
@@ -104,28 +104,34 @@ def _expand_grid():
     return list(_BATCH_SIZES), list(_SEQ_LENGTHS)
 
 
-def get_dsv4_flash_csa_context_test_cases():
-    from collector.case_generator import get_dsv4_flash_csa_context_test_cases as _impl
+def get_dsv4_csa_context_test_cases():
+    from collector.case_generator import get_dsv4_csa_context_test_cases as _impl
 
     return _impl()
 
 
-def get_dsv4_flash_csa_generation_test_cases():
-    from collector.case_generator import get_dsv4_flash_csa_generation_test_cases as _impl
+def get_dsv4_csa_generation_test_cases():
+    from collector.case_generator import get_dsv4_csa_generation_test_cases as _impl
 
     return _impl()
 
 
-def get_dsv4_flash_hca_context_test_cases():
-    from collector.case_generator import get_dsv4_flash_hca_context_test_cases as _impl
+def get_dsv4_hca_context_test_cases():
+    from collector.case_generator import get_dsv4_hca_context_test_cases as _impl
 
     return _impl()
 
 
-def get_dsv4_flash_hca_generation_test_cases():
-    from collector.case_generator import get_dsv4_flash_hca_generation_test_cases as _impl
+def get_dsv4_hca_generation_test_cases():
+    from collector.case_generator import get_dsv4_hca_generation_test_cases as _impl
 
     return _impl()
+
+
+get_dsv4_flash_csa_context_test_cases = get_dsv4_csa_context_test_cases
+get_dsv4_flash_csa_generation_test_cases = get_dsv4_csa_generation_test_cases
+get_dsv4_flash_hca_context_test_cases = get_dsv4_hca_context_test_cases
+get_dsv4_flash_hca_generation_test_cases = get_dsv4_hca_generation_test_cases
 
 
 __all__ = [
@@ -134,11 +140,15 @@ __all__ = [
     "_SEQ_LENGTHS",
     "_TP_SIZES",
     "_filter_pairs",
+    "get_dsv4_csa_context_test_cases",
+    "get_dsv4_csa_generation_test_cases",
     "get_dsv4_flash_csa_context_test_cases",
     "get_dsv4_flash_csa_generation_test_cases",
     "get_dsv4_flash_hca_context_test_cases",
     "get_dsv4_flash_hca_generation_test_cases",
-    "run_dsv4_flash_attn_worker",
+    "get_dsv4_hca_context_test_cases",
+    "get_dsv4_hca_generation_test_cases",
+    "run_dsv4_attn_worker",
 ]
 
 
@@ -155,7 +165,7 @@ _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
 
 
 _PORTS_PER_GPU = 1000
-_DSV4_FLASH_PORT_RETRIES = 5
+_DSV4_PORT_RETRIES = 5
 
 
 def _port_is_available(port: int) -> bool:
@@ -186,7 +196,7 @@ def _pick_free_port(gpu_id: int) -> int:
     cross-worker collision impossible: worker N's candidate set is
     [40000 + N*1000, 40000 + N*1000 + 999].  Kept as a fallback for
     direct/manual use; normal collect.py entrypoints pass
-    ``AIC_DSV4_FLASH_NCCL_PORT`` explicitly.
+    ``AIC_DSV4_NCCL_PORT`` explicitly.
     """
     base = _nccl_port_for_attempt(gpu_id, 0)
     for offset in range(_PORTS_PER_GPU):
@@ -213,6 +223,25 @@ def _resolve_perf_path(output_path: str | None, default_name: str) -> str:
         return output_path
     os.makedirs(output_path, exist_ok=True)
     return os.path.join(output_path, default_name)
+
+
+def _dsv4_shape_metadata(hf_config) -> dict[str, int]:
+    return {
+        "hidden_size": int(hf_config.hidden_size),
+        "q_lora_rank": int(hf_config.q_lora_rank),
+        "o_lora_rank": int(hf_config.o_lora_rank),
+        "head_dim": int(hf_config.head_dim),
+        "rope_head_dim": int(hf_config.qk_rope_head_dim),
+        "index_n_heads": int(hf_config.index_n_heads),
+        "index_head_dim": int(hf_config.index_head_dim),
+        "index_topk": int(hf_config.index_topk),
+        "window_size": int(hf_config.sliding_window),
+        "o_groups": int(hf_config.o_groups),
+    }
+
+
+def _native_num_attention_heads(hf_config) -> int:
+    return int(getattr(hf_config, "num_attention_heads", NATIVE_HEADS))
 
 
 def _copy_non_weight_files(src_dir: str, dst_dir: str) -> None:
@@ -287,7 +316,7 @@ def _resolve_model_path(
         - ``"bfloat16"`` (default): drops fp8 ``quantization_config`` so weights
           load as bf16 and projections dispatch to cuBLASLt nvjet kernels.  This
           matches the historical collector behavior and is fast/light to load.
-        - ``"fp8_block"``: keeps the upstream V4-Flash fp8 block-quantized
+        - ``"fp8_block"``: keeps the upstream DSV4 fp8 block-quantized
           ``quantization_config``.  Combined with ServerArgs ``quantization="fp8"``
           this routes projection GEMMs through DeepGEMM's
           ``sm90_fp8_gemm_1d2d_impl`` kernel — the same path the production
@@ -296,7 +325,7 @@ def _resolve_model_path(
     TP simulation is NOT done at this layer (do not patch num_attention_heads).
     Use ``_tp_load_model_patch`` instead, which sets ``_TP.world_size`` and
     ``_ATTN_TP_SIZE`` to N at model construction.  That keeps FMLA's required
-    h_q=64 (Q is zero-padded with only the rank's tp_slice filled) while
+    native h_q (Q is zero-padded with only the rank's tp_slice filled) while
     projection GEMMs (wq_b, wo_a, wo_b, ColumnParallel/RowParallel) allocate
     1/N shards.  Patching ``num_attention_heads`` directly would bypass the
     zero-pad path and trip FlashMLA's "Unsupported h_q: 8" template guard.
@@ -393,12 +422,12 @@ def _tp_load_model_patch(tp_size: int):
           reads ``get_attention_tp_size()`` at forward time for the
           ``q_padded[..., n_heads]`` / ``q_out = q_padded[:, tp_slice, :]``
           zero-pad logic; keeping it at N is what makes FlashMLA receive the
-          fixed h_q=64 with only the rank-0 slice filled (matching prod TP=N
+          fixed native h_q with only the rank-0 slice filled (matching prod TP=N
           rank-0 byte-for-byte).
 
     Why this is safe:
       - FlashMLA's ``Unsupported h_q: 8`` error is avoided because Q is always
-        zero-padded to h_q=64 before FMLA — at any N, FMLA sees h_q=64.
+        zero-padded to the native head count before FMLA.
       - V4 main attention's ``wq_b`` is ``ColumnParallelLinear`` and stores
         ``self.tp_size`` at construction (read once), so forward uses N
         without re-querying _TP.world_size.
@@ -480,8 +509,8 @@ def _load_model_runner(
     gpu_id = int(device.split(":")[-1]) if ":" in device else 0
     # CUDA_VISIBLE_DEVICES remaps every child to cuda:0; keep the physical GPU
     # id for NCCL port sharding so parallel workers do not collide.
-    port_shard = int(os.environ.get("AIC_DSV4_FLASH_PORT_SHARD", gpu_id))
-    nccl_port = int(os.environ.get("AIC_DSV4_FLASH_NCCL_PORT") or _pick_free_port(port_shard))
+    port_shard = int(os.environ.get("AIC_DSV4_PORT_SHARD", gpu_id))
+    nccl_port = int(os.environ.get("AIC_DSV4_NCCL_PORT") or _pick_free_port(port_shard))
 
     server_args = ServerArgs(
         model_path=local_model_path,
@@ -509,7 +538,7 @@ def _load_model_runner(
         max_prefill_tokens=max(max_total_tokens or 4096, 2048),
     )
     # gemm_type controls projection GEMM dispatch.  "fp8_block" → DeepGEMM
-    # (matches production V4-Flash-FP8); anything else → cuBLASLt bf16.
+    # (matches production DSV4 FP8); anything else → cuBLASLt bf16.
     server_args.quantization = "fp8" if gemm_type == "fp8_block" else None
     server_args.enable_piecewise_cuda_graph = False
     server_args.attention_backend = "compressed"
@@ -850,17 +879,19 @@ def _log_result(
     perf_filename_prefix: str = "dsv4",
     gemm_type: str = "bfloat16",
     tp_size: int = 1,
+    native_num_heads: int = NATIVE_HEADS,
+    shape_metadata: dict[str, int] | None = None,
 ) -> None:
-    # V4-Flash output layout: ONE CSV per (attn_kind, mode) — 3 kinds x 2
-    # modes = 6 files total, regardless of how many (tp_size, gemm_type)
+    # DeepSeek-V4 output layout: ONE CSV per (attn_kind, mode) — 2 kinds x 2
+    # modes = 4 files total, regardless of how many (tp_size, gemm_type)
     # subprocesses run.  Within each file, rows are disambiguated by the
     # ``tp_size``, ``gemm_type``, ``batch_size``, ``isl`` columns.
     # ``log_perf`` is file-locked so concurrent appends from different
     # subprocesses to the same kind+mode file are safe.
-    # Non-V4-Flash callers (legacy ``dsv4`` MLA module) still use the old
+    # Non-DSV4 callers still use the old
     # per-(prefix, kind) filename layout to avoid behavior breaks.
-    if perf_filename_prefix.startswith("dsv4_flash"):
-        consolidated_filename = f"dsv4_flash_{attn_kind}_{mode}_module_perf.txt"
+    if perf_filename_prefix.startswith("dsv4"):
+        consolidated_filename = f"dsv4_{attn_kind}_{mode}_module_perf.txt"
     else:
         consolidated_filename = f"{perf_filename_prefix}_{attn_kind}_{mode}_module_perf.txt"
     perf_filename = _resolve_perf_path(output_path, consolidated_filename)
@@ -873,12 +904,13 @@ def _log_result(
                 "mla_dtype": "bfloat16",
                 "kv_cache_dtype": kv_cache_dtype,
                 "gemm_type": gemm_type,
-                "num_heads": NATIVE_HEADS,
+                "num_heads": native_num_heads,
                 "batch_size": batch_size,
                 "isl": seq_len if is_prefill else 1,
                 "tp_size": tp_size,
                 "step": 0 if is_prefill else seq_len,
                 "compress_ratio": compress_ratio,
+                **(shape_metadata or {}),
                 "latency": f"{latency_ms:.4f}",
             }
         ],
@@ -1000,6 +1032,8 @@ def run_dsv4_mla_module(
                         perf_filename_prefix=perf_filename_prefix,
                         gemm_type=gemm_type,
                         tp_size=tp_size,
+                        native_num_heads=_native_num_attention_heads(model_runner.model_config.hf_config),
+                        shape_metadata=_dsv4_shape_metadata(model_runner.model_config.hf_config),
                     )
                     stats.update(
                         {
@@ -1010,7 +1044,7 @@ def run_dsv4_mla_module(
                     )
                     results.append(stats)
                 except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
-                    print(f"[WARN] dsv4-flash {sweep_label} bs={batch_size} sl={seq_len}: OOM; skipping this shape")
+                    print(f"[WARN] dsv4-attn {sweep_label} bs={batch_size} sl={seq_len}: OOM; skipping this shape")
                     skipped_shapes.append((batch_size, seq_len, "OOM"))
                     try:
                         torch.cuda.empty_cache()
@@ -1019,7 +1053,7 @@ def run_dsv4_mla_module(
                 except Exception as exc:
                     traceback.print_exc()
                     print(
-                        f"[WARN] dsv4-flash {sweep_label} bs={batch_size} sl={seq_len}: "
+                        f"[WARN] dsv4-attn {sweep_label} bs={batch_size} sl={seq_len}: "
                         f"{type(exc).__name__}; skipping this shape"
                     )
                     skipped_shapes.append((batch_size, seq_len, type(exc).__name__))
@@ -1042,7 +1076,7 @@ def run_dsv4_mla_module(
                             _cleanup_step()
                         except Exception as _cleanup_exc:
                             print(
-                                f"[WARN] dsv4-flash {sweep_label} bs={batch_size} sl={seq_len}: "
+                                f"[WARN] dsv4-attn {sweep_label} bs={batch_size} sl={seq_len}: "
                                 f"cleanup step '{_cleanup_label}' failed with "
                                 f"{type(_cleanup_exc).__name__}; CUDA context likely poisoned, "
                                 "remaining shapes in this sweep may be unreliable"
@@ -1057,7 +1091,7 @@ def run_dsv4_mla_module(
     if skipped_shapes:
         skipped_str = ", ".join(f"(bs={b},sl={s},reason={r})" for b, s, r in skipped_shapes)
         print(
-            f"[WARN] dsv4-flash {sweep_label}: SWEEP SUMMARY — {len(skipped_shapes)} of "
+            f"[WARN] dsv4-attn {sweep_label}: SWEEP SUMMARY — {len(skipped_shapes)} of "
             f"{len(skipped_shapes) + len(results)} shapes failed: {skipped_str}"
         )
     return results
@@ -1088,7 +1122,7 @@ def _run_subprocess(
     """
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    env["AIC_DSV4_FLASH_PORT_SHARD"] = str(gpu_id)
+    env["AIC_DSV4_PORT_SHARD"] = str(gpu_id)
     env.setdefault("SGLANG_APPLY_CONFIG_BACKUP", "none")
     env.setdefault("SGLANG_LOAD_FORMAT", "dummy")
     # Hard-disable DeepGEMM bulk pre-compile.  First sl in this sweep
@@ -1098,7 +1132,7 @@ def _run_subprocess(
 
     code = (
         f'import sys; sys.path.insert(0, "{os.path.dirname(os.path.abspath(__file__))}")\n'
-        f"from collect_dsv4_flash_attn import _subprocess_entry\n"
+        f"from collect_dsv4_attn import _subprocess_entry\n"
         f"_subprocess_entry(\n"
         f'    mode="{mode}",\n'
         f'    attn_kind="{attn_kind}",\n'
@@ -1113,7 +1147,7 @@ def _run_subprocess(
 
     # Persist subprocess output to a per-task log so we can inspect failures
     # even when the child dies before stdout is streamed (e.g. OOM kill).
-    log_dir = os.path.join(tempfile.gettempdir(), "dsv4_flash_subproc_logs")
+    log_dir = os.path.join(tempfile.gettempdir(), "dsv4_subproc_logs")
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(
         log_dir,
@@ -1122,7 +1156,7 @@ def _run_subprocess(
 
     def _run_once(nccl_port: int) -> tuple[int, str]:
         attempt_env = env.copy()
-        attempt_env["AIC_DSV4_FLASH_NCCL_PORT"] = str(nccl_port)
+        attempt_env["AIC_DSV4_NCCL_PORT"] = str(nccl_port)
         with open(log_path, "wb") as logf:
             proc = subprocess.Popen(
                 [sys.executable, "-c", code],
@@ -1148,7 +1182,7 @@ def _run_subprocess(
             print(log_text)
         return proc.returncode, log_text
 
-    max_attempts = _DSV4_FLASH_PORT_RETRIES
+    max_attempts = _DSV4_PORT_RETRIES
     for attempt in range(max_attempts):
         nccl_port = _nccl_port_for_attempt(gpu_id, attempt)
         returncode, log_text = _run_once(nccl_port)
@@ -1165,7 +1199,7 @@ def _run_subprocess(
             continue
 
         raise RuntimeError(
-            f"dsv4_flash_{attn_kind}_{mode} subprocess failed for "
+            f"dsv4_{attn_kind}_{mode} subprocess failed for "
             f"(bs={batch_size}, tp={tp_size}, gemm={gemm_type}); "
             f"exit={returncode}; log: {log_path}"
         )
@@ -1190,7 +1224,7 @@ def _subprocess_entry(
     bs_grid, sl_grid = _expand_grid()
     pairs = _filter_pairs(mode, [batch_size], sl_grid)
     if not pairs:
-        print(f"[dsv4-flash] no valid sl values for mode={mode}, bs={batch_size}")
+        print(f"[dsv4] no valid sl values for mode={mode}, bs={batch_size}")
         return
     # Sort sl DESCENDING — start from the largest case so:
     #   1. OOM fails fast (don't waste time on small sl before discovering
@@ -1225,13 +1259,13 @@ def _subprocess_entry(
         output_path=output_path,
         mem_fraction_static=0.7,
         max_total_tokens=max_total_tokens,
-        perf_filename_prefix="dsv4_flash",
+        perf_filename_prefix="dsv4",
         gemm_type=gemm_type,
         tp_size=tp_size,
     )
 
 
-def run_dsv4_flash_attn_worker(
+def run_dsv4_attn_worker(
     seq_len: int,
     batch_size: int,
     tp_size: int,
@@ -1253,7 +1287,7 @@ def run_dsv4_flash_attn_worker(
 
     ``tp_size`` triggers single-process TP simulation in the spawned subprocess
     via ``collect_dsv4_mla_module._tp_load_model_patch``: ColumnParallel /
-    RowParallel weights allocate at 1/N shape; FMLA sees h_q=64 (zero-padded).
+    RowParallel weights allocate at 1/N shape; FMLA sees native h_q (zero-padded).
     """
     del seq_len, attention_backend  # placeholders; sl swept inside subprocess
 
@@ -1269,7 +1303,7 @@ def run_dsv4_flash_attn_worker(
     gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
 
     print(
-        f"[dsv4-flash {mode}] kind={attn_kind} tp={tp_size} gemm={gemm_type} "
+        f"[dsv4 {mode}] kind={attn_kind} tp={tp_size} gemm={gemm_type} "
         f"bs={batch_size} (sl swept internally) GPU={gpu_id}"
     )
 
@@ -1299,9 +1333,7 @@ def _parse_int_list(value: str) -> list[int]:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Collect DeepSeek-V4-Flash HCA/CSA attention-module latency on SGLang."
-    )
+    parser = argparse.ArgumentParser(description="Collect DeepSeek-V4 HCA/CSA attention-module latency on SGLang.")
     parser.add_argument("--model-path", default=CLI_DEFAULT_MODEL)
     parser.add_argument("--mode", choices=["context", "generation"], required=True)
     parser.add_argument(
@@ -1327,7 +1359,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=(
             f"Comma-separated TP sizes to sweep.  Default '{','.join(str(t) for t in _TP_SIZES)}'.  "
             "Each value runs the in-process TP simulation; FMLA always sees "
-            "h_q=64 (V4 zero-pads), so any TP power-of-2 in [1, 32] is valid."
+            "the native head count (V4 zero-pads), so any TP power-of-2 in [1, 32] is valid."
         ),
     )
     return parser
@@ -1377,7 +1409,7 @@ def main() -> None:
                     )
                 except Exception:
                     traceback.print_exc()
-                    print(f"[dsv4-flash] FAILED kind={kind} tp={tp_size} bs={bs}; continuing")
+                    print(f"[dsv4] FAILED kind={kind} tp={tp_size} bs={bs}; continuing")
 
 
 if __name__ == "__main__":

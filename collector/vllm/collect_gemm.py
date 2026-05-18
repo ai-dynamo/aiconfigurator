@@ -12,14 +12,12 @@ quantized-weight preparation, and backend-specific skips.
 __compat__ = "vllm>=0.14.0"
 
 import os
+from types import SimpleNamespace
 
 import torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    maybe_post_process_fp8_weight_block,
-)
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.version import __version__ as vllm_version
 
@@ -172,12 +170,10 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
                     if not hasattr(gemm, "weight_scale"):
                         gemm.weight_scale = gemm.weight_scale_inv
 
-                # Support both old (layer-only) and new (layer, cutlass_supported)
-                # signatures for maybe_post_process_fp8_weight_block.
-                try:
-                    maybe_post_process_fp8_weight_block(gemm)
-                except TypeError:
-                    maybe_post_process_fp8_weight_block(gemm, cutlass_block_fp8_supported=True)
+                quant_method = getattr(gemm, "quant_method", None)
+                if quant_method is None or not hasattr(quant_method, "process_weights_after_loading"):
+                    raise RuntimeError("Unable to post-process vLLM fp8_block linear weights")
+                quant_method.process_weights_after_loading(gemm)
 
                 # Dynamic activation scheme does not create input_scale;
                 # the forward path still reads it, so set it explicitly.
@@ -204,7 +200,14 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
 
         return gemm
 
-    exit_stack.enter_context(set_current_vllm_config(VllmConfig()))
+    vllm_config = VllmConfig()
+    if vllm_config.model_config is None:
+        vllm_config.model_config = SimpleNamespace(
+            dtype=dtype,
+            hf_text_config=SimpleNamespace(model_type=""),
+            model="collector_dummy",
+        )
+    exit_stack.enter_context(set_current_vllm_config(vllm_config))
 
     outside_loop_count = 1 if gemm_type in ("fp8_block", "nvfp4") else 6
     op_list = []

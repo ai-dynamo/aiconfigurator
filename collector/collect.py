@@ -12,6 +12,7 @@ modules own benchmark setup, while `model_cases.py` and YAML own case selection.
 import contextlib
 import functools
 import os
+import sys
 import warnings
 
 from helper import get_device_module, get_device_str
@@ -585,9 +586,7 @@ def worker(
                 # Flush logs again after warning
                 for handler in worker_logger.handlers:
                     handler.flush()
-                # Exiting with non-zero code will add an additional error to the summary,
-                # which we don't want (error already reported above).
-                exit(0)
+                sys.exit(EXIT_CODE_RESTART)
         finally:
             with lock:
                 progress_value.value += 1
@@ -832,10 +831,11 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 last_progress = progress_value.value
 
             # Check process health — only restart if there is still work
-            # remaining.  Workers that consumed a None sentinel or finished
-            # via sys.exit(EXIT_CODE_RESTART) should not be restarted once
-            # all tasks are dispatched, otherwise the new worker blocks
-            # forever on queue.get().
+            # remaining. Workers that consumed a None sentinel or requested
+            # restart via EXIT_CODE_RESTART (successful task cleanup or handled
+            # fatal CUDA error cleanup) should not be restarted once all tasks
+            # are dispatched, otherwise the new worker blocks forever on
+            # queue.get().
             for i, p in enumerate(processes):
                 if p is None:
                     continue
@@ -846,8 +846,8 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                     process_stats[i]["restarts"] += 1
                     if exit_code == EXIT_CODE_RESTART:
                         logger.debug(
-                            f"Process {i} completed task and exited normally for release gpu memory"
-                            f"(completed tasks: {process_stats[i]['restarts']})"
+                            f"Process {i} requested restart after task cleanup or handled fatal error "
+                            f"(restart count: {process_stats[i]['restarts']})"
                         )
                     else:
                         logger.warning(
@@ -1471,8 +1471,6 @@ def main():
                 f"model_path={args.model_path!r}, model_architecture={args.model_architecture!r}; "
                 "using base op cases only plus legacy model filtering."
             )
-        else:
-            logger_message = None
     else:
         os.environ.pop("COLLECTOR_MODEL_PATH", None)
 

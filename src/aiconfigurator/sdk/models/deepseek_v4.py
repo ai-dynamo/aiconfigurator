@@ -92,11 +92,11 @@ class DeepSeekV4Model(BaseModel):
 
         def _attention_ops(is_context: bool, scale_factor: float):
             ratio_counts = Counter(self._compress_ratios)
-            # DeepSeek-V4 Flash has a small number of pure SWA layers
-            # (compress_ratio=0). Approximate their module latency with HCA
-            # (compress_ratio=128) so the model reuses DeepSeek-V4 HCA perf data
-            # instead of requiring a dedicated SWA collector. KV cache capacity
-            # below still uses the real per-layer ratios.
+            # Some DeepSeek-V4 configs include pure SWA layers (compress_ratio=0).
+            # Approximate their module latency with HCA (compress_ratio=128) so
+            # the model reuses DeepSeek-V4 HCA perf data instead of requiring a
+            # dedicated SWA collector. KV cache capacity below still uses the
+            # real per-layer ratios.
             ratio_counts[128] += ratio_counts.pop(0, 0)
             op_cls = ops.ContextDeepSeekV4AttentionModule if is_context else ops.GenerationDeepSeekV4AttentionModule
             name = "context_attention" if is_context else "generation_attention"
@@ -105,6 +105,8 @@ class DeepSeekV4Model(BaseModel):
                     name,
                     count * scale_factor,
                     local_heads,
+                    self._num_heads,
+                    tp_size,
                     h,
                     deepseek_v4_cfg.q_lora_rank,
                     deepseek_v4_cfg.o_lora_rank,
@@ -119,7 +121,6 @@ class DeepSeekV4Model(BaseModel):
                     kvcache_quant_mode,
                     fmha_quant_mode,
                     gemm_quant_mode,
-                    architecture=self.architecture,
                 )
                 for ratio, count in ratio_counts.items()
                 if count > 0

@@ -111,7 +111,14 @@ def _build_mock_backend():
             isl=runtime_config.isl,
             osl=runtime_config.osl,
         )
-        return _make_summary(row, runtime_config)
+        summary = _make_summary(row, runtime_config)
+        if mode == "static_ctx":
+            summary.set_context_latency_dict({"context_attention": 1.0})
+            summary.set_context_source_dict({"context_attention": "silicon"})
+        elif mode == "static_gen":
+            summary.set_generation_latency_dict({"generation_attention": 2.0})
+            summary.set_generation_source_dict({"generation_attention": "empirical"})
+        return summary
 
     backend.run_static = _run_static
     return backend
@@ -200,6 +207,23 @@ class TestRequireSameTPFiltering:
             assert mismatched.empty, (
                 f"require_same_tp=True but found mismatched rows:\n{mismatched[['(p)tp', '(d)tp']]}"
             )
+
+    def test_run_disagg_carries_per_ops_source(self, disagg_session, runtime_config, model_config):
+        result = disagg_session.run_disagg(
+            model_path="test-model",
+            runtime_config=runtime_config,
+            prefill_model_config=model_config,
+            prefill_batch_size=1,
+            prefill_num_worker=1,
+            decode_model_config=model_config,
+            decode_batch_size=1,
+            decode_num_worker=1,
+        )
+
+        assert result.get_per_ops_source() == {
+            "prefill": {"context_attention": "silicon"},
+            "decode": {"generation_attention": "empirical"},
+        }
 
     def test_false_allows_mismatched_tp(self, disagg_session, runtime_config, model_config):
         """require_same_tp=False → results are non-empty (mismatched TP is fine)."""

@@ -346,7 +346,7 @@ def test_model_cases_path_can_infer_model_path():
 
     assert plan.model_path == "sgl-project/DeepSeek-V4-Flash-FP8"
     assert plan.model_architecture == "DeepseekV4ForCausalLM"
-    assert "dsv4_flash_csa_context_module" in plan.op_cases
+    assert "dsv4_csa_context_module" in plan.op_cases
     assert "mhc_module" in plan.op_cases
 
 
@@ -375,7 +375,7 @@ def test_full_mode_aggregates_all_model_case_files():
     assert plan.model_path is None
     assert len(plan.model_cases_paths) >= 18
     assert "wideep_mla_context" in plan.op_cases
-    assert "dsv4_flash_csa_context_module" in plan.op_cases
+    assert "dsv4_csa_context_module" in plan.op_cases
     assert "gdn" in plan.op_cases
 
 

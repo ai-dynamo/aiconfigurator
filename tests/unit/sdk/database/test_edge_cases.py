@@ -255,6 +255,7 @@ class TestGemmInterpolation:
 
         # Should return a reasonable interpolated value
         assert result > 0
+        assert result.source == "silicon"
 
         # Should be between surrounding values
         lower_bound = comprehensive_perf_db.query_gemm(
@@ -276,6 +277,7 @@ class TestGemmInterpolation:
 
         # Should return a reasonable value
         assert result > 0
+        assert result.source == "silicon"
 
         # For large sizes, should be larger than smaller sizes
         smaller = comprehensive_perf_db.query_gemm(

@@ -66,7 +66,6 @@ class BaseBackend(ABC):
                 beam_width=1,
                 s=effective_isl,
                 prefix=prefix,
-                model_name=getattr(model, "model_name", ""),
                 seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
             )
             context_latency_dict[op._name] += float(result)
@@ -108,7 +107,6 @@ class BaseBackend(ABC):
                     batch_size=batch_size,
                     beam_width=beam_width,
                     s=isl + i + 1,
-                    model_name=getattr(model, "model_name", ""),
                     gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
                 )
                 latency_dict[op._name] += float(result)
@@ -404,6 +402,14 @@ class BaseBackend(ABC):
         summary.set_generation_power_avg(generation_power_avg)
         summary.set_e2e_power_avg(e2e_power_avg)
         summary.set_memory_and_check_oom(memory, database.system_spec["gpu"]["mem_capacity"])
+        # KV-per-seq context for capacity probing in CLI detail reports.
+        try:
+            kv_seq_len_used = isl + beam_width * osl
+            kv_bytes_per_seq = model.get_kvcache_bytes_per_sequence(kv_seq_len_used)
+            summary.set_kv_per_seq(kv_bytes_per_seq, kv_seq_len_used)
+        except Exception:
+            # Best-effort; downstream report degrades gracefully when unset.
+            pass
         summary.set_summary_df(summary_df)
 
         return summary
