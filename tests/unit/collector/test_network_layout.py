@@ -42,3 +42,10 @@ def test_slurm_network_docs_use_new_folder_name():
 
     for path in docs:
         assert "slurm_comm_collector" not in path.read_text(encoding="utf-8")
+
+
+def test_nccl_collector_uses_num_gpus_as_gpu_count():
+    source = (NETWORK_ROOT / "collect_nccl.py").read_text(encoding="utf-8")
+
+    assert '"-g",' in source
+    assert '"-t",\n            str(num_gpus),' not in source

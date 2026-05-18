@@ -64,7 +64,7 @@ def nccl_benchmark(
             str(size),
             "-e",
             str(size),
-            "-t",
+            "-g",
             str(num_gpus),
             "-d",
             dtype,
