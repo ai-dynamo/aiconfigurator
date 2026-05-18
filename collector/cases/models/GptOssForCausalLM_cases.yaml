@@ -18,11 +18,27 @@ model_case_values:
       inter_size: 2880
       topk: 4
       num_experts: 128
+      framework_quantization:
+        vllm:
+          allowed_modes:
+            - w4a16_mxfp4
+          module_config:
+            w4a16_mxfp4:
+              has_bias: true
+              activation: swigluoai
     - model_path: openai/gpt-oss-20b
       hidden_size: 2880
       inter_size: 2880
       topk: 4
       num_experts: 32
+      framework_quantization:
+        vllm:
+          allowed_modes:
+            - w4a16_mxfp4
+          module_config:
+            w4a16_mxfp4:
+              has_bias: true
+              activation: swigluoai
 
 all_frameworks_op_cases:
   moe:

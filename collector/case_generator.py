@@ -474,6 +474,7 @@ class MoeQuantizationSpec:
     min_sm: Optional[int]
     min_sm_exclusive: Optional[int]
     requires_runtime_feature: Optional[str]
+    requires_model_quantization_config: bool
     allowed_model_paths: tuple[str, ...]
     module_config: dict[str, object]
 
@@ -526,6 +527,7 @@ def get_moe_quantization_specs(backend: str) -> list[MoeQuantizationSpec]:
                     if raw_mode.get("requires_runtime_feature") is None
                     else str(raw_mode["requires_runtime_feature"])
                 ),
+                requires_model_quantization_config=bool(raw_mode.get("requires_model_quantization_config", False)),
                 allowed_model_paths=tuple(
                     _as_str_list(
                         raw_mode.get("allowed_model_paths", []),
@@ -560,8 +562,52 @@ def get_moe_quantization_modes(
     return modes
 
 
-def get_moe_quantization_module_config(backend: str, moe_type: str) -> dict[str, object]:
+def _model_moe_backend_quantization(model_name: str, backend: str) -> dict[str, object]:
+    for model_case in _model_case_values("moe", apply_model_filter=False):
+        if model_case.get("model_path") != model_name:
+            continue
+        framework_quantization = model_case.get("framework_quantization", {})
+        if not isinstance(framework_quantization, dict):
+            raise TypeError("model_case_values.moe.framework_quantization must be a mapping")
+        backend_quantization = framework_quantization.get(backend, {})
+        if backend_quantization is None:
+            return {}
+        if not isinstance(backend_quantization, dict):
+            raise TypeError(f"model_case_values.moe.framework_quantization.{backend} must be a mapping")
+        return dict(backend_quantization)
+    return {}
+
+
+def _model_quantization_modes(
+    model_quantization: dict[str, object],
+    field_name: str,
+) -> list[str] | None:
+    modes = model_quantization.get(field_name)
+    if modes is None:
+        return None
+    return _as_str_list(modes, field_name=f"model_case_values.moe.framework_quantization.{field_name}")
+
+
+def get_moe_quantization_module_config(
+    backend: str,
+    moe_type: str,
+    *,
+    model_name: str | None = None,
+) -> dict[str, object]:
     """Return optional framework module config for a MoE quantization mode."""
+
+    if model_name is not None:
+        model_quantization = _model_moe_backend_quantization(model_name, backend)
+        module_config = model_quantization.get("module_config", {})
+        if not isinstance(module_config, dict):
+            raise TypeError("model_case_values.moe.framework_quantization.module_config must be a mapping")
+        mode_config = module_config.get(moe_type, {})
+        if mode_config is None:
+            return {}
+        if not isinstance(mode_config, dict):
+            raise TypeError(f"model_case_values.moe.framework_quantization.module_config.{moe_type} must be a mapping")
+        if mode_config:
+            return dict(mode_config)
 
     for spec in get_moe_quantization_specs(backend):
         if spec.name == moe_type:
@@ -572,9 +618,22 @@ def get_moe_quantization_module_config(backend: str, moe_type: str) -> dict[str,
 def moe_model_allows_quantization(backend: str, model_name: str, moe_type: str) -> bool:
     """Return whether backend YAML allows a MoE quantization mode for a model."""
 
+    model_quantization = _model_moe_backend_quantization(model_name, backend)
     for spec in get_moe_quantization_specs(backend):
-        if spec.name == moe_type and spec.allowed_model_paths and model_name not in spec.allowed_model_paths:
+        if spec.name != moe_type:
+            continue
+        if spec.allowed_model_paths and model_name not in spec.allowed_model_paths:
             return False
+        if spec.requires_model_quantization_config and not model_quantization:
+            return False
+        break
+
+    allowed_modes = _model_quantization_modes(model_quantization, "allowed_modes")
+    if allowed_modes is not None and moe_type not in allowed_modes:
+        return False
+    excluded_modes = _model_quantization_modes(model_quantization, "excluded_modes")
+    if excluded_modes is not None and moe_type in excluded_modes:
+        return False
 
     values = _moe_backend_values(backend)
     raw_policies = values.get("model_quantization_policies", [])

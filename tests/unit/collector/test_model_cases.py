@@ -158,10 +158,11 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
     assert not moe_model_allows_quantization("vllm", "openai/gpt-oss-20b", "bfloat16")
     assert not moe_model_allows_quantization("vllm", "Qwen/Qwen3-235B-A22B", "w4a16_mxfp4")
     assert moe_model_allows_quantization("vllm", "Qwen/Qwen3-235B-A22B", "bfloat16")
-    assert get_moe_quantization_module_config("vllm", "w4a16_mxfp4") == {
+    assert get_moe_quantization_module_config("vllm", "w4a16_mxfp4", model_name="openai/gpt-oss-20b") == {
         "has_bias": True,
         "activation": "swigluoai",
     }
+    assert get_moe_quantization_module_config("vllm", "w4a16_mxfp4", model_name="Qwen/Qwen3-235B-A22B") == {}
 
     assert moe_shape_satisfies_constraints(
         "vllm",

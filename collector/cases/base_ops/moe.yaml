@@ -88,18 +88,7 @@ common_case_values:
       requires_runtime_feature: nvfp4
     - name: w4a16_mxfp4
       requires_runtime_feature: mxfp4
-      allowed_model_paths:
-      - openai/gpt-oss-20b
-      - openai/gpt-oss-120b
-      module_config:
-        has_bias: true
-        activation: swigluoai
-    model_quantization_policies:
-    - model_paths:
-      - openai/gpt-oss-20b
-      - openai/gpt-oss-120b
-      allowed_modes:
-      - w4a16_mxfp4
+      requires_model_quantization_config: true
     shape_constraints:
     - mode: fp8_block
       divisible_by:

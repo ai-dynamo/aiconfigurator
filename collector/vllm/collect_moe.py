@@ -254,7 +254,7 @@ def run_moe_torch(
             raise ImportError("MXFP4 MoE requires vllm >= 0.17.0 with Mxfp4Config support.")
 
         mxfp4_quant_config = Mxfp4Config()
-        mxfp4_module_config = get_moe_quantization_module_config("vllm", moe_type)
+        mxfp4_module_config = get_moe_quantization_module_config("vllm", moe_type, model_name=model_name)
 
         # pcp_size=1: vLLM 0.17.0 added prefill context parallel to FusedMoE
         # (vllm-project/vllm#32344); without it, __init__ calls get_pcp_group()
