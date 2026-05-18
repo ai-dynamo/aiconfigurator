@@ -144,7 +144,8 @@ def benchmark_trtllm_allreduce(
 
     # Parse test range
     min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
-    torch_dtype = tllm._utils.str_dtype_to_torch(dtype)
+    trtllm_dtype = "float16" if dtype == "half" else dtype
+    torch_dtype = tllm._utils.str_dtype_to_torch(trtllm_dtype)
 
     # AllReduce parameters
     all_reduce_params = trtllm_mods["TorchAllReduceParams"](
