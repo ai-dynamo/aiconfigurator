@@ -540,7 +540,7 @@ def _parse_hf_config_json(config: dict) -> dict:
     d = config.get("head_dim") or config.get("attention_head_dim") or (hidden_size // n if n > 0 else 0)
 
     # MoE parameters
-    topk = config.get("num_experts_per_tok", 0)
+    topk = config.get("num_experts_per_tok") or config.get("top_k_experts") or 0
     num_experts = config.get("num_local_experts") or config.get("n_routed_experts") or config.get("num_experts", 0)
     moe_inter_size = config.get("moe_intermediate_size", 0) or config.get("intermediate_size", 0)
 
@@ -687,6 +687,35 @@ def _parse_hf_config_json(config: dict) -> dict:
     elif architecture in {"Qwen3ForCausalLM", "Qwen3MoeForCausalLM", "MiniMaxM2ForCausalLM"}:
         # Qwen3-family and MiniMax-M2 attention include per-layer Q/K normalization.
         extra_params = {"architecture": architecture, "use_qk_norm": True}
+    elif architecture == "Gemma4ForConditionalGeneration":
+        # Gemma 4 hybrid attention + dense-MLP-plus-MoE FFN. Layer kind per `layer_types`.
+        # Q/K/V head_dim and KV-head count differ between SWA and global layers; global
+        # layers may set attention_k_eq_v (no v_proj, V reuses K projection output).
+        layer_types_raw = config.get("layer_types", [])
+        if len(layer_types_raw) != layers:
+            raise ValueError(
+                f"Gemma 4 layer_types length {len(layer_types_raw)} != num_hidden_layers {layers}"
+            )
+        if any(lt not in ("sliding_attention", "full_attention") for lt in layer_types_raw):
+            raise ValueError(
+                "Gemma 4 layer_types must contain only 'sliding_attention' or 'full_attention'"
+            )
+        extra_params = common.Gemma4MoEConfig(
+            layer_types=tuple(layer_types_raw),
+            swa_num_kv_heads=config["num_key_value_heads"],
+            swa_head_dim=config["head_dim"],
+            global_num_kv_heads=config["num_global_key_value_heads"],
+            global_head_dim=config["global_head_dim"],
+            sliding_window_size=config.get("sliding_window", 0),
+            attention_k_eq_v=bool(config.get("attention_k_eq_v", False)),
+        )
+        logger.info(
+            f"Gemma 4 config: "
+            f"swa_layers={extra_params.layer_types.count('sliding_attention')}, "
+            f"global_layers={extra_params.layer_types.count('full_attention')}, "
+            f"num_experts={num_experts}, top_k={topk}, "
+            f"sw={extra_params.sliding_window_size}, k_eq_v_global={extra_params.attention_k_eq_v}"
+        )
     elif architecture in {"Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"}:
         # Qwen3.5 hybrid GDN + full-attention model.
         layer_types_raw = config.get("layer_types", [])
