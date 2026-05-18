@@ -659,6 +659,43 @@ class TestQuantizationModes:
         assert "bfloat16" in mode_names
         assert "fp8" in mode_names
 
+    @pytest.mark.parametrize(
+        "hf_id,backend_name",
+        [
+            ("deepseek-ai/DeepSeek-V3", "trtllm"),
+            ("deepseek-ai/DeepSeek-V3", "sglang"),
+            ("nvidia/Kimi-K2.5-NVFP4", "trtllm"),
+            ("nvidia/Kimi-K2.5-NVFP4", "sglang"),
+        ],
+    )
+    def test_deepseek_v3_and_kimi_keep_fp8_fmha_for_supported_backends(self, hf_id, backend_name):
+        model_info = get_model_config_from_model_path(hf_id)
+        model_config = config.ModelConfig()
+
+        models._apply_model_quant_defaults(
+            model_config,
+            model_info["raw_config"],
+            model_info["architecture"],
+            backend_name,
+        )
+
+        assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+        assert model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
+
+    def test_vllm_still_uses_bfloat16_fmha_tables_for_quantized_models(self):
+        model_info = get_model_config_from_model_path("deepseek-ai/DeepSeek-V3")
+        model_config = config.ModelConfig()
+
+        models._apply_model_quant_defaults(
+            model_config,
+            model_info["raw_config"],
+            model_info["architecture"],
+            "vllm",
+        )
+
+        assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+        assert model_config.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+
 
 class TestMOEModelFP8BlockQuantizationValidation:
     """Test MOEModel._validate_fp8_block_quantized_moe_config() method."""
