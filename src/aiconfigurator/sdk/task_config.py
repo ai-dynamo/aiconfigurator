@@ -346,7 +346,6 @@ class TaskConfig:
     decode_backend_name: str = "trtllm"
     decode_backend_version: str | None = None
     decode_enable_wideep: bool = False
-    decode_enable_chunked_prefill: bool = False
     decode_enable_eplb: bool = False
     decode_quant_preset: str | None = None
     decode_gemm_quant_mode: common.GEMMQuantMode | None = None
