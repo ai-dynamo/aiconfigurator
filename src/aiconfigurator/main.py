@@ -6,6 +6,7 @@ import logging
 import sys
 
 from aiconfigurator import __version__
+from aiconfigurator.agent import get_agent_text, list_agent_refs, list_agent_skills
 from aiconfigurator.cli.main import configure_parser as configure_cli_parser
 from aiconfigurator.cli.main import main as cli_main
 from aiconfigurator.generator.api import generator_cli_helper
@@ -54,6 +55,41 @@ def _show_version(extra_args: list[str]) -> None:
     print(f"aiconfigurator {__version__}")
 
 
+def _run_agent(extra_args: list[str]) -> None:
+    agent_parser = argparse.ArgumentParser(description="Print bundled AIConfigurator agent guidance.")
+    agent_parser.add_argument(
+        "skill",
+        nargs="?",
+        choices=list_agent_skills(),
+        default="usage",
+        help="Agent skill to print. Defaults to usage.",
+    )
+    agent_parser.add_argument(
+        "--ref",
+        dest="reference",
+        default=None,
+        help="Print one progressive reference for the selected skill.",
+    )
+    agent_parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List bundled skills and references.",
+    )
+    agent_args = agent_parser.parse_args(extra_args)
+
+    if agent_args.list:
+        for skill in list_agent_skills():
+            refs = ", ".join(list_agent_refs(skill)) or "<none>"
+            print(f"{skill}: {refs}")
+        return
+
+    try:
+        text = get_agent_text(agent_args.skill, agent_args.reference)
+    except ValueError as exc:
+        agent_parser.error(str(exc))
+    print(text, end="" if text.endswith("\n") else "\n")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="AIConfigurator for disaggregated serving deployment.")
     subparsers = parser.add_subparsers(dest="command", help="Command to run", required=True)
@@ -72,6 +108,10 @@ def main(argv: list[str] | None = None) -> None:
     # Version subcommand
     version_parser = subparsers.add_parser("version", help="Show version information", add_help=False)
     version_parser.set_defaults(handler=_show_version)
+
+    # Agent guidance subcommand
+    agent_parser = subparsers.add_parser("agent", help="Print bundled agent skill guidance", add_help=False)
+    agent_parser.set_defaults(handler=_run_agent)
 
     args, extras = parser.parse_known_args(argv)
 
