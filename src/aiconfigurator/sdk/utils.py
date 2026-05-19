@@ -540,7 +540,13 @@ def _parse_hf_config_json(config: dict) -> dict:
     d = config.get("head_dim") or config.get("attention_head_dim") or (hidden_size // n if n > 0 else 0)
 
     # MoE parameters
-    topk = config.get("num_experts_per_tok") or config.get("top_k_experts") or 0
+    # Explicit None checks so an explicit `num_experts_per_tok: 0` (dense model)
+    # is preserved instead of falling through to the `top_k_experts` fallback.
+    topk = config.get("num_experts_per_tok")
+    if topk is None:
+        topk = config.get("top_k_experts")
+    if topk is None:
+        topk = 0
     num_experts = config.get("num_local_experts") or config.get("n_routed_experts") or config.get("num_experts", 0)
     moe_inter_size = config.get("moe_intermediate_size", 0) or config.get("intermediate_size", 0)
 
