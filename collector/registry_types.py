@@ -26,6 +26,7 @@ class PerfFile(str, Enum):
     GEMM = "gemm_perf.txt"
     CONTEXT_ATTENTION = "context_attention_perf.txt"
     GENERATION_ATTENTION = "generation_attention_perf.txt"
+    ENCODER_ATTENTION = "encoder_attention_perf.txt"
     MOE = "moe_perf.txt"
     CONTEXT_MLA = "context_mla_perf.txt"
     GENERATION_MLA = "generation_mla_perf.txt"

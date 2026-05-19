@@ -963,6 +963,65 @@ class ContextAttention(Operation):
         return self._weights * self._scale_factor
 
 
+class EncoderAttention(Operation):
+    """
+    Non-causal encoder attention: full N^2, MHA, no KV cache, optional partial RoPE.
+
+    Used to model bidirectional encoders — ViT (vision), audio encoders, and any
+    other omni-modal encoder where the kernel runs full N^2 attention without a
+    causal mask and without writing a KV cache. The optional
+    ``partial_rotary_factor`` accounts for partial-rotation RoPE variants such as
+    Qwen3-VL (factor=0.5, rotating half of head_dim). Set to 0.0 to disable RoPE.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        num_heads: int,
+        head_size: int,
+        fmha_quant_mode: common.FMHAQuantMode = common.FMHAQuantMode.bfloat16,
+        partial_rotary_factor: float = 1.0,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._n = num_heads
+        self._head_size = head_size
+        self._fmha_quant_mode = fmha_quant_mode
+        self._partial_rotary_factor = partial_rotary_factor
+        self._weights = 0.0
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """Query encoder attention latency with energy data."""
+        batch_size = kwargs.get("batch_size")
+        seq_len = kwargs.get("s")
+
+        result = database.query_encoder_attention(
+            batch_size,
+            seq_len,
+            self._n,
+            self._head_size,
+            self._fmha_quant_mode,
+        )
+
+        # Partial RoPE: factor=1.0 -> full rotation (full Q+K read/write),
+        # factor=0.5 -> half head_dim rotated (Qwen3-VL), factor=0.0 -> no RoPE.
+        if self._partial_rotary_factor > 0:
+            qk_num = self._n * self._head_size
+            apply_rope_latency = (
+                self._partial_rotary_factor * 2 * database.query_mem_op(qk_num * 2 + qk_num * 2)
+            )
+            result += apply_rope_latency * 1.1  # correction factor
+
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
 class GenerationAttention(Operation):
     """
     Generation attention operation.
