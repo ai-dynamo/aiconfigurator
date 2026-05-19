@@ -60,8 +60,12 @@ _MOE_MODEL_CONFIGS: list[list] = [
     [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B"],  # qwen3-moe, 30b-a3b
     [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B"],  # qwen3-moe, 235b-a22b
     [6144, 2560, 8, 160, "Qwen/Qwen3-Coder-480B-A35B-Instruct"],  # qwen3-moe, 480b-a35b
+    [2048, 512, 8, 256, "Qwen/Qwen3.5-35B-A3B"],  # qwen3.5-moe, 35b-a3b
+    [4096, 1024, 10, 512, "Qwen/Qwen3.5-397B-A17B"],  # qwen3.5-moe, 397b-a17b
     [7168, 2048, 8, 384, "moonshotai/Kimi-K2-Instruct"],  # kimi k2
     [7168, 2048, 8, 384, "nvidia/Kimi-K2.5-NVFP4"],  # kimi k2.5 nvfp4 (same shape, separate collection for fp4 kernels)
+    [5120, 8192, 1, 128, "meta-llama/Llama-4-Maverick-17B-128E-Instruct"],  # llama 4 maverick
+    [5120, 8192, 1, 16, "meta-llama/Llama-4-Scout-17B-16E-Instruct"],  # llama 4 scout
     [3072, 1536, 8, 256, "MiniMaxAI/MiniMax-M2.5"],  # minimax m2.5 (also covers nvidia/MiniMax-M2.5-NVFP4)
     [2880, 2880, 4, 128, "openai/gpt-oss-120b"],
     [2880, 2880, 4, 32, "openai/gpt-oss-20b"],
@@ -73,7 +77,6 @@ _MOE_MODEL_CONFIGS: list[list] = [
         512,
         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
     ],  # nemotron-3 super (uses relu2, non-gated)
-    [4096, 1024, 10, 512, "Qwen/Qwen3.5-397B-A17B"],  # qwen3.5-moe, 397b-a17b
 ]
 
 # MLA: [num_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, model_name]
