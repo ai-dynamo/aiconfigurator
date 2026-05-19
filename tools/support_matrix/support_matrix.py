@@ -13,6 +13,7 @@ import csv
 import json
 import logging
 import os
+import re
 import traceback
 from concurrent.futures import BrokenExecutor, ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -67,6 +68,18 @@ _FRONTIER_ENVELOPE_COLUMNS = {
 _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
+_DETERMINISTIC_UNSUPPORTED_ERROR_PATTERNS = (
+    re.compile(r"(?:ValueError|UnsupportedWideepConfigError): Unsupported .+ quant mode '.+'"),
+    re.compile(r"uses native FP4 routed-expert weights and is not supported on Hopper systems"),
+    re.compile(r"Invalid quantized MoE configuration: .*weight_block_size=\d+ != 0"),
+    re.compile(
+        r"This combination of model, system, backend, and backend version is not supported by AIC in SILICON mode"
+    ),
+    re.compile(r"Missing silicon data for the requested lookup"),
+    re.compile(r"data not loaded for system="),
+    re.compile(r"No results found: the model does not fit in GPU memory for any parallel configuration"),
+    re.compile(r"non-wideep SGLang to support TP>1 and DP>1 for attn simultaneously"),
+)
 
 
 def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[str, str, str, str]:
@@ -233,6 +246,21 @@ def _format_exception_for_csv(error_message: str | None) -> str | None:
         return None
     cwd = os.getcwd() + os.sep
     return error_message.replace(cwd, "").replace("\n", "\\n")
+
+
+def _last_error_line(error_message: str) -> str:
+    for line in reversed(error_message.splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return error_message.strip()
+
+
+def _deterministic_unsupported_reason(error_message: str) -> str | None:
+    normalized = error_message.replace("\\n", "\n")
+    if not any(pattern.search(normalized) for pattern in _DETERMINISTIC_UNSUPPORTED_ERROR_PATTERNS):
+        return None
+    return f"Deterministic unsupported configuration: {_last_error_line(normalized)}"
 
 
 def _shorten_error(error_message: str, max_chars: int = 600) -> str:
@@ -664,8 +692,14 @@ class SupportMatrix:
                     mode,
                     str(e),
                 )
-                statuses[mode] = STATUS_FAIL
-                error_messages[mode] = traceback.format_exc()
+                traceback_text = traceback.format_exc()
+                deterministic_reason = _deterministic_unsupported_reason(traceback_text)
+                if deterministic_reason is not None:
+                    statuses[mode] = STATUS_HW_INCOMPATIBLE
+                    error_messages[mode] = deterministic_reason
+                else:
+                    statuses[mode] = STATUS_FAIL
+                    error_messages[mode] = traceback_text
             finally:
                 error_messages[mode] = _format_exception_for_csv(error_messages.get(mode))
                 perf_database.clear_database_runtime_caches(system, backend, version)
