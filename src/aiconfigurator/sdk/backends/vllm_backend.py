@@ -284,15 +284,56 @@ class VLLMBackend(BaseBackend):
 
             # Calculate timing (unchanged)
             ttft = mix_step_latency_ms * np.ceil(isl / ctx_tokens)
-            # correction for ttft in trtllm agg mode, assume we have requests 10x of concurrency
-            # (batch size here) to mitigate the impact of first round latency
-            # assume we need to increase x of requests when concurrency gets larger.
-            # thus capped to 4 to make it reasonable.
-            correction_factor = min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)
-            ttft *= correction_factor
+
+            # Queue-aware waiting model for TTFT.
+            # Baseline 0.5-step waiting (uniform arrivals in current step), plus a dynamic
+            # queue term based on prefill utilization (Kingman approximation).
+            ttft_wait_base_steps = kwargs.get("ttft_wait_base_steps", 0.5)
+            # assume G/G/1
+            ttft_arrival_cv2 = kwargs.get("ttft_arrival_cv2", 1.0)
+            ttft_service_cv2 = kwargs.get("ttft_service_cv2", 0.0)
+            ttft_wait_max_queue_steps = kwargs.get("ttft_wait_max_queue_steps", 3.0)
+            ttft_wait_queue_scale = kwargs.get("ttft_wait_queue_scale", 1.0)
+
+            queue_wait_steps = 0.0
+            prefill_util = 0.0
+            total_sched_latency_ms = num_mix_steps * mix_step_latency_ms + num_genonly_steps * genonly_step_latency_ms
+            if total_sched_latency_ms > 0 and mix_step_latency_ms > 0 and isl > 0:
+                # Arrival rate is derived from predicted steady-state request completion rate.
+                request_rate_est = 1000.0 * b / total_sched_latency_ms
+
+                prefill_units_per_mix_step = ctx_tokens / isl
+
+                prefill_service_time_ms = mix_step_latency_ms / prefill_units_per_mix_step
+                prefill_service_rate = 1000.0 / prefill_service_time_ms if prefill_service_time_ms > 0 else 0.0
+
+                # 3. Queue-aware waiting model
+                if prefill_service_rate > 0:
+                    prefill_util = request_rate_est / prefill_service_rate
+                    if prefill_util < 1.0:
+                        kingman_wait_ms = (
+                            (prefill_util / (1.0 - prefill_util))
+                            * (ttft_arrival_cv2 + ttft_service_cv2)
+                            / 2.0
+                            * prefill_service_time_ms
+                        )
+                        queue_wait_steps = ttft_wait_queue_scale * (kingman_wait_ms / mix_step_latency_ms)
+                    else:
+                        # Saturation guard: if utilization is >= 1, queue delay can explode.
+                        queue_wait_steps = ttft_wait_max_queue_steps
+
+            # TODO empirical correction:
+            # When request rate is high and queue wait steps is less than 1, we round it up to 1 step
+            # Refined: If the system is busy (high rate), we assume at least 1 step of waiting
+            if request_rate_est > 1:
+                queue_wait_steps = max(queue_wait_steps, 1.0)
+            ttft_wait_steps = ttft_wait_base_steps + queue_wait_steps
+            ttft *= 1.0 + ttft_wait_steps
+
             logger.debug(
                 f"ttft correction factor: {2 + (steps_to_finish_ctx - 3) / 2 / 10} capped to "
-                f"{correction_factor} when b: {b}, ctx_tokens: {ctx_tokens} isl {isl}"
+                f"ttft wait modeling: base_steps={ttft_wait_base_steps}, queue_steps={queue_wait_steps}, "
+                f"total_wait_steps={ttft_wait_steps}, prefill_util={prefill_util}"
             )
 
             tpot = (mix_step_latency_ms * num_mix_steps_for_tpot_calc + genonly_step_latency_ms * num_genonly_steps) / (
