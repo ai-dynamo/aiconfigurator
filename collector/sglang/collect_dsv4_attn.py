@@ -80,6 +80,10 @@ try:
     from collector.case_generator import (
         _dsv4_module_filter_pairs as _filter_pairs,
     )
+    from collector.case_generator import get_dsv4_csa_context_test_cases as _get_dsv4_csa_context_test_cases_impl
+    from collector.case_generator import get_dsv4_csa_generation_test_cases as _get_dsv4_csa_generation_test_cases_impl
+    from collector.case_generator import get_dsv4_hca_context_test_cases as _get_dsv4_hca_context_test_cases_impl
+    from collector.case_generator import get_dsv4_hca_generation_test_cases as _get_dsv4_hca_generation_test_cases_impl
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from case_generator import (
@@ -97,6 +101,10 @@ except ModuleNotFoundError:
     from case_generator import (
         _dsv4_module_filter_pairs as _filter_pairs,
     )
+    from case_generator import get_dsv4_csa_context_test_cases as _get_dsv4_csa_context_test_cases_impl
+    from case_generator import get_dsv4_csa_generation_test_cases as _get_dsv4_csa_generation_test_cases_impl
+    from case_generator import get_dsv4_hca_context_test_cases as _get_dsv4_hca_context_test_cases_impl
+    from case_generator import get_dsv4_hca_generation_test_cases as _get_dsv4_hca_generation_test_cases_impl
 
 
 def _expand_grid():
@@ -105,27 +113,19 @@ def _expand_grid():
 
 
 def get_dsv4_csa_context_test_cases():
-    from collector.case_generator import get_dsv4_csa_context_test_cases as _impl
-
-    return _impl()
+    return _get_dsv4_csa_context_test_cases_impl()
 
 
 def get_dsv4_csa_generation_test_cases():
-    from collector.case_generator import get_dsv4_csa_generation_test_cases as _impl
-
-    return _impl()
+    return _get_dsv4_csa_generation_test_cases_impl()
 
 
 def get_dsv4_hca_context_test_cases():
-    from collector.case_generator import get_dsv4_hca_context_test_cases as _impl
-
-    return _impl()
+    return _get_dsv4_hca_context_test_cases_impl()
 
 
 def get_dsv4_hca_generation_test_cases():
-    from collector.case_generator import get_dsv4_hca_generation_test_cases as _impl
-
-    return _impl()
+    return _get_dsv4_hca_generation_test_cases_impl()
 
 
 get_dsv4_flash_csa_context_test_cases = get_dsv4_csa_context_test_cases

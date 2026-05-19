@@ -9,6 +9,7 @@ rank-local model runner construction, DeepEP buffer sizing, warmup/measurement,
 and perf-row aggregation for WideEP MoE cases.
 """
 
+import functools
 import json
 import logging
 import os
@@ -39,10 +40,10 @@ if COLLECTOR_ROOT not in sys.path:
     sys.path.append(COLLECTOR_ROOT)
 
 try:
-    from helper import _get_moe_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
+    from helper import _resolve_local_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
 except ModuleNotFoundError:
     sys.path.append(COLLECTOR_ROOT)
-    from helper import _get_moe_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
+    from helper import _resolve_local_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
 from importlib.metadata import version as get_version
 from math import ceil as _ceil
 
@@ -74,7 +75,30 @@ def _make_scale_tensor(num_tokens: int, hidden_size: int, device) -> torch.Tenso
     return torch.ones(num_tokens, scale_dim, device=device, dtype=torch.float32)
 
 
-MOE_MODEL_PATH = _get_moe_model_path()
+def _selected_moe_model_id() -> str:
+    # collect.py sets COLLECTOR_MODEL_PATH from --model-path / case_plan.model_path.
+    return (
+        os.environ.get("COLLECTOR_MODEL_PATH")
+        or os.environ.get("MOE_MODEL_PATH")
+        or os.environ.get("DEEPSEEK_MODEL_PATH")
+        or "deepseek-ai/DeepSeek-V3"
+    )
+
+
+@functools.cache
+def _resolve_moe_model_path(model_id: str) -> str:
+    return _resolve_local_model_path(model_id)
+
+
+def _get_moe_model_path() -> str:
+    """Resolve MoE model path lazily so that ``collect.py``'s registry import
+    of this module does not trigger tempdir / JSON I/O on every invocation.
+
+    Cached per model id for the lifetime of the process; subprocess workers each get a
+    fresh interpreter and re-resolve on first call (which converges on the
+    same deterministic tempdir built by ``helper._resolve_local_model_path``).
+    """
+    return _resolve_moe_model_path(_selected_moe_model_id())
 
 
 def get_moe_prefill_test_cases(rank):
@@ -981,7 +1005,7 @@ def run_moe_benchmark(num_experts, gpu_id, output_path=None):
 
     server_port = 30000 + gpu_id * 100
     server_args = ServerArgs(
-        model_path=MOE_MODEL_PATH,
+        model_path=_get_moe_model_path(),
         dtype="auto",
         device="cuda",
         load_format="dummy",
@@ -1090,7 +1114,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-path", default=None, help="Output directory for perf files")
     args = parser.parse_args()
 
-    print(f"Model path: {MOE_MODEL_PATH}")
+    print(f"Model path: {_get_moe_model_path()}")
 
     # Run all MOE test cases
     for test_case in get_wideep_moe_test_cases():

@@ -16,7 +16,6 @@ def _mock_helper_imports(monkeypatch):
     fake_helper.get_sm_version = lambda: 90  # default Hopper
     fake_helper.log_perf = lambda **kw: None
     fake_helper.benchmark_with_power = lambda **kw: None
-    fake_helper._get_deepseek_model_path = lambda: "/fake"
     monkeypatch.setitem(__import__("sys").modules, "helper", fake_helper)
 
     fake_torch = types.ModuleType("torch")

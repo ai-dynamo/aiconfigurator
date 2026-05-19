@@ -377,6 +377,17 @@ def _is_cuda_fatal_exception(exc, torch_mod) -> bool:
     accelerator_error = getattr(torch_mod, "AcceleratorError", ())
     is_cuda_fatal = isinstance(exc, accelerator_error) if accelerator_error else False
     if not is_cuda_fatal:
+        error_text = str(exc).lower()
+        fatal_markers = (
+            "illegal memory access",
+            "unspecified launch failure",
+            "cuda_error_launch_failed",
+            "cublas_status_execution_failed",
+            "cublas_status_internal_error",
+            "cublas_status_alloc_failed",
+        )
+        is_cuda_fatal = any(marker in error_text for marker in fatal_markers)
+    if not is_cuda_fatal:
         # DSLCudaRuntimeError from CUTLASS DSL also corrupts CUDA context but
         # is not a torch.AcceleratorError subclass.
         is_cuda_fatal = type(exc).__name__ == "DSLCudaRuntimeError"

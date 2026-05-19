@@ -190,6 +190,44 @@ def _expected_failure_context():
     }
 
 
+class TestCudaFatalExceptionDetection:
+    def test_torch_accelerator_error_is_fatal(self):
+        torch_mod = MagicMock()
+        torch_mod.AcceleratorError = type("AcceleratorError", (Exception,), {})
+
+        assert _collect_mod._is_cuda_fatal_exception(torch_mod.AcceleratorError("boom"), torch_mod)
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "CUDA error: an illegal memory access was encountered",
+            "cuda error: unspecified launch failure",
+            "CUDA_ERROR_LAUNCH_FAILED",
+            "CUBLAS_STATUS_EXECUTION_FAILED",
+            "CUBLAS_STATUS_INTERNAL_ERROR",
+            "CUBLAS_STATUS_ALLOC_FAILED",
+        ],
+    )
+    def test_cuda_fatal_markers_are_fatal(self, message):
+        torch_mod = MagicMock()
+        torch_mod.AcceleratorError = type("AcceleratorError", (Exception,), {})
+
+        assert _collect_mod._is_cuda_fatal_exception(RuntimeError(message), torch_mod)
+
+    def test_dsl_cuda_runtime_error_is_fatal(self):
+        torch_mod = MagicMock()
+        torch_mod.AcceleratorError = type("AcceleratorError", (Exception,), {})
+        exc_cls = type("DSLCudaRuntimeError", (RuntimeError,), {})
+
+        assert _collect_mod._is_cuda_fatal_exception(exc_cls("context corrupted"), torch_mod)
+
+    def test_non_cuda_exception_is_not_fatal(self):
+        torch_mod = MagicMock()
+        torch_mod.AcceleratorError = type("AcceleratorError", (Exception,), {})
+
+        assert not _collect_mod._is_cuda_fatal_exception(ValueError("plain failure"), torch_mod)
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
