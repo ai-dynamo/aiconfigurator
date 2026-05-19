@@ -3,6 +3,7 @@
 
 import csv
 import functools
+import hashlib
 import heapq
 import json
 import logging
@@ -441,6 +442,16 @@ def setup_signal_handlers(worker_id):
 # Global tracking
 _LOGGING_CONFIGURED = False
 _LOG_DIR = None
+_MAX_LOG_DIR_LABEL_LENGTH = 120
+
+
+def _collector_log_dir_name(scope, time_stamp):
+    scope_label = "+".join(scope) if scope else "all"
+    if len(scope_label) > _MAX_LOG_DIR_LABEL_LENGTH:
+        digest = hashlib.sha1(scope_label.encode("utf-8")).hexdigest()[:12]
+        prefix_length = _MAX_LOG_DIR_LABEL_LENGTH - len(digest) - 1
+        scope_label = f"{scope_label[:prefix_length]}+{digest}"
+    return f"{scope_label}_{time_stamp}"
 
 
 def setup_logging(scope=["all"], debug=False, worker_id=None):
@@ -527,7 +538,7 @@ def setup_logging(scope=["all"], debug=False, worker_id=None):
 
     # Create log directory
     time_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    _LOG_DIR = Path(f"{'+'.join(scope)}_{time_stamp}")
+    _LOG_DIR = Path(_collector_log_dir_name(scope, time_stamp))
     if not _LOG_DIR.is_dir():
         _LOG_DIR.mkdir()
 
