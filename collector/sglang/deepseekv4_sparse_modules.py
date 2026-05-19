@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""DeepSeek-V4-Flash sparse-attention kernel-level collector for SGLang.
+"""DeepSeek-V4 sparse-attention kernel-level collector for SGLang.
 
 Benchmarks the two past_kv-sensitive kernels that bench accurately at the
 kernel level (paged_mqa_logits + hca_attn).  Inputs match upstream layouts
@@ -22,7 +22,7 @@ Sweep dims (defaults):
                [1, 8, 64, 256, 1024, 4096, 8192]
     past_kv  : 0 → ~1M     [0, 1024, 4096, 16384, 65536, 262144, 1048575-8192]
 
-CSV schema matches existing aic dsv4_flash module CSVs (so loaders can be
+CSV schema matches existing aic dsv4 module CSVs (so loaders can be
 shared): ``isl`` carries M, ``step`` carries past_kv, ``compress_ratio``
 distinguishes CSA(=4) / HCA(=128).
 """
@@ -35,10 +35,12 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import sys
 import traceback
 from collections.abc import Callable
+from pathlib import Path
 
 import torch
 
@@ -52,61 +54,61 @@ except ModuleNotFoundError:
 # module so collect.py's registry can resolve them via getattr on this module.
 try:
     from collector.common_test_cases import (
-        _DSV4_FLASH_MODEL_PATH as DEFAULT_MODEL,
+        _DSV4_DEFAULT_MODELS,
     )
     from collector.common_test_cases import (
-        _DSV4_FLASH_SPARSE_BS_LIST as DEFAULT_BS_LIST,
+        _DSV4_SPARSE_BS_LIST as DEFAULT_BS_LIST,
     )
     from collector.common_test_cases import (
-        _DSV4_FLASH_SPARSE_ISL_LIST as DEFAULT_ISL_LIST,
+        _DSV4_SPARSE_ISL_LIST as DEFAULT_ISL_LIST,
     )
     from collector.common_test_cases import (
-        _DSV4_FLASH_SPARSE_PAST_KV_LIST as DEFAULT_PAST_KV_LIST,
+        _DSV4_SPARSE_PAST_KV_LIST as DEFAULT_PAST_KV_LIST,
     )
     from collector.common_test_cases import (
-        _DSV4_FLASH_SPARSE_TP_LIST_ATTN as DEFAULT_TP_LIST_ATTN,
+        _DSV4_SPARSE_TP_LIST_ATTN as DEFAULT_TP_LIST_ATTN,
     )
     from collector.common_test_cases import (
-        DSV4_FLASH_SPARSE_KERNELS as KERNELS,
+        DSV4_SPARSE_KERNELS as KERNELS,
     )
     from collector.common_test_cases import (
-        _build_dsv4_flash_sparse_test_cases as _build_sparse_test_cases,
+        _build_dsv4_sparse_test_cases as _build_sparse_test_cases,
     )
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import (
-        _DSV4_FLASH_MODEL_PATH as DEFAULT_MODEL,
+        _DSV4_DEFAULT_MODELS,
     )
     from common_test_cases import (
-        _DSV4_FLASH_SPARSE_BS_LIST as DEFAULT_BS_LIST,
+        _DSV4_SPARSE_BS_LIST as DEFAULT_BS_LIST,
     )
     from common_test_cases import (
-        _DSV4_FLASH_SPARSE_ISL_LIST as DEFAULT_ISL_LIST,
+        _DSV4_SPARSE_ISL_LIST as DEFAULT_ISL_LIST,
     )
     from common_test_cases import (
-        _DSV4_FLASH_SPARSE_PAST_KV_LIST as DEFAULT_PAST_KV_LIST,
+        _DSV4_SPARSE_PAST_KV_LIST as DEFAULT_PAST_KV_LIST,
     )
     from common_test_cases import (
-        _DSV4_FLASH_SPARSE_TP_LIST_ATTN as DEFAULT_TP_LIST_ATTN,
+        _DSV4_SPARSE_TP_LIST_ATTN as DEFAULT_TP_LIST_ATTN,
     )
     from common_test_cases import (
-        DSV4_FLASH_SPARSE_KERNELS as KERNELS,
+        DSV4_SPARSE_KERNELS as KERNELS,
     )
     from common_test_cases import (
-        _build_dsv4_flash_sparse_test_cases as _build_sparse_test_cases,
+        _build_dsv4_sparse_test_cases as _build_sparse_test_cases,
     )
 
 
-def get_dsv4_flash_paged_mqa_logits_test_cases():
-    from collector.common_test_cases import get_dsv4_flash_paged_mqa_logits_test_cases as _impl
+def get_dsv4_paged_mqa_logits_test_cases():
+    from collector.common_test_cases import get_dsv4_paged_mqa_logits_test_cases as _impl
 
     if not _dsv4_sparse_kernel_supported("paged_mqa_logits"):
         return []
     return _impl()
 
 
-def get_dsv4_flash_hca_attn_test_cases():
-    from collector.common_test_cases import get_dsv4_flash_hca_attn_test_cases as _impl
+def get_dsv4_hca_attn_test_cases():
+    from collector.common_test_cases import get_dsv4_hca_attn_test_cases as _impl
 
     if not _dsv4_sparse_kernel_supported("hca_attn"):
         return []
@@ -121,25 +123,23 @@ __all__ = [
     "DEFAULT_TP_LIST_ATTN",
     "KERNELS",
     "_build_sparse_test_cases",
-    "get_dsv4_flash_hca_attn_test_cases",
-    "get_dsv4_flash_paged_mqa_logits_test_cases",
+    "get_dsv4_hca_attn_test_cases",
+    "get_dsv4_paged_mqa_logits_test_cases",
     "run_dsv4_sparse_kernel_worker",
 ]
 
 
+DEFAULT_MODEL = _DSV4_DEFAULT_MODELS[0]
+MODEL_CONFIGS_DIR = Path(__file__).resolve().parents[2] / "src" / "aiconfigurator" / "model_configs"
+
 # ═══════════════════════════════════════════════════════════════════════
-# V4-Flash architectural constants
+# DeepSeek-V4 sparse architectural constants
 # ═══════════════════════════════════════════════════════════════════════
 
-# Indexer
-N_IDX_HEADS = 64
-IDX_HEAD_DIM = 128
-
-# Main attention (V4-Flash NSA -- MODEL1_FP8Sparse layout)
-N_HEADS_Q = 64
+# Main attention (DSV4 NSA -- MODEL1_FP8Sparse layout)
 V_HEAD_DIM = 512
 
-# FlashMLA d_qk for V4-Flash NSA = 512 (NOT 576).  Layout MODEL1_FP8Sparse:
+# FlashMLA d_qk for DSV4 NSA = 512 (NOT 576).  Layout MODEL1_FP8Sparse:
 #   d_nope=448, d_rope=64, tile_size=64, num_tiles=7
 # bytes_per_token = 448 + 64*2 + 7 + 1 = 584 (with 1 pad)
 FMLA_D_QK = 512
@@ -164,10 +164,10 @@ def _device_num_sms(device: str | torch.device) -> int:
 # Two kernels are benched at the kernel level:
 #   - paged_mqa_logits: CSA indexer scoring (TP-independent, accurate)
 #   - hca_attn:       HCA's flash_mla over c128 cache (TP-independent, accurate)
-#                     (production V4-Flash at TP>1 also runs FlashMLA with
-#                      h_q=64 — sglang pads Q to full 64 heads, then slices
-#                      output back; see deepseek_v4.py:847.  So TP=1 data is
-#                      valid for any deployment TP.)
+#                     (production DSV4 at TP>1 also runs FlashMLA with
+#                      the native h_q — sglang pads Q to full native heads,
+#                      then slices output back; see deepseek_v4.py:847.  So
+#                      TP=1 data is valid for any deployment TP.)
 #
 # Two kernels are modeled ANALYTICALLY in perf_database (NOT benched):
 #   - topk_512: pure memory-IO scan over fp32 logits (per-token causal).
@@ -178,8 +178,8 @@ def _device_num_sms(device: str | torch.device) -> int:
 #   - csa_attn: cache scatter pattern of topk-selected indices is impossible
 #     to reproduce with sequential indices in a kernel-level bench.
 KERNEL_TO_OP_NAME = {
-    "paged_mqa_logits": "dsv4_flash_paged_mqa_logits_module",
-    "hca_attn": "dsv4_flash_hca_attn_module",
+    "paged_mqa_logits": "dsv4_paged_mqa_logits_module",
+    "hca_attn": "dsv4_hca_attn_module",
 }
 
 KERNEL_TO_KERNEL_SOURCE = {
@@ -194,14 +194,14 @@ KERNEL_TO_COMPRESS_RATIO = {
 }
 
 KERNEL_TO_DEFAULT_FILENAME = {
-    "paged_mqa_logits": "dsv4_flash_paged_mqa_logits_module_perf.txt",
-    "hca_attn": "dsv4_flash_hca_attn_module_perf.txt",
+    "paged_mqa_logits": "dsv4_paged_mqa_logits_module_perf.txt",
+    "hca_attn": "dsv4_hca_attn_module_perf.txt",
 }
 
 
 def _dsv4_sparse_kernel_supported(kernel: str) -> bool:
     """Return True when the active runtime can execute a DSV4 sparse kernel."""
-    if os.environ.get("COLLECTOR_FORCE_DSV4_FLASH_SPARSE") == "1":
+    if os.environ.get("COLLECTOR_FORCE_DSV4_SPARSE") == "1":
         return True
     if kernel == "hca_attn":
         return importlib.util.find_spec("flash_mla") is not None
@@ -288,7 +288,7 @@ def _kv_cache_cast_to_fp8_indexer(x: torch.Tensor) -> torch.Tensor:
 
 
 def _quantize_k_cache_model1(k_bf16: torch.Tensor) -> torch.Tensor:
-    """FlashMLA MODEL1_FP8Sparse pack (V4-Flash layout).
+    """FlashMLA MODEL1_FP8Sparse pack (DSV4 sparse layout).
 
     k_bf16: (num_blocks, block_size, 1, d_qk=512) bf16
     out:    (num_blocks, block_size, 1, bytes_per_token=584) packed fp8
@@ -351,7 +351,15 @@ def _quantize_k_cache_model1(k_bf16: torch.Tensor) -> torch.Tensor:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _bench_paged_mqa_logits(M: int, past_kv: int, *, batch_size: int = 1, device: str = "cuda:0") -> float:  # noqa: N803
+def _bench_paged_mqa_logits(
+    M: int,  # noqa: N803
+    past_kv: int,
+    *,
+    index_n_heads: int,
+    index_head_dim: int,
+    batch_size: int = 1,
+    device: str = "cuda:0",
+) -> float:
     """Benchmark paged_mqa_logits.
 
     Note: the SM90 kernel imposes ``next_n ≤ 2`` (smem capacity); larger M
@@ -371,18 +379,18 @@ def _bench_paged_mqa_logits(M: int, past_kv: int, *, batch_size: int = 1, device
     b = M
     next_n = 1
 
-    # Q: (b, 1, num_heads, head_dim) → fp8
-    q_bf16 = torch.randn(b, next_n, N_IDX_HEADS, IDX_HEAD_DIM, dtype=torch.bfloat16, device=device)
+    # Q: (b, 1, index_n_heads, index_head_dim) → fp8
+    q_bf16 = torch.randn(b, next_n, index_n_heads, index_head_dim, dtype=torch.bfloat16, device=device)
     q = q_bf16.to(torch.float8_e4m3fn)
 
     # KV cache: SHARED across all b "fake-batch" entries (avoid b-fold blowup
     # at long past_kv).  Different entries' block_tables all point at the
     # same physical blocks — kernel just reads the same KV M times.
     blocks_per_req = (full_c4 + block_kv - 1) // block_kv
-    kv_bf16 = torch.randn(blocks_per_req, block_kv, 1, IDX_HEAD_DIM, dtype=torch.bfloat16, device=device)
+    kv_bf16 = torch.randn(blocks_per_req, block_kv, 1, index_head_dim, dtype=torch.bfloat16, device=device)
     kv_in = _kv_cache_cast_to_fp8_indexer(kv_bf16)
 
-    weights = torch.randn(b * next_n, N_IDX_HEADS, dtype=torch.float32, device=device)
+    weights = torch.randn(b * next_n, index_n_heads, dtype=torch.float32, device=device)
 
     # Per-token causal context_lens — matches sglang's ``seq_lens_casual``
     # (deepseek_v4_backend_radix.py:1124).  Each new token i has effective
@@ -421,7 +429,7 @@ def _build_flash_mla_inputs(
 ) -> tuple[torch.Tensor, ...]:
     """Build fp8 paged K cache + Q + indices + scheduler metadata.
 
-    Layout = MODEL1_FP8Sparse (V4-Flash NSA): d_qk=512 with 584-byte fp8 cache.
+    Layout = MODEL1_FP8Sparse (DSV4 NSA): d_qk=512 with 584-byte fp8 cache.
     """
     full_s = M + past_kv
     M_per_req = M // batch_size if batch_size > 1 else M  # noqa: N806
@@ -463,6 +471,7 @@ def _bench_flash_mla_sparse(
     past_kv: int,
     *,
     K_per_query: int,  # noqa: N803
+    native_heads: int,
     batch_size: int = 1,
     tp_size: int = 1,
     device: str = "cuda:0",
@@ -475,16 +484,16 @@ def _bench_flash_mla_sparse(
     Total K attended per query = SWA_WINDOW + extra_K_per_query.
 
     TP zero-pad (mirrors ``sglang/srt/models/deepseek_v4.py:847``):
-      1. Projection produces ``q_local`` of shape (..., 64//tp, d_qk) —
+      1. Projection produces ``q_local`` of shape (..., native_heads//tp, d_qk) —
          the rank's actual computed heads.
-      2. ``q_padded`` is allocated full (..., 64, d_qk) and the rank's
+      2. ``q_padded`` is allocated full (..., native_heads, d_qk) and the rank's
          ``tp_slice`` is filled from ``q_local``; other heads are zeros.
-      3. FlashMLA always receives h_q=64 (kernel only supports {64, 128}).
+      3. FlashMLA always receives the full native head count.
     """
     from flash_mla import flash_mla_with_kvcache, get_mla_metadata
 
     # rank-local head count (what the upstream projection actually produces)
-    n_local_heads = max(1, N_HEADS_Q // tp_size)
+    n_local_heads = max(1, native_heads // tp_size)
     _full_s = M + past_kv
     M_per_req = M // batch_size if batch_size > 1 else M  # noqa: N806
 
@@ -498,19 +507,16 @@ def _bench_flash_mla_sparse(
         device=device,
     )
 
-    # Zero-pad ``q_local`` to full N_HEADS_Q before the FlashMLA call —
-    # this is what sglang's deepseek_v4.py:847 does at TP > 1, and at
-    # TP = 1 it's a no-op since n_local_heads == N_HEADS_Q.  FlashMLA
-    # only supports h_q ∈ {64, 128}, so passing the unpadded q_local
-    # (e.g. h_q=8 at tp=8) trips ``Unsupported h_q`` regardless of TP.
-    if n_local_heads == N_HEADS_Q:
+    # Zero-pad ``q_local`` to the full native head count before the FlashMLA
+    # call. Passing the unpadded TP-local head count trips ``Unsupported h_q``.
+    if n_local_heads == native_heads:
         q = q_local
     else:
-        q = torch.zeros(batch_size, M_per_req, N_HEADS_Q, FMLA_D_QK, dtype=torch.bfloat16, device=device)
+        q = torch.zeros(batch_size, M_per_req, native_heads, FMLA_D_QK, dtype=torch.bfloat16, device=device)
         q[:, :, :n_local_heads, :] = q_local  # rank-0's tp_slice
 
     # Kernel always sees full h_q.
-    n_local_heads = N_HEADS_Q
+    n_local_heads = native_heads
     swa_window = 128
     swa_indices = torch.arange(swa_window, dtype=torch.int32, device=device)
     swa_indices = swa_indices.view(1, 1, swa_window).expand(batch_size, M_per_req, swa_window).contiguous()
@@ -560,7 +566,15 @@ def _bench_flash_mla_sparse(
     return _bench_cuda_graph(kernel_fn, device=device)
 
 
-def _bench_hca_attn(M: int, past_kv: int, *, batch_size: int = 1, tp_size: int = 1, device: str = "cuda:0") -> float:  # noqa: N803
+def _bench_hca_attn(
+    M: int,  # noqa: N803
+    past_kv: int,
+    *,
+    native_heads: int,
+    batch_size: int = 1,
+    tp_size: int = 1,
+    device: str = "cuda:0",
+) -> float:
     """HCA: each Q attends to all c128 positions (no topk cap)."""
     full_s = M + past_kv
     K_per_query = max(1, full_s // 128)  # noqa: N806
@@ -568,6 +582,7 @@ def _bench_hca_attn(M: int, past_kv: int, *, batch_size: int = 1, tp_size: int =
         M,
         past_kv,
         K_per_query=K_per_query,
+        native_heads=native_heads,
         batch_size=batch_size,
         tp_size=tp_size,
         device=device,
@@ -599,6 +614,7 @@ def _write_row(
     isl: int,
     past_kv: int,
     tp_size: int,
+    native_heads: int,
     latency_ms: float,
     device_name: str,
     model_path: str = DEFAULT_MODEL,
@@ -619,7 +635,7 @@ def _write_row(
                 "mla_dtype": mla_dtype,
                 "kv_cache_dtype": kv_cache_dtype,
                 "gemm_type": gemm_type,
-                "num_heads": N_HEADS_Q,
+                "num_heads": native_heads,
                 "batch_size": bs,
                 "isl": isl,
                 "tp_size": tp_size,
@@ -641,8 +657,8 @@ def _write_row(
 # ═══════════════════════════════════════════════════════════════════════
 # Worker
 # ═══════════════════════════════════════════════════════════════════════
-# Test cases (``get_dsv4_flash_{paged_mqa_logits,hca_attn}_test_cases`` and
-# ``_build_sparse_test_cases``) are imported from ``dsv4_flash_test_cases``
+# Test cases (``get_dsv4_{paged_mqa_logits,hca_attn}_test_cases`` and
+# ``_build_sparse_test_cases``) are imported from ``dsv4_test_cases``
 # at the top of this module — kept central so both collectors share the
 # same sweep grid definitions.
 
@@ -671,11 +687,20 @@ def run_dsv4_sparse_kernel_worker(
     """
     if kernel not in _BENCH_FN:
         raise ValueError(f"unknown kernel={kernel}; expected one of {list(_BENCH_FN)}")
+    if os.path.isdir(model_path):
+        config_path = Path(model_path) / "config.json"
+    else:
+        config_path = MODEL_CONFIGS_DIR / f"{model_path.replace('/', '--')}_config.json"
+    with open(config_path, encoding="utf-8") as f:
+        model_config = json.load(f)
+    native_heads = int(model_config["num_attention_heads"])
+    index_n_heads = int(model_config["index_n_heads"])
+    index_head_dim = int(model_config["index_head_dim"])
 
     # The OpEntry binds a single ``perf_filename`` (placeholder
-    # ``dsv4_flash_sparse_module_perf.txt``) but we collect TWO kernels in
+    # ``dsv4_sparse_module_perf.txt``) but we collect TWO kernels in
     # one op — always derive the directory from the bound path and dispatch
-    # to ``dsv4_flash_{kernel}_module_perf.txt`` per the case's ``kernel``.
+    # to ``dsv4_{kernel}_module_perf.txt`` per the case's ``kernel``.
     output_dir = os.path.dirname(perf_filename) or os.getcwd()
     perf_path = _make_perf_filename(kernel, output_dir)
 
@@ -684,10 +709,15 @@ def run_dsv4_sparse_kernel_worker(
 
     bench_fn = _BENCH_FN[kernel]
     if kernel == "hca_attn":
-        kwargs = dict(batch_size=bs, tp_size=tp_size, device=device)
+        kwargs = dict(batch_size=bs, tp_size=tp_size, native_heads=native_heads, device=device)
     else:
         # paged_mqa_logits: bs at kernel level is flattened to b=M, next_n=1
-        kwargs = dict(batch_size=1, device=device)
+        kwargs = dict(
+            batch_size=1,
+            index_n_heads=index_n_heads,
+            index_head_dim=index_head_dim,
+            device=device,
+        )
 
     try:
         bench_result = bench_fn(M, past_kv, **kwargs)
@@ -711,6 +741,7 @@ def run_dsv4_sparse_kernel_worker(
         isl=isl,
         past_kv=past_kv,
         tp_size=tp_size,
+        native_heads=native_heads,
         latency_ms=latency_ms,
         device_name=device_name,
         model_path=model_path,
@@ -730,7 +761,7 @@ def _parse_int_list(value: str) -> list[int]:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Collect DeepSeek-V4-Flash sparse-attention kernel-level latency.")
+    parser = argparse.ArgumentParser(description="Collect DeepSeek-V4 sparse-attention kernel-level latency.")
     parser.add_argument("--kernel", default="all", help=f"comma-separated subset of {KERNELS} (or 'all')")
     parser.add_argument("--bs-list", type=_parse_int_list, default=DEFAULT_BS_LIST)
     parser.add_argument("--isl-list", type=_parse_int_list, default=DEFAULT_ISL_LIST)
@@ -746,6 +777,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 def main():
     args = _build_arg_parser().parse_args()
+    os.environ["COLLECTOR_MODEL_PATH"] = args.model_path
 
     if args.kernel == "all":
         kernels = list(KERNELS)
@@ -764,7 +796,7 @@ def main():
     )
     print(f"Running {len(cases)} sparse-kernel test cases on {args.device}")
     for case in cases:
-        bs, isl, past_kv, tp, kernel = case[:5]
+        bs, isl, past_kv, tp, kernel, model_path = case
         perf_path = _make_perf_filename(kernel, args.output_path)
         run_dsv4_sparse_kernel_worker(
             bs,
@@ -772,7 +804,7 @@ def main():
             past_kv,
             tp,
             kernel,
-            args.model_path,
+            model_path,
             perf_filename=perf_path,
             device=args.device,
         )
