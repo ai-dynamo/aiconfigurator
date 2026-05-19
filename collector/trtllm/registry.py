@@ -68,7 +68,7 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.GENERATION_ATTENTION,
     ),
     OpEntry(
-        op="attention_encoder",
+        op="encoder_attention",
         module="collector.trtllm.collect_attn_encoder",
         get_func="get_encoder_attention_test_cases",
         run_func="run_encoder_attention_torch",

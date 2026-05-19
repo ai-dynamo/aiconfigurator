@@ -9,6 +9,11 @@ Qwen2-VL ViT uses in production (see
 ``tensorrt_llm/_torch/models/modeling_qwen2vl.py``):
   - ``kv_cache_manager=None`` -> prepare() sets use_cache=False, kv_cache_block_offsets=None
   - ``attention_mask=PredefinedAttentionMask.FULL`` -> mMaskType=padding (non-causal)
+  - ``pos_embd_params=None`` -> FMHA kernel does NOT do fused RoPE; production ViT
+    applies RoPE outside the attention op via ``apply_rotary_pos_emb_vision`` (see
+    ``Qwen2_5_VLVisionAttention.__init__`` in modeling_qwen2vl.py:518). The
+    out-of-kernel RoPE cost is modeled separately by ``EncoderAttention.query()``
+    using ``partial_rotary_factor``.
 """
 
 import os
@@ -18,13 +23,10 @@ import torch
 from tensorrt_llm._torch.attention_backend import TrtllmAttentionMetadata
 from tensorrt_llm._torch.attention_backend.interface import (
     AttentionRuntimeFeatures,
-    PositionalEmbeddingParams,
     PredefinedAttentionMask,
-    RopeParams,
 )
 from tensorrt_llm._torch.attention_backend.utils import create_attention
 from tensorrt_llm._torch.metadata import KVCacheParams
-from tensorrt_llm.functional import PositionEmbeddingType
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantConfig
 
@@ -47,16 +49,20 @@ def run_encoder_attention_torch(
 
     os.environ["TRTLLM_ENABLE_XQA_JIT"] = "0"
 
-    pos_embd_params = PositionalEmbeddingParams(type=PositionEmbeddingType.rope_gpt_neox, rope=RopeParams(dim=head_dim))
     quant_config = QuantConfig(quant_algo=None, kv_cache_quant_algo=None, group_size=128)
 
+    # pos_embd_params=None mirrors Qwen2_5_VLVisionAttention (modeling_qwen2vl.py:518).
+    # Production ViT applies RoPE outside the FMHA kernel; if we passed a non-None
+    # pos_embd_params here the FMHA kernel would perform a *fused* RoPE inside, the
+    # collected latency would double-count RoPE against EncoderAttention.query()'s
+    # partial_rotary_factor term.
     attn = create_attention(
         backend_name="TRTLLM",
         layer_idx=0,
         num_heads=num_heads,
         head_dim=head_dim,
         num_kv_heads=num_heads,  # MHA
-        pos_embd_params=pos_embd_params,
+        pos_embd_params=None,
         quant_config=quant_config,
         is_mla_enable=False,
     )
@@ -71,6 +77,10 @@ def run_encoder_attention_torch(
     attn_metadata = TrtllmAttentionMetadata(
         max_num_requests=batch_size,
         max_num_tokens=total_num_tokens,
+        # kv_cache_manager=None requires max_seq_len to be set explicitly
+        # (trtllm.py:813-830: "If the attention is no cache, max_seq_len
+        # should be set manually by user").
+        max_seq_len=seq_len,
         kv_cache_manager=None,
         mapping=mapping,
         enable_flash_mla=False,
@@ -105,6 +115,7 @@ def run_encoder_attention_torch(
     # Warmup once
     kernel_func()
 
+    # Use benchmark_with_power context manager
     with benchmark_with_power(
         device=device, kernel_func=kernel_func, num_warmups=10, num_runs=6, repeat_n=1,
     ) as results:
@@ -133,17 +144,17 @@ def run_encoder_attention_torch(
 
 
 def get_encoder_attention_test_cases():
-    """Encoder matrix: MHA, bf16, non-causal."""
     b_list = [1, 2, 4, 8, 16, 32, 64]
-    s_list = [256, 512, 1024, 2048, 4096, 8192, 16384]
-    n_list = [12, 16, 24, 32]
-    head_dim_list = [72, 80, 128]
+    s_list = [256, 400, 576, 1024, 1296, 2304, 3136, 4096, 5184, 6400,
+              7744, 8192, 9216, 10816, 12544, 14400, 16384]
+    n_list = [12, 16, 25]
+    head_dim_list = [64, 72, 80, 88, 112, 128]
 
     test_cases = []
     for head_dim in head_dim_list:
-        for n in n_list:
-            for s in s_list:
-                for b in b_list:
+        for n in sorted(n_list, reverse=True):
+            for s in sorted(s_list, reverse=True):
+                for b in sorted(b_list, reverse=True):
                     if 4 * b * s * n * head_dim * 2 >= 2**31:
                         continue
                     test_cases.append([b, s, n, head_dim])

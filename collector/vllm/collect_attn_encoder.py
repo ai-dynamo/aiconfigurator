@@ -11,7 +11,7 @@ encoder path: full N^2, MHA, no KV cache. Uses vLLM's official
 so the measured latency matches the kernel actually invoked by encoder inference.
 """
 
-__compat__ = "vllm>=0.11.0"
+__compat__ = "vllm>=0.21.0"
 
 import os
 
@@ -33,7 +33,6 @@ from collector.vllm.utils import (
     create_common_attn_metadata,
     create_standard_kv_cache_spec,
     create_vllm_config,
-    get_attention_backend,
     with_exit_stack,
 )
 
@@ -49,7 +48,7 @@ def run_encoder_attention_torch(
     perf_filename,
     device="cuda:0",
 ):
-    from vllm.attention.backends.abstract import AttentionType
+    from vllm.v1.attention.backend import AttentionType
 
     torch.cuda.set_device(device)
     dtype = torch.bfloat16
@@ -82,16 +81,13 @@ def run_encoder_attention_torch(
     )
     exit_stack.enter_context(set_current_vllm_config(vllm_config))
 
-    try:
-        backend = current_platform.get_attn_backend_cls(
-            None, head_dim, dtype, kv_cache_dtype=None, block_size=block_size,
-            use_mla=False, has_sink=False, use_sparse=False, use_mm_prefix=False,
-        )
-    except TypeError:
-        backend = current_platform.get_attn_backend_cls(
-            None, head_dim, dtype, kv_cache_dtype=None, block_size=block_size,
-            use_mla=False, has_sink=False, use_sparse=False,
-        )
+    # vLLM >=0.21: signature is (selected_backend, AttentionSelectorConfig)
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=head_dim, dtype=dtype, kv_cache_dtype=None,
+        block_size=block_size, use_mla=False, has_sink=False, use_sparse=False,
+    )
+    backend = current_platform.get_attn_backend_cls(None, attn_selector_config)
 
     backend_name_obj = resolve_obj_by_qualname(backend)
     backend_name_str = backend_name_obj.get_name()
@@ -102,7 +98,11 @@ def run_encoder_attention_torch(
         common_attn_metadata.causal = False
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config, False)
-    builder_cls, impl_cls = get_attention_backend(backend)
+    # ``backend`` from get_attn_backend_cls is a qualname string in vLLM >=0.21;
+    # the resolved class exposes get_builder_cls/get_impl_cls directly, so skip
+    # the Enum-based ``get_attention_backend()`` helper.
+    builder_cls = backend_name_obj.get_builder_cls()
+    impl_cls = backend_name_obj.get_impl_cls()
     layer_names = ["placeholder"]
     builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
     attn_metadata = builder.build(
@@ -137,6 +137,7 @@ def run_encoder_attention_torch(
     def run():
         impl.forward(mock_layer, query, key, value, kv_cache, attn_metadata, output=output)
 
+    # Use benchmark_with_power context manager
     with benchmark_with_power(
         device=device, kernel_func=run, num_warmups=3, num_runs=6, repeat_n=1,
     ) as results:
@@ -168,21 +169,21 @@ def run_encoder_attention_torch(
 
 
 def get_encoder_attention_test_cases(if_unit_test=False):
-    """Encoder matrix: MHA, bf16, non-causal, head_dim covers Qwen3-VL / InternVL3 / Llama4-V."""
     if if_unit_test:
         return [[1, 256, 16, 72]]
 
     b_list = [1, 2, 4, 8, 16, 32, 64]
-    s_list = [256, 512, 1024, 2048, 4096, 8192, 16384]
-    n_list = [12, 16, 24, 32]
-    head_dim_list = [72, 80, 128]
+    s_list = [256, 400, 576, 1024, 1296, 2304, 3136, 4096, 5184, 6400,
+              7744, 8192, 9216, 10816, 12544, 14400, 16384]
+    n_list = [12, 16, 25]
+    head_dim_list = [64, 72, 80, 88, 112, 128]
 
     test_cases = []
     for head_dim in head_dim_list:
-        for n in n_list:
-            for s in s_list:
-                for b in b_list:
-                    # Memory guard (single-pass, no paged cache): Q+K+V+O ~ 4*b*s*n*h*2B
+        for n in sorted(n_list, reverse=True):
+            for s in sorted(s_list, reverse=True):
+                for b in sorted(b_list, reverse=True):
+                    # Memory guard (single-pass, no paged cache): Q+K+V+O ~ 4*b*s*n*h*2B < 2GB
                     if 4 * b * s * n * head_dim * 2 >= 2**31:
                         continue
                     test_cases.append([b, s, n, head_dim])

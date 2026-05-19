@@ -87,7 +87,7 @@ def _build_kernel_runner(
                 window_size=(-1, -1),
             )
 
-        return run_iter, "sglang_encoder_fa3"
+        return run_iter, "flash_attention_v3"
 
     if sm == 100:
         # Matches VisionFlash4Attention.forward (vision.py:491-501).
@@ -104,7 +104,7 @@ def _build_kernel_runner(
                 ver=4,
             )
 
-        return run_iter, "sglang_encoder_fa4"
+        return run_iter, "flash_attention_v4"
 
     # SM<90 or SM>100 (e.g. SM80 A100, SM120 RTX 5090): Triton path,
     # matching VisionTritonAttention.forward (vision.py:362-381) non-graph branch.
@@ -125,7 +125,7 @@ def _build_kernel_runner(
             sm_scale=softmax_scale,
         )
 
-    return run_iter, "sglang_encoder_triton"
+    return run_iter, "triton"
 
 
 def run_encoder_attention_torch(
@@ -149,9 +149,7 @@ def run_encoder_attention_torch(
         dtype=torch.bfloat16,
     )
 
-    # Inherit the LLM collectors' default ``use_cuda_graph=True`` (see
-    # collect_attn.py:501-507). The collected latency is then directly
-    # comparable to context_attention / generation_attention numbers.
+    # Use benchmark_with_power context manager
     with benchmark_with_power(
         device=torch_device,
         kernel_func=run_iter,
@@ -187,17 +185,17 @@ def run_encoder_attention_torch(
 
 
 def get_encoder_attention_test_cases():
-    """Encoder-only matrix: MHA, bf16, non-causal."""
     b_list = [1, 2, 4, 8, 16, 32, 64]
-    s_list = [256, 512, 1024, 2048, 4096, 8192, 16384]
-    n_list = [12, 16, 24, 32]
-    head_dim_list = [72, 80, 128]
+    s_list = [256, 400, 576, 1024, 1296, 2304, 3136, 4096, 5184, 6400,
+              7744, 8192, 9216, 10816, 12544, 14400, 16384]
+    n_list = [12, 16, 25]
+    head_dim_list = [64, 72, 80, 88, 112, 128]
 
     test_cases = []
     for head_dim in head_dim_list:
-        for n in n_list:
-            for s in s_list:
-                for b in b_list:
+        for n in sorted(n_list, reverse=True):
+            for s in sorted(s_list, reverse=True):
+                for b in sorted(b_list, reverse=True):
                     if 4 * b * s * n * head_dim * 2 >= 2**31:
                         continue
                     test_cases.append([b, s, n, head_dim])
