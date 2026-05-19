@@ -14,6 +14,7 @@ from aiconfigurator.logging_utils import use_plain_cli_output
 from aiconfigurator.sdk import config
 from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.common import ColumnsAgg
+from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.inference_session import DisaggInferenceSession, InferenceSession
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
@@ -173,7 +174,7 @@ def agg_pareto(
                 "parallel configurations. Try reducing --batch-size, increasing "
                 "--free-gpu-memory-fraction, or using a system with more VRAM per GPU."
             )
-        raise RuntimeError(
+        raise NoFeasibleConfigError(
             "No results found for any parallel configuration. No configuration satisfied the "
             "TTFT/TPOT or request-latency constraints. Try relaxing --ttft, --tpot, or "
             "--request_latency (e.g., higher ttft/tpot or higher request_latency)."
