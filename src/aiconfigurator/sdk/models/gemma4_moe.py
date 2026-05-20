@@ -166,7 +166,16 @@ class Gemma4MoEModel(BaseModel):
         )
         return router_ops + [
             ops.MoEDispatch(
-                f"{prefix}_moe_pre_dispatch", count, h, self._topk, self._num_experts, moe_tp, moe_ep, attn_dp, True
+                f"{prefix}_moe_pre_dispatch",
+                count,
+                h,
+                self._topk,
+                self._num_experts,
+                moe_tp,
+                moe_ep,
+                attn_dp,
+                True,
+                quant_mode=moe_q,
             ),
             ops.MoE(
                 f"{prefix}_moe",
@@ -182,7 +191,16 @@ class Gemma4MoEModel(BaseModel):
                 attn_dp,
             ),
             ops.MoEDispatch(
-                f"{prefix}_moe_post_dispatch", count, h, self._topk, self._num_experts, moe_tp, moe_ep, attn_dp, False
+                f"{prefix}_moe_post_dispatch",
+                count,
+                h,
+                self._topk,
+                self._num_experts,
+                moe_tp,
+                moe_ep,
+                attn_dp,
+                False,
+                quant_mode=moe_q,
             ),
         ]
 
