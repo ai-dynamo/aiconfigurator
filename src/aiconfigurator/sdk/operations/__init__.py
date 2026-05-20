@@ -27,7 +27,6 @@ from __future__ import annotations
 from aiconfigurator.sdk.operations._legacy import (
     NCCL,
     P2P,
-    ContextAttention,
     ContextDeepSeekV4AttentionModule,
     ContextDSAModule,
     ContextMLA,
@@ -35,7 +34,6 @@ from aiconfigurator.sdk.operations._legacy import (
     DeepSeekV4MHCModule,
     FallbackOp,
     GDNKernel,
-    GenerationAttention,
     GenerationDeepSeekV4AttentionModule,
     GenerationDSAModule,
     GenerationMLA,
@@ -54,11 +52,12 @@ from aiconfigurator.sdk.operations._legacy import (
     logger,  # noqa: F401
 )
 
+# Per-family modules (migrated out of _legacy.py).
+from aiconfigurator.sdk.operations.attention import ContextAttention, GenerationAttention
+
 # Shared base + utilities. These come first so per-family modules can import
 # from .base without circular issues.
 from aiconfigurator.sdk.operations.base import Operation, clear_all_op_caches
-
-# Per-family modules (migrated out of _legacy.py).
 from aiconfigurator.sdk.operations.elementwise import ElementWise
 from aiconfigurator.sdk.operations.embedding import Embedding
 from aiconfigurator.sdk.operations.gemm import GEMM
