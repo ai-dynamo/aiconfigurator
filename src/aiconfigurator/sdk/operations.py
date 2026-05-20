@@ -794,13 +794,24 @@ class MoEDispatch(Operation):
                         hidden_size=self._hidden_size,
                     )
             else:
-                assert self._attention_tp_size == 1 or self._attention_dp_size == 1, (
-                    "We don't enable the path for non-wideep SGLang to support TP>1 and DP>1 for attn simultaneously"
-                )
-                # TODO: support TP+DP
                 logger.debug("MoEDispatch: In SGLang non-DeepEP execution path")
+                combined_attention_tpdp = self._attention_tp_size > 1 and self._attention_dp_size > 1
                 if self._pre_dispatch:
-                    if self._attention_tp_size > 1:  # tp>1, use allreduce
+                    if combined_attention_tpdp:
+                        # Matches SGLang DP attention: shard across attention TP, then gather across the full TP world.
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half,
+                            self._attention_tp_size,
+                            "reduce_scatter",
+                            volume,
+                        )
+                        comm_latency += database.query_nccl(
+                            common.CommQuantMode.half,
+                            self.num_gpus,
+                            "all_gather",
+                            volume * self._attention_dp_size,
+                        )
+                    elif self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
                         comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
                     elif self._attention_dp_size > 1:
@@ -813,7 +824,21 @@ class MoEDispatch(Operation):
                     else:
                         comm_latency = 0
                 else:
-                    if self._attention_tp_size > 1:  # tp>1, use allreduce
+                    if combined_attention_tpdp:
+                        # Reverse path: reduce-scatter across the full TP world, then rebuild each attention TP group.
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half,
+                            self.num_gpus,
+                            "reduce_scatter",
+                            volume * self._attention_dp_size,
+                        )
+                        comm_latency += database.query_nccl(
+                            common.CommQuantMode.half,
+                            self._attention_tp_size,
+                            "all_gather",
+                            volume,
+                        )
+                    elif self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
                         comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
                     elif self._attention_dp_size > 1:
