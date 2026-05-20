@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Standalone Python distribution for the Rust accelerator. Consumed by
+# `aiconfigurator` via the `aiconfigurator[rust]` extra (lock-step minor
+# version). Pure-Python `aiconfigurator` works without this package; the
+# SDK's `should_use_rust_engine_step` + `is_rust_core_available` plumbing
+# gracefully falls back to the Python latency path when this extension
+# isn't importable.
+
+[project]
+name = "aiconfigurator-rust-core"
+version = "0.9.0"
+description = "Native Rust accelerator for aiconfigurator's forward-pass latency estimator"
+authors = [
+    { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
+]
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+GitHub = "https://github.com/ai-dynamo/aiconfigurator"
+
+[build-system]
+requires = ["maturin>=1.10,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+bindings = "pyo3"
+features = ["extension-module"]
+module-name = "aiconfigurator_rust_core.aiconfigurator_core"
+python-source = "python"

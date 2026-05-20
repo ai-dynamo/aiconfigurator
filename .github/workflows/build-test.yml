@@ -27,7 +27,7 @@ jobs:
             workers: "-n 2"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           lfs: true
           fetch-depth: 0
@@ -62,9 +62,6 @@ jobs:
         run: |
           echo "CPU cores: $(nproc)"
           free -h
-      - name: Build wheel in container
-        run: |
-          docker build -f docker/Dockerfile -t aiconfigurator:build --target build .
       - name: Run tests in container
         shell: bash
         run: |
@@ -88,71 +85,147 @@ jobs:
             docker cp aic:/workspace/test_report.md ./test_report.md
 
   build-test-wheels:
-    name: Build & test wheel (${{ matrix.archs }})
-    runs-on: ${{ matrix.os }}
+    name: Build & test wheels (${{ matrix.tag_label }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
-            archs: x86_64
-            platform: linux/amd64
-          - os: ubuntu-24.04-arm
-            archs: aarch64
-            platform: linux/arm64
+          # === Linux glibc (manylinux_2_28) — primary baseline; runs combined-test ===
+          - { runner: ubuntu-24.04,     archs: x86_64,  build_method: docker, wheel_base: "quay.io/pypa/manylinux_2_28_x86_64",  platform: "linux/amd64", combined_test: true,  tag_label: manylinux_2_28_x86_64 }
+          - { runner: ubuntu-24.04-arm, archs: aarch64, build_method: docker, wheel_base: "quay.io/pypa/manylinux_2_28_aarch64", platform: "linux/arm64", combined_test: true,  tag_label: manylinux_2_28_aarch64 }
+          # === Linux glibc (manylinux2014) — older glibc 2.17 for EL7-era reach ===
+          - { runner: ubuntu-24.04,     archs: x86_64,  build_method: docker, wheel_base: "quay.io/pypa/manylinux2014_x86_64",   platform: "linux/amd64", combined_test: false, tag_label: manylinux2014_x86_64 }
+          - { runner: ubuntu-24.04-arm, archs: aarch64, build_method: docker, wheel_base: "quay.io/pypa/manylinux2014_aarch64",  platform: "linux/arm64", combined_test: false, tag_label: manylinux2014_aarch64 }
+          # === Linux musl (musllinux_1_2) — Alpine / distroless ===
+          - { runner: ubuntu-24.04,     archs: x86_64,  build_method: docker, wheel_base: "quay.io/pypa/musllinux_1_2_x86_64",   platform: "linux/amd64", combined_test: false, tag_label: musllinux_1_2_x86_64 }
+          - { runner: ubuntu-24.04-arm, archs: aarch64, build_method: docker, wheel_base: "quay.io/pypa/musllinux_1_2_aarch64",  platform: "linux/arm64", combined_test: false, tag_label: musllinux_1_2_aarch64 }
+          # === macOS (native maturin build) ===
+          - { runner: macos-14, archs: arm64,  build_method: native, combined_test: false, tag_label: macosx_arm64 }
+          # === Windows (native maturin build) ===
+          - { runner: windows-2022, archs: x86_64, build_method: native, combined_test: false, tag_label: win_amd64 }
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           lfs: true
           fetch-depth: 0
       - name: Git LFS Pull
         run: git lfs pull
-      - name: Build wheel via docker/Dockerfile
+
+      # --- Docker-based Linux builds -----------------------------------------
+      - name: Build aiconfigurator-rust-core wheel (Docker)
+        if: matrix.build_method == 'docker'
         run: |
           mkdir -p dist
           docker buildx build \
             --platform ${{ matrix.platform }} \
-            --build-arg MANYLINUX_ARCH=${{ matrix.archs }} \
-            --target wheel-out \
+            --build-arg WHEEL_BUILD_BASE=${{ matrix.wheel_base }} \
+            --target wheel-out-rust \
+            --output type=local,dest=./dist \
+            -f docker/Dockerfile \
+            .
+
+      - name: Build pure-Python aiconfigurator wheel (Docker)
+        if: matrix.build_method == 'docker' && matrix.combined_test
+        run: |
+          docker buildx build \
+            --platform ${{ matrix.platform }} \
+            --target wheel-out-pure \
             --output type=local,dest=./dist \
             -f docker/Dockerfile \
             .
           ls -la dist/
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v3
+
+      - name: Unified combined-install smoke (rust + python fallback)
+        # combined-test installs both wheels into one venv, runs the CLI
+        # with --engine-step-backend rust, then uninstalls rust-core and
+        # re-runs with --engine-step-backend python. Gated to the primary
+        # Linux baseline rows; manylinux2014 / musllinux / macOS / Windows
+        # produce their wheel as a deliverable artifact only.
+        if: matrix.build_method == 'docker' && matrix.combined_test
+        run: |
+          docker buildx build \
+            --platform ${{ matrix.platform }} \
+            --build-arg WHEEL_BUILD_BASE=${{ matrix.wheel_base }} \
+            --target combined-test \
+            -f docker/Dockerfile \
+            .
+
+      # --- Native macOS / Windows builds -------------------------------------
+      # Rust installed via the official rustup script (no third-party actions).
+      - name: Install Rust toolchain (macOS native)
+        if: matrix.build_method == 'native' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust toolchain (Windows native)
+        if: matrix.build_method == 'native' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+          .\rustup-init.exe -y --profile minimal --default-toolchain stable --default-host x86_64-pc-windows-msvc
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\.cargo\bin"
+
+      - name: Set up Python 3.10 (native)
+        if: matrix.build_method == 'native'
+        uses: actions/setup-python@v6
         with:
-          version: latest
-      - name: Install wheel and run aiconfigurator with rust backend
+          python-version: "3.10"
+
+      - name: Install cargo-cyclonedx (native)
+        # Pinned to the same version as the docker rust-toolchain stage so
+        # SBOM emission stays consistent across all matrix rows.
+        if: matrix.build_method == 'native'
+        shell: bash
+        run: cargo install --locked cargo-cyclonedx --version 0.5.7
+
+      - name: Build rust-core wheel (native maturin)
+        if: matrix.build_method == 'native'
+        shell: bash
+        working-directory: rust/aiconfigurator-core
         run: |
-          set -euo pipefail
-          uv venv --python 3.12 .venv-test
-          # shellcheck disable=SC1091
-          source .venv-test/bin/activate
-          uv pip install dist/aiconfigurator-*.whl
-          aiconfigurator cli default \
-            --model-path Qwen/Qwen3-32B \
-            --total-gpus 1 \
-            --system h200_sxm \
-            --engine-step-backend rust \
-            --save-dir "${RUNNER_TEMP}/aic-out"
-      - name: Extract CycloneDX SBOM from wheel
+          python -m pip install --quiet 'maturin>=1.10,<2'
+          mkdir -p ../../dist
+          maturin build --release --out ../../dist
+
+      - name: Repair macOS wheel via delocate
+        # No-op for our pure-Rust cdylib (no external dylib deps to bundle)
+        # but keeps the wheel-repair conventions consistent with auditwheel.
+        if: matrix.build_method == 'native' && runner.os == 'macOS'
+        shell: bash
         run: |
-          set -euo pipefail
+          python -m pip install --quiet delocate
+          mkdir -p dist-repaired
+          for whl in dist/*.whl; do
+            delocate-wheel -w dist-repaired -v "$whl"
+          done
+          mv dist-repaired/*.whl dist/
+
+      # --- Cross-platform SBOM extraction ------------------------------------
+      - name: Extract CycloneDX SBOM from rust-core wheel
+        # Uses Python's stdlib zipfile so it works on Linux / macOS / Windows
+        # runners without depending on the `unzip` binary.
+        shell: bash
+        run: |
           mkdir -p sbom
-          # maturin's PEP 770 path drops the SBOM at
-          # `<dist-info>/sboms/<crate-name>-py3.cyclonedx.json` — for us that's
-          # `aiconfigurator-core-py3.cyclonedx.json`. The `*.cyclonedx.json`
-          # glob future-proofs us against a maturin version that tweaks the
-          # naming convention. `unzip -p` reads one file out of the wheel to
-          # stdout — the wheel itself is never unpacked.
-          unzip -p dist/aiconfigurator-*.whl 'aiconfigurator-*.dist-info/sboms/*.cyclonedx.json' \
-            > "sbom/sbom-aiconfigurator-wheel-rust-${{ matrix.archs }}.cdx.json"
-          ls -la sbom/
+          python <<'PY'
+          import glob, shutil, zipfile
+          whl = glob.glob("dist/aiconfigurator_rust_core-*.whl")[0]
+          out = "sbom/sbom-aiconfigurator-rust-core-${{ matrix.tag_label }}.cdx.json"
+          with zipfile.ZipFile(whl) as zf:
+              name = next(n for n in zf.namelist() if n.endswith(".cyclonedx.json"))
+              with zf.open(name) as src, open(out, "wb") as dst:
+                  shutil.copyfileobj(src, dst)
+          PY
+
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
-          name: sbom-aiconfigurator-wheel-rust-${{ matrix.archs }}
-          path: sbom/sbom-aiconfigurator-wheel-rust-${{ matrix.archs }}.cdx.json
+          name: sbom-aiconfigurator-rust-core-${{ matrix.tag_label }}
+          path: sbom/sbom-aiconfigurator-rust-core-${{ matrix.tag_label }}.cdx.json
           if-no-files-found: error

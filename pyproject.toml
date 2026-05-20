@@ -57,6 +57,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Opt in to the native Rust forward-pass estimator. Pulls in the matching
+# `aiconfigurator-rust-core` wheel for the user's platform (manylinux_2_28
+# Linux x86_64 / aarch64 today; macOS + musllinux + Windows planned). On
+# platforms without a precompiled extension wheel, this extra fails to
+# install — the bare `pip install aiconfigurator` keeps working with the
+# Python fallback path.
+rust = ["aiconfigurator-rust-core>=0.9.0,<0.10.0"]
 dev = [
     "uv",
     "ruff==0.14.1",
@@ -85,38 +92,22 @@ GitHub = "https://github.com/ai-dynamo/aiconfigurator"
 Repository = "https://github.com/ai-dynamo/aiconfigurator.git"
 
 [build-system]
-requires = ["maturin>=1.10,<2"]
-build-backend = "maturin"
-
-[tool.maturin]
-manifest-path = "rust/aiconfigurator-core/Cargo.toml"
-bindings = "pyo3"
-features = ["extension-module"]
-module-name = "aiconfigurator._native.aiconfigurator_core"
-python-source = "src"
-# Maturin auto-includes non-Python files under python-source, but we list the
-# package data globs explicitly so the wheel contract stays visible and a
-# missing data file fails the A/B comparison loudly rather than silently.
-include = [
-    { path = "src/aiconfigurator/cli/*.yaml", format = ["sdist", "wheel"] },
-    { path = "src/aiconfigurator/cli/exps/*.yaml", format = ["sdist", "wheel"] },
-    { path = "src/aiconfigurator/generator/config/**/*.yaml", format = ["sdist", "wheel"] },
-    { path = "src/aiconfigurator/generator/config/backend_templates/**/*.j2", format = ["sdist", "wheel"] },
-    { path = "src/aiconfigurator/generator/rule_plugin/**/*.rule", format = ["sdist", "wheel"] },
-    { path = "src/aiconfigurator/systems/*.yaml", format = ["sdist", "wheel"] },
-    { path = "src/aiconfigurator/systems/*.csv", format = ["sdist", "wheel"] },
-    { path = "src/aiconfigurator/systems/**/*.txt", format = ["sdist", "wheel"] },
-    { path = "src/aiconfigurator/model_configs/*.json", format = ["sdist", "wheel"] },
-    { path = "src/aiconfigurator/webapp/components/profiling/styles.css", format = ["sdist", "wheel"] },
-    { path = "src/aiconfigurator/webapp/components/profiling/js/*.js", format = ["sdist", "wheel"] },
-    # Source distribution also needs the Rust crate to be buildable.
-    { path = "rust/**/*.rs", format = "sdist" },
-    { path = "rust/**/Cargo.toml", format = "sdist" },
-    { path = "rust/**/Cargo.lock", format = "sdist" },
-]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [project.scripts]
 aiconfigurator = "aiconfigurator.main:main"
+
+[tool.setuptools.package-data]
+"aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
+"aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule"]
+"aiconfigurator" = ["systems/*.yaml", "systems/*.csv", "systems/**/*.txt", "model_configs/*.json"]
+"aiconfigurator.webapp.components.profiling" = ["styles.css", "js/*.js"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["*"]
+exclude = ["tests", "docker", "collector", "systems"]
 
 [tool.ruff]
 line-length = 120

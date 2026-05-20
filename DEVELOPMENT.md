@@ -40,22 +40,28 @@ source .venv/bin/activate
 ### 4. Install Development Dependencies
 
 ```bash
-# Install the package in editable mode with dev dependencies
+# Install the package in editable mode with dev dependencies.
+# This installs only the pure-Python wheel — no Rust toolchain required.
 pip install -e ".[dev]"
 ```
 
-This also compiles the Rust core (`rust/aiconfigurator-core`) via `maturin` as a
-PyO3 extension module and drops the resulting shared library into
-`src/aiconfigurator/_native/aiconfigurator_core.abi3.so` (or `.pyd` on Windows),
-which `aiconfigurator.sdk.rust_engine_step` imports directly. A Rust toolchain
-(`cargo`/`rustc`) on `PATH` is required for this step — install via
-[rustup](https://rustup.rs/) if you don't have one.
+The bare `aiconfigurator` package is **pure Python**: no Docker, no Rust
+compile, installs anywhere pip works. If you want the Rust-accelerated forward-pass estimator (opt-in via `--engine-step-backend rust`), also install
+the companion `aiconfigurator-rust-core` extension:
 
-For fast Rust-side iteration without a full reinstall, use `maturin develop`:
+```bash
+# Install both the pure package and the precompiled Rust extension (if a
+# precompiled wheel for your platform is available — manylinux_2_28 today).
+pip install -e ".[dev,rust]"
+```
+
+For Rust-side iteration without reinstalling, work directly in the
+`rust/aiconfigurator-core/` subproject:
 
 ```bash
 pip install maturin
-maturin develop --release --manifest-path rust/aiconfigurator-core/Cargo.toml
+cd rust/aiconfigurator-core
+maturin develop --release   # builds aiconfigurator_rust_core from this checkout
 ```
 
 ### 5. Install Pre-Commit Hooks
@@ -109,23 +115,75 @@ Pre-commit hooks automatically run checks before each commit.
 pre-commit run --all-files
 ```
 
-### Building the Rust Core
+### Building the two wheels
 
-The Rust core is compiled into the wheel by [maturin](https://www.maturin.rs/)
-as a PyO3 extension module whenever you run `pip install -e .`, `pip install .`,
-or `maturin build --release`. The resulting shared library lives at
-`src/aiconfigurator/_native/aiconfigurator_core.abi3.so` and is imported
-directly by `aiconfigurator.sdk.rust_engine_step` — no `ctypes`, no
-filename-glob loader.
+`aiconfigurator` ships as **two separate PyPI distributions**:
 
-Because the crate is built with PyO3's `abi3-py310` stable-ABI feature, one
-compiled artifact works on every CPython ≥ 3.10. The wheel is correspondingly
-tagged `cp310-abi3-manylinux_2_28_<arch>`.
+| Distribution | Wheel tag | Contents | Build tool |
+|---|---|---|---|
+| `aiconfigurator` | `py3-none-any` | Pure Python SDK + CLI + bundled data files (model_configs, systems, generator templates) | setuptools |
+| `aiconfigurator-rust-core` | `cp310-abi3-<platform>` (matrix below) | PyO3 extension module `aiconfigurator_rust_core.aiconfigurator_core` | maturin |
 
-For fast iteration on the Rust side without reinstalling, use:
+The pure-Python `aiconfigurator` works without the rust extension. The
+SDK's `--engine-step-backend rust` flag is gated by `is_rust_core_available()`
+which falls back to the Python latency path on platforms where the
+extension isn't installed. Version coordination: lock-step minor versions
+(`aiconfigurator 0.9.x` requires `aiconfigurator-rust-core>=0.9.0,<0.10.0`).
+
+#### Supported platforms
+
+CI publishes a precompiled `aiconfigurator-rust-core` wheel for each of the
+following platforms; `pip install aiconfigurator[rust]` picks the right one
+automatically:
+
+| Platform | Wheel tag |
+|---|---|
+| Linux x86_64 (glibc ≥ 2.28; RHEL 8+, Ubuntu 20.04+) | `cp310-abi3-manylinux_2_28_x86_64` |
+| Linux aarch64 (glibc ≥ 2.28) | `cp310-abi3-manylinux_2_28_aarch64` |
+| Linux x86_64 (glibc ≥ 2.17; RHEL 7-era, Amazon Linux 2) | `cp310-abi3-manylinux2014_x86_64` |
+| Linux aarch64 (glibc ≥ 2.17) | `cp310-abi3-manylinux2014_aarch64` |
+| Linux x86_64 (musl; Alpine / distroless) | `cp310-abi3-musllinux_1_2_x86_64` |
+| Linux aarch64 (musl) | `cp310-abi3-musllinux_1_2_aarch64` |
+| macOS arm64 (Apple Silicon) | `cp310-abi3-macosx_14_0_arm64` |
+| macOS x86_64 (Intel) | `cp310-abi3-macosx_10_13_x86_64` |
+| Windows x86_64 | `cp310-abi3-win_amd64` |
+
+Hosts outside this matrix (e.g. Windows ARM64, FreeBSD, PyPy) fall through
+to the source distribution and need a local Rust toolchain to build. Bare
+`pip install aiconfigurator` always works without the extension.
+
+#### Local build commands
+
+Single multi-stage `docker/Dockerfile` exposes one buildx target per
+artifact, plus a `combined-test` target that exercises both backends
+end-to-end. Same commands work locally and in CI.
 
 ```bash
-maturin develop --release --manifest-path rust/aiconfigurator-core/Cargo.toml
+# Pure-Python wheel (fast, no Docker actually needed):
+uv build --wheel
+# OR via Dockerfile for reproducibility:
+docker buildx build --target wheel-out-pure --output type=local,dest=./dist \
+  -f docker/Dockerfile .
+
+# Rust extension wheel (requires docker buildx + a manylinux/musllinux container):
+docker buildx build \
+  --platform linux/arm64 \
+  --build-arg WHEEL_BUILD_BASE=quay.io/pypa/manylinux_2_28_aarch64 \
+  --target wheel-out-rust --output type=local,dest=./dist \
+  -f docker/Dockerfile .
+
+# Swap WHEEL_BUILD_BASE to target other Linux variants without other changes:
+#   quay.io/pypa/manylinux2014_aarch64   (older glibc)
+#   quay.io/pypa/musllinux_1_2_aarch64   (Alpine / distroless)
+#   quay.io/pypa/manylinux_2_28_x86_64   (x86_64, default if you omit the arg)
+
+# Unified end-to-end smoke (installs both wheels, runs CLI with rust then
+# python backends, fails if either path is broken):
+docker buildx build \
+  --platform linux/arm64 \
+  --build-arg WHEEL_BUILD_BASE=quay.io/pypa/manylinux_2_28_aarch64 \
+  --target combined-test \
+  -f docker/Dockerfile .
 ```
 
 Enable the Rust path per-CLI-run with:
@@ -136,25 +194,27 @@ aiconfigurator cli ... --engine-step-backend rust
 
 #### SBOM (CycloneDX)
 
-CI-built wheels (`docker build --target wheel-out`) ship a CycloneDX JSON SBOM
-for the Rust crate's dependency graph at
-`<wheel>.dist-info/sboms/aiconfigurator-core-py3.cyclonedx.json` per PEP 770.
-The SBOM is emitted by maturin's built-in `cargo-cyclonedx` integration — no
-custom build steps. Local dev installs (`pip install -e .`, `maturin develop`)
-do not emit the SBOM by default; only `maturin build` does.
+The `aiconfigurator-rust-core` wheel ships a CycloneDX JSON SBOM for the
+Rust crate's dependency graph at
+`<wheel>.dist-info/sboms/aiconfigurator-core.cyclonedx.json` per PEP 770.
+The SBOM is emitted by maturin's built-in `cargo-cyclonedx` integration —
+no custom build steps. The pure-Python `aiconfigurator` wheel does not
+ship an SBOM (no native dependencies to inventory).
 
-To produce an SBOM-bearing wheel locally:
+To produce an SBOM-bearing rust-core wheel locally outside Docker:
 
 ```bash
 pip install maturin
 cargo install --locked cargo-cyclonedx --version 0.5.7   # required on PATH for maturin's SBOM path
-maturin build --release --manifest-path rust/aiconfigurator-core/Cargo.toml
+cd rust/aiconfigurator-core
+maturin build --release
 ```
 
 To inspect the SBOM in a built wheel:
 
 ```bash
-unzip -p dist/aiconfigurator-*.whl 'aiconfigurator-*.dist-info/sboms/*.cyclonedx.json' | jq .
+unzip -p dist/aiconfigurator_rust_core-*.whl \
+  'aiconfigurator_rust_core-*.dist-info/sboms/*.cyclonedx.json' | jq .
 ```
 
 ### Running Tests
