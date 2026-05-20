@@ -33,8 +33,6 @@ from aiconfigurator.sdk.operations._legacy import (
     ContextMLA,
     CustomAllReduce,
     DeepSeekV4MHCModule,
-    ElementWise,
-    Embedding,
     FallbackOp,
     GDNKernel,
     GenerationAttention,
@@ -61,6 +59,8 @@ from aiconfigurator.sdk.operations._legacy import (
 from aiconfigurator.sdk.operations.base import Operation, clear_all_op_caches
 
 # Per-family modules (migrated out of _legacy.py).
+from aiconfigurator.sdk.operations.elementwise import ElementWise
+from aiconfigurator.sdk.operations.embedding import Embedding
 from aiconfigurator.sdk.operations.gemm import GEMM
 
 # Re-export commonly-imported names that the prior monolithic operations.py

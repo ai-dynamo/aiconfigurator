@@ -24,6 +24,9 @@ import math
 import numpy as np
 from scipy import interpolate
 
+from aiconfigurator.sdk import common
+from aiconfigurator.sdk.performance_result import PerformanceResult
+
 logger = logging.getLogger(__name__)
 
 
@@ -590,3 +593,48 @@ def extrapolate_data_grid(
                         data_dict[x][y] = {z: value}
                     else:
                         data_dict[x][y][z] = value
+
+
+# ---------------------------------------------------------------------------
+# Analytical mem-bound latency estimator
+# ---------------------------------------------------------------------------
+
+
+def estimate_mem_op(
+    gpu_spec: dict,
+    mem_bytes: int,
+    database_mode: common.DatabaseMode,
+) -> PerformanceResult | tuple[float, float, float]:
+    """Estimate memory-operation latency analytically (no CSV data).
+
+    Field lookups on ``gpu_spec`` are lazy by mode: SOL paths only read
+    ``mem_bw``; EMPIRICAL / SILICON / HYBRID also read
+    ``mem_bw_empirical_scaling_factor`` and ``mem_empirical_constant_latency``.
+    SILICON has no CSV table for raw memory ops, so it falls through to the
+    empirical formula and tags the result as ``empirical``.
+
+    Args:
+        gpu_spec: ``system_spec["gpu"]`` dict.
+        mem_bytes: memory traffic (read + write) for the op.
+        database_mode: SOL / SOL_FULL / EMPIRICAL / SILICON / HYBRID.
+
+    Returns:
+        ``PerformanceResult`` (latency in ms, energy=0.0) for SOL / EMPIRICAL /
+        SILICON / HYBRID. ``(sol_time, 0, sol_time)`` tuple for SOL_FULL.
+
+    See ``PerfDatabase.query_mem_op`` for the wrapping LRU-cached entry point.
+    """
+    sol_time_ms = mem_bytes / gpu_spec["mem_bw"] * 1000
+
+    if database_mode == common.DatabaseMode.SOL:
+        return PerformanceResult(sol_time_ms, energy=0.0, source="sol")
+    if database_mode == common.DatabaseMode.SOL_FULL:
+        return sol_time_ms, 0, sol_time_ms
+
+    # EMPIRICAL / SILICON / HYBRID share the empirical formula — no silicon
+    # table exists for raw memory ops, so always tag as ``"empirical"``.
+    empirical_time_ms = (
+        mem_bytes / (gpu_spec["mem_bw"] * gpu_spec["mem_bw_empirical_scaling_factor"])
+        + gpu_spec["mem_empirical_constant_latency"]
+    ) * 1000
+    return PerformanceResult(empirical_time_ms, energy=0.0, source="empirical")
