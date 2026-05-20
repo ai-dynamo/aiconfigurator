@@ -112,10 +112,6 @@ def run_encoder_attention_torch(
             attention_mask=PredefinedAttentionMask.FULL,
         )
 
-    # Warmup once
-    kernel_func()
-
-    # Use benchmark_with_power context manager
     with benchmark_with_power(
         device=device, kernel_func=kernel_func, num_warmups=10, num_runs=6, repeat_n=1,
     ) as results:
@@ -145,10 +141,14 @@ def run_encoder_attention_torch(
 
 def get_encoder_attention_test_cases():
     b_list = [1, 2, 4, 8, 16, 32, 64]
-    s_list = [256, 400, 576, 1024, 1296, 2304, 3136, 4096, 5184, 6400,
-              7744, 8192, 9216, 10816, 12544, 14400, 16384]
-    n_list = [12, 16, 25]
-    head_dim_list = [64, 72, 80, 88, 112, 128]
+    s_list = [13, 16, 26, 32, 52, 64, 104, 128, 192, 256, 400, 512, 576,
+              1024, 1296, 1500, 1536, 2048, 2304, 3072, 3136, 4096, 5184,
+              6144, 6400, 7744, 8192, 9216, 10240, 10816, 12288, 12544,
+              14400, 16384, 24576, 32768, 49152, 65536]
+
+    n_list = [12, 16, 20, 24, 32]
+
+    head_dim_list = [64, 72, 80, 88, 96, 128, 160]
 
     test_cases = []
     for head_dim in head_dim_list:
