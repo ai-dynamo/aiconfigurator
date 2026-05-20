@@ -67,7 +67,12 @@ _GENERATION_ATTENTION_TARGET_Z: list[int] = [
 
 
 def _cache_key(database: PerfDatabase) -> tuple:
-    """Shared cache key — same shape as GEMM's, used by both Attention ops."""
+    """Shared cache key — same shape as GEMM's, used by both Attention ops.
+
+    TODO: hoist to ``operations/base.py`` once a third op family (Phase 3
+    NCCL / MLA / Mamba) lands and needs the same key shape — preferring
+    duplication over premature abstraction with only two callers.
+    """
     return (
         database.systems_root,
         database.system,
@@ -122,7 +127,11 @@ class ContextAttention(Operation):
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
         """Idempotent. Loads context_attention CSV into the class cache,
-        applies grid extrapolation, binds ``database._context_attention_data``."""
+        applies grid extrapolation, binds ``database._context_attention_data``.
+
+        Mirrors ``GEMM.load_data``: correction/extrapolation operate on the
+        canonical class-cache value (passed explicitly), then the instance
+        attr is bound, respecting any pre-set test override."""
         import os
 
         from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_context_attention_data
@@ -140,6 +149,7 @@ class ContextAttention(Operation):
             cls._extrapolate(cls._data_cache[key])
             cls._record_load()
 
+        # Bind instance attr (respect intentional test pre-overrides).
         if "_context_attention_data" not in database.__dict__:
             database._context_attention_data = cls._data_cache[key]
 
@@ -151,7 +161,7 @@ class ContextAttention(Operation):
     def _extrapolate(cls, data_wrapper) -> None:
         """Apply the legacy 4-level (quant_mode → kv_cache_dtype → num_kv_heads
         → head_size → window_size → grid) extrapolation."""
-        if data_wrapper is None or not data_wrapper.loaded:
+        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
             return
 
         for quant_mode in data_wrapper:
@@ -371,7 +381,11 @@ class GenerationAttention(Operation):
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
         """Idempotent. Loads generation_attention CSV, clamps to SOL, applies
-        grid extrapolation, binds ``database._generation_attention_data``."""
+        grid extrapolation, binds ``database._generation_attention_data``.
+
+        Mirrors ``GEMM.load_data``: correction/extrapolation operate on the
+        canonical class-cache value (passed explicitly), then the instance
+        attr is bound, respecting any pre-set test override."""
         import os
 
         from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_generation_attention_data
@@ -386,16 +400,12 @@ class GenerationAttention(Operation):
                 load_generation_attention_data(sources), PerfDataFilename.generation_attention, primary_path
             )
 
-            # Bind before SOL clamp so the helper can read via instance attr
-            # (matches the GEMM pattern for the backward-compat re-clamp from
-            # ``PerfDatabase._correct_data``).
-            if "_generation_attention_data" not in database.__dict__:
-                database._generation_attention_data = cls._data_cache[key]
-
             cls._correct_sol(database, cls._data_cache[key])
             cls._extrapolate(cls._data_cache[key])
             cls._record_load()
-        elif "_generation_attention_data" not in database.__dict__:
+
+        # Bind instance attr (respect intentional test pre-overrides).
+        if "_generation_attention_data" not in database.__dict__:
             database._generation_attention_data = cls._data_cache[key]
 
     @classmethod
@@ -451,7 +461,7 @@ class GenerationAttention(Operation):
     @classmethod
     def _extrapolate(cls, data_wrapper) -> None:
         """Apply the legacy 4-level extrapolation grid."""
-        if data_wrapper is None or not data_wrapper.loaded:
+        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
             return
 
         for kv_cache_dtype in data_wrapper:

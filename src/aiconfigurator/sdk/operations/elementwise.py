@@ -55,10 +55,14 @@ class ElementWise(Operation):
         result = interpolation.estimate_mem_op(
             database.system_spec["gpu"], read_bytes + write_bytes, database._default_database_mode
         )
+        # ``estimate_mem_op`` always returns a tagged PerformanceResult
+        # (``"sol"`` / ``"empirical"``) — read the tag directly. Mem-op is
+        # never silicon-tagged because there is no silicon table for raw
+        # memory ops.
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=result.source,
         )
 
     def get_weights(self, **kwargs):

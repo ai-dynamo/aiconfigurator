@@ -49,10 +49,14 @@ class Embedding(Operation):
         d2d_bytes = x * self._column_size * 2
 
         result = interpolation.estimate_mem_op(database.system_spec["gpu"], d2d_bytes, database._default_database_mode)
+        # ``estimate_mem_op`` always returns a tagged PerformanceResult
+        # (``"sol"`` / ``"empirical"``) — read the tag directly. Mem-op is
+        # never silicon-tagged because there is no silicon table for raw
+        # memory ops.
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=result.source,
         )
 
     def get_weights(self, **kwargs):

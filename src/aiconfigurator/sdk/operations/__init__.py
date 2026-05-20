@@ -52,11 +52,11 @@ from aiconfigurator.sdk.operations._legacy import (
     logger,  # noqa: F401
 )
 
-# Per-family modules (migrated out of _legacy.py).
+# Per-family modules (migrated out of _legacy.py) plus the shared base
+# class. Import order doesn't matter for circular-import safety — Python's
+# import caching handles the dependency graph — so we follow ruff's
+# alphabetical convention here.
 from aiconfigurator.sdk.operations.attention import ContextAttention, GenerationAttention
-
-# Shared base + utilities. These come first so per-family modules can import
-# from .base without circular issues.
 from aiconfigurator.sdk.operations.base import Operation, clear_all_op_caches
 from aiconfigurator.sdk.operations.elementwise import ElementWise
 from aiconfigurator.sdk.operations.embedding import Embedding
