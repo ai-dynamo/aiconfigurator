@@ -26,13 +26,11 @@ from __future__ import annotations
 # log calls until their owning issue lands.
 from aiconfigurator.sdk.operations._legacy import (
     ContextDeepSeekV4AttentionModule,
-    ContextDSAModule,
     ContextMLA,
     DeepSeekV4MHCModule,
     FallbackOp,
     GDNKernel,
     GenerationDeepSeekV4AttentionModule,
-    GenerationDSAModule,
     GenerationMLA,
     Mamba2,
     Mamba2Kernel,
@@ -56,6 +54,7 @@ from aiconfigurator.sdk.operations._legacy import (
 from aiconfigurator.sdk.operations.attention import ContextAttention, GenerationAttention
 from aiconfigurator.sdk.operations.base import Operation, clear_all_op_caches
 from aiconfigurator.sdk.operations.communication import NCCL, P2P, CustomAllReduce
+from aiconfigurator.sdk.operations.dsa import ContextDSAModule, GenerationDSAModule
 from aiconfigurator.sdk.operations.elementwise import ElementWise
 from aiconfigurator.sdk.operations.embedding import Embedding
 from aiconfigurator.sdk.operations.gemm import GEMM
