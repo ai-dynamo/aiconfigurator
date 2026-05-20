@@ -22,6 +22,7 @@ from aiconfigurator.sdk.common import (
     DefaultHFModels,
     HybridMoEConfig,
     Qwen35Config,
+    VisionEncoderConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -491,6 +492,7 @@ def _parse_hf_config_json(config: dict) -> dict:
         ValueError: If a required field is missing from the config or the architecture is not supported
     """
     architecture = config["architectures"][0]
+    vision_cfg = config.get("vision_config")
 
     # For multimodal models, unwrap the nested text config so that all LLM
     # parameters (layers, hidden_size, MoE fields, etc.) are read from the
@@ -741,7 +743,35 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"full_attn_layers={extra_params.layer_types.count('full_attention')}, "
             f"num_experts={extra_params.num_experts}"
         )
-
+    elif architecture in ("Qwen3VLForConditionalGeneration", "Qwen3VLMoeForConditionalGeneration"):
+        if vision_cfg:
+            deepstack_visual_indexes = tuple(vision_cfg.get("deepstack_visual_indexes", []))
+            # PatchMerger: pixel-shuffle fuses spatial_merge_size² patches per token.
+            # The MLP operates on merged tokens: 2 layers (fc1, fc2) with dims
+            #   fc1: merger_dim → merger_dim  (merger_dim = hidden_size * spatial_merge_size²)
+            #   fc2: merger_dim → out_hidden_size
+            merger_dim = vision_cfg["hidden_size"] * vision_cfg["spatial_merge_size"] ** 2
+            out_hidden_size = vision_cfg["out_hidden_size"]
+            extra_params = VisionEncoderConfig(
+                depth=vision_cfg["depth"],
+                hidden_size=vision_cfg["hidden_size"],
+                num_heads=vision_cfg["num_heads"],
+                intermediate_size=vision_cfg["intermediate_size"],
+                patch_size=vision_cfg["patch_size"],
+                temporal_patch_size=vision_cfg["temporal_patch_size"],
+                spatial_merge_size=vision_cfg["spatial_merge_size"],
+                out_hidden_size=out_hidden_size,
+                deepstack_visual_indexes=deepstack_visual_indexes,
+                projector_dims=((merger_dim, merger_dim), (merger_dim, out_hidden_size)),
+                projector_n_instances=1 + len(deepstack_visual_indexes),
+            )
+            logger.info(
+                "Qwen3VL vision encoder config: depth=%d, hidden=%d, patch=%d, spatial_merge=%d",
+                extra_params.depth,
+                extra_params.hidden_size,
+                extra_params.patch_size,
+                extra_params.spatial_merge_size,
+            )
     return {
         "architecture": architecture,
         "layers": layers,

@@ -578,15 +578,18 @@ class SGLANGBackend(BaseBackend):
         # Calculate weights memory - same as TRTLLM
         for op in model.context_ops:
             weights += op.get_weights()
-
         # Count weights on a single GPU
         weights /= model.config.pp_size
+
+        for op in model.encoder_ops:
+            weights += op.get_weights()
 
         h = model._num_heads * model._head_size
         # MoE block-scale workspace is routed-token payload, so its feature
         # width is the residual hidden size. For most models this equals
         # num_heads * head_size; DeepSeek-V4's attention expansion is wider.
         moe_workspace_h = getattr(model, "_hidden_size", h)
+
         if num_tokens == 0:
             num_tokens = (isl - prefix) * batch_size
 

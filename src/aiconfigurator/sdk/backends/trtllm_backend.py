@@ -650,6 +650,9 @@ class TRTLLMBackend(BaseBackend):
         # count weights on a single GPU
         weights /= model.config.pp_size
 
+        for op in model.encoder_ops:
+            weights += op.get_weights()
+
         h = model._num_heads * model._head_size
         moe_workspace_h = getattr(model, "_hidden_size", h)
         if num_tokens == 0:
