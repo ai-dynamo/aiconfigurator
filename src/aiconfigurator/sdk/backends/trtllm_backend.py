@@ -651,6 +651,7 @@ class TRTLLMBackend(BaseBackend):
         weights /= model.config.pp_size
 
         h = model._num_heads * model._head_size
+        moe_workspace_h = getattr(model, "_hidden_size", h)
         if num_tokens == 0:
             num_tokens = (isl - prefix) * batch_size
 
@@ -666,9 +667,22 @@ class TRTLLMBackend(BaseBackend):
             c_dict = {1: 11, 2: 6.5, 4: 5, 8: 5}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 70 * 1024 * 1024)  # minimum act
-        elif model.model_family == "MOE":
+        elif model.model_family in ("MOE", "GEMMA4MOE"):
             c_dict = {1: 22, 2: 13, 4: 10, 8: 10}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
+            if model.model_family == "GEMMA4MOE":
+                # Fine-grained MoE (128 experts top-8): add dispatch workspace term,
+                # mirroring the DEEPSEEK family's accounting below.
+                activations += (
+                    num_tokens
+                    * moe_workspace_h
+                    * model.config.attention_dp_size
+                    * model._num_experts
+                    * model._topk
+                    / model.config.moe_ep_size
+                    / 128
+                    * 4
+                )
             activations = max(activations, 70 * 1024 * 1024)  # minimum act
         elif model.model_family in ("DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25"):
             c_dict = {1: 22, 2: 13, 4: 10, 8: 10}
