@@ -2869,8 +2869,10 @@ class PerfDatabase:
                 return tuple(_wrap_data_dict(item) for item in result)
             return _wrap_data_dict(result)
 
-        # Core ops
-        self._gemm_data = _load_op_data(PerfDataFilename.gemm)
+        # Core ops. GEMM moved to operations/gemm.py: data loading, SOL
+        # correction, and grid extrapolation now live there. ``GEMM.load_data``
+        # is invoked once below (after the other ``_load_op_data`` calls) so
+        # the loaders are still patched in unit-test setups.
         self._context_attention_data = _load_op_data(PerfDataFilename.context_attention)
         self._generation_attention_data = _load_op_data(PerfDataFilename.generation_attention)
         self._moe_data, self._moe_low_latency_data = _load_op_data(PerfDataFilename.moe)
@@ -2888,8 +2890,7 @@ class PerfDatabase:
         self._generation_mla_module_data = _load_op_data(PerfDataFilename.mla_generation_module)
         self._mamba2_data = _load_op_data(PerfDataFilename.mamba2)
         self._gdn_data = _load_op_data(PerfDataFilename.gdn)
-        self._compute_scale_data = _load_op_data(PerfDataFilename.compute_scale)
-        self._scale_matrix_data = _load_op_data(PerfDataFilename.scale_matrix)
+        # compute_scale + scale_matrix are GEMM-owned (loaded by GEMM.load_data below)
         self._context_dsa_module_data = _load_op_data(PerfDataFilename.dsa_context_module)
         self._generation_dsa_module_data = _load_op_data(PerfDataFilename.dsa_generation_module)
         self._mhc_module_data = _load_op_data(PerfDataFilename.mhc_module)
@@ -2952,7 +2953,18 @@ class PerfDatabase:
             self._wideep_moe_compute_data = _load_op_data(PerfDataFilename.wideep_moe_compute)
             self._trtllm_alltoall_data = _load_op_data(PerfDataFilename.trtllm_alltoall)
 
-        # pre-correction
+        # GEMM owns its three CSV tables + SOL correction + grid extrapolation.
+        # The eager invocation here is a transition compromise — Pattern A
+        # is supposed to be lazy-on-first-query, but the existing test
+        # surface (stub_perf_db, comprehensive_perf_db) patches loaders only
+        # during ``__init__``, so a lazy load triggered later in the test
+        # would hit unpatched real-disk loaders. ISSUE-16 retires this
+        # eager call once test fixtures migrate to the lazy contract.
+        from aiconfigurator.sdk.operations.gemm import GEMM
+
+        GEMM.load_data(self)
+
+        # pre-correction (non-GEMM ops; GEMM SOL correction is in GEMM.load_data)
         self._correct_data()
 
         # regular context attention
@@ -3120,83 +3132,8 @@ class PerfDatabase:
                                 target_z_list=target_z_list,
                             )
 
-        # regular gemm
-        if self._gemm_data:
-            for quant_mode, data_dict in self._gemm_data.items():
-                target_x_list = [
-                    1,
-                    2,
-                    4,
-                    8,
-                    16,
-                    32,
-                    48,
-                    64,
-                    80,
-                    96,
-                    128,
-                    160,
-                    192,
-                    224,
-                    256,
-                    320,
-                    384,
-                    448,
-                    512,
-                    640,
-                    768,
-                    896,
-                    1024,
-                    2048,
-                    4096,
-                    8192,
-                    16384,
-                    32768,
-                    131072,
-                    524288,
-                    1048576,
-                    2097152 * 8,
-                ]  # num_tokens
-                target_y_list = [
-                    32,
-                    64,
-                    128,
-                    256,
-                    512,
-                    768,
-                    1024,
-                    1536,
-                    2048,
-                    2560,
-                    3072,
-                    3584,
-                    4096,
-                    5120,
-                    6144,
-                    7168,
-                    8192,
-                    10240,
-                    12288,
-                    14336,
-                    16384,
-                    20480,
-                    24576,
-                    28672,
-                    32768,
-                    40960,
-                    49152,
-                    57344,
-                    65536,
-                    131072,
-                    262144,
-                ]  # to fit vocab gemm
-                target_z_list = target_y_list
-                self._extrapolate_data_grid(
-                    data_dict=data_dict,
-                    target_x_list=target_x_list,
-                    target_y_list=target_y_list,
-                    target_z_list=target_z_list,
-                )
+        # GEMM extrapolation moved to operations/gemm.py (GEMM._extrapolate_gemm_data,
+        # invoked from GEMM.load_data above).
 
         # mla
         # wideep context mla
@@ -4075,27 +4012,14 @@ class PerfDatabase:
     def _get_quant_tc_flops(self, quant_mode) -> float:
         """Resolve actual tensor-core FLOPS for a given quant mode.
 
-        Maps the quant mode's compute factor (1/2/4) to the corresponding
-        ``*_tc_flops`` entry in the system GPU spec.  Falls back to
-        ``bfloat16_tc_flops * compute_factor`` when the spec entry is missing.
+        Thin wrapper around ``GEMM._get_quant_tc_flops``; kept on
+        ``PerfDatabase`` because the DSV4 / MLA / attention SOL paths
+        still reference it as ``self._get_quant_tc_flops(...)``.
+        ISSUE-16 retires this wrapper once those callers migrate.
         """
-        compute_to_flops_key = {1: "bfloat16_tc_flops", 2: "fp8_tc_flops", 4: "fp4_tc_flops"}
-        gpu = self.system_spec["gpu"]
-        key = compute_to_flops_key.get(quant_mode.value.compute)
-        if key is not None and key in gpu:
-            return gpu[key]
-        return gpu["bfloat16_tc_flops"] * quant_mode.value.compute
+        from aiconfigurator.sdk.operations.gemm import GEMM
 
-    @staticmethod
-    def _normalize_gemm_quant_mode_for_table(quant_mode: common.GEMMQuantMode) -> common.GEMMQuantMode:
-        """
-        Normalize GEMM quant modes for perf table lookup.
-
-        `fp8_static` is a behavioral mode that reuses `fp8` perf tables.
-        """
-        if quant_mode == common.GEMMQuantMode.fp8_static:
-            return common.GEMMQuantMode.fp8
-        return quant_mode
+        return GEMM._get_quant_tc_flops(self.system_spec, quant_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_gemm(
@@ -4107,14 +4031,8 @@ class PerfDatabase:
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
-        Query GEMM operation latency and energy.
-
-        Args:
-            m: Number of rows in output matrix
-            n: Number of columns in output matrix
-            k: Inner dimension
-            quant_mode: Quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+        Query GEMM operation latency and energy. Delegates to ``GEMM``;
+        see ``aiconfigurator.sdk.operations.gemm.GEMM._query_gemm_table``.
 
         Returns:
             PerformanceResult: Acts as float (latency in ms).
@@ -4127,84 +4045,9 @@ class PerfDatabase:
             >>> energy_wms = result.energy
             >>> power_w = result.power  # or result.energy / float(result)
         """
+        from aiconfigurator.sdk.operations.gemm import GEMM
 
-        def get_sol(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            tc_flops = self._get_quant_tc_flops(quant_mode)
-            sol_math = 2 * m * n * k / tc_flops * 1000
-            sol_mem = quant_mode.value.memory * (m * n + m * k + n * k) / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> float:
-            """
-            Get the empirical time
-            """
-            sol_time = get_sol(m, n, k, quant_mode)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
-
-        # SOL and EMPIRICAL modes don't have power/energy data
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(m, n, k, quant_mode)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(m, n, k, quant_mode), energy=0.0, source="empirical")
-
-        # TODO: remove "else" and unindent
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                def _to_performance_result(result, *, source: str = "silicon"):
-                    """Normalize GEMM table entries into a PerformanceResult.
-
-                    Interpolated/extrapolated GEMM values are still derived from
-                    silicon table data; only explicit formula fallbacks are
-                    tagged as empirical.
-                    """
-                    if isinstance(result, dict):
-                        return PerformanceResult(result["latency"], energy=result.get("energy", 0.0), source=source)
-                    return PerformanceResult(result, energy=0.0, source=source)
-
-                self._gemm_data.raise_if_not_loaded()
-                if table_quant_mode not in self._gemm_data:
-                    supported = sorted([k.name for k in self._gemm_data])
-                    raise PerfDataNotAvailableError(
-                        "GEMM perf data not available for requested quant mode. "
-                        f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
-                        f"quant_mode='{quant_mode.name}'. "
-                        f"Supported gemm modes: {supported}"
-                    )
-
-                gemm_data = self._gemm_data[table_quant_mode]
-
-                if m in gemm_data and n in gemm_data[m] and k in gemm_data[m][n]:
-                    result = gemm_data[m][n][k]
-                    return _to_performance_result(result)
-
-                m_values = sorted(m_key for m_key in gemm_data if n in gemm_data[m_key] and k in gemm_data[m_key][n])
-                if len(m_values) >= 2:
-                    m_left, m_right = self._nearest_1d_point_helper(m, m_values, inner_only=False)
-                    result = self._interp_1d([m_left, m_right], [gemm_data[m_left][n][k], gemm_data[m_right][n][k]], m)
-                    return _to_performance_result(result)
-
-                result = self._interp_3d(m, n, k, gemm_data, "cubic")
-                return _to_performance_result(result)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(m, n, k, quant_mode),
-                database_mode=database_mode,
-                error_msg=f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}",
-            )
+        return GEMM._query_gemm_table(self, m, n, k, quant_mode, database_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_compute_scale(
@@ -4214,88 +4057,11 @@ class PerfDatabase:
         quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query compute scale latency (dynamic quantization - static quantization).
+        """Query compute scale latency. Delegates to
+        ``GEMM._query_compute_scale_table``."""
+        from aiconfigurator.sdk.operations.gemm import GEMM
 
-        Args:
-            m: Number of rows in input matrix
-            k: Number of columns in input matrix
-            quant_mode: Quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(m: int, k: int) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            sol_mem = 2 * m * k / self.system_spec["gpu"]["mem_bw"] * 1000.0
-            sol_time = sol_mem
-            return sol_time, 0, sol_mem
-
-        def get_empirical(m: int, k: int) -> float:
-            """
-            Get the empirical time
-            """
-            sol_time = get_sol(m, k)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
-
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(m, k)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(m, k), energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._compute_scale_data.raise_if_not_loaded()
-                if table_quant_mode not in self._compute_scale_data:
-                    supported = sorted([k.name for k in self._compute_scale_data])
-                    raise PerfDataNotAvailableError(
-                        "Compute scale perf data not available for requested quant mode. "
-                        f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
-                        f"quant_mode='{quant_mode.name}'. "
-                        f"Supported modes: {supported}"
-                    )
-                table = self._compute_scale_data[table_quant_mode]
-                m_i = int(m)
-                k_i = int(k)
-
-                m_keys = sorted(table.keys())
-                m_i = max(m_keys[0], min(m_i, m_keys[-1]))
-
-                k_min = None
-                k_max = None
-                for row in table.values():
-                    if not row:
-                        continue
-                    row_min = min(row.keys())
-                    row_max = max(row.keys())
-                    k_min = row_min if k_min is None else min(k_min, row_min)
-                    k_max = row_max if k_max is None else max(k_max, row_max)
-
-                if k_min is not None and k_max is not None:
-                    k_i = max(k_min, min(k_i, k_max))
-
-                result = self._interp_2d_linear(m_i, k_i, table)
-                return self._interp_pr(result["latency"], energy=result.get("energy", 0.0))
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(m, k),
-                database_mode=database_mode,
-                error_msg=f"Failed to query compute_scale data for {m=}, {k=}, {quant_mode=}",
-            )
+        return GEMM._query_compute_scale_table(self, m, k, quant_mode, database_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_scale_matrix(
@@ -4305,88 +4071,11 @@ class PerfDatabase:
         quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query scale matrix (static quantization) latency.
+        """Query scale matrix latency. Delegates to
+        ``GEMM._query_scale_matrix_table``."""
+        from aiconfigurator.sdk.operations.gemm import GEMM
 
-        Args:
-            m: Number of rows in input matrix
-            k: Number of columns in input matrix
-            quant_mode: Quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(m: int, k: int) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            sol_mem = 3 * m * k / self.system_spec["gpu"]["mem_bw"] * 1000.0
-            sol_time = sol_mem
-            return sol_time, 0, sol_mem
-
-        def get_empirical(m: int, k: int) -> float:
-            """
-            Get the empirical time
-            """
-            sol_time = get_sol(m, k)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
-
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(m, k)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(m, k), energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._scale_matrix_data.raise_if_not_loaded()
-                if table_quant_mode not in self._scale_matrix_data:
-                    supported = sorted([k.name for k in self._scale_matrix_data])
-                    raise PerfDataNotAvailableError(
-                        "Scale matrix perf data not available for requested quant mode. "
-                        f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
-                        f"quant_mode='{quant_mode.name}'. "
-                        f"Supported modes: {supported}"
-                    )
-                table = self._scale_matrix_data[table_quant_mode]
-                m_i = int(m)
-                k_i = int(k)
-
-                m_keys = sorted(table.keys())
-                m_i = max(m_keys[0], min(m_i, m_keys[-1]))
-
-                k_min = None
-                k_max = None
-                for row in table.values():
-                    if not row:
-                        continue
-                    row_min = min(row.keys())
-                    row_max = max(row.keys())
-                    k_min = row_min if k_min is None else min(k_min, row_min)
-                    k_max = row_max if k_max is None else max(k_max, row_max)
-
-                if k_min is not None and k_max is not None:
-                    k_i = max(k_min, min(k_i, k_max))
-
-                result = self._interp_2d_linear(m_i, k_i, table)
-                return self._interp_pr(result["latency"], energy=result.get("energy", 0.0))
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(m, k),
-                database_mode=database_mode,
-                error_msg=f"Failed to query scale_matrix data for {m=}, {k=}, {quant_mode=}",
-            )
+        return GEMM._query_scale_matrix_table(self, m, k, quant_mode, database_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_context_attention(
@@ -6468,28 +6157,21 @@ class PerfDatabase:
 
     def _correct_data(self) -> None:
         """
-        Correct the data based on sol time reference.
+        Correct the data based on sol time reference. GEMM SOL clamping lives
+        in ``GEMM._correct_sol`` (invoked from ``GEMM.load_data``); we forward
+        here for backward compat with tests that mutate ``_gemm_data`` and
+        then call ``_correct_data()`` to re-clamp.
+
+        The init path runs this immediately after ``GEMM.load_data`` already
+        applied SOL correction, so there is a duplicate full-table pass. It
+        is harmless — SOL clamping is idempotent (``max(sol, current)`` is
+        a no-op when ``current >= sol`` after the first pass) — but the
+        duplicate iteration is O(n) over the GEMM table. ISSUE-16 can route
+        the init call directly to GEMM and drop this forward.
         """
-        # regular gemm
-        if self._gemm_data:
-            for quant_mode in self._gemm_data:
-                for m in self._gemm_data[quant_mode]:
-                    for n in self._gemm_data[quant_mode][m]:
-                        for k in self._gemm_data[quant_mode][m][n]:
-                            sol = self.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
-                            data = self._gemm_data[quant_mode][m][n][k]
-                            current_latency = data["latency"] if isinstance(data, dict) else data
-                            if sol > current_latency:
-                                logger.debug(
-                                    f"gemm quant {quant_mode} m{m} n{n} k{k}: sol {sol} > perf_db {current_latency}"
-                                )
-                                if isinstance(data, dict):
-                                    # Update only latency, keep power unchanged
-                                    # Convert PerformanceResult to float
-                                    self._gemm_data[quant_mode][m][n][k]["latency"] = float(max(sol, current_latency))
-                                else:
-                                    # Legacy format (float)
-                                    self._gemm_data[quant_mode][m][n][k] = float(max(sol, current_latency))
+        from aiconfigurator.sdk.operations.gemm import GEMM
+
+        GEMM._correct_sol(self)
 
         # regular generation attention
         if self._generation_attention_data:

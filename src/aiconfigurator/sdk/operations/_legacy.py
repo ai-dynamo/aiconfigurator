@@ -1,40 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Legacy home for op classes that have not yet been migrated to their own
+files. Each ISSUE-04..14 moves a family of classes out of this file into a
+dedicated module. Final cleanup (ISSUE-15) deletes this file once empty."""
+
 import logging
 from typing import Optional
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.operations.base import Operation
 from aiconfigurator.sdk.perf_database import PerfDatabase
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 logger = logging.getLogger(__name__)
-
-
-class Operation:
-    """
-    Base operation class.
-
-    Note: query() now returns PerformanceResult (float-like) instead of plain float.
-    This maintains backward compatibility while adding power data.
-    """
-
-    def __init__(self, name: str, scale_factor: float) -> None:
-        self._name = name
-        self._scale_factor = scale_factor
-
-    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """
-        Query operation latency with power data.
-
-        Returns:
-            PerformanceResult: PerformanceResult (behaves like float) with latency in milliseconds
-                   (scaled by scale_factor). Power data available via .power attribute.
-        """
-        raise NotImplementedError
-
-    def get_weights(self, **kwargs):
-        raise NotImplementedError
 
 
 class CustomAllReduce(Operation):
@@ -134,97 +113,6 @@ class NCCL(Operation):
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
             source=getattr(result, "source", "silicon"),
-        )
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
-
-
-class GEMM(Operation):
-    """
-    GEMM operation with power tracking.
-    """
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        n: int,
-        k: int,
-        quant_mode: common.GEMMQuantMode,
-        **kwargs,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        self._n = n
-        self._k = k
-        self._quant_mode = quant_mode
-        self._weights = self._n * self._k * quant_mode.value.memory
-        self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
-        self._low_precision_input = kwargs.get("low_precision_input", False)
-
-    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """
-        Query GEMM latency with energy data.
-
-        For `fp8_static` quant mode, subtracts compute_scale overhead.
-        For GEMMs marked as low-precision input under `fp8_static`, also subtract scale_matrix.
-
-        Returns:
-            PerformanceResult: Behaves like float (scaled latency in ms).
-                              Energy data accessible via .energy attribute.
-                              Power can be derived as energy/latency.
-        """
-        x = kwargs.get("x")
-        x //= self._scale_num_tokens
-        overwrite_quant_mode = kwargs.get("quant_mode")
-        quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
-        is_fp8_static = quant_mode == common.GEMMQuantMode.fp8_static
-
-        # Query with energy
-        result = database.query_gemm(x, self._n, self._k, quant_mode)
-        latency = float(result)
-        energy = result.energy
-        source = getattr(result, "source", "silicon")
-
-        # Adjust for fp8_static: subtract compute_scale overhead, only fix for trtllm now
-        if is_fp8_static:
-            compute_scale_result = database.query_compute_scale(x, self._k, quant_mode)
-            latency -= float(compute_scale_result)
-            energy -= compute_scale_result.energy
-            sub_src = getattr(compute_scale_result, "source", "silicon")
-            if sub_src != source:
-                source = "mixed"
-            if self._low_precision_input:
-                scale_matrix_result = database.query_scale_matrix(x, self._k, quant_mode)
-                latency -= float(scale_matrix_result)
-                energy -= scale_matrix_result.energy
-                sub_src = getattr(scale_matrix_result, "source", "silicon")
-                if sub_src != source:
-                    source = "mixed"
-
-        # Ensure non-negative latency and energy
-        latency_clamped = max(0.0, latency)
-        energy_clamped = max(0.0, energy)
-        if latency_clamped != latency or energy_clamped != energy:
-            logger.warning(
-                "GEMM.query clamped latency/energy to 0.0. "
-                "op=%s m=%s n=%s k=%s quant_mode=%s post_sub(lat=%.6f, eng=%.6f)",
-                self._name,
-                x,
-                self._n,
-                self._k,
-                quant_mode.name,
-                latency,
-                energy,
-            )
-
-        latency = latency_clamped
-        energy = energy_clamped
-
-        return PerformanceResult(
-            latency=latency * self._scale_factor,
-            energy=energy * self._scale_factor,
-            source=source,
         )
 
     def get_weights(self, **kwargs):
