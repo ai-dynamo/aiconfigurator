@@ -9,10 +9,10 @@ only — context attention has no SOL clamp in the legacy
 ``PerfDatabase.query_context_attention`` / ``query_generation_attention``
 delegate here.
 
-``ContextAttention.query`` switches its three ``query_mem_op`` callers
-(QK-norm, apply-RoPE, KV-write) to ``interpolation.estimate_mem_op``
-directly — removing one of the cross-cutting ``database.*`` couplings
-the refactor aims to eliminate.
+``ContextAttention.query`` keeps its three ``query_mem_op`` callers
+(QK-norm, apply-RoPE, KV-write) pointed at ``database.query_mem_op`` —
+deciding a long-term home for the analytical mem-op formula is deferred
+to the post-refactor cleanup.
 
 Cache key is ``(systems_root, system, backend, version,
 enable_shared_layer)``, same as GEMM (and every other migrated op).
@@ -305,22 +305,15 @@ class ContextAttention(Operation):
         q_num = self._n * self._head_size
         k_num = self._n_kv * self._head_size
         v_num = self._n_kv * self._head_size
-        # QK-norm / apply-RoPE / KV-write mem-op latencies. Switched from
-        # ``database.query_mem_op`` to ``interpolation.estimate_mem_op`` as
-        # part of ISSUE-06 — see Phase-2 design doc Section 5.4.
-        gpu_spec = database.system_spec["gpu"]
-        mode = database._default_database_mode
         extra_latency = 0
         if self._use_qk_norm:
-            qk_norm_latency = 2 * interpolation.estimate_mem_op(
-                gpu_spec, q_num * 2, mode
-            ) + 2 * interpolation.estimate_mem_op(gpu_spec, k_num * 2, mode)
+            qk_norm_latency = 2 * database.query_mem_op(q_num * 2) + 2 * database.query_mem_op(k_num * 2)
             extra_latency += qk_norm_latency * 2  # elementwise before norm
-        apply_rope_latency = 2 * interpolation.estimate_mem_op(gpu_spec, q_num * 2 + k_num * 2, mode)
+        apply_rope_latency = 2 * database.query_mem_op(q_num * 2 + k_num * 2)  # apply rope
 
-        kv_write_latency = interpolation.estimate_mem_op(
-            gpu_spec, k_num * self._fmha_quant_mode.value.memory, mode
-        ) + interpolation.estimate_mem_op(gpu_spec, v_num * self._fmha_quant_mode.value.memory, mode)
+        kv_write_latency = database.query_mem_op(k_num * self._fmha_quant_mode.value.memory) + database.query_mem_op(
+            v_num * self._fmha_quant_mode.value.memory
+        )
         extra_latency += apply_rope_latency + kv_write_latency
         result += extra_latency * 1.1  # correction factor for extra latency
 

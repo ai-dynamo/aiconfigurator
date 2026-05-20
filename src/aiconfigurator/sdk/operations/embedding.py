@@ -5,16 +5,15 @@
 
 No CSV-backed data — latency derived analytically from ``mem_bw``. The
 base ``Operation.load_data`` no-op default handles the missing table.
-``query()`` calls ``interpolation.estimate_mem_op`` directly instead of
-the ``PerfDatabase.query_mem_op`` wrapper (which ISSUE-16 retires once
-every caller has migrated).
+``query()`` calls ``database.query_mem_op`` (the legacy entry point on
+``PerfDatabase``); deciding a long-term home for the analytical mem-op
+formula is deferred to the post-refactor cleanup.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from aiconfigurator.sdk import interpolation
 from aiconfigurator.sdk.operations.base import Operation
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -48,15 +47,11 @@ class Embedding(Operation):
         x = kwargs.get("x")
         d2d_bytes = x * self._column_size * 2
 
-        result = interpolation.estimate_mem_op(database.system_spec["gpu"], d2d_bytes, database._default_database_mode)
-        # ``estimate_mem_op`` always returns a tagged PerformanceResult
-        # (``"sol"`` / ``"empirical"``) — read the tag directly. Mem-op is
-        # never silicon-tagged because there is no silicon table for raw
-        # memory ops.
+        result = database.query_mem_op(d2d_bytes)
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=result.source,
+            source=getattr(result, "source", "silicon"),
         )
 
     def get_weights(self, **kwargs):
