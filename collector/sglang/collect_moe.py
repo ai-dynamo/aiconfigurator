@@ -30,12 +30,20 @@ if _server_args_module._global_server_args is None:
     )
     _server_args_module._global_server_args = _mock_server_args
 
-from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_moe
-from sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_config import (
-    get_config_dtype_str,
-    get_default_config,
-    get_moe_configs,
-)
+try:
+    from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import fused_moe
+    from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_config import (
+        get_config_dtype_str,
+        get_default_config,
+        get_moe_configs,
+    )
+except ImportError:
+    from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_moe
+    from sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_config import (
+        get_config_dtype_str,
+        get_default_config,
+        get_moe_configs,
+    )
 from sglang.srt.layers.moe.moe_runner.base import MoeRunnerConfig
 from sglang.srt.layers.moe.topk import StandardTopKOutput, TopKConfig, select_experts
 from sglang.srt.utils import is_hip
@@ -45,7 +53,10 @@ from sglang.srt.utils import is_hip
 # during CUDA graph capture or in headless benchmark contexts.  Replace the compiled
 # function with an eager equivalent so benchmarks don't stall.
 try:
-    import sglang.srt.layers.moe.fused_moe_triton.fused_moe as _fmoe_mod
+    try:
+        import sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe as _fmoe_mod
+    except ImportError:
+        import sglang.srt.layers.moe.fused_moe_triton.fused_moe as _fmoe_mod
 
     def _eager_moe_sum_reduce(x, out, routed_scaling_factor):
         torch.sum(x, dim=1, out=out)
@@ -133,7 +144,7 @@ def get_moe_test_cases():
     elif sm_version < 100:
         moe_list = ["bfloat16", "fp8_block", "int4_wo"]
     elif sm_version in (100, 103):
-        moe_list = ["bfloat16", "fp8_block", "nvfp4", "int4_wo"]
+        moe_list = ["bfloat16", "fp8_block", "nvfp4", "w4a8_mxfp4_mxfp8", "int4_wo"]
     else:
         # SGLang 0.5.10 routes nvfp4 MoE through FlashInfer CuteDSL, whose
         # runtime check only accepts sm_100/sm_103 and fails all sm_120 cases.
@@ -149,6 +160,16 @@ def get_moe_test_cases():
         num_tokens_list = [num_tokens for num_tokens in common_moe_testcase.num_tokens_list if num_tokens <= 20480]
 
         for moe_type, num_tokens in itertools.product(moe_list, num_tokens_list):
+            is_native_dsv4 = model_name.startswith("deepseek-ai/DeepSeek-V4-")
+            if moe_type == "w4a8_mxfp4_mxfp8" and not is_native_dsv4:
+                continue
+            if moe_type == "nvfp4" and is_native_dsv4:
+                # Native DeepSeek-V4 experts are queried by AIC as
+                # w4a8_mxfp4_mxfp8.  The SGLang kernel path is the same FP4
+                # FlashInfer/CuteDSL path, but the perf row must use the AIC
+                # quant-mode name so silicon lookup can find it.
+                continue
+
             # fp8_block requires hidden_size divisible by block group_size (128)
             if moe_type == "fp8_block" and (
                 common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0
@@ -480,7 +501,7 @@ def get_moe_test_cases():
                 # requires 144 KiB shared memory, above the 99 KiB limit.
                 continue
 
-            if moe_type == "nvfp4":
+            if moe_type in ("nvfp4", "w4a8_mxfp4_mxfp8"):
                 shard_k = common_moe_testcase.inter_size // common_moe_testcase.tp
                 # fp4_quantize requires weight dims divisible by 16 after TP sharding.
                 # CuteDSL grouped GEMM additionally requires 16-byte contiguous alignment:
@@ -1094,13 +1115,15 @@ def run_moe_torch(
         "fp8_block",
         "bfloat16",
         "nvfp4",
+        "w4a8_mxfp4_mxfp8",
         "int4_wo",
-    ], "only support moe type = fp8_block, bfloat16, nvfp4, or int4_wo"
+    ], "only support moe type = fp8_block, bfloat16, nvfp4, w4a8_mxfp4_mxfp8, or int4_wo"
     assert inter_size % moe_tp_size == 0, "inter_size % moe_tp_size must be 0"
     assert num_experts % moe_ep_size == 0, "num_experts must be divisible by moe_ep_size"
 
     num_local_experts = num_experts // moe_ep_size
     use_int4_w4a16 = moe_type == "int4_wo"
+    use_nvfp4_kernel = moe_type in ("nvfp4", "w4a8_mxfp4_mxfp8")
     # int4_wo uses block_shape=[0, group_size] for grouped scales (group_size=128)
     if use_int4_w4a16:
         block_shape = [0, 128]
@@ -1135,7 +1158,7 @@ def run_moe_torch(
             moe_type == "fp8_block",
             False,
             False,
-            use_nvfp4=moe_type == "nvfp4",
+            use_nvfp4=use_nvfp4_kernel,
             use_int4_w4a16=use_int4_w4a16,
             block_shape=block_shape,
             distributed=distributed,
@@ -1154,7 +1177,7 @@ def run_moe_torch(
             moe_type == "fp8_block",
             False,
             False,
-            use_nvfp4=moe_type == "nvfp4",
+            use_nvfp4=use_nvfp4_kernel,
             use_int4_w4a16=use_int4_w4a16,
             block_shape=block_shape,
             distributed=distributed,
@@ -1183,7 +1206,7 @@ def run_moe_torch(
         op_name="moe",
         kernel_source=(
             "sglang_flashinfer_cutedsl_moe"
-            if moe_type == "nvfp4"
+            if use_nvfp4_kernel
             else "sglang_marlin_moe"
             if moe_type == "int4_wo" and _HAS_MARLIN_MOE
             else "sglang_fused_moe_triton"

@@ -221,10 +221,9 @@ def interp_2d_linear(x: int, y: int, data: dict, extracted_metrics_cache: dict |
     sample_value = get_sample_leaf_value(data)
 
     if isinstance(sample_value, dict):
-        data_id = id(data)
-        if data_id not in extracted_metrics_cache:
-            extracted_metrics_cache[data_id] = extract_latency_and_energy_2d(data)
-        latency_data, energy_data = extracted_metrics_cache[data_id]
+        # Do not cache by id(data): short-lived wrapper dicts can reuse ids or
+        # mutate between calls, which makes interpolation return stale values.
+        latency_data, energy_data = extract_latency_and_energy_2d(data)
 
         points_list = []
         latency_values = []
@@ -351,10 +350,9 @@ def interp_3d(
     sample_value = get_sample_leaf_value(data)
 
     if isinstance(sample_value, dict):
-        data_id = id(data)
-        if data_id not in extracted_metrics_cache:
-            extracted_metrics_cache[data_id] = extract_latency_and_energy_3d(data)
-        latency_data, energy_data = extracted_metrics_cache[data_id]
+        # Do not cache by id(data): short-lived wrapper dicts can reuse ids or
+        # mutate between calls, which makes interpolation return stale values.
+        latency_data, energy_data = extract_latency_and_energy_3d(data)
 
         if method == "linear":
             latency = interp_3d_linear(x, y, z, latency_data)

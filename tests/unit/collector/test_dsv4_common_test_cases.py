@@ -29,6 +29,7 @@ def test_dsv4_attn_cases_cover_default_models(monkeypatch):
 def test_dsv4_attn_cases_include_same_gemm_types_for_default_models(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     monkeypatch.setattr(sys, "argv", ["pytest"])
+    monkeypatch.setattr(common_test_cases, "_has_native_fp4_experts", lambda: True)
 
     cases = common_test_cases.get_dsv4_csa_context_test_cases()
 
