@@ -58,6 +58,12 @@ class TRTLLMBackend(BaseBackend):
         )
         self.name = common.BackendName.trtllm
 
+    def get_default_free_gpu_memory_fraction(self) -> float | None:
+        return TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
+
+    def get_kv_cache_memory_check_params(self) -> tuple[float, float]:
+        return KV_CACHE_MEMORY_RESERVED_FRACTION, KV_CACHE_MEMORY_TOLERANCE
+
     def run_agg(
         self, model: BaseModel, database: PerfDatabase, runtime_config: RuntimeConfig, **kwargs
     ) -> InferenceSummary:
