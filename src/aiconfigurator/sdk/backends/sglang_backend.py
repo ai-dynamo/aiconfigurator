@@ -601,9 +601,22 @@ class SGLANGBackend(BaseBackend):
             c_dict = {1: 14, 2: 8.5, 4: 6.5, 8: 6.5}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 90 * 1024 * 1024)  # Higher minimum for SGLANG
-        elif model.model_family == "MOE":
+        elif model.model_family in ("MOE", "GEMMA4MOE"):
             c_dict = {1: 28, 2: 17, 4: 13, 8: 13}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
+            if model.model_family == "GEMMA4MOE":
+                # Fine-grained MoE (128 experts top-8): add dispatch workspace term,
+                # mirroring the DEEPSEEK family's accounting below.
+                activations += (
+                    num_tokens
+                    * moe_workspace_h
+                    * model.config.attention_dp_size
+                    * model._num_experts
+                    * model._topk
+                    / model.config.moe_ep_size
+                    / 128
+                    * 4
+                )
             activations = max(activations, 90 * 1024 * 1024)  # Higher minimum for SGLANG
         elif model.model_family in ("DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25"):
             c_dict = {1: 28, 2: 17, 4: 13, 8: 13}

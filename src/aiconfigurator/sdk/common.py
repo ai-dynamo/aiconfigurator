@@ -105,6 +105,31 @@ class HybridMoEConfig:
 
 
 @dataclass(frozen=True)
+class Gemma4MoEConfig:
+    """Config for Google Gemma 4 (gemma4_text) hybrid attention + dense-MLP-plus-MoE FFN.
+
+    Every layer runs both a shared dense MLP (intermediate_size, ``Gemma4TextMLP``) and a
+    routed top-k MoE branch in parallel, summed at the end of the block. Attention shape
+    differs per layer type:
+      - sliding_attention (SWA): num_key_value_heads x head_dim, separate K and V projections,
+        token window = sliding_window_size.
+      - full_attention (global): num_global_key_value_heads x global_head_dim, K=V at the
+        projection (no v_proj) when attention_k_eq_v is set, no window cap.
+
+    Shared dense MLP intermediate is the model-level ``inter_size`` (HF ``intermediate_size``).
+    Routed-expert intermediate is the model-level ``moe_inter_size`` (HF ``moe_intermediate_size``).
+    """
+
+    layer_types: tuple[str, ...]  # per-layer: "sliding_attention" or "full_attention"
+    swa_num_kv_heads: int  # KV heads on sliding_attention layers
+    swa_head_dim: int  # Q/K/V head dim on sliding_attention layers
+    global_num_kv_heads: int  # KV heads on full_attention layers
+    global_head_dim: int  # Q/K/V head dim on full_attention layers
+    sliding_window_size: int  # token window for sliding_attention layers
+    attention_k_eq_v: bool = False  # true means global layers reuse K as V (no v_proj)
+
+
+@dataclass(frozen=True)
 class Qwen35Config:
     """Config for Qwen3.5 hybrid GDN + full-attention model (dense and MoE).
 
@@ -398,6 +423,8 @@ DefaultHFModels = {
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
     "nvidia/nemotron-ultra-rl-050826",
     "nvidia/Nemotron-H-56B-Base-8K",
+    # Google Gemma 4 Models
+    "google/gemma-4-26B-A4B",
 }
 
 """
@@ -435,6 +462,7 @@ ModelFamily = {
     "NEMOTRONH",
     "HYBRIDMOE",
     "QWEN35",
+    "GEMMA4MOE",
 }
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
@@ -459,6 +487,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Llama4ForConditionalGeneration": "HYBRIDMOE",
     "Qwen3_5ForConditionalGeneration": "QWEN35",
     "Qwen3_5MoeForConditionalGeneration": "QWEN35",
+    "Gemma4ForConditionalGeneration": "GEMMA4MOE",
 }
 
 # Multimodal architectures whose LLM config lives under a nested key (e.g. "text_config").
@@ -468,6 +497,7 @@ MULTIMODAL_TEXT_CONFIG_KEY = {
     "Llama4ForConditionalGeneration": "text_config",
     "Qwen3_5ForConditionalGeneration": "text_config",
     "Qwen3_5MoeForConditionalGeneration": "text_config",
+    "Gemma4ForConditionalGeneration": "text_config",
 }
 
 """

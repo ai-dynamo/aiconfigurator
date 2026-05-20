@@ -101,6 +101,7 @@ from aiconfigurator.sdk.models.deepseek_v32 import (
     TrtllmWideEPDeepSeekV32Model,
     WideEPDeepSeekV32Model,
 )
+from aiconfigurator.sdk.models.gemma4_moe import Gemma4MoEModel
 from aiconfigurator.sdk.models.gpt import GPTModel
 from aiconfigurator.sdk.models.hybrid_moe import HybridMoEModel
 from aiconfigurator.sdk.models.llama import LLAMAModel
@@ -115,6 +116,7 @@ __all__ = [
     "DeepSeekV4Model",
     "DeepSeekV32Model",
     "GPTModel",
+    "Gemma4MoEModel",
     "HybridMoEModel",
     "LLAMAModel",
     "MOEModel",
