@@ -1,6 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Shared collector runtime helpers.
+
+This module is intentionally broad: collectors use it for benchmark timing,
+power sampling, subprocess/restart control, device detection, perf logging,
+case IDs, routing-logit synthesis, and small distributed-workload utilities.
+Keep collector-specific policy in the per-framework collector modules or YAML
+case files; this file should stay focused on reusable execution mechanics.
+"""
+
 import csv
 import functools
 import heapq
@@ -175,7 +184,7 @@ def benchmark_with_power(
     power_min_duration: float | None = None,  # Auto-detect from environment if None
     allow_graph_fail: bool = False,  # Enable graceful fallback on graph capture failure
     use_cuda_graph: bool = True,  # set False to force eager execution (ops whose captured
-    # private pools retain memory across tasks — see collect_mla_module_v3 DSA context).
+    # private pools retain memory across tasks — see collect_mla_module DSA context).
 ):
     """
     Context manager that handles warmup, graph capture, timing, and power monitoring.
@@ -1283,7 +1292,7 @@ def power_law_logits_v3(
 ):
     """Generate power law distributed router logits for MoE.
 
-    Used by: sglang/collect_moe.py, vllm/collect_moe.py, trtllm/collect_moe_v*.py
+    Used by: sglang/collect_moe.py, vllm/collect_moe.py, trtllm/collect_moe.py
 
     Args:
         num_tokens: Number of tokens
@@ -1408,7 +1417,7 @@ def build_rank0_local_workload(rank0_info: dict) -> dict[str, object]:
 def power_law_deepep_prefill(num_tokens, num_experts, topk, ep, alpha):
     """Generate power law distribution for DeepEP MoE prefill phase.
 
-    Used by: sglang/collect_wideep_deepep_moe.py
+    Used by: wideep/sglang/collect_deepep_moe.py
 
     Args:
         num_tokens: Number of tokens
@@ -1452,7 +1461,7 @@ def power_law_deepep_decode(num_tokens, num_experts, topk, ep, alpha):
     Creates a power law token distribution across all experts, then returns
     the distribution for the EP rank that has the highest total token count.
 
-    Used by: sglang/collect_wideep_deepep_moe.py
+    Used by: wideep/sglang/collect_deepep_moe.py
 
     Args:
         num_tokens: Number of tokens

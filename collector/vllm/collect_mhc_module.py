@@ -18,7 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import torch
 
-from collector.common_test_cases import get_common_mhc_test_cases
+from collector.case_generator import get_common_mhc_test_cases
 from collector.helper import benchmark_with_power, log_perf
 from collector.registry_types import PerfFile
 from collector.vllm.utils import setup_distributed

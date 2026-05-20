@@ -4,6 +4,13 @@
 
 # Modified from https://github.com/vllm-project/vllm/blob/v0.11.0/tests/v1/attention/utils.py
 
+"""Shared vLLM collector test harness utilities.
+
+Adapted from vLLM's attention test helpers, this module builds minimal vLLM
+configs, KV-cache specs, distributed setup contexts, cache-population helpers,
+and backend compatibility shims used by the vLLM collectors.
+"""
+
 import functools
 import inspect
 import os

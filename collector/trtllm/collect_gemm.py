@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""TensorRT-LLM GEMM collector.
+
+Expands shared GEMM case specs into TRT-LLM Linear-layer benchmarks across BF16,
+FP8, FP8 block, and related quantization modes. Shape policy comes from
+`case_generator.py`/YAML; this file owns TRT-LLM layer construction, padding,
+quantized-weight setup, and perf logging.
+"""
+
 import ctypes
 import math
 from collections import defaultdict
@@ -8,7 +16,7 @@ from collections import defaultdict
 import tensorrt_llm
 import torch
 import torch.nn.functional as F
-from common_test_cases import get_gemm_common_test_cases
+from case_generator import get_gemm_case_specs
 from tensorrt_llm._torch.modules.linear import Linear
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
@@ -117,7 +125,7 @@ def get_gemm_test_cases():
     # weight shape run consecutively.  This allows the per-process weight cache
     # in run_gemm to amortise the expensive torch.randn weight allocation across
     # all 75 x values instead of reallocating on every call.
-    all_cases = get_gemm_common_test_cases()
+    all_cases = get_gemm_case_specs()
     nk_to_x: dict = defaultdict(list)
     for c in all_cases:
         nk_to_x[(c.n, c.k)].append(c.x)

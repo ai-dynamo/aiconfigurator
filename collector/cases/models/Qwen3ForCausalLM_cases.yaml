@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: Qwen3ForCausalLM
+model_path: Qwen/Qwen3-32B
+model_paths:
+  - Qwen/Qwen3-0.6B
+  - Qwen/Qwen3-1.7B
+  - Qwen/Qwen3-8B
+  - Qwen/Qwen3-32B
+  - Qwen/Qwen3-32B-FP8
+  - Qwen/Qwen3-32B-FP8-Static-PerTensor
+include_base: true
+description: >
+  Qwen3 dense-family model-centric collection plan.

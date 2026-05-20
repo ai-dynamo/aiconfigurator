@@ -61,42 +61,50 @@ except ModuleNotFoundError:
     from helper import benchmark_with_power, log_perf
 
 
-# Re-export test case generators from the dedicated test_cases module so
-# collect.py's registry (``module="collector.sglang.collect_dsv4_attn"``)
-# can resolve them via getattr.
+# Re-export test case generators from the centralized case generator module so
+# collect.py's registry (``module="collector.sglang.collect_dsv4_attn"``) can
+# resolve them via getattr.
 try:
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         _DSV4_MODULE_BATCH_SIZES as _BATCH_SIZES,
     )
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         _DSV4_MODULE_SEQ_LENGTHS as _SEQ_LENGTHS,
     )
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         _DSV4_MODULE_TP_SIZES as _TP_SIZES,
     )
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         DSV4_ATTN_KINDS as ATTN_KINDS,
     )
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         _dsv4_module_filter_pairs as _filter_pairs,
     )
+    from collector.case_generator import get_dsv4_csa_context_test_cases as _get_dsv4_csa_context_test_cases_impl
+    from collector.case_generator import get_dsv4_csa_generation_test_cases as _get_dsv4_csa_generation_test_cases_impl
+    from collector.case_generator import get_dsv4_hca_context_test_cases as _get_dsv4_hca_context_test_cases_impl
+    from collector.case_generator import get_dsv4_hca_generation_test_cases as _get_dsv4_hca_generation_test_cases_impl
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from common_test_cases import (
+    from case_generator import (
         _DSV4_MODULE_BATCH_SIZES as _BATCH_SIZES,
     )
-    from common_test_cases import (
+    from case_generator import (
         _DSV4_MODULE_SEQ_LENGTHS as _SEQ_LENGTHS,
     )
-    from common_test_cases import (
+    from case_generator import (
         _DSV4_MODULE_TP_SIZES as _TP_SIZES,
     )
-    from common_test_cases import (
+    from case_generator import (
         DSV4_ATTN_KINDS as ATTN_KINDS,
     )
-    from common_test_cases import (
+    from case_generator import (
         _dsv4_module_filter_pairs as _filter_pairs,
     )
+    from case_generator import get_dsv4_csa_context_test_cases as _get_dsv4_csa_context_test_cases_impl
+    from case_generator import get_dsv4_csa_generation_test_cases as _get_dsv4_csa_generation_test_cases_impl
+    from case_generator import get_dsv4_hca_context_test_cases as _get_dsv4_hca_context_test_cases_impl
+    from case_generator import get_dsv4_hca_generation_test_cases as _get_dsv4_hca_generation_test_cases_impl
 
 
 def _expand_grid():
@@ -105,27 +113,25 @@ def _expand_grid():
 
 
 def get_dsv4_csa_context_test_cases():
-    from collector.common_test_cases import get_dsv4_csa_context_test_cases as _impl
-
-    return _impl()
+    return _get_dsv4_csa_context_test_cases_impl()
 
 
 def get_dsv4_csa_generation_test_cases():
-    from collector.common_test_cases import get_dsv4_csa_generation_test_cases as _impl
-
-    return _impl()
+    return _get_dsv4_csa_generation_test_cases_impl()
 
 
 def get_dsv4_hca_context_test_cases():
-    from collector.common_test_cases import get_dsv4_hca_context_test_cases as _impl
-
-    return _impl()
+    return _get_dsv4_hca_context_test_cases_impl()
 
 
 def get_dsv4_hca_generation_test_cases():
-    from collector.common_test_cases import get_dsv4_hca_generation_test_cases as _impl
+    return _get_dsv4_hca_generation_test_cases_impl()
 
-    return _impl()
+
+get_dsv4_flash_csa_context_test_cases = get_dsv4_csa_context_test_cases
+get_dsv4_flash_csa_generation_test_cases = get_dsv4_csa_generation_test_cases
+get_dsv4_flash_hca_context_test_cases = get_dsv4_hca_context_test_cases
+get_dsv4_flash_hca_generation_test_cases = get_dsv4_hca_generation_test_cases
 
 
 __all__ = [
@@ -136,6 +142,10 @@ __all__ = [
     "_filter_pairs",
     "get_dsv4_csa_context_test_cases",
     "get_dsv4_csa_generation_test_cases",
+    "get_dsv4_flash_csa_context_test_cases",
+    "get_dsv4_flash_csa_generation_test_cases",
+    "get_dsv4_flash_hca_context_test_cases",
+    "get_dsv4_flash_hca_generation_test_cases",
     "get_dsv4_hca_context_test_cases",
     "get_dsv4_hca_generation_test_cases",
     "run_dsv4_attn_worker",

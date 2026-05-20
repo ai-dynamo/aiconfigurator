@@ -50,57 +50,57 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from helper import benchmark_with_power, log_perf
 
-# Re-export test case generators from the centralised common_test_cases
+# Re-export test case generators from the centralized case generator
 # module so collect.py's registry can resolve them via getattr on this module.
 try:
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         _DSV4_DEFAULT_MODELS,
     )
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         _DSV4_SPARSE_BS_LIST as DEFAULT_BS_LIST,
     )
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         _DSV4_SPARSE_ISL_LIST as DEFAULT_ISL_LIST,
     )
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         _DSV4_SPARSE_PAST_KV_LIST as DEFAULT_PAST_KV_LIST,
     )
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         _DSV4_SPARSE_TP_LIST_ATTN as DEFAULT_TP_LIST_ATTN,
     )
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         DSV4_SPARSE_KERNELS as KERNELS,
     )
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         _build_dsv4_sparse_test_cases as _build_sparse_test_cases,
     )
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from common_test_cases import (
+    from case_generator import (
         _DSV4_DEFAULT_MODELS,
     )
-    from common_test_cases import (
+    from case_generator import (
         _DSV4_SPARSE_BS_LIST as DEFAULT_BS_LIST,
     )
-    from common_test_cases import (
+    from case_generator import (
         _DSV4_SPARSE_ISL_LIST as DEFAULT_ISL_LIST,
     )
-    from common_test_cases import (
+    from case_generator import (
         _DSV4_SPARSE_PAST_KV_LIST as DEFAULT_PAST_KV_LIST,
     )
-    from common_test_cases import (
+    from case_generator import (
         _DSV4_SPARSE_TP_LIST_ATTN as DEFAULT_TP_LIST_ATTN,
     )
-    from common_test_cases import (
+    from case_generator import (
         DSV4_SPARSE_KERNELS as KERNELS,
     )
-    from common_test_cases import (
+    from case_generator import (
         _build_dsv4_sparse_test_cases as _build_sparse_test_cases,
     )
 
 
 def get_dsv4_paged_mqa_logits_test_cases():
-    from collector.common_test_cases import get_dsv4_paged_mqa_logits_test_cases as _impl
+    from collector.case_generator import get_dsv4_paged_mqa_logits_test_cases as _impl
 
     if not _dsv4_sparse_kernel_supported("paged_mqa_logits"):
         return []
@@ -108,11 +108,15 @@ def get_dsv4_paged_mqa_logits_test_cases():
 
 
 def get_dsv4_hca_attn_test_cases():
-    from collector.common_test_cases import get_dsv4_hca_attn_test_cases as _impl
+    from collector.case_generator import get_dsv4_hca_attn_test_cases as _impl
 
     if not _dsv4_sparse_kernel_supported("hca_attn"):
         return []
     return _impl()
+
+
+get_dsv4_flash_paged_mqa_logits_test_cases = get_dsv4_paged_mqa_logits_test_cases
+get_dsv4_flash_hca_attn_test_cases = get_dsv4_hca_attn_test_cases
 
 
 __all__ = [
@@ -123,6 +127,8 @@ __all__ = [
     "DEFAULT_TP_LIST_ATTN",
     "KERNELS",
     "_build_sparse_test_cases",
+    "get_dsv4_flash_hca_attn_test_cases",
+    "get_dsv4_flash_paged_mqa_logits_test_cases",
     "get_dsv4_hca_attn_test_cases",
     "get_dsv4_paged_mqa_logits_test_cases",
     "run_dsv4_sparse_kernel_worker",

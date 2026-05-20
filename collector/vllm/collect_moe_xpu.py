@@ -1,9 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""vLLM MoE collector for XPU devices.
+
+Uses XPU-capable vLLM fused-MoE paths and helper device abstractions to
+benchmark synthetic MoE cases. The module adapts common MoE case specs to XPU
+kernel constraints, builds routing logits, and writes vLLM MoE perf rows.
+"""
+
 __compat__ = "vllm>=0.11.0"
 
-import itertools
 import os
 
 import torch
@@ -11,7 +17,12 @@ import torch.nn.functional as F
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
-from collector.common_test_cases import MoeCommonTestCase
+from collector.case_generator import (
+    get_moe_backend_model_activation,
+    get_moe_backend_test_cases,
+    get_moe_quantization_modes,
+    moe_model_allows_quantization,
+)
 from collector.helper import (
     balanced_logits,
     benchmark_with_power,
@@ -34,149 +45,28 @@ def resolve_moe_activation(model_name: str) -> str:
 
     Priority:
     1) explicit env override via AIC_COLLECTOR_MOE_ACTIVATION
-    2) model-family heuristic
+    2) backend model case YAML
     3) default silu
     """
     env_activation = os.getenv("AIC_COLLECTOR_MOE_ACTIVATION")
     if env_activation:
         return env_activation.strip().lower()
-
-    name = model_name.lower()
-    if any(key in name for key in ["qwen", "mixtral", "deepseek", "llama"]):
-        return "silu"
-    if "gemma" in name:
-        return "gelu"
-    if "gpt-oss" in name:
-        return "swigluoai"
-
-    return "silu"
+    return get_moe_backend_model_activation("vllm_xpu", model_name, default="silu")
 
 
 def get_moe_xpu_test_cases():
-    num_tokens = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        320,
-        384,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-        12288,
-        16384,
-    ]
-    tp_list = [1, 2, 4, 8, 16, 32]
-    ep_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    num_gpu_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-
-    # previous commit's smaller configs for non-GPT-OSS models
-    tp_list_small = [1, 2, 4, 8]
-    ep_list_small = [1, 2, 4, 8]
-    num_gpu_list_small = [1, 2, 4, 8]
-
-    gpt_oss_model_names = {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
-
-    token_distributions = [
-        ("balanced", 0.0),
-        ("power_law", 1.01),
-        ("power_law", 1.2),
-    ]
-
-    # hidden_size,inter_s,topk,num_expert
-    model_config_list = [
-        [2048, 1408, 4, 60, "Qwen/Qwen1.5-MoE-A2.7B"],
-        [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B"],
-        [8192, 5120, 1, 16, "meta-llama/Llama-4-Scout-17B-16E"],
-        [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B-Instruct-2507"],
-        [2880, 2880, 4, 128, "openai/gpt-oss-120b"],
-        [2880, 2880, 4, 32, "openai/gpt-oss-20b"],
-    ]
-
-    test_cases: list[MoeCommonTestCase] = []
-
-    for model_config in model_config_list:
-        hs, inter_s, topk, num_experts, model_name = model_config
-
-        # Use large configs for GPT-OSS models, small configs for commit's models
-        if model_name in gpt_oss_model_names:
-            cur_tp_list = tp_list
-            cur_ep_list = ep_list
-            cur_num_gpu_list = num_gpu_list
-        else:
-            cur_tp_list = tp_list_small
-            cur_ep_list = ep_list_small
-            cur_num_gpu_list = num_gpu_list_small
-
-        for (
-            num_gpu,
-            tp,
-            ep,
-            (token_distribution, power_law_alpha),
-        ) in itertools.product(
-            cur_num_gpu_list,
-            cur_tp_list,
-            cur_ep_list,
-            token_distributions,
-        ):
-            # Qwen3-30B-A3B: exclude tp >= 8 as they are not used for actual deployments
-            if model_name == "Qwen/Qwen3-30B-A3B" and tp >= 8:
-                continue
-
-            if tp * ep != num_gpu:
-                continue
-            if ep > num_experts:
-                continue
-            if num_experts % ep != 0:
-                continue
-            # we need to ensure inter_s can be divided by tp.
-            if inter_s % tp != 0:
-                continue
-
-            test_cases.append(
-                MoeCommonTestCase(
-                    num_tokens_list=num_tokens,
-                    hidden_size=hs,
-                    inter_size=inter_s,
-                    topk=topk,
-                    num_experts=num_experts,
-                    tp=tp,
-                    ep=ep,
-                    model_name=model_name,
-                    token_expert_distribution=token_distribution,
-                    power_law_alpha=power_law_alpha,
-                )
-            )
-
-    return test_cases
+    return get_moe_backend_test_cases("vllm_xpu")
 
 
 def get_moe_test_cases():
     """Generate MoE test cases"""
 
-    # Quantization types supported by vLLM
-    moe_list = ["bfloat16"]
-    if hasattr(torch, "float8_e4m3fn"):
-        moe_list += ["fp8"]
-    moe_list += ["w4a16_mxfp4"]
-
-    gpt_oss_models = {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
+    enabled_moe_types = get_moe_quantization_modes(
+        "vllm_xpu",
+        sm_version=0,
+        runtime_version=vllm_version,
+        runtime_features={"torch_fp8_e4m3fn": hasattr(torch, "float8_e4m3fn")},
+    )
 
     test_cases = []
 
@@ -190,13 +80,8 @@ def get_moe_test_cases():
         if common_moe_testcase.tp > 1 and common_moe_testcase.ep > 1:
             continue
 
-        for moe_type in moe_list:
-            # GPT-OSS models only use mxfp4 quantization in production;
-            # skip them for other quant types.
-            if model_name in gpt_oss_models and moe_type != "w4a16_mxfp4":
-                continue
-            # Conversely, mxfp4 is only collected for GPT-OSS models.
-            if moe_type == "w4a16_mxfp4" and model_name not in gpt_oss_models:
+        for moe_type in enabled_moe_types:
+            if not moe_model_allows_quantization("vllm_xpu", model_name, moe_type):
                 continue
 
             test_cases.append(

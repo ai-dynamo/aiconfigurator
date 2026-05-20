@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""SGLang MLA collector.
+
+Builds standalone RadixAttention/ForwardBatch mocks for MLA context and
+generation kernels without starting a server. Shared MLA cases come from YAML;
+this file owns SGLang MLA backend choice, paged KV-cache setup, DP-attention
+mocking, SM-specific skips, and perf logging.
+"""
+
 __compat__ = "sglang>=0.5.10rc0"
 
 import math

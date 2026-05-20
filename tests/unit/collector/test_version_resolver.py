@@ -142,50 +142,48 @@ class TestResolveModule:
         run_func="run_moe_torch",
         perf_filename=PerfFile.MOE,
         versions=(
-            VersionRoute("1.1.0", "collector.trtllm.collect_moe_v3"),
-            VersionRoute("0.21.0", "collector.trtllm.collect_moe_v2"),
-            VersionRoute("0.20.0", "collector.trtllm.collect_moe_v1"),
+            VersionRoute("0.17.0", "collector.example.collect_versioned_op_v2"),
+            VersionRoute("0.15.0", "collector.example.collect_versioned_op_v1"),
         ),
     )
 
     UNVERSIONED_ENTRY: ClassVar[OpEntry] = OpEntry(
         op="gemm",
-        module="collector.trtllm.collect_gemm",
+        module="collector.vllm.collect_gemm",
         get_func="get_gemm_test_cases",
         run_func="run_gemm",
         perf_filename=PerfFile.GEMM,
     )
 
     def test_unversioned_returns_module_directly(self):
-        assert resolve_module(self.UNVERSIONED_ENTRY, "999.0.0") == "collector.trtllm.collect_gemm"
+        assert resolve_module(self.UNVERSIONED_ENTRY, "999.0.0") == "collector.vllm.collect_gemm"
 
     @pytest.mark.parametrize(
         "runtime,expected_module",
         [
-            ("1.3.0", "collector.trtllm.collect_moe_v3"),
-            ("1.1.0", "collector.trtllm.collect_moe_v3"),
-            ("1.0.0", "collector.trtllm.collect_moe_v2"),
-            ("0.21.0", "collector.trtllm.collect_moe_v2"),
-            ("0.20.0", "collector.trtllm.collect_moe_v1"),
+            ("0.18.0", "collector.example.collect_versioned_op_v2"),
+            ("0.17.0", "collector.example.collect_versioned_op_v2"),
+            ("0.16.0", "collector.example.collect_versioned_op_v1"),
+            ("0.15.0", "collector.example.collect_versioned_op_v1"),
         ],
     )
     def test_versioned_routing(self, runtime, expected_module):
         assert resolve_module(self.VERSIONED_ENTRY, runtime) == expected_module
 
     def test_unsupported_version_returns_none(self):
-        assert resolve_module(self.VERSIONED_ENTRY, "0.19.0") is None
+        assert resolve_module(self.VERSIONED_ENTRY, "0.14.0") is None
 
     def test_rc_routes_to_previous(self):
-        """1.1.0rc2 < 1.1.0, so it should fall through to v2 (>= 0.21.0)."""
-        assert resolve_module(self.VERSIONED_ENTRY, "1.1.0rc2") == "collector.trtllm.collect_moe_v2"
+        """0.17.0rc2 < 0.17.0, so it should fall through to v1."""
+        assert resolve_module(self.VERSIONED_ENTRY, "0.17.0rc2") == "collector.example.collect_versioned_op_v1"
 
     def test_post_routes_to_current(self):
-        """0.21.0.post1 >= 0.21.0, so it should match v2."""
-        assert resolve_module(self.VERSIONED_ENTRY, "0.21.0.post1") == "collector.trtllm.collect_moe_v2"
+        """0.17.0.post1 >= 0.17.0, so it should match v2."""
+        assert resolve_module(self.VERSIONED_ENTRY, "0.17.0.post1") == "collector.example.collect_versioned_op_v2"
 
     def test_short_version_routes_to_current(self):
-        """1.1 should be treated as 1.1.0."""
-        assert resolve_module(self.VERSIONED_ENTRY, "1.1") == "collector.trtllm.collect_moe_v3"
+        """0.17 should be treated as 0.17.0."""
+        assert resolve_module(self.VERSIONED_ENTRY, "0.17") == "collector.example.collect_versioned_op_v2"
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +196,7 @@ class TestBuildCollections:
     SAMPLE_REGISTRY: ClassVar[list[OpEntry]] = [
         OpEntry(
             op="gemm",
-            module="collector.trtllm.collect_gemm",
+            module="collector.vllm.collect_gemm",
             get_func="get_gemm_test_cases",
             run_func="run_gemm",
             perf_filename=PerfFile.GEMM,
@@ -209,45 +207,45 @@ class TestBuildCollections:
             run_func="run_moe_torch",
             perf_filename=PerfFile.MOE,
             versions=(
-                VersionRoute("1.1.0", "collector.trtllm.collect_moe_v3"),
-                VersionRoute("0.20.0", "collector.trtllm.collect_moe_v1"),
+                VersionRoute("0.17.0", "collector.example.collect_versioned_op_v2"),
+                VersionRoute("0.15.0", "collector.example.collect_versioned_op_v1"),
             ),
         ),
     ]
 
     def test_all_ops_included(self):
-        colls = build_collections(self.SAMPLE_REGISTRY, "trtllm", "1.1.0")
+        colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.17.0")
         op_names = [c["type"] for c in colls]
         assert "gemm" in op_names
         assert "moe" in op_names
 
     def test_ops_filter(self):
-        colls = build_collections(self.SAMPLE_REGISTRY, "trtllm", "1.1.0", ops=["gemm"])
+        colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.17.0", ops=["gemm"])
         assert len(colls) == 1
         assert colls[0]["type"] == "gemm"
 
     def test_unsupported_version_skipped(self):
-        colls = build_collections(self.SAMPLE_REGISTRY, "trtllm", "0.19.0")
+        colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.14.0")
         op_names = [c["type"] for c in colls]
         assert "gemm" in op_names
         assert "moe" not in op_names
 
     def test_resolved_module_in_output(self):
-        colls = build_collections(self.SAMPLE_REGISTRY, "trtllm", "1.1.0", ops=["moe"])
-        assert colls[0]["module"] == "collector.trtllm.collect_moe_v3"
+        colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.17.0", ops=["moe"])
+        assert colls[0]["module"] == "collector.example.collect_versioned_op_v2"
 
     def test_resolved_module_old_version(self):
-        colls = build_collections(self.SAMPLE_REGISTRY, "trtllm", "0.20.0", ops=["moe"])
-        assert colls[0]["module"] == "collector.trtllm.collect_moe_v1"
+        colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.15.0", ops=["moe"])
+        assert colls[0]["module"] == "collector.example.collect_versioned_op_v1"
 
     def test_output_dict_shape(self):
-        colls = build_collections(self.SAMPLE_REGISTRY, "trtllm", "1.1.0", ops=["gemm"])
+        colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.17.0", ops=["gemm"])
         c = colls[0]
         assert set(c.keys()) == {"name", "type", "module", "get_func", "run_func", "perf_filename"}
-        assert c["name"] == "trtllm"
+        assert c["name"] == "vllm"
 
     def test_perf_filename_propagated(self):
-        colls = build_collections(self.SAMPLE_REGISTRY, "trtllm", "1.1.0", ops=["gemm"])
+        colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.17.0", ops=["gemm"])
         assert colls[0]["perf_filename"] == PerfFile.GEMM
 
 
@@ -298,11 +296,18 @@ class TestRegistryIntegrity:
     """Validate structural invariants of all backend registries."""
 
     @pytest.fixture(
-        params=["trtllm", "vllm", "sglang"],
+        params=[
+            ("collector.trtllm.registry", "trtllm"),
+            ("collector.vllm.registry", "vllm"),
+            ("collector.sglang.registry", "sglang"),
+            ("collector.wideep.trtllm.registry", "wideep.trtllm"),
+            ("collector.wideep.sglang.registry", "wideep.sglang"),
+        ],
     )
     def registry(self, request):
-        mod = __import__(f"collector.{request.param}.registry", fromlist=["REGISTRY"])
-        return mod.REGISTRY, request.param
+        module_name, backend = request.param
+        mod = __import__(module_name, fromlist=["REGISTRY"])
+        return mod.REGISTRY, backend
 
     def test_every_entry_is_opentry(self, registry):
         reg, backend = registry
@@ -412,7 +417,7 @@ class TestRegistryIntegrity:
         """For each module base name, _vN suffixes must be v1, v2, ..., vN with no gaps.
 
         Checked across the entire registry because different ops may share
-        the same versioned module (e.g. moe and moe_eplb both use collect_moe_v3).
+        the same versioned module (e.g. multiple vLLM module ops can share one versioned collector).
         """
         reg, backend = registry
         # Collect all version numbers grouped by module base name

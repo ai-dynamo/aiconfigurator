@@ -562,7 +562,7 @@ def test_lookup_sparse_kernel_missing_returns_none():
 
 def test_dsv4_test_cases_active_under_no_filter(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         get_dsv4_csa_context_test_cases,
         get_dsv4_paged_mqa_logits_test_cases,
     )
@@ -574,7 +574,7 @@ def test_dsv4_test_cases_active_under_no_filter(monkeypatch):
 def test_dsv4_test_cases_skipped_under_other_model(monkeypatch):
     """Filter to a non-V4 model → V4 ops emit zero cases (collector skips)."""
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "deepseek-ai/DeepSeek-V3")
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         get_dsv4_csa_context_test_cases,
         get_dsv4_csa_generation_test_cases,
         get_dsv4_hca_attn_test_cases,
@@ -596,7 +596,7 @@ def test_dsv4_test_cases_skipped_under_other_model(monkeypatch):
 )
 def test_dsv4_test_cases_active_under_v4_filter(monkeypatch, model_path):
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
-    from collector.common_test_cases import get_dsv4_csa_context_test_cases
+    from collector.case_generator import get_dsv4_csa_context_test_cases
 
     cases = get_dsv4_csa_context_test_cases()
     assert len(cases) > 0
@@ -616,7 +616,7 @@ def test_dsv4_test_cases_active_under_v4_filter(monkeypatch, model_path):
 def test_dsv4_sparse_test_cases_only_indexer_tp1(monkeypatch, model_path):
     """Sweep is fixed at tp=[1] (kernel is TP-invariant)."""
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
-    from collector.common_test_cases import (
+    from collector.case_generator import (
         get_dsv4_hca_attn_test_cases,
         get_dsv4_paged_mqa_logits_test_cases,
     )

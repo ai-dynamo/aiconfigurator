@@ -48,7 +48,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWABackend
 from vllm.v1.kv_cache_interface import MLAAttentionSpec, SlidingWindowMLASpec
 from vllm.version import __version__ as vllm_version
 
-from collector.common_test_cases import (
+from collector.case_generator import (
     _DSV4_DEFAULT_MODELS,
     _DSV4_MODULE_BATCH_SIZES,
     _DSV4_MODULE_SEQ_LENGTHS,

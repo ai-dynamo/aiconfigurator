@@ -18,6 +18,20 @@ def _mock_helper_imports(monkeypatch):
     fake_helper.benchmark_with_power = lambda **kw: None
     monkeypatch.setitem(__import__("sys").modules, "helper", fake_helper)
 
+    fake_torch = types.ModuleType("torch")
+    fake_torch.bfloat16 = "bfloat16"
+    fake_torch.float16 = "float16"
+    fake_torch.float32 = "float32"
+    fake_torch.cuda = types.SimpleNamespace(
+        empty_cache=lambda: None,
+        get_device_capability=lambda *_a, **_kw: (9, 0),
+        get_device_name=lambda *_a, **_kw: "Fake GPU",
+        is_available=lambda: False,
+        set_device=lambda *_a, **_kw: None,
+    )
+    fake_torch.randn = lambda *_a, **_kw: None
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
 
 def _import_module():
     """Import collect_mla_module after mocking."""
@@ -43,20 +57,25 @@ class TestGetPrecisionCombos:
             combos = mod._get_precision_combos("context")
         assert ("bfloat16", "bfloat16", "bfloat16") in combos
         assert ("bfloat16", "fp8", "bfloat16") in combos
-        assert len(combos) == 2
+        assert ("bfloat16", "bfloat16", "fp8_block") in combos
+        assert ("bfloat16", "fp8", "fp8_block") in combos
+        assert len(combos) == 4
 
     def test_ada_sm89_no_fp8(self):
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=89):
             combos = mod._get_precision_combos("context")
-        assert combos == [("bfloat16", "bfloat16", "bfloat16")]
+        assert combos == [
+            ("bfloat16", "bfloat16", "bfloat16"),
+            ("bfloat16", "bfloat16", "fp8_block"),
+        ]
 
     def test_blackwell_sm100(self):
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=100):
             combos = mod._get_precision_combos("generation")
         assert ("bfloat16", "fp8", "bfloat16") in combos
-        assert len(combos) == 2
+        assert len(combos) == 4
 
     def test_no_phase_difference(self):
         """SGLang precision combos are the same for context and generation."""
@@ -88,17 +107,10 @@ class TestGetBackends:
     def test_mla_older(self):
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=80):
-            assert mod._get_backends("mla") == "flashinfer"
+            assert mod._get_backends("mla") == "triton"
 
 
 class TestGetContextTestCases:
-    def test_filenames(self):
-        mod = _import_module()
-        with patch.object(mod, "get_sm_version", return_value=90):
-            cases = mod.get_context_test_cases("dsa")
-        fnames = {c[6] for c in cases}
-        assert fnames == {"dsa_context_module_perf.txt"}
-
     def test_memory_guard(self):
         """No test case exceeds batch_size * seq_len > 128K."""
         mod = _import_module()
@@ -115,21 +127,14 @@ class TestGetContextTestCases:
                     assert case[1] <= 8
 
     def test_format_length(self):
-        """Each test case has 7 elements."""
+        """Each inner sweep test case has 6 elements."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             for case in mod.get_context_test_cases("mla"):
-                assert len(case) == 7
+                assert len(case) == 6
 
 
 class TestGetGenerationTestCases:
-    def test_filenames(self):
-        mod = _import_module()
-        with patch.object(mod, "get_sm_version", return_value=90):
-            cases = mod.get_generation_test_cases("mla")
-        fnames = {c[6] for c in cases}
-        assert fnames == {"mla_generation_module_perf.txt"}
-
     def test_memory_guard(self):
         """No test case exceeds batch_size * seq_len > 256K."""
         mod = _import_module()
@@ -143,33 +148,37 @@ class TestBuildModuleTestCases:
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("dsa", "context")
-        model_paths = {c[7] for c in cases}
+        model_paths = {c[6] for c in cases}
         assert "deepseek-ai/DeepSeek-V3.2" in model_paths
         assert "zai-org/GLM-5" in model_paths
 
-    def test_mla_includes_v3_only(self):
+    def test_mla_includes_v3_family(self):
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("mla", "context")
-        model_paths = {c[7] for c in cases}
-        assert model_paths == {"deepseek-ai/DeepSeek-V3"}
+        model_paths = {c[6] for c in cases}
+        assert model_paths == {
+            "deepseek-ai/DeepSeek-R1",
+            "deepseek-ai/DeepSeek-V3",
+            "nvidia/DeepSeek-V3.1-NVFP4",
+        }
 
     def test_format_length_10(self):
-        """Each built test case has 10 elements (7 + model_path + attn_type + backend)."""
+        """Each built test case has 9 elements (6 + model_path + attn_type + backend)."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             for case in mod._build_module_test_cases("dsa", "generation"):
-                assert len(case) == 10
-                assert case[8] == "dsa"
-                assert case[9] is None  # DSA backend resolved at runtime
+                assert len(case) == 9
+                assert case[7] == "dsa"
+                assert case[8] is None  # DSA backend resolved at runtime
 
     def test_deduplication(self):
         """One entry per (model, precision_combo, head_num) — not per (batch, seq)."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("dsa", "context")
-        # DSV3.2: 2 dtypes x 4 heads = 8, GLM-5: 2 dtypes x 3 heads (64 native, skip 128) = 6 -> 14
-        assert len(cases) == 8 + 6
+        # DSv3.2: 1 precision x 2 heads, GLM-5 variants: 1 precision x 1 head each.
+        assert len(cases) == 2 + 3
 
     def test_placeholder_seq_batch(self):
         """seq_len and batch_size are placeholders (0) — subprocess sweeps internally."""
@@ -217,46 +226,48 @@ class TestGetMlaBackendList:
     def test_older(self):
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=80):
-            assert mod._get_mla_backend_list() == ["flashinfer"]
+            assert mod._get_mla_backend_list() == []
 
 
 class TestBuildWideepMlaTestCases:
     def test_format_length_10(self):
-        """Each wideep MLA test case has 10 elements (9 + attention_backend)."""
+        """Each wideep MLA test case has 9 elements (6 + model_path + attn_type + backend)."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             for case in mod._build_wideep_mla_test_cases("context"):
-                assert len(case) == 10
-                assert case[8] == "mla"
+                assert len(case) == 9
+                assert case[7] == "mla"
 
     def test_context_filename(self):
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_wideep_mla_test_cases("context")
-        fnames = {c[6] for c in cases}
-        assert fnames == {"wideep_context_mla_perf.txt"}
+        assert {c[7] for c in cases} == {"mla"}
 
     def test_generation_filename(self):
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_wideep_mla_test_cases("generation")
-        fnames = {c[6] for c in cases}
-        assert fnames == {"wideep_generation_mla_perf.txt"}
+        assert {c[7] for c in cases} == {"mla"}
 
     def test_only_mla_models(self):
-        """Wideep MLA only includes MLA-type models (DeepSeek-V3), not DSA."""
+        """Wideep MLA only includes MLA-type models, not DSA."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_wideep_mla_test_cases("context")
-        model_paths = {c[7] for c in cases}
-        assert model_paths == {"deepseek-ai/DeepSeek-V3"}
+        model_paths = {c[6] for c in cases}
+        assert model_paths == {
+            "deepseek-ai/DeepSeek-R1",
+            "deepseek-ai/DeepSeek-V3",
+            "nvidia/DeepSeek-V3.1-NVFP4",
+        }
 
     def test_sweeps_backends(self):
         """Hopper should sweep flashinfer and fa3 backends."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_wideep_mla_test_cases("context")
-        backends = {c[9] for c in cases}
+        backends = {c[8] for c in cases}
         assert backends == {"flashinfer", "fa3"}
 
     def test_single_precision_bfloat16(self):

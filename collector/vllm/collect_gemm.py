@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""vLLM GEMM collector for CUDA backends.
+
+Builds vLLM RowParallelLinear layers with synthetic weights to benchmark BF16,
+FP8, FP8 block, and FP4-style paths where available. Shared GEMM shapes come
+from `case_generator.py`; this file handles vLLM config contexts, distributed setup,
+quantized-weight preparation, and backend-specific skips.
+"""
+
 __compat__ = "vllm>=0.14.0"
 
 import os
@@ -13,7 +21,7 @@ from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.version import __version__ as vllm_version
 
-from collector.common_test_cases import get_gemm_common_test_cases
+from collector.case_generator import get_gemm_case_specs
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.vllm.utils import setup_distributed, with_exit_stack
 
@@ -57,7 +65,7 @@ def get_gemm_test_cases():
 
     test_cases = []
 
-    for gemm_common_testcase in get_gemm_common_test_cases():
+    for gemm_common_testcase in get_gemm_case_specs():
         x = gemm_common_testcase.x
         n = gemm_common_testcase.n
         k = gemm_common_testcase.k
