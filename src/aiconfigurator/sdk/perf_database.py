@@ -1541,11 +1541,8 @@ def load_generation_dsa_module_data(dsa_file: str):
 def load_mhc_module_data(mhc_file: str):
     """Load DeepSeek-V4 mHC pre/post module-level performance data.
 
-    CSV columns: framework, version, device, op_name, kernel_source,
+    CSV columns: framework, version, device, op_name, kernel_source, model,
     architecture, num_tokens, hc_mult, hidden_size, latency [, power]
-    Optional metadata columns: num_sites, sinkhorn_iters
-    Legacy rows may include a ``model`` column; it is ignored because mHC is
-    selected by compute shape.
 
     ``op_name`` is ``pre`` or ``post``, matching the ``op`` arg of
     ``query_mhc_module``.
@@ -1580,6 +1577,21 @@ def load_mhc_module_data(mhc_file: str):
     return mhc_data
 
 
+def load_context_deepseek_v4_attention_module_data(attn_file: str):
+    """Legacy single-file loader (kept for backwards compat with the old
+    combined ``deepseek_v4_context_module_perf.txt`` convention).  V4-Flash
+    data is now split across ``dsv4_{csa,hca}_context_*`` files —
+    see ``load_context_dsv4_kind_module_data``."""
+    logger.debug(f"DeepSeek-V4 context attention module data file {attn_file} not loaded.")
+    return None
+
+
+def load_generation_deepseek_v4_attention_module_data(attn_file: str):
+    """Legacy single-file loader; V4-Flash data is now split per attn_kind."""
+    logger.debug(f"DeepSeek-V4 generation attention module data file {attn_file} not loaded.")
+    return None
+
+
 _DSV4_DTYPE_ALIASES = {
     # CSV columns use sglang naming; aic_dev enums use canonical short names.
     "fp8_e4m3": "fp8",
@@ -1590,24 +1602,61 @@ def _dsv4_normalize_dtype(name: str) -> str:
     return _DSV4_DTYPE_ALIASES.get(name, name)
 
 
-# DeepSeek-V4 special-case for the data axis that distinguishes TP variants.
+# V4-Flash uses the existing ``num_heads`` data axis.
 #
-# The generic MLA convention in ``models/deepseek_v4.py`` computes
+# The generic MLA convention in ``models.py:_make_*_attention_ops`` computes
 # ``local_heads = self._num_heads // tp_size`` and passes it into the op as
-# ``num_heads``.  That math reflects real head sharding for DSv2/DSv3 — but
-# DeepSeek-V4 attention backends may pad Q for sparse kernels; the persisted
-# rows use ``tp_size`` as the axis that differentiates TP variants.
-#
-# Rather than touch that generic math, the V4 operation passes both the local
-# head count for SOL math and the native-head/tp_size keys for silicon lookup.
+# ``num_heads``.  SGLang may zero-pad Q back to h_q=64 inside the FlashMLA
+# backend, but the AIC surface still passes the rank-local head count.  Keep the
+# persisted data keyed by that same ``num_heads`` value so V4-Flash follows the
+# same lookup convention as the other attention module data.
+DSV4_NATIVE_HEADS = 64
+_DSV4_CONTEXT_MODELING_ENV = "AIC_DSV4_CONTEXT_MODELING"
+_DSV4_CONTEXT_MODELING_PREFIX_MODULE = "prefix_module"
+_DSV4_CSA_TOPK_SCORE_BYTES = 4
+_DSV4_CSA_TOPK_AIC_BW_UTIL = 0.0008
+_DSV4_CSA_TOPK_REAL_BW_UTIL = 0.03
+
+
+def _dsv4_context_modeling_mode(mode: str | None) -> str:
+    value = mode or os.environ.get(_DSV4_CONTEXT_MODELING_ENV) or _DSV4_CONTEXT_MODELING_PREFIX_MODULE
+    value = value.lower().replace("-", "_")
+    aliases = {
+        "prefix": _DSV4_CONTEXT_MODELING_PREFIX_MODULE,
+        "module": _DSV4_CONTEXT_MODELING_PREFIX_MODULE,
+        "full_module": _DSV4_CONTEXT_MODELING_PREFIX_MODULE,
+        "prefix_module": _DSV4_CONTEXT_MODELING_PREFIX_MODULE,
+    }
+    if value not in aliases:
+        raise ValueError(
+            f"unsupported DeepSeek-V4 Flash context modeling mode {mode!r}; expected one of {sorted(aliases)}"
+        )
+    return aliases[value]
+
+
+def _dsv4_num_heads_from_row(row) -> int:
+    """Return the local-head data key for a V4-Flash collector row.
+
+    Older V4-Flash CSVs wrote the native head count in ``num_heads`` and relied
+    on ``tp_size`` to distinguish rows.  New rows write the local head count.
+    Deriving from ``tp_size`` when present keeps both file shapes readable while
+    exposing a single ``num_heads`` axis to query code.
+    """
+    tp_size = int(row.get("tp_size", 1) or 1)
+    if tp_size > 1:
+        return max(1, DSV4_NATIVE_HEADS // tp_size)
+    raw_num_heads = row.get("num_heads")
+    if raw_num_heads not in (None, ""):
+        return int(raw_num_heads)
+    return DSV4_NATIVE_HEADS
 
 
 def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
-    """DeepSeek-V4 3D lookup: exact, cubic, then sampled-batch fallback.
+    """V4-Flash-only 3D lookup: exact, cubic, then sampled-batch fallback.
 
     Generic ``_interp_3d`` raises ``QhullError`` when the point cloud has
-    a degenerate axis (e.g. the DSV4 sweep caps b=1 at s=8192, so the
-    b axis is flat near that query point).
+    a degenerate axis (e.g. our V4-Flash sweep caps b=1 at s=8192, so the
+    b axis is flat near that query point).  This helper:
 
       1. Try an exact ``dict[x][y][z]`` lookup — handles the common case
          of querying at a measured bench point.
@@ -1620,7 +1669,7 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
     Caller swallows lower-level exceptions if all paths fail.
     """
     if batch_axis not in ("y", "z"):
-        raise ValueError(f"unsupported DeepSeek-V4 fallback {batch_axis=}; expected 'y' or 'z'")
+        raise ValueError(f"unsupported V4-Flash fallback {batch_axis=}; expected 'y' or 'z'")
 
     # Use .get() chain instead of [] indexing: dict_ may be a (nested)
     # defaultdict, so [] reads would create spurious empty branches that
@@ -1644,7 +1693,7 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
     except Exception:
         pass
 
-    # Fallback: real DeepSeek-V4 data is sampled at batches like 1/2/4/8.
+    # Fallback: real V4-Flash data is sampled at batches like 1/2/4/8.
     # Prefer the largest batch <= query batch that covers the sequence length
     # (interpolation along s). Only extrapolate along s if none covers it.
     sub = dict_.get(x) if isinstance(dict_, dict) else None
@@ -1706,35 +1755,31 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
                     continue
 
     if batch_axis == "y":
-        raise ValueError(f"DeepSeek-V4 robust lookup failed (tp={x}, b={y}, s={z})")
-    raise ValueError(f"DeepSeek-V4 robust lookup failed (tp={x}, s={y}, b={z})")
+        raise ValueError(f"V4-Flash robust lookup failed (tp={x}, b={y}, s={z})")
+    raise ValueError(f"V4-Flash robust lookup failed (tp={x}, s={y}, b={z})")
 
 
 def load_context_dsv4_kind_module_data(file_path: str):
-    """Load ONE DeepSeek-V4 context CSV (single attn_kind / compress_ratio).
+    """Load ONE V4-Flash context CSV (single attn_kind / compress_ratio).
 
-    Returns an 8-level nested dict:
-        data[fmha_quant][kv_quant][gemm_quant][native_heads][compress_ratio]
-            [tp_size][s][b] = {"latency": ms, "power": W, "energy": J}
+    Dict structure:
+        data[fmha_quant][kv_quant][gemm_quant][arch][compress_ratio]
+            [num_heads][prefix][s][b] = {"latency": ms, "power": W, "energy": J}
 
-    ``tp_size`` is the data axis. The model layer passes it through the
-    attention operation for silicon lookup.
-
-    Multiple files (csa/hca/swa) merge cleanly because compress_ratio is
-    the differentiating leaf dimension.
+    ``step`` in the context CSV is the prefix/past-KV length.
     """
     rows = _read_filtered_rows(file_path)
     if rows is None:
-        logger.debug(f"DSV4 module data file {file_path} not found.")
+        logger.debug(f"DSV4-Flash module data file {file_path} not found.")
         return None
 
-    # 8-level nesting: fmha → kv → gemm → native_heads → cr → tp → s → b
+    # fmha -> kv -> gemm -> arch -> cr -> num_heads -> prefix -> s -> b
     def _make_nested(depth: int):
         if depth == 0:
             return defaultdict()
         return defaultdict(lambda d=depth: _make_nested(d - 1))
 
-    data = _make_nested(7)
+    data = _make_nested(8)
     has_power = bool(rows) and "power" in rows[0]
 
     for row in rows:
@@ -1743,20 +1788,20 @@ def load_context_dsv4_kind_module_data(file_path: str):
         try:
             b = int(row["batch_size"])
             s = int(row["isl"])
-            tp_size = int(row.get("tp_size", 1))
+            prefix = int(float(row.get("step", 0) or 0))
+            num_heads = _dsv4_num_heads_from_row(row)
             cr = int(row["compress_ratio"])
             latency = float(row["latency"])
         except (TypeError, ValueError, KeyError):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        native_heads = int(row["num_heads"])
+        arch = row.get("architecture", "DeepseekV4ForCausalLM")
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
 
-        # The row-distinguishing axis is ``tp_size`` itself.
-        data[fmha_mode][kv_dtype][gemm_mode][native_heads][cr][tp_size][s][b] = {
+        data[fmha_mode][kv_dtype][gemm_mode][arch][cr][num_heads][prefix][s][b] = {
             "latency": latency,
             "power": power,
             "energy": power * latency,
@@ -1765,21 +1810,19 @@ def load_context_dsv4_kind_module_data(file_path: str):
 
 
 def load_generation_dsv4_kind_module_data(file_path: str):
-    """Load ONE DeepSeek-V4 generation CSV.
+    """Load ONE V4-Flash generation CSV.
 
     Generation lookup uses absolute KV length ``s_total = isl + step`` (decode
     is q_len=1 with past_kv = step).  Dict shape:
-        data[kv_quant][gemm_quant][native_heads][compress_ratio]
-            [tp_size][b][s_total]
-
-    ``tp_size`` is passed by the attention operation for silicon lookup.
+        data[kv_quant][gemm_quant][arch][compress_ratio]
+            [num_heads][b][s_total]
     """
     rows = _read_filtered_rows(file_path)
     if rows is None:
-        logger.debug(f"DSV4 module data file {file_path} not found.")
+        logger.debug(f"DSV4-Flash module data file {file_path} not found.")
         return None
 
-    # 7-level nesting: kv → gemm → native_heads → cr → tp → b → s_total
+    # 7-level nesting: kv → gemm → arch → cr → num_heads → b → s_total
     def _make_nested(depth: int):
         if depth == 0:
             return defaultdict()
@@ -1794,22 +1837,20 @@ def load_generation_dsv4_kind_module_data(file_path: str):
         try:
             b = int(row["batch_size"])
             s_total = int(row["isl"]) + int(row["step"])
-            tp_size = int(row.get("tp_size", 1))
+            num_heads = _dsv4_num_heads_from_row(row)
             cr = int(row["compress_ratio"])
             latency = float(row["latency"])
         except (TypeError, ValueError, KeyError):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        native_heads = int(row["num_heads"])
+        arch = row.get("architecture", "DeepseekV4ForCausalLM")
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
 
-        # DeepSeek-V4: tp_size is the axis that differentiates rows.  See note
-        # at the top of the file.  Generation convention puts ``b`` before
-        # ``s_total`` (matches existing ``_interp_3d(num_heads, b, s, ...)``
-        # call order in ``query_generation_*``).
-        data[kv_dtype][gemm_mode][native_heads][cr][tp_size][b][s_total] = {
+        # Generation convention puts ``b`` before ``s_total`` (matches existing
+        # ``_interp_3d(num_heads, b, s, ...)`` call order in ``query_generation_*``).
+        data[kv_dtype][gemm_mode][arch][cr][num_heads][b][s_total] = {
             "latency": latency,
             "power": power,
             "energy": power * latency,
@@ -1831,40 +1872,6 @@ def _deep_merge_dsv4_dicts(dest, src):
         else:
             dest[k] = v
     return dest
-
-
-def load_dsv4_sparse_kernel_data(file_path: str):
-    """Load DeepSeek-V4 sparse-kernel CSV (paged_mqa_logits or hca_attn).
-
-    Emitted by ``collector.sglang.deepseekv4_sparse_modules``.  Used for
-    kernel-level past_kv Δ correction on top of the chunk-0 module baseline.
-
-    Dict structure:
-        data[native_heads][tp_size][past_kv][isl][bs] = {"latency": ms}
-    """
-    rows = _read_filtered_rows(file_path)
-    if rows is None:
-        logger.debug(f"DSV4 sparse-kernel data file {file_path} not found.")
-        return None
-
-    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
-
-    for row in rows:
-        # Skip duplicate header rows (file may be appended to across runs)
-        if row.get("batch_size") in (None, "", "batch_size"):
-            continue
-        try:
-            bs = int(row["batch_size"])
-            isl = int(row["isl"])
-            past_kv = int(row["step"])
-            tp_size = int(row.get("tp_size", 1))
-            latency = float(row["latency"])
-        except (TypeError, ValueError):
-            continue
-        native_heads = int(row["num_heads"])
-        data[native_heads][tp_size][past_kv][isl][bs] = {"latency": latency}
-
-    return data
 
 
 def load_context_mla_module_data(mla_module_file: str):
@@ -2835,8 +2842,6 @@ class PerfDatabase:
                 PerfDataFilename.dsv4_hca_context_module: load_context_dsv4_kind_module_data,
                 PerfDataFilename.dsv4_csa_generation_module: load_generation_dsv4_kind_module_data,
                 PerfDataFilename.dsv4_hca_generation_module: load_generation_dsv4_kind_module_data,
-                PerfDataFilename.dsv4_paged_mqa_logits_module: load_dsv4_sparse_kernel_data,
-                PerfDataFilename.dsv4_hca_attn_module: load_dsv4_sparse_kernel_data,
             }
             perf_data_dir = data_dir
             if op_filename_enum == PerfDataFilename.nccl:
@@ -2894,10 +2899,10 @@ class PerfDatabase:
         self._generation_dsa_module_data = _load_op_data(PerfDataFilename.dsa_generation_module)
         self._mhc_module_data = _load_op_data(PerfDataFilename.mhc_module)
 
-        # DeepSeek-V4 module-level data — collected as split files per mode
-        # (csa/hca).  Each loader returns a nested dict scoped to one
-        # compress_ratio; we merge into one aggregate attribute so downstream
-        # queries do not need to know which attention kind produced each row.
+        # V4-Flash module-level data — collected as 3 split files per mode
+        # (csa/hca/swa).  Each loader returns a nested dict scoped to one
+        # compress_ratio; we merge into the SAME attribute the legacy single-
+        # file loader fills, so downstream queries are unchanged.
         def _load_dsv4_split(loaded_list):
             merged: dict = {}
             first_loaded = next((x for x in loaded_list if x is not None), None)
@@ -2924,13 +2929,6 @@ class PerfDatabase:
             self._context_deepseek_v4_attention_module_data
         )
         self._generation_deepseek_v4_attention_module_data = _load_dsv4_split(gen_split)
-
-        # DeepSeek-V4 sparse-kernel data (kernel-level past_kv Δ correction).
-        # Dict keyed by ``arch -> tp -> past_kv -> isl -> bs``.
-        self._dsv4_sparse_kernel_data = {
-            "paged_mqa_logits": _load_op_data(PerfDataFilename.dsv4_paged_mqa_logits_module),
-            "hca_attn": _load_op_data(PerfDataFilename.dsv4_hca_attn_module),
-        }
 
         # sglang wideep path
         if backend == "sglang":
@@ -7483,6 +7481,51 @@ class PerfDatabase:
             total = ramp + (end - saturation_start + 1) * limit
         return batch_size * total
 
+    @classmethod
+    def _dsv4_csa_topk_score_bytes(cls, batch_size: int, query_len: int, prefix: int, ratio: int, topk: int) -> float:
+        if ratio <= 0 or topk <= 0 or query_len <= 0 or batch_size <= 0:
+            return 0.0
+
+        def _is_int_value(value) -> bool:
+            return abs(float(value) - round(float(value))) < 1e-9
+
+        if _is_int_value(batch_size) and _is_int_value(query_len) and _is_int_value(prefix):
+            b = round(float(batch_size))
+            q = round(float(query_len))
+            p = round(float(prefix))
+            start = max(p + 1, (topk + 1) * ratio)
+            end = p + q
+            if end < start:
+                return 0.0
+            score_elems = cls._sum_floor_upto(end, ratio) - cls._sum_floor_upto(start - 1, ratio)
+            return float(b * score_elems * _DSV4_CSA_TOPK_SCORE_BYTES)
+
+        p = float(prefix)
+        q = float(query_len)
+        b = float(batch_size)
+        start = max(p, float((topk + 1) * ratio))
+        end = p + q
+        if end <= start:
+            return 0.0
+        score_elems = (end * end - start * start) / (2.0 * ratio)
+        return b * score_elems * _DSV4_CSA_TOPK_SCORE_BYTES
+
+    def _dsv4_csa_topk_latency_delta_ms(
+        self,
+        batch_size: int,
+        query_len: int,
+        prefix: int,
+        ratio: int,
+        topk: int,
+    ) -> float:
+        score_bytes = self._dsv4_csa_topk_score_bytes(batch_size, query_len, prefix, ratio, topk)
+        if score_bytes <= 0.0:
+            return 0.0
+        mem_bw = float(self.system_spec["gpu"]["mem_bw"])
+        collected_ms = score_bytes / (mem_bw * _DSV4_CSA_TOPK_AIC_BW_UTIL) * 1000.0
+        real_ms = score_bytes / (mem_bw * _DSV4_CSA_TOPK_REAL_BW_UTIL) * 1000.0
+        return real_ms - collected_ms
+
     @functools.lru_cache(maxsize=32768)
     def query_mhc_module(
         self,
@@ -7596,141 +7639,6 @@ class PerfDatabase:
                 f"{hc_mult=}, {sinkhorn_iters=}, {op=}"
             ),
         )
-
-    def _lookup_dsv4_sparse_kernel(
-        self,
-        kernel: str,
-        bs: int,
-        isl: int,
-        past_kv: int,
-        tp_size: int,
-        native_heads: int,
-    ) -> Optional[float]:
-        """Look up a sparse-kernel latency at (kernel, bs, isl, past_kv, tp).
-
-        Strategy:
-          1. Exact (bs, isl, past_kv, tp) hit  → return latency
-          2. Cubic 3D interpolation on (past_kv, isl, bs) within the fixed tp slice
-          3. If cubic fails, use the largest sampled batch no larger than the query
-             batch that covers isl, interpolate on (past_kv, isl), then scale by batch.
-        Returns None if the kernel CSV is not loaded.
-        """
-        all_data = getattr(self, "_dsv4_sparse_kernel_data", None)
-        if all_data is None or kernel not in all_data:
-            return None
-        loaded = all_data[kernel]
-        if loaded is None or loaded.data is None:
-            return None
-        per_tp = loaded.data.get(native_heads)
-        if per_tp is None:
-            return None
-        if tp_size in per_tp:
-            per_tp_dict = per_tp[tp_size]
-        elif 1 in per_tp:
-            # paged_mqa_logits is collected at tp=1 only — kernel work itself
-            # is TP-independent so we fall back when caller asks for tp>1.
-            per_tp_dict = per_tp[1]
-        else:
-            return None
-        if not per_tp_dict:
-            return None
-
-        def _finite_latency(value):
-            return value is not None and bool(np.all(np.isfinite(np.asarray(value))))
-
-        if past_kv in per_tp_dict and isl in per_tp_dict[past_kv] and bs in per_tp_dict[past_kv][isl]:
-            latency = per_tp_dict[past_kv][isl][bs]["latency"]
-            if _finite_latency(latency):
-                return float(np.asarray(latency))
-
-        try:
-            result = self._interp_3d(past_kv, isl, bs, per_tp_dict, "cubic")
-            latency = result.get("latency") if isinstance(result, dict) else None
-            if _finite_latency(latency):
-                return float(np.asarray(latency))
-        except Exception:
-            pass
-
-        batch_points = sorted(
-            {
-                sampled_b
-                for isl_dict in per_tp_dict.values()
-                if isinstance(isl_dict, dict)
-                for isl_data in isl_dict.values()
-                if isinstance(isl_data, dict)
-                for sampled_b in isl_data
-                if sampled_b <= bs
-            },
-            reverse=True,
-        )
-
-        def _lookup_at_batch(bp, *, allow_extrapolate: bool):
-            batch_slice = defaultdict(dict)
-            for sampled_past, isl_dict in per_tp_dict.items():
-                if not isinstance(isl_dict, dict):
-                    continue
-                for sampled_isl, isl_data in isl_dict.items():
-                    if isinstance(isl_data, dict) and bp in isl_data:
-                        batch_slice[sampled_past][sampled_isl] = isl_data[bp]
-
-            if not batch_slice:
-                return None
-
-            try:
-                latency = self._interp_2d_linear(past_kv, isl, batch_slice)["latency"]
-                if _finite_latency(latency):
-                    return latency
-            except Exception:
-                pass
-
-            def _lookup_isl_at_past(sampled_past):
-                isl_dict = batch_slice.get(sampled_past)
-                if not isinstance(isl_dict, dict):
-                    return None
-                if isl in isl_dict:
-                    return isl_dict[isl].get("latency")
-                isl_points = sorted(s for s, leaf in isl_dict.items() if isinstance(leaf, dict) and "latency" in leaf)
-                if len(isl_points) < 2:
-                    return None
-                if not allow_extrapolate and not (isl_points[0] <= isl <= isl_points[-1]):
-                    return None
-                left, right = self._nearest_1d_point_helper(isl, isl_points, inner_only=not allow_extrapolate)
-                latency = self._interp_1d(
-                    [left, right],
-                    [isl_dict[left].get("latency"), isl_dict[right].get("latency")],
-                    isl,
-                )
-                return latency
-
-            if past_kv in batch_slice:
-                return _lookup_isl_at_past(past_kv)
-
-            past_points = sorted(
-                sampled_past for sampled_past in batch_slice if _lookup_isl_at_past(sampled_past) is not None
-            )
-            if len(past_points) < 2:
-                return None
-            if not allow_extrapolate and not (past_points[0] <= past_kv <= past_points[-1]):
-                return None
-            left, right = self._nearest_1d_point_helper(past_kv, past_points, inner_only=not allow_extrapolate)
-            left_latency = _lookup_isl_at_past(left)
-            right_latency = _lookup_isl_at_past(right)
-            if left_latency is None or right_latency is None:
-                return None
-            return self._interp_1d([left, right], [left_latency, right_latency], past_kv)
-
-        for allow_extrapolate in (False, True):
-            for bp in batch_points:
-                try:
-                    latency = _lookup_at_batch(bp, allow_extrapolate=allow_extrapolate)
-                    if latency is None:
-                        continue
-                    latency = latency * bs / bp
-                    if _finite_latency(latency):
-                        return latency
-                except Exception:
-                    continue
-        return None
 
     def _deepseek_v4_attention_sol(
         self,
@@ -7859,8 +7767,6 @@ class PerfDatabase:
         b: int,
         s: int,
         num_heads: int,
-        native_heads: int,
-        tp_size: int,
         hidden_size: int,
         q_lora_rank: int,
         o_lora_rank: int,
@@ -7878,6 +7784,8 @@ class PerfDatabase:
         database_mode: common.DatabaseMode | None = None,
         *,
         prefix: int = 0,
+        architecture: str = "DeepseekV4ForCausalLM",
+        dsv4_context_modeling: str | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         def get_sol() -> tuple[float, float, float]:
             return self._deepseek_v4_attention_sol(
@@ -7921,112 +7829,139 @@ class PerfDatabase:
                     f"DeepSeek-V4 context attention module data not loaded for system='{self.system}', "
                     f"backend='{self.backend}', version='{self.version}'."
                 )
-            native_dict = data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode].get(native_heads)
-            if native_dict is None:
-                raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 context attention silicon data for native_heads={native_heads}, "
-                    f"loaded keys={list(data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode].keys())}."
-                )
-            deepseek_v4_dict = native_dict[compress_ratio]
+            deepseek_v4_dict = data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture][compress_ratio]
+            head_axis = num_heads
 
-            # Pick correction strategy up-front because it changes the lookup
-            # point: kernel-Δ uses chunk-0 baseline at (b, s); SOL ratio uses
-            # chunk-1 baseline at (b, s+prefix).
-            kernel = {4: "paged_mqa_logits", 128: "hca_attn"}.get(compress_ratio) if prefix > 0 else None
-            t_with = t_without = None
-            if kernel is not None:
-                # Use the operation tp_size for sparse-kernel lookup.
-                # paged_mqa_logits is collected only at tp=1 (kernel is replicated)
-                # — ``_lookup_dsv4_sparse_kernel`` falls back to tp=1 when
-                # the requested tp isn't present, so passing ``tp_size`` works
-                # for both kernels.
-                t_with = self._lookup_dsv4_sparse_kernel(
-                    kernel=kernel,
-                    bs=b,
-                    isl=s,
-                    past_kv=prefix,
-                    tp_size=tp_size,
-                    native_heads=native_heads,
-                )
-                t_without = self._lookup_dsv4_sparse_kernel(
-                    kernel=kernel,
-                    bs=b,
-                    isl=s,
-                    past_kv=0,
-                    tp_size=tp_size,
-                    native_heads=native_heads,
-                )
-                if t_with is None or t_without is None:
-                    raise PerfDataNotAvailableError(
-                        f"DeepSeek-V4 {kernel} sparse-kernel correction data not available for "
-                        f"{b=}, {s=}, {prefix=}, {native_heads=}, {tp_size=}. "
-                        "Cannot query prefix context attention in SILICON mode without kernel delta."
-                    )
-            use_kernel_delta = kernel is not None
-            lookup_s = s if use_kernel_delta else s + prefix
+            def _finite_result(result):
+                if not isinstance(result, dict):
+                    return False
+                value = result.get("latency")
+                return value is not None and bool(np.all(np.isfinite(np.asarray(value))))
 
-            result = None
-            if compress_ratio == 4:
+            def _is_latency_leaf(value):
+                return isinstance(value, dict) and "latency" in value
+
+            def _context_prefix_data(module_dict):
+                head_data = module_dict.get(head_axis) if isinstance(module_dict, dict) else None
+                if not isinstance(head_data, dict):
+                    return None, False
+                for maybe_slice in head_data.values():
+                    if not isinstance(maybe_slice, dict):
+                        continue
+                    # Legacy shape: [num_heads][s][b].  New shape: [num_heads][prefix][s][b].
+                    if any(_is_latency_leaf(v) for v in maybe_slice.values()):
+                        return {0: head_data}, False
+                    return head_data, True
+                return None, False
+
+            def _raw_context_prefix_data():
                 raw_data = getattr(self, "_raw_context_deepseek_v4_attention_module_data", None)
-                raw_dict = None
-                if raw_data is not None and getattr(raw_data, "loaded", True):
-                    try:
-                        raw_native_dict = raw_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode].get(
-                            native_heads
-                        )
-                        raw_dict = None if raw_native_dict is None else raw_native_dict[compress_ratio]
-                    except KeyError:
-                        raw_dict = None
-                result = self._interp_context_topk_piecewise_from_raw(
-                    tp_size, lookup_s, b, raw_dict, index_topk * compress_ratio
-                )
-            if result is None:
-                # Exact → cubic → linear to avoid qhull crashes on the
-                # caps-driven flat b axis.
-                result = _dsv4_robust_3d_lookup(self, deepseek_v4_dict, tp_size, lookup_s, b)
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
+                if raw_data is None or not getattr(raw_data, "loaded", True):
+                    return None, False
+                try:
+                    raw_dict = raw_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture][
+                        compress_ratio
+                    ]
+                except KeyError:
+                    return None, False
+                return _context_prefix_data(raw_dict)
 
-            if prefix > 0:
-                if use_kernel_delta:
-                    # Kernel-Δ correction (preferred when sparse data loaded).
-                    # CSA: paged_mqa_logits bench Δ + topk_512 IO formula Δ.
-                    # HCA: hca_attn bench Δ.
-                    latency += t_with - t_without
-                    if compress_ratio == 4:
-                        # topk_512 IO formula: Δ_bytes = M*past_kv (fp32 scan),
-                        # eff≈0.1 (radix bucket atomics dominate).  Empirically
-                        # within 8% of real on H20.
-                        M = b * s  # noqa: N806
-                        mem_bw = self.system_spec["gpu"]["mem_bw"]
-                        latency += M * prefix / (mem_bw * 0.1) * 1000.0
-                else:
-                    # SOL ratio scaling (fallback when sparse data unavailable).
-                    base_sol = self._deepseek_v4_attention_sol(
-                        is_context=True,
-                        b=b,
-                        s=s + prefix,
-                        prefix=0,
-                        num_heads=num_heads,
-                        hidden_size=hidden_size,
-                        q_lora_rank=q_lora_rank,
-                        o_lora_rank=o_lora_rank,
-                        head_dim=head_dim,
-                        rope_head_dim=rope_head_dim,
-                        index_n_heads=index_n_heads,
-                        index_head_dim=index_head_dim,
-                        index_topk=index_topk,
-                        window_size=window_size,
-                        compress_ratio=compress_ratio,
-                        o_groups=o_groups,
-                        kvcache_quant_mode=kvcache_quant_mode,
-                        fmha_quant_mode=fmha_quant_mode,
-                        gemm_quant_mode=gemm_quant_mode,
-                    )[0]
-                    target_sol = get_sol()[0]
-                    correction = 1.0 if base_sol <= 0 else target_sol / base_sol
-                    latency *= correction
-                    energy *= correction
+            prefix_data, has_prefix_axis = _context_prefix_data(deepseek_v4_dict)
+            raw_prefix_data, _ = _raw_context_prefix_data()
+
+            def _lookup_prefix_module_at(prefix_value: int):
+                if not isinstance(prefix_data, dict):
+                    return None
+                prefix_slice = prefix_data.get(prefix_value)
+                if not isinstance(prefix_slice, dict):
+                    return None
+
+                wrapped = {head_axis: prefix_slice}
+                result = None
+                if compress_ratio == 4:
+                    raw_wrapped = None
+                    if isinstance(raw_prefix_data, dict) and isinstance(raw_prefix_data.get(prefix_value), dict):
+                        raw_wrapped = {head_axis: raw_prefix_data[prefix_value]}
+                    boundary = index_topk * compress_ratio - prefix_value
+                    result = self._interp_context_topk_piecewise_from_raw(head_axis, s, b, raw_wrapped, boundary)
+                    if not _finite_result(result):
+                        result = None
+                if result is None:
+                    try:
+                        result = (
+                            _dsv4_robust_3d_lookup(self, wrapped, head_axis, s, b)
+                            if architecture == "DeepseekV4ForCausalLM"
+                            else self._interp_3d(head_axis, s, b, wrapped, "cubic")
+                        )
+                    except Exception:
+                        return None
+                return result if _finite_result(result) else None
+
+            def _interp_results_1d(x0, x1, r0, r1, x):
+                return {
+                    field: self._interp_1d([x0, x1], [r0.get(field, 0.0), r1.get(field, 0.0)], x)
+                    for field in ("latency", "power", "energy")
+                }
+
+            def _query_prefix_module():
+                if not isinstance(prefix_data, dict):
+                    return None
+                if prefix in prefix_data:
+                    exact_result = _lookup_prefix_module_at(prefix)
+                    if exact_result is not None:
+                        return exact_result
+                if not has_prefix_axis:
+                    return None
+                prefix_points = sorted(p for p, slice_ in prefix_data.items() if isinstance(slice_, dict))
+                if len(prefix_points) < 2:
+                    return None
+
+                # A nominal nearest prefix anchor can be too sparse for the
+                # requested (s, b), e.g. the 1M prefix slice may only contain
+                # (bs=1, isl=1).  Build the prefix-axis interpolation from the
+                # nearest anchors that can actually answer this (s, b) query,
+                # and allow prefix extrapolation just like the sampled-batch
+                # fallback does inside each prefix slice.
+                result_by_prefix = {}
+                for prefix_point in prefix_points:
+                    result = _lookup_prefix_module_at(prefix_point)
+                    if result is not None:
+                        result_by_prefix[prefix_point] = result
+                if len(result_by_prefix) < 2:
+                    return None
+                try:
+                    left, right = self._nearest_1d_point_helper(prefix, list(result_by_prefix.keys()), inner_only=False)
+                except Exception:
+                    return None
+                if left == right:
+                    return result_by_prefix[left]
+                return _interp_results_1d(
+                    left,
+                    right,
+                    result_by_prefix[left],
+                    result_by_prefix[right],
+                    prefix,
+                )
+
+            _dsv4_context_modeling_mode(dsv4_context_modeling)
+            result = _query_prefix_module()
+            if result is None:
+                raise PerfDataNotAvailableError(
+                    f"DeepSeek-V4 prefix-aware context attention module data not available for "
+                    f"{b=}, {s=}, {prefix=}, num_heads={head_axis}, {architecture=}."
+                )
+
+            latency = float(result["latency"])
+            energy = float(result.get("energy", 0.0))
+            if compress_ratio == 4:
+                corrected_latency = max(
+                    0.0,
+                    latency + self._dsv4_csa_topk_latency_delta_ms(b, s, prefix, compress_ratio, index_topk),
+                )
+                if latency > 0.0 and energy:
+                    energy *= corrected_latency / latency
+                latency = corrected_latency
+
             return self._interp_pr(latency, energy=energy)
 
         return self._query_silicon_or_hybrid(
@@ -8035,7 +7970,7 @@ class PerfDatabase:
             database_mode=database_mode,
             error_msg=(
                 f"Failed to query DeepSeek-V4 context attention module for {b=}, {s=}, {prefix=}, "
-                f"{num_heads=}, {native_heads=}, {tp_size=}, {compress_ratio=}"
+                f"{num_heads=}, {compress_ratio=}, {architecture=}"
             ),
         )
 
@@ -8045,8 +7980,6 @@ class PerfDatabase:
         b: int,
         s: int,
         num_heads: int,
-        native_heads: int,
-        tp_size: int,
         hidden_size: int,
         q_lora_rank: int,
         o_lora_rank: int,
@@ -8062,6 +7995,8 @@ class PerfDatabase:
         fmha_quant_mode: common.FMHAQuantMode,
         gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
+        *,
+        architecture: str = "DeepseekV4ForCausalLM",
     ) -> PerformanceResult | tuple[float, float, float]:
         def get_sol() -> tuple[float, float, float]:
             return self._deepseek_v4_attention_sol(
@@ -8105,16 +8040,24 @@ class PerfDatabase:
                     f"DeepSeek-V4 generation attention module data not loaded for system='{self.system}', "
                     f"backend='{self.backend}', version='{self.version}'."
                 )
-            native_dict = data[kvcache_quant_mode][gemm_quant_mode].get(native_heads)
-            if native_dict is None:
-                raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 generation attention silicon data for native_heads={native_heads}, "
-                    f"loaded keys={list(data[kvcache_quant_mode][gemm_quant_mode].keys())}."
+            deepseek_v4_dict = data[kvcache_quant_mode][gemm_quant_mode][architecture][compress_ratio]
+            head_axis = num_heads
+            # V4-Flash generation data is keyed as [num_heads][batch][s_total].
+            result = (
+                _dsv4_robust_3d_lookup(self, deepseek_v4_dict, head_axis, b, s, batch_axis="y")
+                if architecture == "DeepseekV4ForCausalLM"
+                else self._interp_3d(head_axis, b, s, deepseek_v4_dict, "cubic")
+            )
+            latency = float(result["latency"])
+            energy = float(result.get("energy", 0.0))
+            if compress_ratio == 4:
+                corrected_latency = max(
+                    0.0,
+                    latency + self._dsv4_csa_topk_latency_delta_ms(b, 1, s, compress_ratio, index_topk),
                 )
-            deepseek_v4_dict = native_dict[compress_ratio]
-            result = _dsv4_robust_3d_lookup(self, deepseek_v4_dict, tp_size, b, s, batch_axis="y")
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
+                if latency > 0.0 and energy:
+                    energy *= corrected_latency / latency
+                latency = corrected_latency
             return self._interp_pr(latency, energy=energy)
 
         return self._query_silicon_or_hybrid(
@@ -8123,7 +8066,7 @@ class PerfDatabase:
             database_mode=database_mode,
             error_msg=(
                 f"Failed to query DeepSeek-V4 generation attention module for {b=}, {s=}, "
-                f"{num_heads=}, {native_heads=}, {tp_size=}, {compress_ratio=}"
+                f"{num_heads=}, {compress_ratio=}, {architecture=}"
             ),
         )
 
