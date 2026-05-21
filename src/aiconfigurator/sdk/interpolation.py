@@ -82,6 +82,24 @@ def get_sample_leaf_value(data: dict):
     return current
 
 
+def _get_cached_extracted_metrics(cache: dict, ndim: int, data: dict, extractor):
+    """Extract latency/energy views and cache them by object identity.
+
+    The cache keeps the original object in the entry so an ``id(data)`` reused by
+    a different short-lived dict cannot return stale extracted metrics.
+    """
+    cache_key = (ndim, id(data))
+    cached = cache.get(cache_key)
+    if cached is not None:
+        cached_data, extracted = cached
+        if cached_data is data:
+            return extracted
+
+    extracted = extractor(data)
+    cache[cache_key] = (data, extracted)
+    return extracted
+
+
 def nearest_1d_point_helper(x: int, values: list[int], inner_only: bool = True) -> tuple[int, int]:
     """Return the two values bracketing ``x`` from ``values``.
 
@@ -221,9 +239,9 @@ def interp_2d_linear(x: int, y: int, data: dict, extracted_metrics_cache: dict |
     sample_value = get_sample_leaf_value(data)
 
     if isinstance(sample_value, dict):
-        # Do not cache by id(data): short-lived wrapper dicts can reuse ids or
-        # mutate between calls, which makes interpolation return stale values.
-        latency_data, energy_data = extract_latency_and_energy_2d(data)
+        latency_data, energy_data = _get_cached_extracted_metrics(
+            extracted_metrics_cache, 2, data, extract_latency_and_energy_2d
+        )
 
         points_list = []
         latency_values = []
@@ -350,9 +368,9 @@ def interp_3d(
     sample_value = get_sample_leaf_value(data)
 
     if isinstance(sample_value, dict):
-        # Do not cache by id(data): short-lived wrapper dicts can reuse ids or
-        # mutate between calls, which makes interpolation return stale values.
-        latency_data, energy_data = extract_latency_and_energy_3d(data)
+        latency_data, energy_data = _get_cached_extracted_metrics(
+            extracted_metrics_cache, 3, data, extract_latency_and_energy_3d
+        )
 
         if method == "linear":
             latency = interp_3d_linear(x, y, z, latency_data)
