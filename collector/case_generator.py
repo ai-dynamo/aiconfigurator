@@ -1558,8 +1558,7 @@ def _dsv4_module_precision_combos(phase: str, model_path: str):
         combos.append(("bfloat16", "fp8", "fp8_block"))
     else:
         print(
-            "[dsv4-test-cases] device lacks native FP4 experts (pre-Blackwell); "
-            "omitting fp8_block from gemm_type sweep"
+            "[dsv4-test-cases] device lacks native FP4 experts (pre-Blackwell); omitting fp8_block from gemm_type sweep"
         )
     return combos
 

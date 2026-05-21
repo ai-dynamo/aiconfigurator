@@ -288,6 +288,7 @@ def test_dsv4_test_cases_active_under_v4_filter(monkeypatch, model_path):
     # all cases for this op are CSA
     assert {c[7] for c in cases} == {"csa"}
 
+
 @pytest.mark.parametrize(
     "model_path",
     [

@@ -1652,7 +1652,7 @@ def _dsv4_num_heads_from_row(row) -> int:
 
 
 def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
-    """V4-Flash-only 3D lookup: exact, cubic, then sampled-batch fallback.
+    """DeepSeek-V4 module 3D lookup: exact, cubic, then sampled-batch fallback.
 
     Generic ``_interp_3d`` raises ``QhullError`` when the point cloud has
     a degenerate axis (e.g. our V4-Flash sweep caps b=1 at s=8192, so the
@@ -7888,11 +7888,7 @@ class PerfDatabase:
                         result = None
                 if result is None:
                     try:
-                        result = (
-                            _dsv4_robust_3d_lookup(self, wrapped, head_axis, s, b)
-                            if architecture == "DeepseekV4ForCausalLM"
-                            else self._interp_3d(head_axis, s, b, wrapped, "cubic")
-                        )
+                        result = _dsv4_robust_3d_lookup(self, wrapped, head_axis, s, b)
                     except Exception:
                         return None
                 return result if _finite_result(result) else None
@@ -8043,17 +8039,14 @@ class PerfDatabase:
             deepseek_v4_dict = data[kvcache_quant_mode][gemm_quant_mode][architecture][compress_ratio]
             head_axis = num_heads
             # V4-Flash generation data is keyed as [num_heads][batch][s_total].
-            result = (
-                _dsv4_robust_3d_lookup(self, deepseek_v4_dict, head_axis, b, s, batch_axis="y")
-                if architecture == "DeepseekV4ForCausalLM"
-                else self._interp_3d(head_axis, b, s, deepseek_v4_dict, "cubic")
-            )
+            result = _dsv4_robust_3d_lookup(self, deepseek_v4_dict, head_axis, b, s, batch_axis="y")
             latency = float(result["latency"])
             energy = float(result.get("energy", 0.0))
             if compress_ratio == 4:
+                decode_prefix = max(s - 1, 0)
                 corrected_latency = max(
                     0.0,
-                    latency + self._dsv4_csa_topk_latency_delta_ms(b, 1, s, compress_ratio, index_topk),
+                    latency + self._dsv4_csa_topk_latency_delta_ms(b, 1, decode_prefix, compress_ratio, index_topk),
                 )
                 if latency > 0.0 and energy:
                     energy *= corrected_latency / latency

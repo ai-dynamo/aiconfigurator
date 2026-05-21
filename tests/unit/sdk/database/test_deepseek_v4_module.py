@@ -49,12 +49,16 @@ def _deepseek_v4_value(latency: float) -> dict[str, float]:
     return {"latency": latency, "power": 10.0, "energy": latency * 10.0}
 
 
-def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict) -> dict:
+def _context_deepseek_v4_data(
+    compress_ratio: int,
+    attn_dict: dict,
+    architecture: str = "DeepseekV4ForCausalLM",
+) -> dict:
     return {
         common.FMHAQuantMode.bfloat16: {
             common.KVCacheQuantMode.fp8: {
                 common.GEMMQuantMode.fp8_block: {
-                    "DeepseekV4ForCausalLM": {
+                    architecture: {
                         compress_ratio: attn_dict,
                     },
                 },
@@ -63,11 +67,15 @@ def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict) -> dict:
     }
 
 
-def _generation_deepseek_v4_data(compress_ratio: int, attn_dict: dict) -> dict:
+def _generation_deepseek_v4_data(
+    compress_ratio: int,
+    attn_dict: dict,
+    architecture: str = "DeepseekV4ForCausalLM",
+) -> dict:
     return {
         common.KVCacheQuantMode.fp8: {
             common.GEMMQuantMode.fp8_block: {
-                "DeepseekV4ForCausalLM": {
+                architecture: {
                     compress_ratio: attn_dict,
                 },
             },
@@ -511,7 +519,7 @@ class TestDeepSeekV4AttentionModule:
         db.system_spec["gpu"]["mem_bw"] = 4_800_000_000_000
         module_grid = {
             8: {
-                167: {4518: _deepseek_v4_value(10.0)},
+                167: {4519: _deepseek_v4_value(10.0)},
             }
         }
         db._generation_deepseek_v4_attention_module_data = LoadedOpData(
@@ -530,7 +538,7 @@ class TestDeepSeekV4AttentionModule:
             **{
                 **kwargs,
                 "b": 167,
-                "s": 4518,
+                "s": 4519,
                 "num_heads": 8,
                 "index_topk": 512,
             },
@@ -572,6 +580,62 @@ class TestDeepSeekV4AttentionModule:
 
         assert float(result) > 0
         assert result.energy >= 0
+
+    def test_context_silicon_uses_robust_lookup_for_deepseek_v4_architecture_alias(self, mutable_comprehensive_perf_db):
+        db = mutable_comprehensive_perf_db
+        architecture = "DeepseekV4ForCausalLMVariant"
+        module_grid = _dsv4_sampled_batch_caps_grid()
+        db._context_deepseek_v4_attention_module_data = LoadedOpData(
+            _context_deepseek_v4_data(128, module_grid, architecture=architecture),
+            common.PerfDataFilename.dsv4_hca_context_module,
+            "mock_dsv4_context_module_tp8_alias",
+        )
+
+        result = db.query_context_deepseek_v4_attention_module(
+            **{
+                **_deepseek_v4_attn_kwargs(128),
+                "b": 3,
+                "s": 2682,
+                "prefix": 0,
+                "num_heads": 8,
+            },
+            architecture=architecture,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        b2_at_2682 = 4.80 + (5.80 - 4.80) * (2682 - 2048) / (4096 - 2048)
+        expected = b2_at_2682 * 3 / 2
+        assert float(result) == pytest.approx(expected)
+        assert result.energy == pytest.approx(expected * 10.0)
+
+    def test_generation_silicon_uses_robust_lookup_for_deepseek_v4_architecture_alias(
+        self, mutable_comprehensive_perf_db
+    ):
+        db = mutable_comprehensive_perf_db
+        architecture = "DeepseekV4ForCausalLMVariant"
+        mock_grid = _dsv4_generation_sampled_grid()
+        db._generation_deepseek_v4_attention_module_data = LoadedOpData(
+            _generation_deepseek_v4_data(128, mock_grid, architecture=architecture),
+            common.PerfDataFilename.dsv4_hca_generation_module,
+            "mock_dsv4_generation_module_tp8_alias",
+        )
+        kwargs = _deepseek_v4_attn_kwargs(128)
+        kwargs.pop("prefix")
+
+        result = db.query_generation_deepseek_v4_attention_module(
+            **{
+                **kwargs,
+                "b": 1,
+                "s": 1,
+                "num_heads": 8,
+            },
+            architecture=architecture,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        expected = 0.20 + (0.50 - 0.20) * (1 - 2) / (5 - 2)
+        assert float(result) == pytest.approx(expected)
+        assert result.energy == pytest.approx(expected * 10.0)
 
 
 def test_deepseek_v4_static_sol_and_hybrid_run_end_to_end(mutable_comprehensive_perf_db):
