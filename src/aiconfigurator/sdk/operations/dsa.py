@@ -19,8 +19,8 @@ the MLA/Mamba block, once after); both loads are consolidated into a
 single ``load_data`` call per class.
 
 DSA-specific helpers (``_is_dsa_interpolation_miss``,
-``_format_dsa_unavailable_message``) also move here as static methods.
-``DSA_MODEL_DIMS`` and ``DEFAULT_DSA_ARCHITECTURE`` stay on
+``_format_dsa_unavailable_message``) also move here as module-level
+functions. ``DSA_MODEL_DIMS`` and ``DEFAULT_DSA_ARCHITECTURE`` stay on
 ``perf_database.py`` as module-level constants for now — the cleanup PR
 revisits their home.
 """
