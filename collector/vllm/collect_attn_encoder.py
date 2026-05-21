@@ -5,9 +5,6 @@
 
 Directly invokes the ViT wrappers used by vLLM's ``MMEncoderAttention`` path
 (``vit_flash_attn_wrapper`` / ``vit_triton_attn_wrapper`` / ``vit_torch_sdpa_wrapper``).
-This is the same code path Qwen2/2.5/3-VL, Whisper, SigLIP, etc. use in production
-— mirrors ``MMEncoderAttention.forward_cuda`` dispatch but skips the ``nn.Module``
-wrapper to match the level at which ``collect_attn.py`` collects the LM path.
 """
 
 __compat__ = "vllm>=0.21.0"
@@ -112,17 +109,17 @@ def get_encoder_attention_test_cases(if_unit_test=False):
               6144, 6400, 7744, 8192, 9216, 10240, 10816, 12288, 12544,
               14400, 16384, 24576, 32768, 49152, 65536]
 
-    n_list = [12, 16, 20, 24, 32]
+    n_list = [2, 4, 5, 8, 10, 16, 20]
 
-    head_dim_list = [64, 72, 80, 88, 96, 128, 160]
+    head_dim_list = [64, 72, 80, 88, 96, 128]
 
     test_cases = []
     for head_dim in head_dim_list:
         for n in sorted(n_list, reverse=True):
             for s in sorted(s_list, reverse=True):
                 for b in sorted(b_list, reverse=True):
-                    # Q+K+V+O memory guard (no paged cache for encoder)
-                    if 4 * b * s * n * head_dim * 2 >= 2**31:
+                    # Workload token budget guard (max 128K tokens)
+                    if b * s > 131072:
                         continue
                     test_cases.append([b, s, n, head_dim])
     return test_cases
