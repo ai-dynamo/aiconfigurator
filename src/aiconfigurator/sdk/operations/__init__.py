@@ -27,8 +27,6 @@ from __future__ import annotations
 from aiconfigurator.sdk.operations._legacy import (
     FallbackOp,
     OverlapOp,
-    TrtLLMWideEPMoE,
-    TrtLLMWideEPMoEDispatch,
     logger,  # noqa: F401
 )
 
@@ -58,7 +56,7 @@ from aiconfigurator.sdk.operations.mla import (
     WideEPContextMLA,
     WideEPGenerationMLA,
 )
-from aiconfigurator.sdk.operations.moe import MoE, MoEDispatch
+from aiconfigurator.sdk.operations.moe import MoE, MoEDispatch, TrtLLMWideEPMoE, TrtLLMWideEPMoEDispatch
 
 # Re-export commonly-imported names that the prior monolithic operations.py
 # exposed at module level. Some test files and external callers do
