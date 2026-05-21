@@ -41,8 +41,6 @@ from aiconfigurator.sdk.operations._legacy import (
     Mamba2Kernel,
     MLABmm,
     MLAModule,
-    MoE,
-    MoEDispatch,
     OverlapOp,
     TrtLLMWideEPMoE,
     TrtLLMWideEPMoEDispatch,
@@ -61,6 +59,7 @@ from aiconfigurator.sdk.operations.base import Operation, clear_all_op_caches
 from aiconfigurator.sdk.operations.elementwise import ElementWise
 from aiconfigurator.sdk.operations.embedding import Embedding
 from aiconfigurator.sdk.operations.gemm import GEMM
+from aiconfigurator.sdk.operations.moe import MoE, MoEDispatch
 
 # Re-export commonly-imported names that the prior monolithic operations.py
 # exposed at module level. Some test files and external callers do
