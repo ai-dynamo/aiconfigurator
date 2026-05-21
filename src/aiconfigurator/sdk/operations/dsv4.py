@@ -625,9 +625,9 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
     Owns three class-level caches:
     - ``_data_cache`` — merged ctx table (csa + hca split files combined)
-    - ``_raw_data_cache`` — deepcopy of the merged table, used for the
-      topk-piecewise lookup that consults the *pre-merge* compress_ratio==4
-      rows for boundary correctness.
+    - ``_raw_data_cache`` — deepcopy of the merged table, kept untouched
+      so the topk-piecewise lookup can consult the original
+      compress_ratio==4 rows for boundary correctness.
     - ``_sparse_kernel_cache`` — dict ``{"paged_mqa_logits", "hca_attn"}``
       of ``LoadedOpData`` used for prefix kernel-Δ correction.
     """
