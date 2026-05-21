@@ -2913,11 +2913,9 @@ class PerfDatabase:
         # patched during ``__init__`` in unit tests).
 
         # More model-specific ops
-        self._context_mla_data = _load_op_data(PerfDataFilename.context_mla)
-        self._generation_mla_data = _load_op_data(PerfDataFilename.generation_mla)
-        self._mla_bmm_data = _load_op_data(PerfDataFilename.mla_bmm)
-        self._context_mla_module_data = _load_op_data(PerfDataFilename.mla_context_module)
-        self._generation_mla_module_data = _load_op_data(PerfDataFilename.mla_generation_module)
+        # MLA family (regular + module + BMM) moved to operations/mla.py
+        # (ContextMLA.load_data / GenerationMLA.load_data / MLABmm.load_data /
+        # MLAModule.load_data handle the loads + extrapolation).
         # mamba2 + gdn moved to operations/mamba.py (Mamba2Kernel.load_data /
         # GDNKernel.load_data handle the loads).
         # compute_scale + scale_matrix are GEMM-owned (loaded by GEMM.load_data below)
@@ -2967,8 +2965,10 @@ class PerfDatabase:
         if backend == "sglang":
             self._wideep_context_moe_data = _load_op_data(PerfDataFilename.wideep_context_moe)
             self._wideep_generation_moe_data = _load_op_data(PerfDataFilename.wideep_generation_moe)
-            self._wideep_context_mla_data = _load_op_data(PerfDataFilename.wideep_context_mla)
-            self._wideep_generation_mla_data = _load_op_data(PerfDataFilename.wideep_generation_mla)
+            # WideEP MLA data moved to operations/mla.py
+            # (WideEPContextMLA / WideEPGenerationMLA load_data handle these,
+            # gated internally on backend == "sglang"). Note: load happens
+            # at the bottom of __init__ for every backend; non-SGLang gets None.
             self._wideep_deepep_normal_data = _load_op_data(PerfDataFilename.wideep_deepep_normal)
             self._wideep_deepep_ll_data = _load_op_data(PerfDataFilename.wideep_deepep_ll)
 
@@ -2994,6 +2994,14 @@ class PerfDatabase:
         from aiconfigurator.sdk.operations.dsa import ContextDSAModule, GenerationDSAModule
         from aiconfigurator.sdk.operations.gemm import GEMM
         from aiconfigurator.sdk.operations.mamba import GDNKernel, Mamba2Kernel
+        from aiconfigurator.sdk.operations.mla import (
+            ContextMLA,
+            GenerationMLA,
+            MLABmm,
+            MLAModule,
+            WideEPContextMLA,
+            WideEPGenerationMLA,
+        )
 
         GEMM.load_data(self)
         ContextAttention.load_data(self)
@@ -3004,6 +3012,12 @@ class PerfDatabase:
         GenerationDSAModule.load_data(self)
         Mamba2Kernel.load_data(self)
         GDNKernel.load_data(self)
+        ContextMLA.load_data(self)
+        GenerationMLA.load_data(self)
+        MLABmm.load_data(self)
+        MLAModule.load_data(self)
+        WideEPContextMLA.load_data(self)
+        WideEPGenerationMLA.load_data(self)
 
         # pre-correction (non-migrated ops; migrated ops apply their own
         # SOL correction during ``load_data``)
@@ -3017,231 +3031,8 @@ class PerfDatabase:
         # GEMM extrapolation moved to operations/gemm.py (GEMM._extrapolate_gemm_data,
         # invoked from GEMM.load_data above).
 
-        # mla
-        # wideep context mla
-        if getattr(self, "_wideep_context_mla_data", None):
-            for kernel_source in self._wideep_context_mla_data:
-                for quant_mode in self._wideep_context_mla_data[kernel_source]:
-                    for kv_cache_dtype in self._wideep_context_mla_data[kernel_source][quant_mode]:
-                        num_heads_list = list(
-                            self._wideep_context_mla_data[kernel_source][quant_mode][kv_cache_dtype].keys()
-                        )
-                        data_dict = self._wideep_context_mla_data[kernel_source][quant_mode][kv_cache_dtype]
-                        target_x_list = num_heads_list  # to reuse x dim
-                        # currently, support max seq to 1M.
-                        # Because all the system is linear for now.
-                        # it will be difficult to do square interpolation.
-                        # Use more points to do the approximation
-                        target_y_list = (
-                            [16, 32, 64, 128, 256, 512, 1024, 2048]
-                            + [4096 + i * 2048 for i in range(14)]
-                            + [32768 + 16384 * i for i in range(6)]
-                            + [131072 + 32768 * i for i in range(12)]
-                            + [524288 + 65536 * i for i in range(9)]
-                        )  # s
-                        target_z_list = [
-                            1,
-                            2,
-                            4,
-                            8,
-                            16,
-                            32,
-                            64,
-                            128,
-                            256,
-                            384,
-                            512,
-                            1024,
-                            2048,
-                        ]  # b
-
-                        self._extrapolate_data_grid(
-                            data_dict=data_dict,  # tpsize,sb
-                            target_x_list=target_x_list,
-                            target_y_list=target_y_list,
-                            target_z_list=target_z_list,
-                            sqrt_y_value=True,
-                        )
-
-        # regular context mla
-        if self._context_mla_data:
-            for quant_mode in self._context_mla_data:
-                for kv_cache_dtype in self._context_mla_data[quant_mode]:
-                    num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
-                    data_dict = self._context_mla_data[quant_mode][kv_cache_dtype]
-                    target_x_list = num_heads_list  # to reuse x dim
-                    # currently, support max seq to 1M. Because all the system is linear for now.
-                    # it will be difficult to do square interpolation.
-                    # Use more points to do the approximation
-                    target_y_list = (
-                        [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-                        + [4096 + i * 2048 for i in range(14)]
-                        + [32768 + 16384 * i for i in range(6)]
-                        + [131072 + 32768 * i for i in range(12)]
-                        + [524288 + 65536 * i for i in range(9)]
-                    )  # s
-                    target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]  # b
-
-                    self._extrapolate_data_grid(
-                        data_dict=data_dict,  # tpsize,sb
-                        target_x_list=target_x_list,
-                        target_y_list=target_y_list,
-                        target_z_list=target_z_list,
-                        sqrt_y_value=True,
-                    )
-        # wideep generation mla
-        if getattr(self, "_wideep_generation_mla_data", None):
-            for kernel_source in self._wideep_generation_mla_data:
-                for kv_cache_dtype in self._wideep_generation_mla_data[kernel_source]:
-                    tp_list = list(self._wideep_generation_mla_data[kernel_source][kv_cache_dtype].keys())
-                    data_dict = self._wideep_generation_mla_data[kernel_source][kv_cache_dtype]
-                    target_x_list = tp_list  # n
-                    target_y_list = [
-                        1,
-                        2,
-                        4,
-                        8,
-                        16,
-                        32,
-                        64,
-                        128,
-                        256,
-                        384,
-                        512,
-                        1024,
-                        2048,
-                        8192,
-                    ]  # b
-                    target_z_list = [
-                        1,
-                        2,
-                        4,
-                        8,
-                        16,
-                        32,
-                        64,
-                        128,
-                        256,
-                        512,
-                        1024,
-                        2048,
-                        4096,
-                        8192,
-                        16384,
-                        32768,
-                        65536,
-                        131072,
-                        262144,
-                        2097152 * 8,
-                    ]  # s
-
-                    self._extrapolate_data_grid(
-                        data_dict=data_dict,  # tpsize, bs
-                        target_x_list=target_x_list,
-                        target_y_list=target_y_list,
-                        target_z_list=target_z_list,
-                    )
-
-        # regular generation mla
-        if self._generation_mla_data:
-            for kv_cache_dtype in self._generation_mla_data:
-                tp_list = list(self._generation_mla_data[kv_cache_dtype].keys())
-                data_dict = self._generation_mla_data[kv_cache_dtype]
-                target_x_list = tp_list  # n
-                target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]  # b
-                target_z_list = [
-                    1,
-                    2,
-                    4,
-                    8,
-                    16,
-                    32,
-                    64,
-                    128,
-                    256,
-                    512,
-                    1024,
-                    2048,
-                    4096,
-                    8192,
-                    16384,
-                    32768,
-                    65536,
-                    131072,
-                    262144,
-                    2097152 * 8,
-                ]  # s
-
-                self._extrapolate_data_grid(
-                    data_dict=data_dict,  # tpsize, bs
-                    target_x_list=target_x_list,
-                    target_y_list=target_y_list,
-                    target_z_list=target_z_list,
-                )
-
-        # MLA module-level data extrapolation
-        # Dict structure: data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b]
-        if getattr(self, "_context_mla_module_data", None) is not None:
-            for fmha_mode in self._context_mla_module_data:
-                for kv_cache_dtype in self._context_mla_module_data[fmha_mode]:
-                    for gemm_mode in self._context_mla_module_data[fmha_mode][kv_cache_dtype]:
-                        data_dict = self._context_mla_module_data[fmha_mode][kv_cache_dtype][gemm_mode]
-                        num_heads_list = list(data_dict.keys())
-                        target_x_list = num_heads_list
-                        target_y_list = (
-                            [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-                            + [4096 + i * 2048 for i in range(14)]
-                            + [32768 + 16384 * i for i in range(6)]
-                            + [131072 + 32768 * i for i in range(12)]
-                            + [524288 + 65536 * i for i in range(9)]
-                        )
-                        target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]
-
-                        self._extrapolate_data_grid(
-                            data_dict=data_dict,
-                            target_x_list=target_x_list,
-                            target_y_list=target_y_list,
-                            target_z_list=target_z_list,
-                        )
-
-        # Dict structure: data[fmha_mode][kv_dtype][gemm_mode][num_heads][b][s]
-        if getattr(self, "_generation_mla_module_data", None) is not None:
-            for fmha_mode in self._generation_mla_module_data:
-                for kv_cache_dtype in self._generation_mla_module_data[fmha_mode]:
-                    for gemm_mode in self._generation_mla_module_data[fmha_mode][kv_cache_dtype]:
-                        data_dict = self._generation_mla_module_data[fmha_mode][kv_cache_dtype][gemm_mode]
-                        num_heads_list = list(data_dict.keys())
-                        target_x_list = num_heads_list
-                        target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]
-                        target_z_list = [
-                            1,
-                            2,
-                            4,
-                            8,
-                            16,
-                            32,
-                            64,
-                            128,
-                            256,
-                            512,
-                            1024,
-                            2048,
-                            4096,
-                            8192,
-                            16384,
-                            32768,
-                            65536,
-                            131072,
-                            262144,
-                            2097152 * 8,
-                        ]
-
-                        self._extrapolate_data_grid(
-                            data_dict=data_dict,
-                            target_x_list=target_x_list,
-                            target_y_list=target_y_list,
-                            target_z_list=target_z_list,
-                        )
+        # MLA family extrapolation moved to operations/mla.py
+        # (Context/Generation MLA + WideEP variants + MLAModule).
 
         # DSA module-level extrapolation moved to operations/dsa.py
         # (ContextDSAModule._extrapolate / GenerationDSAModule._extrapolate,
@@ -3974,93 +3765,19 @@ class PerfDatabase:
         fmha_quant_mode: common.FMHAQuantMode,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query context MLA (Multi-head Latent Attention) latency and energy.
+        """Query context MLA latency. Delegates to ``ContextMLA._query_context_mla_table``."""
+        from aiconfigurator.sdk.operations.mla import ContextMLA
 
-        Args:
-            b: Batch size
-            s: Sequence length to be computed
-            prefix: Prefix cache length
-            num_heads: Number of attention heads
-            kvcache_quant_mode: KV cache quantization mode
-            fmha_quant_mode: Attention computation quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(
-            b: int,
-            s: int,
-            prefix: int,
-            num_heads: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-            fmha_quant_mode: common.FMHAQuantMode,
-        ) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            full_s = s + prefix
-            ops = (
-                b * num_heads * 2 / 2 * (192 + 128) * (full_s * full_s - prefix * prefix)
-            )  # 2 for fma, 2 for causality. num_heads, for local heads
-            # s * 192 for q read, full_s * 192 for k read, full_s * 128 for v read, s * 192 for write.
-            mem_bytes = (
-                b * num_heads * (kvcache_quant_mode.value.memory * full_s * (192 + 128) + 2 * s * (192 + 128))
-            )  # 2 for qk, TODO
-            sol_math = ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
-            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(
-            b: int,
-            s: int,
-            prefix: int,
-            num_heads: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-            fmha_quant_mode: common.FMHAQuantMode,
-        ) -> float:
-            """
-            Get the hybrid time
-            """
-            latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.6
-            return latency / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
-            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._context_mla_data.raise_if_not_loaded()
-                full_s = s + prefix
-                prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-                mla_dict = self._context_mla_data[fmha_quant_mode][kvcache_quant_mode]
-                result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
-                latency = result["latency"] * prefix_correction
-                energy = result.get("energy", 0.0) * prefix_correction
-                return self._interp_pr(latency, energy=energy)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode),
-                database_mode=database_mode,
-                error_msg=(
-                    f"Failed to query context mla data for {b=}, {s=}, {prefix=}, {num_heads=}, "
-                    f"{kvcache_quant_mode=}, {fmha_quant_mode=}"
-                ),
-            )
+        return ContextMLA._query_context_mla_table(
+            self,
+            b,
+            s,
+            prefix,
+            num_heads,
+            kvcache_quant_mode,
+            fmha_quant_mode,
+            database_mode,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_generation_mla(
@@ -4071,81 +3788,17 @@ class PerfDatabase:
         kvcache_quant_mode: common.KVCacheQuantMode,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query generation MLA (Multi-head Latent Attention) latency and energy.
+        """Query generation MLA latency. Delegates to ``GenerationMLA._query_generation_mla_table``."""
+        from aiconfigurator.sdk.operations.mla import GenerationMLA
 
-        Args:
-            b: Batch size
-            s: KV cache length
-            num_heads: Number of attention heads
-            kvcache_quant_mode: KV cache quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(
-            b: int, s: int, num_heads: int, kvcache_quant_mode: common.KVCacheQuantMode
-        ) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            if kvcache_quant_mode == common.KVCacheQuantMode.fp8:
-                quant_mode_gen = common.FMHAQuantMode.fp8
-            else:
-                quant_mode_gen = common.FMHAQuantMode.bfloat16
-            # only consider bfloat16 mmha
-            ops = 2 * b * num_heads * 1088 * s  # 2 for fma
-            # kvcache load bytes will depend on kvcache quant.
-            # while input q and output might be in bfloat16.
-            mem_bytes = b * (num_heads * 1088 * 2 + (s - 1) * 576 * kvcache_quant_mode.value.memory)
-            # bfloat16 io + bfloat16/fp8 kv cache, TODO fp8 io
-            sol_math = ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / quant_mode_gen.value.compute
-            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(
-            b: int,
-            s: int,
-            num_heads: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-        ) -> float:
-            """
-            Get the hybrid time
-            """
-            latency = get_sol(b, s, num_heads, kvcache_quant_mode)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_latency = get_sol(b, s, num_heads, kvcache_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, num_heads, kvcache_quant_mode)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(b, s, num_heads, kvcache_quant_mode)
-            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._generation_mla_data.raise_if_not_loaded()
-                mla_dict = self._generation_mla_data[kvcache_quant_mode]
-                result = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
-                latency = result["latency"]
-                energy = result.get("energy", 0.0)
-                return self._interp_pr(latency, energy=energy)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(b, s, num_heads, kvcache_quant_mode),
-                database_mode=database_mode,
-                error_msg=f"Failed to query generation mla data for {b=}, {s=}, {num_heads=}, {kvcache_quant_mode=}",
-            )
+        return GenerationMLA._query_generation_mla_table(
+            self,
+            b,
+            s,
+            num_heads,
+            kvcache_quant_mode,
+            database_mode,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_context_mla_module(
@@ -4159,86 +3812,20 @@ class PerfDatabase:
         gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query context MLA module-level latency and energy.
+        """Query context MLA module latency. Delegates to ``MLAModule._query_context_mla_module_table``."""
+        from aiconfigurator.sdk.operations.mla import MLAModule
 
-        This queries profiling data from the complete MLA context forward pass
-        captured as a single operation.
-
-        Args:
-            b: Batch size
-            s: Sequence length to be computed
-            prefix: Prefix cache length
-            num_heads: Number of attention heads (local, after TP split)
-            kvcache_quant_mode: KV cache quantization mode
-            fmha_quant_mode: FMHA quantization mode
-            gemm_quant_mode: GEMM quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-
-        Raises:
-            PerfDataNotAvailableError: If module-level MLA context data is not available.
-        """
-
-        def get_sol(
-            b: int,
-            s: int,
-            prefix: int,
-            num_heads: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-            fmha_quant_mode: common.FMHAQuantMode,
-        ) -> tuple[float, float, float]:
-            # Reuse the same SOL model as query_context_mla
-            full_s = s + prefix
-            ops = b * num_heads * 2 / 2 * (192 + 128) * (full_s * full_s - prefix * prefix)
-            mem_bytes = b * num_heads * (kvcache_quant_mode.value.memory * full_s * (192 + 128) + 2 * s * (192 + 128))
-            sol_math = ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
-            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(
-            b: int,
-            s: int,
-            prefix: int,
-            num_heads: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-            fmha_quant_mode: common.FMHAQuantMode,
-        ) -> float:
-            latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.6
-            return latency / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
-            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-        else:
-
-            def get_silicon():
-                self._context_mla_module_data.raise_if_not_loaded()
-                full_s = s + prefix
-                prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-                mla_dict = self._context_mla_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
-                result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
-                latency = result["latency"] * prefix_correction
-                energy = result.get("energy", 0.0) * prefix_correction
-                return self._interp_pr(latency, energy=energy)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode),
-                database_mode=database_mode,
-                error_msg=(
-                    f"Failed to query context MLA module data for {b=}, {s=}, {prefix=}, "
-                    f"{num_heads=}, {kvcache_quant_mode=}, {fmha_quant_mode=}, {gemm_quant_mode=}"
-                ),
-            )
+        return MLAModule._query_context_mla_module_table(
+            self,
+            b,
+            s,
+            prefix,
+            num_heads,
+            kvcache_quant_mode,
+            fmha_quant_mode,
+            gemm_quant_mode,
+            database_mode,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_generation_mla_module(
@@ -4251,85 +3838,19 @@ class PerfDatabase:
         gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query generation MLA module-level latency and energy.
+        """Query generation MLA module latency. Delegates to ``MLAModule._query_generation_mla_module_table``."""
+        from aiconfigurator.sdk.operations.mla import MLAModule
 
-        This queries profiling data from the complete MLA forward pass (including
-        BMM pre, attention, and BMM post) captured as a single operation.
-
-        Args:
-            b: Batch size (each generating 1 token)
-            s: KV cache length
-            num_heads: Number of attention heads (local, after TP split)
-            kv_cache_dtype: KV cache quantization mode
-            fmha_quant_mode: FMHA quantization mode
-            gemm_quant_mode: GEMM quantization mode for BMM operations
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-
-        Raises:
-            PerfDataNotAvailableError: If module-level MLA data is not available.
-        """
-
-        # Reuse the same SOL model as query_generation_mla — the module captures
-        # the same operations, just profiled together.
-        # For a proper SOL we'd also include BMM pre/post, but that's a refinement
-        # for later; the primary purpose here is SILICON mode with real data.
-        def get_sol(
-            b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode
-        ) -> tuple[float, float, float]:
-            if kv_cache_dtype == common.KVCacheQuantMode.fp8:
-                quant_mode_gen = common.FMHAQuantMode.fp8
-            else:
-                quant_mode_gen = common.FMHAQuantMode.bfloat16
-            # MLA attention ops
-            attn_ops = 2 * b * num_heads * 1088 * s
-            mem_bytes = b * (num_heads * 1088 * 2 + (s - 1) * 576 * kv_cache_dtype.value.memory)
-            sol_math = attn_ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / quant_mode_gen.value.compute
-            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            # Add BMM pre + post SOL (same as query_mla_bmm)
-            bmm_ops = 2 * 2 * b * num_heads * 128 * 512  # pre + post
-            bmm_mem = 2 * num_heads * (b * 640 + 128 * 512) * gemm_quant_mode.value.memory
-            bmm_math = bmm_ops / (self.system_spec["gpu"]["bfloat16_tc_flops"] * gemm_quant_mode.value.compute) * 1000
-            bmm_mem_time = bmm_mem / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_math += bmm_math
-            sol_mem += bmm_mem_time
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode) -> float:
-            latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
-            scale_factor = 0.5
-            return latency / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, num_heads, kv_cache_dtype)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(b, s, num_heads, kv_cache_dtype)
-            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-        else:
-
-            def get_silicon():
-                self._generation_mla_module_data.raise_if_not_loaded()
-                mla_dict = self._generation_mla_module_data[fmha_quant_mode][kv_cache_dtype][gemm_quant_mode]
-                result = self._interp_3d(num_heads, b, s, mla_dict, "cubic")
-                latency = result["latency"]
-                energy = result.get("energy", 0.0)
-                return self._interp_pr(latency, energy=energy)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(b, s, num_heads, kv_cache_dtype),
-                database_mode=database_mode,
-                error_msg=(
-                    f"Failed to query generation MLA module data for {b=}, {s=}, "
-                    f"{num_heads=}, {kv_cache_dtype=}, {gemm_quant_mode=}"
-                ),
-            )
+        return MLAModule._query_generation_mla_module_table(
+            self,
+            b,
+            s,
+            num_heads,
+            kv_cache_dtype,
+            fmha_quant_mode,
+            gemm_quant_mode,
+            database_mode,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_generation_mla(
@@ -4342,124 +3863,22 @@ class PerfDatabase:
         attention_backend: str | None = None,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
+        """Query WideEP generation MLA latency.
+
+        Delegates to ``WideEPGenerationMLA._query_wideep_generation_mla_table``.
         """
-        Query the generation mla data for SGLang backend with SOL calculation
-        """
+        from aiconfigurator.sdk.operations.mla import WideEPGenerationMLA
 
-        def get_sol(
-            b: int,
-            s: int,
-            tp_size: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-            fmha_quant_mode: common.FMHAQuantMode,
-        ) -> tuple[float, float, float]:
-            hidden_size = 7168
-            q_lora_rank = 1536
-            kv_lora_rank = 512
-            qk_rope_head_dim = 64
-            qk_nope_head_dim = 128
-            v_head_dim = 128
-            num_head = 128 // tp_size
-
-            # NOTE: qkv_a projection is now modeled as a standalone GEMM op
-            # (generation_qkv_a_proj_gemm) outside of the MLA attention forward path,
-            # matching sglang >=0.5.6 where qkv_a_proj was moved out of attention.
-
-            # q_b projection
-            q_b_flop = 2 * q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) * b
-            q_b_mem = (
-                b * q_lora_rank
-                + q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim)
-                + 2 * b * num_head * (qk_rope_head_dim + qk_nope_head_dim)
-            )
-
-            # q_w_kc (attention computation)
-            q_w_kc_flop = 2 * num_head * qk_nope_head_dim * kv_lora_rank * b
-            q_w_kc_mem = (
-                b * num_head * qk_nope_head_dim
-                + num_head * kv_lora_rank * qk_nope_head_dim
-                + 2 * b * num_head * kv_lora_rank
-            )
-
-            attn_flop = 2 * b * s * num_head * (qk_rope_head_dim + kv_lora_rank * 2)
-            attn_mem = (
-                b * num_head * (kv_lora_rank + qk_rope_head_dim)
-                + b * s * (qk_rope_head_dim + kv_lora_rank)
-                + b * num_head * kv_lora_rank
-            )
-
-            # s_w_vc (attention output projection)
-            s_w_vc_flop = 2 * b * num_head * kv_lora_rank * v_head_dim
-            s_w_vc_mem = (
-                b * num_head * kv_lora_rank + num_head * v_head_dim * kv_lora_rank + 2 * b * num_head * v_head_dim
-            )
-
-            # attention output projection
-            attn_out_flop = 2 * num_head * v_head_dim * hidden_size * b
-            attn_out_mem = b * num_head * v_head_dim + num_head * v_head_dim * hidden_size + 2 * b * hidden_size
-
-            ops = q_b_flop + q_w_kc_flop + s_w_vc_flop + attn_out_flop
-            mem_bytes = (q_b_mem + q_w_kc_mem + attn_mem * 2 + s_w_vc_mem + attn_out_mem) * fmha_quant_mode.value.memory
-            sol_math = ops / (self.system_spec["gpu"]["bfloat16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
-            sol_math += attn_flop / (self.system_spec["gpu"]["bfloat16_tc_flops"]) * 1000
-            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(
-            b: int,
-            s: int,
-            tp_size: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-            fmha_quant_mode: common.FMHAQuantMode,
-        ) -> float:
-            """
-            Get the hybrid time
-            """
-            latency = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.7
-            return latency / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_time = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_time, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(
-                get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode), energy=0.0, source="empirical"
-            )
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._wideep_generation_mla_data.raise_if_not_loaded()
-                attn_backend = attention_backend or "flashinfer"
-                if attn_backend == "flashinfer":
-                    attn_data = self._wideep_generation_mla_data["flashinfer"]
-                elif attn_backend == "fa3":
-                    attn_data = self._wideep_generation_mla_data["fa3"]
-                else:
-                    raise ValueError(f"Unsupported attention backend: {attn_backend}")
-                # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
-                num_heads = 128 // tp_size
-                mla_dict = attn_data[kvcache_quant_mode]
-                result = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
-                latency = result["latency"]
-                energy = result.get("energy", 0.0)
-                return self._interp_pr(latency, energy=energy)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode),
-                database_mode=database_mode,
-                error_msg=(
-                    f"Failed to query wideep generation mla data for {b=}, {s=}, {tp_size=}, "
-                    f"{kvcache_quant_mode=}, {fmha_quant_mode=}"
-                ),
-            )
+        return WideEPGenerationMLA._query_wideep_generation_mla_table(
+            self,
+            b,
+            s,
+            tp_size,
+            kvcache_quant_mode,
+            fmha_quant_mode,
+            attention_backend,
+            database_mode,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_context_mla(
@@ -4473,124 +3892,20 @@ class PerfDatabase:
         attention_backend: str | None = None,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        def get_sol(
-            b: int,
-            s: int,
-            prefix: int,
-            tp_size: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-            fmha_quant_mode: common.FMHAQuantMode,
-        ) -> tuple[float, float, float]:
-            hidden_size = 7168
-            q_lora_rank = 1536
-            kv_lora_rank = 512
-            qk_rope_head_dim = 64
-            qk_nope_head_dim = 128
-            v_head_dim = 128
-            num_head = 128 // tp_size
+        """Query WideEP context MLA latency. Delegates to ``WideEPContextMLA._query_wideep_context_mla_table``."""
+        from aiconfigurator.sdk.operations.mla import WideEPContextMLA
 
-            # NOTE: qkv_a projection is now modeled as a standalone GEMM op in the pipeline
-            # (context_qkv_a_proj_gemm), so it is excluded from this SOL calculation.
-
-            # q_b projection
-            q_b_flop = 2 * q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) * b * s
-            q_b_mem = (
-                b * q_lora_rank * s
-                + q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim)
-                + 2 * b * num_head * (qk_rope_head_dim + qk_nope_head_dim) * s
-            )
-
-            # kv_b projection
-            kv_b_flop = 2 * kv_lora_rank * num_head * (qk_nope_head_dim + v_head_dim) * b * s
-            kv_b_mem = (
-                b * s * kv_lora_rank
-                + num_head * (qk_nope_head_dim + v_head_dim) * kv_lora_rank
-                + 2 * b * num_head * (qk_nope_head_dim + v_head_dim) * s
-            )
-
-            # attention computation (prefill mode)
-            full_s = s + prefix
-            attn_flop = (
-                2 * num_head * (qk_nope_head_dim * 2 + qk_rope_head_dim) * b * (full_s * full_s - prefix * prefix) // 2
-            )
-            attn_mem = (
-                b * s * num_head * (qk_nope_head_dim + qk_rope_head_dim)  # q read
-                + b * full_s * num_head * (qk_nope_head_dim + qk_rope_head_dim)  # k read
-                + b * full_s * num_head * qk_nope_head_dim  # v read
-                + b * s * num_head * qk_nope_head_dim  # write
-            )
-
-            # attention output projection
-            attn_out_flop = 2 * num_head * v_head_dim * hidden_size * b * s
-            attn_out_mem = b * num_head * v_head_dim * s + num_head * v_head_dim * hidden_size + 2 * b * hidden_size * s
-
-            ops = q_b_flop + kv_b_flop + attn_out_flop
-            mem_bytes = (q_b_mem + kv_b_mem + attn_mem * 2 + attn_out_mem) * fmha_quant_mode.value.memory
-            sol_math = ops / (self.system_spec["gpu"]["bfloat16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
-            sol_math += attn_flop / (self.system_spec["gpu"]["bfloat16_tc_flops"]) * 1000
-            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(
-            b: int,
-            s: int,
-            prefix: int,
-            tp_size: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-            fmha_quant_mode: common.FMHAQuantMode,
-        ) -> float:
-            """
-            Get the hybrid time
-            """
-            latency = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.6
-            return latency / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_time = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_time, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(
-                get_empirical(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode),
-                energy=0.0,
-                source="empirical",
-            )
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._wideep_context_mla_data.raise_if_not_loaded()
-                attn_backend = attention_backend or "flashinfer"
-                if attn_backend == "flashinfer":
-                    attn_data = self._wideep_context_mla_data["flashinfer"]
-                elif attn_backend == "fa3":
-                    attn_data = self._wideep_context_mla_data["fa3"]
-                else:
-                    raise ValueError(f"Unsupported attention backend: {attn_backend}")
-
-                # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
-                num_heads = 128 // tp_size
-                mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
-                full_s = s + prefix
-                prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-                result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
-                latency = result["latency"] * prefix_correction
-                energy = result.get("energy", 0.0) * prefix_correction
-                return self._interp_pr(latency, energy=energy)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode),
-                database_mode=database_mode,
-                error_msg=(
-                    f"Failed to query wideep context mla data for {b=}, {s=}, {prefix=}, {tp_size=}, "
-                    f"{kvcache_quant_mode=}, {fmha_quant_mode=}"
-                ),
-            )
+        return WideEPContextMLA._query_wideep_context_mla_table(
+            self,
+            b,
+            s,
+            prefix,
+            tp_size,
+            kvcache_quant_mode,
+            fmha_quant_mode,
+            attention_backend,
+            database_mode,
+        )
 
     # to simplify, we no longer support allreduce_strategy
     @functools.lru_cache(maxsize=32768)
@@ -5060,89 +4375,17 @@ class PerfDatabase:
         if_pre: bool = True,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query MLA batch matrix multiply latency and energy.
+        """Query MLA BMM latency. Delegates to ``MLABmm._query_mla_bmm_table``."""
+        from aiconfigurator.sdk.operations.mla import MLABmm
 
-        Args:
-            num_tokens: Number of tokens
-            num_heads: Number of attention heads
-            quant_mode: Quantization mode
-            if_pre: Whether this is pre or post operation
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(
-            num_tokens: int, num_heads: int, quant_mode: common.GEMMQuantMode, if_pre: bool
-        ) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            ops = 2 * num_tokens * num_heads * 128 * 512  # 2 for fma
-            mem_bytes = num_heads * (num_tokens * 640 + 128 * 512) * quant_mode.value.memory
-            sol_math = ops / (self.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
-            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(
-            num_tokens: int,
-            num_heads: int,
-            quant_mode: common.GEMMQuantMode,
-            if_pre: bool,
-        ) -> float:
-            """
-            Get the hybrid time
-            """
-            latency = get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_latency = get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(num_tokens, num_heads, quant_mode, if_pre)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(num_tokens, num_heads, quant_mode, if_pre)
-            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._mla_bmm_data.raise_if_not_loaded()
-                quant_mode_lookup = quant_mode if quant_mode in self._mla_bmm_data else common.GEMMQuantMode.bfloat16
-                mla_bmm_dict = self._mla_bmm_data[quant_mode_lookup]["mla_gen_pre" if if_pre else "mla_gen_post"][
-                    num_heads
-                ]
-                num_left, num_right = self._nearest_1d_point_helper(
-                    num_tokens,
-                    list(mla_bmm_dict.keys()),
-                    inner_only=False,
-                )
-                result = self._interp_1d(
-                    [num_left, num_right],
-                    [mla_bmm_dict[num_left], mla_bmm_dict[num_right]],
-                    num_tokens,
-                )
-                if isinstance(result, dict):
-                    lat = result["latency"]
-                    energy = result.get("energy", 0.0)
-                else:
-                    lat = result
-                    energy = 0.0
-                return self._interp_pr(lat, energy=energy)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(num_tokens, num_heads, quant_mode, if_pre),
-                database_mode=database_mode,
-                error_msg=f"Failed to query mla bmm data for {num_tokens=}, {num_heads=}, {quant_mode=}, {if_pre=}",
-            )
+        return MLABmm._query_mla_bmm_table(
+            self,
+            num_tokens,
+            num_heads,
+            quant_mode,
+            if_pre,
+            database_mode,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_mem_op(
