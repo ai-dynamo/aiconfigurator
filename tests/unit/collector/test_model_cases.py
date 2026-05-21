@@ -69,11 +69,12 @@ def test_attention_shape_specs_are_yaml_backed_with_backend_overrides():
     vllm_xpu_context = get_attention_context_shape_sweeps("vllm_xpu")[0]
     vllm_generation = get_attention_generation_shape_sweeps("vllm")[0]
 
-    assert sglang_context["head_dims"] == [128, 256]
-    assert trtllm_context["head_dims"] == [64, 128, 256]
-    assert vllm_context["head_dims"] == [128, 64]
+    assert sglang_context["head_dims"] == [128, 192, 256]
+    assert trtllm_context["head_dims"] == [64, 128, 192, 256]
+    assert trtllm_context["query_head_counts"][:6] == [1, 2, 3, 4, 5, 6]
+    assert vllm_context["head_dims"] == [64, 128, 192]
     assert vllm_context["query_head_counts"][-1] == 64
-    assert vllm_context["window_sizes"] == [0, 128]
+    assert vllm_context["window_sizes"] == [0, 128, 8192]
     assert vllm_xpu_context["batch_sizes"] == [1, 2, 4, 8, 16, 32]
     assert vllm_xpu_context["kv_head_options"] == [1, 2, 4, 8]
     assert vllm_generation["mha_query_head_counts"][-1] == 64
@@ -120,7 +121,7 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
 
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
-    assert len(get_common_moe_test_cases()) == 3654
+    assert len(get_common_moe_test_cases()) == 3972
     assert len(get_context_mla_case_specs()) == 550
     assert len(get_generation_mla_case_specs()) == 885
     assert len(get_common_mamba2_test_cases()) == 8

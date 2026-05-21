@@ -18,6 +18,17 @@ def test_trtllm_supported_quant_modes_include_fp8_static(comprehensive_perf_db):
     assert modes.count(common.GEMMQuantMode.fp8_static.name) == 1
 
 
+def test_vllm_supported_quant_modes_include_fp8_static(mutable_comprehensive_perf_db):
+    db = mutable_comprehensive_perf_db
+    db.backend = common.BackendName.vllm.value
+    db._update_support_matrix()
+
+    modes = db.supported_quant_mode["gemm"]
+    assert common.GEMMQuantMode.fp8.name in modes
+    assert common.GEMMQuantMode.fp8_static.name in modes
+    assert modes.count(common.GEMMQuantMode.fp8_static.name) == 1
+
+
 def test_query_gemm_fp8_static_reuses_fp8_table(comprehensive_perf_db):
     m, n, k = 32, 256, 512
     fp8_result = comprehensive_perf_db.query_gemm(m, n, k, common.GEMMQuantMode.fp8)
@@ -89,8 +100,10 @@ def test_query_scale_matrix_fp8_static_reuses_fp8_table(mutable_comprehensive_pe
     assert clamped.energy == pytest.approx(fp8_max_m.energy)
 
 
-def test_gemm_query_subtracts_overheads_only_for_fp8_static_and_qwen_proj_fc2():
+def test_trtllm_gemm_query_subtracts_overheads_for_fp8_static():
     class FakeDatabase:
+        backend = common.BackendName.trtllm.value
+
         def __init__(self):
             self.calls: list[tuple[str, common.GEMMQuantMode]] = []
 
@@ -153,3 +166,35 @@ def test_gemm_query_subtracts_overheads_only_for_fp8_static_and_qwen_proj_fc2():
     assert float(result3) == pytest.approx(10.0)
     assert result3.energy == pytest.approx(100.0)
     assert db3.calls == [("gemm", common.GEMMQuantMode.fp8)]
+
+
+def test_vllm_gemm_query_does_not_subtract_overheads_for_fp8_static():
+    class FakeDatabase:
+        backend = common.BackendName.vllm.value
+
+        def __init__(self):
+            self.calls: list[tuple[str, common.GEMMQuantMode]] = []
+
+        def query_gemm(self, m, n, k, quant_mode, database_mode=None):
+            self.calls.append(("gemm", quant_mode))
+            return PerformanceResult(10.0, energy=100.0)
+
+        def query_compute_scale(self, m, k, quant_mode, database_mode=None):
+            raise AssertionError("vLLM fp8_static GEMM should not query compute_scale")
+
+        def query_scale_matrix(self, m, k, quant_mode, database_mode=None):
+            raise AssertionError("vLLM fp8_static GEMM should not query scale_matrix")
+
+    db = FakeDatabase()
+    op = ops.GEMM(
+        "context_proj_gemm",
+        1.0,
+        n=128,
+        k=256,
+        quant_mode=common.GEMMQuantMode.fp8_static,
+        low_precision_input=True,
+    )
+    result = op.query(db, x=64, model_name="Qwen/Qwen3-32B")
+    assert float(result) == pytest.approx(10.0)
+    assert result.energy == pytest.approx(100.0)
+    assert db.calls == [("gemm", common.GEMMQuantMode.fp8_static)]

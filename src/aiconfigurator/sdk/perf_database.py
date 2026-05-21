@@ -3633,6 +3633,10 @@ class PerfDatabase:
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None) or getattr(self, "_oneccl_data", None)),
             }
+            # `fp8_static` is a behavioral mode that reuses `fp8` GEMM perf tables.
+            gemm_modes = self.supported_quant_mode.get("gemm", []) or []
+            if common.GEMMQuantMode.fp8.name in gemm_modes and common.GEMMQuantMode.fp8_static.name not in gemm_modes:
+                gemm_modes.append(common.GEMMQuantMode.fp8_static.name)
         else:
             self.supported_quant_mode = {}
 
@@ -7209,9 +7213,39 @@ class PerfDatabase:
                     except (KeyError, TypeError):
                         raw_dsa_dict = None
                 try:
-                    result = self._interp_dsa_context_topk_piecewise_from_raw(
-                        num_heads, full_s, b, raw_dsa_dict, index_topk
-                    )
+                    if num_heads in dsa_dict and full_s in dsa_dict[num_heads] and b in dsa_dict[num_heads][full_s]:
+                        result = dsa_dict[num_heads][full_s][b]
+                    elif num_heads in dsa_dict and full_s in dsa_dict[num_heads]:
+                        batch_dict = dsa_dict[num_heads][full_s]
+                        batch_keys = sorted(batch_dict)
+                        if len(batch_keys) < 2:
+                            result = None
+                        else:
+                            left, right = self._nearest_1d_point_helper(b, batch_keys, inner_only=False)
+
+                            def interp_batch_metric(metric: str) -> float:
+                                return self._interp_1d(
+                                    [left, right],
+                                    [
+                                        self._get_value(batch_dict[left], metric),
+                                        self._get_value(batch_dict[right], metric),
+                                    ],
+                                    b,
+                                )
+
+                            result = {
+                                "latency": interp_batch_metric("latency"),
+                                "power": interp_batch_metric("power"),
+                                "energy": interp_batch_metric("energy"),
+                            }
+                    else:
+                        result = self._interp_dsa_context_topk_piecewise_from_raw(
+                            num_heads, full_s, b, raw_dsa_dict, index_topk
+                        )
+                        if result is None:
+                            result = self._interp_dsa_context_topk_piecewise_from_raw(
+                                num_heads, full_s, b, dsa_dict, index_topk
+                            )
                     if result is None:
                         result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
                     latency = result["latency"]
@@ -7406,7 +7440,69 @@ class PerfDatabase:
                     )
                 try:
                     dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
-                    result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
+                    sequence_candidates = [s]
+                    if s > 0:
+                        sequence_candidates.append(s - 1)
+
+                    def exact_sequence_value(seq_dict):
+                        for seq_key in sequence_candidates:
+                            if seq_key in seq_dict:
+                                return seq_dict[seq_key]
+                        return None
+
+                    result = None
+                    if num_heads in dsa_dict and b in dsa_dict[num_heads]:
+                        seq_dict = dsa_dict[num_heads][b]
+                        result = exact_sequence_value(seq_dict)
+                        if result is None:
+                            seq_keys = sorted(seq_dict)
+                            if len(seq_keys) >= 2:
+                                left, right = self._nearest_1d_point_helper(s, seq_keys, inner_only=False)
+
+                                def interp_seq_metric(metric: str) -> float:
+                                    return self._interp_1d(
+                                        [left, right],
+                                        [
+                                            self._get_value(seq_dict[left], metric),
+                                            self._get_value(seq_dict[right], metric),
+                                        ],
+                                        s,
+                                    )
+
+                                result = {
+                                    "latency": interp_seq_metric("latency"),
+                                    "power": interp_seq_metric("power"),
+                                    "energy": interp_seq_metric("energy"),
+                                }
+                    if result is None and num_heads in dsa_dict:
+                        batch_dict = {}
+                        for batch_key, seq_dict in dsa_dict[num_heads].items():
+                            value = exact_sequence_value(seq_dict)
+                            if value is not None:
+                                batch_dict[batch_key] = value
+                        batch_keys = sorted(batch_dict)
+                        if len(batch_keys) >= 2:
+                            left, right = self._nearest_1d_point_helper(b, batch_keys, inner_only=False)
+
+                            def interp_batch_metric(metric: str) -> float:
+                                return self._interp_1d(
+                                    [left, right],
+                                    [
+                                        self._get_value(batch_dict[left], metric),
+                                        self._get_value(batch_dict[right], metric),
+                                    ],
+                                    b,
+                                )
+
+                            result = {
+                                "latency": interp_batch_metric("latency"),
+                                "power": interp_batch_metric("power"),
+                                "energy": interp_batch_metric("energy"),
+                            }
+                    if result is None:
+                        result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
+                    if result is None:
+                        result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
                     latency = result["latency"]
                     energy = result.get("energy", 0.0)
                 except (KeyError, TypeError, ValueError, AssertionError) as exc:

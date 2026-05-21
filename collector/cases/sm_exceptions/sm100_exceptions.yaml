@@ -11,16 +11,6 @@ description: >
   Most quantized paths are supported; remaining skips are kernel-shape limits.
 
 framework_specific_op_exceptions:
-  sglang:
-    moe:
-      rules:
-        - reason_type: framework_version_unsupported
-          version_prefixes: ["0.5.10"]
-          reason: SGLang 0.5.10 MoE collector does not support GPT-OSS MoE cases.
-          fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
-          match:
-            model_path:
-              in: [openai/gpt-oss-20b, openai/gpt-oss-120b]
   trtllm:
     mla_bmm_gen_pre:
       rules:

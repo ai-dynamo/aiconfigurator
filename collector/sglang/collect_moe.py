@@ -28,8 +28,13 @@ if _server_args_module._global_server_args is None:
     _mock_server_args.enable_fused_moe_sum_all_reduce = (
         False  # sglang >=0.5.10; prevents fused all-reduce in single-GPU benchmarks
     )
+    _mock_server_args.kt_weight_path = None
+    _mock_server_args.flashinfer_mxfp4_moe_precision = "default"
     _server_args_module._global_server_args = _mock_server_args
 
+import sglang.srt.layers.moe.fused_moe_triton.layer as _moe_layer_mod
+import sglang.srt.layers.moe.token_dispatcher.standard as _std_dispatch_mod
+import sglang.srt.layers.moe.utils as _moe_utils
 from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_moe
 from sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_config import (
     get_config_dtype_str,
@@ -37,8 +42,18 @@ from sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_config import (
     get_moe_configs,
 )
 from sglang.srt.layers.moe.moe_runner.base import MoeRunnerConfig
-from sglang.srt.layers.moe.topk import StandardTopKOutput, TopKConfig, select_experts
+from sglang.srt.layers.moe.topk import BypassedTopKOutput, StandardTopKOutput, TopKConfig, select_experts
+from sglang.srt.layers.moe.utils import MoeRunnerBackend
 from sglang.srt.utils import is_hip
+
+try:
+    import sglang.srt.layers.quantization.mxfp4 as _mxfp4_mod
+    from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
+    from sglang.srt.layers.quantization.mxfp4 import Mxfp4Config
+
+    _HAS_SGLANG_MXFP4 = True
+except ImportError:
+    _HAS_SGLANG_MXFP4 = False
 
 # sglang >=0.5.10: fused_experts_impl uses @torch.compile on moe_sum_reduce_torch_compile
 # for tokens_in_chunk <= 32 and topk > 2.  torch.compile's JIT compilation can hang
@@ -133,7 +148,14 @@ def get_moe_test_cases():
     elif sm_version < 100:
         moe_list = ["bfloat16", "fp8_block", "int4_wo"]
     elif sm_version in (100, 103):
-        moe_list = ["bfloat16", "fp8_block", "nvfp4", "int4_wo"]
+        moe_list = [
+            "bfloat16",
+            "fp8_block",
+            "nvfp4",
+            "int4_wo",
+            "w4a16_mxfp4",
+            "w4a8_mxfp4_mxfp8",
+        ]
     else:
         # SGLang 0.5.10 routes nvfp4 MoE through FlashInfer CuteDSL, whose
         # runtime check only accepts sm_100/sm_103 and fails all sm_120 cases.
@@ -143,12 +165,16 @@ def get_moe_test_cases():
 
     for common_moe_testcase in get_common_moe_test_cases():
         model_name = common_moe_testcase.model_name
-        if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
-            continue
 
         num_tokens_list = [num_tokens for num_tokens in common_moe_testcase.num_tokens_list if num_tokens <= 20480]
 
         for moe_type, num_tokens in itertools.product(moe_list, num_tokens_list):
+            if moe_type == "w4a8_mxfp4_mxfp8" and "DeepSeek-V4" not in model_name:
+                continue
+            if moe_type == "w4a16_mxfp4" and model_name not in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
+                continue
+            if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"] and moe_type != "w4a16_mxfp4":
+                continue
             # fp8_block requires hidden_size divisible by block group_size (128)
             if moe_type == "fp8_block" and (
                 common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0
@@ -554,12 +580,15 @@ def benchmark_config(
     use_int8_w8a16: bool,
     use_nvfp4: bool = False,
     use_int4_w4a16: bool = False,
+    use_mxfp4_w4a8: bool = False,
     block_shape: list[int] | None = None,
     num_iters: int = 10,
     distributed: str = "power_law",
     power_law_alpha: float = 0,
     workloads: list["Rank0Workload"] | None = None,
     swiglu_limit: float | None = None,
+    moe_tp_size: int = 1,
+    moe_ep_size: int = 1,
 ) -> float:
     device = torch.device("cuda")
     if workloads is not None:
@@ -771,6 +800,71 @@ def benchmark_config(
                 w2_alpha=w2_alpha,
                 masked_m=masked_m_list[i % num_iters],
             )
+    elif use_mxfp4_w4a8:
+        if not _HAS_SGLANG_MXFP4:
+            raise ImportError("SGLang MXFP4 MoE support is not available")
+        if workloads is not None:
+            raise ValueError("MXFP4 benchmarking uses full-router logits, not rank-local workloads")
+
+        previous_backend = _moe_utils.MOE_RUNNER_BACKEND
+        _moe_utils.MOE_RUNNER_BACKEND = MoeRunnerBackend.FLASHINFER_MXFP4
+        _patch_mxfp4_single_process_parallel(moe_tp_size=moe_tp_size, moe_ep_size=moe_ep_size)
+
+        intermediate_size = shard_intermediate_size // 2 * moe_tp_size
+        mxfp4_config_kwargs = {}
+        if "is_checkpoint_mxfp4_serialized" in inspect.signature(Mxfp4Config).parameters:
+            mxfp4_config_kwargs["is_checkpoint_mxfp4_serialized"] = True
+        quant_config = Mxfp4Config(**mxfp4_config_kwargs)
+        moe_layer = FusedMoE(
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            layer_id=0,
+            top_k=topk,
+            params_dtype=dtype,
+            reduce_results=False,
+            quant_config=quant_config,
+            prefix="aic_sglang_mxfp4_moe",
+        ).to(device)
+        _moe_utils.MOE_RUNNER_BACKEND = previous_backend
+
+        with torch.no_grad():
+            moe_layer.w13_weight.zero_()
+            moe_layer.w2_weight.zero_()
+            moe_layer.w13_weight_scale.copy_(
+                torch.ones_like(moe_layer.w13_weight_scale, dtype=torch.float8_e4m3fn).view(torch.uint8)
+            )
+            moe_layer.w2_weight_scale.copy_(
+                torch.ones_like(moe_layer.w2_weight_scale, dtype=torch.float8_e4m3fn).view(torch.uint8)
+            )
+            moe_layer.w13_weight_bias.zero_()
+            moe_layer.w2_weight_bias.zero_()
+        moe_layer.quant_method.process_weights_after_loading(moe_layer)
+
+        x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+        if distributed == "uniform":
+            router_logits_list = [
+                torch.randn(num_tokens, num_experts, dtype=torch.float32, device=device) for _ in range(num_iters)
+            ]
+        elif distributed == "balanced":
+            router_logits_list = [balanced_logits(num_tokens, num_experts, topk).to(device) for _ in range(num_iters)]
+        elif distributed == "power_law":
+            router_logits_list = [
+                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(device)
+                for _ in range(num_iters)
+            ]
+        else:
+            raise ValueError(f"Unsupported distributed mode: {distributed}")
+
+        def run_op(i):
+            moe_layer(
+                x,
+                BypassedTopKOutput(
+                    hidden_states=x,
+                    router_logits=router_logits_list[i % num_iters],
+                    topk_config=TopKConfig(top_k=topk),
+                ),
+            )
     else:
         init_dtype = torch.bfloat16 if use_fp8_w8a8 else dtype
         x = None if workloads is not None else torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -914,6 +1008,23 @@ def benchmark_config(
     return results["latency_ms"] / outside_loop_count, results["power_stats"]
 
 
+def _patch_mxfp4_single_process_parallel(*, moe_tp_size: int, moe_ep_size: int) -> None:
+    """Patch SGLang distributed helpers so a collector process can time rank-0 MoE."""
+
+    for module in (_moe_layer_mod, _std_dispatch_mod, _mxfp4_mod):
+        if hasattr(module, "get_tp_group"):
+            module.get_tp_group = lambda: None
+        if hasattr(module, "is_allocation_symmetric"):
+            module.is_allocation_symmetric = lambda: False
+    _moe_layer_mod.get_moe_expert_parallel_world_size = lambda: moe_ep_size
+    _moe_layer_mod.get_moe_expert_parallel_rank = lambda: 0
+    _moe_layer_mod.get_moe_tensor_parallel_world_size = lambda: moe_tp_size
+    _moe_layer_mod.get_moe_tensor_parallel_rank = lambda: 0
+    _moe_layer_mod.create_kt_config_from_server_args = lambda server_args, layer_id: None
+    _std_dispatch_mod.get_moe_expert_parallel_world_size = lambda: moe_ep_size
+    _std_dispatch_mod.get_moe_expert_parallel_rank = lambda: 0
+
+
 def benchmark(
     num_tokens: int,
     num_experts: int,
@@ -926,18 +1037,21 @@ def benchmark(
     use_int8_w8a16: bool,
     use_nvfp4: bool = False,
     use_int4_w4a16: bool = False,
+    use_mxfp4_w4a8: bool = False,
     block_shape: list[int] | None = None,
     distributed: str = "power_law",
     power_law_alpha: float = 0,
     workloads: list["Rank0Workload"] | None = None,
     swiglu_limit: float | None = None,
+    moe_tp_size: int = 1,
+    moe_ep_size: int = 1,
 ) -> tuple[dict[str, int], float]:
     torch.cuda.manual_seed_all(0)
     benchmark_num_tokens = (
         max(workload["hidden_states"].shape[0] for workload in workloads) if workloads is not None else num_tokens
     )
 
-    if use_nvfp4 or (use_int4_w4a16 and _HAS_MARLIN_MOE):
+    if use_nvfp4 or use_mxfp4_w4a8 or (use_int4_w4a16 and _HAS_MARLIN_MOE):
         # nvfp4 uses flashinfer cutedsl backend; int4_w4a16 uses Marlin CUDA
         # kernels — neither needs Triton tuning configs.
         kernel_time, power_stats = benchmark_config(
@@ -953,11 +1067,14 @@ def benchmark(
             use_int8_w8a16,
             use_nvfp4,
             use_int4_w4a16,
+            use_mxfp4_w4a8,
             block_shape,
             distributed=distributed,
             power_law_alpha=power_law_alpha,
             workloads=workloads,
             swiglu_limit=swiglu_limit,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
         )
         return kernel_time, power_stats
 
@@ -998,11 +1115,14 @@ def benchmark(
         use_int8_w8a16,
         use_nvfp4,
         use_int4_w4a16,
+        use_mxfp4_w4a8,
         block_shape,
         distributed=distributed,
         power_law_alpha=power_law_alpha,
         workloads=workloads,
         swiglu_limit=swiglu_limit,
+        moe_tp_size=moe_tp_size,
+        moe_ep_size=moe_ep_size,
     )
     return kernel_time, power_stats
 
@@ -1095,12 +1215,15 @@ def run_moe_torch(
         "bfloat16",
         "nvfp4",
         "int4_wo",
-    ], "only support moe type = fp8_block, bfloat16, nvfp4, or int4_wo"
+        "w4a16_mxfp4",
+        "w4a8_mxfp4_mxfp8",
+    ], "only support moe type = fp8_block, bfloat16, nvfp4, int4_wo, w4a16_mxfp4, or w4a8_mxfp4_mxfp8"
     assert inter_size % moe_tp_size == 0, "inter_size % moe_tp_size must be 0"
     assert num_experts % moe_ep_size == 0, "num_experts must be divisible by moe_ep_size"
 
     num_local_experts = num_experts // moe_ep_size
     use_int4_w4a16 = moe_type == "int4_wo"
+    use_mxfp4_w4a8 = moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
     # int4_wo uses block_shape=[0, group_size] for grouped scales (group_size=128)
     if use_int4_w4a16:
         block_shape = [0, 128]
@@ -1110,7 +1233,7 @@ def run_moe_torch(
         block_shape = None
 
     rank0_workloads: list[Rank0Workload] | None = None
-    if moe_ep_size > 1 and distributed in ("power_law", "balanced"):
+    if moe_ep_size > 1 and distributed in ("power_law", "balanced") and not use_mxfp4_w4a8:
         rank0_workloads = build_rank0_workloads(
             num_workloads=5,
             num_tokens=num_tokens,
@@ -1137,16 +1260,19 @@ def run_moe_torch(
             False,
             use_nvfp4=moe_type == "nvfp4",
             use_int4_w4a16=use_int4_w4a16,
+            use_mxfp4_w4a8=False,
             block_shape=block_shape,
             distributed=distributed,
             power_law_alpha=power_law_alpha,
             workloads=rank0_workloads,
             swiglu_limit=swiglu_limit,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
         )
     else:
         latency, power_stats = benchmark(
             num_tokens,
-            num_local_experts,
+            num_experts if use_mxfp4_w4a8 else num_local_experts,
             2 * inter_size // moe_tp_size,
             hidden_size,
             topk,
@@ -1156,10 +1282,13 @@ def run_moe_torch(
             False,
             use_nvfp4=moe_type == "nvfp4",
             use_int4_w4a16=use_int4_w4a16,
+            use_mxfp4_w4a8=use_mxfp4_w4a8,
             block_shape=block_shape,
             distributed=distributed,
             power_law_alpha=power_law_alpha,
             swiglu_limit=swiglu_limit,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
         )
 
     log_perf(
@@ -1186,6 +1315,8 @@ def run_moe_torch(
             if moe_type == "nvfp4"
             else "sglang_marlin_moe"
             if moe_type == "int4_wo" and _HAS_MARLIN_MOE
+            else "sglang_flashinfer_mxfp4_moe"
+            if moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
             else "sglang_fused_moe_triton"
         ),
         perf_filename=perf_filename,
