@@ -2792,7 +2792,10 @@ class PerfDatabase:
         # now live there. Their ``load_data`` classmethods are invoked once
         # below (after the other ``_load_op_data`` calls) so the loaders are
         # still patched in unit-test setups.
-        self._moe_data, self._moe_low_latency_data = _load_op_data(PerfDataFilename.moe)
+        # ``_moe_data`` + ``_moe_low_latency_data`` are loaded by
+        # ``MoE.load_data`` below (AIC-? / ISSUE-12). The ``load_moe_data``
+        # CSV loader is still the only loader that returns a tuple; the MoE
+        # class unpacks it.
 
         # Comm ops (CustomAllReduce + NCCL + P2P) moved to
         # operations/communication.py. Their ``load_data`` classmethods are
@@ -2817,14 +2820,15 @@ class PerfDatabase:
 
         # sglang wideep path
         if backend == "sglang":
-            self._wideep_context_moe_data = _load_op_data(PerfDataFilename.wideep_context_moe)
-            self._wideep_generation_moe_data = _load_op_data(PerfDataFilename.wideep_generation_moe)
+            # ``_wideep_context_moe_data`` + ``_wideep_generation_moe_data``
+            # are loaded by ``MoE.load_data`` below (AIC-537 / Phase 4.1).
+            # ``_wideep_deepep_normal_data`` + ``_wideep_deepep_ll_data``
+            # are loaded by ``MoEDispatch.load_data`` below.
             # WideEP MLA data moved to operations/mla.py
             # (WideEPContextMLA / WideEPGenerationMLA load_data handle these,
             # gated internally on backend == "sglang"). Note: load happens
             # at the bottom of __init__ for every backend; non-SGLang gets None.
-            self._wideep_deepep_normal_data = _load_op_data(PerfDataFilename.wideep_deepep_normal)
-            self._wideep_deepep_ll_data = _load_op_data(PerfDataFilename.wideep_deepep_ll)
+            pass
 
         # DSA module-level attention data moved to operations/dsa.py
         # (ContextDSAModule.load_data / GenerationDSAModule.load_data handle
@@ -2861,6 +2865,7 @@ class PerfDatabase:
             WideEPContextMLA,
             WideEPGenerationMLA,
         )
+        from aiconfigurator.sdk.operations.moe import MoE, MoEDispatch
 
         GEMM.load_data(self)
         ContextAttention.load_data(self)
@@ -2880,6 +2885,8 @@ class PerfDatabase:
         DeepSeekV4MHCModule.load_data(self)
         ContextDeepSeekV4AttentionModule.load_data(self)
         GenerationDeepSeekV4AttentionModule.load_data(self)
+        MoE.load_data(self)
+        MoEDispatch.load_data(self)
 
         # pre-correction (non-migrated ops; migrated ops apply their own
         # SOL correction during ``load_data``)
@@ -3817,416 +3824,26 @@ class PerfDatabase:
         is_gated: bool = True,
         enable_eplb: bool = False,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query MoE (Mixture of Experts) layer latency and energy.
+        """Delegates to ``MoE``; see ``operations.moe.MoE._query_moe_table``."""
+        from aiconfigurator.sdk.operations.moe import MoE
 
-        Args:
-            num_tokens: Number of tokens
-            hidden_size: Hidden dimension size
-            inter_size: Intermediate size
-            topk: Number of experts activated per token
-            num_experts: Total number of experts
-            moe_tp_size: MoE tensor parallelism size
-            moe_ep_size: MoE expert parallelism size
-            quant_mode: MoE quantization mode
-            workload_distribution: Workload distribution pattern
-            is_context: Whether this is context (prefill) phase
-            moe_backend: MoE backend type (for SGLang)
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-            is_gated: Whether MoE uses gated activation (SwiGLU=True, Relu2=False).
-                      Low-latency kernel only available for gated MoE.
-            enable_eplb: Expert Parallel Load Balancing. When enabled, applies
-                        num_tokens correction (0.8x) during prefill phase only.
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        num_gemms = 3 if is_gated else 2  # gated (SwiGLU): 3 GEMMs; non-gated (Relu2): 2 GEMMs
-
-        def get_sol(
-            num_tokens: int,
-            hidden_size: int,
-            inter_size: int,
-            topk: int,
-            num_experts: int,
-            moe_tp_size: int,
-            moe_ep_size: int,
-            quant_mode: common.MoEQuantMode,
-            workload_distribution: str,
-        ) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            # we ignore router part. only consider mlp
-            # tp already impacted inter_size.
-            # only consider even workload.
-            total_tokens = num_tokens * topk
-            ops = total_tokens * hidden_size * inter_size * num_gemms * 2 // moe_ep_size // moe_tp_size
-            mem_bytes = quant_mode.value.memory * (
-                total_tokens // moe_ep_size * hidden_size * 2  # input+output
-                + total_tokens // moe_ep_size * inter_size * num_gemms // moe_tp_size  # intermediate
-                + hidden_size
-                * inter_size
-                * num_gemms
-                // moe_tp_size
-                * min(num_experts // moe_ep_size, total_tokens // moe_ep_size)
-            )
-            sol_math = ops / (self.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
-            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(
-            num_tokens: int,
-            hidden_size: int,
-            inter_size: int,
-            topk: int,
-            num_experts: int,
-            moe_tp_size: int,
-            moe_ep_size: int,
-            quant_mode: common.MoEQuantMode,
-            workload_distribution: str,
-        ) -> float:
-            """
-            Get the hybrid time
-            """
-            latency = get_sol(
-                num_tokens,
-                hidden_size,
-                inter_size,
-                topk,
-                num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                quant_mode,
-                workload_distribution,
-            )[0]
-            scale_factor = 0.4
-            return latency / scale_factor
-
-        def _estimate_overflow_with_last_token_util(
-            query_tokens: int,
-            moe_dict: dict,
-            hidden_size: int,
-            inter_size: int,
-            topk: int,
-            num_experts: int,
-            moe_tp_size: int,
-            moe_ep_size: int,
-            quant_mode: common.MoEQuantMode,
-            workload_distribution: str,
-        ) -> PerformanceResult:
-            """Estimate overflow latency using utilization at the largest collected token.
-            Call only when query_tokens > max(moe_dict.keys()).
-            """
-            token_points = sorted(moe_dict.keys())
-            last_token = token_points[-1]
-            last_point = moe_dict[last_token]
-            if isinstance(last_point, dict):
-                last_latency = float(last_point["latency"])
-                last_power = float(last_point.get("power", 0.0))
-                last_energy = float(last_point.get("energy", 0.0))
-            else:
-                last_latency = float(last_point)
-                last_power = 0.0
-                last_energy = 0.0
-
-            sol_last = get_sol(
-                last_token,
-                hidden_size,
-                inter_size,
-                topk,
-                num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                quant_mode,
-                workload_distribution,
-            )[0]
-            sol_query = get_sol(
-                query_tokens,
-                hidden_size,
-                inter_size,
-                topk,
-                num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                quant_mode,
-                workload_distribution,
-            )[0]
-
-            util = min(1.0, sol_last / last_latency)  # clamp MFU ≤ 1.0
-            util = max(util, 1e-8)  # guard against near-zero sol_last
-            est_latency = sol_query / util
-
-            est_energy = 0.0
-            if last_power > 0:
-                est_energy = last_power * est_latency
-            elif last_energy > 0:
-                est_energy = last_energy * (est_latency / last_latency)
-
-            # Overflow estimate anchored on the last silicon point's utilization
-            # and scaled by SOL ratio. It is still silicon-derived, not a pure
-            # formula fallback, so keep the source tag aligned with _interp_pr.
-            return self._interp_pr(est_latency, energy=est_energy)
-
-        def _require_moe_token_points(
-            moe_dict: dict,
-            query_tokens: int,
-            used_workload_distribution: str,
-        ) -> list[int]:
-            token_points = sorted(moe_dict.keys())
-            if token_points:
-                return token_points
-
-            raise PerfDataNotAvailableError(
-                "No MoE silicon data points for requested shape. "
-                f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
-                f"num_tokens={query_tokens}, hidden_size={hidden_size}, inter_size={inter_size}, "
-                f"topk={topk}, num_experts={num_experts}, moe_tp_size={moe_tp_size}, "
-                f"moe_ep_size={moe_ep_size}, quant_mode={quant_mode}, "
-                f"workload_distribution='{used_workload_distribution}'."
-            )
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_latency = get_sol(
-                num_tokens,
-                hidden_size,
-                inter_size,
-                topk,
-                num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                quant_mode,
-                workload_distribution,
-            )[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(
-                num_tokens,
-                hidden_size,
-                inter_size,
-                topk,
-                num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                quant_mode,
-                workload_distribution,
-            )
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(
-                num_tokens,
-                hidden_size,
-                inter_size,
-                topk,
-                num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                quant_mode,
-                workload_distribution,
-            )
-            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                if self.backend == common.BackendName.sglang.value:
-                    # deepep_moe is for sglang wideep only
-                    # Apply num_tokens correction when eplb is enabled (only during prefill)
-                    num_tokens_corrected = int(num_tokens * 0.8) if enable_eplb and is_context else num_tokens
-                    if moe_backend == "deepep_moe":
-                        if is_context:
-                            moe_data = self._wideep_context_moe_data
-                        else:
-                            moe_data = self._wideep_generation_moe_data
-                    else:
-                        moe_data = self._moe_data
-
-                    moe_data.raise_if_not_loaded()
-
-                    used_workload_distribution = (
-                        workload_distribution if workload_distribution in moe_data[quant_mode] else "uniform"
-                    )
-                    moe_dict = moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
-                        inter_size
-                    ][moe_tp_size][moe_ep_size]
-                    token_points = _require_moe_token_points(
-                        moe_dict,
-                        num_tokens_corrected,
-                        used_workload_distribution,
-                    )
-                    if num_tokens_corrected > token_points[-1]:
-                        return _estimate_overflow_with_last_token_util(
-                            num_tokens_corrected,
-                            moe_dict,
-                            hidden_size,
-                            inter_size,
-                            topk,
-                            num_experts,
-                            moe_tp_size,
-                            moe_ep_size,
-                            quant_mode,
-                            workload_distribution,
-                        )
-                    num_left, num_right = self._nearest_1d_point_helper(
-                        num_tokens_corrected,
-                        list(moe_dict.keys()),
-                        inner_only=False,
-                    )
-                    result = self._interp_1d(
-                        [num_left, num_right],
-                        [moe_dict[num_left], moe_dict[num_right]],
-                        num_tokens_corrected,
-                    )
-                    if isinstance(result, dict):
-                        lat = result["latency"]
-                        energy = result.get("energy", 0.0)
-                    else:
-                        lat = result
-                        energy = 0.0
-                    return self._interp_pr(lat, energy=energy)
-                elif self.backend == common.BackendName.trtllm.value:
-                    if self._moe_data is None and self._moe_low_latency_data is None:
-                        raise PerfDataNotAvailableError(
-                            f"MoE perf table is missing for system='{self.system}', "
-                            f"backend='{self.backend}', version='{self.version}'. "
-                            "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
-                        )
-                    # aligned with trtllm, kernel source selection.
-                    # Low-latency kernel only available for gated MoE (SwiGLU), not for Relu2
-                    if (
-                        num_tokens <= 128
-                        and self._moe_low_latency_data
-                        and quant_mode == common.MoEQuantMode.nvfp4
-                        and is_gated
-                    ):
-                        try:
-                            used_workload_distribution = (
-                                workload_distribution
-                                if workload_distribution in self._moe_low_latency_data[quant_mode]
-                                else "uniform"
-                            )
-                            moe_dict = self._moe_low_latency_data[quant_mode][used_workload_distribution][topk][
-                                num_experts
-                            ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-                            if not moe_dict:
-                                # Shape not present in low-latency table (nested defaultdict returned
-                                # an empty dict instead of raising KeyError). Fall back to regular data.
-                                raise KeyError(
-                                    f"No low-latency data for nvfp4 shape "
-                                    f"[{hidden_size}, {inter_size}, {topk}, {num_experts}]"
-                                )
-                            logger.debug(
-                                f"Using low-latency kernel for nvfp4 moe "
-                                f"{workload_distribution} {topk} {num_experts} {hidden_size} "
-                                f"{inter_size} {moe_tp_size} {moe_ep_size}."
-                            )
-                        except:
-                            used_workload_distribution = (
-                                workload_distribution
-                                if workload_distribution in self._moe_data[quant_mode]
-                                else "uniform"
-                            )
-                            moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
-                                hidden_size
-                            ][inter_size][moe_tp_size][moe_ep_size]
-                    else:
-                        used_workload_distribution = (
-                            workload_distribution if workload_distribution in self._moe_data[quant_mode] else "uniform"
-                        )
-                        moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
-                            hidden_size
-                        ][inter_size][moe_tp_size][moe_ep_size]
-                    token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
-                    if num_tokens > token_points[-1]:
-                        return _estimate_overflow_with_last_token_util(
-                            num_tokens,
-                            moe_dict,
-                            hidden_size,
-                            inter_size,
-                            topk,
-                            num_experts,
-                            moe_tp_size,
-                            moe_ep_size,
-                            quant_mode,
-                            workload_distribution,
-                        )
-                    num_left, num_right = self._nearest_1d_point_helper(
-                        num_tokens,
-                        list(moe_dict.keys()),
-                        inner_only=False,
-                    )
-                    result = self._interp_1d(
-                        [num_left, num_right],
-                        [moe_dict[num_left], moe_dict[num_right]],
-                        num_tokens,
-                    )
-                    if isinstance(result, dict):
-                        lat = result["latency"]
-                        energy = result.get("energy", 0.0)
-                    else:
-                        lat = result
-                        energy = 0.0
-                    return self._interp_pr(lat, energy=energy)
-                elif self.backend == common.BackendName.vllm.value:
-                    self._moe_data.raise_if_not_loaded()
-                    used_workload_distribution = (
-                        workload_distribution if workload_distribution in self._moe_data[quant_mode] else "uniform"
-                    )
-                    moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
-                        inter_size
-                    ][moe_tp_size][moe_ep_size]
-                    token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
-                    if num_tokens > token_points[-1]:
-                        return _estimate_overflow_with_last_token_util(
-                            num_tokens,
-                            moe_dict,
-                            hidden_size,
-                            inter_size,
-                            topk,
-                            num_experts,
-                            moe_tp_size,
-                            moe_ep_size,
-                            quant_mode,
-                            workload_distribution,
-                        )
-                    num_left, num_right = self._nearest_1d_point_helper(
-                        num_tokens, list(moe_dict.keys()), inner_only=False
-                    )
-                    result = self._interp_1d(
-                        [num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens
-                    )
-                    if isinstance(result, dict):
-                        latency = result["latency"]
-                        energy = result.get("energy", 0.0)
-                    else:
-                        latency = result
-                        energy = 0.0
-                    return self._interp_pr(latency, energy=energy)
-                else:
-                    raise NotImplementedError(f"backend {self.backend} not supported for moe")
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(
-                    num_tokens,
-                    hidden_size,
-                    inter_size,
-                    topk,
-                    num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    quant_mode,
-                    workload_distribution,
-                ),
-                database_mode=database_mode,
-                error_msg=(
-                    f"Failed to query moe data for {num_tokens=}, {hidden_size=}, {inter_size=}, {topk=}, "
-                    f"{num_experts=}, {moe_tp_size=}, {moe_ep_size=}, {quant_mode=}, {workload_distribution=}"
-                ),
-            )
+        return MoE._query_moe_table(
+            self,
+            num_tokens=num_tokens,
+            hidden_size=hidden_size,
+            inter_size=inter_size,
+            topk=topk,
+            num_experts=num_experts,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+            quant_mode=quant_mode,
+            workload_distribution=workload_distribution,
+            is_context=is_context,
+            moe_backend=moe_backend,
+            database_mode=database_mode,
+            is_gated=is_gated,
+            enable_eplb=enable_eplb,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_mla_bmm(
@@ -4362,33 +3979,19 @@ class PerfDatabase:
         hidden_size: int,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query the DeepEP LL operation data
-        """
+        """Delegates to ``MoEDispatch``; see
+        ``operations.moe.MoEDispatch._query_wideep_deepep_ll_table``."""
+        from aiconfigurator.sdk.operations.moe import MoEDispatch
 
-        def get_sol(num_tokens: int, topk: int, num_experts: int) -> tuple[float, float, float]:
-            raise NotImplementedError("WideEP deepep ll operation's sol is not implemented yet")
-            return
-
-        def get_empirical(num_tokens: int, topk: int, num_experts: int) -> float:
-            raise NotImplementedError("WideEP deepep ll operation's empirical is not implemented yet")
-            return
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(num_tokens, topk, num_experts)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(num_tokens, topk, num_experts)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0, source="empirical")
-        else:
-            data = self._wideep_deepep_ll_data[node_num][hidden_size][topk][num_experts]
-            num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
-            result = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
-            lat = result["latency"] if isinstance(result, dict) else result
-            energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
-            return self._interp_pr(lat / 1000.0, energy=energy / 1000.0)
+        return MoEDispatch._query_wideep_deepep_ll_table(
+            self,
+            node_num=node_num,
+            num_tokens=num_tokens,
+            num_experts=num_experts,
+            topk=topk,
+            hidden_size=hidden_size,
+            database_mode=database_mode,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_deepep_normal(
@@ -4401,41 +4004,20 @@ class PerfDatabase:
         sms: int,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query the DeepEP normal operation data
-        """
+        """Delegates to ``MoEDispatch``; see
+        ``operations.moe.MoEDispatch._query_wideep_deepep_normal_table``."""
+        from aiconfigurator.sdk.operations.moe import MoEDispatch
 
-        def get_sol(num_tokens: int, num_experts: int, topk: int, hidden_size: int) -> tuple[float, float, float]:
-            raise NotImplementedError("WideEP deepep normal operation's sol is not implemented yet")
-            return
-
-        def get_empirical(num_tokens: int, num_experts: int, topk: int, hidden_size: int) -> float:
-            raise NotImplementedError("WideEP deepep normal operation's empirical is not implemented yet")
-            return
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(num_tokens, num_experts, topk, hidden_size)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(num_tokens, num_experts, topk, hidden_size)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(
-                get_empirical(num_tokens, num_experts, topk, hidden_size), energy=0.0, source="empirical"
-            )
-        else:
-            if node_num == 1 and sms == 20:  # only collect sm=20 for now
-                data = self._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
-                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
-                result = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
-                lat = result["latency"] if isinstance(result, dict) else result
-                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
-            else:
-                data = self._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
-                result = self._interp_2d_linear(sms, num_tokens, data)
-                lat = result["latency"] if isinstance(result, dict) else result
-                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
-            return self._interp_pr(lat / 1000.0, energy=energy / 1000.0)
+        return MoEDispatch._query_wideep_deepep_normal_table(
+            self,
+            node_num=node_num,
+            num_tokens=num_tokens,
+            num_experts=num_experts,
+            topk=topk,
+            hidden_size=hidden_size,
+            sms=sms,
+            database_mode=database_mode,
+        )
 
     def _correct_data(self) -> None:
         """
