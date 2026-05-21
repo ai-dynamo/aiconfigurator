@@ -32,7 +32,6 @@ constraint (cache misses on non-SGLang backends).
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
@@ -41,8 +40,6 @@ from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
     from aiconfigurator.sdk.perf_database import PerfDatabase
-
-logger = logging.getLogger(__name__)
 
 
 def _cache_key(database: PerfDatabase) -> tuple:
@@ -1128,6 +1125,16 @@ class WideEPGenerationMLA(Operation):
 
         cls.load_data(database)
         data_wrapper = database._wideep_generation_mla_data
+        if data_wrapper is None:
+            # Non-SGLang backends never load this table; ``load_data`` binds
+            # ``None`` rather than a ``LoadedOpData(None)`` so that calling
+            # ``raise_if_not_loaded()`` is not an option. Surface a structured
+            # error here instead of an opaque ``NoneType`` attribute crash.
+            from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+            raise PerfDataNotAvailableError(
+                f"WideEP generation MLA perf data is SGLang-only; backend='{database.backend}' has no table."
+            )
 
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
@@ -1373,6 +1380,13 @@ class WideEPContextMLA(Operation):
 
         cls.load_data(database)
         data_wrapper = database._wideep_context_mla_data
+        if data_wrapper is None:
+            # See WideEPGenerationMLA above for rationale.
+            from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+            raise PerfDataNotAvailableError(
+                f"WideEP context MLA perf data is SGLang-only; backend='{database.backend}' has no table."
+            )
 
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
