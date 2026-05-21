@@ -5,7 +5,7 @@ import pytest
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk import operations as ops
-from aiconfigurator.sdk.perf_database import LoadedOpData
+from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataNotAvailableError
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 pytestmark = pytest.mark.unit
@@ -29,9 +29,48 @@ def test_vllm_supported_quant_modes_include_fp8_static(mutable_comprehensive_per
     assert modes.count(common.GEMMQuantMode.fp8_static.name) == 1
 
 
-def test_sglang_supported_quant_modes_include_fp8_static(mutable_comprehensive_perf_db):
+def test_sglang_supported_quant_modes_include_fp8_static_only_when_data_exists(mutable_comprehensive_perf_db):
     db = mutable_comprehensive_perf_db
     db.backend = common.BackendName.sglang.value
+    db._gemm_data = LoadedOpData(
+        {
+            common.GEMMQuantMode.fp8: {
+                32: {
+                    256: {
+                        512: {"latency": 1.0, "energy": 10.0},
+                    }
+                }
+            }
+        },
+        common.PerfDataFilename.gemm,
+        "dummy_path",
+    )
+    db._update_support_matrix()
+
+    modes = db.supported_quant_mode["gemm"]
+    assert common.GEMMQuantMode.fp8.name in modes
+    assert common.GEMMQuantMode.fp8_static.name not in modes
+
+    db._gemm_data = LoadedOpData(
+        {
+            common.GEMMQuantMode.fp8: {
+                32: {
+                    256: {
+                        512: {"latency": 1.0, "energy": 10.0},
+                    }
+                }
+            },
+            common.GEMMQuantMode.fp8_static: {
+                32: {
+                    256: {
+                        512: {"latency": 2.0, "energy": 20.0},
+                    }
+                }
+            },
+        },
+        common.PerfDataFilename.gemm,
+        "dummy_path",
+    )
     db._update_support_matrix()
 
     modes = db.supported_quant_mode["gemm"]
@@ -47,6 +86,71 @@ def test_query_gemm_fp8_static_reuses_fp8_table(comprehensive_perf_db):
 
     assert float(static_result) == pytest.approx(float(fp8_result))
     assert static_result.energy == pytest.approx(fp8_result.energy)
+
+
+def test_sglang_query_gemm_fp8_static_uses_static_table(mutable_comprehensive_perf_db):
+    db = mutable_comprehensive_perf_db
+    db.backend = common.BackendName.sglang.value
+    db._gemm_data = LoadedOpData(
+        {
+            common.GEMMQuantMode.fp8: {
+                33: {
+                    272: {
+                        544: {"latency": 1.0, "energy": 10.0},
+                    }
+                }
+            },
+            common.GEMMQuantMode.fp8_static: {
+                33: {
+                    272: {
+                        544: {"latency": 2.0, "energy": 20.0},
+                    }
+                }
+            },
+        },
+        common.PerfDataFilename.gemm,
+        "dummy_path",
+    )
+    db.query_gemm.cache_clear()
+
+    result = db.query_gemm(
+        33,
+        272,
+        544,
+        common.GEMMQuantMode.fp8_static,
+        database_mode=common.DatabaseMode.SILICON,
+    )
+
+    assert float(result) == pytest.approx(2.0)
+    assert result.energy == pytest.approx(20.0)
+
+
+def test_sglang_query_gemm_fp8_static_requires_static_table(mutable_comprehensive_perf_db):
+    db = mutable_comprehensive_perf_db
+    db.backend = common.BackendName.sglang.value
+    db._gemm_data = LoadedOpData(
+        {
+            common.GEMMQuantMode.fp8: {
+                35: {
+                    280: {
+                        560: {"latency": 1.0, "energy": 10.0},
+                    }
+                }
+            }
+        },
+        common.PerfDataFilename.gemm,
+        "dummy_path",
+    )
+    db.query_gemm.cache_clear()
+
+    with pytest.raises(PerfDataNotAvailableError, match="fp8_static"):
+        db.query_gemm(
+            35,
+            280,
+            560,
+            common.GEMMQuantMode.fp8_static,
+            database_mode=common.DatabaseMode.SILICON,
+        )
 
 
 def test_query_compute_scale_fp8_static_reuses_fp8_table(mutable_comprehensive_perf_db):

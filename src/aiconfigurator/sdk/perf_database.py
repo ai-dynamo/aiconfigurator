@@ -3587,10 +3587,6 @@ class PerfDatabase:
                 "wideep_context_mla": list(wideep_context_mla_modes),
                 "wideep_generation_mla": list(wideep_generation_mla_modes),
             }
-            # `fp8_static` is a behavioral mode that reuses `fp8` GEMM perf tables.
-            gemm_modes = self.supported_quant_mode.get("gemm", []) or []
-            if common.GEMMQuantMode.fp8.name in gemm_modes and common.GEMMQuantMode.fp8_static.name not in gemm_modes:
-                gemm_modes.append(common.GEMMQuantMode.fp8_static.name)
         elif self.backend == "trtllm":
             self.supported_quant_mode = {
                 "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
@@ -4099,13 +4095,32 @@ class PerfDatabase:
     @staticmethod
     def _normalize_gemm_quant_mode_for_table(quant_mode: common.GEMMQuantMode) -> common.GEMMQuantMode:
         """
-        Normalize GEMM quant modes for perf table lookup.
+        Normalize fp8_static overhead table lookups.
 
-        `fp8_static` is a behavioral mode that reuses `fp8` perf tables.
+        compute_scale and scale_matrix data are stored with the `fp8` GEMM
+        table family because they model the delta between dynamic and static
+        FP8. GEMM itself may have a first-class `fp8_static` table.
         """
         if quant_mode == common.GEMMQuantMode.fp8_static:
             return common.GEMMQuantMode.fp8
         return quant_mode
+
+    def _gemm_quant_mode_for_table(self, quant_mode: common.GEMMQuantMode) -> common.GEMMQuantMode:
+        """
+        Pick the GEMM table key for a requested quant mode.
+
+        SGLang `fp8_static` must be collected as its own GEMM mode. TRT-LLM and
+        vLLM keep the legacy fallback to the dynamic `fp8` table unless an
+        explicit static table exists.
+        """
+        if quant_mode != common.GEMMQuantMode.fp8_static:
+            return quant_mode
+        if self.backend == common.BackendName.sglang.value:
+            return quant_mode
+        gemm_data = getattr(self, "_gemm_data", None)
+        if gemm_data is not None and (not hasattr(gemm_data, "loaded") or gemm_data.loaded) and quant_mode in gemm_data:
+            return quant_mode
+        return common.GEMMQuantMode.fp8
 
     @functools.lru_cache(maxsize=32768)
     def query_gemm(
@@ -4159,7 +4174,7 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
 
-        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
+        table_quant_mode = self._gemm_quant_mode_for_table(quant_mode)
 
         # SOL and EMPIRICAL modes don't have power/energy data
         if database_mode == common.DatabaseMode.SOL:
