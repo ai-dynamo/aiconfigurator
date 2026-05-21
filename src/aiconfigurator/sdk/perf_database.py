@@ -2869,16 +2869,18 @@ class PerfDatabase:
                 return tuple(_wrap_data_dict(item) for item in result)
             return _wrap_data_dict(result)
 
-        # Core ops
-        self._gemm_data = _load_op_data(PerfDataFilename.gemm)
-        self._context_attention_data = _load_op_data(PerfDataFilename.context_attention)
-        self._generation_attention_data = _load_op_data(PerfDataFilename.generation_attention)
+        # Core ops. GEMM / ContextAttention / GenerationAttention moved to
+        # operations/*: data loading, SOL correction, and grid extrapolation
+        # now live there. Their ``load_data`` classmethods are invoked once
+        # below (after the other ``_load_op_data`` calls) so the loaders are
+        # still patched in unit-test setups.
         self._moe_data, self._moe_low_latency_data = _load_op_data(PerfDataFilename.moe)
 
-        # Comm ops
-        self._custom_allreduce_data = _load_op_data(PerfDataFilename.custom_allreduce)
-        self._nccl_data = _load_op_data(PerfDataFilename.nccl)
-        self._oneccl_data = _load_op_data(PerfDataFilename.oneccl) if oneccl_data_dir else None
+        # Comm ops (CustomAllReduce + NCCL + P2P) moved to
+        # operations/communication.py. Their ``load_data`` classmethods are
+        # invoked below after the other ``_load_op_data`` calls (same
+        # transition rationale as GEMM/Attention — loaders are still
+        # patched during ``__init__`` in unit tests).
 
         # More model-specific ops
         self._context_mla_data = _load_op_data(PerfDataFilename.context_mla)
@@ -2886,12 +2888,11 @@ class PerfDatabase:
         self._mla_bmm_data = _load_op_data(PerfDataFilename.mla_bmm)
         self._context_mla_module_data = _load_op_data(PerfDataFilename.mla_context_module)
         self._generation_mla_module_data = _load_op_data(PerfDataFilename.mla_generation_module)
-        self._mamba2_data = _load_op_data(PerfDataFilename.mamba2)
-        self._gdn_data = _load_op_data(PerfDataFilename.gdn)
-        self._compute_scale_data = _load_op_data(PerfDataFilename.compute_scale)
-        self._scale_matrix_data = _load_op_data(PerfDataFilename.scale_matrix)
-        self._context_dsa_module_data = _load_op_data(PerfDataFilename.dsa_context_module)
-        self._generation_dsa_module_data = _load_op_data(PerfDataFilename.dsa_generation_module)
+        # mamba2 + gdn moved to operations/mamba.py (Mamba2Kernel.load_data /
+        # GDNKernel.load_data handle the loads).
+        # compute_scale + scale_matrix are GEMM-owned (loaded by GEMM.load_data below)
+        # context_dsa_module + generation_dsa_module are DSA-owned (loaded by
+        # ContextDSAModule.load_data / GenerationDSAModule.load_data below).
         self._mhc_module_data = _load_op_data(PerfDataFilename.mhc_module)
 
         # DeepSeek-V4 module-level data — collected as split files per mode
@@ -2941,262 +2942,50 @@ class PerfDatabase:
             self._wideep_deepep_normal_data = _load_op_data(PerfDataFilename.wideep_deepep_normal)
             self._wideep_deepep_ll_data = _load_op_data(PerfDataFilename.wideep_deepep_ll)
 
-        # DSA module-level attention data (DeepSeek Sparse Attention)
-        # Uses same dict structure as MLA so interpolation/query can be reused
-        self._context_dsa_module_data = _load_op_data(PerfDataFilename.dsa_context_module)
-        self._generation_dsa_module_data = _load_op_data(PerfDataFilename.dsa_generation_module)
-        self._raw_context_dsa_module_data = copy.deepcopy(self._context_dsa_module_data)
+        # DSA module-level attention data moved to operations/dsa.py
+        # (ContextDSAModule.load_data / GenerationDSAModule.load_data handle
+        # the load + deepcopy of the raw rows + grid extrapolation).
 
         # TensorRT-LLM wideep path
         if backend == "trtllm":
             self._wideep_moe_compute_data = _load_op_data(PerfDataFilename.wideep_moe_compute)
             self._trtllm_alltoall_data = _load_op_data(PerfDataFilename.trtllm_alltoall)
 
-        # pre-correction
+        # GEMM / ContextAttention / GenerationAttention own their CSV tables +
+        # SOL correction + grid extrapolation. The eager invocations here are
+        # a transition compromise — Pattern A is supposed to be lazy-on-first-
+        # query, but the existing test surface (stub_perf_db,
+        # comprehensive_perf_db) patches loaders only during ``__init__``,
+        # so a lazy load triggered later would hit unpatched real-disk
+        # loaders. ISSUE-16 retires these eager calls once test fixtures
+        # migrate to the lazy contract.
+        from aiconfigurator.sdk.operations.attention import ContextAttention, GenerationAttention
+        from aiconfigurator.sdk.operations.communication import NCCL, CustomAllReduce
+        from aiconfigurator.sdk.operations.dsa import ContextDSAModule, GenerationDSAModule
+        from aiconfigurator.sdk.operations.gemm import GEMM
+        from aiconfigurator.sdk.operations.mamba import GDNKernel, Mamba2Kernel
+
+        GEMM.load_data(self)
+        ContextAttention.load_data(self)
+        GenerationAttention.load_data(self)
+        CustomAllReduce.load_data(self)
+        NCCL.load_data(self)
+        ContextDSAModule.load_data(self)
+        GenerationDSAModule.load_data(self)
+        Mamba2Kernel.load_data(self)
+        GDNKernel.load_data(self)
+
+        # pre-correction (non-migrated ops; migrated ops apply their own
+        # SOL correction during ``load_data``)
         self._correct_data()
 
-        # regular context attention
-        if self._context_attention_data:
-            for quant_mode in self._context_attention_data:
-                for kv_cache_dtype in self._context_attention_data[quant_mode]:
-                    for num_kv_heads in self._context_attention_data[quant_mode][kv_cache_dtype]:
-                        for head_size in self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads]:
-                            for window_size in self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads][
-                                head_size
-                            ]:
-                                data_dict = self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads][
-                                    head_size
-                                ][window_size]
-                                min_x = min(data_dict.keys())
-                                target_x_list = [
-                                    1,
-                                    2,
-                                    3,
-                                    4,
-                                    5,
-                                    6,
-                                    8,
-                                    9,
-                                    10,
-                                    12,
-                                    14,
-                                    16,
-                                    18,
-                                    20,
-                                    24,
-                                    28,
-                                    32,
-                                    36,
-                                    40,
-                                    48,
-                                    56,
-                                    72,
-                                    96,
-                                    128,
-                                ]  # n
-                                # currently, support max seq to 1M. Because all the system is linear for
-                                # now. it will be difficult to do square interpolation. Use more points
-                                # to do the approximation.
-                                # Note: start from 1 to make sure any small ISL can be interpolated,
-                                # even if the ISL is smaller than what exists in the collected data.
-                                target_y_list = (
-                                    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-                                    + [4096 + i * 2048 for i in range(14)]
-                                    + [32768 + 16384 * i for i in range(6)]
-                                    + [131072 + 32768 * i for i in range(12)]
-                                    + [524288 + 65536 * i for i in range(9)]
-                                )  # s
-                                target_z_list = [
-                                    1,
-                                    2,
-                                    4,
-                                    8,
-                                    16,
-                                    32,
-                                    64,
-                                    128,
-                                    256,
-                                    512,
-                                    384,
-                                    1024,
-                                    2048,
-                                ]  # b
+        # Context + Generation attention extrapolation moved to
+        # operations/attention.py (ContextAttention._extrapolate /
+        # GenerationAttention._extrapolate, invoked from their respective
+        # load_data classmethods above).
 
-                                filtered_x_list = []
-                                for i in target_x_list:
-                                    if i >= min_x:
-                                        filtered_x_list.append(i)
-                                self._extrapolate_data_grid(
-                                    data_dict=data_dict,  # nsb
-                                    target_x_list=filtered_x_list,
-                                    target_y_list=target_y_list,
-                                    target_z_list=target_z_list,
-                                    sqrt_y_value=True,
-                                )
-
-        # regular generation attention
-        if self._generation_attention_data:
-            for kv_cache_dtype in self._generation_attention_data:
-                for num_kv_heads in self._generation_attention_data[kv_cache_dtype]:
-                    for head_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads]:
-                        for window_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads][head_size]:
-                            target_x_list = [
-                                1,
-                                2,
-                                3,
-                                4,
-                                5,
-                                6,
-                                8,
-                                9,
-                                10,
-                                12,
-                                14,
-                                16,
-                                18,
-                                20,
-                                24,
-                                28,
-                                32,
-                                36,
-                                40,
-                                48,
-                                56,
-                                72,
-                                96,
-                                128,
-                            ]  # n
-                            target_y_list = [
-                                1,
-                                2,
-                                4,
-                                8,
-                                16,
-                                32,
-                                64,
-                                128,
-                                256,
-                                384,
-                                512,
-                                1024,
-                                2048,
-                                8192,
-                            ]  # b
-                            target_z_list = [
-                                1,
-                                2,
-                                4,
-                                8,
-                                16,
-                                32,
-                                64,
-                                128,
-                                256,
-                                512,
-                                1024,
-                                2048,
-                                4096,
-                                8192,
-                                16384,
-                                32768,
-                                65536,
-                                131072,
-                                262144,
-                                2097152 * 8,
-                            ]  # s
-                            data_dict = self._generation_attention_data[kv_cache_dtype][num_kv_heads][head_size][
-                                window_size
-                            ]
-                            min_x = min(data_dict.keys())
-                            filtered_x_list = []
-                            for i in target_x_list:
-                                if i >= min_x:
-                                    filtered_x_list.append(i)
-
-                            self._extrapolate_data_grid(
-                                data_dict=data_dict,  # nbs
-                                target_x_list=filtered_x_list,
-                                target_y_list=target_y_list,
-                                target_z_list=target_z_list,
-                            )
-
-        # regular gemm
-        if self._gemm_data:
-            for quant_mode, data_dict in self._gemm_data.items():
-                target_x_list = [
-                    1,
-                    2,
-                    4,
-                    8,
-                    16,
-                    32,
-                    48,
-                    64,
-                    80,
-                    96,
-                    128,
-                    160,
-                    192,
-                    224,
-                    256,
-                    320,
-                    384,
-                    448,
-                    512,
-                    640,
-                    768,
-                    896,
-                    1024,
-                    2048,
-                    4096,
-                    8192,
-                    16384,
-                    32768,
-                    131072,
-                    524288,
-                    1048576,
-                    2097152 * 8,
-                ]  # num_tokens
-                target_y_list = [
-                    32,
-                    64,
-                    128,
-                    256,
-                    512,
-                    768,
-                    1024,
-                    1536,
-                    2048,
-                    2560,
-                    3072,
-                    3584,
-                    4096,
-                    5120,
-                    6144,
-                    7168,
-                    8192,
-                    10240,
-                    12288,
-                    14336,
-                    16384,
-                    20480,
-                    24576,
-                    28672,
-                    32768,
-                    40960,
-                    49152,
-                    57344,
-                    65536,
-                    131072,
-                    262144,
-                ]  # to fit vocab gemm
-                target_z_list = target_y_list
-                self._extrapolate_data_grid(
-                    data_dict=data_dict,
-                    target_x_list=target_x_list,
-                    target_y_list=target_y_list,
-                    target_z_list=target_z_list,
-                )
+        # GEMM extrapolation moved to operations/gemm.py (GEMM._extrapolate_gemm_data,
+        # invoked from GEMM.load_data above).
 
         # mla
         # wideep context mla
@@ -3424,70 +3213,9 @@ class PerfDatabase:
                             target_z_list=target_z_list,
                         )
 
-        # DSA (DeepSeek Sparse Attention) data interpolation
-        # Dict structure: data[fmha_mode][kv_dtype][gemm_mode][arch][num_heads][s][b]
-        if getattr(self, "_context_dsa_module_data", None) is not None:
-            for fmha_mode in self._context_dsa_module_data:
-                for kv_cache_dtype in self._context_dsa_module_data[fmha_mode]:
-                    for gemm_mode in self._context_dsa_module_data[fmha_mode][kv_cache_dtype]:
-                        for arch in self._context_dsa_module_data[fmha_mode][kv_cache_dtype][gemm_mode]:
-                            data_dict = self._context_dsa_module_data[fmha_mode][kv_cache_dtype][gemm_mode][arch]
-                            num_heads_list = list(data_dict.keys())
-                            target_x_list = num_heads_list
-                            target_y_list = (
-                                [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-                                + [4096 + i * 2048 for i in range(14)]
-                                + [32768 + 16384 * i for i in range(6)]
-                                + [131072 + 32768 * i for i in range(12)]
-                                + [524288 + 65536 * i for i in range(9)]
-                            )
-                            target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]
-
-                            self._extrapolate_data_grid(
-                                data_dict=data_dict,
-                                target_x_list=target_x_list,
-                                target_y_list=target_y_list,
-                                target_z_list=target_z_list,
-                            )
-
-        # Dict structure: data[kv_dtype][gemm_mode][arch][num_heads][b][s]
-        if getattr(self, "_generation_dsa_module_data", None) is not None:
-            for kv_cache_dtype in self._generation_dsa_module_data:
-                for gemm_mode in self._generation_dsa_module_data[kv_cache_dtype]:
-                    for arch in self._generation_dsa_module_data[kv_cache_dtype][gemm_mode]:
-                        data_dict = self._generation_dsa_module_data[kv_cache_dtype][gemm_mode][arch]
-                        tp_list = list(data_dict.keys())
-                        target_x_list = tp_list
-                        target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]
-                        target_z_list = [
-                            1,
-                            2,
-                            4,
-                            8,
-                            16,
-                            32,
-                            64,
-                            128,
-                            256,
-                            512,
-                            1024,
-                            2048,
-                            4096,
-                            8192,
-                            16384,
-                            32768,
-                            65536,
-                            131072,
-                            262144,
-                            2097152 * 8,
-                        ]
-
-                        self._extrapolate_data_grid(
-                            data_dict=data_dict,
-                            target_x_list=target_x_list,
-                            target_y_list=target_y_list,
-                            target_z_list=target_z_list,
-                        )
+        # DSA module-level extrapolation moved to operations/dsa.py
+        # (ContextDSAModule._extrapolate / GenerationDSAModule._extrapolate,
+        # invoked from their respective load_data classmethods above).
 
         # post-correction
         self._correct_data()
@@ -3935,6 +3663,11 @@ class PerfDatabase:
         """Thin wrapper — delegates to ``interpolation.interp_dsa_context_topk_piecewise_from_raw``."""
         return interpolation.interp_dsa_context_topk_piecewise_from_raw(num_heads, full_s, b, dsa_dict, index_topk)
 
+    # TODO(ISSUE-16 cleanup PR): remove these two helpers — moved to
+    # ``operations/dsa.py`` as module-level functions. The copies here
+    # have no remaining callers in ``perf_database.py`` after Phase 3.4
+    # (``9a37aef``); the cleanup PR prunes them once it can no longer break
+    # downstream code that might still import them as PerfDatabase methods.
     @staticmethod
     def _is_dsa_interpolation_miss(error: Exception) -> bool:
         message = str(error)
@@ -4075,27 +3808,14 @@ class PerfDatabase:
     def _get_quant_tc_flops(self, quant_mode) -> float:
         """Resolve actual tensor-core FLOPS for a given quant mode.
 
-        Maps the quant mode's compute factor (1/2/4) to the corresponding
-        ``*_tc_flops`` entry in the system GPU spec.  Falls back to
-        ``bfloat16_tc_flops * compute_factor`` when the spec entry is missing.
+        Thin wrapper around ``GEMM._get_quant_tc_flops``; kept on
+        ``PerfDatabase`` because the DSV4 / MLA / attention SOL paths
+        still reference it as ``self._get_quant_tc_flops(...)``.
+        ISSUE-16 retires this wrapper once those callers migrate.
         """
-        compute_to_flops_key = {1: "bfloat16_tc_flops", 2: "fp8_tc_flops", 4: "fp4_tc_flops"}
-        gpu = self.system_spec["gpu"]
-        key = compute_to_flops_key.get(quant_mode.value.compute)
-        if key is not None and key in gpu:
-            return gpu[key]
-        return gpu["bfloat16_tc_flops"] * quant_mode.value.compute
+        from aiconfigurator.sdk.operations.gemm import GEMM
 
-    @staticmethod
-    def _normalize_gemm_quant_mode_for_table(quant_mode: common.GEMMQuantMode) -> common.GEMMQuantMode:
-        """
-        Normalize GEMM quant modes for perf table lookup.
-
-        `fp8_static` is a behavioral mode that reuses `fp8` perf tables.
-        """
-        if quant_mode == common.GEMMQuantMode.fp8_static:
-            return common.GEMMQuantMode.fp8
-        return quant_mode
+        return GEMM._get_quant_tc_flops(self.system_spec, quant_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_gemm(
@@ -4107,14 +3827,8 @@ class PerfDatabase:
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
-        Query GEMM operation latency and energy.
-
-        Args:
-            m: Number of rows in output matrix
-            n: Number of columns in output matrix
-            k: Inner dimension
-            quant_mode: Quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+        Query GEMM operation latency and energy. Delegates to ``GEMM``;
+        see ``aiconfigurator.sdk.operations.gemm.GEMM._query_gemm_table``.
 
         Returns:
             PerformanceResult: Acts as float (latency in ms).
@@ -4127,84 +3841,9 @@ class PerfDatabase:
             >>> energy_wms = result.energy
             >>> power_w = result.power  # or result.energy / float(result)
         """
+        from aiconfigurator.sdk.operations.gemm import GEMM
 
-        def get_sol(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            tc_flops = self._get_quant_tc_flops(quant_mode)
-            sol_math = 2 * m * n * k / tc_flops * 1000
-            sol_mem = quant_mode.value.memory * (m * n + m * k + n * k) / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> float:
-            """
-            Get the empirical time
-            """
-            sol_time = get_sol(m, n, k, quant_mode)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
-
-        # SOL and EMPIRICAL modes don't have power/energy data
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(m, n, k, quant_mode)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(m, n, k, quant_mode), energy=0.0, source="empirical")
-
-        # TODO: remove "else" and unindent
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                def _to_performance_result(result, *, source: str = "silicon"):
-                    """Normalize GEMM table entries into a PerformanceResult.
-
-                    Interpolated/extrapolated GEMM values are still derived from
-                    silicon table data; only explicit formula fallbacks are
-                    tagged as empirical.
-                    """
-                    if isinstance(result, dict):
-                        return PerformanceResult(result["latency"], energy=result.get("energy", 0.0), source=source)
-                    return PerformanceResult(result, energy=0.0, source=source)
-
-                self._gemm_data.raise_if_not_loaded()
-                if table_quant_mode not in self._gemm_data:
-                    supported = sorted([k.name for k in self._gemm_data])
-                    raise PerfDataNotAvailableError(
-                        "GEMM perf data not available for requested quant mode. "
-                        f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
-                        f"quant_mode='{quant_mode.name}'. "
-                        f"Supported gemm modes: {supported}"
-                    )
-
-                gemm_data = self._gemm_data[table_quant_mode]
-
-                if m in gemm_data and n in gemm_data[m] and k in gemm_data[m][n]:
-                    result = gemm_data[m][n][k]
-                    return _to_performance_result(result)
-
-                m_values = sorted(m_key for m_key in gemm_data if n in gemm_data[m_key] and k in gemm_data[m_key][n])
-                if len(m_values) >= 2:
-                    m_left, m_right = self._nearest_1d_point_helper(m, m_values, inner_only=False)
-                    result = self._interp_1d([m_left, m_right], [gemm_data[m_left][n][k], gemm_data[m_right][n][k]], m)
-                    return _to_performance_result(result)
-
-                result = self._interp_3d(m, n, k, gemm_data, "cubic")
-                return _to_performance_result(result)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(m, n, k, quant_mode),
-                database_mode=database_mode,
-                error_msg=f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}",
-            )
+        return GEMM._query_gemm_table(self, m, n, k, quant_mode, database_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_compute_scale(
@@ -4214,88 +3853,11 @@ class PerfDatabase:
         quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query compute scale latency (dynamic quantization - static quantization).
+        """Query compute scale latency. Delegates to
+        ``GEMM._query_compute_scale_table``."""
+        from aiconfigurator.sdk.operations.gemm import GEMM
 
-        Args:
-            m: Number of rows in input matrix
-            k: Number of columns in input matrix
-            quant_mode: Quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(m: int, k: int) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            sol_mem = 2 * m * k / self.system_spec["gpu"]["mem_bw"] * 1000.0
-            sol_time = sol_mem
-            return sol_time, 0, sol_mem
-
-        def get_empirical(m: int, k: int) -> float:
-            """
-            Get the empirical time
-            """
-            sol_time = get_sol(m, k)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
-
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(m, k)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(m, k), energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._compute_scale_data.raise_if_not_loaded()
-                if table_quant_mode not in self._compute_scale_data:
-                    supported = sorted([k.name for k in self._compute_scale_data])
-                    raise PerfDataNotAvailableError(
-                        "Compute scale perf data not available for requested quant mode. "
-                        f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
-                        f"quant_mode='{quant_mode.name}'. "
-                        f"Supported modes: {supported}"
-                    )
-                table = self._compute_scale_data[table_quant_mode]
-                m_i = int(m)
-                k_i = int(k)
-
-                m_keys = sorted(table.keys())
-                m_i = max(m_keys[0], min(m_i, m_keys[-1]))
-
-                k_min = None
-                k_max = None
-                for row in table.values():
-                    if not row:
-                        continue
-                    row_min = min(row.keys())
-                    row_max = max(row.keys())
-                    k_min = row_min if k_min is None else min(k_min, row_min)
-                    k_max = row_max if k_max is None else max(k_max, row_max)
-
-                if k_min is not None and k_max is not None:
-                    k_i = max(k_min, min(k_i, k_max))
-
-                result = self._interp_2d_linear(m_i, k_i, table)
-                return self._interp_pr(result["latency"], energy=result.get("energy", 0.0))
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(m, k),
-                database_mode=database_mode,
-                error_msg=f"Failed to query compute_scale data for {m=}, {k=}, {quant_mode=}",
-            )
+        return GEMM._query_compute_scale_table(self, m, k, quant_mode, database_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_scale_matrix(
@@ -4305,94 +3867,17 @@ class PerfDatabase:
         quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query scale matrix (static quantization) latency.
+        """Query scale matrix latency. Delegates to
+        ``GEMM._query_scale_matrix_table``."""
+        from aiconfigurator.sdk.operations.gemm import GEMM
 
-        Args:
-            m: Number of rows in input matrix
-            k: Number of columns in input matrix
-            quant_mode: Quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(m: int, k: int) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            sol_mem = 3 * m * k / self.system_spec["gpu"]["mem_bw"] * 1000.0
-            sol_time = sol_mem
-            return sol_time, 0, sol_mem
-
-        def get_empirical(m: int, k: int) -> float:
-            """
-            Get the empirical time
-            """
-            sol_time = get_sol(m, k)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
-
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(m, k)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(m, k), energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._scale_matrix_data.raise_if_not_loaded()
-                if table_quant_mode not in self._scale_matrix_data:
-                    supported = sorted([k.name for k in self._scale_matrix_data])
-                    raise PerfDataNotAvailableError(
-                        "Scale matrix perf data not available for requested quant mode. "
-                        f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
-                        f"quant_mode='{quant_mode.name}'. "
-                        f"Supported modes: {supported}"
-                    )
-                table = self._scale_matrix_data[table_quant_mode]
-                m_i = int(m)
-                k_i = int(k)
-
-                m_keys = sorted(table.keys())
-                m_i = max(m_keys[0], min(m_i, m_keys[-1]))
-
-                k_min = None
-                k_max = None
-                for row in table.values():
-                    if not row:
-                        continue
-                    row_min = min(row.keys())
-                    row_max = max(row.keys())
-                    k_min = row_min if k_min is None else min(k_min, row_min)
-                    k_max = row_max if k_max is None else max(k_max, row_max)
-
-                if k_min is not None and k_max is not None:
-                    k_i = max(k_min, min(k_i, k_max))
-
-                result = self._interp_2d_linear(m_i, k_i, table)
-                return self._interp_pr(result["latency"], energy=result.get("energy", 0.0))
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(m, k),
-                database_mode=database_mode,
-                error_msg=f"Failed to query scale_matrix data for {m=}, {k=}, {quant_mode=}",
-            )
+        return GEMM._query_scale_matrix_table(self, m, k, quant_mode, database_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_context_attention(
         self,
         b: int,
-        s: int,  # s is the seq len to be computed, full_s = s + prefix
+        s: int,
         prefix: int,
         n: int,
         n_kv: int,
@@ -4402,140 +3887,23 @@ class PerfDatabase:
         window_size: int = 0,
         head_size: int = 128,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query context (prefill) attention latency and energy.
+        """Query context attention latency. Delegates to
+        ``ContextAttention._query_context_attention_table``."""
+        from aiconfigurator.sdk.operations.attention import ContextAttention
 
-        Args:
-            b: Batch size
-            s: Sequence length to be computed
-            prefix: Prefix cache length
-            n: Number of attention heads
-            n_kv: Number of KV heads (for GQA)
-            kvcache_quant_mode: KV cache quantization mode
-            fmha_quant_mode: Attention computation quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-            window_size: Sliding window size (0 for no window)
-            head_size: Dimension per head
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(
-            b: int,
-            s: int,
-            prefix: int,
-            n: int,
-            n_kv: int,
-            h: int,
-            w: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-            fmha_quant_mode: common.FMHAQuantMode,
-        ) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            full_s = s + prefix
-            if w > 0 and full_s > w:
-                # Sliding window attention
-                # Each position attends to at most w previous positions
-                ops = 2 * b * (full_s - prefix) * w * n * h * 2
-            else:
-                # Normal no sliding window
-                ops = (
-                    2 * b * (full_s * full_s - prefix * prefix) * n * h * 2 / 2
-                )  # 2 for fma, 2 for q*k^t+*v, /2 for causality.
-            mem_bytes = (
-                2
-                * b
-                * (
-                    n * (full_s - prefix) * h  # Q read, assuming 16 bits
-                    + n * (full_s - prefix) * h  # Output write, assuming 16 bits
-                )
-                + kvcache_quant_mode.value.memory * b * (2 * n_kv * full_s * h)  # K,V read
-            )  # TODO fp8 io
-            sol_math = ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
-            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(
-            b: int,
-            s: int,
-            prefix: int,
-            n: int,
-            n_kv: int,
-            head_size: int,
-            window_size: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-            fmha_quant_mode: common.FMHAQuantMode,
-        ) -> float:
-            """
-            Get the empirical time
-            """
-            latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.6
-            return latency / scale_factor
-
-        # query logic starts
-        assert n_kv <= n, "n_kv must be less than or equal to n"
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(
-                b,
-                s,
-                prefix,
-                n,
-                n_kv,
-                head_size,
-                window_size,
-                kvcache_quant_mode,
-                fmha_quant_mode,
-            )
-            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._context_attention_data.raise_if_not_loaded()
-                full_s = s + prefix
-                prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-                # In self._context_attention_data, we use n_kv = 0 to mean n_kv == n.
-                n_kv_lookup = 0 if n == n_kv else n_kv
-                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][
-                    head_size
-                ][window_size]
-                result = self._interp_3d(n, full_s, b, attention_dict, "cubic")
-                latency = result["latency"] * prefix_correction
-                energy = result.get("energy", 0.0) * prefix_correction
-                return self._interp_pr(latency, energy=energy)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(
-                    b,
-                    s,
-                    prefix,
-                    n,
-                    n_kv,
-                    head_size,
-                    window_size,
-                    kvcache_quant_mode,
-                    fmha_quant_mode,
-                ),
-                database_mode=database_mode,
-                error_msg=(
-                    f"Failed to query context attention data for {b=}, {s=}, {prefix=}, {n=}, {n_kv=}, "
-                    f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, {fmha_quant_mode=}"
-                ),
-            )
+        return ContextAttention._query_context_attention_table(
+            self,
+            b,
+            s,
+            prefix,
+            n,
+            n_kv,
+            kvcache_quant_mode,
+            fmha_quant_mode,
+            database_mode,
+            window_size,
+            head_size,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_generation_attention(
@@ -4549,125 +3917,21 @@ class PerfDatabase:
         window_size: int = 0,
         head_size: int = 128,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query generation (decode) attention latency and energy.
+        """Query generation attention latency. Delegates to
+        ``GenerationAttention._query_generation_attention_table``."""
+        from aiconfigurator.sdk.operations.attention import GenerationAttention
 
-        Args:
-            b: Batch size
-            s: KV cache length
-            n: Number of attention heads
-            n_kv: Number of KV heads (for GQA)
-            kvcache_quant_mode: KV cache quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-            window_size: Sliding window size (0 for no window)
-            head_size: Dimension per head
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(
-            b: int,
-            s: int,
-            n: int,
-            n_kv: int,
-            h: int,
-            w: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-        ) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            if kvcache_quant_mode == common.KVCacheQuantMode.fp8:
-                quant_mode_gen = common.FMHAQuantMode.fp8
-            else:
-                quant_mode_gen = common.FMHAQuantMode.bfloat16
-            if w > 0:
-                kv_len = min(s - 1, w)
-            else:
-                kv_len = s - 1
-            # only consider bfloat16 mmha
-            ops = 2 * b * n * h * 2 * (kv_len)  # 2 for fma, 2 for q*k^t+*v
-            # kvcache load bytes will depend on kvcache quant. while input q and output might be in
-            # bfloat16.
-            mem_bytes = b * (
-                n * h * 2  # Query read, assuming 16bits
-                + 2 * n_kv * (kv_len) * h * kvcache_quant_mode.value.memory  # K, V cache read
-                + n * h * 2  # Output write, assuming 16bits
-            )
-
-            sol_math = ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / quant_mode_gen.value.compute
-            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(
-            b: int,
-            s: int,
-            n: int,
-            n_kv: int,
-            h: int,
-            w: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-        ) -> float:
-            """
-            Get the hybrid time
-            """
-            latency = get_sol(b, s, n, n_kv, h, w, kvcache_quant_mode)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
-
-        # query logic starts
-        assert n_kv <= n, "n_kv must be less than or equal to n"
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_latency = get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
-            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._generation_attention_data.raise_if_not_loaded()
-                # In self._generation_attention_data, we use n_kv = 0 to mean n_kv == n.
-                n_kv_lookup = n_kv if n_kv != n else 0
-
-                attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv_lookup][head_size][
-                    window_size
-                ]
-                # Decode batches often contain a mix of sequence lengths around the nominal KV length `s`.
-                # Using a single point (n,b,s) can be noisy/inaccurate, so average a small neighborhood.
-                s_min = max(1, int(s * 0.9))
-                s_max = max(s_min, int(s * 1.1))
-                sample_cnt = 5
-                s_samples = [s_min + (s_max - s_min) * i // (sample_cnt - 1) for i in range(sample_cnt)]
-
-                latency_sum = 0.0
-                energy_sum = 0.0
-                for s_i in s_samples:
-                    r = self._interp_3d(n, b, s_i, attention_dict, "bilinear")
-                    latency_sum += float(r["latency"])
-                    energy_sum += float(r.get("energy", 0.0))
-
-                latency = latency_sum / sample_cnt
-                energy = energy_sum / sample_cnt
-                return self._interp_pr(latency, energy=energy)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode),
-                database_mode=database_mode,
-                error_msg=(
-                    f"Failed to query generation attention data for {b=}, {s=}, {n=}, {n_kv=}, "
-                    f"{head_size=}, {window_size=}, {kvcache_quant_mode=}"
-                ),
-            )
+        return GenerationAttention._query_generation_attention_table(
+            self,
+            b,
+            s,
+            n,
+            n_kv,
+            kvcache_quant_mode,
+            database_mode,
+            window_size,
+            head_size,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_context_mla(
@@ -5307,114 +4571,11 @@ class PerfDatabase:
         size: int,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query custom AllReduce operation latency and energy.
+        """Query custom AllReduce latency. Delegates to
+        ``CustomAllReduce._query_custom_allreduce_table``."""
+        from aiconfigurator.sdk.operations.communication import CustomAllReduce
 
-        Args:
-            quant_mode: Communication quantization mode
-            tp_size: Tensor parallelism size
-            size: Number of elements to reduce
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(quant_mode: common.CommQuantMode, tp_size: int, size: int) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            if tp_size == 1:
-                return 0, 0, 0
-            # count, not size in bytes
-            p2p_bw = self._get_p2p_bandwidth(tp_size)
-
-            # assume all are ring allreduce, ignore constant latency
-            # (~1us for hopper, ~2us for two-die blackwell)
-            # assume bfloat16
-            sol_time = 2 * size * 2 / tp_size * (tp_size - 1) / p2p_bw
-            return sol_time * 1000, 0, 0
-
-        def get_empirical(quant_mode: common.CommQuantMode, tp_size: int, size: int) -> float:
-            """
-            Get the empirical time
-            """
-            latency = get_sol(quant_mode, tp_size, size)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_latency = get_sol(quant_mode, tp_size, size)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(quant_mode, tp_size, size)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(quant_mode, tp_size, size)
-            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                if tp_size == 1:
-                    return PerformanceResult(0.0, energy=0.0, source="empirical")
-                if self.system_spec["node"]["num_gpus_per_node"] == 72 and tp_size > 4:
-                    # on GB200, we only have custom all reduce for up to tp4.
-                    return self.query_nccl(quant_mode, tp_size, "all_reduce", size)
-
-                self._custom_allreduce_data.raise_if_not_loaded()
-
-                # The loader returns a 4-deep defaultdict, so chained indexing silently
-                # synthesizes empty dicts for missing (quant_mode, tp_size, strategy)
-                # combinations. Validate explicitly so upstream callers see a structured
-                # PerfDataNotAvailableError instead of an internal AssertionError from
-                # _nearest_1d_point_helper when the CSV has no rows for this bucket.
-                effective_tp = min(tp_size, self.system_spec["node"]["num_gpus_per_node"])
-                by_tp = self._custom_allreduce_data.get(quant_mode, {})
-                strategy_dict = by_tp.get(effective_tp, {})
-                comm_dict = strategy_dict.get("AUTO", {})
-                if not comm_dict:
-                    raise PerfDataNotAvailableError(
-                        f"No custom_allreduce silicon data for quant_mode={quant_mode.value.name}, "
-                        f"tp_size={effective_tp} (requested tp_size={tp_size}). "
-                        f"Available tp_sizes for this quant_mode: {sorted(by_tp.keys())}. "
-                        "Consider using HYBRID mode, or supply custom_allreduce_perf.txt rows "
-                        "covering this tp_size."
-                    )
-                size_left, size_right = self._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
-                result = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
-
-                # Extract latency and energy
-                if isinstance(result, dict):
-                    lat = result["latency"]
-                    energy = result.get("energy", 0.0)
-                else:
-                    lat = result
-                    energy = 0.0
-
-                if tp_size > self.system_spec["node"]["num_gpus_per_node"]:
-                    base_bw = self._get_p2p_bandwidth(self.system_spec["node"]["num_gpus_per_node"])
-                    target_bw = self._get_p2p_bandwidth(tp_size)
-                    scale_factor = (
-                        (tp_size - 1)
-                        / tp_size
-                        * self.system_spec["node"]["num_gpus_per_node"]
-                        / (self.system_spec["node"]["num_gpus_per_node"] - 1)
-                        * base_bw
-                        / target_bw
-                    )
-                    lat = lat * scale_factor
-                    energy = energy * scale_factor
-
-                return self._interp_pr(lat, energy=energy)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(quant_mode, tp_size, size),
-                database_mode=database_mode,
-                error_msg=f"Failed to query custom allreduce data for {quant_mode=}, {tp_size=}, {size=}",
-            )
+        return CustomAllReduce._query_custom_allreduce_table(self, quant_mode, tp_size, size, database_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_nccl(
@@ -5425,114 +4586,11 @@ class PerfDatabase:
         message_size: int,  # element number
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query NCCL collective communication latency and energy.
+        """Query NCCL collective communication latency. Delegates to
+        ``NCCL._query_nccl_table``."""
+        from aiconfigurator.sdk.operations.communication import NCCL
 
-        Args:
-            dtype: Communication quantization mode
-            num_gpus: Number of GPUs in collective
-            operation: NCCL operation type ("all_reduce", "all_gather", etc.)
-            message_size: Number of elements to communicate
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-                              Power can be computed as energy/latency (W).
-
-        Example:
-            >>> result = db.query_nccl(CommQuantMode.half, 8, "all_reduce", 16384)
-            >>> latency_ms = float(result)
-            >>> energy_wms = result.energy
-            >>> power_w = result.power
-        """
-
-        def get_sol(
-            dtype: common.CommQuantMode, num_gpus: int, operation: str, message_size: int
-        ) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            message_size: element number
-            """
-            sol_time = 0.0
-            p2p_bw = self._get_p2p_bandwidth(num_gpus)
-
-            if operation == "all_gather" or operation == "alltoall" or operation == "reduce_scatter":
-                sol_time = dtype.value.memory * message_size * (num_gpus - 1) / num_gpus / p2p_bw * 1000
-            elif operation == "all_reduce":
-                sol_time = 2 * dtype.value.memory * message_size * (num_gpus - 1) / num_gpus / p2p_bw * 1000
-            return sol_time, 0, sol_time
-
-        def get_empirical(dtype: common.CommQuantMode, num_gpus: int, operation: str, message_size: int) -> float:
-            """
-            Get the empirical time
-            """
-            latency = get_sol(dtype, num_gpus, operation, message_size)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(dtype, num_gpus, operation, message_size)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(dtype, num_gpus, operation, message_size)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(
-                get_empirical(dtype, num_gpus, operation, message_size), energy=0.0, source="empirical"
-            )
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                if num_gpus == 1:
-                    return PerformanceResult(0.0, energy=0.0, source="empirical")
-
-                # Use oneCCL data as fallback when NCCL data is not available (e.g. XPU systems)
-                nccl_source = self._nccl_data
-                if not nccl_source.loaded and self._oneccl_data is not None and self._oneccl_data.loaded:
-                    nccl_source = self._oneccl_data
-                nccl_source.raise_if_not_loaded()
-
-                max_num_gpus = max(nccl_source[dtype][operation].keys())
-                nccl_dict = nccl_source[dtype][operation][min(num_gpus, max_num_gpus)]
-                size_left, size_right = self._nearest_1d_point_helper(
-                    message_size,
-                    list(nccl_dict.keys()),
-                    inner_only=False,
-                )
-                result = self._interp_1d(
-                    [size_left, size_right],
-                    [nccl_dict[size_left], nccl_dict[size_right]],
-                    message_size,
-                )
-
-                # Extract latency and energy from result
-                if isinstance(result, dict):
-                    lat = result["latency"]
-                    energy = result.get("energy", 0.0)
-                else:
-                    lat = result
-                    energy = 0.0
-
-                if num_gpus > max_num_gpus:  # need to do some correction
-                    logger.debug(f"nccl num_gpus {num_gpus} > max_num_gpus {max_num_gpus}, need to do some correction")
-                    # Scale factor based on bandwidth ratio between measured and target GPU counts
-                    max_num_gpus_bw = self._get_p2p_bandwidth(max_num_gpus)
-                    num_gpus_bw = self._get_p2p_bandwidth(num_gpus)
-                    scale_factor = max_num_gpus_bw / num_gpus_bw
-                    # Apply the same scaling formula to both latency and energy
-                    scaling_formula = (num_gpus - 1) / num_gpus * max_num_gpus / (max_num_gpus - 1) * scale_factor
-                    lat = lat * scaling_formula
-                    energy = energy * scaling_formula
-
-                return self._interp_pr(lat, energy=energy)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(dtype, num_gpus, operation, message_size),
-                database_mode=database_mode,
-                error_msg=f"Failed to query nccl data for {dtype=}, {num_gpus=}, {operation=}, {message_size=}",
-            )
+        return NCCL._query_nccl_table(self, dtype, num_gpus, operation, message_size, database_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_moe(
@@ -6102,105 +5160,23 @@ class PerfDatabase:
         n_groups: int,
         chunk_size: int,
     ) -> PerformanceResult:
-        """
-        Query Mamba2 kernel (Conv1D or SSM) latency and energy.
+        """Query Mamba2 kernel latency. Delegates to ``Mamba2Kernel._query_mamba2_table``."""
+        from aiconfigurator.sdk.operations.mamba import Mamba2Kernel
 
-        Args:
-            phase: "context" or "generation"
-            kernel_source: "causal_conv1d_fn", "mamba_chunk_scan_combined",
-                           "causal_conv1d_update", or "selective_state_update"
-            batch_size: batch size
-            seq_len: sequence length (context only; use 0 or any for generation)
-            d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size: model config
-
-        Returns:
-            PerformanceResult with latency (ms) and energy (W·ms).
-            Uses SOL-based fallback when mamba2_perf data is not loaded.
-        """
-        mamba2_data: dict = getattr(self, "_mamba2_data", {})
-
-        def get_sol() -> tuple[float, float, float]:
-            d_inner = nheads * head_dim
-            conv_dim = d_inner + 2 * n_groups * d_state
-            x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
-            if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
-                conv_read_bytes = x * conv_dim * (d_conv + 1) * 2
-                conv_write_bytes = x * conv_dim * 2
-                total_bytes = conv_read_bytes + conv_write_bytes
-            else:
-                ssm_read_bytes = x * (d_inner + n_groups * d_state * 2 + nheads) * 2
-                ssm_write_bytes = x * d_inner * 2
-                total_bytes = ssm_read_bytes + ssm_write_bytes
-            sol_mem = total_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            return sol_mem, 0, sol_mem
-
-        if not mamba2_data:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-        model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
-        try:
-            by_phase = mamba2_data[kernel_source]
-        except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        try:
-            by_key = by_phase[phase]
-        except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        if model_key not in by_key:
-            # Nearest config by d_model
-            keys_with_d_model = [k for k in by_key if k[0] == d_model]
-            if keys_with_d_model:
-                model_key = keys_with_d_model[0]
-            else:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-        table = by_key[model_key]
-
-        if phase == "context":
-            if seq_len is None or seq_len <= 0:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            try:
-                result = self._interp_2d_linear(batch_size, seq_len, table)
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            return self._interp_pr(
-                result["latency"],
-                energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
-            )
-        else:
-            try:
-                batch_left, batch_right = self._nearest_1d_point_helper(
-                    batch_size, list(table.keys()), inner_only=False
-                )
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-            # Ensure we pass entry dicts {latency, power, energy}; handle legacy nested batch_size -> seq_len -> entry
-            def _mamba2_gen_entry(val):
-                if isinstance(val, dict) and "latency" in val:
-                    return val
-                if isinstance(val, dict) and val:
-                    inner = next(iter(val.values()))
-                    if isinstance(inner, dict) and "latency" in inner:
-                        return inner
-                return None
-
-            y_left = _mamba2_gen_entry(table[batch_left])
-            y_right = _mamba2_gen_entry(table[batch_right])
-            if y_left is None or y_right is None:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            result = self._interp_1d(
-                [batch_left, batch_right],
-                [y_left, y_right],
-                batch_size,
-            )
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", result.get("power", 0.0) * lat)
-            else:
-                lat = result
-                energy = 0.0
-            return self._interp_pr(lat, energy=energy)
+        return Mamba2Kernel._query_mamba2_table(
+            self,
+            phase,
+            kernel_source,
+            batch_size,
+            seq_len,
+            d_model,
+            d_state,
+            d_conv,
+            nheads,
+            head_dim,
+            n_groups,
+            chunk_size,
+        )
 
     def query_gdn(
         self,
@@ -6215,171 +5191,31 @@ class PerfDatabase:
         head_v_dim: int,
         d_conv: int,
     ) -> PerformanceResult:
-        """
-        Query Gated DeltaNet (GDN) kernel latency and energy for Qwen3.5 linear_attention layers.
+        """Query GDN kernel latency. Delegates to ``GDNKernel._query_gdn_table``."""
+        from aiconfigurator.sdk.operations.mamba import GDNKernel
 
-        Args:
-            phase: "context" or "generation"
-            kernel_source: "causal_conv1d_fn", "chunk_gated_delta_rule" (context),
-                           "causal_conv1d_update", "fused_sigmoid_gating_delta_rule_update" (generation)
-            batch_size: batch size
-            seq_len: sequence length (context only; unused for generation)
-            d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv: GDN layer config
-
-        Returns:
-            PerformanceResult with latency (ms) and energy (W·ms).
-            Uses SOL-based fallback when gdn_perf data is not loaded.
-        """
-        gdn_data: dict = getattr(self, "_gdn_data", {})
-
-        def get_sol() -> tuple[float, float, float]:
-            x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
-            if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
-                conv_channels = num_k_heads * head_k_dim + num_v_heads * head_v_dim
-                read_bytes = x * conv_channels * (d_conv + 1) * 2
-                write_bytes = x * conv_channels * 2
-            elif kernel_source == "chunk_gated_delta_rule":
-                # GDN chunked scan (context phase).
-                # State shape: [num_v_heads, head_k_dim, head_v_dim], stored as BF16 in global memory.
-                # Intermediate h_chunks [B, NT, H, K, V] are written by chunk_delta_h and read by
-                # chunk_o via global memory (separate kernel launches). Allocated via k.new_empty()
-                # (no dtype override), so matches input dtype: FP16/BF16 → 2 bytes.
-                chunk_size = 64  # flash-linear-attention default for chunk_gated_delta_rule
-                state_size = num_v_heads * head_k_dim * head_v_dim
-                num_chunks = (seq_len // chunk_size) if seq_len else 0
-                h_chunks_bytes = num_chunks * state_size * 2 * batch_size
-                read_bytes = (
-                    x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2
-                    + state_size * 2 * batch_size
-                    + h_chunks_bytes  # chunk_o reads h_chunks from global memory
-                )
-                write_bytes = (
-                    x * num_v_heads * head_v_dim * 2
-                    + state_size * 2 * batch_size
-                    + h_chunks_bytes  # chunk_delta_h writes h_chunks to global memory
-                )
-            elif kernel_source == "fused_sigmoid_gating_delta_rule_update":
-                # GDN single-step decode. State stored as BF16 in global memory.
-                state_size = num_v_heads * head_k_dim * head_v_dim
-                read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 2 * batch_size
-                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 2 * batch_size
-            else:
-                read_bytes = x * d_model * 2
-                write_bytes = x * d_model * 2
-            sol_mem = (read_bytes + write_bytes) / self.system_spec["gpu"]["mem_bw"] * 1000
-            return sol_mem, 0, sol_mem
-
-        if not gdn_data:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-        model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
-        try:
-            by_phase = gdn_data[kernel_source]
-        except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        try:
-            by_key = by_phase[phase]
-        except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        if model_key not in by_key:
-            # Nearest config by d_model, then num_v_heads as secondary discriminator
-            keys_same_d_model = [k for k in by_key if k[0] == d_model]
-            if keys_same_d_model:
-                model_key = min(keys_same_d_model, key=lambda k: abs(k[3] - num_v_heads))
-            else:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-        table = by_key[model_key]
-
-        if phase == "context":
-            if seq_len is None or seq_len <= 0:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            try:
-                result = self._interp_2d_linear(batch_size, seq_len, table)
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            return self._interp_pr(
-                result["latency"],
-                energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
-            )
-        else:
-            try:
-                batch_left, batch_right = self._nearest_1d_point_helper(
-                    batch_size, list(table.keys()), inner_only=False
-                )
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-            def _gdn_gen_entry(val):
-                if isinstance(val, dict) and "latency" in val:
-                    return val
-                if isinstance(val, dict) and val:
-                    inner = next(iter(val.values()))
-                    if isinstance(inner, dict) and "latency" in inner:
-                        return inner
-                return None
-
-            y_left = _gdn_gen_entry(table[batch_left])
-            y_right = _gdn_gen_entry(table[batch_right])
-            if y_left is None or y_right is None:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            result = self._interp_1d(
-                [batch_left, batch_right],
-                [y_left, y_right],
-                batch_size,
-            )
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", result.get("power", 0.0) * lat)
-            else:
-                lat = result
-                energy = 0.0
-            return self._interp_pr(lat, energy=energy)
+        return GDNKernel._query_gdn_table(
+            self,
+            phase,
+            kernel_source,
+            batch_size,
+            seq_len,
+            d_model,
+            num_k_heads,
+            head_k_dim,
+            num_v_heads,
+            head_v_dim,
+            d_conv,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_p2p(
         self, message_bytes: int, database_mode: common.DatabaseMode | None = None
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query P2P (point-to-point) communication latency and energy.
+        """Query P2P latency. Delegates to ``P2P._query_p2p_table``."""
+        from aiconfigurator.sdk.operations.communication import P2P
 
-        Args:
-            message_bytes: Number of bytes to transfer
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(message_bytes: int) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            # TODO, use intra_node_bw if num_gpus < num_gpus_per_node
-            sol_time = message_bytes / self.system_spec["node"]["inter_node_bw"] * 1000
-            return sol_time, 0, sol_time
-
-        def get_empirical(message_bytes: int) -> float:
-            """
-            Get the empirical time
-            """
-            return (
-                message_bytes / self.system_spec["node"]["inter_node_bw"] + self.system_spec["node"]["p2p_latency"]
-            ) * 1000
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(message_bytes)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(message_bytes)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(message_bytes), energy=0.0, source="empirical")
-        else:
-            # No silicon table for P2P — even SILICON/HYBRID modes use the
-            # empirical formula here, so tag the source accordingly.
-            return PerformanceResult(get_empirical(message_bytes), energy=0.0, source="empirical")
+        return P2P._query_p2p_table(self, message_bytes, database_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_deepep_ll(
@@ -6468,75 +5304,24 @@ class PerfDatabase:
 
     def _correct_data(self) -> None:
         """
-        Correct the data based on sol time reference.
-        """
-        # regular gemm
-        if self._gemm_data:
-            for quant_mode in self._gemm_data:
-                for m in self._gemm_data[quant_mode]:
-                    for n in self._gemm_data[quant_mode][m]:
-                        for k in self._gemm_data[quant_mode][m][n]:
-                            sol = self.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
-                            data = self._gemm_data[quant_mode][m][n][k]
-                            current_latency = data["latency"] if isinstance(data, dict) else data
-                            if sol > current_latency:
-                                logger.debug(
-                                    f"gemm quant {quant_mode} m{m} n{n} k{k}: sol {sol} > perf_db {current_latency}"
-                                )
-                                if isinstance(data, dict):
-                                    # Update only latency, keep power unchanged
-                                    # Convert PerformanceResult to float
-                                    self._gemm_data[quant_mode][m][n][k]["latency"] = float(max(sol, current_latency))
-                                else:
-                                    # Legacy format (float)
-                                    self._gemm_data[quant_mode][m][n][k] = float(max(sol, current_latency))
+        Correct the data based on sol time reference. GEMM + GenerationAttention
+        SOL clamping live in their respective ``_correct_sol`` classmethods
+        (invoked from each ``load_data``); we forward here for backward compat
+        with tests that mutate the data and then call ``_correct_data()`` to
+        re-clamp.
 
-        # regular generation attention
-        if self._generation_attention_data:
-            for quant_mode in self._generation_attention_data:
-                for n_kv in self._generation_attention_data[quant_mode]:
-                    for head_size in self._generation_attention_data[quant_mode][n_kv]:
-                        for window_size in self._generation_attention_data[quant_mode][n_kv][head_size]:
-                            for n in self._generation_attention_data[quant_mode][n_kv][head_size][window_size]:
-                                for b in self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n]:
-                                    for s in self._generation_attention_data[quant_mode][n_kv][head_size][window_size][
-                                        n
-                                    ][b]:
-                                        if n_kv == 0:
-                                            n_kv_local = n
-                                        else:
-                                            n_kv_local = n_kv
-                                        sol = self.query_generation_attention(
-                                            b,
-                                            s,
-                                            n,
-                                            n_kv_local,
-                                            quant_mode,
-                                            database_mode=common.DatabaseMode.SOL,
-                                            window_size=window_size,
-                                            head_size=head_size,
-                                        )
-                                        data = self._generation_attention_data[quant_mode][n_kv][head_size][
-                                            window_size
-                                        ][n][b][s]
-                                        current_latency = data["latency"] if isinstance(data, dict) else data
-                                        if sol > current_latency:
-                                            logger.debug(
-                                                f"generation attention quant {quant_mode} n{n} "
-                                                f"n_kv{n_kv_local} b{b} s{s}: sol {sol} > "
-                                                f"perf_db {current_latency}"
-                                            )
-                                            if isinstance(data, dict):
-                                                # Update only latency, keep power unchanged
-                                                # Convert PerformanceResult to float
-                                                self._generation_attention_data[quant_mode][n_kv][head_size][
-                                                    window_size
-                                                ][n][b][s]["latency"] = float(sol)
-                                            else:
-                                                # Legacy format (float)
-                                                self._generation_attention_data[quant_mode][n_kv][head_size][
-                                                    window_size
-                                                ][n][b][s] = float(sol)
+        The init path runs this immediately after ``load_data`` already
+        applied SOL correction, so there are duplicate full-table passes.
+        They are harmless — SOL clamping is idempotent (``max(sol, current)``
+        is a no-op when ``current >= sol`` after the first pass) — but the
+        duplicate iterations are O(n) over each table. ISSUE-16 can route
+        the init call directly and drop these forwards.
+        """
+        from aiconfigurator.sdk.operations.attention import GenerationAttention
+        from aiconfigurator.sdk.operations.gemm import GEMM
+
+        GEMM._correct_sol(self)
+        GenerationAttention._correct_sol(self)
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_moe_compute(
@@ -7017,247 +5802,25 @@ class PerfDatabase:
         index_head_dim: int | None = None,
         index_topk: int | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query context DSA module-level latency and energy.
+        """Query context DSA module latency. Delegates to
+        ``ContextDSAModule._query_context_dsa_module_table``."""
+        from aiconfigurator.sdk.operations.dsa import ContextDSAModule
 
-        DSA module includes: kv_a_proj + norms + q_b_proj + indexer (wq_b + weights_proj +
-        FP8 MQA logits + TopK) + sparse MLA (BMM pre + sparse attention + BMM post) + o_proj.
-
-        Args:
-            b: Batch size
-            s: Number of query tokens in this prefill step
-            num_heads: Number of attention heads (local, after TP split)
-            kvcache_quant_mode: KV cache quantization mode
-            fmha_quant_mode: FMHA quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-            prefix: Prefix length in KV cache
-            architecture: HF architecture string (e.g. "DeepseekV32ForCausalLM")
-            index_n_heads: Number of heads in the indexer (default from DSA_MODEL_DIMS)
-            index_head_dim: Head dim in the indexer (default from DSA_MODEL_DIMS)
-            index_topk: Top-k selected by the indexer (default from DSA_MODEL_DIMS)
-
-        Returns:
-            PerformanceResult or (sol_time, sol_math, sol_mem) for SOL_FULL
-        """
-        dims = DSA_MODEL_DIMS.get(architecture, DSA_MODEL_DIMS[DEFAULT_DSA_ARCHITECTURE])
-        hidden_size = dims["hidden_size"]
-        q_lora = dims["q_lora_rank"]
-        kv_lora = dims["kv_lora_rank"]
-        qk_nope = dims["qk_nope_head_dim"]
-        qk_rope = dims["qk_rope_head_dim"]
-        v_dim = dims["v_head_dim"]
-        if index_n_heads is None:
-            index_n_heads = dims["index_n_heads"]
-        if index_head_dim is None:
-            index_head_dim = dims["index_head_dim"]
-        if index_topk is None:
-            index_topk = dims["index_topk"]
-        qk_head_dim = qk_nope + qk_rope
-        attn_head_dim = kv_lora + qk_rope
-
-        def get_sol(
-            b: int,
-            s: int,
-            prefix: int,
-            num_heads: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-            fmha_quant_mode: common.FMHAQuantMode,
-        ) -> tuple[float, float, float]:
-            """
-            SOL estimate for the full DSA context attention block.
-
-            Ops are split into two groups with different throughput/memory:
-              - GEMM group (linear projections + absorption BMMs): gemm_quant_mode
-              - Attention group (indexer logits + sparse MLA): fmha_quant_mode
-            """
-            full_s = s + prefix
-            tokens = b * s
-
-            # ── Compute (FLOPs) ─────────────────────────────────────────
-            proj_out = q_lora + kv_lora + qk_rope + index_head_dim
-
-            # GEMM group — throughput governed by gemm_quant_mode
-            # 1. kv_a_proj: [tokens, hidden_size] x [hidden_size, q_lora+kv_lora+qk_rope+index_head_dim]
-            # 2. q_b_proj: [tokens, q_lora] x [q_lora, num_heads * qk_head_dim]
-            # 3. Indexer wq_b: [tokens, q_lora] x [q_lora, index_n_heads * index_head_dim]
-            # 4. Indexer weights_proj: [tokens, hidden_size] x [hidden_size, index_n_heads]
-            # 5. o_proj: [tokens, num_heads*v_dim] x [num_heads*v_dim, hidden_size]
-            # 6. BMM pre (q_nope absorption): num_heads x [tokens, qk_nope] x [kv_lora, qk_nope]
-            # 7. BMM post (V projection): num_heads x [tokens, kv_lora] x [v_dim, kv_lora]
-            gemm_group_ops = (
-                2 * tokens * hidden_size * proj_out
-                + 2 * tokens * q_lora * (num_heads * qk_head_dim)
-                + 2 * tokens * q_lora * (index_n_heads * index_head_dim)
-                + 2 * tokens * hidden_size * index_n_heads
-                + 2 * tokens * (num_heads * v_dim) * hidden_size
-                + 2 * num_heads * tokens * qk_nope * kv_lora
-                + 2 * num_heads * tokens * kv_lora * v_dim
-            )
-
-            # Indexer logits group — always FP8 (hardcoded in both vLLM and TRT-LLM)
-            # 8. Indexer FP8 MQA logits: Q[tokens, index_n_heads, head_dim] x K[full_s, head_dim]
-            #    TRT-LLM skips logits+topk when kv_len <= topk (skip_indexer optimization).
-            #    wq_b and weights_proj GEMMs still run regardless.
-            if full_s <= index_topk:
-                indexer_logits_ops = 0
-            else:
-                indexer_logits_ops = 2 * tokens * index_n_heads * index_head_dim * full_s
-
-            # Sparse MLA attention group — throughput governed by fmha_quant_mode
-            # 9. Sparse MLA attention: only selected top-k over full KV cache.
-            #    QK^T uses attn_head_dim (kv_lora+qk_rope=576), V aggregation uses kv_lora (512).
-            effective_kv = min(full_s, index_topk)
-            # Exact KV pair count: sum_{i=0..s-1} min(prefix+i+1, topk)
-            if full_s <= index_topk:
-                # All queries in causal ramp (indexer skipped, full causal attention)
-                total_kv_pairs = b * (full_s * (full_s + 1) - prefix * (prefix + 1)) // 2
-            elif prefix >= index_topk:
-                # All queries saturated at topk
-                total_kv_pairs = tokens * index_topk
-            else:
-                # Mixed: first (topk-prefix) queries ramp, rest saturated
-                ramp_pairs = b * (index_topk * (index_topk + 1) - prefix * (prefix + 1)) // 2
-                sat_pairs = b * (full_s - index_topk) * index_topk
-                total_kv_pairs = ramp_pairs + sat_pairs
-            sparse_attn_ops = 2 * num_heads * (attn_head_dim + kv_lora) * total_kv_pairs
-
-            # ── Memory (bytes) ──────────────────────────────────────────
-            # GEMM weights — size governed by gemm_quant_mode.memory
-            gemm_weight_bytes = (
-                hidden_size * proj_out  # kv_a_proj
-                + q_lora * num_heads * qk_head_dim  # q_b_proj
-                + q_lora * index_n_heads * index_head_dim  # wq_b
-                + hidden_size * index_n_heads  # weights_proj
-                + num_heads * v_dim * hidden_size  # o_proj
-            ) * gemm_quant_mode.value.memory
-
-            # KV cache reads for sparse attention
-            kv_cache_bytes = b * num_heads * effective_kv * attn_head_dim * kvcache_quant_mode.value.memory
-            # Indexer K cache read (MQA: 1 shared K head, FP8 with per-128 scales).
-            # Per-token bytes: head_dim (FP8) + ceil(head_dim/128)*4 (scales).
-            indexer_entry_bytes = common.indexer_cache_entry_bytes(index_head_dim)
-            indexer_cache_bytes = 0 if full_s <= index_topk else b * full_s * indexer_entry_bytes
-            # Q activations read + write
-            q_io_bytes = tokens * num_heads * qk_head_dim * fmha_quant_mode.value.memory * 2
-
-            total_mem = gemm_weight_bytes + kv_cache_bytes + indexer_cache_bytes + q_io_bytes
-
-            # ── SOL ─────────────────────────────────────────────────────
-            gemm_flops = self._get_quant_tc_flops(gemm_quant_mode)
-            indexer_fp8_flops = self._get_quant_tc_flops(common.FMHAQuantMode.fp8)
-            attn_flops = self._get_quant_tc_flops(fmha_quant_mode)
-
-            sol_math = (
-                gemm_group_ops / gemm_flops + indexer_logits_ops / indexer_fp8_flops + sparse_attn_ops / attn_flops
-            ) * 1000
-            sol_mem = total_mem / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(
-            b: int,
-            s: int,
-            prefix: int,
-            num_heads: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-            fmha_quant_mode: common.FMHAQuantMode,
-        ) -> float:
-            latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.5
-            return latency / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
-            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-        else:
-
-            def missing_context_dsa_error() -> PerfDataNotAvailableError:
-                return PerfDataNotAvailableError(
-                    f"Context DSA module data not available for system='{self.system}', "
-                    f"backend='{self.backend}', version='{self.version}', architecture='{architecture}', "
-                    f"fmha_quant_mode={fmha_quant_mode}, kvcache_quant_mode={kvcache_quant_mode}, "
-                    f"gemm_quant_mode={gemm_quant_mode}, num_heads={num_heads}, s={s}, prefix={prefix}, b={b}. "
-                    "Missing silicon data for the requested lookup."
-                )
-
-            try:
-                dsa_module_data = getattr(self, "_context_dsa_module_data", None)
-                if dsa_module_data is None:
-                    raise PerfDataNotAvailableError(
-                        f"Context DSA module perf data not loaded for system='{self.system}', "
-                        f"backend='{self.backend}', version='{self.version}'."
-                    )
-                try:
-                    dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
-                except (KeyError, TypeError) as exc:
-                    raise missing_context_dsa_error() from exc
-                full_s = s + prefix
-                raw_dsa_dict = None
-                raw_dsa_module_data = getattr(self, "_raw_context_dsa_module_data", None)
-                if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
-                    try:
-                        raw_dsa_dict = raw_dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][
-                            architecture
-                        ]
-                    except (KeyError, TypeError):
-                        raw_dsa_dict = None
-                try:
-                    result = self._interp_dsa_context_topk_piecewise_from_raw(
-                        num_heads, full_s, b, raw_dsa_dict, index_topk
-                    )
-                    if result is None:
-                        result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
-                    latency = result["latency"]
-                    energy = result.get("energy", 0.0)
-                except (KeyError, TypeError, ValueError, AssertionError) as exc:
-                    raise missing_context_dsa_error() from exc
-                if prefix > 0:
-                    base_sol = get_sol(b, full_s, 0, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-                    target_sol = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-                    correction = 1.0 if base_sol <= 0 else target_sol / base_sol
-                    latency *= correction
-                    energy *= correction
-                return self._interp_pr(latency, energy=energy)
-            except Exception as e:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
-                        f"{index_n_heads=}, {index_head_dim=}, {index_topk=}; using empirical"
-                    )
-                    latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
-                    return PerformanceResult(latency, energy=0.0, source="empirical")
-                if isinstance(e, PerfDataNotAvailableError):
-                    logger.warning(str(e))
-                    raise
-                if self._is_dsa_interpolation_miss(e):
-                    message = self._format_dsa_unavailable_message(
-                        "Context",
-                        e,
-                        b=b,
-                        s=s,
-                        prefix=prefix,
-                        num_heads=num_heads,
-                        architecture=architecture,
-                        index_n_heads=index_n_heads,
-                        index_head_dim=index_head_dim,
-                        index_topk=index_topk,
-                    )
-                    logger.warning(message)
-                    raise PerfDataNotAvailableError(message) from None
-                else:
-                    logger.exception(
-                        f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
-                        f"{index_n_heads=}, {index_head_dim=}, {index_topk=}, "
-                        f"{kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}."
-                    )
-                    raise
+        return ContextDSAModule._query_context_dsa_module_table(
+            self,
+            b,
+            s,
+            num_heads,
+            kvcache_quant_mode,
+            fmha_quant_mode,
+            gemm_quant_mode,
+            database_mode,
+            prefix=prefix,
+            architecture=architecture,
+            index_n_heads=index_n_heads,
+            index_head_dim=index_head_dim,
+            index_topk=index_topk,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_generation_dsa_module(
@@ -7274,176 +5837,23 @@ class PerfDatabase:
         index_head_dim: int | None = None,
         index_topk: int | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query generation DSA module-level latency and energy.
+        """Query generation DSA module latency. Delegates to
+        GenerationDSAModule._query_generation_dsa_module_table."""
+        from aiconfigurator.sdk.operations.dsa import GenerationDSAModule
 
-        Args:
-            b: Batch size (each generating 1 token)
-            s: KV cache length
-            num_heads: Number of attention heads (local, after TP split)
-            kv_cache_dtype: KV cache quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-            index_n_heads: Number of heads in the indexer
-            index_head_dim: Head dim in the indexer
-            index_topk: Top-k selected by the indexer
-        """
-        dims = DSA_MODEL_DIMS.get(architecture, DSA_MODEL_DIMS[DEFAULT_DSA_ARCHITECTURE])
-        hidden_size = dims["hidden_size"]
-        q_lora = dims["q_lora_rank"]
-        kv_lora = dims["kv_lora_rank"]
-        qk_nope = dims["qk_nope_head_dim"]
-        qk_rope = dims["qk_rope_head_dim"]
-        v_dim = dims["v_head_dim"]
-        if index_n_heads is None:
-            index_n_heads = dims["index_n_heads"]
-        if index_head_dim is None:
-            index_head_dim = dims["index_head_dim"]
-        if index_topk is None:
-            index_topk = dims["index_topk"]
-        qk_head_dim = qk_nope + qk_rope
-        attn_head_dim = kv_lora + qk_rope
-
-        def get_sol(
-            b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode
-        ) -> tuple[float, float, float]:
-            """SOL estimate for generation DSA module (1 token per request).
-
-            Ops split into GEMM group (gemm_quant_mode) and attention group
-            (fmha derived from kv_cache_dtype).
-            """
-            fmha_mode = common.FMHAQuantMode.bfloat16
-
-            tokens = b
-            proj_out = q_lora + kv_lora + qk_rope + index_head_dim
-            effective_kv = min(s, index_topk)
-
-            # ── GEMM group — throughput governed by gemm_quant_mode ─────
-            # 1. kv_a_proj: [tokens, hidden_size] x [hidden_size, q_lora+kv_lora+qk_rope+index_head_dim]
-            # 2. q_b_proj: [tokens, q_lora] x [q_lora, num_heads * qk_head_dim]
-            # 3. Indexer wq_b: [tokens, q_lora] x [q_lora, index_n_heads * index_head_dim]
-            # 4. Indexer weights_proj: [tokens, hidden_size] x [hidden_size, index_n_heads]
-            # 5. o_proj: [tokens, num_heads*v_dim] x [num_heads*v_dim, hidden_size]
-            # 6. BMM pre (q_nope absorption) + BMM post (V projection)
-            gemm_group_ops = (
-                2 * tokens * hidden_size * proj_out
-                + 2 * tokens * q_lora * num_heads * qk_head_dim
-                + 2 * tokens * q_lora * index_n_heads * index_head_dim
-                + 2 * tokens * hidden_size * index_n_heads
-                + 2 * tokens * num_heads * v_dim * hidden_size
-                + 2 * num_heads * tokens * qk_nope * kv_lora
-                + 2 * num_heads * tokens * kv_lora * v_dim
-            )
-
-            # Indexer logits — always FP8 (hardcoded in both vLLM and TRT-LLM)
-            # 7. Indexer: paged FP8 MQA logits over full KV cache
-            indexer_logits_ops = 2 * tokens * index_n_heads * index_head_dim * s
-
-            # Sparse MLA attention — throughput governed by fmha_mode
-            # 8. Sparse attention: only top-k tokens
-            #    QK^T uses attn_head_dim (kv_lora+qk_rope=576), V aggregation uses kv_lora (512)
-            sparse_attn_ops = 2 * tokens * num_heads * (attn_head_dim + kv_lora) * effective_kv
-
-            # ── Memory (bytes) ──────────────────────────────────────────
-            # GEMM weights (read once) — size governed by gemm_quant_mode.memory
-            gemm_weight_bytes = (
-                hidden_size * proj_out  # kv_a_proj
-                + q_lora * num_heads * qk_head_dim  # q_b_proj
-                + q_lora * index_n_heads * index_head_dim  # wq_b
-                + hidden_size * index_n_heads  # weights_proj
-                + num_heads * v_dim * hidden_size  # o_proj
-            ) * gemm_quant_mode.value.memory
-            # Indexer K cache read: full s (paged, MQA 1 head, FP8 with per-128 scales)
-            indexer_entry_bytes = common.indexer_cache_entry_bytes(index_head_dim)
-            indexer_cache_bytes = b * s * indexer_entry_bytes
-            # MLA KV cache read: only top-k tokens
-            kv_cache_bytes = b * effective_kv * attn_head_dim * kv_cache_dtype.value.memory
-            total_mem = gemm_weight_bytes + indexer_cache_bytes + kv_cache_bytes
-
-            # ── SOL ─────────────────────────────────────────────────────
-            gemm_flops = self._get_quant_tc_flops(gemm_quant_mode)
-            indexer_fp8_flops = self._get_quant_tc_flops(common.FMHAQuantMode.fp8)
-            attn_flops = self._get_quant_tc_flops(fmha_mode)
-
-            sol_math = (
-                gemm_group_ops / gemm_flops + indexer_logits_ops / indexer_fp8_flops + sparse_attn_ops / attn_flops
-            ) * 1000
-            sol_mem = total_mem / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode) -> float:
-            latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
-            scale_factor = 0.5
-            return latency / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, num_heads, kv_cache_dtype)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(b, s, num_heads, kv_cache_dtype)
-            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-        else:
-
-            def missing_generation_dsa_error() -> PerfDataNotAvailableError:
-                return PerfDataNotAvailableError(
-                    f"Generation DSA module data not available for system='{self.system}', "
-                    f"backend='{self.backend}', version='{self.version}', architecture='{architecture}', "
-                    f"kv_cache_dtype={kv_cache_dtype}, gemm_quant_mode={gemm_quant_mode}, "
-                    f"num_heads={num_heads}, s={s}, b={b}. "
-                    "Missing silicon data for the requested lookup."
-                )
-
-            try:
-                dsa_module_data = getattr(self, "_generation_dsa_module_data", None)
-                if dsa_module_data is None:
-                    raise PerfDataNotAvailableError(
-                        f"Generation DSA module perf data not loaded for system='{self.system}', "
-                        f"backend='{self.backend}', version='{self.version}'."
-                    )
-                try:
-                    dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
-                    result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
-                    latency = result["latency"]
-                    energy = result.get("energy", 0.0)
-                except (KeyError, TypeError, ValueError, AssertionError) as exc:
-                    raise missing_generation_dsa_error() from exc
-                return self._interp_pr(latency, energy=energy)
-            except Exception as e:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "
-                        f"{index_n_heads=}, {index_head_dim=}, {index_topk=}; using empirical"
-                    )
-                    latency = get_empirical(b, s, num_heads, kv_cache_dtype)
-                    return PerformanceResult(latency, energy=0.0, source="empirical")
-                if isinstance(e, PerfDataNotAvailableError):
-                    logger.warning(str(e))
-                    raise
-                if self._is_dsa_interpolation_miss(e):
-                    message = self._format_dsa_unavailable_message(
-                        "Generation",
-                        e,
-                        b=b,
-                        s=s,
-                        num_heads=num_heads,
-                        architecture=architecture,
-                        index_n_heads=index_n_heads,
-                        index_head_dim=index_head_dim,
-                        index_topk=index_topk,
-                    )
-                    logger.warning(message)
-                    raise PerfDataNotAvailableError(message) from None
-                else:
-                    logger.exception(
-                        f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "
-                        f"{index_n_heads=}, {index_head_dim=}, {index_topk=}, "
-                        f"{kv_cache_dtype=}, {database_mode=}."
-                    )
-                    raise
+        return GenerationDSAModule._query_generation_dsa_module_table(
+            self,
+            b,
+            s,
+            num_heads,
+            kv_cache_dtype,
+            gemm_quant_mode,
+            database_mode,
+            architecture=architecture,
+            index_n_heads=index_n_heads,
+            index_head_dim=index_head_dim,
+            index_topk=index_topk,
+        )
 
     @staticmethod
     def _causal_limited_pairs(batch_size: int, query_len: int, prefix: int, limit: int) -> int:
