@@ -32,7 +32,6 @@ from aiconfigurator.sdk.operations._legacy import (
     ContextMLA,
     CustomAllReduce,
     DeepSeekV4MHCModule,
-    FallbackOp,
     GDNKernel,
     GenerationDeepSeekV4AttentionModule,
     GenerationDSAModule,
@@ -41,7 +40,6 @@ from aiconfigurator.sdk.operations._legacy import (
     Mamba2Kernel,
     MLABmm,
     MLAModule,
-    OverlapOp,
     WideEPContextMLA,
     WideEPGenerationMLA,
     _BaseDeepSeekV4AttentionModule,
@@ -58,6 +56,7 @@ from aiconfigurator.sdk.operations.elementwise import ElementWise
 from aiconfigurator.sdk.operations.embedding import Embedding
 from aiconfigurator.sdk.operations.gemm import GEMM
 from aiconfigurator.sdk.operations.moe import MoE, MoEDispatch, TrtLLMWideEPMoE, TrtLLMWideEPMoEDispatch
+from aiconfigurator.sdk.operations.overlap import FallbackOp, OverlapOp
 
 # Re-export commonly-imported names that the prior monolithic operations.py
 # exposed at module level. Some test files and external callers do
