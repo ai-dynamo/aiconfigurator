@@ -1,29 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for DeepSeek-V4 sparse-kernel infrastructure.
+"""Unit tests for V4-Flash sparse-kernel infrastructure.
 
 Covers:
   * the per-(attn_kind, mode) module loaders and their split-file merge
-  * the sparse-kernel CSV loader (paged_mqa_logits / hca_attn)
-  * ``_lookup_dsv4_sparse_kernel`` (exact + interp + tp fallback)
+  * V4-Flash CSV rows deriving the local ``num_heads`` key from ``tp_size``
   * ``_dsv4_robust_3d_lookup`` exact-match short-circuit
   * ``_deep_merge_dsv4_dicts`` cross-kind dict merge
+  * topk_512 IO-formula past_kv correction inside the V4 context query
 """
 
 from __future__ import annotations
-
-from typing import ClassVar
 
 import pytest
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.perf_database import (
-    LoadedOpData,
+    DSV4_NATIVE_HEADS,
     _deep_merge_dsv4_dicts,
+    _dsv4_num_heads_from_row,
     _dsv4_robust_3d_lookup,
     load_context_dsv4_kind_module_data,
-    load_dsv4_sparse_kernel_data,
     load_generation_dsv4_kind_module_data,
 )
 
@@ -39,15 +37,6 @@ _CTX_HEADER = (
     "mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,"
     "step,compress_ratio,latency"
 )
-_SPARSE_HEADER = _CTX_HEADER  # same column layout
-_FLASH_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
-_PRO_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
-_FLASH_NATIVE_HEADS = 64
-_PRO_NATIVE_HEADS = 128
-
-
-def _native_heads_for_model(model: str) -> int:
-    return _PRO_NATIVE_HEADS if "Pro" in model else _FLASH_NATIVE_HEADS
 
 
 def _ctx_row(
@@ -57,51 +46,24 @@ def _ctx_row(
     bs: int,
     isl: int,
     tp: int,
+    step: int = 0,
     gemm: str = "fp8_block",
     lat: float = 1.0,
-    model: str = _FLASH_MODEL,
 ) -> str:
     return (
         f"SGLang,test,NVIDIA H20-3e,dsv4_{attn_kind}_context_module,"
-        f"compressed_flashmla,{model},DeepseekV4ForCausalLM,"
-        f"bfloat16,fp8_e4m3,{gemm},{_native_heads_for_model(model)},{bs},{isl},{tp},0,{cr},{lat:.4f}"
+        "compressed_flashmla,deepseek-ai/DeepSeek-V4-Flash,DeepseekV4ForCausalLM,"
+        f"bfloat16,fp8_e4m3,{gemm},64,{bs},{isl},{tp},{step},{cr},{lat:.4f}"
     )
 
 
 def _gen_row(
-    *,
-    attn_kind: str,
-    cr: int,
-    bs: int,
-    isl: int,
-    step: int,
-    tp: int,
-    gemm: str = "fp8_block",
-    lat: float = 0.1,
-    model: str = _FLASH_MODEL,
+    *, attn_kind: str, cr: int, bs: int, isl: int, step: int, tp: int, gemm: str = "fp8_block", lat: float = 0.1
 ) -> str:
     return (
         f"SGLang,test,NVIDIA H20-3e,dsv4_{attn_kind}_generation_module,"
-        f"compressed_flashmla,{model},DeepseekV4ForCausalLM,"
-        f"bfloat16,fp8_e4m3,{gemm},{_native_heads_for_model(model)},{bs},{isl},{tp},{step},{cr},{lat:.4f}"
-    )
-
-
-def _sparse_row(
-    *,
-    kernel: str,
-    bs: int,
-    isl: int,
-    past_kv: int,
-    tp: int,
-    cr: int,
-    lat: float = 0.05,
-    model: str = _FLASH_MODEL,
-) -> str:
-    return (
-        f"SGLang,test,NVIDIA H20-3e,dsv4_{kernel}_module,"
-        f"{kernel},{model},DeepseekV4ForCausalLM,"
-        f"fp8_e4m3,fp8_e4m3,fp8_block,{_native_heads_for_model(model)},{bs},{isl},{tp},{past_kv},{cr},{lat:.4f}"
+        "compressed_flashmla,deepseek-ai/DeepSeek-V4-Flash,DeepseekV4ForCausalLM,"
+        f"bfloat16,fp8_e4m3,{gemm},64,{bs},{isl},{tp},{step},{cr},{lat:.4f}"
     )
 
 
@@ -111,42 +73,27 @@ def _write_csv(path, header: str, rows: list[str]) -> str:
 
 
 # ───────────────────────────────────────────────────────────────────────
-# Loader: sparse-kernel CSV
+# Local num_heads key derivation from collector rows
 # ───────────────────────────────────────────────────────────────────────
 
 
-def test_load_dsv4_sparse_kernel_data_basic(tmp_path):
-    rows = [
-        _sparse_row(kernel="paged_mqa_logits", bs=1, isl=1024, past_kv=0, tp=1, cr=4, lat=0.10),
-        _sparse_row(kernel="paged_mqa_logits", bs=1, isl=1024, past_kv=8192, tp=1, cr=4, lat=0.30),
-        _sparse_row(kernel="paged_mqa_logits", bs=1, isl=8192, past_kv=0, tp=1, cr=4, lat=0.55),
-    ]
-    path = _write_csv(tmp_path / "paged.txt", _SPARSE_HEADER, rows)
-    data = load_dsv4_sparse_kernel_data(path)
-    assert data is not None
-    # data[native_heads][tp][past_kv][isl][bs] = {"latency": ...}
-    assert data[_FLASH_NATIVE_HEADS][1][0][1024][1]["latency"] == pytest.approx(0.10)
-    assert data[_FLASH_NATIVE_HEADS][1][8192][1024][1]["latency"] == pytest.approx(0.30)
-    assert data[_FLASH_NATIVE_HEADS][1][0][8192][1]["latency"] == pytest.approx(0.55)
+@pytest.mark.parametrize(
+    "row,expected_num_heads",
+    [
+        ({"num_heads": "64", "tp_size": "1"}, 64),
+        ({"num_heads": "64", "tp_size": "2"}, 32),
+        ({"num_heads": "64", "tp_size": "4"}, 16),
+        ({"num_heads": "64", "tp_size": "8"}, 8),
+        ({"num_heads": "8"}, 8),
+    ],
+)
+def test_dsv4_num_heads_from_row(row, expected_num_heads):
+    """Old CSVs may write native heads; loader exposes the local num_heads axis."""
+    assert _dsv4_num_heads_from_row(row) == expected_num_heads
 
 
-def test_load_dsv4_sparse_kernel_data_skips_dup_headers(tmp_path):
-    """Loader must skip CSV header lines mistakenly appended on re-runs."""
-    rows = [
-        _sparse_row(kernel="hca_attn", bs=1, isl=1024, past_kv=0, tp=1, cr=128, lat=0.5),
-        _SPARSE_HEADER,  # duplicate header
-        _sparse_row(kernel="hca_attn", bs=1, isl=2048, past_kv=0, tp=1, cr=128, lat=0.7),
-    ]
-    path = _write_csv(tmp_path / "hca_dup.txt", _SPARSE_HEADER, rows)
-    data = load_dsv4_sparse_kernel_data(path)
-    assert data is not None
-    # Both real rows present, header line silently dropped.
-    assert data[_FLASH_NATIVE_HEADS][1][0][1024][1]["latency"] == pytest.approx(0.5)
-    assert data[_FLASH_NATIVE_HEADS][1][0][2048][1]["latency"] == pytest.approx(0.7)
-
-
-def test_load_dsv4_sparse_kernel_data_missing_returns_none(tmp_path):
-    assert load_dsv4_sparse_kernel_data(str(tmp_path / "no_such.txt")) is None
+def test_dsv4_native_head_count():
+    assert DSV4_NATIVE_HEADS == 64
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -154,8 +101,8 @@ def test_load_dsv4_sparse_kernel_data_missing_returns_none(tmp_path):
 # ───────────────────────────────────────────────────────────────────────
 
 
-def test_load_context_dsv4_kind_module_data_keys_by_tp(tmp_path):
-    """Context loader must key the inner cube by ``tp_size``, not ``num_heads``."""
+def test_load_context_dsv4_kind_module_data_keys_by_num_heads(tmp_path):
+    """Context loader must key the inner cube by local ``num_heads``."""
     rows = [
         _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=1, lat=18.0),
         _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=2, lat=14.0),
@@ -164,15 +111,14 @@ def test_load_context_dsv4_kind_module_data_keys_by_tp(tmp_path):
     ]
     path = _write_csv(tmp_path / "csa_ctx.txt", _CTX_HEADER, rows)
     data = load_context_dsv4_kind_module_data(path)
-    sub = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][
-        _FLASH_NATIVE_HEADS
-    ][4]
-    # keys at the 6th level are tp_size {1, 2, 4, 8}
-    assert set(sub.keys()) == {1, 2, 4, 8}
-    # axis order continues [tp][s][b]
-    assert sub[8][8192][1]["latency"] == pytest.approx(10.5)
+    arch = "DeepseekV4ForCausalLM"
+    sub = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][arch][4]
+    # keys at the 6th level are local num_heads {64, 32, 16, 8}
+    assert set(sub.keys()) == {8, 16, 32, 64}
+    # axis order continues [num_heads][prefix][s][b]; context step is the prefix.
+    assert sub[8][0][8192][1]["latency"] == pytest.approx(10.5)
     # TP variation must be preserved (smaller TP slower; projections 1/N sharded)
-    assert sub[1][8192][1]["latency"] > sub[8][8192][1]["latency"]
+    assert sub[64][0][8192][1]["latency"] > sub[8][0][8192][1]["latency"]
 
 
 def test_load_generation_dsv4_kind_module_data_b_before_s(tmp_path):
@@ -189,37 +135,14 @@ def test_load_generation_dsv4_kind_module_data_b_before_s(tmp_path):
     ]
     path = _write_csv(tmp_path / "csa_gen.txt", _CTX_HEADER, rows)
     data = load_generation_dsv4_kind_module_data(path)
-    sub = data[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][_FLASH_NATIVE_HEADS][4]
-    # axis order [tp][b][s_total] — b comes before s_total
+    arch = "DeepseekV4ForCausalLM"
+    sub = data[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][arch][4]
+    # axis order [num_heads][b][s_total] — b comes before s_total
     s_total_short = 1 + 1023  # isl + step
     s_total_long = 1 + 8191
-    assert sub[1][1][s_total_short]["latency"] == pytest.approx(0.1)
-    assert sub[1][4][s_total_short]["latency"] == pytest.approx(0.4)
-    assert sub[1][4][s_total_long]["latency"] == pytest.approx(1.0)
-
-
-def test_load_context_dsv4_kind_module_data_keeps_native_heads_separate(tmp_path):
-    rows = [
-        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=1, lat=18.0, model=_FLASH_MODEL),
-        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=1, lat=23.0, model=_PRO_MODEL),
-    ]
-    path = _write_csv(tmp_path / "csa_ctx_models.txt", _CTX_HEADER, rows)
-    data = load_context_dsv4_kind_module_data(path)
-    data = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block]
-    assert data[_FLASH_NATIVE_HEADS][4][1][8192][1]["latency"] == pytest.approx(18.0)
-    assert data[_PRO_NATIVE_HEADS][4][1][8192][1]["latency"] == pytest.approx(23.0)
-
-
-def test_load_generation_dsv4_kind_module_data_keeps_native_heads_separate(tmp_path):
-    rows = [
-        _gen_row(attn_kind="hca", cr=128, bs=1, isl=1, step=1023, tp=1, lat=0.2, model=_FLASH_MODEL),
-        _gen_row(attn_kind="hca", cr=128, bs=1, isl=1, step=1023, tp=1, lat=0.6, model=_PRO_MODEL),
-    ]
-    path = _write_csv(tmp_path / "hca_gen_models.txt", _CTX_HEADER, rows)
-    data = load_generation_dsv4_kind_module_data(path)
-    data = data[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block]
-    assert data[_FLASH_NATIVE_HEADS][128][1][1][1024]["latency"] == pytest.approx(0.2)
-    assert data[_PRO_NATIVE_HEADS][128][1][1][1024]["latency"] == pytest.approx(0.6)
+    assert sub[64][1][s_total_short]["latency"] == pytest.approx(0.1)
+    assert sub[64][4][s_total_short]["latency"] == pytest.approx(0.4)
+    assert sub[64][4][s_total_long]["latency"] == pytest.approx(1.0)
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -228,14 +151,21 @@ def test_load_generation_dsv4_kind_module_data_keeps_native_heads_separate(tmp_p
 
 
 def test_deep_merge_dsv4_dicts_preserves_disjoint_keys():
-    csa = {"f": {"k": {"g": {4: {"x": 1}}}}}
-    hca = {"f": {"k": {"g": {128: {"x": 2}}}}}
+    csa = {"f": {"k": {"g": {"a": {4: {"x": 1}}}}}}
+    hca = {"f": {"k": {"g": {"a": {128: {"x": 2}}}}}}
     merged = {}
     for d in (csa, hca):
         _deep_merge_dsv4_dicts(merged, d)
-    assert sorted(merged["f"]["k"]["g"].keys()) == [4, 128]
-    assert merged["f"]["k"]["g"][4] == {"x": 1}
-    assert merged["f"]["k"]["g"][128] == {"x": 2}
+    assert sorted(merged["f"]["k"]["g"]["a"].keys()) == [4, 128]
+    assert merged["f"]["k"]["g"]["a"][4] == {"x": 1}
+    assert merged["f"]["k"]["g"]["a"][128] == {"x": 2}
+
+
+def test_deep_merge_dsv4_dicts_handles_none():
+    dest = {"a": 1}
+    out = _deep_merge_dsv4_dicts(dest, None)
+    assert out is dest
+    assert dest == {"a": 1}
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -256,303 +186,54 @@ def test_robust_3d_lookup_exact_match_short_circuits():
 
 
 # ───────────────────────────────────────────────────────────────────────
-# _lookup_dsv4_sparse_kernel — tp fallback + past_kv interp
+# Generic interpolation cache regressions
 # ───────────────────────────────────────────────────────────────────────
 
 
-def _make_sparse_db_with_paged_mqa(tmp_path, *, lat_at_past0: float, lat_at_past8192: float):
-    """Helper: build a minimal PerfDatabase carrying paged_mqa_logits at tp=1."""
+def test_interp_2d_linear_ignores_stale_id_cache():
     from aiconfigurator.sdk.perf_database import PerfDatabase
 
-    rows = [
-        _sparse_row(kernel="paged_mqa_logits", bs=1, isl=8192, past_kv=0, tp=1, cr=4, lat=lat_at_past0),
-        _sparse_row(kernel="paged_mqa_logits", bs=1, isl=8192, past_kv=8192, tp=1, cr=4, lat=lat_at_past8192),
-    ]
-    path = _write_csv(tmp_path / "paged.txt", _SPARSE_HEADER, rows)
-    data = load_dsv4_sparse_kernel_data(path)
-
-    class _DB:
-        # mimic the attribute name PerfDatabase uses
-        _dsv4_sparse_kernel_data: ClassVar[dict] = {
-            "paged_mqa_logits": LoadedOpData(data, None, path),
-        }
-        _interp_1d = PerfDatabase._interp_1d
-        _nearest_1d_point_helper = PerfDatabase._nearest_1d_point_helper
-
-    return _DB()
-
-
-def _sparse_value(latency: float) -> dict[str, float]:
-    return {"latency": latency}
-
-
-def _sparse_sampled_batch_caps_grid(*, offset: float = 0.0) -> dict:
-    """Mock sparse-kernel data with sampled DeepSeek-V4 batch caps."""
-    return {
-        1024: {
-            1: _sparse_value(offset + 1.00),
-            2: _sparse_value(offset + 3.00),
-            4: _sparse_value(offset + 6.00),
-            8: _sparse_value(offset + 12.00),
-        },
-        2048: {
-            1: _sparse_value(offset + 2.00),
-            2: _sparse_value(offset + 4.80),
-            4: _sparse_value(offset + 8.00),
-        },
-        4096: {
-            1: _sparse_value(offset + 3.00),
-            2: _sparse_value(offset + 5.80),
-        },
-        8192: {
-            1: _sparse_value(offset + 4.00),
-        },
+    db = PerfDatabase.__new__(PerfDatabase)
+    data = {
+        0: {0: {"latency": 1.0, "energy": 0.0}, 10: {"latency": 3.0, "energy": 0.0}},
+        10: {0: {"latency": 5.0, "energy": 0.0}, 10: {"latency": 7.0, "energy": 0.0}},
+    }
+    db._extracted_metrics_cache = {
+        id(data): (
+            {0: {0: 100.0, 10: 100.0}, 10: {0: 100.0, 10: 100.0}},
+            {0: {0: 0.0, 10: 0.0}, 10: {0: 0.0, 10: 0.0}},
+        )
     }
 
+    result = PerfDatabase._interp_2d_linear(db, 5, 5, data)
 
-def _make_sparse_db_from_grid(per_tp_dict: dict):
+    assert result["latency"] == pytest.approx(4.0)
+
+
+def test_interp_3d_ignores_stale_id_cache():
     from aiconfigurator.sdk.perf_database import PerfDatabase
 
-    class _DB:
-        _dsv4_sparse_kernel_data: ClassVar[dict] = {
-            "paged_mqa_logits": LoadedOpData(
-                {_FLASH_NATIVE_HEADS: {1: per_tp_dict}},
-                None,
-                "mock_paged_mqa_logits",
-            ),
-        }
-        _interp_2d_linear = PerfDatabase._interp_2d_linear
-        _interp_1d = PerfDatabase._interp_1d
-        _nearest_1d_point_helper = PerfDatabase._nearest_1d_point_helper
+    db = PerfDatabase.__new__(PerfDatabase)
+    data = {}
+    for x in (0, 10):
+        data[x] = {}
+        for y in (0, 10):
+            data[x][y] = {}
+            for z in (0, 10):
+                data[x][y][z] = {"latency": float(x + y + z), "energy": 0.0}
+    db._extracted_metrics_cache = {
+        id(data): (
+            {
+                0: {0: {0: 100.0, 10: 100.0}, 10: {0: 100.0, 10: 100.0}},
+                10: {0: {0: 100.0, 10: 100.0}, 10: {0: 100.0, 10: 100.0}},
+            },
+            {0: {0: {0: 0.0, 10: 0.0}, 10: {0: 0.0, 10: 0.0}}, 10: {0: {0: 0.0, 10: 0.0}, 10: {0: 0.0, 10: 0.0}}},
+        )
+    }
 
-    return _DB()
+    result = PerfDatabase._interp_3d(db, 5, 5, 5, data, "linear")
 
-
-def test_lookup_sparse_kernel_exact_hit(tmp_path):
-    from aiconfigurator.sdk.perf_database import PerfDatabase
-
-    db = _make_sparse_db_with_paged_mqa(tmp_path, lat_at_past0=0.1, lat_at_past8192=0.3)
-    val = PerfDatabase._lookup_dsv4_sparse_kernel(
-        db,
-        kernel="paged_mqa_logits",
-        bs=1,
-        isl=8192,
-        past_kv=0,
-        tp_size=1,
-        native_heads=_FLASH_NATIVE_HEADS,
-    )
-    assert val == pytest.approx(0.1)
-    val = PerfDatabase._lookup_dsv4_sparse_kernel(
-        db,
-        kernel="paged_mqa_logits",
-        bs=1,
-        isl=8192,
-        past_kv=8192,
-        tp_size=1,
-        native_heads=_FLASH_NATIVE_HEADS,
-    )
-    assert val == pytest.approx(0.3)
-
-
-def test_lookup_sparse_kernel_tp_fallback(tmp_path):
-    """Caller asks tp=8 but data only has tp=1 — must fall back to tp=1."""
-    from aiconfigurator.sdk.perf_database import PerfDatabase
-
-    db = _make_sparse_db_with_paged_mqa(tmp_path, lat_at_past0=0.1, lat_at_past8192=0.3)
-    val = PerfDatabase._lookup_dsv4_sparse_kernel(
-        db,
-        kernel="paged_mqa_logits",
-        bs=1,
-        isl=8192,
-        past_kv=8192,
-        tp_size=8,
-        native_heads=_FLASH_NATIVE_HEADS,
-    )
-    assert val == pytest.approx(0.3)
-
-
-def test_lookup_sparse_kernel_past_kv_linear_interp(tmp_path):
-    """Bracketing past_kv values exist — return linear interp."""
-    from aiconfigurator.sdk.perf_database import PerfDatabase
-
-    db = _make_sparse_db_with_paged_mqa(tmp_path, lat_at_past0=0.1, lat_at_past8192=0.3)
-    # midpoint past_kv=4096 → expect 0.2
-    val = PerfDatabase._lookup_dsv4_sparse_kernel(
-        db,
-        kernel="paged_mqa_logits",
-        bs=1,
-        isl=8192,
-        past_kv=4096,
-        tp_size=1,
-        native_heads=_FLASH_NATIVE_HEADS,
-    )
-    assert val == pytest.approx(0.2, rel=1e-3)
-
-
-def test_lookup_sparse_kernel_uses_requested_native_heads(tmp_path):
-    from aiconfigurator.sdk.perf_database import PerfDatabase
-
-    rows = [
-        _sparse_row(kernel="hca_attn", bs=1, isl=8192, past_kv=0, tp=1, cr=128, lat=0.4, model=_FLASH_MODEL),
-        _sparse_row(kernel="hca_attn", bs=1, isl=8192, past_kv=0, tp=1, cr=128, lat=0.9, model=_PRO_MODEL),
-    ]
-    path = _write_csv(tmp_path / "hca_models.txt", _SPARSE_HEADER, rows)
-    data = load_dsv4_sparse_kernel_data(path)
-
-    class _DB:
-        _dsv4_sparse_kernel_data: ClassVar[dict] = {
-            "hca_attn": LoadedOpData(data, None, path),
-        }
-
-    val = PerfDatabase._lookup_dsv4_sparse_kernel(
-        _DB(),
-        kernel="hca_attn",
-        bs=1,
-        isl=8192,
-        past_kv=0,
-        tp_size=1,
-        native_heads=_PRO_NATIVE_HEADS,
-    )
-    assert val == pytest.approx(0.9)
-
-
-def test_lookup_sparse_kernel_uses_cubic_3d_before_fallback():
-    from aiconfigurator.sdk.perf_database import PerfDatabase
-
-    calls = []
-
-    class _DB:
-        _dsv4_sparse_kernel_data: ClassVar[dict] = {
-            "paged_mqa_logits": LoadedOpData(
-                {
-                    _FLASH_NATIVE_HEADS: {
-                        1: {
-                            0: {1024: {1: _sparse_value(1.0)}},
-                            4096: {2048: {2: _sparse_value(4.0)}},
-                        }
-                    }
-                },
-                None,
-                "mock_paged_mqa_logits",
-            ),
-        }
-
-        def _interp_3d(self, x, y, z, data, method):
-            calls.append((x, y, z, method))
-            return {"latency": 7.0}
-
-    val = PerfDatabase._lookup_dsv4_sparse_kernel(
-        _DB(),
-        kernel="paged_mqa_logits",
-        bs=2,
-        isl=1536,
-        past_kv=2048,
-        tp_size=1,
-        native_heads=_FLASH_NATIVE_HEADS,
-    )
-
-    assert val == pytest.approx(7.0)
-    assert calls == [(2048, 1536, 2, "cubic")]
-
-
-def test_lookup_sparse_kernel_uses_b2_when_bs3_s2682_is_missing():
-    from aiconfigurator.sdk.perf_database import PerfDatabase
-
-    db = _make_sparse_db_from_grid({0: _sparse_sampled_batch_caps_grid()})
-    val = PerfDatabase._lookup_dsv4_sparse_kernel(
-        db,
-        kernel="paged_mqa_logits",
-        bs=3,
-        isl=2682,
-        past_kv=0,
-        tp_size=1,
-        native_heads=_FLASH_NATIVE_HEADS,
-    )
-
-    b2_at_2682 = 4.80 + (5.80 - 4.80) * (2682 - 2048) / (4096 - 2048)
-    assert val == pytest.approx(b2_at_2682 * 3 / 2)
-
-
-def test_lookup_sparse_kernel_uses_largest_batch_that_covers_isl():
-    from aiconfigurator.sdk.perf_database import PerfDatabase
-
-    db = _make_sparse_db_from_grid({0: _sparse_sampled_batch_caps_grid()})
-    val = PerfDatabase._lookup_dsv4_sparse_kernel(
-        db,
-        kernel="paged_mqa_logits",
-        bs=5,
-        isl=2682,
-        past_kv=0,
-        tp_size=1,
-        native_heads=_FLASH_NATIVE_HEADS,
-    )
-
-    b2_at_2682 = 4.80 + (5.80 - 4.80) * (2682 - 2048) / (4096 - 2048)
-    assert val == pytest.approx(b2_at_2682 * 5 / 2)
-
-
-def test_lookup_sparse_kernel_uses_b4_when_bs5_s1565_is_missing():
-    from aiconfigurator.sdk.perf_database import PerfDatabase
-
-    isl = 1565.2
-    db = _make_sparse_db_from_grid({0: _sparse_sampled_batch_caps_grid()})
-    val = PerfDatabase._lookup_dsv4_sparse_kernel(
-        db,
-        kernel="paged_mqa_logits",
-        bs=5,
-        isl=isl,
-        past_kv=0,
-        tp_size=1,
-        native_heads=_FLASH_NATIVE_HEADS,
-    )
-
-    b4_at_isl = 6.00 + (8.00 - 6.00) * (isl - 1024) / (2048 - 1024)
-    assert val == pytest.approx(b4_at_isl * 5 / 4)
-
-
-def test_lookup_sparse_kernel_interpolates_past_kv_after_batch_fallback():
-    from aiconfigurator.sdk.perf_database import PerfDatabase
-
-    isl = 1565.2
-    db = _make_sparse_db_from_grid(
-        {
-            0: _sparse_sampled_batch_caps_grid(offset=0.0),
-            4096: _sparse_sampled_batch_caps_grid(offset=4.0),
-        }
-    )
-    val = PerfDatabase._lookup_dsv4_sparse_kernel(
-        db,
-        kernel="paged_mqa_logits",
-        bs=5,
-        isl=isl,
-        past_kv=2048,
-        tp_size=1,
-        native_heads=_FLASH_NATIVE_HEADS,
-    )
-
-    b4_at_isl = 6.00 + (8.00 - 6.00) * (isl - 1024) / (2048 - 1024)
-    at_past_0 = b4_at_isl * 5 / 4
-    at_past_4096 = (b4_at_isl + 4.0) * 5 / 4
-    assert val == pytest.approx((at_past_0 + at_past_4096) / 2)
-
-
-def test_lookup_sparse_kernel_missing_returns_none():
-    """Missing dict / kernel name → None (caller uses SOL ratio fallback)."""
-    from aiconfigurator.sdk.perf_database import PerfDatabase
-
-    class _DB:
-        _dsv4_sparse_kernel_data: ClassVar[dict] = {}
-
-    val = PerfDatabase._lookup_dsv4_sparse_kernel(
-        _DB(),
-        kernel="paged_mqa_logits",
-        bs=1,
-        isl=8192,
-        past_kv=0,
-        tp_size=1,
-        native_heads=_FLASH_NATIVE_HEADS,
-    )
-    assert val is None
+    assert result["latency"] == pytest.approx(15.0)
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -572,7 +253,7 @@ def test_dsv4_test_cases_active_under_no_filter(monkeypatch):
 
 
 def test_dsv4_test_cases_skipped_under_other_model(monkeypatch):
-    """Filter to a non-V4 model → V4 ops emit zero cases (collector skips)."""
+    """Filter to a non-V4 model -> V4 module ops emit zero cases."""
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "deepseek-ai/DeepSeek-V3")
     from collector.case_generator import (
         get_dsv4_csa_context_test_cases,
@@ -590,6 +271,8 @@ def test_dsv4_test_cases_skipped_under_other_model(monkeypatch):
 @pytest.mark.parametrize(
     "model_path",
     [
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "deepseek-ai/DeepSeek-V4-Pro",
         "sgl-project/DeepSeek-V4-Flash-FP8",
         "sgl-project/DeepSeek-V4-Pro-FP8",
     ],
@@ -600,7 +283,7 @@ def test_dsv4_test_cases_active_under_v4_filter(monkeypatch, model_path):
 
     cases = get_dsv4_csa_context_test_cases()
     assert len(cases) > 0
-    # all cases use the caller-provided DeepSeek-V4 model path
+    # all cases use the caller-provided V4 Flash/Pro model path
     assert {c[6] for c in cases} == {model_path}
     # all cases for this op are CSA
     assert {c[7] for c in cases} == {"csa"}
@@ -625,6 +308,26 @@ def test_dsv4_sparse_test_cases_only_indexer_tp1(monkeypatch, model_path):
     hca = get_dsv4_hca_attn_test_cases()
     assert {c[3] for c in paged} == {1}
     assert {c[3] for c in hca} == {1}
+
+
+def test_dsv4_fp8_models_keep_fp8_block_on_pre_blackwell(monkeypatch):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "sgl-project/DeepSeek-V4-Flash-FP8")
+    import collector.case_generator as cases_mod
+
+    monkeypatch.setattr(cases_mod, "_has_native_fp4_experts", lambda: False)
+    cases = cases_mod.get_dsv4_csa_context_test_cases()
+
+    assert "fp8_block" in {c[5] for c in cases}
+
+
+def test_dsv4_native_fp4_models_skip_fp8_block_on_pre_blackwell(monkeypatch):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "deepseek-ai/DeepSeek-V4-Flash")
+    import collector.case_generator as cases_mod
+
+    monkeypatch.setattr(cases_mod, "_has_native_fp4_experts", lambda: False)
+    cases = cases_mod.get_dsv4_csa_context_test_cases()
+
+    assert "fp8_block" not in {c[5] for c in cases}
 
 
 # ───────────────────────────────────────────────────────────────────────
