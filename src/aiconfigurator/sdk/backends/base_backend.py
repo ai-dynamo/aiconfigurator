@@ -1083,6 +1083,7 @@ class BaseBackend:
                         osl=osl,
                         prefix=prefix,
                         seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
+                        gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
                         engine_step_backend=runtime_config.engine_step_backend,
                     ),
                     ctx_tokens=ctx_tokens,
