@@ -10,7 +10,22 @@ import pytest
 import yaml
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.operations.base import Operation
 from aiconfigurator.sdk.perf_database import PerfDatabase
+
+
+@pytest.fixture(autouse=True)
+def _reset_op_load_counts():
+    """Reset ``Operation._load_data_call_count`` between tests.
+
+    Data caches stay intact (the comprehensive_perf_db singleton relies on
+    them); only the instrumentation counter is reset so
+    ``test_load_data_counts.py`` and any future lazy-load assertions start
+    from a clean slate."""
+    Operation._load_data_call_count.clear()
+    yield
+    Operation._load_data_call_count.clear()
+
 
 # ---------------------------------------------------------------------------
 # Single source of truth: every loader function that PerfDatabase.__init__
