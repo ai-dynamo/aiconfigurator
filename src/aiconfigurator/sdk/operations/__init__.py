@@ -25,8 +25,6 @@ from __future__ import annotations
 # logger lives in ``_legacy.py``; per-family migrations don't redirect their
 # log calls until their owning issue lands.
 from aiconfigurator.sdk.operations._legacy import (
-    FallbackOp,
-    OverlapOp,
     logger,  # noqa: F401
 )
 
@@ -57,6 +55,7 @@ from aiconfigurator.sdk.operations.mla import (
     WideEPGenerationMLA,
 )
 from aiconfigurator.sdk.operations.moe import MoE, MoEDispatch, TrtLLMWideEPMoE, TrtLLMWideEPMoEDispatch
+from aiconfigurator.sdk.operations.overlap import FallbackOp, OverlapOp
 
 # Re-export commonly-imported names that the prior monolithic operations.py
 # exposed at module level. Some test files and external callers do
