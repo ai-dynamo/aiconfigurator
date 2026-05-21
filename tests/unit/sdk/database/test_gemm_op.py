@@ -78,10 +78,12 @@ class TestLoadData:
         tests and force a real-disk re-load with no loader patches active."""
         from aiconfigurator.sdk.operations.base import Operation
 
-        initial_count = Operation._load_data_call_count[GEMM]
+        initial_count = Operation._load_data_call_count.get(GEMM, 0)
         for _ in range(5):
             GEMM.load_data(stub_perf_db)
-        assert Operation._load_data_call_count[GEMM] == initial_count, "repeated load_data calls must not re-load"
+        assert Operation._load_data_call_count.get(GEMM, 0) == initial_count, (
+            "repeated load_data calls must not re-load"
+        )
 
     def test_load_data_respects_test_overrides(self, mutable_comprehensive_perf_db):
         """If a test overwrites ``_gemm_data`` after construction, a later

@@ -41,11 +41,11 @@ class GEMM(Operation):
     - ``_scale_matrix_cache``: scale_matrix latency/energy keyed by ``quant_mode -> m -> k``
 
     All three are class-level dicts keyed by
-    ``(system, backend, version, enable_shared_layer)``.
+    ``(systems_root, system, backend, version, enable_shared_layer)``.
     """
 
     # Per-op subclass overrides of Operation._data_cache. Keyed by
-    # (system, backend, version, enable_shared_layer).
+    # (systems_root, system, backend, version, enable_shared_layer).
     _data_cache: ClassVar[dict] = {}
     _compute_scale_cache: ClassVar[dict] = {}
     _scale_matrix_cache: ClassVar[dict] = {}

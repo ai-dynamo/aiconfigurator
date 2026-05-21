@@ -52,6 +52,12 @@ def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]
 def set_systems_paths(raw_paths: str | Iterable[str] | None) -> None:
     """
     Override the system search paths for the current process.
+
+    Also evicts every Operation subclass's class-level CSV cache via
+    ``clear_all_op_caches()`` — those caches are keyed by ``systems_root``
+    among other things, so changing the path set could otherwise serve
+    stale rows on a subsequent ``PerfDatabase`` construction that aliases
+    a previously-loaded key tuple.
     """
     global _SYSTEMS_PATHS
     resolved_paths = _normalize_systems_paths(raw_paths)
@@ -62,6 +68,9 @@ def set_systems_paths(raw_paths: str | Iterable[str] | None) -> None:
             f"Invalid entries: {', '.join(invalid_paths)}"
         )
     _SYSTEMS_PATHS = resolved_paths
+    from aiconfigurator.sdk.operations.base import clear_all_op_caches
+
+    clear_all_op_caches()
 
 
 def get_systems_paths() -> list[str]:
@@ -563,7 +572,13 @@ def _store_loaded_database(
 
 
 def clear_database_runtime_caches(system: str, backend: str, version: str) -> None:
-    """Clear per-query/interpolation caches for one loaded database."""
+    """Clear per-query/interpolation caches for one loaded database.
+
+    Also evicts every Operation subclass's class-level CSV cache via
+    ``clear_all_op_caches()`` so a subsequent reload reads fresh rows
+    from disk — the per-class caches survive the per-instance
+    ``clear_runtime_caches()`` and would otherwise serve the prior data.
+    """
     seen_database_ids: set[int] = set()
     for cache_key, systems_cache in databases_cache.items():
         _, cached_system, _ = cache_key
@@ -583,9 +598,20 @@ def clear_database_runtime_caches(system: str, backend: str, version: str) -> No
         if callable(clear_runtime_caches):
             clear_runtime_caches()
 
+    from aiconfigurator.sdk.operations.base import clear_all_op_caches
+
+    clear_all_op_caches()
+
 
 def unload_database(system: str, backend: str, version: str) -> None:
-    """Remove one loaded database from every systems-root/shared-mode cache."""
+    """Remove one loaded database from every systems-root/shared-mode cache.
+
+    Also evicts every Operation subclass's class-level CSV cache via
+    ``clear_all_op_caches()`` so a future ``get_database(...)`` for the
+    same ``(system, backend, version)`` rebuilds the op-level caches from
+    disk instead of aliasing the stale tables that survived the database
+    pop.
+    """
     for cache_key in list(databases_cache.keys()):
         _, cached_system, _ = cache_key
         if cached_system != system:
@@ -604,6 +630,10 @@ def unload_database(system: str, backend: str, version: str) -> None:
             systems_cache.pop(backend, None)
         if not systems_cache:
             databases_cache.pop(cache_key, None)
+
+    from aiconfigurator.sdk.operations.base import clear_all_op_caches
+
+    clear_all_op_caches()
 
 
 def _load_database_ref_in_parent(ref: DatabaseRef) -> PerfDatabase | None:

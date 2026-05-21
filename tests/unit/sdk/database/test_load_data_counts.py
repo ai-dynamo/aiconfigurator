@@ -22,7 +22,7 @@ def test_gemm_loads_exactly_once_across_many_queries(stub_perf_db):
     # The autouse ``_reset_op_load_counts`` fixture cleared the counter
     # before this test ran. ``stub_perf_db`` already triggered one eager
     # load during construction.
-    initial_count = Operation._load_data_call_count[GEMM]
+    initial_count = Operation._load_data_call_count.get(GEMM, 0)
     assert initial_count <= 1, "GEMM should load at most once during db construction"
 
     quant_mode = common.GEMMQuantMode.bfloat16
@@ -30,16 +30,16 @@ def test_gemm_loads_exactly_once_across_many_queries(stub_perf_db):
         stub_perf_db.query_gemm(m, n, k, quant_mode)
 
     # Many queries → still loaded exactly once.
-    assert Operation._load_data_call_count[GEMM] == initial_count
+    assert Operation._load_data_call_count.get(GEMM, 0) == initial_count
 
 
 def test_gemm_load_count_unaffected_by_repeated_load_data_calls(stub_perf_db):
     """Calling ``GEMM.load_data`` directly multiple times must not increment
     the counter beyond the initial load."""
-    initial_count = Operation._load_data_call_count[GEMM]
+    initial_count = Operation._load_data_call_count.get(GEMM, 0)
     for _ in range(5):
         GEMM.load_data(stub_perf_db)
-    assert Operation._load_data_call_count[GEMM] == initial_count
+    assert Operation._load_data_call_count.get(GEMM, 0) == initial_count
 
 
 def test_clear_all_op_caches_resets_counter_and_class_cache():
@@ -62,10 +62,17 @@ def test_clear_all_op_caches_resets_counter_and_class_cache():
         GEMM._data_cache[sentinel_key] = "sentinel"
         Operation._load_data_call_count[GEMM] = 99
 
+        # Seed the other two GEMM caches too so we can verify the contract
+        # clears all three per-class caches, not just ``_data_cache``.
+        GEMM._compute_scale_cache[sentinel_key] = "compute-scale-sentinel"
+        GEMM._scale_matrix_cache[sentinel_key] = "scale-matrix-sentinel"
+
         clear_all_op_caches()
 
         assert sentinel_key not in GEMM._data_cache
-        assert Operation._load_data_call_count[GEMM] == 0
+        assert sentinel_key not in GEMM._compute_scale_cache
+        assert sentinel_key not in GEMM._scale_matrix_cache
+        assert Operation._load_data_call_count.get(GEMM, 0) == 0
     finally:
         GEMM._data_cache.update(saved["data"])
         GEMM._compute_scale_cache.update(saved["compute_scale"])
