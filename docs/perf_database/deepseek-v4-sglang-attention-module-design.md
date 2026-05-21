@@ -121,7 +121,7 @@ python3 collector/sglang/collect_dsv4_attn.py \
 Full collection for attention modules:
 
 ```bash
-cd /raid/kimi/ds4_new/aiconfigurator
+# From the repository root:
 python3 collector/collect.py \
   --backend sglang \
   --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
@@ -489,7 +489,7 @@ The correction applies only to CSA (`compress_ratio == 4`). HCA uses
 Collect all SGLang DeepSeek-V4 Flash FP8 module-level attention data:
 
 ```bash
-cd /raid/kimi/ds4_new/aiconfigurator
+# From the repository root:
 python3 collector/collect.py \
   --backend sglang \
   --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
@@ -515,15 +515,14 @@ bash collector/collect_comm.sh --all_reduce_backend sglang --skip-nccl
 Run focused unit tests for the DeepSeek-V4 module path:
 
 ```bash
-cd /raid/kimi/ds4_new/aiconfigurator
-PYTHONPATH=/raid/kimi/ds4_new/aiconfigurator/src \
+PYTHONPATH=src \
 python3 -m pytest tests/unit/sdk/database/test_deepseek_v4_module.py -q
 ```
 
 Run only the CSA top-k correction tests:
 
 ```bash
-PYTHONPATH=/raid/kimi/ds4_new/aiconfigurator/src \
+PYTHONPATH=src \
 python3 -m pytest tests/unit/sdk/database/test_deepseek_v4_module.py \
   -k "csa_topk_bandwidth_delta" -q
 ```
