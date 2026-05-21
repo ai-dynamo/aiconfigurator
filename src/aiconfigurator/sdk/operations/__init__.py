@@ -29,11 +29,8 @@ from aiconfigurator.sdk.operations._legacy import (
     ContextMLA,
     DeepSeekV4MHCModule,
     FallbackOp,
-    GDNKernel,
     GenerationDeepSeekV4AttentionModule,
     GenerationMLA,
-    Mamba2,
-    Mamba2Kernel,
     MLABmm,
     MLAModule,
     MoE,
@@ -58,6 +55,7 @@ from aiconfigurator.sdk.operations.dsa import ContextDSAModule, GenerationDSAMod
 from aiconfigurator.sdk.operations.elementwise import ElementWise
 from aiconfigurator.sdk.operations.embedding import Embedding
 from aiconfigurator.sdk.operations.gemm import GEMM
+from aiconfigurator.sdk.operations.mamba import GDNKernel, Mamba2, Mamba2Kernel
 
 # Re-export commonly-imported names that the prior monolithic operations.py
 # exposed at module level. Some test files and external callers do
