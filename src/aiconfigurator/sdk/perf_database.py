@@ -2918,8 +2918,8 @@ class PerfDatabase:
         self._mla_bmm_data = _load_op_data(PerfDataFilename.mla_bmm)
         self._context_mla_module_data = _load_op_data(PerfDataFilename.mla_context_module)
         self._generation_mla_module_data = _load_op_data(PerfDataFilename.mla_generation_module)
-        self._mamba2_data = _load_op_data(PerfDataFilename.mamba2)
-        self._gdn_data = _load_op_data(PerfDataFilename.gdn)
+        # mamba2 + gdn moved to operations/mamba.py (Mamba2Kernel.load_data /
+        # GDNKernel.load_data handle the loads).
         # compute_scale + scale_matrix are GEMM-owned (loaded by GEMM.load_data below)
         # context_dsa_module + generation_dsa_module are DSA-owned (loaded by
         # ContextDSAModule.load_data / GenerationDSAModule.load_data below).
@@ -2993,6 +2993,7 @@ class PerfDatabase:
         from aiconfigurator.sdk.operations.communication import NCCL, CustomAllReduce
         from aiconfigurator.sdk.operations.dsa import ContextDSAModule, GenerationDSAModule
         from aiconfigurator.sdk.operations.gemm import GEMM
+        from aiconfigurator.sdk.operations.mamba import GDNKernel, Mamba2Kernel
 
         GEMM.load_data(self)
         ContextAttention.load_data(self)
@@ -3001,6 +3002,8 @@ class PerfDatabase:
         NCCL.load_data(self)
         ContextDSAModule.load_data(self)
         GenerationDSAModule.load_data(self)
+        Mamba2Kernel.load_data(self)
+        GDNKernel.load_data(self)
 
         # pre-correction (non-migrated ops; migrated ops apply their own
         # SOL correction during ``load_data``)
@@ -5182,105 +5185,23 @@ class PerfDatabase:
         n_groups: int,
         chunk_size: int,
     ) -> PerformanceResult:
-        """
-        Query Mamba2 kernel (Conv1D or SSM) latency and energy.
+        """Query Mamba2 kernel latency. Delegates to ``Mamba2Kernel._query_mamba2_table``."""
+        from aiconfigurator.sdk.operations.mamba import Mamba2Kernel
 
-        Args:
-            phase: "context" or "generation"
-            kernel_source: "causal_conv1d_fn", "mamba_chunk_scan_combined",
-                           "causal_conv1d_update", or "selective_state_update"
-            batch_size: batch size
-            seq_len: sequence length (context only; use 0 or any for generation)
-            d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size: model config
-
-        Returns:
-            PerformanceResult with latency (ms) and energy (W·ms).
-            Uses SOL-based fallback when mamba2_perf data is not loaded.
-        """
-        mamba2_data: dict = getattr(self, "_mamba2_data", {})
-
-        def get_sol() -> tuple[float, float, float]:
-            d_inner = nheads * head_dim
-            conv_dim = d_inner + 2 * n_groups * d_state
-            x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
-            if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
-                conv_read_bytes = x * conv_dim * (d_conv + 1) * 2
-                conv_write_bytes = x * conv_dim * 2
-                total_bytes = conv_read_bytes + conv_write_bytes
-            else:
-                ssm_read_bytes = x * (d_inner + n_groups * d_state * 2 + nheads) * 2
-                ssm_write_bytes = x * d_inner * 2
-                total_bytes = ssm_read_bytes + ssm_write_bytes
-            sol_mem = total_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            return sol_mem, 0, sol_mem
-
-        if not mamba2_data:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-        model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
-        try:
-            by_phase = mamba2_data[kernel_source]
-        except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        try:
-            by_key = by_phase[phase]
-        except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        if model_key not in by_key:
-            # Nearest config by d_model
-            keys_with_d_model = [k for k in by_key if k[0] == d_model]
-            if keys_with_d_model:
-                model_key = keys_with_d_model[0]
-            else:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-        table = by_key[model_key]
-
-        if phase == "context":
-            if seq_len is None or seq_len <= 0:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            try:
-                result = self._interp_2d_linear(batch_size, seq_len, table)
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            return self._interp_pr(
-                result["latency"],
-                energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
-            )
-        else:
-            try:
-                batch_left, batch_right = self._nearest_1d_point_helper(
-                    batch_size, list(table.keys()), inner_only=False
-                )
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-            # Ensure we pass entry dicts {latency, power, energy}; handle legacy nested batch_size -> seq_len -> entry
-            def _mamba2_gen_entry(val):
-                if isinstance(val, dict) and "latency" in val:
-                    return val
-                if isinstance(val, dict) and val:
-                    inner = next(iter(val.values()))
-                    if isinstance(inner, dict) and "latency" in inner:
-                        return inner
-                return None
-
-            y_left = _mamba2_gen_entry(table[batch_left])
-            y_right = _mamba2_gen_entry(table[batch_right])
-            if y_left is None or y_right is None:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            result = self._interp_1d(
-                [batch_left, batch_right],
-                [y_left, y_right],
-                batch_size,
-            )
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", result.get("power", 0.0) * lat)
-            else:
-                lat = result
-                energy = 0.0
-            return self._interp_pr(lat, energy=energy)
+        return Mamba2Kernel._query_mamba2_table(
+            self,
+            phase,
+            kernel_source,
+            batch_size,
+            seq_len,
+            d_model,
+            d_state,
+            d_conv,
+            nheads,
+            head_dim,
+            n_groups,
+            chunk_size,
+        )
 
     def query_gdn(
         self,
@@ -5295,126 +5216,22 @@ class PerfDatabase:
         head_v_dim: int,
         d_conv: int,
     ) -> PerformanceResult:
-        """
-        Query Gated DeltaNet (GDN) kernel latency and energy for Qwen3.5 linear_attention layers.
+        """Query GDN kernel latency. Delegates to ``GDNKernel._query_gdn_table``."""
+        from aiconfigurator.sdk.operations.mamba import GDNKernel
 
-        Args:
-            phase: "context" or "generation"
-            kernel_source: "causal_conv1d_fn", "chunk_gated_delta_rule" (context),
-                           "causal_conv1d_update", "fused_sigmoid_gating_delta_rule_update" (generation)
-            batch_size: batch size
-            seq_len: sequence length (context only; unused for generation)
-            d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv: GDN layer config
-
-        Returns:
-            PerformanceResult with latency (ms) and energy (W·ms).
-            Uses SOL-based fallback when gdn_perf data is not loaded.
-        """
-        gdn_data: dict = getattr(self, "_gdn_data", {})
-
-        def get_sol() -> tuple[float, float, float]:
-            x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
-            if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
-                conv_channels = num_k_heads * head_k_dim + num_v_heads * head_v_dim
-                read_bytes = x * conv_channels * (d_conv + 1) * 2
-                write_bytes = x * conv_channels * 2
-            elif kernel_source == "chunk_gated_delta_rule":
-                # GDN chunked scan (context phase).
-                # State shape: [num_v_heads, head_k_dim, head_v_dim], stored as BF16 in global memory.
-                # Intermediate h_chunks [B, NT, H, K, V] are written by chunk_delta_h and read by
-                # chunk_o via global memory (separate kernel launches). Allocated via k.new_empty()
-                # (no dtype override), so matches input dtype: FP16/BF16 → 2 bytes.
-                chunk_size = 64  # flash-linear-attention default for chunk_gated_delta_rule
-                state_size = num_v_heads * head_k_dim * head_v_dim
-                num_chunks = (seq_len // chunk_size) if seq_len else 0
-                h_chunks_bytes = num_chunks * state_size * 2 * batch_size
-                read_bytes = (
-                    x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2
-                    + state_size * 2 * batch_size
-                    + h_chunks_bytes  # chunk_o reads h_chunks from global memory
-                )
-                write_bytes = (
-                    x * num_v_heads * head_v_dim * 2
-                    + state_size * 2 * batch_size
-                    + h_chunks_bytes  # chunk_delta_h writes h_chunks to global memory
-                )
-            elif kernel_source == "fused_sigmoid_gating_delta_rule_update":
-                # GDN single-step decode. State stored as BF16 in global memory.
-                state_size = num_v_heads * head_k_dim * head_v_dim
-                read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 2 * batch_size
-                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 2 * batch_size
-            else:
-                read_bytes = x * d_model * 2
-                write_bytes = x * d_model * 2
-            sol_mem = (read_bytes + write_bytes) / self.system_spec["gpu"]["mem_bw"] * 1000
-            return sol_mem, 0, sol_mem
-
-        if not gdn_data:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-        model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
-        try:
-            by_phase = gdn_data[kernel_source]
-        except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        try:
-            by_key = by_phase[phase]
-        except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        if model_key not in by_key:
-            # Nearest config by d_model, then num_v_heads as secondary discriminator
-            keys_same_d_model = [k for k in by_key if k[0] == d_model]
-            if keys_same_d_model:
-                model_key = min(keys_same_d_model, key=lambda k: abs(k[3] - num_v_heads))
-            else:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-        table = by_key[model_key]
-
-        if phase == "context":
-            if seq_len is None or seq_len <= 0:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            try:
-                result = self._interp_2d_linear(batch_size, seq_len, table)
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            return self._interp_pr(
-                result["latency"],
-                energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
-            )
-        else:
-            try:
-                batch_left, batch_right = self._nearest_1d_point_helper(
-                    batch_size, list(table.keys()), inner_only=False
-                )
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-            def _gdn_gen_entry(val):
-                if isinstance(val, dict) and "latency" in val:
-                    return val
-                if isinstance(val, dict) and val:
-                    inner = next(iter(val.values()))
-                    if isinstance(inner, dict) and "latency" in inner:
-                        return inner
-                return None
-
-            y_left = _gdn_gen_entry(table[batch_left])
-            y_right = _gdn_gen_entry(table[batch_right])
-            if y_left is None or y_right is None:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            result = self._interp_1d(
-                [batch_left, batch_right],
-                [y_left, y_right],
-                batch_size,
-            )
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", result.get("power", 0.0) * lat)
-            else:
-                lat = result
-                energy = 0.0
-            return self._interp_pr(lat, energy=energy)
+        return GDNKernel._query_gdn_table(
+            self,
+            phase,
+            kernel_source,
+            batch_size,
+            seq_len,
+            d_model,
+            num_k_heads,
+            head_k_dim,
+            num_v_heads,
+            head_v_dim,
+            d_conv,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_p2p(
