@@ -86,8 +86,7 @@ def test_non_dsv4_vllm_019_error_remains_fail(monkeypatch):
 def test_kimi_moonshot_trtllm_b200_int4_wo_is_framework_incompatible(monkeypatch):
     def fake_run_mode(**_kwargs):
         raise ValueError(
-            "Unsupported moe quant mode 'int4_wo' for system='b200_sxm', "
-            "backend='trtllm', version='1.3.0rc10'."
+            "Unsupported moe quant mode 'int4_wo' for system='b200_sxm', backend='trtllm', version='1.3.0rc10'."
         )
 
     monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
