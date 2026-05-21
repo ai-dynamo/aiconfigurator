@@ -29,6 +29,17 @@ def test_vllm_supported_quant_modes_include_fp8_static(mutable_comprehensive_per
     assert modes.count(common.GEMMQuantMode.fp8_static.name) == 1
 
 
+def test_sglang_supported_quant_modes_include_fp8_static(mutable_comprehensive_perf_db):
+    db = mutable_comprehensive_perf_db
+    db.backend = common.BackendName.sglang.value
+    db._update_support_matrix()
+
+    modes = db.supported_quant_mode["gemm"]
+    assert common.GEMMQuantMode.fp8.name in modes
+    assert common.GEMMQuantMode.fp8_static.name in modes
+    assert modes.count(common.GEMMQuantMode.fp8_static.name) == 1
+
+
 def test_query_gemm_fp8_static_reuses_fp8_table(comprehensive_perf_db):
     m, n, k = 32, 256, 512
     fp8_result = comprehensive_perf_db.query_gemm(m, n, k, common.GEMMQuantMode.fp8)
@@ -168,11 +179,11 @@ def test_trtllm_gemm_query_subtracts_overheads_for_fp8_static():
     assert db3.calls == [("gemm", common.GEMMQuantMode.fp8)]
 
 
-def test_vllm_gemm_query_does_not_subtract_overheads_for_fp8_static():
+@pytest.mark.parametrize("backend", [common.BackendName.vllm.value, common.BackendName.sglang.value])
+def test_non_trtllm_gemm_query_does_not_subtract_overheads_for_fp8_static(backend):
     class FakeDatabase:
-        backend = common.BackendName.vllm.value
-
         def __init__(self):
+            self.backend = backend
             self.calls: list[tuple[str, common.GEMMQuantMode]] = []
 
         def query_gemm(self, m, n, k, quant_mode, database_mode=None):
@@ -180,10 +191,10 @@ def test_vllm_gemm_query_does_not_subtract_overheads_for_fp8_static():
             return PerformanceResult(10.0, energy=100.0)
 
         def query_compute_scale(self, m, k, quant_mode, database_mode=None):
-            raise AssertionError("vLLM fp8_static GEMM should not query compute_scale")
+            raise AssertionError(f"{backend} fp8_static GEMM should not query compute_scale")
 
         def query_scale_matrix(self, m, k, quant_mode, database_mode=None):
-            raise AssertionError("vLLM fp8_static GEMM should not query scale_matrix")
+            raise AssertionError(f"{backend} fp8_static GEMM should not query scale_matrix")
 
     db = FakeDatabase()
     op = ops.GEMM(

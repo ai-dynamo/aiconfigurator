@@ -3551,13 +3551,15 @@ class PerfDatabase:
         # We need to collect quant_modes from the nested structure
         if self.backend == "sglang":
             wideep_context_mla_modes = set()
-            for kernel_source in self._wideep_context_mla_data or {}:
-                for quant_mode in (self._wideep_context_mla_data or {})[kernel_source]:
+            wideep_context_mla_data = getattr(self, "_wideep_context_mla_data", None) or {}
+            for kernel_source in wideep_context_mla_data:
+                for quant_mode in wideep_context_mla_data[kernel_source]:
                     wideep_context_mla_modes.add(quant_mode.name)
 
             wideep_generation_mla_modes = set()
-            for kernel_source in self._wideep_generation_mla_data or {}:
-                for kv_cache_dtype in (self._wideep_generation_mla_data or {})[kernel_source]:
+            wideep_generation_mla_data = getattr(self, "_wideep_generation_mla_data", None) or {}
+            for kernel_source in wideep_generation_mla_data:
+                for kv_cache_dtype in wideep_generation_mla_data[kernel_source]:
                     wideep_generation_mla_modes.add(kv_cache_dtype.name)
 
             self.supported_quant_mode = {
@@ -3585,6 +3587,10 @@ class PerfDatabase:
                 "wideep_context_mla": list(wideep_context_mla_modes),
                 "wideep_generation_mla": list(wideep_generation_mla_modes),
             }
+            # `fp8_static` is a behavioral mode that reuses `fp8` GEMM perf tables.
+            gemm_modes = self.supported_quant_mode.get("gemm", []) or []
+            if common.GEMMQuantMode.fp8.name in gemm_modes and common.GEMMQuantMode.fp8_static.name not in gemm_modes:
+                gemm_modes.append(common.GEMMQuantMode.fp8_static.name)
         elif self.backend == "trtllm":
             self.supported_quant_mode = {
                 "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),

@@ -99,10 +99,10 @@ Qwen/Qwen3-32B-FP8,Qwen3ForCausalLM,b200_sxm,trtllm,1.3.0rc10,agg,PASS,
 Qwen/Qwen3-32B-FP8,Qwen3ForCausalLM,b200_sxm,trtllm,1.3.0rc10,disagg,PASS,
 Qwen/Qwen3-32B-FP8,Qwen3ForCausalLM,b200_sxm,vllm,0.19.0,agg,PASS,
 Qwen/Qwen3-32B-FP8,Qwen3ForCausalLM,b200_sxm,vllm,0.19.0,disagg,PASS,
-Qwen/Qwen3-32B-FP8-Static-PerTensor,Qwen3ForCausalLM,b200_sxm,sglang,0.5.10,agg,HW_INCOMPATIBLE,"CPU-verified deterministic unhealable: ValueError: Unsupported gemm quant mode 'fp8_static' for system='b200_sxm', backend='sglang', version='0.5.10'. Supported gemm modes: ['bfloat16', 'fp8', 'fp8_block', 'nvfp4']"
-Qwen/Qwen3-32B-FP8-Static-PerTensor,Qwen3ForCausalLM,b200_sxm,sglang,0.5.10,disagg,HW_INCOMPATIBLE,"CPU-verified deterministic unhealable: ValueError: Unsupported gemm quant mode 'fp8_static' for system='b200_sxm', backend='sglang', version='0.5.10'. Supported gemm modes: ['bfloat16', 'fp8', 'fp8_block', 'nvfp4']"
-Qwen/Qwen3-32B-FP8-Static-PerTensor,Qwen3ForCausalLM,b200_sxm,sglang,0.5.9,agg,HW_INCOMPATIBLE,"CPU-verified deterministic unhealable: ValueError: Unsupported gemm quant mode 'fp8_static' for system='b200_sxm', backend='sglang', version='0.5.9'. Supported gemm modes: ['bfloat16', 'fp8', 'fp8_block', 'nvfp4']"
-Qwen/Qwen3-32B-FP8-Static-PerTensor,Qwen3ForCausalLM,b200_sxm,sglang,0.5.9,disagg,HW_INCOMPATIBLE,"CPU-verified deterministic unhealable: ValueError: Unsupported gemm quant mode 'fp8_static' for system='b200_sxm', backend='sglang', version='0.5.9'. Supported gemm modes: ['bfloat16', 'fp8', 'fp8_block', 'nvfp4']"
+Qwen/Qwen3-32B-FP8-Static-PerTensor,Qwen3ForCausalLM,b200_sxm,sglang,0.5.10,agg,PASS,
+Qwen/Qwen3-32B-FP8-Static-PerTensor,Qwen3ForCausalLM,b200_sxm,sglang,0.5.10,disagg,PASS,
+Qwen/Qwen3-32B-FP8-Static-PerTensor,Qwen3ForCausalLM,b200_sxm,sglang,0.5.9,agg,PASS,
+Qwen/Qwen3-32B-FP8-Static-PerTensor,Qwen3ForCausalLM,b200_sxm,sglang,0.5.9,disagg,PASS,
 Qwen/Qwen3-32B-FP8-Static-PerTensor,Qwen3ForCausalLM,b200_sxm,trtllm,1.2.0rc5,agg,PASS,
 Qwen/Qwen3-32B-FP8-Static-PerTensor,Qwen3ForCausalLM,b200_sxm,trtllm,1.2.0rc5,disagg,PASS,
 Qwen/Qwen3-32B-FP8-Static-PerTensor,Qwen3ForCausalLM,b200_sxm,trtllm,1.3.0rc10,agg,PASS,
