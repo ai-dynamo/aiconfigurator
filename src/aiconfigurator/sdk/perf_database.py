@@ -7219,9 +7219,17 @@ class PerfDatabase:
                     except (KeyError, TypeError):
                         raw_dsa_dict = None
                 try:
-                    if num_heads in dsa_dict and full_s in dsa_dict[num_heads] and b in dsa_dict[num_heads][full_s]:
+                    result = self._interp_dsa_context_topk_piecewise_from_raw(
+                        num_heads, full_s, b, raw_dsa_dict, index_topk
+                    )
+                    if (
+                        result is None
+                        and num_heads in dsa_dict
+                        and full_s in dsa_dict[num_heads]
+                        and b in dsa_dict[num_heads][full_s]
+                    ):
                         result = dsa_dict[num_heads][full_s][b]
-                    elif num_heads in dsa_dict and full_s in dsa_dict[num_heads]:
+                    elif result is None and num_heads in dsa_dict and full_s in dsa_dict[num_heads]:
                         batch_dict = dsa_dict[num_heads][full_s]
                         batch_keys = sorted(batch_dict)
                         if len(batch_keys) < 2:
@@ -7244,14 +7252,10 @@ class PerfDatabase:
                                 "power": interp_batch_metric("power"),
                                 "energy": interp_batch_metric("energy"),
                             }
-                    else:
+                    if result is None:
                         result = self._interp_dsa_context_topk_piecewise_from_raw(
-                            num_heads, full_s, b, raw_dsa_dict, index_topk
+                            num_heads, full_s, b, dsa_dict, index_topk
                         )
-                        if result is None:
-                            result = self._interp_dsa_context_topk_piecewise_from_raw(
-                                num_heads, full_s, b, dsa_dict, index_topk
-                            )
                     if result is None:
                         result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
                     latency = result["latency"]

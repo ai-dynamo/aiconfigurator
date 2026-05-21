@@ -192,6 +192,28 @@ def _should_retry_with_large_worker(error_message: str | None) -> bool:
     )
 
 
+def _is_known_framework_incompatible_gap(
+    *,
+    model: str,
+    backend: str,
+    version: str,
+    error_message: str | None,
+) -> bool:
+    """Return True for deterministic framework/data gaps that should not stay plain FAIL."""
+    if not error_message:
+        return False
+    if backend != common.BackendName.vllm.value or version != "0.19.0":
+        return False
+    if "DeepSeek-V4" not in model:
+        return False
+
+    normalized = error_message.lower()
+    return (
+        "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
+        or "deepseek-v4 mhc module data not loaded" in normalized
+    )
+
+
 def _enum_name(value: object | None) -> str | None:
     if value is None:
         return None
@@ -749,7 +771,15 @@ class SupportMatrix:
                         attempt_queue.append(retry_attempt)
                         continue
 
-                    statuses[mode] = STATUS_FAIL
+                    if _is_known_framework_incompatible_gap(
+                        model=model,
+                        backend=backend,
+                        version=version,
+                        error_message=raw_error,
+                    ):
+                        statuses[mode] = STATUS_HW_INCOMPATIBLE
+                    else:
+                        statuses[mode] = STATUS_FAIL
                     error_messages[mode] = raw_error
                     break
 
