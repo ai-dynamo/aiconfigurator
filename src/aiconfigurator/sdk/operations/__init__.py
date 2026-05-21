@@ -27,14 +27,11 @@ from __future__ import annotations
 from aiconfigurator.sdk.operations._legacy import (
     NCCL,
     P2P,
-    ContextDeepSeekV4AttentionModule,
     ContextDSAModule,
     ContextMLA,
     CustomAllReduce,
-    DeepSeekV4MHCModule,
     FallbackOp,
     GDNKernel,
-    GenerationDeepSeekV4AttentionModule,
     GenerationDSAModule,
     GenerationMLA,
     Mamba2,
@@ -48,7 +45,6 @@ from aiconfigurator.sdk.operations._legacy import (
     TrtLLMWideEPMoEDispatch,
     WideEPContextMLA,
     WideEPGenerationMLA,
-    _BaseDeepSeekV4AttentionModule,
     logger,  # noqa: F401
 )
 
@@ -58,6 +54,12 @@ from aiconfigurator.sdk.operations._legacy import (
 # alphabetical convention here.
 from aiconfigurator.sdk.operations.attention import ContextAttention, GenerationAttention
 from aiconfigurator.sdk.operations.base import Operation, clear_all_op_caches
+from aiconfigurator.sdk.operations.dsv4 import (
+    ContextDeepSeekV4AttentionModule,
+    DeepSeekV4MHCModule,
+    GenerationDeepSeekV4AttentionModule,
+    _BaseDeepSeekV4AttentionModule,
+)
 from aiconfigurator.sdk.operations.elementwise import ElementWise
 from aiconfigurator.sdk.operations.embedding import Embedding
 from aiconfigurator.sdk.operations.gemm import GEMM

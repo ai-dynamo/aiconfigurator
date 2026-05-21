@@ -15,7 +15,6 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
 
-import numpy as np
 import yaml
 
 from aiconfigurator.sdk import common, interpolation
@@ -1602,112 +1601,11 @@ def _dsv4_normalize_dtype(name: str) -> str:
 # head count for SOL math and the native-head/tp_size keys for silicon lookup.
 
 
-def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
-    """DeepSeek-V4 3D lookup: exact, cubic, then sampled-batch fallback.
-
-    Generic ``_interp_3d`` raises ``QhullError`` when the point cloud has
-    a degenerate axis (e.g. the DSV4 sweep caps b=1 at s=8192, so the
-    b axis is flat near that query point).
-
-      1. Try an exact ``dict[x][y][z]`` lookup — handles the common case
-         of querying at a measured bench point.
-      2. Try the existing cubic interpolation path.
-      3. If interpolation fails, use the largest sampled batch no larger than
-         the query batch, interpolate/extrapolate along sequence length, and
-         scale by batch. ``batch_axis`` selects whether fallback treats ``y``
-         or ``z`` as the batch axis.
-
-    Caller swallows lower-level exceptions if all paths fail.
-    """
-    if batch_axis not in ("y", "z"):
-        raise ValueError(f"unsupported DeepSeek-V4 fallback {batch_axis=}; expected 'y' or 'z'")
-
-    # Use .get() chain instead of [] indexing: dict_ may be a (nested)
-    # defaultdict, so [] reads would create spurious empty branches that
-    # later poison _interp_3d's grid traversal.
-    level1 = dict_.get(x) if isinstance(dict_, dict) else None
-    level2 = level1.get(y) if isinstance(level1, dict) else None
-    exact = level2.get(z) if isinstance(level2, dict) else None
-    if isinstance(exact, dict) and "latency" in exact:
-        return exact
-
-    def _finite_result(result):
-        if not isinstance(result, dict):
-            return False
-        value = result.get("latency")
-        return value is not None and bool(np.all(np.isfinite(np.asarray(value))))
-
-    try:
-        result = self._interp_3d(x, y, z, dict_, "cubic")
-        if _finite_result(result):
-            return result
-    except Exception:
-        pass
-
-    # Fallback: real DeepSeek-V4 data is sampled at batches like 1/2/4/8.
-    # Prefer the largest batch <= query batch that covers the sequence length
-    # (interpolation along s). Only extrapolate along s if none covers it.
-    sub = dict_.get(x) if isinstance(dict_, dict) else None
-    if isinstance(sub, dict):
-        query_s, query_b = (z, y) if batch_axis == "y" else (y, z)
-
-        def _batch_points():
-            if batch_axis == "y":
-                return sorted(
-                    (bp for bp, sd in sub.items() if isinstance(sd, dict) and bp <= query_b),
-                    reverse=True,
-                )
-            return sorted(
-                {bp for sd in sub.values() if isinstance(sd, dict) for bp in sd if bp <= query_b},
-                reverse=True,
-            )
-
-        def _leaf_at(s, b):
-            first_key, second_key = (b, s) if batch_axis == "y" else (s, b)
-            level = sub.get(first_key)
-            return level.get(second_key) if isinstance(level, dict) else None
-
-        def _seq_points_at_batch(b):
-            if batch_axis == "y":
-                level = sub.get(b)
-                return sorted(level.keys()) if isinstance(level, dict) else []
-            return sorted(s for s, sd in sub.items() if isinstance(sd, dict) and b in sd)
-
-        def _lookup_at_batch(bp, *, allow_extrapolate: bool):
-            exact_at_batch = _leaf_at(query_s, bp)
-            if exact_at_batch is not None:
-                return exact_at_batch
-            ss = _seq_points_at_batch(bp)
-            if len(ss) < 2:
-                return None
-            if not allow_extrapolate and not (ss[0] <= query_s <= ss[-1]):
-                return None
-            sl, sr = self._nearest_1d_point_helper(query_s, ss, inner_only=not allow_extrapolate)
-            left = _leaf_at(sl, bp)
-            right = _leaf_at(sr, bp)
-            if not isinstance(left, dict) or not isinstance(right, dict):
-                return None
-            return {
-                field: self._interp_1d([sl, sr], [left.get(field, 0.0), right.get(field, 0.0)], query_s)
-                for field in ("latency", "power", "energy")
-            }
-
-        batch_points = _batch_points()
-        for allow_extrapolate in (False, True):
-            for bp in batch_points:
-                try:
-                    leaf = _lookup_at_batch(bp, allow_extrapolate=allow_extrapolate)
-                    if leaf is None:
-                        continue
-                    result = {f: leaf.get(f, 0.0) * query_b / bp for f in ("latency", "power", "energy")}
-                    if _finite_result(result):
-                        return result
-                except Exception:
-                    continue
-
-    if batch_axis == "y":
-        raise ValueError(f"DeepSeek-V4 robust lookup failed (tp={x}, b={y}, s={z})")
-    raise ValueError(f"DeepSeek-V4 robust lookup failed (tp={x}, s={y}, b={z})")
+# ``_dsv4_robust_3d_lookup`` moved to ``operations.dsv4`` along with the
+# rest of the DSV4 family (AIC-1095 / ISSUE-11). Re-exported via
+# ``__getattr__`` at the bottom of this module so tests importing it via
+# ``from aiconfigurator.sdk.perf_database import _dsv4_robust_3d_lookup``
+# keep working without triggering operations/__init__.py at import time.
 
 
 def load_context_dsv4_kind_module_data(file_path: str):
@@ -1817,20 +1715,11 @@ def load_generation_dsv4_kind_module_data(file_path: str):
     return data
 
 
-def _deep_merge_dsv4_dicts(dest, src):
-    """In-place merge ``src`` nested dict into ``dest``.
-
-    Used to combine the per-(attn_kind) CSVs into one nested dict.  At any
-    level where both sides have a dict, recurse; otherwise overwrite.
-    """
-    if src is None:
-        return dest
-    for k, v in src.items():
-        if k in dest and isinstance(dest[k], dict) and isinstance(v, dict):
-            _deep_merge_dsv4_dicts(dest[k], v)
-        else:
-            dest[k] = v
-    return dest
+# ``_deep_merge_dsv4_dicts`` moved to ``operations.dsv4`` (AIC-1095 /
+# ISSUE-11). Re-exported via ``__getattr__`` at the bottom of this module
+# so tests importing it via
+# ``from aiconfigurator.sdk.perf_database import _deep_merge_dsv4_dicts``
+# keep working without triggering operations/__init__.py at import time.
 
 
 def load_dsv4_sparse_kernel_data(file_path: str):
@@ -2892,45 +2781,11 @@ class PerfDatabase:
         # compute_scale + scale_matrix are GEMM-owned (loaded by GEMM.load_data below)
         self._context_dsa_module_data = _load_op_data(PerfDataFilename.dsa_context_module)
         self._generation_dsa_module_data = _load_op_data(PerfDataFilename.dsa_generation_module)
-        self._mhc_module_data = _load_op_data(PerfDataFilename.mhc_module)
-
-        # DeepSeek-V4 module-level data — collected as split files per mode
-        # (csa/hca).  Each loader returns a nested dict scoped to one
-        # compress_ratio; we merge into one aggregate attribute so downstream
-        # queries do not need to know which attention kind produced each row.
-        def _load_dsv4_split(loaded_list):
-            merged: dict = {}
-            first_loaded = next((x for x in loaded_list if x is not None), None)
-            if first_loaded is None:
-                return None
-            for loaded in loaded_list:
-                if loaded is None or not loaded.loaded:
-                    continue
-                _deep_merge_dsv4_dicts(merged, loaded.data)
-            if not merged:
-                return None
-            return LoadedOpData(merged, first_loaded.op_name_enum, first_loaded.filepath)
-
-        ctx_split = [
-            _load_op_data(PerfDataFilename.dsv4_csa_context_module),
-            _load_op_data(PerfDataFilename.dsv4_hca_context_module),
-        ]
-        gen_split = [
-            _load_op_data(PerfDataFilename.dsv4_csa_generation_module),
-            _load_op_data(PerfDataFilename.dsv4_hca_generation_module),
-        ]
-        self._context_deepseek_v4_attention_module_data = _load_dsv4_split(ctx_split)
-        self._raw_context_deepseek_v4_attention_module_data = copy.deepcopy(
-            self._context_deepseek_v4_attention_module_data
-        )
-        self._generation_deepseek_v4_attention_module_data = _load_dsv4_split(gen_split)
-
-        # DeepSeek-V4 sparse-kernel data (kernel-level past_kv Δ correction).
-        # Dict keyed by ``arch -> tp -> past_kv -> isl -> bs``.
-        self._dsv4_sparse_kernel_data = {
-            "paged_mqa_logits": _load_op_data(PerfDataFilename.dsv4_paged_mqa_logits_module),
-            "hca_attn": _load_op_data(PerfDataFilename.dsv4_hca_attn_module),
-        }
+        # ``_mhc_module_data`` is loaded by ``DeepSeekV4MHCModule.load_data``
+        # below. DSV4 context / generation attention module data + raw
+        # deepcopy + sparse-kernel sidecar dict are loaded by
+        # ``Context/GenerationDeepSeekV4AttentionModule.load_data`` below
+        # (AIC-1095 / ISSUE-11).
 
         # sglang wideep path
         if backend == "sglang":
@@ -2961,11 +2816,19 @@ class PerfDatabase:
         # loaders. ISSUE-16 retires these eager calls once test fixtures
         # migrate to the lazy contract.
         from aiconfigurator.sdk.operations.attention import ContextAttention, GenerationAttention
+        from aiconfigurator.sdk.operations.dsv4 import (
+            ContextDeepSeekV4AttentionModule,
+            DeepSeekV4MHCModule,
+            GenerationDeepSeekV4AttentionModule,
+        )
         from aiconfigurator.sdk.operations.gemm import GEMM
 
         GEMM.load_data(self)
         ContextAttention.load_data(self)
         GenerationAttention.load_data(self)
+        DeepSeekV4MHCModule.load_data(self)
+        ContextDeepSeekV4AttentionModule.load_data(self)
+        GenerationDeepSeekV4AttentionModule.load_data(self)
 
         # pre-correction (non-migrated ops; migrated ops apply their own
         # SOL correction during ``load_data``)
@@ -6755,107 +6618,20 @@ class PerfDatabase:
         quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """Query DeepSeek-V4 mHC pre/post latency.
-
-        The SOL estimate models the combined attention-site and FFN-site mHC work
-        inside one decoder layer, matching the collector's module boundary.
+        """Delegates to ``DeepSeekV4MHCModule``; see
+        ``aiconfigurator.sdk.operations.dsv4.DeepSeekV4MHCModule._query_mhc_table``.
         """
-        sites = 2
-        hc_dim = hc_mult * hidden_size
-        mix_hc = (2 + hc_mult) * hc_mult
+        from aiconfigurator.sdk.operations.dsv4 import DeepSeekV4MHCModule
 
-        def get_sol() -> tuple[float, float, float]:
-            pre_ops = sites * (
-                2 * num_tokens * hc_dim * mix_hc
-                + num_tokens * hc_dim * 3
-                + num_tokens * (hc_mult * hc_mult + 2 * hc_mult) * sinkhorn_iters
-                + 2 * num_tokens * hc_mult * hidden_size
-            )
-            post_ops = sites * (
-                2 * num_tokens * hc_mult * hc_mult * hidden_size + 2 * num_tokens * hc_mult * hidden_size
-            )
-            if op == "pre":
-                ops = pre_ops
-            elif op == "post":
-                ops = post_ops
-            elif op == "both":
-                ops = pre_ops + post_ops
-            else:
-                raise ValueError(f"Unsupported DeepSeek-V4 mHC op: {op}")
-
-            param_bytes = sites * (mix_hc * hc_dim + mix_hc + 3) * quant_mode.value.memory
-            activation_bytes = sites * num_tokens * hc_dim * quant_mode.value.memory * (3 if op == "both" else 2)
-            if op in {"pre", "both"}:
-                activation_bytes += sites * num_tokens * (2 * hc_mult + hc_mult * hc_mult) * 4
-            sol_math = ops / self._get_quant_tc_flops(quant_mode) * 1000
-            sol_mem = (param_bytes + activation_bytes) / self.system_spec["gpu"]["mem_bw"] * 1000
-            return max(sol_math, sol_mem), sol_math, sol_mem
-
-        def get_empirical() -> float:
-            return get_sol()[0] / 0.55
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        if database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol()
-        if database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
-
-        def get_silicon():
-            mhc_data = getattr(self, "_mhc_module_data", None)
-            if not mhc_data:
-                raise PerfDataNotAvailableError(
-                    f"DeepSeek-V4 mHC module data not loaded for system='{self.system}', "
-                    f"backend='{self.backend}', version='{self.version}'."
-                )
-
-            def _lookup_single(op_name: str) -> PerformanceResult:
-                # Validate bucket presence before chained indexing; mhc_data is
-                # a nested defaultdict, so `mhc_data[op][hc_mult][hidden_size]`
-                # would silently materialize empty dicts and then fall through
-                # to _nearest_1d_point_helper with an empty key list, surfacing
-                # as an opaque AssertionError instead of a structured
-                # PerfDataNotAvailableError.
-                if (
-                    op_name not in mhc_data
-                    or hc_mult not in mhc_data[op_name]
-                    or hidden_size not in mhc_data[op_name][hc_mult]
-                    or not mhc_data[op_name][hc_mult][hidden_size]
-                ):
-                    raise PerfDataNotAvailableError(
-                        f"No mHC silicon data for op='{op_name}', hc_mult={hc_mult}, hidden_size={hidden_size}."
-                    )
-                mhc_dict = mhc_data[op_name][hc_mult][hidden_size]
-                left, right = self._nearest_1d_point_helper(num_tokens, list(mhc_dict.keys()), inner_only=False)
-                result = self._interp_1d([left, right], [mhc_dict[left], mhc_dict[right]], num_tokens)
-                latency = result["latency"] if isinstance(result, dict) else result
-                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
-                return self._interp_pr(latency, energy=energy)
-
-            # Silicon tables only store "pre" and "post" rows. For op=="both"
-            # (still a supported input in operations.DeepSeekV4MHCModule),
-            # aggregate the two silicon look-ups so callers don't need to know
-            # about the storage layout.
-            if op == "both":
-                pre_result = _lookup_single("pre")
-                post_result = _lookup_single("post")
-                # Use PerformanceResult's __add__ to merge sources correctly
-                # (silicon + silicon -> silicon, mismatch -> mixed) instead of
-                # constructing a new PR that would default-tag as silicon.
-                return pre_result + post_result
-
-            return _lookup_single(op)
-
-        return self._query_silicon_or_hybrid(
-            get_silicon=get_silicon,
-            get_empirical=get_empirical,
+        return DeepSeekV4MHCModule._query_mhc_table(
+            self,
+            num_tokens=num_tokens,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            sinkhorn_iters=sinkhorn_iters,
+            op=op,
+            quant_mode=quant_mode,
             database_mode=database_mode,
-            error_msg=(
-                f"Failed to query DeepSeek-V4 mHC module for {num_tokens=}, {hidden_size=}, "
-                f"{hc_mult=}, {sinkhorn_iters=}, {op=}"
-            ),
         )
 
     def _lookup_dsv4_sparse_kernel(
@@ -6867,252 +6643,23 @@ class PerfDatabase:
         tp_size: int,
         native_heads: int,
     ) -> Optional[float]:
-        """Look up a sparse-kernel latency at (kernel, bs, isl, past_kv, tp).
+        """Delegates to ``ContextDeepSeekV4AttentionModule._lookup_sparse_kernel``.
 
-        Strategy:
-          1. Exact (bs, isl, past_kv, tp) hit  → return latency
-          2. Cubic 3D interpolation on (past_kv, isl, bs) within the fixed tp slice
-          3. If cubic fails, use the largest sampled batch no larger than the query
-             batch that covers isl, interpolate on (past_kv, isl), then scale by batch.
-        Returns None if the kernel CSV is not loaded.
+        Kept as an instance method for tests that invoke it via the
+        unbound form ``PerfDatabase._lookup_dsv4_sparse_kernel(db, ...)``;
+        ISSUE-16 cleanup retires this wrapper once those tests migrate.
         """
-        all_data = getattr(self, "_dsv4_sparse_kernel_data", None)
-        if all_data is None or kernel not in all_data:
-            return None
-        loaded = all_data[kernel]
-        if loaded is None or loaded.data is None:
-            return None
-        per_tp = loaded.data.get(native_heads)
-        if per_tp is None:
-            return None
-        if tp_size in per_tp:
-            per_tp_dict = per_tp[tp_size]
-        elif 1 in per_tp:
-            # paged_mqa_logits is collected at tp=1 only — kernel work itself
-            # is TP-independent so we fall back when caller asks for tp>1.
-            per_tp_dict = per_tp[1]
-        else:
-            return None
-        if not per_tp_dict:
-            return None
+        from aiconfigurator.sdk.operations.dsv4 import ContextDeepSeekV4AttentionModule
 
-        def _finite_latency(value):
-            return value is not None and bool(np.all(np.isfinite(np.asarray(value))))
-
-        if past_kv in per_tp_dict and isl in per_tp_dict[past_kv] and bs in per_tp_dict[past_kv][isl]:
-            latency = per_tp_dict[past_kv][isl][bs]["latency"]
-            if _finite_latency(latency):
-                return float(np.asarray(latency))
-
-        try:
-            result = self._interp_3d(past_kv, isl, bs, per_tp_dict, "cubic")
-            latency = result.get("latency") if isinstance(result, dict) else None
-            if _finite_latency(latency):
-                return float(np.asarray(latency))
-        except Exception:
-            pass
-
-        batch_points = sorted(
-            {
-                sampled_b
-                for isl_dict in per_tp_dict.values()
-                if isinstance(isl_dict, dict)
-                for isl_data in isl_dict.values()
-                if isinstance(isl_data, dict)
-                for sampled_b in isl_data
-                if sampled_b <= bs
-            },
-            reverse=True,
+        return ContextDeepSeekV4AttentionModule._lookup_sparse_kernel(
+            self,
+            kernel=kernel,
+            bs=bs,
+            isl=isl,
+            past_kv=past_kv,
+            tp_size=tp_size,
+            native_heads=native_heads,
         )
-
-        def _lookup_at_batch(bp, *, allow_extrapolate: bool):
-            batch_slice = defaultdict(dict)
-            for sampled_past, isl_dict in per_tp_dict.items():
-                if not isinstance(isl_dict, dict):
-                    continue
-                for sampled_isl, isl_data in isl_dict.items():
-                    if isinstance(isl_data, dict) and bp in isl_data:
-                        batch_slice[sampled_past][sampled_isl] = isl_data[bp]
-
-            if not batch_slice:
-                return None
-
-            try:
-                latency = self._interp_2d_linear(past_kv, isl, batch_slice)["latency"]
-                if _finite_latency(latency):
-                    return latency
-            except Exception:
-                pass
-
-            def _lookup_isl_at_past(sampled_past):
-                isl_dict = batch_slice.get(sampled_past)
-                if not isinstance(isl_dict, dict):
-                    return None
-                if isl in isl_dict:
-                    return isl_dict[isl].get("latency")
-                isl_points = sorted(s for s, leaf in isl_dict.items() if isinstance(leaf, dict) and "latency" in leaf)
-                if len(isl_points) < 2:
-                    return None
-                if not allow_extrapolate and not (isl_points[0] <= isl <= isl_points[-1]):
-                    return None
-                left, right = self._nearest_1d_point_helper(isl, isl_points, inner_only=not allow_extrapolate)
-                latency = self._interp_1d(
-                    [left, right],
-                    [isl_dict[left].get("latency"), isl_dict[right].get("latency")],
-                    isl,
-                )
-                return latency
-
-            if past_kv in batch_slice:
-                return _lookup_isl_at_past(past_kv)
-
-            past_points = sorted(
-                sampled_past for sampled_past in batch_slice if _lookup_isl_at_past(sampled_past) is not None
-            )
-            if len(past_points) < 2:
-                return None
-            if not allow_extrapolate and not (past_points[0] <= past_kv <= past_points[-1]):
-                return None
-            left, right = self._nearest_1d_point_helper(past_kv, past_points, inner_only=not allow_extrapolate)
-            left_latency = _lookup_isl_at_past(left)
-            right_latency = _lookup_isl_at_past(right)
-            if left_latency is None or right_latency is None:
-                return None
-            return self._interp_1d([left, right], [left_latency, right_latency], past_kv)
-
-        for allow_extrapolate in (False, True):
-            for bp in batch_points:
-                try:
-                    latency = _lookup_at_batch(bp, allow_extrapolate=allow_extrapolate)
-                    if latency is None:
-                        continue
-                    latency = latency * bs / bp
-                    if _finite_latency(latency):
-                        return latency
-                except Exception:
-                    continue
-        return None
-
-    def _deepseek_v4_attention_sol(
-        self,
-        *,
-        is_context: bool,
-        b: int,
-        s: int,
-        prefix: int,
-        num_heads: int,
-        hidden_size: int,
-        q_lora_rank: int,
-        o_lora_rank: int,
-        head_dim: int,
-        rope_head_dim: int,
-        index_n_heads: int,
-        index_head_dim: int,
-        index_topk: int,
-        window_size: int,
-        compress_ratio: int,
-        o_groups: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode,
-    ) -> tuple[float, float, float]:
-        tokens = b * s if is_context else b
-        kv_len = prefix + s if is_context else max(0, s - 1)
-        local_groups = max(1, o_groups)
-
-        gemm_projection_ops = (
-            2 * tokens * hidden_size * q_lora_rank
-            + 2 * tokens * q_lora_rank * num_heads * head_dim
-            + 2 * tokens * hidden_size * head_dim
-            + 2 * tokens * local_groups * o_lora_rank * hidden_size
-        )
-        output_absorption_ops = 2 * tokens * num_heads * head_dim * o_lora_rank
-
-        compressor_mult = 2 if compress_ratio == 4 else 1
-        compressor_ops = 0.0
-        if compress_ratio:
-            compressor_ops = 4 * tokens * hidden_size * compressor_mult * head_dim
-            compressor_ops += 2 * tokens * compressor_mult * head_dim
-            if compress_ratio == 4:
-                indexer_compressor_mult = 2
-                compressor_ops += 4 * tokens * hidden_size * indexer_compressor_mult * index_head_dim
-                compressor_ops += 2 * tokens * indexer_compressor_mult * index_head_dim
-
-        if is_context:
-            window_pairs = self._causal_limited_pairs(b, s, prefix, window_size)
-            if compress_ratio:
-                compressed_limit = index_topk if compress_ratio == 4 else max(0, kv_len // compress_ratio)
-                compressed_pairs = self._compressed_context_pairs(b, s, prefix, compress_ratio, compressed_limit)
-            else:
-                compressed_pairs = 0
-        else:
-            window_pairs = b * min(kv_len, window_size)
-            if compress_ratio:
-                compressed_limit = index_topk if compress_ratio == 4 else max(0, kv_len // compress_ratio)
-                compressed_pairs = b * min(kv_len // compress_ratio, compressed_limit)
-            else:
-                compressed_pairs = 0
-
-        attention_pairs = window_pairs + compressed_pairs
-        attention_ops = 4 * num_heads * head_dim * attention_pairs
-
-        indexer_ops = 0.0
-        indexer_bfloat16_ops = 0.0
-        indexer_cache_bytes = 0.0
-        if compress_ratio == 4:
-            compressed_len = kv_len // compress_ratio
-            if is_context:
-                indexer_query_tokens = b * s
-            else:
-                indexer_query_tokens = b
-            indexer_pairs = indexer_query_tokens * compressed_len
-            indexer_ops = (
-                2 * indexer_query_tokens * q_lora_rank * index_n_heads * index_head_dim
-                + 2 * indexer_pairs * index_n_heads * index_head_dim
-            )
-            indexer_bfloat16_ops = 2 * indexer_query_tokens * hidden_size * index_n_heads
-            indexer_cache_bytes = b * compressed_len * common.deepseek_v4_indexer_cache_entry_bytes(index_head_dim)
-
-        gemm_weight_bytes = (
-            hidden_size * q_lora_rank
-            + q_lora_rank * num_heads * head_dim
-            + hidden_size * head_dim
-            + local_groups * o_lora_rank * hidden_size
-        ) * gemm_quant_mode.value.memory
-        bfloat16_weight_bytes = num_heads * head_dim * o_lora_rank * common.GEMMQuantMode.bfloat16.value.memory
-        if compress_ratio:
-            gemm_weight_bytes += 2 * hidden_size * compressor_mult * head_dim * gemm_quant_mode.value.memory
-        if compress_ratio == 4:
-            gemm_weight_bytes += q_lora_rank * index_n_heads * index_head_dim * gemm_quant_mode.value.memory
-            bfloat16_weight_bytes += hidden_size * index_n_heads * common.GEMMQuantMode.bfloat16.value.memory
-
-        activation_bytes = (
-            tokens
-            * (hidden_size + q_lora_rank + num_heads * head_dim + head_dim + local_groups * o_lora_rank)
-            * gemm_quant_mode.value.memory
-        )
-        kv_cache_bytes = attention_pairs * num_heads * head_dim * kvcache_quant_mode.value.memory
-        rope_bytes = tokens * num_heads * rope_head_dim * fmha_quant_mode.value.memory
-
-        sol_math = (
-            (gemm_projection_ops + compressor_ops) / self._get_quant_tc_flops(gemm_quant_mode)
-            + (output_absorption_ops + indexer_bfloat16_ops) / self._get_quant_tc_flops(common.GEMMQuantMode.bfloat16)
-            + indexer_ops / self._get_quant_tc_flops(common.GEMMQuantMode.fp8)
-            + attention_ops / self._get_quant_tc_flops(fmha_quant_mode)
-        ) * 1000
-        sol_mem = (
-            (
-                gemm_weight_bytes
-                + bfloat16_weight_bytes
-                + activation_bytes
-                + kv_cache_bytes
-                + indexer_cache_bytes
-                + rope_bytes
-            )
-            / self.system_spec["gpu"]["mem_bw"]
-            * 1000
-        )
-        return max(sol_math, sol_mem), sol_math, sol_mem
 
     @functools.lru_cache(maxsize=32768)
     def query_context_deepseek_v4_attention_module(
@@ -7140,164 +6687,34 @@ class PerfDatabase:
         *,
         prefix: int = 0,
     ) -> PerformanceResult | tuple[float, float, float]:
-        def get_sol() -> tuple[float, float, float]:
-            return self._deepseek_v4_attention_sol(
-                is_context=True,
-                b=b,
-                s=s,
-                prefix=prefix,
-                num_heads=num_heads,
-                hidden_size=hidden_size,
-                q_lora_rank=q_lora_rank,
-                o_lora_rank=o_lora_rank,
-                head_dim=head_dim,
-                rope_head_dim=rope_head_dim,
-                index_n_heads=index_n_heads,
-                index_head_dim=index_head_dim,
-                index_topk=index_topk,
-                window_size=window_size,
-                compress_ratio=compress_ratio,
-                o_groups=o_groups,
-                kvcache_quant_mode=kvcache_quant_mode,
-                fmha_quant_mode=fmha_quant_mode,
-                gemm_quant_mode=gemm_quant_mode,
-            )
+        """Delegates to ``ContextDeepSeekV4AttentionModule``; see
+        ``operations.dsv4.ContextDeepSeekV4AttentionModule._query_context_attn_table``.
+        """
+        from aiconfigurator.sdk.operations.dsv4 import ContextDeepSeekV4AttentionModule
 
-        def get_empirical() -> float:
-            return get_sol()[0] / 0.55
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        if database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol()
-        if database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
-
-        def get_silicon():
-            data = getattr(self, "_context_deepseek_v4_attention_module_data", None)
-            if not data:
-                raise PerfDataNotAvailableError(
-                    f"DeepSeek-V4 context attention module data not loaded for system='{self.system}', "
-                    f"backend='{self.backend}', version='{self.version}'."
-                )
-            native_dict = data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode].get(native_heads)
-            if native_dict is None:
-                raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 context attention silicon data for native_heads={native_heads}, "
-                    f"loaded keys={list(data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode].keys())}."
-                )
-            deepseek_v4_dict = native_dict[compress_ratio]
-
-            # Pick correction strategy up-front because it changes the lookup
-            # point: kernel-Δ uses chunk-0 baseline at (b, s); SOL ratio uses
-            # chunk-1 baseline at (b, s+prefix).
-            kernel = {4: "paged_mqa_logits", 128: "hca_attn"}.get(compress_ratio) if prefix > 0 else None
-            t_with = t_without = None
-            if kernel is not None:
-                # Use the operation tp_size for sparse-kernel lookup.
-                # paged_mqa_logits is collected only at tp=1 (kernel is replicated)
-                # — ``_lookup_dsv4_sparse_kernel`` falls back to tp=1 when
-                # the requested tp isn't present, so passing ``tp_size`` works
-                # for both kernels.
-                t_with = self._lookup_dsv4_sparse_kernel(
-                    kernel=kernel,
-                    bs=b,
-                    isl=s,
-                    past_kv=prefix,
-                    tp_size=tp_size,
-                    native_heads=native_heads,
-                )
-                t_without = self._lookup_dsv4_sparse_kernel(
-                    kernel=kernel,
-                    bs=b,
-                    isl=s,
-                    past_kv=0,
-                    tp_size=tp_size,
-                    native_heads=native_heads,
-                )
-                if t_with is None or t_without is None:
-                    raise PerfDataNotAvailableError(
-                        f"DeepSeek-V4 {kernel} sparse-kernel correction data not available for "
-                        f"{b=}, {s=}, {prefix=}, {native_heads=}, {tp_size=}. "
-                        "Cannot query prefix context attention in SILICON mode without kernel delta."
-                    )
-            use_kernel_delta = kernel is not None
-            lookup_s = s if use_kernel_delta else s + prefix
-
-            result = None
-            if compress_ratio == 4:
-                raw_data = getattr(self, "_raw_context_deepseek_v4_attention_module_data", None)
-                raw_dict = None
-                if raw_data is not None and getattr(raw_data, "loaded", True):
-                    try:
-                        raw_native_dict = raw_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode].get(
-                            native_heads
-                        )
-                        raw_dict = None if raw_native_dict is None else raw_native_dict[compress_ratio]
-                    except KeyError:
-                        raw_dict = None
-                result = self._interp_context_topk_piecewise_from_raw(
-                    tp_size, lookup_s, b, raw_dict, index_topk * compress_ratio
-                )
-            if result is None:
-                # Exact → cubic → linear to avoid qhull crashes on the
-                # caps-driven flat b axis.
-                result = _dsv4_robust_3d_lookup(self, deepseek_v4_dict, tp_size, lookup_s, b)
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
-
-            if prefix > 0:
-                if use_kernel_delta:
-                    # Kernel-Δ correction (preferred when sparse data loaded).
-                    # CSA: paged_mqa_logits bench Δ + topk_512 IO formula Δ.
-                    # HCA: hca_attn bench Δ.
-                    latency += t_with - t_without
-                    if compress_ratio == 4:
-                        # topk_512 IO formula: Δ_bytes = M*past_kv (fp32 scan),
-                        # eff≈0.1 (radix bucket atomics dominate).  Empirically
-                        # within 8% of real on H20.
-                        M = b * s  # noqa: N806
-                        mem_bw = self.system_spec["gpu"]["mem_bw"]
-                        latency += M * prefix / (mem_bw * 0.1) * 1000.0
-                else:
-                    # SOL ratio scaling (fallback when sparse data unavailable).
-                    base_sol = self._deepseek_v4_attention_sol(
-                        is_context=True,
-                        b=b,
-                        s=s + prefix,
-                        prefix=0,
-                        num_heads=num_heads,
-                        hidden_size=hidden_size,
-                        q_lora_rank=q_lora_rank,
-                        o_lora_rank=o_lora_rank,
-                        head_dim=head_dim,
-                        rope_head_dim=rope_head_dim,
-                        index_n_heads=index_n_heads,
-                        index_head_dim=index_head_dim,
-                        index_topk=index_topk,
-                        window_size=window_size,
-                        compress_ratio=compress_ratio,
-                        o_groups=o_groups,
-                        kvcache_quant_mode=kvcache_quant_mode,
-                        fmha_quant_mode=fmha_quant_mode,
-                        gemm_quant_mode=gemm_quant_mode,
-                    )[0]
-                    target_sol = get_sol()[0]
-                    correction = 1.0 if base_sol <= 0 else target_sol / base_sol
-                    latency *= correction
-                    energy *= correction
-            return self._interp_pr(latency, energy=energy)
-
-        return self._query_silicon_or_hybrid(
-            get_silicon=get_silicon,
-            get_empirical=get_empirical,
+        return ContextDeepSeekV4AttentionModule._query_context_attn_table(
+            self,
+            b=b,
+            s=s,
+            num_heads=num_heads,
+            native_heads=native_heads,
+            tp_size=tp_size,
+            hidden_size=hidden_size,
+            q_lora_rank=q_lora_rank,
+            o_lora_rank=o_lora_rank,
+            head_dim=head_dim,
+            rope_head_dim=rope_head_dim,
+            index_n_heads=index_n_heads,
+            index_head_dim=index_head_dim,
+            index_topk=index_topk,
+            window_size=window_size,
+            compress_ratio=compress_ratio,
+            o_groups=o_groups,
+            kvcache_quant_mode=kvcache_quant_mode,
+            fmha_quant_mode=fmha_quant_mode,
+            gemm_quant_mode=gemm_quant_mode,
             database_mode=database_mode,
-            error_msg=(
-                f"Failed to query DeepSeek-V4 context attention module for {b=}, {s=}, {prefix=}, "
-                f"{num_heads=}, {native_heads=}, {tp_size=}, {compress_ratio=}"
-            ),
+            prefix=prefix,
         )
 
     @functools.lru_cache(maxsize=32768)
@@ -7324,69 +6741,49 @@ class PerfDatabase:
         gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        def get_sol() -> tuple[float, float, float]:
-            return self._deepseek_v4_attention_sol(
-                is_context=False,
-                b=b,
-                s=s,
-                prefix=0,
-                num_heads=num_heads,
-                hidden_size=hidden_size,
-                q_lora_rank=q_lora_rank,
-                o_lora_rank=o_lora_rank,
-                head_dim=head_dim,
-                rope_head_dim=rope_head_dim,
-                index_n_heads=index_n_heads,
-                index_head_dim=index_head_dim,
-                index_topk=index_topk,
-                window_size=window_size,
-                compress_ratio=compress_ratio,
-                o_groups=o_groups,
-                kvcache_quant_mode=kvcache_quant_mode,
-                fmha_quant_mode=fmha_quant_mode,
-                gemm_quant_mode=gemm_quant_mode,
-            )
+        """Delegates to ``GenerationDeepSeekV4AttentionModule``; see
+        ``operations.dsv4.GenerationDeepSeekV4AttentionModule._query_generation_attn_table``.
+        """
+        from aiconfigurator.sdk.operations.dsv4 import GenerationDeepSeekV4AttentionModule
 
-        def get_empirical() -> float:
-            return get_sol()[0] / 0.6
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        if database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol()
-        if database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
-
-        def get_silicon():
-            data = getattr(self, "_generation_deepseek_v4_attention_module_data", None)
-            if not data:
-                raise PerfDataNotAvailableError(
-                    f"DeepSeek-V4 generation attention module data not loaded for system='{self.system}', "
-                    f"backend='{self.backend}', version='{self.version}'."
-                )
-            native_dict = data[kvcache_quant_mode][gemm_quant_mode].get(native_heads)
-            if native_dict is None:
-                raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 generation attention silicon data for native_heads={native_heads}, "
-                    f"loaded keys={list(data[kvcache_quant_mode][gemm_quant_mode].keys())}."
-                )
-            deepseek_v4_dict = native_dict[compress_ratio]
-            result = _dsv4_robust_3d_lookup(self, deepseek_v4_dict, tp_size, b, s, batch_axis="y")
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
-            return self._interp_pr(latency, energy=energy)
-
-        return self._query_silicon_or_hybrid(
-            get_silicon=get_silicon,
-            get_empirical=get_empirical,
+        return GenerationDeepSeekV4AttentionModule._query_generation_attn_table(
+            self,
+            b=b,
+            s=s,
+            num_heads=num_heads,
+            native_heads=native_heads,
+            tp_size=tp_size,
+            hidden_size=hidden_size,
+            q_lora_rank=q_lora_rank,
+            o_lora_rank=o_lora_rank,
+            head_dim=head_dim,
+            rope_head_dim=rope_head_dim,
+            index_n_heads=index_n_heads,
+            index_head_dim=index_head_dim,
+            index_topk=index_topk,
+            window_size=window_size,
+            compress_ratio=compress_ratio,
+            o_groups=o_groups,
+            kvcache_quant_mode=kvcache_quant_mode,
+            fmha_quant_mode=fmha_quant_mode,
+            gemm_quant_mode=gemm_quant_mode,
             database_mode=database_mode,
-            error_msg=(
-                f"Failed to query DeepSeek-V4 generation attention module for {b=}, {s=}, "
-                f"{num_heads=}, {native_heads=}, {tp_size=}, {compress_ratio=}"
-            ),
         )
+
+
+def __getattr__(name):
+    """Lazy re-export of DSV4 helpers moved to ``operations.dsv4``.
+
+    Avoids the circular import that would occur if these were imported
+    eagerly at module level (``operations/__init__.py`` pulls in
+    ``_legacy.py`` which imports ``PerfDatabase``, which is not yet
+    bound while ``perf_database`` is loading).
+    """
+    if name in ("_dsv4_robust_3d_lookup", "_deep_merge_dsv4_dicts"):
+        from aiconfigurator.sdk.operations import dsv4 as _dsv4_module
+
+        return getattr(_dsv4_module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 if __name__ == "__main__":
