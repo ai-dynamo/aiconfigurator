@@ -35,6 +35,15 @@ from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 # These are substring patterns that will be matched against the full model name
 # supported in trtllm 1.3.0rc1, please expect failures for these models if using trtllm < 1.3.0rc1
 NON_GATED_MOE_MODELS = ["Nemotron-3"]
+_MXFP4_MOE_TYPES = {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
+_TRTLLM_MXFP4_MOE_MODELS = {
+    "moonshotai/Kimi-K2-Instruct",
+    "moonshotai/Kimi-K2.5",
+    "nvidia/Kimi-K2.5-NVFP4",
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+}
+_GPTOSS_MOE_MODELS = {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
 
 from collector.case_generator import get_common_moe_test_cases
 from collector.helper import (
@@ -174,8 +183,6 @@ def get_moe_test_cases():
     if sm_version >= 100:
         moe_list += ["nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"]
 
-    _GPTOSS_MOE_TYPES = {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}  # noqa: N806
-
     test_cases = []
 
     for common_moe_testcase in get_common_moe_test_cases():
@@ -184,15 +191,14 @@ def get_moe_test_cases():
         moe_tp = common_moe_testcase.tp
 
         for moe_type in moe_list:
-            if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
-                if moe_type not in _GPTOSS_MOE_TYPES:
+            if moe_type in _MXFP4_MOE_TYPES:
+                if model_name not in _TRTLLM_MXFP4_MOE_MODELS:
                     continue
-                if sm_version >= 120 and _is_trtllm_130rc5_or_rc10_runtime():
+                if model_name in _GPTOSS_MOE_MODELS and sm_version >= 120 and _is_trtllm_130rc5_or_rc10_runtime():
                     # TRTLLMGenFusedMoE in 1.3.0rc5/1.3.0rc10 rejects SM120+.
                     continue
-            else:
-                if moe_type in _GPTOSS_MOE_TYPES:
-                    continue
+            elif model_name in _GPTOSS_MOE_MODELS:
+                continue
 
             # w4afp8 requires k shape to be multiple of 128
             if moe_type == "w4afp8" and inter_s // moe_tp % 128 != 0:
@@ -393,6 +399,10 @@ def run_moe_torch(
         # Select backend based on platform and quant mode.
         if min_latency_mode:
             model_config.moe_backend = "trtllm"
+        elif moe_type in _MXFP4_MOE_TYPES and sm_version >= 100:
+            # Blackwell MXFP4 MoE is implemented by TRTLLMGenFusedMoE; CUTLASS
+            # rejects WFP4A16 on SM100.
+            model_config.moe_backend = "trtllm"
         elif moe_type == "fp8_block":
             if sm_version >= 100:
                 # Blackwell: DeepGEMM uses MXFP8 style (E4M3 + UE8M0 scale).
@@ -487,9 +497,10 @@ def run_moe_torch(
     # the proper shuffle/permutation (torch.ops.trtllm.shuffle_matrix) is applied,
     # which the kernel expects for correct memory access patterns.
     if moe_type in ("w4a16_mxfp4", "w4a8_mxfp4_mxfp8"):
-        w1_bias = torch.randn((num_experts, inter_size), dtype=dtype, device=device)
-        w2_bias = torch.randn((num_experts, hidden_size), dtype=dtype, device=device)
-        w3_bias = torch.randn((num_experts, inter_size), dtype=dtype, device=device)
+        local_num_experts = num_experts // moe_ep_size
+        w1_bias = torch.randn((local_num_experts, inter_size), dtype=dtype, device=device)
+        w2_bias = torch.randn((local_num_experts, hidden_size), dtype=dtype, device=device)
+        w3_bias = torch.randn((local_num_experts, inter_size), dtype=dtype, device=device)
 
         from triton_kernels.numerics_details.mxfp import downcast_to_mxfp_torch
 
@@ -501,23 +512,23 @@ def run_moe_torch(
             return tensor_fp4, tensor_scales
 
         # Convert one weight tensor at a time to lower peak memory.
-        w1_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype, device=device)
+        w1_weight = torch.randn((local_num_experts, inter_size, hidden_size), dtype=dtype, device=device)
         w1_weight_fp4, w1_weight_scale = fp32_to_mxfp4(w1_weight)
         del w1_weight
         torch.cuda.empty_cache()
 
-        w2_weight = torch.randn((num_experts, hidden_size, inter_size), dtype=dtype, device=device)
+        w2_weight = torch.randn((local_num_experts, hidden_size, inter_size), dtype=dtype, device=device)
         w2_weight_fp4, w2_weight_scale = fp32_to_mxfp4(w2_weight)
         del w2_weight
         torch.cuda.empty_cache()
 
-        w3_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype, device=device)
+        w3_weight = torch.randn((local_num_experts, inter_size, hidden_size), dtype=dtype, device=device)
         w3_weight_fp4, w3_weight_scale = fp32_to_mxfp4(w3_weight)
         del w3_weight
         torch.cuda.empty_cache()
 
         weights = {}
-        for expert_id in range(num_experts):
+        for expert_id in range(local_num_experts):
             weights[f"{expert_id}.w1.weight"] = w1_weight_fp4[expert_id]
             weights[f"{expert_id}.w2.weight"] = w2_weight_fp4[expert_id]
             weights[f"{expert_id}.w3.weight"] = w3_weight_fp4[expert_id]
