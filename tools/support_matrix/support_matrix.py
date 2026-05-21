@@ -195,6 +195,7 @@ def _should_retry_with_large_worker(error_message: str | None) -> bool:
 def _is_known_framework_incompatible_gap(
     *,
     model: str,
+    system: str,
     backend: str,
     version: str,
     error_message: str | None,
@@ -202,15 +203,25 @@ def _is_known_framework_incompatible_gap(
     """Return True for deterministic framework/data gaps that should not stay plain FAIL."""
     if not error_message:
         return False
-    if backend != common.BackendName.vllm.value or version != "0.19.0":
-        return False
-    if "DeepSeek-V4" not in model:
-        return False
 
     normalized = error_message.lower()
+    if (
+        backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "DeepSeek-V4" in model
+        and (
+            "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
+            or "deepseek-v4 mhc module data not loaded" in normalized
+        )
+    ):
+        return True
+
     return (
-        "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
-        or "deepseek-v4 mhc module data not loaded" in normalized
+        model == "moonshotai/Kimi-K2.5"
+        and system == "b200_sxm"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and "unsupported moe quant mode 'int4_wo'" in normalized
     )
 
 
@@ -773,6 +784,7 @@ class SupportMatrix:
 
                     if _is_known_framework_incompatible_gap(
                         model=model,
+                        system=system,
                         backend=backend,
                         version=version,
                         error_message=raw_error,
