@@ -3663,6 +3663,11 @@ class PerfDatabase:
         """Thin wrapper — delegates to ``interpolation.interp_dsa_context_topk_piecewise_from_raw``."""
         return interpolation.interp_dsa_context_topk_piecewise_from_raw(num_heads, full_s, b, dsa_dict, index_topk)
 
+    # TODO(ISSUE-16 cleanup PR): remove these two helpers — moved to
+    # ``operations/dsa.py`` as module-level functions. The copies here
+    # have no remaining callers in ``perf_database.py`` after Phase 3.4
+    # (``9a37aef``); the cleanup PR prunes them once it can no longer break
+    # downstream code that might still import them as PerfDatabase methods.
     @staticmethod
     def _is_dsa_interpolation_miss(error: Exception) -> bool:
         message = str(error)
