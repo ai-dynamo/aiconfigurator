@@ -15,12 +15,22 @@ class VLLMBackend(BaseBackend):
 
     Currently mirrors TRT-LLM's activation-memory model (the pre-refactor
     implementation literally delegated ``_get_memory_usage`` to TRTLLMBackend),
-    with no KV-cache-aware OOM accounting yet.
+    with no KV-cache-aware OOM accounting yet. We reuse both TRT-LLM's
+    per-family coefficient table and its ``_moe_workspace_width`` hook so
+    estimates stay byte-identical with the old delegation; the agg-pipeline
+    hooks (``_resolve_agg_kwargs``, ``_oom_check_kwargs``, ...) remain at
+    BaseBackend defaults — vLLM does not yet do KV-cache OOM probing.
     """
 
     # Reuse TRT-LLM's per-family activation coefficients until a vLLM-specific
     # tuning lands.
     ACTIVATION_COEFFICIENTS = TRTLLMBackend.ACTIVATION_COEFFICIENTS
+
+    # Mirror TRT-LLM's MoE workspace accounting (raw h for DEEPSEEK family,
+    # ``_hidden_size`` for GEMMA4MOE). Plain class-attribute alias to the
+    # function object — Python binds it to the VLLMBackend instance at call
+    # time; the function does not touch any TRTLLMBackend-specific state.
+    _moe_workspace_width = TRTLLMBackend._moe_workspace_width
 
     def __init__(self):
         super().__init__()

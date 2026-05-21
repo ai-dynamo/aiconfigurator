@@ -847,11 +847,17 @@ class BaseBackend:
             f"{correction_factor} when b: {b}, ctx_tokens: {ctx_tokens} isl {isl}"
         )
 
-        tpot = (mix_step_latency_ms * num_mix_steps_for_tpot_calc + genonly_step_latency_ms * num_genonly_steps) / (
-            num_mix_steps_for_tpot_calc + num_genonly_steps
+        # Guard against osl == 1 (no-decode), which makes both denominators zero.
+        _tpot_steps = num_mix_steps_for_tpot_calc + num_genonly_steps
+        tpot = (
+            (mix_step_latency_ms * num_mix_steps_for_tpot_calc + genonly_step_latency_ms * num_genonly_steps)
+            / _tpot_steps
+            if _tpot_steps > 0
+            else 0.0
         )
+        _total_step_latency_ms = num_mix_steps * mix_step_latency_ms + num_genonly_steps * genonly_step_latency_ms
         output_throughput = (
-            1000 / (num_mix_steps * mix_step_latency_ms + num_genonly_steps * genonly_step_latency_ms) * b * (osl - 1)
+            (1000 / _total_step_latency_ms * b * (osl - 1)) if (osl > 1 and _total_step_latency_ms > 0) else 0.0
         )
         logger.debug(
             f"ctx_tokens: {ctx_tokens}, b: {b}, osl: {osl}, isl: {isl}, "
@@ -883,7 +889,7 @@ class BaseBackend:
         output_throughput = output_throughput * scale_factor
         concurrency = b * scale_factor
 
-        request_rate = output_throughput / (osl - 1)
+        request_rate = output_throughput / (osl - 1) if osl > 1 else 0.0
         if b > 1:
             # will not be corrected by balance score when it's larger than 1.0
             # in order to indicate what's happening

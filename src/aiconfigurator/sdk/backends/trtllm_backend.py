@@ -70,7 +70,13 @@ class TRTLLMBackend(BaseBackend):
         # explicit None from the Python API still falls back to the constant.
         max_seq_len = kwargs.get("max_seq_len")
         if max_seq_len is None:
-            max_seq_len = isl + osl
+            # KV cache must hold isl + beam_width * osl tokens per slot; the
+            # plain isl + osl default under-sizes the cache when beam_width > 1.
+            try:
+                beam_width = int(kwargs.get("beam_width", 1))
+            except (TypeError, ValueError):
+                beam_width = 1
+            max_seq_len = isl + beam_width * osl
         free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction")
         if free_gpu_memory_fraction is None:
             free_gpu_memory_fraction = TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
