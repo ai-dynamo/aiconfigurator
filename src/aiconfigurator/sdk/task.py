@@ -916,27 +916,6 @@ class TaskConfig:
         Check that the task can be run by AIC.
         """
 
-        # fp8_static GEMM mode is currently TRTLLM-only.
-        def _validate_fp8_static(worker_cfg: DefaultMunch, target: str) -> None:
-            gemm_quant_mode = worker_cfg.get("gemm_quant_mode", None)
-            if gemm_quant_mode is None:
-                return
-            mode_name = gemm_quant_mode.name if hasattr(gemm_quant_mode, "name") else str(gemm_quant_mode)
-            if str(mode_name).lower() != common.GEMMQuantMode.fp8_static.name:
-                return
-
-            backend_name = worker_cfg.get("backend_name", None)
-            if str(backend_name).lower() != common.BackendName.trtllm.value:
-                raise ValueError(
-                    f"fp8_static is currently only supported in trtllm backend. we got backend='{backend_name}'."
-                )
-
-        if self.serving_mode == "agg":
-            _validate_fp8_static(self.config.worker_config, "worker_config")
-        elif self.serving_mode == "disagg":
-            _validate_fp8_static(self.config.prefill_worker_config, "prefill_worker_config")
-            _validate_fp8_static(self.config.decode_worker_config, "decode_worker_config")
-
         database_mode_for_validation = getattr(self.config, "database_mode", None)
         allow_missing_data = (
             database_mode_for_validation is not None
