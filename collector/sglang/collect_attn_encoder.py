@@ -3,27 +3,15 @@
 
 """Encoder (non-causal) attention collector for multimodal / omni-modal models.
 
-Covers ViT-style vision encoders, audio encoders, and any other bidirectional
-encoder path: full N^2, MHA, no KV cache. We call the **same underlying kernels**
-that sglang's production ``VisionAttention`` wrapper dispatches to per-SM, but
-skip the wrapper's ``seq_lens.max().item()`` host sync (vision.py:435, 489, 369)
-so the call can be captured into a CUDA graph — matching how the existing LLM
-collectors (``collect_attn.py``) measure attention latency. Eager-mode timing
-would include wrapper host overhead and would not be comparable to LLM data.
-
 SM dispatch mirrors ``VisionAttention._determine_attention_backend``
-(vision.py:934-975):
 
 - CUDA SM == 90 (Hopper)     -> ``flash_attn_varlen_func``           (FA3)
 - CUDA SM == 100 (Blackwell) -> ``flash_attn_varlen_func(ver=4)``    (FA4)
 - other CUDA (SM<90, SM120)  -> ``context_attention_fwd``            (Triton)
 
-For our uniform-shape sweep ``max_seqlen == seq_len`` is a known python int,
-so the wrapper's host sync is unnecessary — the kernel arguments are byte-
-identical to what production passes.
 """
 
-__compat__ = "sglang>=0.5.10rc0"
+__compat__ = "sglang>=0.5.11"
 
 from typing import NamedTuple
 
@@ -47,10 +35,6 @@ def _build_kernel_runner(
 ):
     """Return ``(run_iter, backend_tag)`` for the given device and shape.
 
-    ``run_iter`` calls the same kernel that the production sglang
-    ``VisionAttention`` wrapper would dispatch on this SM, with arguments
-    matched to vision.py:430/447/370/491 (non-cuda-graph branch). Inputs are
-    closed over so ``run_iter()`` is CUDA-graph capturable (no host syncs).
     """
     if device.type != "cuda":
         raise RuntimeError(
@@ -62,7 +46,7 @@ def _build_kernel_runner(
     k = torch.randn(total_tokens, num_heads, head_dim, device=device, dtype=dtype)
     v = torch.randn(total_tokens, num_heads, head_dim, device=device, dtype=dtype)
 
-    # Uniform batch: cu_seqlens = [0, s, 2s, ..., b*s], max_seqlen = s (python int)
+    # Uniform batch: cu_seqlens = [0, s, 2s, ..., b*s], max_seqlen = s
     cu_seqlens = torch.arange(
         0, (batch_size + 1) * seq_len,
         step=seq_len, dtype=torch.int32, device=device,
@@ -73,7 +57,7 @@ def _build_kernel_runner(
     sm = get_sm_version()  # 90 / 100 / 120 / ...
 
     if sm == 90:
-        # Matches VisionFlash3Attention.forward (vision.py:437-447) non-graph branch.
+        # Matches VisionFlash3Attention.forward.
         from sglang.jit_kernel.flash_attention import flash_attn_varlen_func
 
         def run_iter():
@@ -90,7 +74,7 @@ def _build_kernel_runner(
         return run_iter, "flash_attention_v3"
 
     if sm == 100:
-        # Matches VisionFlash4Attention.forward (vision.py:491-501).
+        # Matches VisionFlash4Attention.forward.
         from sglang.jit_kernel.flash_attention import flash_attn_varlen_func
 
         def run_iter():
@@ -106,8 +90,8 @@ def _build_kernel_runner(
 
         return run_iter, "flash_attention_v4"
 
-    # SM<90 or SM>100 (e.g. SM80 A100, SM120 RTX 5090): Triton path,
-    # matching VisionTritonAttention.forward (vision.py:362-381) non-graph branch.
+    # SM<90 or SM>100: Triton path
+    # matching VisionTritonAttention.forward.
     from sglang.srt.layers.attention.triton_ops.prefill_attention import (
         context_attention_fwd,
     )
@@ -202,6 +186,8 @@ def get_encoder_attention_test_cases():
                 for b in sorted(b_list, reverse=True):
                     # Workload token budget guard (max 128K tokens)
                     if b * s > 131072:
+                        continue
+                    if 4 * b * s * n * head_dim * 2 >= 2**31:
                         continue
                     test_cases.append([b, s, n, head_dim])
     return test_cases

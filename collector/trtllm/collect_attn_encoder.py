@@ -3,17 +3,12 @@
 
 """Encoder (non-causal) attention collector for multimodal / omni-modal models.
 
-Covers ViT-style vision encoders, audio encoders, and any other bidirectional
-encoder path: full N^2, MHA, no KV cache. Uses the same TRT-LLM path that
-Qwen2-VL ViT uses in production (see
-``tensorrt_llm/_torch/models/modeling_qwen2vl.py``):
-  - ``kv_cache_manager=None`` -> prepare() sets use_cache=False, kv_cache_block_offsets=None
-  - ``attention_mask=PredefinedAttentionMask.FULL`` -> mMaskType=padding (non-causal)
-  - ``pos_embd_params=None`` -> FMHA kernel does NOT do fused RoPE; production ViT
-    applies RoPE outside the attention op via ``apply_rotary_pos_emb_vision`` (see
-    ``Qwen2_5_VLVisionAttention.__init__`` in modeling_qwen2vl.py:518). The
-    out-of-kernel RoPE cost is modeled separately by ``EncoderAttention.query()``
-    using ``partial_rotary_factor``.
+SM-specific FMHA kernel dispatch is handled internally by ``thop.attention``:
+
+- ``kv_cache_manager=None``                        -> single-pass, no KV cache
+- ``attention_mask=PredefinedAttentionMask.FULL``  -> non-causal (padding mask)
+- ``pos_embd_params=None``                         -> RoPE applied outside FMHA
+
 """
 
 import os
@@ -51,11 +46,7 @@ def run_encoder_attention_torch(
 
     quant_config = QuantConfig(quant_algo=None, kv_cache_quant_algo=None, group_size=128)
 
-    # pos_embd_params=None mirrors Qwen2_5_VLVisionAttention (modeling_qwen2vl.py:518).
-    # Production ViT applies RoPE outside the FMHA kernel; if we passed a non-None
-    # pos_embd_params here the FMHA kernel would perform a *fused* RoPE inside, the
-    # collected latency would double-count RoPE against EncoderAttention.query()'s
-    # partial_rotary_factor term.
+    # pos_embd_params=None Production ViT applies RoPE outside the FMHA kernel
     attn = create_attention(
         backend_name="TRTLLM",
         layer_idx=0,
@@ -72,14 +63,11 @@ def run_encoder_attention_torch(
     input_seq_lens = [seq_len] * batch_size
     request_ids = list(range(batch_size))
 
-    # No KV cache: encoder is single-pass. This mirrors Qwen2-VL ViT
-    # (modeling_qwen2vl.py:708-717) which sets kv_cache_manager=None.
+    # No KV cache: encoder is single-pass.
     attn_metadata = TrtllmAttentionMetadata(
         max_num_requests=batch_size,
         max_num_tokens=total_num_tokens,
         # kv_cache_manager=None requires max_seq_len to be set explicitly
-        # (trtllm.py:813-830: "If the attention is no cache, max_seq_len
-        # should be set manually by user").
         max_seq_len=seq_len,
         kv_cache_manager=None,
         mapping=mapping,
@@ -157,6 +145,8 @@ def get_encoder_attention_test_cases():
                 for b in sorted(b_list, reverse=True):
                     # Workload token budget guard (max 128K tokens)
                     if b * s > 131072:
+                        continue
+                    if 4 * b * s * n * head_dim * 2 >= 2**31:
                         continue
                     test_cases.append([b, s, n, head_dim])
     return test_cases

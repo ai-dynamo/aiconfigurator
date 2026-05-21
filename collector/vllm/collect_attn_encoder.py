@@ -65,7 +65,9 @@ def run_encoder_attention_torch(
             q, k, v, batch_size=batch_size, scale=scale, cu_seqlens=cu_seqlens,
         )
     elif backend == AttentionBackendEnum.TORCH_SDPA:
-        run = lambda: vit_torch_sdpa_wrapper(q, k, v, scale=scale)
+        run = lambda: vit_torch_sdpa_wrapper(
+            q, k, v, scale=scale,
+        )
     else:
         # FlashInfer ViT needs cu_seqlens padding + workspace; not on the ViT default path.
         raise NotImplementedError(f"ViT backend {backend} not supported by collector")
@@ -120,6 +122,8 @@ def get_encoder_attention_test_cases(if_unit_test=False):
                 for b in sorted(b_list, reverse=True):
                     # Workload token budget guard (max 128K tokens)
                     if b * s > 131072:
+                        continue
+                    if 4 * b * s * n * head_dim * 2 >= 2**31:
                         continue
                     test_cases.append([b, s, n, head_dim])
     return test_cases
