@@ -158,3 +158,45 @@ Webapp is actually a UI for these stuff. The logics are the same. They're buildi
 In order to save search time, you need to reduce the search space by choosing fewer parallel options. Say for `num_gpu_per_worker` here, it's DeepSeek V3 with 671B model 
 parameters. With fp8_block, the rough estimation of the model weights is 671GB. You can not hold it on 4/2/1 gpus, you can modify it to `[8]` only. 
 Of source, in most cases, we would like to have the default set work. Ideally, users don't have to modify them. But for specific perf studies, you can try it.
+
+## Customized empirical corrections for systems and backends
+Empirical corrections can be customized per system/backend/version instead of being hard-coded.
+
+Current support:
+1. vLLM backend is supported.
+2. Other backends can adopt the same mechanism in future updates.
+
+Place a yaml file at:
+`src/aiconfigurator/systems/empirical_correction/<system>/<backend>/<version>/empirical_correction.yaml`
+
+Example:
+```yaml
+corrections:
+  tpot_num_mix_steps_for_tpot_calc: "max(1, num_mix_steps - 3)"
+  ttft_correction_factor: "min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)"
+```
+
+Behavior and fallback:
+1. The loader first checks the exact path for current `system/backend/version`.
+2. If the file is missing, a key is missing, or an expression is invalid, sdk falls back to the built-in default formula.
+3. Expressions are evaluated with a safe allowlist evaluator (not Python `eval`).
+
+Allowed variables by formula:
+1. `tpot_num_mix_steps_for_tpot_calc`: `num_mix_steps`
+2. `ttft_correction_factor`: `steps_to_finish_ctx`
+
+Supported expression functions:
+1. `min(...)`
+2. `max(...)`
+3. `ceil(...)`
+4. `floor(...)`
+
+Supported operators:
+1. Binary: `+`, `-`, `*`, `/`, `//`, `%`, `**`
+2. Unary: `+x`, `-x`
+
+Not supported:
+1. Attribute access like `obj.x`
+2. Indexing like `a[0]`
+3. Keyword-argument calls like `max(a=1, b=2)`
+4. Any function not in the allowlist above
