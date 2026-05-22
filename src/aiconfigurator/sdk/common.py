@@ -105,6 +105,44 @@ class HybridMoEConfig:
 
 
 @dataclass(frozen=True)
+class VisionEncoderConfig:
+    """
+    Configuration for the vision encoder (ViT) component of multimodal VL models.
+
+    Covers Qwen3-VL and similar vision-language architectures where the visual
+    encoder is a separate ViT that runs before the LLM backbone.
+
+    Attributes:
+        depth (int): Number of ViT transformer layers
+        hidden_size (int): Hidden dimension of the ViT
+        num_heads (int): Number of attention heads in the ViT
+        intermediate_size (int): FFN intermediate size in the ViT
+        patch_size (int): Spatial patch size in pixels (applied to H and W)
+        temporal_patch_size (int): Temporal patch size for video inputs (1 for image-only)
+        spatial_merge_size (int): Pixel-shuffle reduction factor applied after ViT
+            (e.g., 2 means 2x2 patches are merged, dividing token count by 4)
+        out_hidden_size (int): Output projection dimension (must match LLM hidden size)
+        projector_dims (tuple[tuple[int, int], ...]): Per-layer (in_dim, out_dim) pairs
+            for the vision-to-LLM projector MLP. Empty tuple means no projector.
+            Dimensions are absolute (before TP sharding); build_encoder_ops applies TP.
+        projector_n_instances (int): Number of projector instances to model (e.g.,
+            1 + len(deepstack_visual_indexes) for Qwen3VL deepstack variants).
+    """
+
+    depth: int
+    hidden_size: int
+    num_heads: int
+    intermediate_size: int
+    patch_size: int
+    temporal_patch_size: int
+    spatial_merge_size: int
+    out_hidden_size: int
+    deepstack_visual_indexes: tuple[int, ...] = ()
+    projector_dims: tuple[tuple[int, int], ...] = ()
+    projector_n_instances: int = 1
+
+
+@dataclass(frozen=True)
 class Gemma4MoEConfig:
     """Config for Google Gemma 4 (gemma4_text) hybrid attention + dense-MLP-plus-MoE FFN.
 
@@ -399,6 +437,13 @@ DefaultHFModels = {
     "Qwen/Qwen3-Coder-480B-A35B-Instruct",
     "nvidia/Qwen3-235B-A22B-NVFP4",
     "Qwen/Qwen3-32B-FP8-Static-PerTensor",
+    "Qwen/Qwen3-VL-2B-Instruct",
+    "Qwen/Qwen3-VL-4B-Instruct",
+    "Qwen/Qwen3-VL-8B-Instruct",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "Qwen/Qwen3-VL-32B-Instruct",
+    "Qwen/Qwen3-VL-32B-Thinking",
+    "Qwen/Qwen3-VL-235B-A22B-Instruct",
     # MiniMax Models
     "MiniMaxAI/MiniMax-M2.5",
     "nvidia/MiniMax-M2.5-NVFP4",
@@ -468,6 +513,8 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
     "Qwen2ForCausalLM": "LLAMA",
     "Qwen3ForCausalLM": "LLAMA",
+    "Qwen3VLForConditionalGeneration": "QWEN3VL",
+    "Qwen3VLMoeForConditionalGeneration": "QWEN3VL_MOE",
     "MiMoForCausalLM": "LLAMA",
     "DeepSeekForCausalLM": "DEEPSEEK",
     "DeepseekV3ForCausalLM": "DEEPSEEK",
@@ -498,6 +545,8 @@ MULTIMODAL_TEXT_CONFIG_KEY = {
     "Qwen3_5ForConditionalGeneration": "text_config",
     "Qwen3_5MoeForConditionalGeneration": "text_config",
     "Gemma4ForConditionalGeneration": "text_config",
+    "Qwen3VLForConditionalGeneration": "text_config",
+    "Qwen3VLMoeForConditionalGeneration": "text_config",
 }
 
 """
@@ -525,6 +574,7 @@ ColumnsStatic = [
     "tokens/s/gpu",
     "tokens/s/user",
     "request_latency",
+    "encoder_latency",
     "context_latency",
     "generation_latency",
     "num_total_gpus",
@@ -648,6 +698,11 @@ ColumnsDisagg = [
     "(d)backend",
     "(d)version",
     "(d)system",
+    "(e)workers",
+    "(e)tp",
+    "(e)pp",
+    "(e)parallel",
+    "(e)memory",
     "power_w",  # NEW: E2E weighted average power in watts
 ]
 

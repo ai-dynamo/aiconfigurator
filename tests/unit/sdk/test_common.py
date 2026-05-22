@@ -262,3 +262,18 @@ class TestSupportMatrix:
         assert result.disagg_supported is True
         assert result.agg_pass_count == 1
         assert result.agg_total_count == 1
+
+
+class TestEncoderLatencyColumn:
+    """Test encoder_latency column is in ColumnsStatic in the correct position."""
+
+    def test_encoder_latency_in_columns_static(self):
+        assert "encoder_latency" in common.ColumnsStatic
+
+    def test_encoder_latency_before_context_latency(self):
+        cols = common.ColumnsStatic
+        assert cols.index("encoder_latency") < cols.index("context_latency")
+
+    def test_encoder_latency_before_generation_latency(self):
+        cols = common.ColumnsStatic
+        assert cols.index("encoder_latency") < cols.index("generation_latency")

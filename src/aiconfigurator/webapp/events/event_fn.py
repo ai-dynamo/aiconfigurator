@@ -182,6 +182,9 @@ class EventFn:
         enable_eplb,
         mode,
         record_df,
+        image_height=0,
+        image_width=0,
+        num_images=1,
     ):
         is_error = False
         stdout_buffer = StringIO()
@@ -215,7 +218,15 @@ class EventFn:
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
-                runtime_config = config.RuntimeConfig(batch_size=batch_size, isl=isl, osl=osl, prefix=prefix)
+                runtime_config = config.RuntimeConfig(
+                    batch_size=batch_size,
+                    isl=isl,
+                    osl=osl,
+                    prefix=prefix,
+                    image_height=int(image_height or 0),
+                    image_width=int(image_width or 0),
+                    num_images_per_request=int(num_images or 1),
+                )
 
                 model = get_model(model_path, model_config, backend_name)
                 stride = (osl + 8 - 1) // 8  # run at most 8 steps
@@ -229,15 +240,17 @@ class EventFn:
         stderr_text = stderr_buffer.getvalue()
         if is_error:
             return (
-                gr.update(value=""),
                 gr.update(value="ERROR!!!"),
+                gr.update(value=""),
+                gr.update(value=""),
                 gr.update(value=""),
                 gr.update(value=record_df),
                 gr.update(value=stdout_text + stderr_text + traceback_log),
             )
         else:
-            perf_info, mem_info, context_info, generation_info = summary.get_static_info()
+            perf_info, mem_info, encoder_info, context_info, generation_info = summary.get_static_info()
             summary_string = f"```\n{perf_info + mem_info}\n```"
+            encoder_breakdown_string = f"```\n{encoder_info}\n```"
             context_breakdown_string = f"```\n{context_info}\n```"
             generation_breakdown_string = f"```\n{generation_info}\n```"
             new_record_df = summary.get_summary_df()
@@ -249,6 +262,7 @@ class EventFn:
             # need to update the textbox (breakdown) as well the table to be downloaded
             return (
                 gr.update(value=summary_string),
+                gr.update(value=encoder_breakdown_string),
                 gr.update(value=context_breakdown_string),
                 gr.update(value=generation_breakdown_string),
                 gr.update(value=updated_record_df),

@@ -35,9 +35,13 @@ class EventHandler:
                 components["model_misc_config_components"]["enable_eplb"],
                 components["mode"],
                 components["record_df"],
+                components["runtime_config_components"]["image_height"],
+                components["runtime_config_components"]["image_width"],
+                components["runtime_config_components"]["num_images"],
             ],
             outputs=[
                 components["summary_box"],
+                components["encoder_breakdown_box"],
                 components["context_breakdown_box"],
                 components["generation_breakdown_box"],
                 components["record_df"],
