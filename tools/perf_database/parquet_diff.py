@@ -258,6 +258,20 @@ def render_report(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def find_legacy_perf_changes(entries: list[DiffEntry]) -> list[DiffEntry]:
+    """Return added/modified legacy text perf files; deletions are migration-safe."""
+    return [entry for entry in entries if entry.path.endswith("_perf.txt") and not entry.status.startswith("D")]
+
+
+def should_fail_strict(comparisons: list[Comparison], legacy_perf_changes: list[DiffEntry]) -> bool:
+    converted_bad = [
+        item
+        for item in comparisons
+        if item.base_path and item.base_path.endswith(".txt") and not (item.columns_match and item.content_match)
+    ]
+    return bool(converted_bad or legacy_perf_changes)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-ref", default="origin/main")
@@ -269,9 +283,7 @@ def main() -> int:
 
     entries = _parse_diff(args.base_ref, args.head_ref, args.path_prefix)
     parquet_entries = [entry for entry in entries if entry.path.endswith(".parquet")]
-    legacy_perf_changes = [
-        entry for entry in entries if entry.path.endswith("_perf.txt") and not entry.status.startswith("D")
-    ]
+    legacy_perf_changes = find_legacy_perf_changes(entries)
     comparisons = [_compare(args.base_ref, args.head_ref, entry) for entry in parquet_entries]
     report = render_report(
         base_ref=args.base_ref,
@@ -287,12 +299,7 @@ def main() -> int:
     else:
         sys.stdout.write(report)
 
-    converted_bad = [
-        item
-        for item in comparisons
-        if item.base_path and item.base_path.endswith(".txt") and not (item.columns_match and item.content_match)
-    ]
-    if not args.no_strict and (converted_bad or legacy_perf_changes):
+    if not args.no_strict and should_fail_strict(comparisons, legacy_perf_changes):
         return 1
     return 0
 

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import subprocess
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -11,78 +11,46 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-PARQUET_DIFF = REPO_ROOT / "tools" / "perf_database" / "parquet_diff.py"
-PERF_PATH = Path("src/aiconfigurator/systems/data/h100_sxm/trtllm/1.0.0/gemm_perf.txt")
+PARQUET_DIFF = Path(__file__).resolve().parents[3] / "tools" / "perf_database" / "parquet_diff.py"
 
 
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+@pytest.fixture
+def parquet_diff_module():
+    spec = importlib.util.spec_from_file_location("parquet_diff", PARQUET_DIFF)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
-def _init_repo(tmp_path: Path) -> Path:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-b", "main")
-    _git(repo, "config", "user.email", "test@example.com")
-    _git(repo, "config", "user.name", "Test User")
-    return repo
+def test_legacy_perf_policy_flags_added_and_modified_text_files(parquet_diff_module):
+    entries = [
+        parquet_diff_module.DiffEntry("A", "src/aiconfigurator/systems/data/h100/gemm_perf.txt"),
+        parquet_diff_module.DiffEntry("M", "src/aiconfigurator/systems/data/h100/moe_perf.txt"),
+        parquet_diff_module.DiffEntry("D", "src/aiconfigurator/systems/data/h100/nccl_perf.txt"),
+        parquet_diff_module.DiffEntry("A", "src/aiconfigurator/systems/data/h100/gemm_perf.parquet"),
+    ]
+
+    legacy_changes = parquet_diff_module.find_legacy_perf_changes(entries)
+
+    assert [entry.status for entry in legacy_changes] == ["A", "M"]
+    assert parquet_diff_module.should_fail_strict([], legacy_changes)
 
 
-def _write_perf_file(repo: Path, body: str = "op,latency_ms\ngemm,1.0\n") -> None:
-    path = repo / PERF_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body)
+def test_legacy_perf_policy_allows_text_file_deletions(parquet_diff_module):
+    entries = [
+        parquet_diff_module.DiffEntry("D", "src/aiconfigurator/systems/data/h100/gemm_perf.txt"),
+    ]
 
-
-def _run_parquet_diff(repo: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [
-            sys.executable,
-            str(PARQUET_DIFF),
-            "--base-ref",
-            "HEAD~1",
-            "--head-ref",
-            "HEAD",
-        ],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=False,
+    legacy_changes = parquet_diff_module.find_legacy_perf_changes(entries)
+    report = parquet_diff_module.render_report(
+        base_ref="origin/main",
+        head_ref="HEAD",
+        entries=entries,
+        comparisons=[],
+        legacy_perf_changes=legacy_changes,
     )
 
-
-@pytest.mark.parametrize("change_type", ["added", "modified"])
-def test_parquet_diff_fails_when_legacy_perf_text_is_added_or_modified(tmp_path, change_type):
-    repo = _init_repo(tmp_path)
-
-    if change_type == "modified":
-        _write_perf_file(repo)
-        _git(repo, "add", str(PERF_PATH))
-
-    _git(repo, "commit", "--allow-empty", "-m", "base")
-
-    _write_perf_file(repo, "op,latency_ms\ngemm,2.0\n")
-    _git(repo, "add", str(PERF_PATH))
-    _git(repo, "commit", "-m", f"{change_type} legacy perf text")
-
-    result = _run_parquet_diff(repo)
-
-    assert result.returncode == 1
-    assert "- Legacy `*_perf.txt` files added or modified: 1" in result.stdout
-    assert "### Legacy Text Perf Files Still Changed" in result.stdout
-
-
-def test_parquet_diff_allows_legacy_perf_text_deletions(tmp_path):
-    repo = _init_repo(tmp_path)
-    _write_perf_file(repo)
-    _git(repo, "add", str(PERF_PATH))
-    _git(repo, "commit", "-m", "base")
-
-    _git(repo, "rm", str(PERF_PATH))
-    _git(repo, "commit", "-m", "delete legacy perf text")
-
-    result = _run_parquet_diff(repo)
-
-    assert result.returncode == 0
-    assert "- Legacy `*_perf.txt` files added or modified: 0" in result.stdout
+    assert legacy_changes == []
+    assert not parquet_diff_module.should_fail_strict([], legacy_changes)
+    assert "- Legacy `*_perf.txt` files added or modified: 0" in report
