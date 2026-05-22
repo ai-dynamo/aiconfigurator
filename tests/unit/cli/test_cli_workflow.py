@@ -336,7 +336,7 @@ class TestBuildDefaultTaskConfigs:
         assert mock_task_config.call_count == 2
         assert "Skipping SGLang DeepEP agg sweep" in caplog.text
         assert "Skipping SGLang DeepEP disagg sweep" in caplog.text
-        assert "wideep_deepep_normal_perf.txt" in caplog.text
+        assert "wideep_deepep_normal_perf.parquet" in caplog.text
 
     @patch("aiconfigurator.cli.main.check_is_moe", return_value=True)
     @patch("aiconfigurator.cli.main.TaskConfig")
@@ -348,7 +348,7 @@ class TestBuildDefaultTaskConfigs:
     ):
         """SGLang DeepEP sweeps remain available when required DeepEP op data exists."""
         mock_task_config.return_value = MagicMock(name="MockTaskConfig")
-        for filename in ("wideep_deepep_normal_perf.txt", "wideep_deepep_ll_perf.txt"):
+        for filename in ("wideep_deepep_normal_perf.parquet", "wideep_deepep_ll_perf.parquet"):
             (tmp_path / filename).write_text("header\n", encoding="utf-8")
 
         with patch("aiconfigurator.cli.main._get_backend_data_path", return_value=str(tmp_path)):
