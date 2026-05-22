@@ -6,14 +6,36 @@ from __future__ import annotations
 
 import argparse
 import csv
+import subprocess
 import sys
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
+
+LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
+
+
+def _smudge_lfs_pointer(data: bytes) -> bytes:
+    result = subprocess.run(["git", "lfs", "smudge"], input=data, capture_output=True, check=False)
+    if result.returncode != 0:
+        stderr = result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(f"Failed to smudge Git LFS pointer: {stderr}")
+    if result.stdout.startswith(LFS_POINTER_PREFIX):
+        raise RuntimeError("Git LFS smudge returned a pointer; fetch the LFS object before diffing")
+    return result.stdout
+
+
+def _read_parquet_table(path: Path):
+    with path.open("rb") as f:
+        prefix = f.read(len(LFS_POINTER_PREFIX))
+    if prefix == LFS_POINTER_PREFIX:
+        return pq.read_table(pa.BufferReader(_smudge_lfs_pointer(path.read_bytes())))
+    return pq.read_table(path)
 
 
 def parquet_to_csv(path: Path) -> None:
-    table = pq.read_table(path)
+    table = _read_parquet_table(path)
     fieldnames = table.schema.names
     writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames, lineterminator="\n")
     writer.writeheader()

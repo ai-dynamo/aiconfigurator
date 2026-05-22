@@ -13,6 +13,7 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -753,20 +754,41 @@ def convert_perf_csv_to_parquet(
     return parquet_path
 
 
-def finalize_perf_outputs(
-    output_root: str | os.PathLike = ".",
+def find_perf_csv_outputs(output_root: str | os.PathLike = ".", *, recursive: bool = False) -> list[Path]:
+    """Find collector CSV staging files directly under `output_root` by default."""
+    root = Path(output_root)
+    paths = root.rglob("*_perf.txt") if recursive else root.glob("*_perf.txt")
+    return sorted(path for path in paths if path.name != "INCOMPLETE.txt")
+
+
+def finalize_perf_files(
+    csv_files: Iterable[str | os.PathLike],
     *,
     delete_source: bool = True,
     compression: str = "zstd",
 ) -> list[Path]:
-    """Finalize collector CSV staging files under `output_root` as parquet."""
-    root = Path(output_root)
+    """Finalize explicit collector CSV staging files as parquet."""
     converted: list[Path] = []
-    for csv_path in sorted(root.rglob("*_perf.txt")):
-        if csv_path.name == "INCOMPLETE.txt":
+    for csv_file in sorted({Path(path) for path in csv_files}):
+        if csv_file.name == "INCOMPLETE.txt" or not csv_file.name.endswith("_perf.txt") or not csv_file.exists():
             continue
-        converted.append(convert_perf_csv_to_parquet(csv_path, delete_source=delete_source, compression=compression))
+        converted.append(convert_perf_csv_to_parquet(csv_file, delete_source=delete_source, compression=compression))
     return converted
+
+
+def finalize_perf_outputs(
+    output_root: str | os.PathLike = ".",
+    *,
+    recursive: bool = False,
+    delete_source: bool = True,
+    compression: str = "zstd",
+) -> list[Path]:
+    """Finalize collector CSV staging files directly under `output_root` as parquet."""
+    return finalize_perf_files(
+        find_perf_csv_outputs(output_root, recursive=recursive),
+        delete_source=delete_source,
+        compression=compression,
+    )
 
 
 # Helper functions for MoE

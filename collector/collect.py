@@ -68,7 +68,8 @@ from pathlib import Path
 from helper import (
     EXIT_CODE_RESTART,
     create_test_case_id,
-    finalize_perf_outputs,
+    finalize_perf_files,
+    find_perf_csv_outputs,
     save_error_report,
     setup_logging,
     setup_signal_handlers,
@@ -1198,6 +1199,13 @@ def main():
     if not args.profile:
         mp.set_start_method("spawn")
 
+    output_root = Path.cwd()
+    existing_perf_outputs = {path.resolve(): path.stat().st_mtime_ns for path in find_perf_csv_outputs(output_root)}
+
+    def was_touched_by_run(path: Path) -> bool:
+        resolved = path.resolve()
+        return resolved not in existing_perf_outputs or path.stat().st_mtime_ns != existing_perf_outputs[resolved]
+
     # Use profiling context manager
     with ProfilerContext(args.backend, enabled=args.profile):
         if args.backend == "trtllm":
@@ -1210,7 +1218,13 @@ def main():
     if args.keep_csv:
         logger.info("Keeping collector CSV staging files because --keep-csv was passed")
     else:
-        converted = finalize_perf_outputs(".")
+        touched_perf_outputs = [path for path in find_perf_csv_outputs(output_root) if was_touched_by_run(path)]
+        if touched_perf_outputs:
+            logger.info(
+                "Finalizing collector CSV staging files as parquet:\n  "
+                + "\n  ".join(str(path) for path in touched_perf_outputs)
+            )
+        converted = finalize_perf_files(touched_perf_outputs)
         if converted:
             logger.info(f"Finalized {len(converted)} collector perf files as parquet")
 
