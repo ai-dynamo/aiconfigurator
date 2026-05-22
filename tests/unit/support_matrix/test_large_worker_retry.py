@@ -69,3 +69,30 @@ def test_run_single_test_retries_large_worker_after_recoverable_failure(monkeypa
     assert [call["yaml_config"] is None for call in calls] == [True, False, True, False]
     assert calls[1]["yaml_config"]["config"]["worker_config"]["num_gpu_per_worker"] == [16]
     assert calls[3]["yaml_config"]["config"]["prefill_worker_config"]["pp_list"] == [2]
+
+
+def test_run_single_test_can_return_row_replay_commands(monkeypatch):
+    def fake_run_mode(**_kwargs):
+        return pd.DataFrame({"tokens/s/gpu": [1.0]})
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+
+    statuses, errors, commands = SupportMatrix.run_single_test(
+        model="zai-org/GLM-5",
+        system="b200_sxm",
+        backend="sglang",
+        version="0.5.10",
+        modes_to_test=("agg",),
+        include_commands=True,
+        system_spec={"gpu": {"sm_version": 100, "fp8_tc_flops": 1, "fp4_tc_flops": 1}},
+    )
+
+    assert statuses == {"agg": STATUS_PASS}
+    assert errors == {"agg": None}
+    assert commands == {
+        "agg": (
+            "python tools/support_matrix/generate_support_matrix.py "
+            "--model zai-org/GLM-5 --system b200_sxm --backend sglang "
+            "--backend-version 0.5.10 --mode agg --max-workers 1 --no-save"
+        )
+    }

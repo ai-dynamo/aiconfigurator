@@ -8,14 +8,18 @@ from tools.support_matrix.compare_support_matrix import (
     find_blocking_status_transitions,
     generate_pr_description,
 )
-from tools.support_matrix.support_matrix import STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_PASS
+from tools.support_matrix.support_matrix import STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_PASS, SUPPORT_MATRIX_HEADER
 
 pytestmark = pytest.mark.unit
 
-HEADER = ["HuggingFaceID", "Architecture", "System", "Backend", "Version", "Mode", "Status", "ErrMsg"]
+HEADER = SUPPORT_MATRIX_HEADER
 
 
-def _row(status: str, err_msg: str = "") -> list[str]:
+def _row(
+    status: str,
+    err_msg: str = "",
+    command: str = "python tools/support_matrix/generate_support_matrix.py",
+) -> list[str]:
     return [
         "Qwen/Qwen3-32B-FP8",
         "Qwen3ForCausalLM",
@@ -25,6 +29,7 @@ def _row(status: str, err_msg: str = "") -> list[str]:
         "agg",
         status,
         err_msg,
+        command,
     ]
 
 
@@ -54,6 +59,12 @@ def test_csv_sanity_requires_hardware_incompatible_reason():
     errors = check_csv_sanity(HEADER, [_row(STATUS_HW_INCOMPATIBLE)])
 
     assert any("must include a hardware incompatibility reason" in err for err in errors)
+
+
+def test_csv_sanity_requires_command_for_current_header():
+    errors = check_csv_sanity(HEADER, [_row(STATUS_PASS, command="")])
+
+    assert any("Command column must include" in err for err in errors)
 
 
 def test_pass_to_hardware_incompatible_is_blocking_transition():
