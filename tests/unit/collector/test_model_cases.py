@@ -617,6 +617,51 @@ def test_filter_test_cases_reports_expected_sm_exception_reasons():
     ]
 
 
+def test_sm120_exception_filters_trtllm_gptoss_mxfp4():
+    plan = build_collection_case_plan(
+        backend="trtllm",
+        model_path="openai/gpt-oss-120b",
+        gpu_type="rtx_pro_6000_server",
+    )
+    case = [
+        "w4a16_mxfp4",
+        [1, 2, 4],
+        2880,
+        2880,
+        4,
+        128,
+        1,
+        1,
+        False,
+        "openai/gpt-oss-120b",
+        "power_law",
+        1.01,
+    ]
+
+    expected = expected_failure_for_test_case(
+        case,
+        plan=plan.op_cases["moe"],
+        full_module_name="trtllm.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert expected == {
+        "case_id": create_test_case_id(case, "run_moe_torch", "trtllm.moe"),
+        "source": "sm_exception",
+        "selector": "rule",
+        "reason_type": "framework_version_unsupported",
+        "reason": "TRT-LLM 1.3.0rc5/rc10 TRTLLMGenFusedMoE rejects GPT-OSS MXFP4 paths on SM120.",
+    }
+    assert expected_failure_for_test_case(
+        case,
+        plan=plan.op_cases["moe"],
+        full_module_name="trtllm.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="1.3.0rc4",
+    ) is None
+
+
 def test_filter_test_cases_supports_computed_rule_conditions():
     cases = [
         [1, 4096, 64, 4, 128, False, False, False],

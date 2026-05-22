@@ -580,6 +580,7 @@ def benchmark_config(
     use_int8_w8a16: bool,
     use_nvfp4: bool = False,
     use_int4_w4a16: bool = False,
+    use_mxfp4_w4a16: bool = False,
     use_mxfp4_w4a8: bool = False,
     block_shape: list[int] | None = None,
     num_iters: int = 10,
@@ -591,6 +592,7 @@ def benchmark_config(
     moe_ep_size: int = 1,
 ) -> float:
     device = torch.device("cuda")
+    use_mxfp4_moe = use_mxfp4_w4a16 or use_mxfp4_w4a8
     if workloads is not None:
         num_iters = len(workloads)
         num_tokens = max(workload["hidden_states"].shape[0] for workload in workloads)
@@ -800,7 +802,7 @@ def benchmark_config(
                 w2_alpha=w2_alpha,
                 masked_m=masked_m_list[i % num_iters],
             )
-    elif use_mxfp4_w4a8:
+    elif use_mxfp4_moe:
         if not _HAS_SGLANG_MXFP4:
             raise ImportError("SGLang MXFP4 MoE support is not available")
         if workloads is not None:
@@ -1037,6 +1039,7 @@ def benchmark(
     use_int8_w8a16: bool,
     use_nvfp4: bool = False,
     use_int4_w4a16: bool = False,
+    use_mxfp4_w4a16: bool = False,
     use_mxfp4_w4a8: bool = False,
     block_shape: list[int] | None = None,
     distributed: str = "power_law",
@@ -1050,8 +1053,9 @@ def benchmark(
     benchmark_num_tokens = (
         max(workload["hidden_states"].shape[0] for workload in workloads) if workloads is not None else num_tokens
     )
+    use_mxfp4_moe = use_mxfp4_w4a16 or use_mxfp4_w4a8
 
-    if use_nvfp4 or use_mxfp4_w4a8 or (use_int4_w4a16 and _HAS_MARLIN_MOE):
+    if use_nvfp4 or use_mxfp4_moe or (use_int4_w4a16 and _HAS_MARLIN_MOE):
         # nvfp4 uses flashinfer cutedsl backend; int4_w4a16 uses Marlin CUDA
         # kernels — neither needs Triton tuning configs.
         kernel_time, power_stats = benchmark_config(
@@ -1067,6 +1071,7 @@ def benchmark(
             use_int8_w8a16,
             use_nvfp4,
             use_int4_w4a16,
+            use_mxfp4_w4a16,
             use_mxfp4_w4a8,
             block_shape,
             distributed=distributed,
@@ -1115,6 +1120,7 @@ def benchmark(
         use_int8_w8a16,
         use_nvfp4,
         use_int4_w4a16,
+        use_mxfp4_w4a16,
         use_mxfp4_w4a8,
         block_shape,
         distributed=distributed,
@@ -1223,7 +1229,11 @@ def run_moe_torch(
 
     num_local_experts = num_experts // moe_ep_size
     use_int4_w4a16 = moe_type == "int4_wo"
-    use_mxfp4_w4a8 = moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
+    # GPT-OSS uses W4A16 MXFP4; DeepSeek-V4 uses W4A8 MXFP4/MXFP8.
+    # Both currently run through SGLang's FlashInfer MXFP4 MoE backend.
+    use_mxfp4_w4a16 = moe_type == "w4a16_mxfp4"
+    use_mxfp4_w4a8 = moe_type == "w4a8_mxfp4_mxfp8"
+    use_mxfp4_moe = use_mxfp4_w4a16 or use_mxfp4_w4a8
     # int4_wo uses block_shape=[0, group_size] for grouped scales (group_size=128)
     if use_int4_w4a16:
         block_shape = [0, 128]
@@ -1233,7 +1243,7 @@ def run_moe_torch(
         block_shape = None
 
     rank0_workloads: list[Rank0Workload] | None = None
-    if moe_ep_size > 1 and distributed in ("power_law", "balanced") and not use_mxfp4_w4a8:
+    if moe_ep_size > 1 and distributed in ("power_law", "balanced") and not use_mxfp4_moe:
         rank0_workloads = build_rank0_workloads(
             num_workloads=5,
             num_tokens=num_tokens,
@@ -1260,6 +1270,7 @@ def run_moe_torch(
             False,
             use_nvfp4=moe_type == "nvfp4",
             use_int4_w4a16=use_int4_w4a16,
+            use_mxfp4_w4a16=False,
             use_mxfp4_w4a8=False,
             block_shape=block_shape,
             distributed=distributed,
@@ -1272,7 +1283,7 @@ def run_moe_torch(
     else:
         latency, power_stats = benchmark(
             num_tokens,
-            num_experts if use_mxfp4_w4a8 else num_local_experts,
+            num_experts if use_mxfp4_moe else num_local_experts,
             2 * inter_size // moe_tp_size,
             hidden_size,
             topk,
@@ -1282,6 +1293,7 @@ def run_moe_torch(
             False,
             use_nvfp4=moe_type == "nvfp4",
             use_int4_w4a16=use_int4_w4a16,
+            use_mxfp4_w4a16=use_mxfp4_w4a16,
             use_mxfp4_w4a8=use_mxfp4_w4a8,
             block_shape=block_shape,
             distributed=distributed,

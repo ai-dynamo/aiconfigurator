@@ -194,9 +194,6 @@ def get_moe_test_cases():
             if moe_type in _MXFP4_MOE_TYPES:
                 if model_name not in _TRTLLM_MXFP4_MOE_MODELS:
                     continue
-                if model_name in _GPTOSS_MOE_MODELS and sm_version >= 120 and _is_trtllm_130rc5_or_rc10_runtime():
-                    # TRTLLMGenFusedMoE in 1.3.0rc5/1.3.0rc10 rejects SM120+.
-                    continue
             elif model_name in _GPTOSS_MOE_MODELS:
                 continue
 
