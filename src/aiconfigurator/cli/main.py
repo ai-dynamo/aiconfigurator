@@ -306,6 +306,13 @@ def _add_default_mode_arguments(parser):
         "When set, MoE models use EP-only parallelism with deepep_moe backend. "
         "Applies to both DeepSeek and Qwen3-235B on SGLang.",
     )
+    parser.add_argument(
+        "--config-yaml",
+        type=str,
+        default=None,
+        help="YAML patch applied to both default-mode agg and disagg search configs. "
+        "Use this for advanced search-space controls such as worker_config.",
+    )
 
 
 def _add_experiments_mode_arguments(parser):
@@ -950,6 +957,7 @@ def build_default_task_configs(
     max_seq_len: int | None = None,
     enable_wideep: bool = False,
     engine_step_backend: str | None = None,
+    yaml_config: dict[str, Any] | None = None,
 ) -> dict[str, TaskConfig]:
     """Build agg and disagg task configs for default mode comparison.
 
@@ -973,6 +981,7 @@ def build_default_task_configs(
         enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
         enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
         engine_step_backend: Experimental static latency backend ("python" or "rust").
+        yaml_config: Optional TaskConfig YAML patch applied to generated agg/disagg tasks.
 
     Returns:
         Dict with TaskConfig objects. When backend='auto', returns 6 configs
@@ -1097,15 +1106,19 @@ def build_default_task_configs(
     if enable_wideep:
         common_kwargs["moe_backend"] = "deepep_moe"
 
-    # Create yaml_config to pass nextn and nextn_accept_rates if specified
-    yaml_config = None
+    # Create yaml_config to pass search-space overrides and nextn settings.
+    yaml_config = copy.deepcopy(yaml_config) if yaml_config else None
     if nextn > 0:
-        yaml_config = {
-            "config": {
+        if yaml_config is None:
+            yaml_config = {"mode": "patch", "config": {}}
+        yaml_config.setdefault("mode", "patch")
+        yaml_config.setdefault("config", {})
+        yaml_config["config"].update(
+            {
                 "nextn": nextn,
                 "nextn_accept_rates": nextn_accept_rates,
             }
-        }
+        )
 
     task_configs: dict[str, TaskConfig] = {}
     is_moe_model = check_is_moe(model_path)
@@ -1443,6 +1456,24 @@ def build_experiment_task_configs(
                 logger.exception("Failed to build TaskConfig for experiment '%s'", unique_name)
 
     return task_configs
+
+
+def _load_default_yaml_config(path: str | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            loaded = yaml.safe_load(fh) or {}
+    except Exception as exc:
+        raise ValueError(f"Error loading default config YAML file '{path}'") from exc
+    if not isinstance(loaded, dict):
+        raise TypeError(f"Default config YAML file '{path}' must contain a mapping")
+    if "config" not in loaded:
+        loaded = {"mode": "patch", "config": loaded}
+    if not isinstance(loaded.get("config"), dict):
+        raise TypeError(f"Default config YAML file '{path}' config must be a mapping")
+    loaded.setdefault("mode", "patch")
+    return loaded
 
 
 def _execute_task_configs(
@@ -2071,6 +2102,7 @@ def main(args):
             max_seq_len=args.max_seq_len,
             engine_step_backend=args.engine_step_backend,
             enable_wideep=getattr(args, "enable_wideep", False),
+            yaml_config=_load_default_yaml_config(args.config_yaml),
         )
     elif args.mode == "exp":
         try:

@@ -11,16 +11,35 @@ from aiconfigurator.sdk.performance_result import PerformanceResult
 pytestmark = pytest.mark.unit
 
 
-def test_trtllm_supported_quant_modes_include_fp8_static(comprehensive_perf_db):
-    modes = comprehensive_perf_db.supported_quant_mode["gemm"]
-    assert common.GEMMQuantMode.fp8.name in modes
-    assert common.GEMMQuantMode.fp8_static.name in modes
-    assert modes.count(common.GEMMQuantMode.fp8_static.name) == 1
+def _gemm_loaded_data(*quant_modes: common.GEMMQuantMode) -> LoadedOpData:
+    return LoadedOpData(
+        {
+            quant_mode: {
+                32: {
+                    256: {
+                        512: {"latency": 1.0, "energy": 10.0},
+                    }
+                }
+            }
+            for quant_mode in quant_modes
+        },
+        common.PerfDataFilename.gemm,
+        "dummy_path",
+    )
 
 
-def test_vllm_supported_quant_modes_include_fp8_static(mutable_comprehensive_perf_db):
+@pytest.mark.parametrize("backend", [common.BackendName.trtllm.value, common.BackendName.vllm.value])
+def test_supported_quant_modes_include_fp8_static_only_when_data_exists(mutable_comprehensive_perf_db, backend):
     db = mutable_comprehensive_perf_db
-    db.backend = common.BackendName.vllm.value
+    db.backend = backend
+    db._gemm_data = _gemm_loaded_data(common.GEMMQuantMode.fp8)
+    db._update_support_matrix()
+
+    modes = db.supported_quant_mode["gemm"]
+    assert common.GEMMQuantMode.fp8.name in modes
+    assert common.GEMMQuantMode.fp8_static.name not in modes
+
+    db._gemm_data = _gemm_loaded_data(common.GEMMQuantMode.fp8, common.GEMMQuantMode.fp8_static)
     db._update_support_matrix()
 
     modes = db.supported_quant_mode["gemm"]
@@ -79,31 +98,26 @@ def test_sglang_supported_quant_modes_include_fp8_static_only_when_data_exists(m
     assert modes.count(common.GEMMQuantMode.fp8_static.name) == 1
 
 
-def test_query_gemm_fp8_static_reuses_fp8_table(comprehensive_perf_db):
-    m, n, k = 32, 256, 512
-    fp8_result = comprehensive_perf_db.query_gemm(m, n, k, common.GEMMQuantMode.fp8)
-    static_result = comprehensive_perf_db.query_gemm(m, n, k, common.GEMMQuantMode.fp8_static)
-
-    assert float(static_result) == pytest.approx(float(fp8_result))
-    assert static_result.energy == pytest.approx(fp8_result.energy)
-
-
-def test_sglang_query_gemm_fp8_static_uses_static_table(mutable_comprehensive_perf_db):
+@pytest.mark.parametrize(
+    "backend",
+    [common.BackendName.trtllm.value, common.BackendName.vllm.value, common.BackendName.sglang.value],
+)
+def test_query_gemm_fp8_static_uses_static_table(mutable_comprehensive_perf_db, backend):
     db = mutable_comprehensive_perf_db
-    db.backend = common.BackendName.sglang.value
+    db.backend = backend
     db._gemm_data = LoadedOpData(
         {
             common.GEMMQuantMode.fp8: {
-                33: {
-                    272: {
-                        544: {"latency": 1.0, "energy": 10.0},
+                32: {
+                    256: {
+                        512: {"latency": 1.0, "energy": 10.0},
                     }
                 }
             },
             common.GEMMQuantMode.fp8_static: {
-                33: {
-                    272: {
-                        544: {"latency": 2.0, "energy": 20.0},
+                32: {
+                    256: {
+                        512: {"latency": 2.0, "energy": 20.0},
                     }
                 }
             },
@@ -114,9 +128,9 @@ def test_sglang_query_gemm_fp8_static_uses_static_table(mutable_comprehensive_pe
     db.query_gemm.cache_clear()
 
     result = db.query_gemm(
-        33,
-        272,
-        544,
+        32,
+        256,
+        512,
         common.GEMMQuantMode.fp8_static,
         database_mode=common.DatabaseMode.SILICON,
     )
@@ -125,18 +139,22 @@ def test_sglang_query_gemm_fp8_static_uses_static_table(mutable_comprehensive_pe
     assert result.energy == pytest.approx(20.0)
 
 
-def test_sglang_query_gemm_fp8_static_requires_static_table(mutable_comprehensive_perf_db):
+@pytest.mark.parametrize(
+    "backend",
+    [common.BackendName.trtllm.value, common.BackendName.vllm.value, common.BackendName.sglang.value],
+)
+def test_query_gemm_fp8_static_requires_static_table(mutable_comprehensive_perf_db, backend):
     db = mutable_comprehensive_perf_db
-    db.backend = common.BackendName.sglang.value
+    db.backend = backend
     db._gemm_data = LoadedOpData(
         {
             common.GEMMQuantMode.fp8: {
-                35: {
-                    280: {
-                        560: {"latency": 1.0, "energy": 10.0},
+                33: {
+                    272: {
+                        544: {"latency": 1.0, "energy": 10.0},
                     }
                 }
-            }
+            },
         },
         common.PerfDataFilename.gemm,
         "dummy_path",
@@ -145,9 +163,9 @@ def test_sglang_query_gemm_fp8_static_requires_static_table(mutable_comprehensiv
 
     with pytest.raises(PerfDataNotAvailableError, match="fp8_static"):
         db.query_gemm(
-            35,
-            280,
-            560,
+            33,
+            272,
+            544,
             common.GEMMQuantMode.fp8_static,
             database_mode=common.DatabaseMode.SILICON,
         )

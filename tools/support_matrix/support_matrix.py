@@ -53,6 +53,7 @@ DEFAULT_ENGINE_STEP_COMPARISON_RTOL = 0.05
 DEFAULT_ENGINE_STEP_COMPARISON_ATOL = 1e-3
 DEFAULT_ENGINE_STEP_FRONTIER_RTOL = 0.75
 DEFAULT_ENGINE_STEP_FRONTIER_ATOL = 1e-3
+LARGE_PIPELINE_CONFIG_PATH = "tools/support_matrix/configs/large_pipeline_parallel_worker.yaml"
 _RUST_CORE_AUTOBUILD_ENV = "AICONFIGURATOR_RUST_CORE_AUTOBUILD"
 _APPROXIMATE_ENGINE_STEP_COLUMNS = frozenset(
     {
@@ -126,6 +127,7 @@ def _support_matrix_row_command(
     engine_step_comparison_atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
     engine_step_frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
     engine_step_frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
+    yaml_config_path: str | None = None,
 ) -> str:
     """Return the repo-local CLI command that checks this model/system/backend path."""
     if constraints is None:
@@ -162,6 +164,8 @@ def _support_matrix_row_command(
         "1",
         "--no-color",
     ]
+    if yaml_config_path is not None:
+        parts.extend(["--config-yaml", yaml_config_path])
     if compare_engine_step_backends:
         # ``cli default`` does not expose the support-matrix Python/Rust
         # comparator; use the default Python engine-step path for the public
@@ -290,6 +294,9 @@ def _is_known_framework_incompatible_gap(
             or "deepseek-v4 mhc module data not loaded" in normalized
         )
     ):
+        return True
+
+    if "unsupported gemm quant mode 'fp8_static'" in normalized:
         return True
 
     return (
@@ -854,6 +861,21 @@ class SupportMatrix:
 
                     statuses[mode] = STATUS_PASS
                     error_messages[mode] = None
+                    if include_commands and attempt.yaml_config is not None:
+                        commands[mode] = _support_matrix_row_command(
+                            model=model,
+                            system=system,
+                            backend=backend,
+                            version=version,
+                            mode=mode,
+                            constraints=constraints,
+                            compare_engine_step_backends=compare_engine_step_backends,
+                            engine_step_comparison_rtol=engine_step_comparison_rtol,
+                            engine_step_comparison_atol=engine_step_comparison_atol,
+                            engine_step_frontier_rtol=engine_step_frontier_rtol,
+                            engine_step_frontier_atol=engine_step_frontier_atol,
+                            yaml_config_path=LARGE_PIPELINE_CONFIG_PATH,
+                        )
                     break
 
                 except Exception as e:

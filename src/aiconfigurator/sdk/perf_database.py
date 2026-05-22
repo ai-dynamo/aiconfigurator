@@ -3609,10 +3609,6 @@ class PerfDatabase:
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
             }
-            # `fp8_static` is a behavioral mode that reuses `fp8` GEMM perf tables.
-            gemm_modes = self.supported_quant_mode.get("gemm", []) or []
-            if common.GEMMQuantMode.fp8.name in gemm_modes and common.GEMMQuantMode.fp8_static.name not in gemm_modes:
-                gemm_modes.append(common.GEMMQuantMode.fp8_static.name)
         elif self.backend == "vllm":
             self.supported_quant_mode = {
                 "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
@@ -3635,10 +3631,6 @@ class PerfDatabase:
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None) or getattr(self, "_oneccl_data", None)),
             }
-            # `fp8_static` is a behavioral mode that reuses `fp8` GEMM perf tables.
-            gemm_modes = self.supported_quant_mode.get("gemm", []) or []
-            if common.GEMMQuantMode.fp8.name in gemm_modes and common.GEMMQuantMode.fp8_static.name not in gemm_modes:
-                gemm_modes.append(common.GEMMQuantMode.fp8_static.name)
         else:
             self.supported_quant_mode = {}
 
@@ -4109,18 +4101,10 @@ class PerfDatabase:
         """
         Pick the GEMM table key for a requested quant mode.
 
-        SGLang `fp8_static` must be collected as its own GEMM mode. TRT-LLM and
-        vLLM keep the legacy fallback to the dynamic `fp8` table unless an
-        explicit static table exists.
+        Static FP8 is a distinct GEMM runtime path and must have first-class
+        perf rows. Do not satisfy `fp8_static` from the dynamic `fp8` table.
         """
-        if quant_mode != common.GEMMQuantMode.fp8_static:
-            return quant_mode
-        if self.backend == common.BackendName.sglang.value:
-            return quant_mode
-        gemm_data = getattr(self, "_gemm_data", None)
-        if gemm_data is not None and (not hasattr(gemm_data, "loaded") or gemm_data.loaded) and quant_mode in gemm_data:
-            return quant_mode
-        return common.GEMMQuantMode.fp8
+        return quant_mode
 
     @functools.lru_cache(maxsize=32768)
     def query_gemm(
@@ -7465,6 +7449,9 @@ class PerfDatabase:
                     )
                 try:
                     dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
+                    # Generation callers pass ``s`` as total decode length, while
+                    # some collectors persist the same point as past-KV length.
+                    # Try both exact keys before falling back to interpolation.
                     sequence_candidates = [s]
                     if s > 0:
                         sequence_candidates.append(s - 1)

@@ -71,6 +71,40 @@ def test_run_single_test_retries_large_worker_after_recoverable_failure(monkeypa
     assert calls[3]["yaml_config"]["config"]["prefill_worker_config"]["pp_list"] == [2]
 
 
+def test_run_single_test_reports_large_worker_replay_command(monkeypatch):
+    calls: list[dict] = []
+
+    def fake_run_mode(**kwargs):
+        calls.append(kwargs)
+        if kwargs["yaml_config"] is None:
+            raise RuntimeError("No results found: the model does not fit in GPU memory for any parallel configuration.")
+        return pd.DataFrame({"tokens/s/gpu": [1.0]})
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    monkeypatch.setattr(
+        support_matrix_module,
+        "_get_test_constraints",
+        lambda _model: TestConstraints(total_gpus=128, isl=256, osl=256, prefix=128, ttft=2_000_000, tpot=50_000),
+    )
+
+    statuses, errors, commands = SupportMatrix.run_single_test(
+        model="zai-org/GLM-5",
+        system="b200_sxm",
+        backend="sglang",
+        version="0.5.10",
+        modes_to_test=("agg",),
+        include_commands=True,
+        system_spec={"gpu": {"sm_version": 100, "fp8_tc_flops": 1, "fp4_tc_flops": 1}},
+    )
+
+    assert statuses == {"agg": STATUS_PASS}
+    assert errors == {"agg": None}
+    assert len(calls) == 2
+    assert commands["agg"].endswith(
+        "--top-n 1 --no-color --config-yaml tools/support_matrix/configs/large_pipeline_parallel_worker.yaml"
+    )
+
+
 def test_run_single_test_can_return_row_replay_commands(monkeypatch):
     def fake_run_mode(**_kwargs):
         return pd.DataFrame({"tokens/s/gpu": [1.0]})
