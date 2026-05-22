@@ -54,24 +54,60 @@ def _clean_cell_value(value):
     return text or None
 
 
+def _support_matrix_cli_constraints(model: str) -> dict[str, str]:
+    lower_model = model.lower()
+    large_model_markers = (
+        "deepseek",
+        "glm-5",
+        "kimi",
+        "llama-4-maverick",
+        "llama-4-scout",
+        "minimax",
+        "mimo-v2",
+        "nemotron-ultra",
+    )
+    sizes = [float(match) for match in re.findall(r"(\d+(?:\.\d+)?)b", lower_model)]
+    max_size = max(sizes, default=None)
+    if max_size is not None and max_size < 10:
+        return {"total_gpus": "4", "ttft": "1500.0", "tpot": "50.0"}
+    if max_size is not None and max_size < 100 and not any(marker in lower_model for marker in large_model_markers):
+        return {"total_gpus": "32", "ttft": "2000.0", "tpot": "50.0"}
+    return {"total_gpus": "128", "ttft": "2000000.0", "tpot": "50000.0"}
+
+
 def _support_matrix_command(model: str, system: str, backend: str, version: str, mode: str) -> str:
+    constraints = _support_matrix_cli_constraints(model)
     parts = [
-        "python",
-        "tools/support_matrix/generate_support_matrix.py",
+        "aiconfigurator",
+        "cli",
+        "default",
         "--model",
         model,
+        "--total-gpus",
+        constraints["total_gpus"],
         "--system",
         system,
         "--backend",
         backend,
         "--backend-version",
         version,
-        "--mode",
-        mode,
-        "--max-workers",
+        "--database-mode",
+        "SILICON",
+        "--isl",
+        "256",
+        "--osl",
+        "256",
+        "--prefix",
+        "128",
+        "--ttft",
+        constraints["ttft"],
+        "--tpot",
+        constraints["tpot"],
+        "--top-n",
         "1",
-        "--no-save",
+        "--no-color",
     ]
+    _ = mode
     return " ".join(shlex.quote(str(part)) for part in parts)
 
 
@@ -87,7 +123,7 @@ def _fallback_support_matrix_command(row) -> str:
 
 def _format_row_details(row) -> str:
     command = _clean_cell_value(row["Command"]) if "Command" in row.index else None
-    if command is None:
+    if command is None or "tools/support_matrix/generate_support_matrix.py" in command:
         command = _fallback_support_matrix_command(row)
     error_msg = _clean_cell_value(row["ErrMsg"]) if "ErrMsg" in row.index else None
 

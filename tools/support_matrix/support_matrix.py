@@ -120,44 +120,58 @@ def _support_matrix_row_command(
     backend: str,
     version: str,
     mode: str,
+    constraints: TestConstraints | None = None,
     compare_engine_step_backends: bool = False,
     engine_step_comparison_rtol: float = DEFAULT_ENGINE_STEP_COMPARISON_RTOL,
     engine_step_comparison_atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
     engine_step_frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
     engine_step_frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
 ) -> str:
-    """Return the single-row support-matrix command that reproduces this verdict."""
+    """Return the CLI command that checks this model/system/backend path."""
+    if constraints is None:
+        constraints = _get_test_constraints(model)
     parts = [
-        "python",
-        "tools/support_matrix/generate_support_matrix.py",
+        "aiconfigurator",
+        "cli",
+        "default",
         "--model",
         model,
+        "--total-gpus",
+        str(constraints.total_gpus),
         "--system",
         system,
         "--backend",
         backend,
         "--backend-version",
         version,
-        "--mode",
-        mode,
-        "--max-workers",
+        "--database-mode",
+        "SILICON",
+        "--isl",
+        str(constraints.isl),
+        "--osl",
+        str(constraints.osl),
+        "--prefix",
+        str(constraints.prefix),
+        "--ttft",
+        str(constraints.ttft),
+        "--tpot",
+        str(constraints.tpot),
+        "--top-n",
         "1",
-        "--no-save",
+        "--no-color",
     ]
     if compare_engine_step_backends:
-        parts.append("--compare-engine-step-backends")
-        parts.extend(
-            [
-                "--engine-step-comparison-rtol",
-                str(engine_step_comparison_rtol),
-                "--engine-step-comparison-atol",
-                str(engine_step_comparison_atol),
-                "--engine-step-frontier-rtol",
-                str(engine_step_frontier_rtol),
-                "--engine-step-frontier-atol",
-                str(engine_step_frontier_atol),
-            ]
-        )
+        # ``cli default`` does not expose the support-matrix Python/Rust
+        # comparator; use the default Python engine-step path for the public
+        # replay command.
+        parts.extend(["--engine-step-backend", "python"])
+    _ = (
+        mode,
+        engine_step_comparison_rtol,
+        engine_step_comparison_atol,
+        engine_step_frontier_rtol,
+        engine_step_frontier_atol,
+    )
     return " ".join(shlex.quote(str(part)) for part in parts)
 
 
@@ -740,6 +754,7 @@ class SupportMatrix:
             unsupported_modes = set(modes_to_test) - {"agg", "disagg"}
             if unsupported_modes:
                 raise ValueError(f"Unsupported support-matrix mode(s): {sorted(unsupported_modes)}")
+        constraints = _get_test_constraints(model)
         statuses: dict[str, str] = {}
         error_messages = {}
         commands = {
@@ -749,6 +764,7 @@ class SupportMatrix:
                 backend=backend,
                 version=version,
                 mode=mode,
+                constraints=constraints,
                 compare_engine_step_backends=compare_engine_step_backends,
                 engine_step_comparison_rtol=engine_step_comparison_rtol,
                 engine_step_comparison_atol=engine_step_comparison_atol,
@@ -780,8 +796,6 @@ class SupportMatrix:
                 if include_commands:
                     return statuses, error_messages, commands
                 return statuses, error_messages
-
-        constraints = _get_test_constraints(model)
 
         for mode in modes_to_test:
             attempt_queue = [TaskAttempt("default")]

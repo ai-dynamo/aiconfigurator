@@ -165,23 +165,55 @@ function shellQuote(value) {
   return `'${text.replace(/'/g, `'\\''`)}'`;
 }
 
+function supportMatrixCliConstraints(model) {
+  const lowerModel = String(model || '').toLowerCase();
+  const largeModelMarkers = [
+    'deepseek',
+    'glm-5',
+    'kimi',
+    'llama-4-maverick',
+    'llama-4-scout',
+    'minimax',
+    'mimo-v2',
+    'nemotron-ultra',
+  ];
+  const sizes = Array.from(lowerModel.matchAll(/(\d+(?:\.\d+)?)b/g), match => Number(match[1]))
+    .filter(Number.isFinite);
+  const maxSize = sizes.length ? Math.max(...sizes) : null;
+  if (maxSize !== null && maxSize < 10) {
+    return { totalGpus: '4', ttft: '1500.0', tpot: '50.0' };
+  }
+  if (maxSize !== null && maxSize < 100 && !largeModelMarkers.some(marker => lowerModel.includes(marker))) {
+    return { totalGpus: '32', ttft: '2000.0', tpot: '50.0' };
+  }
+  return { totalGpus: '128', ttft: '2000000.0', tpot: '50000.0' };
+}
+
 function supportMatrixCommand(model, system, backend, version, mode) {
+  const constraints = supportMatrixCliConstraints(model);
   return [
-    'python',
-    'tools/support_matrix/generate_support_matrix.py',
+    'aiconfigurator',
+    'cli',
+    'default',
     '--model', model,
+    '--total-gpus', constraints.totalGpus,
     '--system', system,
     '--backend', backend,
     '--backend-version', version,
-    '--mode', mode,
-    '--max-workers', '1',
-    '--no-save',
+    '--database-mode', 'SILICON',
+    '--isl', '256',
+    '--osl', '256',
+    '--prefix', '128',
+    '--ttft', constraints.ttft,
+    '--tpot', constraints.tpot,
+    '--top-n', '1',
+    '--no-color',
   ].map(shellQuote).join(' ');
 }
 
 function rowCommand(row) {
   const command = (row.Command || '').trim();
-  if (command) return command;
+  if (command && !command.includes('tools/support_matrix/generate_support_matrix.py')) return command;
   return supportMatrixCommand(row.HuggingFaceID, row.System, row.Backend, row.Version, row.Mode);
 }
 
@@ -1286,6 +1318,186 @@ function TopErrors({ errors }) {
   );
 }
 
+function parseSupportDetailSections(text) {
+  return text
+    .split(/\n\s*---\s*\n/)
+    .map(chunk => chunk.trim())
+    .filter(Boolean)
+    .map((raw, index) => {
+      const lines = raw.split('\n');
+      let headingVersion = null;
+      const firstLine = (lines[0] || '').trim();
+      if (/^\[[^\]]+\]$/.test(firstLine)) {
+        headingVersion = firstLine.slice(1, -1);
+        lines.shift();
+      }
+
+      const section = {
+        raw,
+        index,
+        headingVersion,
+        mode: null,
+        status: null,
+        version: null,
+        command: null,
+        details: null,
+      };
+      let block = null;
+      const commandLines = [];
+      const detailLines = [];
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed === 'Command:') {
+          block = 'command';
+          continue;
+        }
+        if (trimmed === 'Details:') {
+          block = 'details';
+          continue;
+        }
+
+        if (block === 'command') {
+          commandLines.push(line);
+          continue;
+        }
+        if (block === 'details') {
+          detailLines.push(line);
+          continue;
+        }
+
+        const fieldMatch = line.match(/^(Mode|Status|Version):\s*(.*)$/);
+        if (fieldMatch) {
+          section[fieldMatch[1].toLowerCase()] = fieldMatch[2].trim();
+        }
+      }
+
+      section.command = commandLines.join('\n').trim() || null;
+      section.details = detailLines.join('\n').trim() || null;
+      section.version = section.version || headingVersion;
+      return section;
+    });
+}
+
+function copyText(text, done) {
+  const copyWithTextarea = () => {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(done)
+      .catch(() => {
+        copyWithTextarea();
+        done();
+      });
+    return;
+  }
+  copyWithTextarea();
+  done();
+}
+
+function StatusBadge({ status }) {
+  const normalized = (status || 'UNKNOWN').toUpperCase();
+  const badgeClass = normalized === 'PASS'
+    ? 'bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300'
+    : normalized === 'HW_INCOMPATIBLE'
+      ? 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'
+      : normalized === 'FAIL'
+        ? 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300'
+        : 'bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300';
+  return (
+    <span className={`px-2 py-0.5 rounded text-[0.68rem] font-bold tracking-wide ${badgeClass}`}>
+      {normalized}
+    </span>
+  );
+}
+
+function CopyCommandButton({ command }) {
+  const [copied, setCopied] = useState(false);
+  if (!command) return null;
+  return (
+    <button
+      onClick={() => copyText(command, () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      })}
+      className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600
+                 text-slate-700 dark:text-slate-200 text-[0.68rem] font-semibold rounded transition-colors whitespace-nowrap"
+    >
+      {copied ? 'Copied' : 'Copy command'}
+    </button>
+  );
+}
+
+function SupportDetailCards({ formatted }) {
+  const sections = parseSupportDetailSections(formatted);
+  if (!sections.length) {
+    return (
+      <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-50 dark:bg-slate-900 p-4 rounded border border-slate-200 dark:border-slate-700">
+        {formatted}
+      </pre>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {sections.map(section => (
+        <section
+          key={section.index}
+          className="rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden"
+        >
+          <div className="px-4 py-3 bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 flex items-center gap-2 flex-wrap">
+            <StatusBadge status={section.status} />
+            <span className="font-semibold text-sm">{section.mode || 'mode unknown'}</span>
+            <span className="text-xs text-slate-500 dark:text-slate-400">version {section.version || 'unknown'}</span>
+            {section.headingVersion && section.headingVersion !== section.version && (
+              <span className="text-xs text-slate-400">group {section.headingVersion}</span>
+            )}
+            <span className="ml-auto"></span>
+            <CopyCommandButton command={section.command} />
+          </div>
+          <div className="px-4 py-3 space-y-3">
+            {section.command && (
+              <div>
+                <div className="text-[0.68rem] uppercase font-bold text-slate-500 dark:text-slate-400 mb-1">
+                  Reproduce Command
+                </div>
+                <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-950 text-slate-100 p-3 rounded">
+                  {section.command}
+                </pre>
+              </div>
+            )}
+            {section.details && (
+              <details open={section.status !== 'PASS'} className="group">
+                <summary className="cursor-pointer text-xs font-semibold text-slate-600 dark:text-slate-300 select-none">
+                  Details
+                </summary>
+                <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-50 dark:bg-slate-950 p-3 rounded border border-slate-200 dark:border-slate-700">
+                  {section.details}
+                </pre>
+              </details>
+            )}
+          </div>
+        </section>
+      ))}
+      <details className="text-xs text-slate-500 dark:text-slate-400">
+        <summary className="cursor-pointer font-semibold select-none">Raw text</summary>
+        <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-50 dark:bg-slate-900 p-3 rounded border border-slate-200 dark:border-slate-700">
+          {formatted}
+        </pre>
+      </details>
+    </div>
+  );
+}
+
 function ErrorModal({ model, system, backend, error, onClose }) {
   const [copied, setCopied] = useState(false);
   if (!error) return null;
@@ -1293,32 +1505,11 @@ function ErrorModal({ model, system, backend, error, onClose }) {
   const showFixLink = /Status: (FAIL|HW_INCOMPATIBLE)/.test(formatted) || formatted.includes('No support-matrix row exists');
   const issueUrl = buildCallForFixUrl(model, system, backend, formatted);
   const copyError = () => {
-    const copyWithTextarea = () => {
-      const textarea = document.createElement('textarea');
-      textarea.value = formatted;
-      textarea.style.position = 'fixed';
-      textarea.style.left = '-9999px';
-      document.body.appendChild(textarea);
-      textarea.focus();
-      textarea.select();
-      document.execCommand('copy');
-      document.body.removeChild(textarea);
-    };
     const done = () => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1400);
     };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(formatted)
-        .then(done)
-        .catch(() => {
-          copyWithTextarea();
-          done();
-        });
-      return;
-    }
-    copyWithTextarea();
-    done();
+    copyText(formatted, done);
   };
   return (
     <div className="fixed inset-0 bg-black/50 z-[1000] flex items-center justify-center p-6" onClick={onClose}>
@@ -1344,9 +1535,7 @@ function ErrorModal({ model, system, backend, error, onClose }) {
           </button>
         </div>
         <div className="px-5 py-4 overflow-y-auto flex-1">
-          <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-50 dark:bg-slate-900 p-4 rounded border border-slate-200 dark:border-slate-700">
-            {formatted}
-          </pre>
+          <SupportDetailCards formatted={formatted} />
         </div>
       </div>
     </div>

@@ -18,7 +18,7 @@ HEADER = SUPPORT_MATRIX_HEADER
 def _row(
     status: str,
     err_msg: str = "",
-    command: str = "python tools/support_matrix/generate_support_matrix.py",
+    command: str = "aiconfigurator cli default --model Qwen/Qwen3-32B-FP8",
 ) -> list[str]:
     return [
         "Qwen/Qwen3-32B-FP8",
