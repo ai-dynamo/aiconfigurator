@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: MixtralForCausalLM
+model_path: mistralai/Mixtral-8x7B-v0.1
+model_paths:
+  - mistralai/Mixtral-8x7B-v0.1
+  - mistralai/Mixtral-8x22B-v0.1
+include_base: true
+description: >
+  Mixtral MoE model-centric collection plan.
+
+model_case_values:
+  moe:
+    - model_path: mistralai/Mixtral-8x7B-v0.1
+      hidden_size: 4096
+      inter_size: 14336
+      topk: 2
+      num_experts: 8
+    - model_path: mistralai/Mixtral-8x22B-v0.1
+      hidden_size: 6144
+      inter_size: 16384
+      topk: 2
+      num_experts: 8
+
+all_frameworks_op_cases:
+  moe:
+    cases: all

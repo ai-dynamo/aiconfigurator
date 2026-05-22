@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import pathlib
 import sys
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import aiconfigurator.sdk.task as task_module
+from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 
@@ -87,6 +89,25 @@ def test_taskconfig_agg_default():
     assert _enum_name(cfg.worker_config.gemm_quant_mode) == "bfloat16"
     assert cfg.worker_config.num_gpu_per_worker == [1, 2, 4, 8]
     assert cfg.applied_layers == ["base-common", "agg-defaults"]
+
+
+def test_taskrunner_no_feasible_config_logs_without_traceback(monkeypatch, caplog):
+    """Expected strict-SLA no-match failures should not emit traceback records."""
+
+    def raise_no_feasible(**kwargs):
+        raise NoFeasibleConfigError("No configuration satisfied the TTFT/TPOT constraints.")
+
+    pa_stub = sys.modules["aiconfigurator.sdk.pareto_analysis"]
+    monkeypatch.setattr(pa_stub, "agg_pareto", raise_no_feasible)
+
+    task = TaskConfig(serving_mode="agg", model_path="Qwen/Qwen3-32B", system_name="h200_sxm")
+
+    with caplog.at_level(logging.WARNING), pytest.raises(NoFeasibleConfigError):
+        TaskRunner().run(task)
+
+    assert "No feasible configuration found" in caplog.text
+    assert "Traceback" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 def test_taskconfig_disagg_default():
@@ -425,6 +446,57 @@ def test_taskconfig_rejects_unsupported_quant_mode(monkeypatch):
         )
 
 
+def test_taskconfig_dense_model_skips_moe_quant_validation(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 90}}
+            self.supported_quant_mode = {
+                "gemm": ["fp8"],
+                "moe": ["bfloat16"],
+                "context_attention": ["fp8"],
+                "generation_attention": ["fp8"],
+            }
+
+    def fake_get_database(system, backend, version, database_mode=None):
+        return FakeDatabase()
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+
+    task = TaskConfig(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        profiles=["fp8"],
+    )
+
+    assert _enum_name(task.config.worker_config.moe_quant_mode) == "fp8"
+
+
+def test_taskconfig_moe_model_validates_moe_quant_mode(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 90}}
+            self.supported_quant_mode = {
+                "gemm": ["fp8"],
+                "moe": ["bfloat16"],
+                "context_attention": ["fp8"],
+                "generation_attention": ["fp8"],
+            }
+
+    def fake_get_database(system, backend, version, database_mode=None):
+        return FakeDatabase()
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+
+    with pytest.raises(ValueError, match=r"Unsupported moe quant mode"):
+        TaskConfig(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-30B-A3B",
+            system_name="h200_sxm",
+            profiles=["fp8"],
+        )
+
+
 def test_taskconfig_sol_still_validates_quant_for_non_deepseek_v4(monkeypatch):
     class FakeDatabase:
         def __init__(self):
@@ -555,12 +627,47 @@ def test_taskconfig_quant_merge_deepseek_fmha_fallback(monkeypatch):
     monkeypatch.setattr(task_module, "get_database", fake_get_database)
     monkeypatch.setattr(task_module, "get_model_config_from_model_path", fake_model_info)
 
-    TaskConfig(
+    task = TaskConfig(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
         backend_name="trtllm",
     )
+
+    assert _enum_name(task.config.worker_config.fmha_quant_mode) == "bfloat16"
+
+
+def test_taskconfig_quant_merge_preserves_explicit_deepseek_fmha(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 90}}
+            self.supported_quant_mode = {
+                "gemm": ["fp8"],
+                "moe": ["fp8"],
+                "context_mla": ["bfloat16"],
+                "generation_mla": ["fp8"],
+            }
+
+    def fake_get_database(system, backend, version, database_mode=None):
+        return FakeDatabase()
+
+    def fake_model_info(_path):
+        return {
+            "raw_config": {"quant_algo": "fp8", "quant_dynamic": True},
+            "architecture": "DeepseekV3ForCausalLM",
+        }
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+    monkeypatch.setattr(task_module, "get_model_config_from_model_path", fake_model_info)
+
+    with pytest.raises(ValueError, match=r"Unsupported context_mla quant mode 'fp8'"):
+        TaskConfig(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            profiles=["fp8"],
+        )
 
 
 def test_taskrunner_runs_agg_and_disagg():

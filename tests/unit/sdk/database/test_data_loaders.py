@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from collections import defaultdict
 from itertools import product
 
 import pyarrow.csv as pc
@@ -15,8 +16,11 @@ from aiconfigurator.sdk.common import (
     GEMMQuantMode,
     KVCacheQuantMode,
     MoEQuantMode,
+    PerfDataFilename,
 )
 from aiconfigurator.sdk.perf_database import (
+    LoadedOpData,
+    PerfDatabase,
     _resolve_perf_data_path,
     databases_cache,
     get_all_databases,
@@ -47,6 +51,30 @@ class DummyPerfDatabase:
         self.version = version
         self.systems_root = systems_root_arg
         self.database_mode = database_mode
+
+
+def test_perf_database_finalize_loaded_data_converts_defaultdicts():
+    nested = defaultdict(lambda: defaultdict(dict))
+    nested["fp8"][128]["latency"] = 1.0
+
+    loaded = LoadedOpData(nested, PerfDataFilename.gemm, "gemm_perf.txt")
+    database = object.__new__(PerfDatabase)
+    database._gemm_data = loaded
+    database._raw_nested_data = {"loaded": loaded, "nested": nested}
+
+    database._finalize_loaded_data()
+
+    assert isinstance(database._gemm_data, LoadedOpData)
+    assert isinstance(database._gemm_data.data, dict)
+    assert not isinstance(database._gemm_data.data, defaultdict)
+    assert isinstance(database._gemm_data.data["fp8"], dict)
+    assert not isinstance(database._gemm_data.data["fp8"], defaultdict)
+    assert database._gemm_data["fp8"][128]["latency"] == 1.0
+    assert isinstance(database._raw_nested_data, dict)
+    assert isinstance(database._raw_nested_data["nested"], dict)
+    assert not isinstance(database._raw_nested_data["nested"], defaultdict)
+    with pytest.raises(KeyError):
+        database._gemm_data["missing"]
 
 
 def test_get_database_with_yaml_and_data_path(tmp_path, monkeypatch):
@@ -96,7 +124,10 @@ def test_get_all_databases(tmp_path, monkeypatch):
         data_subdir = systems_dir / data / backend.value / version
         data_subdir.mkdir(parents=True)
 
-    database_dict = get_all_databases(systems_paths=str(systems_dir))
+    # max_workers=1 keeps loading in-parent so the DummyPerfDatabase monkeypatch
+    # is honored. The ProcessPoolExecutor path re-imports the module in workers
+    # and would bypass the patch.
+    database_dict = get_all_databases(systems_paths=str(systems_dir), max_workers=1)
 
     assert isinstance(database_dict["testsys_0"][BackendName.trtllm.value]["v1"], DummyPerfDatabase)
     assert isinstance(database_dict["testsys_0"][BackendName.trtllm.value]["v2"], DummyPerfDatabase)
@@ -178,7 +209,10 @@ def test_get_all_databases_system_config_conflict(tmp_path, monkeypatch, caplog)
     (systems_root_b / "data_b" / "vllm" / "v0").mkdir(parents=True)
 
     databases_cache.clear()
-    database_dict = get_all_databases(systems_paths=[str(systems_root_a), str(systems_root_b)])
+    # max_workers=1 keeps loading in-parent so the DummyPerfDatabase monkeypatch
+    # is honored. The ProcessPoolExecutor path re-imports the module in workers
+    # and would bypass the patch.
+    database_dict = get_all_databases(systems_paths=[str(systems_root_a), str(systems_root_b)], max_workers=1)
 
     assert "trtllm" in database_dict[system]
     assert "vllm" in database_dict[system]
@@ -202,7 +236,10 @@ def test_get_all_databases_conflicting_backend_version_keeps_first(tmp_path, mon
     (systems_root_b / "data_b" / "trtllm" / "v1").mkdir(parents=True)
 
     databases_cache.clear()
-    database_dict = get_all_databases(systems_paths=[str(systems_root_a), str(systems_root_b)])
+    # max_workers=1 keeps loading in-parent so the DummyPerfDatabase monkeypatch
+    # is honored. The ProcessPoolExecutor path re-imports the module in workers
+    # and would bypass the patch.
+    database_dict = get_all_databases(systems_paths=[str(systems_root_a), str(systems_root_b)], max_workers=1)
     db = database_dict[system]["trtllm"]["v1"]
     assert db.systems_root == str(systems_root_a)
     assert any("Database 'h100/trtllm/v1' already loaded from" in record.message for record in caplog.records)

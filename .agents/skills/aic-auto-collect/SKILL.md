@@ -11,27 +11,6 @@ You are already on a GPU node with one or more GPUs. Your job is to collect AIC 
 
 This is a long-running workflow. Be persistent. Iterate carefully. Do not hide failures by shrinking coverage or deleting hard cases unless the configuration is genuinely unsupported and documented.
 
-## Optional Brev YOLO Setup
-
-If starting from a fresh disposable Brev GPU VM and the user wants unattended Codex work, use the bundled setup script:
-
-```bash
-bash .agents/skills/aic-auto-collect/scripts/setup-brev-yolo.sh
-```
-
-The script installs/uses `nvm`, Node.js, and the Codex CLI, writes NVIDIA inference credentials to `~/.config/nvidia/api-env` with user-only permissions, and creates `~/.local/bin/codex-yolo`.
-
-Noninteractive or customized use:
-
-```bash
-export NVIDIA_INFERENCE_API_KEY="<sk-key>"
-export MODEL="openai/openai/gpt-5.3-codex"
-export NODE_VERSION="20"
-bash .agents/skills/aic-auto-collect/scripts/setup-brev-yolo.sh
-```
-
-Only use `codex-yolo` on isolated throwaway nodes where bypassing approvals and sandboxing is acceptable.
-
 ## Operating Mode
 
 Assume the user wants the complete bring-up unless they explicitly ask for a smoke test only.

@@ -173,6 +173,11 @@ def _plot_worker_setup_table(
                     f"(={_cli_underline(str(row['(d)tp']))}x"
                     f"{_cli_underline(str(row['(d)pp']))})"
                 )
+            gpus_replica_str = (
+                f"{row['num_total_gpus']} "
+                f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
+                f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
+            )
             row_data = [
                 i + 1,
                 row["backend"],
@@ -187,11 +192,7 @@ def _plot_worker_setup_table(
                     f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
                     f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
                     row["replicas"],
-                    (
-                        f"{row['num_total_gpus']} "
-                        f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
-                        f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
-                    ),
+                    gpus_replica_str,
                     row["(p)workers"],
                     p_gpus_worker,
                     p_parallel,
@@ -757,7 +758,7 @@ def save_results(
                     with open(os.path.join(top_config_dir, "generator_config.yaml"), "w") as f:
                         yaml.safe_dump(cfg, f, sort_keys=False)
 
-                    # Per-op data source breakdown (silicon / empirical / mixed),
+                    # Per-op data source breakdown (silicon / empirical / sol / mixed),
                     # pulled from PerformanceResult.source via the InferenceSummary.
                     # Same nested shape as per_ops_data, populated only when the row
                     # carried it through the pareto search.

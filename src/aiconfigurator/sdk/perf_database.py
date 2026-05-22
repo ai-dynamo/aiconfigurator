@@ -8,24 +8,26 @@ import csv
 import functools
 import importlib.resources as pkg_resources
 import logging
-import math
 import os
+import traceback
 from collections import UserDict, defaultdict
 from collections.abc import Callable, Iterable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
 
 import numpy as np
 import yaml
-from scipy import interpolate
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.common import PerfDataFilename, parse_support_matrix_version
 from aiconfigurator.sdk.performance_result import PerformanceResult
+from aiconfigurator.sdk.system_spec import SystemSpec
 
 databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
+_MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError)
 
 
 def _read_perf_rows(perf_file: str) -> list[dict[str, object]]:
@@ -118,6 +120,24 @@ def build_no_databases_message() -> str:
 
 class PerfDataNotAvailableError(RuntimeError):
     """Raised when required performance data is missing or unsupported for a requested mode."""
+
+
+def has_perf_data_not_available_cause(error: BaseException) -> bool:
+    """Return True when an exception or chained cause is a structured perf-data miss."""
+    seen: set[int] = set()
+    stack: list[BaseException] = [error]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        if isinstance(current, PerfDataNotAvailableError):
+            return True
+        seen.add(id(current))
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)
+    return False
 
 
 @functools.cache
@@ -434,72 +454,255 @@ def get_database(
     return None
 
 
-def get_all_databases(
-    systems_paths: str | os.PathLike | Iterable[str] | None = None,
-) -> dict[str, dict[str, dict[str, PerfDatabase]]]:
-    """
-    Get all the databases for all the systems, backends and versions
-    """
-    database_dict = defaultdict(lambda: defaultdict(lambda: defaultdict()))
-    if systems_paths is None:
-        systems_paths = get_systems_paths()
-    elif isinstance(systems_paths, str):
-        systems_paths = [systems_paths]
+DatabaseRef = tuple[str, str, str, str]
+LoadedDatabaseResult = tuple[DatabaseRef, object | None, str | None]
 
-    seen_systems: dict[str, str] = {}
+
+def _as_systems_path_list(systems_paths: str | os.PathLike | Iterable[str] | None) -> list[str]:
+    if systems_paths is None:
+        return get_systems_paths()
+    if isinstance(systems_paths, (str, os.PathLike)):
+        return [os.fspath(systems_paths)]
+    return [os.fspath(path) for path in systems_paths]
+
+
+def _iter_system_yaml_files(systems_paths: list[str]):
     for systems_root in systems_paths:
         try:
-            entries = os.listdir(systems_root)
+            entries = sorted(os.listdir(systems_root))
         except Exception as e:
             logger.warning("Could not list systems dir %s: %s", systems_root, e)
             continue
+
         for entry in entries:
-            if not entry.endswith(".yaml"):
+            if entry.endswith(".yaml"):
+                yield systems_root, entry[:-5], os.path.join(systems_root, entry)
+
+
+def _load_system_spec(system_yaml_path: str) -> dict | None:
+    try:
+        with open(system_yaml_path) as f:
+            system_spec = yaml.load(f, Loader=yaml.SafeLoader)
+    except Exception as e:
+        logger.warning("Could not process system config %s: %s", os.path.basename(system_yaml_path), e)
+        return None
+    if not isinstance(system_spec, dict) or "data_dir" not in system_spec:
+        logger.warning("Could not process system config %s: missing data_dir", os.path.basename(system_yaml_path))
+        return None
+    return system_spec
+
+
+def _iter_database_refs_for_system(systems_root: str, system: str, system_spec: dict):
+    data_dir = os.path.join(systems_root, system_spec["data_dir"])
+    if not os.path.isdir(data_dir):
+        return
+
+    for backend in common.BackendName:
+        backend_name = backend.value
+        backend_path = os.path.join(data_dir, backend_name)
+        if not os.path.isdir(backend_path):
+            continue
+
+        for version in sorted(os.listdir(backend_path)):
+            version_path = os.path.join(backend_path, version)
+            if version.startswith(".") or not os.path.isdir(version_path):
                 continue
-            system = entry[:-5]
-            if system in seen_systems:
+            if os.path.isfile(os.path.join(version_path, "INCOMPLETE.txt")):
+                continue
+            yield system, backend_name, version, systems_root
+
+
+def _discover_database_refs(systems_paths: list[str]) -> list[DatabaseRef]:
+    refs: list[DatabaseRef] = []
+    seen_systems: dict[str, str] = {}
+    seen_databases: dict[tuple[str, str, str], str] = {}
+
+    for systems_root, system, system_yaml_path in _iter_system_yaml_files(systems_paths):
+        if system in seen_systems:
+            logger.warning(
+                "System config '%s' already loaded from %s; also found in %s",
+                system,
+                seen_systems[system],
+                systems_root,
+            )
+        else:
+            seen_systems[system] = systems_root
+
+        system_spec = _load_system_spec(system_yaml_path)
+        if system_spec is None:
+            continue
+
+        for ref in _iter_database_refs_for_system(systems_root, system, system_spec):
+            db_key = ref[:3]
+            existing_root = seen_databases.get(db_key)
+            if existing_root is not None:
                 logger.warning(
-                    "System config '%s' already loaded from %s; also found in %s",
-                    system,
-                    seen_systems[system],
+                    "Database '%s/%s/%s' already loaded from %s; ignoring %s",
+                    db_key[0],
+                    db_key[1],
+                    db_key[2],
+                    existing_root,
                     systems_root,
                 )
-            else:
-                seen_systems[system] = systems_root
-            system_yaml_path = os.path.join(systems_root, entry)
+                continue
+            seen_databases[db_key] = systems_root
+            refs.append(ref)
+
+    return refs
+
+
+def _finalize_loaded_value(value):
+    if isinstance(value, SystemSpec):
+        return value
+    if isinstance(value, LoadedOpData):
+        value.data = _finalize_loaded_value(value.data)
+        return value
+    if isinstance(value, defaultdict):
+        return {_finalize_loaded_value(key): _finalize_loaded_value(item) for key, item in value.items()}
+    if isinstance(value, dict):
+        return {_finalize_loaded_value(key): _finalize_loaded_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_finalize_loaded_value(item) for item in value)
+    if isinstance(value, list):
+        return [_finalize_loaded_value(item) for item in value]
+    return value
+
+
+def _load_database_ref(ref: DatabaseRef) -> LoadedDatabaseResult:
+    system, backend, version, systems_root = ref
+    try:
+        database = get_database(system, backend, version, systems_root)
+        if database is None:
+            return ref, None, "get_database returned None"
+        return ref, database, None
+    except Exception:
+        return ref, None, traceback.format_exc()
+
+
+def _new_database_dict() -> dict[str, dict[str, dict[str, PerfDatabase]]]:
+    return defaultdict(lambda: defaultdict(lambda: defaultdict()))
+
+
+def _store_loaded_database(
+    database_dict: dict[str, dict[str, dict[str, PerfDatabase]]],
+    ref: DatabaseRef,
+    database: PerfDatabase,
+) -> None:
+    system, backend, version, systems_root = ref
+    database_dict[system][backend][version] = database
+    databases_cache[(systems_root, system, False)][backend][version] = database
+
+
+def clear_database_runtime_caches(system: str, backend: str, version: str) -> None:
+    """Clear per-query/interpolation caches for one loaded database."""
+    seen_database_ids: set[int] = set()
+    for cache_key, systems_cache in databases_cache.items():
+        _, cached_system, _ = cache_key
+        if cached_system != system:
+            continue
+
+        backend_cache = systems_cache.get(backend)
+        if not backend_cache or version not in backend_cache:
+            continue
+
+        database = backend_cache[version]
+        database_id = id(database)
+        if database_id in seen_database_ids:
+            continue
+        seen_database_ids.add(database_id)
+        clear_runtime_caches = getattr(database, "clear_runtime_caches", None)
+        if callable(clear_runtime_caches):
+            clear_runtime_caches()
+
+
+def unload_database(system: str, backend: str, version: str) -> None:
+    """Remove one loaded database from every systems-root/shared-mode cache."""
+    for cache_key in list(databases_cache.keys()):
+        _, cached_system, _ = cache_key
+        if cached_system != system:
+            continue
+
+        systems_cache = databases_cache[cache_key]
+        backend_cache = systems_cache.get(backend)
+        if not backend_cache or version not in backend_cache:
+            continue
+
+        database = backend_cache.pop(version)
+        clear_runtime_caches = getattr(database, "clear_runtime_caches", None)
+        if callable(clear_runtime_caches):
+            clear_runtime_caches()
+        if not backend_cache:
+            systems_cache.pop(backend, None)
+        if not systems_cache:
+            databases_cache.pop(cache_key, None)
+
+
+def _load_database_ref_in_parent(ref: DatabaseRef) -> PerfDatabase | None:
+    system, backend, version, systems_root = ref
+    return get_database(system, backend, version, systems_root)
+
+
+def get_all_databases(
+    systems_paths: str | os.PathLike | Iterable[str] | None = None,
+    max_workers: int | None = None,
+) -> dict[str, dict[str, dict[str, PerfDatabase]]]:
+    """
+    Get all databases for all systems, backends, and versions.
+
+    Discovery stays in-process so path precedence and duplicate warnings are
+    deterministic. Database construction runs in a process pool because loading
+    the CSV-backed op tables is the expensive part.
+    """
+    database_dict = _new_database_dict()
+    refs = _discover_database_refs(_as_systems_path_list(systems_paths))
+    if not refs:
+        return database_dict
+
+    if max_workers is None:
+        max_workers = min(len(refs), max(1, (os.cpu_count() or 1) - 1))
+    else:
+        max_workers = max(1, min(max_workers, len(refs)))
+
+    if max_workers == 1:
+        for ref in refs:
+            database = _load_database_ref_in_parent(ref)
+            if database is not None:
+                _store_loaded_database(database_dict, ref, database)
+        return database_dict
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_load_database_ref, ref): ref for ref in refs}
+        for future in as_completed(futures):
+            ref = futures[future]
+            system, backend, version, systems_root = ref
             try:
-                with open(system_yaml_path) as f:
-                    system_spec = yaml.load(f, Loader=yaml.SafeLoader)
-                data_dir = os.path.join(systems_root, system_spec["data_dir"])
-                if not os.path.exists(data_dir):
-                    continue
-                for backend in common.BackendName:
-                    if not os.path.exists(os.path.join(data_dir, backend.value)):
-                        continue
-                    backend_path = os.path.join(data_dir, backend.value)
-                    for version in os.listdir(backend_path):
-                        if version.startswith("."):
-                            continue
-                        if os.path.isfile(os.path.join(backend_path, version, "INCOMPLETE.txt")):
-                            continue
-                        database = get_database(system, backend.value, version, systems_root)
-                        if database is None:
-                            continue
-                        if version in database_dict[system][backend.value]:
-                            existing = database_dict[system][backend.value][version]
-                            existing_root = getattr(existing, "systems_root", None) or "unknown"
-                            logger.warning(
-                                "Database '%s/%s/%s' already loaded from %s; ignoring %s",
-                                system,
-                                backend.value,
-                                version,
-                                existing_root,
-                                systems_root,
-                            )
-                            continue
-                        database_dict[system][backend.value][version] = database
-            except Exception as e:
-                logger.warning(f"Could not process system config {os.path.basename(system_yaml_path)}: {e}")
+                loaded_ref, database, error = future.result()
+            except Exception:
+                logger.warning(
+                    "Parallel load failed for %s/%s/%s from %s; retrying in parent",
+                    system,
+                    backend,
+                    version,
+                    systems_root,
+                    exc_info=True,
+                )
+                database = _load_database_ref_in_parent(ref)
+                if database is not None:
+                    _store_loaded_database(database_dict, ref, database)
+                continue
+
+            if error is not None:
+                logger.warning(
+                    "Could not load database %s/%s/%s from %s: %s",
+                    system,
+                    backend,
+                    version,
+                    systems_root,
+                    error,
+                )
+                continue
+            if database is not None:
+                _store_loaded_database(database_dict, loaded_ref, database)
 
     return database_dict
 
@@ -1369,8 +1572,11 @@ def load_generation_dsa_module_data(dsa_file: str):
 def load_mhc_module_data(mhc_file: str):
     """Load DeepSeek-V4 mHC pre/post module-level performance data.
 
-    CSV columns: framework, version, device, op_name, kernel_source, model,
+    CSV columns: framework, version, device, op_name, kernel_source,
     architecture, num_tokens, hc_mult, hidden_size, latency [, power]
+    Optional metadata columns: num_sites, sinkhorn_iters
+    Legacy rows may include a ``model`` column; it is ignored because mHC is
+    selected by compute shape.
 
     ``op_name`` is ``pre`` or ``post``, matching the ``op`` arg of
     ``query_mhc_module``.
@@ -1405,21 +1611,6 @@ def load_mhc_module_data(mhc_file: str):
     return mhc_data
 
 
-def load_context_deepseek_v4_attention_module_data(attn_file: str):
-    """Legacy single-file loader (kept for backwards compat with the old
-    combined ``deepseek_v4_context_module_perf.txt`` convention).  V4-Flash
-    data is now split across ``dsv4_flash_{csa,hca}_context_*`` files —
-    see ``load_context_dsv4_flash_kind_module_data``."""
-    logger.debug(f"DeepSeek-V4 context attention module data file {attn_file} not loaded.")
-    return None
-
-
-def load_generation_deepseek_v4_attention_module_data(attn_file: str):
-    """Legacy single-file loader; V4-Flash data is now split per attn_kind."""
-    logger.debug(f"DeepSeek-V4 generation attention module data file {attn_file} not loaded.")
-    return None
-
-
 _DSV4_DTYPE_ALIASES = {
     # CSV columns use sglang naming; aic_dev enums use canonical short names.
     "fp8_e4m3": "fp8",
@@ -1430,37 +1621,24 @@ def _dsv4_normalize_dtype(name: str) -> str:
     return _DSV4_DTYPE_ALIASES.get(name, name)
 
 
-# V4-Flash special-case for the data axis that distinguishes TP variants.
+# DeepSeek-V4 special-case for the data axis that distinguishes TP variants.
 #
-# The generic MLA convention in ``models.py:_make_*_attention_ops`` computes
+# The generic MLA convention in ``models/deepseek_v4.py`` computes
 # ``local_heads = self._num_heads // tp_size`` and passes it into the op as
 # ``num_heads``.  That math reflects real head sharding for DSv2/DSv3 — but
-# V4-Flash does NOT actually shard heads (sglang zero-pads Q to keep h_q=64;
-# see ``deepseek_v4.py:847``).  The kernel sees the same h_q on every rank.
+# DeepSeek-V4 attention backends may pad Q for sparse kernels; the persisted
+# rows use ``tp_size`` as the axis that differentiates TP variants.
 #
-# Rather than touch that generic math, the V4 path special-cases here:
-#   * The loader stores data keyed by ``tp_size`` (the column that actually
-#     differentiates rows for V4-Flash; see ``load_*_dsv4_flash_*`` below).
-#   * The query helper recovers ``tp_size`` from the incoming ``num_heads``
-#     argument as ``DSV4_FLASH_NATIVE_HEADS // num_heads`` and uses that
-#     for the data lookup.
-#
-# When sglang eventually adds real V4 head sharding, drop this special-case
-# and the generic ``local_heads`` axis will work directly.
-DSV4_FLASH_NATIVE_HEADS = 64
+# Rather than touch that generic math, the V4 operation passes both the local
+# head count for SOL math and the native-head/tp_size keys for silicon lookup.
 
 
-def _dsv4_flash_tp_from_num_heads(num_heads: int) -> int:
-    """Recover ``tp_size`` from the model layer's ``local_heads`` value."""
-    return max(1, DSV4_FLASH_NATIVE_HEADS // max(num_heads, 1))
-
-
-def _dsv4_flash_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
-    """V4-Flash-only 3D lookup: exact, cubic, then sampled-batch fallback.
+def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
+    """DeepSeek-V4 3D lookup: exact, cubic, then sampled-batch fallback.
 
     Generic ``_interp_3d`` raises ``QhullError`` when the point cloud has
-    a degenerate axis (e.g. our V4-Flash sweep caps b=1 at s=8192, so the
-    b axis is flat near that query point).  This helper:
+    a degenerate axis (e.g. the DSV4 sweep caps b=1 at s=8192, so the
+    b axis is flat near that query point).
 
       1. Try an exact ``dict[x][y][z]`` lookup — handles the common case
          of querying at a measured bench point.
@@ -1473,7 +1651,7 @@ def _dsv4_flash_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z")
     Caller swallows lower-level exceptions if all paths fail.
     """
     if batch_axis not in ("y", "z"):
-        raise ValueError(f"unsupported V4-Flash fallback {batch_axis=}; expected 'y' or 'z'")
+        raise ValueError(f"unsupported DeepSeek-V4 fallback {batch_axis=}; expected 'y' or 'z'")
 
     # Use .get() chain instead of [] indexing: dict_ may be a (nested)
     # defaultdict, so [] reads would create spurious empty branches that
@@ -1497,7 +1675,7 @@ def _dsv4_flash_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z")
     except Exception:
         pass
 
-    # Fallback: real V4-Flash data is sampled at batches like 1/2/4/8.
+    # Fallback: real DeepSeek-V4 data is sampled at batches like 1/2/4/8.
     # Prefer the largest batch <= query batch that covers the sequence length
     # (interpolation along s). Only extrapolate along s if none covers it.
     sub = dict_.get(x) if isinstance(dict_, dict) else None
@@ -1559,30 +1737,29 @@ def _dsv4_flash_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z")
                     continue
 
     if batch_axis == "y":
-        raise ValueError(f"V4-Flash robust lookup failed (tp={x}, b={y}, s={z})")
-    raise ValueError(f"V4-Flash robust lookup failed (tp={x}, s={y}, b={z})")
+        raise ValueError(f"DeepSeek-V4 robust lookup failed (tp={x}, b={y}, s={z})")
+    raise ValueError(f"DeepSeek-V4 robust lookup failed (tp={x}, s={y}, b={z})")
 
 
-def load_context_dsv4_flash_kind_module_data(file_path: str):
-    """Load ONE V4-Flash context CSV (single attn_kind / compress_ratio).
+def load_context_dsv4_kind_module_data(file_path: str):
+    """Load ONE DeepSeek-V4 context CSV (single attn_kind / compress_ratio).
 
     Returns an 8-level nested dict:
-        data[fmha_quant][kv_quant][gemm_quant][arch][compress_ratio]
+        data[fmha_quant][kv_quant][gemm_quant][native_heads][compress_ratio]
             [tp_size][s][b] = {"latency": ms, "power": W, "energy": J}
 
-    ``tp_size`` is the data axis (V4-Flash doesn't shard heads — see top-of-
-    file note + ``_dsv4_flash_tp_from_num_heads``).  Query side recovers
-    tp_size from the ``num_heads`` argument the model layer passes.
+    ``tp_size`` is the data axis. The model layer passes it through the
+    attention operation for silicon lookup.
 
     Multiple files (csa/hca/swa) merge cleanly because compress_ratio is
     the differentiating leaf dimension.
     """
     rows = _read_filtered_rows(file_path)
     if rows is None:
-        logger.debug(f"DSV4-Flash module data file {file_path} not found.")
+        logger.debug(f"DSV4 module data file {file_path} not found.")
         return None
 
-    # 8-level nesting: fmha → kv → gemm → arch → cr → local_heads → s → b
+    # 8-level nesting: fmha → kv → gemm → native_heads → cr → tp → s → b
     def _make_nested(depth: int):
         if depth == 0:
             return defaultdict()
@@ -1604,15 +1781,13 @@ def load_context_dsv4_flash_kind_module_data(file_path: str):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        arch = row.get("architecture", "DeepseekV4ForCausalLM")
+        native_heads = int(row["num_heads"])
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
 
-        # V4-Flash: TP doesn't shard heads (h_q=64 on every rank), so the
-        # row-distinguishing axis is ``tp_size`` itself.  Query side recovers
-        # this via ``_dsv4_flash_tp_from_num_heads``.  See top-of-file note.
-        data[fmha_mode][kv_dtype][gemm_mode][arch][cr][tp_size][s][b] = {
+        # The row-distinguishing axis is ``tp_size`` itself.
+        data[fmha_mode][kv_dtype][gemm_mode][native_heads][cr][tp_size][s][b] = {
             "latency": latency,
             "power": power,
             "energy": power * latency,
@@ -1620,23 +1795,22 @@ def load_context_dsv4_flash_kind_module_data(file_path: str):
     return data
 
 
-def load_generation_dsv4_flash_kind_module_data(file_path: str):
-    """Load ONE V4-Flash generation CSV.
+def load_generation_dsv4_kind_module_data(file_path: str):
+    """Load ONE DeepSeek-V4 generation CSV.
 
     Generation lookup uses absolute KV length ``s_total = isl + step`` (decode
     is q_len=1 with past_kv = step).  Dict shape:
-        data[kv_quant][gemm_quant][arch][compress_ratio]
+        data[kv_quant][gemm_quant][native_heads][compress_ratio]
             [tp_size][b][s_total]
 
-    ``tp_size`` is the data axis; query side recovers it from the model layer's
-    local-head ``num_heads`` value (see top-of-file V4-Flash note).
+    ``tp_size`` is passed by the attention operation for silicon lookup.
     """
     rows = _read_filtered_rows(file_path)
     if rows is None:
-        logger.debug(f"DSV4-Flash module data file {file_path} not found.")
+        logger.debug(f"DSV4 module data file {file_path} not found.")
         return None
 
-    # 7-level nesting: kv → gemm → arch → cr → tp_size → b → s_total
+    # 7-level nesting: kv → gemm → native_heads → cr → tp → b → s_total
     def _make_nested(depth: int):
         if depth == 0:
             return defaultdict()
@@ -1658,15 +1832,15 @@ def load_generation_dsv4_flash_kind_module_data(file_path: str):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        arch = row.get("architecture", "DeepseekV4ForCausalLM")
+        native_heads = int(row["num_heads"])
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
 
-        # V4-Flash: tp_size is the axis that differentiates rows.  See note
+        # DeepSeek-V4: tp_size is the axis that differentiates rows.  See note
         # at the top of the file.  Generation convention puts ``b`` before
         # ``s_total`` (matches existing ``_interp_3d(num_heads, b, s, ...)``
         # call order in ``query_generation_*``).
-        data[kv_dtype][gemm_mode][arch][cr][tp_size][b][s_total] = {
+        data[kv_dtype][gemm_mode][native_heads][cr][tp_size][b][s_total] = {
             "latency": latency,
             "power": power,
             "energy": power * latency,
@@ -1690,18 +1864,18 @@ def _deep_merge_dsv4_dicts(dest, src):
     return dest
 
 
-def load_dsv4_flash_sparse_kernel_data(file_path: str):
-    """Load V4-Flash sparse-kernel CSV (paged_mqa_logits or hca_attn).
+def load_dsv4_sparse_kernel_data(file_path: str):
+    """Load DeepSeek-V4 sparse-kernel CSV (paged_mqa_logits or hca_attn).
 
     Emitted by ``collector.sglang.deepseekv4_sparse_modules``.  Used for
     kernel-level past_kv Δ correction on top of the chunk-0 module baseline.
 
     Dict structure:
-        data[arch][tp_size][past_kv][isl][bs] = {"latency": ms}
+        data[native_heads][tp_size][past_kv][isl][bs] = {"latency": ms}
     """
     rows = _read_filtered_rows(file_path)
     if rows is None:
-        logger.debug(f"DSV4-Flash sparse-kernel data file {file_path} not found.")
+        logger.debug(f"DSV4 sparse-kernel data file {file_path} not found.")
         return None
 
     data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
@@ -1718,8 +1892,8 @@ def load_dsv4_flash_sparse_kernel_data(file_path: str):
             latency = float(row["latency"])
         except (TypeError, ValueError):
             continue
-        arch = row.get("architecture", "DeepseekV4ForCausalLM")
-        data[arch][tp_size][past_kv][isl][bs] = {"latency": latency}
+        native_heads = int(row["num_heads"])
+        data[native_heads][tp_size][past_kv][isl][bs] = {"latency": latency}
 
     return data
 
@@ -2639,7 +2813,7 @@ class PerfDatabase:
         self.systems_root = systems_root
         self.enable_shared_layer = (database_mode or "").upper() == "HYBRID"
         with open(os.path.join(systems_root, system + ".yaml")) as f:
-            self.system_spec = yaml.load(f, Loader=yaml.SafeLoader)
+            self.system_spec = SystemSpec(yaml.load(f, Loader=yaml.SafeLoader))
         self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
 
         # Cache for extracted metric data to avoid repeated extraction in _interp_3d
@@ -2688,14 +2862,12 @@ class PerfDatabase:
                 PerfDataFilename.dsa_context_module: load_context_dsa_module_data,
                 PerfDataFilename.dsa_generation_module: load_generation_dsa_module_data,
                 PerfDataFilename.mhc_module: load_mhc_module_data,
-                PerfDataFilename.deepseek_v4_context_module: load_context_deepseek_v4_attention_module_data,
-                PerfDataFilename.deepseek_v4_generation_module: load_generation_deepseek_v4_attention_module_data,
-                PerfDataFilename.dsv4_flash_csa_context_module: load_context_dsv4_flash_kind_module_data,
-                PerfDataFilename.dsv4_flash_hca_context_module: load_context_dsv4_flash_kind_module_data,
-                PerfDataFilename.dsv4_flash_csa_generation_module: load_generation_dsv4_flash_kind_module_data,
-                PerfDataFilename.dsv4_flash_hca_generation_module: load_generation_dsv4_flash_kind_module_data,
-                PerfDataFilename.dsv4_flash_paged_mqa_logits_module: load_dsv4_flash_sparse_kernel_data,
-                PerfDataFilename.dsv4_flash_hca_attn_module: load_dsv4_flash_sparse_kernel_data,
+                PerfDataFilename.dsv4_csa_context_module: load_context_dsv4_kind_module_data,
+                PerfDataFilename.dsv4_hca_context_module: load_context_dsv4_kind_module_data,
+                PerfDataFilename.dsv4_csa_generation_module: load_generation_dsv4_kind_module_data,
+                PerfDataFilename.dsv4_hca_generation_module: load_generation_dsv4_kind_module_data,
+                PerfDataFilename.dsv4_paged_mqa_logits_module: load_dsv4_sparse_kernel_data,
+                PerfDataFilename.dsv4_hca_attn_module: load_dsv4_sparse_kernel_data,
             }
             perf_data_dir = data_dir
             if op_filename_enum == PerfDataFilename.nccl:
@@ -2753,11 +2925,11 @@ class PerfDatabase:
         self._generation_dsa_module_data = _load_op_data(PerfDataFilename.dsa_generation_module)
         self._mhc_module_data = _load_op_data(PerfDataFilename.mhc_module)
 
-        # V4-Flash module-level data — collected as 3 split files per mode
-        # (csa/hca/swa).  Each loader returns a nested dict scoped to one
-        # compress_ratio; we merge into the SAME attribute the legacy single-
-        # file loader fills, so downstream queries are unchanged.
-        def _load_dsv4_flash_split(loaded_list):
+        # DeepSeek-V4 module-level data — collected as split files per mode
+        # (csa/hca).  Each loader returns a nested dict scoped to one
+        # compress_ratio; we merge into one aggregate attribute so downstream
+        # queries do not need to know which attention kind produced each row.
+        def _load_dsv4_split(loaded_list):
             merged: dict = {}
             first_loaded = next((x for x in loaded_list if x is not None), None)
             if first_loaded is None:
@@ -2771,28 +2943,24 @@ class PerfDatabase:
             return LoadedOpData(merged, first_loaded.op_name_enum, first_loaded.filepath)
 
         ctx_split = [
-            _load_op_data(PerfDataFilename.dsv4_flash_csa_context_module),
-            _load_op_data(PerfDataFilename.dsv4_flash_hca_context_module),
+            _load_op_data(PerfDataFilename.dsv4_csa_context_module),
+            _load_op_data(PerfDataFilename.dsv4_hca_context_module),
         ]
         gen_split = [
-            _load_op_data(PerfDataFilename.dsv4_flash_csa_generation_module),
-            _load_op_data(PerfDataFilename.dsv4_flash_hca_generation_module),
+            _load_op_data(PerfDataFilename.dsv4_csa_generation_module),
+            _load_op_data(PerfDataFilename.dsv4_hca_generation_module),
         ]
-        self._context_deepseek_v4_attention_module_data = _load_dsv4_flash_split(ctx_split) or _load_op_data(
-            PerfDataFilename.deepseek_v4_context_module
-        )
+        self._context_deepseek_v4_attention_module_data = _load_dsv4_split(ctx_split)
         self._raw_context_deepseek_v4_attention_module_data = copy.deepcopy(
             self._context_deepseek_v4_attention_module_data
         )
-        self._generation_deepseek_v4_attention_module_data = _load_dsv4_flash_split(gen_split) or _load_op_data(
-            PerfDataFilename.deepseek_v4_generation_module
-        )
+        self._generation_deepseek_v4_attention_module_data = _load_dsv4_split(gen_split)
 
-        # V4-Flash sparse-kernel data (kernel-level past_kv Δ correction).
+        # DeepSeek-V4 sparse-kernel data (kernel-level past_kv Δ correction).
         # Dict keyed by ``arch -> tp -> past_kv -> isl -> bs``.
-        self._dsv4_flash_sparse_kernel_data = {
-            "paged_mqa_logits": _load_op_data(PerfDataFilename.dsv4_flash_paged_mqa_logits_module),
-            "hca_attn": _load_op_data(PerfDataFilename.dsv4_flash_hca_attn_module),
+        self._dsv4_sparse_kernel_data = {
+            "paged_mqa_logits": _load_op_data(PerfDataFilename.dsv4_paged_mqa_logits_module),
+            "hca_attn": _load_op_data(PerfDataFilename.dsv4_hca_attn_module),
         }
 
         # sglang wideep path
@@ -3356,6 +3524,12 @@ class PerfDatabase:
         self._correct_data()
 
         self._update_support_matrix()
+        self._finalize_loaded_data()
+
+    def _finalize_loaded_data(self) -> None:
+        """Stop loader-time defaultdicts from mutating database state after construction."""
+        for attr, value in list(vars(self).items()):
+            setattr(self, attr, _finalize_loaded_value(value))
 
     def _update_support_matrix(self):
         """
@@ -3726,96 +3900,16 @@ class PerfDatabase:
         return preferred
 
     def _get_value(self, data_value, metric: str = "latency"):
-        """
-        Extract a metric from a data value (handles both dict and float formats).
-
-        Args:
-            data_value: Either a dict {"latency": float, "power": float} or a float (legacy)
-            metric: Which metric to extract ("latency" or "power")
-
-        Returns:
-            float: The requested metric value
-        """
-        if isinstance(data_value, dict):
-            return data_value.get(metric, 0.0)
-        else:
-            # Legacy format: raw float is latency, power is 0
-            return data_value if metric == "latency" else 0.0
-
-    def _extract_metric_data_3d(self, data: dict, metric: str) -> dict:
-        """
-        Extract a specific metric from 3D dict-based data structure.
-
-        Converts {k1: {k2: {k3: {"latency": l, "power": p}}}}
-        to      {k1: {k2: {k3: l}}} or {k1: {k2: {k3: p}}}
-
-        Args:
-            data: Nested 3-level dict where leaf values are dicts or floats
-            metric: Which metric to extract ("latency" or "power")
-
-        Returns:
-            dict: Same structure but with scalar leaf values
-        """
-        result = {}
-        for k1, v1 in data.items():
-            result[k1] = {}
-            for k2, v2 in v1.items():
-                result[k1][k2] = {}
-                for k3, v3 in v2.items():
-                    result[k1][k2][k3] = self._get_value(v3, metric)
-        return result
+        """Thin wrapper — delegates to ``interpolation.get_value``."""
+        return interpolation.get_value(data_value, metric)
 
     def _extract_latency_and_energy_2d(self, data: dict) -> tuple[dict, dict]:
-        """
-        Extract both latency and energy from 2D dict-based data structure in a single pass.
-
-        Args:
-            data: Nested 2-level dict where leaf values are dicts {"latency": l, "power": p, "energy": e}
-
-        Returns:
-            tuple: (latency_data, energy_data) - two dicts with same structure but scalar values
-        """
-        latency_result = {}
-        energy_result = {}
-
-        for k1, v1 in data.items():
-            latency_result[k1] = {}
-            energy_result[k1] = {}
-
-            for k2, v2 in v1.items():
-                latency_result[k1][k2] = self._get_value(v2, "latency")
-                energy_result[k1][k2] = self._get_value(v2, "energy")
-
-        return latency_result, energy_result
+        """Thin wrapper — delegates to ``interpolation.extract_latency_and_energy_2d``."""
+        return interpolation.extract_latency_and_energy_2d(data)
 
     def _extract_latency_and_energy_3d(self, data: dict) -> tuple[dict, dict]:
-        """
-        Extract both latency and energy from 3D dict-based data structure in a single pass.
-
-        This is more efficient than calling _extract_metric_data_3d twice.
-
-        Args:
-            data: Nested 3-level dict where leaf values are dicts {"latency": l, "power": p, "energy": e}
-
-        Returns:
-            tuple: (latency_data, energy_data) - two dicts with same structure but scalar values
-        """
-        latency_result = {}
-        energy_result = {}
-
-        for k1, v1 in data.items():
-            latency_result[k1] = {}
-            energy_result[k1] = {}
-
-            for k2, v2 in v1.items():
-                latency_result[k1][k2] = {}
-                energy_result[k1][k2] = {}
-
-                for k3, v3 in v2.items():
-                    latency_result[k1][k2][k3] = self._get_value(v3, "latency")
-                    energy_result[k1][k2][k3] = self._get_value(v3, "energy")
-
-        return latency_result, energy_result
+        """Thin wrapper — delegates to ``interpolation.extract_latency_and_energy_3d``."""
+        return interpolation.extract_latency_and_energy_3d(data)
 
     def _extrapolate_data_grid(
         self,
@@ -3825,310 +3919,30 @@ class PerfDatabase:
         target_z_list: list[int],
         sqrt_y_value: bool = False,
     ) -> None:
-        """
-        Extrapolate the data grid, we extrapolate the data grid at the initialization stage.
-        Future query will based on interpolation.
-        """
-        x_list = sorted(data_dict.keys())
-        for x in x_list:
-            # z_direction
-            for y in sorted(data_dict[x].keys()):
-                z_dict = data_dict[x][y]
-                if len(z_dict) <= 1:
-                    logger.warning(
-                        f"only one data point for a given xy, might trigger error. "
-                        f"Please revisit data collection. {x=}, {y=}, {z_dict=}"
-                    )
-                    continue
-                for z in target_z_list:
-                    if z not in z_dict:
-                        z_left, z_right = self._nearest_1d_point_helper(z, list(z_dict.keys()), False)
-                        # Check if both left and right boundaries exist
-                        if z_left not in z_dict or z_right not in z_dict:
-                            logger.warning(
-                                f"Skipping interpolation for z={z} as boundaries z_left={z_left} "
-                                f"or z_right={z_right} do not exist in z_dict for x={x}, y={y}"
-                            )
-                            continue
-                        value = self._interp_1d(
-                            [z_left, z_right],
-                            [data_dict[x][y][z_left], data_dict[x][y][z_right]],
-                            z,
-                        )
-                        z_dict[z] = value
-
-            # y_direction
-            for y in target_y_list:
-                if y not in data_dict[x]:
-                    y_keys = list(data_dict[x].keys())
-                    if len(y_keys) < 2:
-                        logger.warning(
-                            f"Skipping y-direction interpolation for x={x}: "
-                            f"only {len(y_keys)} y-value(s), need at least 2"
-                        )
-                        break
-                    y_left, y_right = self._nearest_1d_point_helper(y, y_keys, False)
-                    # Check if both left and right boundaries exist
-                    if y_left not in data_dict[x] or y_right not in data_dict[x]:
-                        logger.warning(
-                            f"Skipping interpolation for y={y} as boundaries y_left={y_left} "
-                            f"or y_right={y_right} do not exist in data_dict[{x}]"
-                        )
-                        continue
-
-                    z_list = sorted(data_dict[x][y_left].keys())
-                    for z in z_list:
-                        # Check if z exists in both y_left and y_right
-                        if z not in data_dict[x][y_left] or z not in data_dict[x][y_right]:
-                            logger.warning(
-                                f"Skipping interpolation for z={z} as it does not exist in both "
-                                f"y_left={y_left} and y_right={y_right}"
-                            )
-                            continue
-
-                        y_left_value = data_dict[x][y_left][z]
-                        y_right_value = data_dict[x][y_right][z]
-                        assert y_right_value is not None, "y_right_value cannot be None"
-                        if sqrt_y_value:
-                            if isinstance(y_left_value, dict):
-                                # Handle dict format: apply sqrt to both latency and power
-                                y_left_value = {
-                                    "latency": math.sqrt(y_left_value["latency"]),
-                                    "power": math.sqrt(y_left_value["power"]) if y_left_value["power"] > 0 else 0.0,
-                                }
-                                y_right_value = {
-                                    "latency": math.sqrt(y_right_value["latency"]),
-                                    "power": math.sqrt(y_right_value["power"]) if y_right_value["power"] > 0 else 0.0,
-                                }
-                            else:
-                                # Handle legacy float format
-                                y_left_value = math.sqrt(y_left_value)
-                                y_right_value = math.sqrt(y_right_value)
-                        value = self._interp_1d([y_left, y_right], [y_left_value, y_right_value], y)
-                        if sqrt_y_value:
-                            if isinstance(value, dict):
-                                # Square both latency and power
-                                value = {
-                                    "latency": value["latency"] * value["latency"],
-                                    "power": value["power"] * value["power"],
-                                }
-                            else:
-                                value = value * value
-
-                        if y not in data_dict[x]:
-                            data_dict[x][y] = {z: value}
-                        else:
-                            data_dict[x][y][z] = value
-
-        x_keys = list(data_dict.keys())
-        for x in target_x_list:
-            if x not in data_dict:
-                if len(x_keys) < 2:
-                    logger.warning(
-                        f"Skipping x-direction interpolation: only {len(x_keys)} x-value(s), need at least 2"
-                    )
-                    break
-                x_left, x_right = self._nearest_1d_point_helper(x, x_keys, False)
-                # Check if both left and right boundaries exist
-                if x_left not in data_dict or x_right not in data_dict:
-                    logger.warning(
-                        f"Skipping interpolation for x={x} as boundaries x_left={x_left} "
-                        f"or x_right={x_right} do not exist in data_dict"
-                    )
-                    continue
-
-                for y in sorted(data_dict[x_left].keys()):
-                    # Check if y exists in both x_left and x_right
-                    if y not in data_dict[x_left] or y not in data_dict[x_right]:
-                        logger.warning(
-                            f"Skipping interpolation for y={y} as it does not exist in both "
-                            f"x_left={x_left} and x_right={x_right}"
-                        )
-                        continue
-
-                    for z in sorted(data_dict[x_left][y].keys()):
-                        # Check if z exists in both x_left and x_right for the given y
-                        if z not in data_dict[x_left][y] or z not in data_dict[x_right][y]:
-                            logger.warning(
-                                f"Skipping interpolation for z={z} as it does not exist in both "
-                                f"x_left={x_left} and x_right={x_right} for y={y}"
-                            )
-                            continue
-
-                        x_left_value = data_dict[x_left][y][z]
-                        x_right_value = data_dict[x_right][y][z]
-                        assert x_right_value is not None, "x_right_value cannot be None"
-                        value = self._interp_1d([x_left, x_right], [x_left_value, x_right_value], x)
-                        if x not in data_dict:
-                            data_dict[x] = {y: {z: value}}
-                        elif y not in data_dict[x]:
-                            data_dict[x][y] = {z: value}
-                        else:
-                            data_dict[x][y][z] = value
-
-    def _nearest_1d_point_helper(self, x: int, values: list[int], inner_only: bool = True) -> tuple[int, int]:
-        """
-        Find the nearest 1d point
-        """
-        assert values is not None and len(values) >= 1, "values is None or empty"
-        if len(values) == 1:
-            if inner_only and x != values[0]:
-                raise ValueError(f"x is not equal to the only value in the list. {x=}, {values=}")
-            return values[0], values[0]
-
-        sorted_values = sorted(values)
-
-        if x < sorted_values[0]:
-            if inner_only:
-                raise ValueError(f"x is less than the smallest value in the list. {x=}, {sorted_values=}")
-            else:
-                return sorted_values[0], sorted_values[1]
-        elif x > sorted_values[-1]:
-            if inner_only:
-                raise ValueError(f"x is greater than the largest value in the list. {x=}, {sorted_values=}")
-            else:
-                return sorted_values[-2], sorted_values[-1]
-
-        for i, value in enumerate(sorted_values):
-            if x >= value and i != len(sorted_values) - 1:
-                continue
-            else:
-                end = value
-                start = sorted_values[i - 1]
-                break
-        if start is None or end is None:
-            raise ValueError(f"start or end is None. {x=}, {sorted_values=}, start={start=}, end={end=}")
-        return start, end
-
-    def _validate(self, value: float) -> float:
-        """
-        Validate the value
-        """
-        value_array = np.asarray(value)
-        if not np.all(np.isfinite(value_array)):
-            raise ValueError(f"Non-finite value detected {value}")
-        if np.any(value_array < 0.0):
-            logger.debug(f"Negative value detected {value}, pass")
-        return value
-
-    def _interp_3d_linear(self, x: int, y: int, z: int, data: dict) -> float:
-        """
-        Interpolate the 3d data using linear interpolation
-        """
-        points_list = []
-        values_list = []
-        x_left, x_right = self._nearest_1d_point_helper(x, list(data.keys()))
-        for i in [x_left, x_right]:
-            y_left, y_right = self._nearest_1d_point_helper(y, list(data[i].keys()))
-            for j in [y_left, y_right]:
-                z_left, z_right = self._nearest_1d_point_helper(z, list(data[i][j].keys()))
-                points_list.append([i, j, z_left])
-                points_list.append([i, j, z_right])
-                values_list.append(data[i][j][z_left])
-                values_list.append(data[i][j][z_right])
-
-        return self._validate(
-            interpolate.griddata(np.array(points_list), np.array(values_list), (x, y, z), method="linear")
+        """Thin wrapper — delegates to ``interpolation.extrapolate_data_grid``."""
+        return interpolation.extrapolate_data_grid(
+            data_dict, target_x_list, target_y_list, target_z_list, sqrt_y_value=sqrt_y_value
         )
 
+    def _nearest_1d_point_helper(self, x: int, values: list[int], inner_only: bool = True) -> tuple[int, int]:
+        """Thin wrapper — delegates to ``interpolation.nearest_1d_point_helper``."""
+        return interpolation.nearest_1d_point_helper(x, values, inner_only)
+
+    def _validate(self, value):
+        """Thin wrapper — delegates to ``interpolation.validate_interpolation_result``."""
+        return interpolation.validate_interpolation_result(value)
+
+    def _interp_3d_linear(self, x: int, y: int, z: int, data: dict) -> float:
+        """Thin wrapper — delegates to ``interpolation.interp_3d_linear``."""
+        return interpolation.interp_3d_linear(x, y, z, data)
+
     def _interp_2d_linear(self, x: int, y: int, data: dict) -> dict:
-        """
-        Interpolate the 2D data using linear interpolation.
-
-        Returns:
-            dict: {"latency": float, "power": float, "energy": float} - interpolated values for all metrics
-        """
-        # Check if data uses new dict format by sampling a leaf value
-        sample_value = self._get_sample_leaf_value(data)
-
-        if isinstance(sample_value, dict):
-            # New format: interpolate latency and energy separately
-            data_id = id(data)
-            if data_id not in self._extracted_metrics_cache:
-                self._extracted_metrics_cache[data_id] = self._extract_latency_and_energy_2d(data)
-
-            latency_data, energy_data = self._extracted_metrics_cache[data_id]
-
-            # Interpolate latency
-            points_list = []
-            latency_values = []
-            x_left, x_right = self._nearest_1d_point_helper(x, list(latency_data.keys()))
-            for i in [x_left, x_right]:
-                y_left, y_right = self._nearest_1d_point_helper(y, list(latency_data[i].keys()))
-                for j in [y_left, y_right]:
-                    points_list.append([i, j])
-                    latency_values.append(latency_data[i][j])
-
-            latency = self._validate(
-                interpolate.griddata(np.array(points_list), np.array(latency_values), (x, y), method="linear")
-            )
-
-            # Interpolate energy using same points
-            energy_values = []
-            for i in [x_left, x_right]:
-                y_left, y_right = self._nearest_1d_point_helper(y, list(energy_data[i].keys()))
-                for j in [y_left, y_right]:
-                    energy_values.append(energy_data[i][j])
-
-            energy = self._validate(
-                interpolate.griddata(np.array(points_list), np.array(energy_values), (x, y), method="linear")
-            )
-
-            return {"latency": latency, "power": 0.0, "energy": energy}
-        else:
-            # Legacy format: data values are floats
-            points_list = []
-            values_list = []
-            x_left, x_right = self._nearest_1d_point_helper(x, list(data.keys()))
-            for i in [x_left, x_right]:
-                y_left, y_right = self._nearest_1d_point_helper(y, list(data[i].keys()))
-                for j in [y_left, y_right]:
-                    points_list.append([i, j])
-                    values_list.append(data[i][j])
-
-            latency = self._validate(
-                interpolate.griddata(np.array(points_list), np.array(values_list), (x, y), method="linear")
-            )
-
-            return {"latency": latency, "power": 0.0, "energy": 0.0}
+        """Thin wrapper — delegates to ``interpolation.interp_2d_linear``."""
+        return interpolation.interp_2d_linear(x, y, data, self._extracted_metrics_cache)
 
     def _interp_3d(self, x: int, y: int, z: int, data: dict, method: str) -> dict:
-        """
-        Interpolate the 3d data using the given method.
-
-        Returns:
-            dict: {"latency": float, "power": float, "energy": float} - interpolated values for all metrics
-            Note: power is always 0.0 as it's not currently used by callers (only latency and energy are used)
-        """
-        # Check if data uses new dict format by sampling a leaf value
-        sample_value = self._get_sample_leaf_value(data)
-
-        if isinstance(sample_value, dict):
-            # New format: interpolate latency and energy only (power is not used by callers)
-            # Use cache to avoid repeated extraction of the same data dictionary
-            data_id = id(data)
-            if data_id not in self._extracted_metrics_cache:
-                # Extract both metrics in a single pass for maximum efficiency
-                self._extracted_metrics_cache[data_id] = self._extract_latency_and_energy_3d(data)
-
-            latency_data, energy_data = self._extracted_metrics_cache[data_id]
-
-            if method == "linear":
-                latency = self._interp_3d_linear(x, y, z, latency_data)
-                energy = self._interp_3d_linear(x, y, z, energy_data)
-            else:
-                latency = self._interp_2d_1d(x, y, z, latency_data, method)
-                energy = self._interp_2d_1d(x, y, z, energy_data, method)
-
-            return {"latency": latency, "power": 0.0, "energy": energy}
-        else:
-            # Legacy format: data values are floats
-            if method == "linear":
-                latency = self._interp_3d_linear(x, y, z, data)
-            else:
-                latency = self._interp_2d_1d(x, y, z, data, method)
-
-            return {"latency": latency, "power": 0.0, "energy": 0.0}
+        """Thin wrapper — delegates to ``interpolation.interp_3d``."""
+        return interpolation.interp_3d(x, y, z, data, method, self._extracted_metrics_cache)
 
     def _interp_context_topk_piecewise_from_raw(
         self,
@@ -4138,63 +3952,8 @@ class PerfDatabase:
         raw_dict: dict | None,
         boundary_seq_len: int | None,
     ) -> dict | None:
-        """
-        Interpolate raw context module data without crossing a top-k regime boundary.
-
-        DSA and DeepSeek-V4 CSA use different kernel paths before and after the
-        top-k selected cache saturates. A smooth interpolation across that
-        boundary can underestimate points just above it. This helper only
-        applies when the exact raw (num_heads, batch) curve has at least two
-        same-regime anchors.
-        """
-        if boundary_seq_len is None or raw_dict is None or num_heads not in raw_dict:
-            return None
-
-        exact_head_data = raw_dict[num_heads]
-        curve = {
-            seq_len: batch_dict[b]
-            for seq_len, batch_dict in exact_head_data.items()
-            if isinstance(batch_dict, dict) and b in batch_dict
-        }
-        if full_s in curve:
-            value = curve[full_s]
-            if isinstance(value, dict):
-                return {
-                    "latency": self._get_value(value, "latency"),
-                    "power": self._get_value(value, "power"),
-                    "energy": self._get_value(value, "energy"),
-                }
-            return {"latency": float(value), "power": 0.0, "energy": 0.0}
-
-        if full_s <= boundary_seq_len:
-            same_regime_keys = sorted(seq_len for seq_len in curve if seq_len <= boundary_seq_len)
-        else:
-            same_regime_keys = sorted(seq_len for seq_len in curve if seq_len > boundary_seq_len)
-
-        if len(same_regime_keys) < 2:
-            return None
-
-        if full_s < same_regime_keys[0]:
-            if full_s <= boundary_seq_len:
-                return None
-            left, right = same_regime_keys[0], same_regime_keys[1]
-        elif full_s > same_regime_keys[-1]:
-            return None
-        else:
-            left, right = self._nearest_1d_point_helper(full_s, same_regime_keys)
-        left_value = curve[left]
-        right_value = curve[right]
-
-        def _interp_metric(metric: str) -> float:
-            left_metric = self._get_value(left_value, metric)
-            right_metric = self._get_value(right_value, metric)
-            return self._interp_1d([left, right], [left_metric, right_metric], full_s)
-
-        return {
-            "latency": _interp_metric("latency"),
-            "power": _interp_metric("power"),
-            "energy": _interp_metric("energy"),
-        }
+        """Thin wrapper — delegates to ``interpolation.interp_context_topk_piecewise_from_raw``."""
+        return interpolation.interp_context_topk_piecewise_from_raw(num_heads, full_s, b, raw_dict, boundary_seq_len)
 
     def _interp_dsa_context_topk_piecewise_from_raw(
         self,
@@ -4204,182 +3963,65 @@ class PerfDatabase:
         dsa_dict: dict | None,
         index_topk: int | None,
     ) -> dict | None:
-        """
-        Interpolate raw DSA context data without crossing the index_topk regime boundary.
+        """Thin wrapper — delegates to ``interpolation.interp_dsa_context_topk_piecewise_from_raw``."""
+        return interpolation.interp_dsa_context_topk_piecewise_from_raw(num_heads, full_s, b, dsa_dict, index_topk)
 
-        DSA context uses a different kernel path when kv_len crosses index_topk:
-        <= topk can skip indexer logits/topk, while > topk enables that path.
-        """
-        return self._interp_context_topk_piecewise_from_raw(num_heads, full_s, b, dsa_dict, index_topk)
+    @staticmethod
+    def _is_dsa_interpolation_miss(error: Exception) -> bool:
+        message = str(error)
+        return isinstance(error, ValueError) and (
+            "x is not equal to the only value in the list" in message
+            or "x is less than the smallest value in the list" in message
+            or "x is greater than the largest value in the list" in message
+        )
+
+    @staticmethod
+    def _format_dsa_unavailable_message(
+        phase: str,
+        error: Exception,
+        *,
+        b: int,
+        s: int,
+        num_heads: int,
+        architecture: str,
+        index_n_heads: int,
+        index_head_dim: int,
+        index_topk: int,
+        prefix: int | None = None,
+    ) -> str:
+        prefix_part = "" if prefix is None else f", prefix={prefix}"
+        return (
+            f"{phase} DSA module perf data unavailable for candidate "
+            f"b={b}, s={s}{prefix_part}, num_heads={num_heads}, architecture={architecture}, "
+            f"index_n_heads={index_n_heads}, index_head_dim={index_head_dim}, index_topk={index_topk}: {error}"
+        )
 
     def _get_sample_leaf_value(self, data: dict):
-        """Get a sample leaf value from nested dict to determine format."""
-        current = data
-        max_depth = 20  # Safety limit to prevent infinite loops
-        depth = 0
-        visited = set()  # Track visited dict ids to detect cycles
-
-        while isinstance(current, dict) and current and depth < max_depth:
-            dict_id = id(current)
-            if dict_id in visited:
-                # Circular reference detected
-                logger.warning("Circular reference detected in _get_sample_leaf_value")
-                break
-            visited.add(dict_id)
-
-            # Check if this is a leaf dict with latency/power keys
-            if "latency" in current or "power" in current:
-                return current
-
-            try:
-                key = next(iter(current))
-                current = current[key]
-                depth += 1
-            except (StopIteration, KeyError, TypeError):
-                # Handle edge cases: empty dict, missing key, or non-dict value
-                break
-
-        if depth >= max_depth:
-            logger.warning(f"Maximum depth ({max_depth}) exceeded in _get_sample_leaf_value")
-
-        return current
+        """Thin wrapper — delegates to ``interpolation.get_sample_leaf_value``."""
+        return interpolation.get_sample_leaf_value(data)
 
     def _get_p2p_bandwidth(self, num_gpus: int) -> float:
-        """
-        Get the appropriate point-to-point bandwidth based on the number of GPUs.
-
-        Three-tier bandwidth selection:
-        - num_gpus <= num_gpus_per_node: intra_node_bw (NVLink within node)
-        - num_gpus <= num_gpus_per_rack: inter_node_bw (NVLink via NVSwitch within rack)
-        - num_gpus > num_gpus_per_rack: inter_rack_bw (InfiniBand between racks)
-
-        Args:
-            num_gpus: Number of GPUs involved in the communication
-
-        Returns:
-            Bandwidth in Bytes/s
-        """
-        node_spec = self.system_spec["node"]
-        num_gpus_per_node = node_spec["num_gpus_per_node"]
-        num_gpus_per_rack = node_spec.get("num_gpus_per_rack", float("inf"))
-
-        if num_gpus <= num_gpus_per_node:
-            return node_spec["intra_node_bw"]
-        elif num_gpus <= num_gpus_per_rack:
-            return node_spec["inter_node_bw"]
-        else:
-            # Inter-rack communication, fallback to inter_node_bw if inter_rack_bw not defined
-            return node_spec.get("inter_rack_bw", node_spec["inter_node_bw"])
+        """Thin wrapper — delegates to ``SystemSpec.get_p2p_bandwidth``."""
+        return self.system_spec.get_p2p_bandwidth(num_gpus)
 
     def _bilinear_interpolation(self, x_list: list[int], y_list: list[int], x: int, y: int, data: dict) -> float:
-        """
-        Interpolate the 2d data using bilinear interpolation
-        """
-        x1, x2 = x_list
-        # assure xy has a rectengle grid
-        y1, y2 = y_list
-        # Calculate the weights for the corners
-        Q11, Q12, Q21, Q22 = data[x1][y1], data[x1][y2], data[x2][y1], data[x2][y2]  # noqa: N806
+        """Thin wrapper — delegates to ``interpolation.bilinear_interpolation``."""
+        return interpolation.bilinear_interpolation(x_list, y_list, x, y, data)
 
-        f_x1_y1 = Q11 * (x2 - x) * (y2 - y)
-        f_x1_y2 = Q12 * (x2 - x) * (y - y1)
-        f_x2_y1 = Q21 * (x - x1) * (y2 - y)
-        f_x2_y2 = Q22 * (x - x1) * (y - y1)
-        # Calculate the total weight
-        total_weight = (x2 - x1) * (y2 - y1)
-        # Calculate the interpolated value
-        interpolated_value = (f_x1_y1 + f_x1_y2 + f_x2_y1 + f_x2_y2) / total_weight
-        return interpolated_value
-
-    def _interp_2d_1d(self, x: int, y: int, z: int, data: dict, method="bilinear") -> float:
-        """
-        Interpolate the 3d data using the given method, 2d after 1d.
-        """
-        x_values = []
-        x_left, x_right = self._nearest_1d_point_helper(x, list(data.keys()))
-
-        for i in [x_left, x_right]:
-            points_list = []
-            values_list = []
-            y_left, y_right = self._nearest_1d_point_helper(y, list(data[i].keys()))
-            for j in [y_left, y_right]:
-                z_left, z_right = self._nearest_1d_point_helper(z, list(data[i][j].keys()))
-                points_list.append([j, z_left])
-                points_list.append([j, z_right])
-                values_list.append(data[i][j][z_left])
-                values_list.append(data[i][j][z_right])
-            if method == "cubic":
-                x_values.append(
-                    self._validate(
-                        interpolate.griddata(np.array(points_list), np.array(values_list), (y, z), method="cubic")
-                    )
-                )
-            elif method == "bilinear":
-                x_values.append(
-                    self._validate(self._bilinear_interpolation([y_left, y_right], [z_left, z_right], y, z, data[i]))
-                )
-            else:
-                raise NotImplementedError
-
-        return self._validate(self._interp_1d([x_left, x_right], x_values, x))
+    def _interp_2d_1d(self, x: int, y: int, z: int, data: dict, method: str = "bilinear") -> float:
+        """Thin wrapper — delegates to ``interpolation.interp_2d_1d``."""
+        return interpolation.interp_2d_1d(x, y, z, data, method)
 
     def _interp_1d(self, x: list[int], y: list, value: int):
-        """
-        Interpolate the 1d data using linear interpolation.
-        Handles both float and dict values.
-
-        Args:
-            x: list of x coordinates
-            y: list of y values (can be floats or dicts)
-            value: target x value
-
-        Returns:
-            float or dict: Interpolated result (dict if input was dict, float otherwise)
-        """
-        x0, x1 = x
-        y0, y1 = y
-
-        # Check if values are dicts (new format) or floats (legacy)
-        if isinstance(y0, dict) and isinstance(y1, dict):
-            # New format: interpolate latency and power separately
-            lat0, lat1 = y0["latency"], y1["latency"]
-            pow0, pow1 = y0["power"], y1["power"]
-
-            # Apply interpolation logic for latency
-            if (x0 - x1) * (lat0 - lat1) < 0 and (value - x0) * (value - x1) > 0:
-                lat1 = lat0
-            if lat0 == lat1:
-                lat_result = lat0
-            else:
-                lat_result = lat0 + (lat1 - lat0) / (x1 - x0) * (value - x0)
-
-            # Apply interpolation logic for power
-            if (x0 - x1) * (pow0 - pow1) < 0 and (value - x0) * (value - x1) > 0:
-                pow1 = pow0
-            if pow0 == pow1:
-                pow_result = pow0
-            else:
-                pow_result = pow0 + (pow1 - pow0) / (x1 - x0) * (value - x0)
-
-            return {"latency": lat_result, "power": pow_result}
-        else:
-            # Legacy format: y values are floats
-            if (x0 - x1) * (y0 - y1) < 0 and (value - x0) * (value - x1) > 0:
-                y1 = y0
-            if y0 == y1:
-                return y0
-            return y0 + (y1 - y0) / (x1 - x0) * (value - x0)
+        """Thin wrapper — delegates to ``interpolation.interp_1d``."""
+        return interpolation.interp_1d(x, y, value)
 
     def set_default_database_mode(self, mode: common.DatabaseMode) -> None:
         """
         Set the default database mode
         """
         if mode != self._default_database_mode:
-            # Clear cached query methods since default database mode affects the results
-            for attr_name in dir(self):
-                attr = getattr(self, attr_name)
-                if hasattr(attr, "cache_clear") and callable(attr):
-                    attr.cache_clear()
+            self.clear_runtime_caches()
             self._default_database_mode = mode
 
     def get_default_database_mode(self) -> common.DatabaseMode:
@@ -4387,6 +4029,24 @@ class PerfDatabase:
         Get the default database mode
         """
         return self._default_database_mode
+
+    def clear_runtime_caches(self) -> None:
+        """Clear cached query/interpolation state while preserving loaded op data."""
+        self._extracted_metrics_cache.clear()
+        for attr_name in dir(self):
+            attr = getattr(self, attr_name)
+            cache_clear = getattr(attr, "cache_clear", None)
+            if callable(cache_clear):
+                cache_clear()
+
+    @staticmethod
+    def _interp_pr(latency: float, energy: float = 0.0) -> PerformanceResult:
+        """Build a PerformanceResult derived from silicon table data.
+
+        Silicon-table interpolation/extrapolation still uses silicon data; only
+        explicit formula fallbacks should be tagged as ``"empirical"``.
+        """
+        return PerformanceResult(latency, energy=energy, source="silicon")
 
     def _query_silicon_or_hybrid(
         self,
@@ -4428,6 +4088,12 @@ class PerfDatabase:
             # get the full traceback via logger.exception.
             if isinstance(e, PerfDataNotAvailableError):
                 logger.warning(exception_msg)
+            elif isinstance(e, _MISSING_SILICON_DATA_EXCEPTIONS):
+                missing_data_error = PerfDataNotAvailableError(
+                    f"{exception_msg} Missing silicon data for the requested lookup."
+                )
+                logger.warning(str(missing_data_error))
+                raise missing_data_error from e
             else:
                 logger.exception(exception_msg)
             # Modify the original exception message
@@ -4518,21 +4184,26 @@ class PerfDatabase:
 
         # SOL and EMPIRICAL modes don't have power/energy data
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0)
+            return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(m, n, k, quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(m, n, k, quant_mode), energy=0.0)
+            return PerformanceResult(get_empirical(m, n, k, quant_mode), energy=0.0, source="empirical")
 
         # TODO: remove "else" and unindent
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
-                def _to_performance_result(result):
-                    """Normalize GEMM table entries into a PerformanceResult."""
+                def _to_performance_result(result, *, source: str = "silicon"):
+                    """Normalize GEMM table entries into a PerformanceResult.
+
+                    Interpolated/extrapolated GEMM values are still derived from
+                    silicon table data; only explicit formula fallbacks are
+                    tagged as empirical.
+                    """
                     if isinstance(result, dict):
-                        return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
-                    return PerformanceResult(result, energy=0.0)
+                        return PerformanceResult(result["latency"], energy=result.get("energy", 0.0), source=source)
+                    return PerformanceResult(result, energy=0.0, source=source)
 
                 self._gemm_data.raise_if_not_loaded()
                 if table_quant_mode not in self._gemm_data:
@@ -4610,11 +4281,11 @@ class PerfDatabase:
         table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
 
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, k)[0], energy=0.0)
+            return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(m, k)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(m, k), energy=0.0)
+            return PerformanceResult(get_empirical(m, k), energy=0.0, source="empirical")
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
@@ -4648,7 +4319,7 @@ class PerfDatabase:
                     k_i = max(k_min, min(k_i, k_max))
 
                 result = self._interp_2d_linear(m_i, k_i, table)
-                return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
+                return self._interp_pr(result["latency"], energy=result.get("energy", 0.0))
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,
@@ -4701,11 +4372,11 @@ class PerfDatabase:
         table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
 
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, k)[0], energy=0.0)
+            return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(m, k)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(m, k), energy=0.0)
+            return PerformanceResult(get_empirical(m, k), energy=0.0, source="empirical")
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
@@ -4739,7 +4410,7 @@ class PerfDatabase:
                     k_i = max(k_min, min(k_i, k_max))
 
                 result = self._interp_2d_linear(m_i, k_i, table)
-                return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
+                return self._interp_pr(result["latency"], energy=result.get("energy", 0.0))
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,
@@ -4845,7 +4516,7 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0)
+            return PerformanceResult(sol_latency, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
@@ -4860,7 +4531,7 @@ class PerfDatabase:
                 kvcache_quant_mode,
                 fmha_quant_mode,
             )
-            return PerformanceResult(emp_latency, energy=0.0)
+            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
@@ -4875,7 +4546,7 @@ class PerfDatabase:
                 result = self._interp_3d(n, full_s, b, attention_dict, "cubic")
                 latency = result["latency"] * prefix_correction
                 energy = result.get("energy", 0.0) * prefix_correction
-                return PerformanceResult(latency, energy=energy)
+                return self._interp_pr(latency, energy=energy)
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,
@@ -4985,12 +4656,12 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0)
+            return PerformanceResult(sol_latency, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
-            return PerformanceResult(emp_latency, energy=0.0)
+            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
@@ -5017,7 +4688,7 @@ class PerfDatabase:
 
                 latency = latency_sum / sample_cnt
                 energy = energy_sum / sample_cnt
-                return PerformanceResult(latency, energy=energy)
+                return self._interp_pr(latency, energy=energy)
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,
@@ -5100,12 +4771,12 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0)
+            return PerformanceResult(sol_latency, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
-            return PerformanceResult(emp_latency, energy=0.0)
+            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
@@ -5116,7 +4787,7 @@ class PerfDatabase:
                 result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
                 latency = result["latency"] * prefix_correction
                 energy = result.get("energy", 0.0) * prefix_correction
-                return PerformanceResult(latency, energy=energy)
+                return self._interp_pr(latency, energy=energy)
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,
@@ -5190,12 +4861,12 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, num_heads, kvcache_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0)
+            return PerformanceResult(sol_latency, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, num_heads, kvcache_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, num_heads, kvcache_quant_mode)
-            return PerformanceResult(emp_latency, energy=0.0)
+            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
@@ -5204,7 +4875,7 @@ class PerfDatabase:
                 result = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
-                return PerformanceResult(latency, energy=energy)
+                return self._interp_pr(latency, energy=energy)
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,
@@ -5278,12 +4949,12 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0)
+            return PerformanceResult(sol_latency, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
-            return PerformanceResult(emp_latency, energy=0.0)
+            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
         else:
 
             def get_silicon():
@@ -5294,7 +4965,7 @@ class PerfDatabase:
                 result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
                 latency = result["latency"] * prefix_correction
                 energy = result.get("energy", 0.0) * prefix_correction
-                return PerformanceResult(latency, energy=energy)
+                return self._interp_pr(latency, energy=energy)
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,
@@ -5371,12 +5042,12 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
-            return PerformanceResult(sol_latency, energy=0.0)
+            return PerformanceResult(sol_latency, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, num_heads, kv_cache_dtype)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, num_heads, kv_cache_dtype)
-            return PerformanceResult(emp_latency, energy=0.0)
+            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
         else:
 
             def get_silicon():
@@ -5385,7 +5056,7 @@ class PerfDatabase:
                 result = self._interp_3d(num_heads, b, s, mla_dict, "cubic")
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
-                return PerformanceResult(latency, energy=energy)
+                return self._interp_pr(latency, energy=energy)
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,
@@ -5491,11 +5162,13 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_time = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_time, energy=0.0)
+            return PerformanceResult(sol_time, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode), energy=0.0)
+            return PerformanceResult(
+                get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode), energy=0.0, source="empirical"
+            )
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
@@ -5513,7 +5186,7 @@ class PerfDatabase:
                 result = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
-                return PerformanceResult(latency, energy=energy)
+                return self._interp_pr(latency, energy=energy)
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,
@@ -5615,13 +5288,14 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_time = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_time, energy=0.0)
+            return PerformanceResult(sol_time, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(
                 get_empirical(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode),
                 energy=0.0,
+                source="empirical",
             )
         else:
             # SILICON or HYBRID mode - use database
@@ -5643,7 +5317,7 @@ class PerfDatabase:
                 result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
                 latency = result["latency"] * prefix_correction
                 energy = result.get("energy", 0.0) * prefix_correction
-                return PerformanceResult(latency, energy=energy)
+                return self._interp_pr(latency, energy=energy)
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,
@@ -5705,17 +5379,17 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(quant_mode, tp_size, size)[0]
-            return PerformanceResult(sol_latency, energy=0.0)
+            return PerformanceResult(sol_latency, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(quant_mode, tp_size, size)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(quant_mode, tp_size, size)
-            return PerformanceResult(emp_latency, energy=0.0)
+            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
                 if tp_size == 1:
-                    return PerformanceResult(0.0, energy=0.0)
+                    return PerformanceResult(0.0, energy=0.0, source="empirical")
                 if self.system_spec["node"]["num_gpus_per_node"] == 72 and tp_size > 4:
                     # on GB200, we only have custom all reduce for up to tp4.
                     return self.query_nccl(quant_mode, tp_size, "all_reduce", size)
@@ -5764,7 +5438,7 @@ class PerfDatabase:
                     lat = lat * scale_factor
                     energy = energy * scale_factor
 
-                return PerformanceResult(lat, energy=energy)
+                return self._interp_pr(lat, energy=energy)
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,
@@ -5831,16 +5505,18 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(dtype, num_gpus, operation, message_size)[0], energy=0.0)
+            return PerformanceResult(get_sol(dtype, num_gpus, operation, message_size)[0], energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(dtype, num_gpus, operation, message_size)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(dtype, num_gpus, operation, message_size), energy=0.0)
+            return PerformanceResult(
+                get_empirical(dtype, num_gpus, operation, message_size), energy=0.0, source="empirical"
+            )
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
                 if num_gpus == 1:
-                    return PerformanceResult(0.0, energy=0.0)
+                    return PerformanceResult(0.0, energy=0.0, source="empirical")
 
                 # Use oneCCL data as fallback when NCCL data is not available (e.g. XPU systems)
                 nccl_source = self._nccl_data
@@ -5880,7 +5556,7 @@ class PerfDatabase:
                     lat = lat * scaling_formula
                     energy = energy * scaling_formula
 
-                return PerformanceResult(lat, energy=energy)
+                return self._interp_pr(lat, energy=energy)
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,
@@ -6056,7 +5732,28 @@ class PerfDatabase:
             elif last_energy > 0:
                 est_energy = last_energy * (est_latency / last_latency)
 
-            return PerformanceResult(est_latency, energy=est_energy)
+            # Overflow estimate anchored on the last silicon point's utilization
+            # and scaled by SOL ratio. It is still silicon-derived, not a pure
+            # formula fallback, so keep the source tag aligned with _interp_pr.
+            return self._interp_pr(est_latency, energy=est_energy)
+
+        def _require_moe_token_points(
+            moe_dict: dict,
+            query_tokens: int,
+            used_workload_distribution: str,
+        ) -> list[int]:
+            token_points = sorted(moe_dict.keys())
+            if token_points:
+                return token_points
+
+            raise PerfDataNotAvailableError(
+                "No MoE silicon data points for requested shape. "
+                f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
+                f"num_tokens={query_tokens}, hidden_size={hidden_size}, inter_size={inter_size}, "
+                f"topk={topk}, num_experts={num_experts}, moe_tp_size={moe_tp_size}, "
+                f"moe_ep_size={moe_ep_size}, quant_mode={quant_mode}, "
+                f"workload_distribution='{used_workload_distribution}'."
+            )
 
         if database_mode is None:
             database_mode = self._default_database_mode
@@ -6072,7 +5769,7 @@ class PerfDatabase:
                 quant_mode,
                 workload_distribution,
             )[0]
-            return PerformanceResult(sol_latency, energy=0.0)
+            return PerformanceResult(sol_latency, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(
                 num_tokens,
@@ -6097,7 +5794,7 @@ class PerfDatabase:
                 quant_mode,
                 workload_distribution,
             )
-            return PerformanceResult(emp_latency, energy=0.0)
+            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
@@ -6121,7 +5818,11 @@ class PerfDatabase:
                     moe_dict = moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
                         inter_size
                     ][moe_tp_size][moe_ep_size]
-                    token_points = sorted(moe_dict.keys())
+                    token_points = _require_moe_token_points(
+                        moe_dict,
+                        num_tokens_corrected,
+                        used_workload_distribution,
+                    )
                     if num_tokens_corrected > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
                             num_tokens_corrected,
@@ -6151,7 +5852,7 @@ class PerfDatabase:
                     else:
                         lat = result
                         energy = 0.0
-                    return PerformanceResult(lat, energy=energy)
+                    return self._interp_pr(lat, energy=energy)
                 elif self.backend == common.BackendName.trtllm.value:
                     if self._moe_data is None and self._moe_low_latency_data is None:
                         raise PerfDataNotAvailableError(
@@ -6204,7 +5905,7 @@ class PerfDatabase:
                         moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
                             hidden_size
                         ][inter_size][moe_tp_size][moe_ep_size]
-                    token_points = sorted(moe_dict.keys())
+                    token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
                     if num_tokens > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
                             num_tokens,
@@ -6234,7 +5935,7 @@ class PerfDatabase:
                     else:
                         lat = result
                         energy = 0.0
-                    return PerformanceResult(lat, energy=energy)
+                    return self._interp_pr(lat, energy=energy)
                 elif self.backend == common.BackendName.vllm.value:
                     self._moe_data.raise_if_not_loaded()
                     used_workload_distribution = (
@@ -6243,7 +5944,7 @@ class PerfDatabase:
                     moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
                         inter_size
                     ][moe_tp_size][moe_ep_size]
-                    token_points = sorted(moe_dict.keys())
+                    token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
                     if num_tokens > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
                             num_tokens,
@@ -6269,7 +5970,7 @@ class PerfDatabase:
                     else:
                         latency = result
                         energy = 0.0
-                    return PerformanceResult(latency, energy=energy)
+                    return self._interp_pr(latency, energy=energy)
                 else:
                     raise NotImplementedError(f"backend {self.backend} not supported for moe")
 
@@ -6347,12 +6048,12 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
-            return PerformanceResult(sol_latency, energy=0.0)
+            return PerformanceResult(sol_latency, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(num_tokens, num_heads, quant_mode, if_pre)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(num_tokens, num_heads, quant_mode, if_pre)
-            return PerformanceResult(emp_latency, energy=0.0)
+            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
@@ -6377,7 +6078,7 @@ class PerfDatabase:
                 else:
                     lat = result
                     energy = 0.0
-                return PerformanceResult(lat, energy=energy)
+                return self._interp_pr(lat, energy=energy)
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,
@@ -6390,46 +6091,33 @@ class PerfDatabase:
     def query_mem_op(
         self, mem_bytes: int, database_mode: common.DatabaseMode | None = None
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query memory operation latency and energy.
-
-        Args:
-            mem_bytes: Number of bytes to transfer
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+        """Query memory-operation latency analytically (no CSV data).
 
         Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
+            PerformanceResult acting as float (latency in ms); energy via ``.energy``.
+            For SOL_FULL, returns a ``(sol_time, 0, sol_time)`` tuple.
         """
+        gpu_spec = self.system_spec["gpu"]
 
-        def get_sol(mem_bytes: int) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            sol_time = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
+        def get_sol() -> tuple[float, float, float]:
+            sol_time = mem_bytes / gpu_spec["mem_bw"] * 1000
             return sol_time, 0, sol_time
 
-        def get_empirical(mem_bytes: int) -> float:
-            """
-            Get the empirical time
-            """
+        def get_empirical() -> float:
             return (
-                mem_bytes
-                / (self.system_spec["gpu"]["mem_bw"] * self.system_spec["gpu"]["mem_bw_empirical_scaling_factor"])
-                + self.system_spec["gpu"]["mem_empirical_constant_latency"]
+                mem_bytes / (gpu_spec["mem_bw"] * gpu_spec["mem_bw_empirical_scaling_factor"])
+                + gpu_spec["mem_empirical_constant_latency"]
             ) * 1000
 
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(mem_bytes)[0], energy=0.0)
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(mem_bytes)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(mem_bytes), energy=0.0)
-        else:
-            # hybrid and silicon modes have same logic
-            return PerformanceResult(get_empirical(mem_bytes), energy=0.0)
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+        if database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol()
+        # EMPIRICAL / SILICON / HYBRID share the same empirical formula. There is
+        # no silicon table for raw memory ops, so always tag as ``empirical``.
+        return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
 
     def query_mamba2(
         self,
@@ -6478,36 +6166,36 @@ class PerfDatabase:
             return sol_mem, 0, sol_mem
 
         if not mamba2_data:
-            return PerformanceResult(get_sol()[0], energy=0.0)
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
 
         model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
         try:
             by_phase = mamba2_data[kernel_source]
         except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0)
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
         try:
             by_key = by_phase[phase]
         except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0)
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
         if model_key not in by_key:
             # Nearest config by d_model
             keys_with_d_model = [k for k in by_key if k[0] == d_model]
             if keys_with_d_model:
                 model_key = keys_with_d_model[0]
             else:
-                return PerformanceResult(get_sol()[0], energy=0.0)
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
 
         table = by_key[model_key]
 
         if phase == "context":
             if seq_len is None or seq_len <= 0:
-                return PerformanceResult(get_sol()[0], energy=0.0)
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             try:
                 result = self._interp_2d_linear(batch_size, seq_len, table)
             except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0)
-            return PerformanceResult(
-                latency=result["latency"],
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            return self._interp_pr(
+                result["latency"],
                 energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
             )
         else:
@@ -6516,7 +6204,7 @@ class PerfDatabase:
                     batch_size, list(table.keys()), inner_only=False
                 )
             except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0)
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
 
             # Ensure we pass entry dicts {latency, power, energy}; handle legacy nested batch_size -> seq_len -> entry
             def _mamba2_gen_entry(val):
@@ -6531,7 +6219,7 @@ class PerfDatabase:
             y_left = _mamba2_gen_entry(table[batch_left])
             y_right = _mamba2_gen_entry(table[batch_right])
             if y_left is None or y_right is None:
-                return PerformanceResult(get_sol()[0], energy=0.0)
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             result = self._interp_1d(
                 [batch_left, batch_right],
                 [y_left, y_right],
@@ -6543,7 +6231,7 @@ class PerfDatabase:
             else:
                 lat = result
                 energy = 0.0
-            return PerformanceResult(lat, energy=energy)
+            return self._interp_pr(lat, energy=energy)
 
     def query_gdn(
         self,
@@ -6613,36 +6301,36 @@ class PerfDatabase:
             return sol_mem, 0, sol_mem
 
         if not gdn_data:
-            return PerformanceResult(get_sol()[0], energy=0.0)
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
 
         model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
         try:
             by_phase = gdn_data[kernel_source]
         except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0)
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
         try:
             by_key = by_phase[phase]
         except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0)
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
         if model_key not in by_key:
             # Nearest config by d_model, then num_v_heads as secondary discriminator
             keys_same_d_model = [k for k in by_key if k[0] == d_model]
             if keys_same_d_model:
                 model_key = min(keys_same_d_model, key=lambda k: abs(k[3] - num_v_heads))
             else:
-                return PerformanceResult(get_sol()[0], energy=0.0)
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
 
         table = by_key[model_key]
 
         if phase == "context":
             if seq_len is None or seq_len <= 0:
-                return PerformanceResult(get_sol()[0], energy=0.0)
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             try:
                 result = self._interp_2d_linear(batch_size, seq_len, table)
             except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0)
-            return PerformanceResult(
-                latency=result["latency"],
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            return self._interp_pr(
+                result["latency"],
                 energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
             )
         else:
@@ -6651,7 +6339,7 @@ class PerfDatabase:
                     batch_size, list(table.keys()), inner_only=False
                 )
             except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0)
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
 
             def _gdn_gen_entry(val):
                 if isinstance(val, dict) and "latency" in val:
@@ -6665,7 +6353,7 @@ class PerfDatabase:
             y_left = _gdn_gen_entry(table[batch_left])
             y_right = _gdn_gen_entry(table[batch_right])
             if y_left is None or y_right is None:
-                return PerformanceResult(get_sol()[0], energy=0.0)
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             result = self._interp_1d(
                 [batch_left, batch_right],
                 [y_left, y_right],
@@ -6677,7 +6365,7 @@ class PerfDatabase:
             else:
                 lat = result
                 energy = 0.0
-            return PerformanceResult(lat, energy=energy)
+            return self._interp_pr(lat, energy=energy)
 
     @functools.lru_cache(maxsize=32768)
     def query_p2p(
@@ -6714,14 +6402,15 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(message_bytes)[0], energy=0.0)
+            return PerformanceResult(get_sol(message_bytes)[0], energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(message_bytes)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(message_bytes), energy=0.0)
+            return PerformanceResult(get_empirical(message_bytes), energy=0.0, source="empirical")
         else:
-            # hybrid and silicon modes have same logic
-            return PerformanceResult(get_empirical(message_bytes), energy=0.0)
+            # No silicon table for P2P — even SILICON/HYBRID modes use the
+            # empirical formula here, so tag the source accordingly.
+            return PerformanceResult(get_empirical(message_bytes), energy=0.0, source="empirical")
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_deepep_ll(
@@ -6748,18 +6437,18 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(num_tokens, topk, num_experts)[0], energy=0.0)
+            return PerformanceResult(get_sol(num_tokens, topk, num_experts)[0], energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(num_tokens, topk, num_experts)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0)
+            return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0, source="empirical")
         else:
             data = self._wideep_deepep_ll_data[node_num][hidden_size][topk][num_experts]
             num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
             result = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
             lat = result["latency"] if isinstance(result, dict) else result
             energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
-            return PerformanceResult(lat / 1000.0, energy=energy / 1000.0)
+            return self._interp_pr(lat / 1000.0, energy=energy / 1000.0)
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_deepep_normal(
@@ -6787,11 +6476,13 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(num_tokens, num_experts, topk, hidden_size)[0], energy=0.0)
+            return PerformanceResult(get_sol(num_tokens, num_experts, topk, hidden_size)[0], energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(num_tokens, num_experts, topk, hidden_size)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(num_tokens, num_experts, topk, hidden_size), energy=0.0)
+            return PerformanceResult(
+                get_empirical(num_tokens, num_experts, topk, hidden_size), energy=0.0, source="empirical"
+            )
         else:
             if node_num == 1 and sms == 20:  # only collect sm=20 for now
                 data = self._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
@@ -6804,7 +6495,7 @@ class PerfDatabase:
                 result = self._interp_2d_linear(sms, num_tokens, data)
                 lat = result["latency"] if isinstance(result, dict) else result
                 energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
-            return PerformanceResult(lat / 1000.0, energy=energy / 1000.0)
+            return self._interp_pr(lat / 1000.0, energy=energy / 1000.0)
 
     def _correct_data(self) -> None:
         """
@@ -7006,7 +6697,7 @@ class PerfDatabase:
                 quant_mode,
                 workload_distribution,
             )[0]
-            return PerformanceResult(sol_latency, energy=0.0)
+            return PerformanceResult(sol_latency, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(
                 num_tokens,
@@ -7033,7 +6724,7 @@ class PerfDatabase:
                 quant_mode,
                 workload_distribution,
             )
-            return PerformanceResult(emp_latency, energy=0.0)
+            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
 
         # Automatically select MoE kernel based on GPU architecture and quant mode
         kernel_source = self._select_moe_kernel(quant_mode)
@@ -7076,7 +6767,7 @@ class PerfDatabase:
                 lat = result
                 energy = 0.0
 
-            return PerformanceResult(lat, energy=energy)
+            return self._interp_pr(lat, energy=energy)
 
         def get_empirical() -> float:
             # Simple empirical fallback based on SOL
@@ -7248,7 +6939,7 @@ class PerfDatabase:
                 quant_mode,
                 node_num,
             )[0]
-            return PerformanceResult(sol_latency, energy=0.0)
+            return PerformanceResult(sol_latency, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(
                 num_tokens,
@@ -7269,7 +6960,7 @@ class PerfDatabase:
                 quant_mode,
                 node_num,
             )
-            return PerformanceResult(emp_latency, energy=0.0)
+            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
 
         kernel_source = self._select_alltoall_kernel(quant_mode, moe_ep_size, topk, moe_backend=moe_backend)
         logger.debug(
@@ -7279,7 +6970,7 @@ class PerfDatabase:
         if kernel_source == "NotEnabled":
             if database_mode == common.DatabaseMode.SOL_FULL:
                 return (0.0, 0.0, 0.0)
-            return PerformanceResult(0.0, energy=0.0)
+            return PerformanceResult(0.0, energy=0.0, source="empirical")
 
         # SILICON or HYBRID mode - use database
         def get_silicon():
@@ -7312,7 +7003,7 @@ class PerfDatabase:
                 lat = result
                 energy = 0.0
 
-            return PerformanceResult(lat, energy=energy)
+            return self._interp_pr(lat, energy=energy)
 
         def get_empirical() -> float:
             return get_empirical_from_sol(
@@ -7510,13 +7201,23 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0)
+            return PerformanceResult(sol_latency, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
-            return PerformanceResult(emp_latency, energy=0.0)
+            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
         else:
+
+            def missing_context_dsa_error() -> PerfDataNotAvailableError:
+                return PerfDataNotAvailableError(
+                    f"Context DSA module data not available for system='{self.system}', "
+                    f"backend='{self.backend}', version='{self.version}', architecture='{architecture}', "
+                    f"fmha_quant_mode={fmha_quant_mode}, kvcache_quant_mode={kvcache_quant_mode}, "
+                    f"gemm_quant_mode={gemm_quant_mode}, num_heads={num_heads}, s={s}, prefix={prefix}, b={b}. "
+                    "Missing silicon data for the requested lookup."
+                )
+
             try:
                 dsa_module_data = getattr(self, "_context_dsa_module_data", None)
                 if dsa_module_data is None:
@@ -7524,36 +7225,63 @@ class PerfDatabase:
                         f"Context DSA module perf data not loaded for system='{self.system}', "
                         f"backend='{self.backend}', version='{self.version}'."
                     )
-                dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
+                try:
+                    dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
+                except (KeyError, TypeError) as exc:
+                    raise missing_context_dsa_error() from exc
                 full_s = s + prefix
                 raw_dsa_dict = None
                 raw_dsa_module_data = getattr(self, "_raw_context_dsa_module_data", None)
                 if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
-                    raw_dsa_dict = raw_dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][
-                        architecture
-                    ]
-                result = self._interp_dsa_context_topk_piecewise_from_raw(
-                    num_heads, full_s, b, raw_dsa_dict, index_topk
-                )
-                if result is None:
-                    result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
-                latency = result["latency"]
-                energy = result.get("energy", 0.0)
+                    try:
+                        raw_dsa_dict = raw_dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][
+                            architecture
+                        ]
+                    except (KeyError, TypeError):
+                        raw_dsa_dict = None
+                try:
+                    result = self._interp_dsa_context_topk_piecewise_from_raw(
+                        num_heads, full_s, b, raw_dsa_dict, index_topk
+                    )
+                    if result is None:
+                        result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
+                    latency = result["latency"]
+                    energy = result.get("energy", 0.0)
+                except (KeyError, TypeError, ValueError, AssertionError) as exc:
+                    raise missing_context_dsa_error() from exc
                 if prefix > 0:
                     base_sol = get_sol(b, full_s, 0, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
                     target_sol = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
                     correction = 1.0 if base_sol <= 0 else target_sol / base_sol
                     latency *= correction
                     energy *= correction
-                return PerformanceResult(latency, energy=energy)
-            except Exception:
+                return self._interp_pr(latency, energy=energy)
+            except Exception as e:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
                         f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
                         f"{index_n_heads=}, {index_head_dim=}, {index_topk=}; using empirical"
                     )
                     latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
-                    return PerformanceResult(latency, energy=0.0)
+                    return PerformanceResult(latency, energy=0.0, source="empirical")
+                if isinstance(e, PerfDataNotAvailableError):
+                    logger.warning(str(e))
+                    raise
+                if self._is_dsa_interpolation_miss(e):
+                    message = self._format_dsa_unavailable_message(
+                        "Context",
+                        e,
+                        b=b,
+                        s=s,
+                        prefix=prefix,
+                        num_heads=num_heads,
+                        architecture=architecture,
+                        index_n_heads=index_n_heads,
+                        index_head_dim=index_head_dim,
+                        index_topk=index_topk,
+                    )
+                    logger.warning(message)
+                    raise PerfDataNotAvailableError(message) from None
                 else:
                     logger.exception(
                         f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
@@ -7683,13 +7411,23 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
-            return PerformanceResult(sol_latency, energy=0.0)
+            return PerformanceResult(sol_latency, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, num_heads, kv_cache_dtype)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, num_heads, kv_cache_dtype)
-            return PerformanceResult(emp_latency, energy=0.0)
+            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
         else:
+
+            def missing_generation_dsa_error() -> PerfDataNotAvailableError:
+                return PerfDataNotAvailableError(
+                    f"Generation DSA module data not available for system='{self.system}', "
+                    f"backend='{self.backend}', version='{self.version}', architecture='{architecture}', "
+                    f"kv_cache_dtype={kv_cache_dtype}, gemm_quant_mode={gemm_quant_mode}, "
+                    f"num_heads={num_heads}, s={s}, b={b}. "
+                    "Missing silicon data for the requested lookup."
+                )
+
             try:
                 dsa_module_data = getattr(self, "_generation_dsa_module_data", None)
                 if dsa_module_data is None:
@@ -7697,19 +7435,39 @@ class PerfDatabase:
                         f"Generation DSA module perf data not loaded for system='{self.system}', "
                         f"backend='{self.backend}', version='{self.version}'."
                     )
-                dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
-                result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
-                latency = result["latency"]
-                energy = result.get("energy", 0.0)
-                return PerformanceResult(latency, energy=energy)
-            except Exception:
+                try:
+                    dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
+                    result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
+                    latency = result["latency"]
+                    energy = result.get("energy", 0.0)
+                except (KeyError, TypeError, ValueError, AssertionError) as exc:
+                    raise missing_generation_dsa_error() from exc
+                return self._interp_pr(latency, energy=energy)
+            except Exception as e:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
                         f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "
                         f"{index_n_heads=}, {index_head_dim=}, {index_topk=}; using empirical"
                     )
                     latency = get_empirical(b, s, num_heads, kv_cache_dtype)
-                    return PerformanceResult(latency, energy=0.0)
+                    return PerformanceResult(latency, energy=0.0, source="empirical")
+                if isinstance(e, PerfDataNotAvailableError):
+                    logger.warning(str(e))
+                    raise
+                if self._is_dsa_interpolation_miss(e):
+                    message = self._format_dsa_unavailable_message(
+                        "Generation",
+                        e,
+                        b=b,
+                        s=s,
+                        num_heads=num_heads,
+                        architecture=architecture,
+                        index_n_heads=index_n_heads,
+                        index_head_dim=index_head_dim,
+                        index_topk=index_topk,
+                    )
+                    logger.warning(message)
+                    raise PerfDataNotAvailableError(message) from None
                 else:
                     logger.exception(
                         f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "
@@ -7809,11 +7567,11 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol()[0], energy=0.0)
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
         if database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol()
         if database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(), energy=0.0)
+            return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
 
         def get_silicon():
             mhc_data = getattr(self, "_mhc_module_data", None)
@@ -7844,7 +7602,7 @@ class PerfDatabase:
                 result = self._interp_1d([left, right], [mhc_dict[left], mhc_dict[right]], num_tokens)
                 latency = result["latency"] if isinstance(result, dict) else result
                 energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
-                return PerformanceResult(latency, energy=energy)
+                return self._interp_pr(latency, energy=energy)
 
             # Silicon tables only store "pre" and "post" rows. For op=="both"
             # (still a supported input in operations.DeepSeekV4MHCModule),
@@ -7853,10 +7611,10 @@ class PerfDatabase:
             if op == "both":
                 pre_result = _lookup_single("pre")
                 post_result = _lookup_single("post")
-                return PerformanceResult(
-                    float(pre_result) + float(post_result),
-                    energy=pre_result.energy + post_result.energy,
-                )
+                # Use PerformanceResult's __add__ to merge sources correctly
+                # (silicon + silicon -> silicon, mismatch -> mixed) instead of
+                # constructing a new PR that would default-tag as silicon.
+                return pre_result + post_result
 
             return _lookup_single(op)
 
@@ -7870,14 +7628,14 @@ class PerfDatabase:
             ),
         )
 
-    def _lookup_dsv4_flash_sparse_kernel(
+    def _lookup_dsv4_sparse_kernel(
         self,
         kernel: str,
         bs: int,
         isl: int,
         past_kv: int,
         tp_size: int,
-        architecture: str = "DeepseekV4ForCausalLM",
+        native_heads: int,
     ) -> Optional[float]:
         """Look up a sparse-kernel latency at (kernel, bs, isl, past_kv, tp).
 
@@ -7888,16 +7646,15 @@ class PerfDatabase:
              batch that covers isl, interpolate on (past_kv, isl), then scale by batch.
         Returns None if the kernel CSV is not loaded.
         """
-        all_data = getattr(self, "_dsv4_flash_sparse_kernel_data", None)
+        all_data = getattr(self, "_dsv4_sparse_kernel_data", None)
         if all_data is None or kernel not in all_data:
             return None
         loaded = all_data[kernel]
         if loaded is None or loaded.data is None:
             return None
-        per_arch = loaded.data
-        if architecture not in per_arch:
+        per_tp = loaded.data.get(native_heads)
+        if per_tp is None:
             return None
-        per_tp = per_arch[architecture]
         if tp_size in per_tp:
             per_tp_dict = per_tp[tp_size]
         elif 1 in per_tp:
@@ -8133,6 +7890,8 @@ class PerfDatabase:
         b: int,
         s: int,
         num_heads: int,
+        native_heads: int,
+        tp_size: int,
         hidden_size: int,
         q_lora_rank: int,
         o_lora_rank: int,
@@ -8150,7 +7909,6 @@ class PerfDatabase:
         database_mode: common.DatabaseMode | None = None,
         *,
         prefix: int = 0,
-        architecture: str = "DeepseekV4ForCausalLM",
     ) -> PerformanceResult | tuple[float, float, float]:
         def get_sol() -> tuple[float, float, float]:
             return self._deepseek_v4_attention_sol(
@@ -8181,11 +7939,11 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol()[0], energy=0.0)
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
         if database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol()
         if database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(), energy=0.0)
+            return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
 
         def get_silicon():
             data = getattr(self, "_context_deepseek_v4_attention_module_data", None)
@@ -8194,15 +7952,13 @@ class PerfDatabase:
                     f"DeepSeek-V4 context attention module data not loaded for system='{self.system}', "
                     f"backend='{self.backend}', version='{self.version}'."
                 )
-            deepseek_v4_dict = data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture][compress_ratio]
-            # V4-Flash special-case: data is keyed by ``tp_size`` (sglang
-            # never splits attention heads, so the "post-TP local_heads"
-            # value the model layer passes here is just a label — recover
-            # the actual tp_size for the lookup).  Other architectures are
-            # unaffected; this branch only fires for DeepseekV4ForCausalLM.
-            head_axis = (
-                _dsv4_flash_tp_from_num_heads(num_heads) if architecture == "DeepseekV4ForCausalLM" else num_heads
-            )
+            native_dict = data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode].get(native_heads)
+            if native_dict is None:
+                raise PerfDataNotAvailableError(
+                    f"No DeepSeek-V4 context attention silicon data for native_heads={native_heads}, "
+                    f"loaded keys={list(data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode].keys())}."
+                )
+            deepseek_v4_dict = native_dict[compress_ratio]
 
             # Pick correction strategy up-front because it changes the lookup
             # point: kernel-Δ uses chunk-0 baseline at (b, s); SOL ratio uses
@@ -8210,31 +7966,31 @@ class PerfDatabase:
             kernel = {4: "paged_mqa_logits", 128: "hca_attn"}.get(compress_ratio) if prefix > 0 else None
             t_with = t_without = None
             if kernel is not None:
-                # Use the recovered tp_size for sparse-kernel lookup.
+                # Use the operation tp_size for sparse-kernel lookup.
                 # paged_mqa_logits is collected only at tp=1 (kernel is replicated)
-                # — ``_lookup_dsv4_flash_sparse_kernel`` falls back to tp=1 when
-                # the requested tp isn't present, so passing ``head_axis`` works
+                # — ``_lookup_dsv4_sparse_kernel`` falls back to tp=1 when
+                # the requested tp isn't present, so passing ``tp_size`` works
                 # for both kernels.
-                t_with = self._lookup_dsv4_flash_sparse_kernel(
+                t_with = self._lookup_dsv4_sparse_kernel(
                     kernel=kernel,
                     bs=b,
                     isl=s,
                     past_kv=prefix,
-                    tp_size=head_axis,
-                    architecture=architecture,
+                    tp_size=tp_size,
+                    native_heads=native_heads,
                 )
-                t_without = self._lookup_dsv4_flash_sparse_kernel(
+                t_without = self._lookup_dsv4_sparse_kernel(
                     kernel=kernel,
                     bs=b,
                     isl=s,
                     past_kv=0,
-                    tp_size=head_axis,
-                    architecture=architecture,
+                    tp_size=tp_size,
+                    native_heads=native_heads,
                 )
                 if t_with is None or t_without is None:
                     raise PerfDataNotAvailableError(
                         f"DeepSeek-V4 {kernel} sparse-kernel correction data not available for "
-                        f"{b=}, {s=}, {prefix=}, {head_axis=}, {architecture=}. "
+                        f"{b=}, {s=}, {prefix=}, {native_heads=}, {tp_size=}. "
                         "Cannot query prefix context attention in SILICON mode without kernel delta."
                     )
             use_kernel_delta = kernel is not None
@@ -8246,24 +8002,19 @@ class PerfDatabase:
                 raw_dict = None
                 if raw_data is not None and getattr(raw_data, "loaded", True):
                     try:
-                        raw_dict = raw_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture][
-                            compress_ratio
-                        ]
+                        raw_native_dict = raw_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode].get(
+                            native_heads
+                        )
+                        raw_dict = None if raw_native_dict is None else raw_native_dict[compress_ratio]
                     except KeyError:
                         raw_dict = None
                 result = self._interp_context_topk_piecewise_from_raw(
-                    head_axis, lookup_s, b, raw_dict, index_topk * compress_ratio
+                    tp_size, lookup_s, b, raw_dict, index_topk * compress_ratio
                 )
             if result is None:
-                # V4-Flash uses a robust lookup (exact -> cubic ->
-                # sampled-batch fallback) to avoid qhull crashes on the
-                # caps-driven flat b axis. Generic ``_interp_3d`` is left
-                # untouched for other architectures.
-                result = (
-                    _dsv4_flash_robust_3d_lookup(self, deepseek_v4_dict, head_axis, lookup_s, b)
-                    if architecture == "DeepseekV4ForCausalLM"
-                    else self._interp_3d(head_axis, lookup_s, b, deepseek_v4_dict, "cubic")
-                )
+                # Exact → cubic → linear to avoid qhull crashes on the
+                # caps-driven flat b axis.
+                result = _dsv4_robust_3d_lookup(self, deepseek_v4_dict, tp_size, lookup_s, b)
             latency = result["latency"]
             energy = result.get("energy", 0.0)
 
@@ -8307,7 +8058,7 @@ class PerfDatabase:
                     correction = 1.0 if base_sol <= 0 else target_sol / base_sol
                     latency *= correction
                     energy *= correction
-            return PerformanceResult(latency, energy=energy)
+            return self._interp_pr(latency, energy=energy)
 
         return self._query_silicon_or_hybrid(
             get_silicon=get_silicon,
@@ -8315,7 +8066,7 @@ class PerfDatabase:
             database_mode=database_mode,
             error_msg=(
                 f"Failed to query DeepSeek-V4 context attention module for {b=}, {s=}, {prefix=}, "
-                f"{num_heads=}, {compress_ratio=}, {architecture=}"
+                f"{num_heads=}, {native_heads=}, {tp_size=}, {compress_ratio=}"
             ),
         )
 
@@ -8325,6 +8076,8 @@ class PerfDatabase:
         b: int,
         s: int,
         num_heads: int,
+        native_heads: int,
+        tp_size: int,
         hidden_size: int,
         q_lora_rank: int,
         o_lora_rank: int,
@@ -8340,8 +8093,6 @@ class PerfDatabase:
         fmha_quant_mode: common.FMHAQuantMode,
         gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
-        *,
-        architecture: str = "DeepseekV4ForCausalLM",
     ) -> PerformanceResult | tuple[float, float, float]:
         def get_sol() -> tuple[float, float, float]:
             return self._deepseek_v4_attention_sol(
@@ -8372,11 +8123,11 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol()[0], energy=0.0)
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
         if database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol()
         if database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(), energy=0.0)
+            return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
 
         def get_silicon():
             data = getattr(self, "_generation_deepseek_v4_attention_module_data", None)
@@ -8385,21 +8136,17 @@ class PerfDatabase:
                     f"DeepSeek-V4 generation attention module data not loaded for system='{self.system}', "
                     f"backend='{self.backend}', version='{self.version}'."
                 )
-            deepseek_v4_dict = data[kvcache_quant_mode][gemm_quant_mode][architecture][compress_ratio]
-            # V4-Flash special-case: data keyed by ``tp_size`` (heads aren't
-            # actually sharded — see note at top of file).
-            head_axis = (
-                _dsv4_flash_tp_from_num_heads(num_heads) if architecture == "DeepseekV4ForCausalLM" else num_heads
-            )
-            # V4-Flash generation data is keyed as [tp_size][batch][s_total].
-            result = (
-                _dsv4_flash_robust_3d_lookup(self, deepseek_v4_dict, head_axis, b, s, batch_axis="y")
-                if architecture == "DeepseekV4ForCausalLM"
-                else self._interp_3d(head_axis, b, s, deepseek_v4_dict, "cubic")
-            )
+            native_dict = data[kvcache_quant_mode][gemm_quant_mode].get(native_heads)
+            if native_dict is None:
+                raise PerfDataNotAvailableError(
+                    f"No DeepSeek-V4 generation attention silicon data for native_heads={native_heads}, "
+                    f"loaded keys={list(data[kvcache_quant_mode][gemm_quant_mode].keys())}."
+                )
+            deepseek_v4_dict = native_dict[compress_ratio]
+            result = _dsv4_robust_3d_lookup(self, deepseek_v4_dict, tp_size, b, s, batch_axis="y")
             latency = result["latency"]
             energy = result.get("energy", 0.0)
-            return PerformanceResult(latency, energy=energy)
+            return self._interp_pr(latency, energy=energy)
 
         return self._query_silicon_or_hybrid(
             get_silicon=get_silicon,
@@ -8407,7 +8154,7 @@ class PerfDatabase:
             database_mode=database_mode,
             error_msg=(
                 f"Failed to query DeepSeek-V4 generation attention module for {b=}, {s=}, "
-                f"{num_heads=}, {compress_ratio=}, {architecture=}"
+                f"{num_heads=}, {native_heads=}, {tp_size=}, {compress_ratio=}"
             ),
         )
 

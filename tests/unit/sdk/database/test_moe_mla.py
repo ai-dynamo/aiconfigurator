@@ -6,6 +6,7 @@ import math
 import pytest
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 pytestmark = pytest.mark.unit
@@ -54,6 +55,7 @@ class TestMoE:
         expected = max(sol_math, sol_mem)
 
         assert math.isclose(result, expected, rel_tol=1e-6)
+        assert result.source == "sol"
 
     def test_query_moe_sol_full_mode(self, comprehensive_perf_db):
         """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
@@ -239,6 +241,80 @@ class TestMoE:
             max_stored
         ]
         assert math.isclose(float(result), expected, rel_tol=1e-6)
+
+    def test_query_moe_vllm_missing_bucket_raises_structured_error(self, mutable_comprehensive_perf_db):
+        """Missing MoE token buckets must not leak raw IndexError/KeyError in SILICON mode."""
+        db = mutable_comprehensive_perf_db
+        db.backend = common.BackendName.vllm.value
+        db._moe_data[common.MoEQuantMode.bfloat16]["uniform"][2][8][2048][8192][1][3] = {}
+
+        with pytest.raises(PerfDataNotAvailableError) as exc_info:
+            db.query_moe(
+                22,
+                2048,
+                8192,
+                2,
+                8,
+                1,
+                3,
+                common.MoEQuantMode.bfloat16,
+                "uniform",
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
+        message = str(exc_info.value)
+        assert "No MoE silicon data points" in message
+        assert "Consider using HYBRID mode" in message
+        assert "IndexError" not in message
+        assert "KeyError" not in message
+
+    def test_query_moe_vllm_missing_dimension_wraps_keyerror(self, mutable_comprehensive_perf_db):
+        """Missing MoE shape dimensions must also be converted to typed missing-data errors."""
+        db = mutable_comprehensive_perf_db
+        db.backend = common.BackendName.vllm.value
+
+        with pytest.raises(PerfDataNotAvailableError) as exc_info:
+            db.query_moe(
+                22,
+                2048,
+                8192,
+                2,
+                8,
+                1,
+                3,
+                common.MoEQuantMode.bfloat16,
+                "uniform",
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
+        message = str(exc_info.value)
+        assert "Missing silicon data for the requested lookup" in message
+        assert "Consider using HYBRID mode" in message
+        assert "KeyError" not in message
+        assert "IndexError" not in message
+
+    def test_query_moe_vllm_missing_bucket_hybrid_falls_back(self, mutable_comprehensive_perf_db):
+        """HYBRID mode keeps the existing empirical fallback for missing MoE silicon data."""
+        db = mutable_comprehensive_perf_db
+        db.backend = common.BackendName.vllm.value
+        db._moe_data[common.MoEQuantMode.bfloat16]["uniform"][2][8][2048][8192][1][3] = {}
+
+        result = db.query_moe(
+            22,
+            2048,
+            8192,
+            2,
+            8,
+            1,
+            3,
+            common.MoEQuantMode.bfloat16,
+            "uniform",
+            database_mode=common.DatabaseMode.HYBRID,
+        )
+
+        assert isinstance(result, PerformanceResult)
+        assert result.source == "empirical"
+        assert float(result) > 0
 
 
 class TestMLABMM:

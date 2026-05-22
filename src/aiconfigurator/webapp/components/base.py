@@ -252,6 +252,7 @@ def create_runtime_config(
     ttft_optional=False,
     itl_optional=False,
     with_request_latency=False,
+    with_images=False,
 ):
     """create runtime config components"""
 
@@ -294,6 +295,20 @@ def create_runtime_config(
             else:
                 request_latency = None
 
+        if with_images:
+            with gr.Row():
+                gr.HTML(
+                    "<span style='color: var(--body-text-color-subdued);'>Vision-language image config (set to 0 to skip encoder)</span>"
+                )
+            with gr.Row():
+                image_height = gr.Number(value=448, label="image height (px)", interactive=True)
+                image_width = gr.Number(value=448, label="image width (px)", interactive=True)
+                num_images = gr.Number(value=0, label="images per request (0 = skip encoder)", interactive=True)
+        else:
+            image_height = None
+            image_width = None
+            num_images = None
+
         return {
             "isl": isl,
             "osl": osl,
@@ -302,4 +317,7 @@ def create_runtime_config(
             "tpot": tpot,
             "batch_size": batch_size,
             "request_latency": request_latency,
+            "image_height": image_height,
+            "image_width": image_width,
+            "num_images": num_images,
         }

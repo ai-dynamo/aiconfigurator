@@ -105,6 +105,69 @@ class HybridMoEConfig:
 
 
 @dataclass(frozen=True)
+class VisionEncoderConfig:
+    """
+    Configuration for the vision encoder (ViT) component of multimodal VL models.
+
+    Covers Qwen3-VL and similar vision-language architectures where the visual
+    encoder is a separate ViT that runs before the LLM backbone.
+
+    Attributes:
+        depth (int): Number of ViT transformer layers
+        hidden_size (int): Hidden dimension of the ViT
+        num_heads (int): Number of attention heads in the ViT
+        intermediate_size (int): FFN intermediate size in the ViT
+        patch_size (int): Spatial patch size in pixels (applied to H and W)
+        temporal_patch_size (int): Temporal patch size for video inputs (1 for image-only)
+        spatial_merge_size (int): Pixel-shuffle reduction factor applied after ViT
+            (e.g., 2 means 2x2 patches are merged, dividing token count by 4)
+        out_hidden_size (int): Output projection dimension (must match LLM hidden size)
+        projector_dims (tuple[tuple[int, int], ...]): Per-layer (in_dim, out_dim) pairs
+            for the vision-to-LLM projector MLP. Empty tuple means no projector.
+            Dimensions are absolute (before TP sharding); build_encoder_ops applies TP.
+        projector_n_instances (int): Number of projector instances to model (e.g.,
+            1 + len(deepstack_visual_indexes) for Qwen3VL deepstack variants).
+    """
+
+    depth: int
+    hidden_size: int
+    num_heads: int
+    intermediate_size: int
+    patch_size: int
+    temporal_patch_size: int
+    spatial_merge_size: int
+    out_hidden_size: int
+    deepstack_visual_indexes: tuple[int, ...] = ()
+    projector_dims: tuple[tuple[int, int], ...] = ()
+    projector_n_instances: int = 1
+
+
+@dataclass(frozen=True)
+class Gemma4MoEConfig:
+    """Config for Google Gemma 4 (gemma4_text) hybrid attention + dense-MLP-plus-MoE FFN.
+
+    Every layer runs both a shared dense MLP (intermediate_size, ``Gemma4TextMLP``) and a
+    routed top-k MoE branch in parallel, summed at the end of the block. Attention shape
+    differs per layer type:
+      - sliding_attention (SWA): num_key_value_heads x head_dim, separate K and V projections,
+        token window = sliding_window_size.
+      - full_attention (global): num_global_key_value_heads x global_head_dim, K=V at the
+        projection (no v_proj) when attention_k_eq_v is set, no window cap.
+
+    Shared dense MLP intermediate is the model-level ``inter_size`` (HF ``intermediate_size``).
+    Routed-expert intermediate is the model-level ``moe_inter_size`` (HF ``moe_intermediate_size``).
+    """
+
+    layer_types: tuple[str, ...]  # per-layer: "sliding_attention" or "full_attention"
+    swa_num_kv_heads: int  # KV heads on sliding_attention layers
+    swa_head_dim: int  # Q/K/V head dim on sliding_attention layers
+    global_num_kv_heads: int  # KV heads on full_attention layers
+    global_head_dim: int  # Q/K/V head dim on full_attention layers
+    sliding_window_size: int  # token window for sliding_attention layers
+    attention_k_eq_v: bool = False  # true means global layers reuse K as V (no v_proj)
+
+
+@dataclass(frozen=True)
 class Qwen35Config:
     """Config for Qwen3.5 hybrid GDN + full-attention model (dense and MoE).
 
@@ -169,9 +232,21 @@ DEEPSEEK_V4_HF_MODELS = frozenset(
 )
 
 
-def _get_support_matrix_resource():
-    """Get the support_matrix.csv as a Traversable resource."""
-    return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
+def _iter_support_matrix_resources():
+    """Yield support matrix CSV resources in deterministic order."""
+    systems_resource = pkg_resources.files("aiconfigurator") / "systems"
+    split_matrix_resource = systems_resource / "support_matrix"
+
+    if split_matrix_resource.is_dir():
+        yield from sorted(
+            (resource for resource in split_matrix_resource.iterdir() if resource.name.endswith(".csv")),
+            key=lambda resource: resource.name,
+        )
+        return
+
+    legacy_matrix_resource = systems_resource / "support_matrix.csv"
+    if legacy_matrix_resource.is_file():
+        yield legacy_matrix_resource
 
 
 @cache
@@ -180,15 +255,15 @@ def get_support_matrix() -> list[dict[str, str]]:
     Get the support matrix as a list of dictionaries.
 
     Returns:
-        list[dict[str, str]]: List of rows from support_matrix.csv.
+        list[dict[str, str]]: List of rows from the support matrix CSV files.
     """
-    csv_resource = _get_support_matrix_resource()
     results = []
-    # Use as_file() context manager for proper package resource access
-    with pkg_resources.as_file(csv_resource) as csv_path, open(csv_path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            results.append(row)
+    for csv_resource in _iter_support_matrix_resources():
+        # Use as_file() context manager for proper package resource access.
+        with pkg_resources.as_file(csv_resource) as csv_path, open(csv_path, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                results.append(row)
     return results
 
 
@@ -273,6 +348,7 @@ def check_support(
         if row["Architecture"] == architecture
         and row["System"].lower() == system.lower()
         and _matches_filters(row, backend, version)
+        and row["Status"] != "HW_INCOMPATIBLE"
     ]
 
     agg_results = [row["Status"] == "PASS" for row in arch_matches if row["Mode"] == "agg"]
@@ -298,7 +374,7 @@ def check_support(
 @cache
 def get_supported_architectures() -> set[str]:
     """
-    Get the set of supported architectures from support_matrix.csv.
+    Get the set of supported architectures from the support matrix CSV files.
 
     Returns:
         set[str]: Set of architecture names that have at least one PASSing configuration.
@@ -316,13 +392,7 @@ def get_default_models() -> set[str]:
         set[str]: Set of unique HuggingFace model IDs from the support matrix
             plus locally cached default model configs.
     """
-    csv_resource = _get_support_matrix_resource()
-    models = set()
-    # Use as_file() context manager for proper package resource access
-    with pkg_resources.as_file(csv_resource) as csv_path, open(csv_path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            models.add(row["HuggingFaceID"])
+    models = {row["HuggingFaceID"] for row in get_support_matrix()}
     models.update(DefaultHFModels)
     return models
 
@@ -330,7 +400,8 @@ def get_default_models() -> set[str]:
 """
 Cached HuggingFace model configs - these are pre-downloaded and stored in model_configs/
 Model parameters are parsed from these configs via get_model_config_from_model_path() in utils.py
-The list of default models for testing is derived from support_matrix.csv and this set via get_default_models()
+The list of default models for testing is derived from the support matrix CSV files
+and this set via get_default_models()
 """
 DefaultHFModels = {
     # Llama 3.1 Models
@@ -366,6 +437,13 @@ DefaultHFModels = {
     "Qwen/Qwen3-Coder-480B-A35B-Instruct",
     "nvidia/Qwen3-235B-A22B-NVFP4",
     "Qwen/Qwen3-32B-FP8-Static-PerTensor",
+    "Qwen/Qwen3-VL-2B-Instruct",
+    "Qwen/Qwen3-VL-4B-Instruct",
+    "Qwen/Qwen3-VL-8B-Instruct",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "Qwen/Qwen3-VL-32B-Instruct",
+    "Qwen/Qwen3-VL-32B-Thinking",
+    "Qwen/Qwen3-VL-235B-A22B-Instruct",
     # MiniMax Models
     "MiniMaxAI/MiniMax-M2.5",
     "nvidia/MiniMax-M2.5-NVFP4",
@@ -388,7 +466,10 @@ DefaultHFModels = {
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+    "nvidia/nemotron-ultra-rl-050826",
     "nvidia/Nemotron-H-56B-Base-8K",
+    # Google Gemma 4 Models
+    "google/gemma-4-26B-A4B",
 }
 
 """
@@ -426,11 +507,14 @@ ModelFamily = {
     "NEMOTRONH",
     "HYBRIDMOE",
     "QWEN35",
+    "GEMMA4MOE",
 }
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
     "Qwen2ForCausalLM": "LLAMA",
     "Qwen3ForCausalLM": "LLAMA",
+    "Qwen3VLForConditionalGeneration": "QWEN3VL",
+    "Qwen3VLMoeForConditionalGeneration": "QWEN3VL_MOE",
     "MiMoForCausalLM": "LLAMA",
     "DeepSeekForCausalLM": "DEEPSEEK",
     "DeepseekV3ForCausalLM": "DEEPSEEK",
@@ -450,6 +534,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Llama4ForConditionalGeneration": "HYBRIDMOE",
     "Qwen3_5ForConditionalGeneration": "QWEN35",
     "Qwen3_5MoeForConditionalGeneration": "QWEN35",
+    "Gemma4ForConditionalGeneration": "GEMMA4MOE",
 }
 
 # Multimodal architectures whose LLM config lives under a nested key (e.g. "text_config").
@@ -459,6 +544,9 @@ MULTIMODAL_TEXT_CONFIG_KEY = {
     "Llama4ForConditionalGeneration": "text_config",
     "Qwen3_5ForConditionalGeneration": "text_config",
     "Qwen3_5MoeForConditionalGeneration": "text_config",
+    "Gemma4ForConditionalGeneration": "text_config",
+    "Qwen3VLForConditionalGeneration": "text_config",
+    "Qwen3VLMoeForConditionalGeneration": "text_config",
 }
 
 """
@@ -486,6 +574,7 @@ ColumnsStatic = [
     "tokens/s/gpu",
     "tokens/s/user",
     "request_latency",
+    "encoder_latency",
     "context_latency",
     "generation_latency",
     "num_total_gpus",
@@ -609,6 +698,11 @@ ColumnsDisagg = [
     "(d)backend",
     "(d)version",
     "(d)system",
+    "(e)workers",
+    "(e)tp",
+    "(e)pp",
+    "(e)parallel",
+    "(e)memory",
     "power_w",  # NEW: E2E weighted average power in watts
 ]
 
@@ -670,22 +764,20 @@ class PerfDataFilename(Enum):
     dsa_context_module = "dsa_context_module_perf.parquet"
     dsa_generation_module = "dsa_generation_module_perf.parquet"
     mhc_module = "mhc_module_perf.parquet"
-    deepseek_v4_context_module = "deepseek_v4_context_module_perf.parquet"
-    deepseek_v4_generation_module = "deepseek_v4_generation_module_perf.parquet"
-    # V4-Flash module-level data — one table per (attn_kind ∈ {csa, hca},
-    # mode ∈ {context, generation}) = 4 files.  Each file contains all
+    # DeepSeek-V4 module-level data — one file per (attn_kind ∈ {csa, hca},
+    # mode ∈ {context, generation}) = 4 files. Each file contains all
     # (tp_size, gemm_type, b, s) rows for that kind+mode.  SWA layers are
     # folded into HCA at the model layer (see models.py:_attention_ops),
     # so no separate SWA collector / data is needed.
-    dsv4_flash_csa_context_module = "dsv4_flash_csa_context_module_perf.parquet"
-    dsv4_flash_hca_context_module = "dsv4_flash_hca_context_module_perf.parquet"
-    dsv4_flash_csa_generation_module = "dsv4_flash_csa_generation_module_perf.parquet"
-    dsv4_flash_hca_generation_module = "dsv4_flash_hca_generation_module_perf.parquet"
-    # V4-Flash sparse-kernel data (kernel-level past_kv Δ correction).
+    dsv4_csa_context_module = "dsv4_csa_context_module_perf.parquet"
+    dsv4_hca_context_module = "dsv4_hca_context_module_perf.parquet"
+    dsv4_csa_generation_module = "dsv4_csa_generation_module_perf.parquet"
+    dsv4_hca_generation_module = "dsv4_hca_generation_module_perf.parquet"
+    # DeepSeek-V4 sparse-kernel data (kernel-level past_kv Δ correction).
     # Indexed by ``arch -> tp -> past_kv -> isl -> bs``.
     # topk_512 and csa_attn are modeled analytically — no CSV needed.
-    dsv4_flash_paged_mqa_logits_module = "dsv4_flash_paged_mqa_logits_module_perf.parquet"
-    dsv4_flash_hca_attn_module = "dsv4_flash_hca_attn_module_perf.parquet"
+    dsv4_paged_mqa_logits_module = "dsv4_paged_mqa_logits_module_perf.parquet"
+    dsv4_hca_attn_module = "dsv4_hca_attn_module_perf.parquet"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])

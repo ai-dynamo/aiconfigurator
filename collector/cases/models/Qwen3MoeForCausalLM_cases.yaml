@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: Qwen3MoeForCausalLM
+model_path: Qwen/Qwen3-235B-A22B
+model_paths:
+  - Qwen/Qwen3-30B-A3B
+  - Qwen/Qwen3-30B-A3B-FP8
+  - Qwen/Qwen3-235B-A22B
+  - Qwen/Qwen3-235B-A22B-FP8
+  - Qwen/Qwen3-235B-A22B-Instruct-2507
+  - Qwen/Qwen3-Coder-480B-A35B-Instruct
+  - nvidia/Qwen3-235B-A22B-NVFP4
+include_base: true
+description: >
+  Qwen3 MoE model-centric collection plan.
+
+model_case_values:
+  moe:
+    - model_path: Qwen/Qwen3-30B-A3B
+      hidden_size: 2048
+      inter_size: 768
+      topk: 8
+      num_experts: 128
+      max_tp_exclusive: 8
+      framework_cases:
+        vllm_xpu:
+          sweep: small
+          activation: silu
+    - model_path: Qwen/Qwen3-30B-A3B-FP8
+      hidden_size: 2048
+      inter_size: 768
+      topk: 8
+      num_experts: 128
+    - model_paths:
+        - Qwen/Qwen3-235B-A22B
+        - Qwen/Qwen3-235B-A22B-FP8
+        - nvidia/Qwen3-235B-A22B-NVFP4
+      hidden_size: 4096
+      inter_size: 1536
+      topk: 8
+      num_experts: 128
+    - model_path: Qwen/Qwen3-Coder-480B-A35B-Instruct
+      hidden_size: 6144
+      inter_size: 2560
+      topk: 8
+      num_experts: 160
+
+all_frameworks_op_cases:
+  moe:
+    cases: all
+
+framework_specific_model_case_values:
+  vllm_xpu:
+    moe:
+      - model_path: Qwen/Qwen3-235B-A22B-Instruct-2507
+        hidden_size: 4096
+        inter_size: 1536
+        topk: 8
+        num_experts: 128
+        sweep: small
+        activation: silu
+
+framework_specific_op_cases:
+  vllm_xpu:
+    moe:
+      cases: all

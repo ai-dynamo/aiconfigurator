@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+op: compute_scale
+description: Base collector v2 cases for compute_scale.
+framework_specific_op_cases:
+  trtllm:
+    compute_scale:
+      cases:
+      - id: trtllm_fp8_compute_scale_shape_sweep
+        description: 'TensorRT-LLM FP8 dynamic scale computation shapes. Expands to [token_count, input_features].
+
+          '
+        token_counts:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 7
+        - 8
+        - 9
+        - 10
+        - 11
+        - 12
+        - 13
+        - 14
+        - 15
+        - 16
+        - 17
+        - 32
+        - 33
+        - 48
+        - 49
+        - 64
+        - 65
+        - 80
+        - 81
+        - 96
+        - 97
+        - 112
+        - 113
+        - 128
+        - 129
+        - 160
+        - 161
+        - 192
+        - 193
+        - 224
+        - 225
+        - 256
+        - 257
+        - 512
+        - 513
+        - 768
+        - 769
+        - 1024
+        - 1025
+        - 1280
+        - 1281
+        - 1536
+        - 1537
+        - 1792
+        - 1793
+        - 2048
+        - 2049
+        - 2304
+        - 2305
+        - 2560
+        - 2561
+        - 2816
+        - 2817
+        - 3072
+        - 3073
+        - 3328
+        - 3329
+        - 3584
+        - 3585
+        - 3840
+        - 3841
+        - 4096
+        - 4097
+        - 4352
+        - 4353
+        - 8192
+        - 16384
+        - 32768
+        input_feature_sizes:
+        - 32
+        - 64
+        - 128
+        - 256
+        - 512
+        - 768
+        - 1024
+        - 1536
+        - 2048
+        - 2560
+        - 3072
+        - 3584
+        - 4096
+        - 5120
+        - 6144
+        - 7168
+        - 8192
+        - 10240
+        - 12288
+        - 16384
+        - 51200
+        - 65536

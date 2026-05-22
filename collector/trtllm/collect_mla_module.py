@@ -11,8 +11,9 @@ output), not just the bare attention kernel.  Uses TRT-LLM's own modeling code
 to construct a single-layer mock model with dummy weights, then extracts the
 attention module for benchmarking.
 
-Supported models and their attention types are defined in SUPPORTED_MODELS.
-Model dimensions are loaded from the HF config.json via from_pretrained().
+Supported models, attention types, and micro-sweeps are defined in collector v2
+YAML and loaded through collector.case_generator. Model dimensions are loaded
+from the HF config.json via from_pretrained().
 
 Usage:
     # MLA context phase (DeepSeek-V3)
@@ -78,6 +79,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from collector.case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.registry_types import PerfFile
 
@@ -112,17 +114,6 @@ try:
         DeepseekV32Attention.post_load_weights = _post_load_weights
 except ImportError:
     pass
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Supported Models — model_path → attention type
-# ═══════════════════════════════════════════════════════════════════════
-
-SUPPORTED_MODELS: dict[str, str] = {
-    "deepseek-ai/DeepSeek-V3": "mla",
-    "deepseek-ai/DeepSeek-V3.2": "dsa",
-    "zai-org/GLM-5": "dsa",
-}
 
 
 def _is_sm120_or_newer() -> bool:
@@ -198,13 +189,18 @@ def get_context_test_cases(attn_type: str):
                      compute_dtype, gemm_type].
     """
     cases = []
-    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 32768]
+    sweep = get_mla_module_sweep_spec("trtllm")
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context", attn_type):
-        for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
-            for b in b_list:
-                for s in s_list:
-                    if b * s > 131072:
+        for num_heads in sweep.inner_sweep_head_counts:
+            for b in sweep.context_batch_sizes:
+                for s in sweep.context_sequence_lengths:
+                    if b * s > sweep.context_max_tokens:
+                        continue
+                    if (
+                        sweep.context_large_sequence_min
+                        and s >= sweep.context_large_sequence_min
+                        and b > sweep.context_large_sequence_max_batch_size
+                    ):
                         continue
                     cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
@@ -217,13 +213,18 @@ def get_generation_test_cases(attn_type: str):
                      compute_dtype, gemm_type].
     """
     cases = []
-    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-    s_list = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+    sweep = get_mla_module_sweep_spec("trtllm")
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation", attn_type):
-        for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
-            for b in b_list:
-                for s in s_list:
-                    if b * s > 1024 * 4096 * 2 * 2 * 2:
+        for num_heads in sweep.inner_sweep_head_counts:
+            for b in sweep.generation_batch_sizes:
+                for s in sweep.generation_sequence_lengths:
+                    if b * s > sweep.generation_max_tokens:
+                        continue
+                    if (
+                        sweep.generation_large_sequence_min
+                        and s >= sweep.generation_large_sequence_min
+                        and b > sweep.generation_large_sequence_max_batch_size
+                    ):
                         continue
                     cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
@@ -237,11 +238,11 @@ def _build_module_test_cases(attn_type: str, mode: str):
      model_path, attn_type]
     """
     base_cases = get_context_test_cases(attn_type) if mode == "context" else get_generation_test_cases(attn_type)
-    model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
+    model_specs = get_mla_module_model_specs(attention_type=attn_type)
     cases = []
-    for model_path in model_paths:
+    for model_spec in model_specs:
         for s, b, h, kv_dtype, compute_dtype, gemm_type in base_cases:
-            cases.append([s, b, h, kv_dtype, compute_dtype, gemm_type, model_path, attn_type])
+            cases.append([s, b, h, kv_dtype, compute_dtype, gemm_type, model_spec.model_path, attn_type])
     return cases
 
 
@@ -796,7 +797,8 @@ def _perf_file_for(attn_type: str, mode: str) -> str:
 
 
 def main():
-    model_names = list(SUPPORTED_MODELS.keys())
+    all_model_specs = get_mla_module_model_specs(apply_model_filter=False)
+    model_names = [spec.model_path for spec in all_model_specs]
 
     parser = argparse.ArgumentParser(
         description="MLA/DSA module-level collector for TRT-LLM",
@@ -839,11 +841,13 @@ def main():
 
     # Select models to run
     if args.model:
-        models_to_run = {args.model: SUPPORTED_MODELS[args.model]}
+        model_specs_to_run = [spec for spec in all_model_specs if spec.model_path == args.model]
     else:
-        models_to_run = SUPPORTED_MODELS
+        model_specs_to_run = all_model_specs
 
-    for model_path, attn_type in models_to_run.items():
+    for model_spec in model_specs_to_run:
+        model_path = model_spec.model_path
+        attn_type = model_spec.attention_type
         print(f"\n{'=' * 60}")
         print(f"Model: {model_path}  |  Attention: {attn_type.upper()}")
         print(f"{'=' * 60}")

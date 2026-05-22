@@ -1,6 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Shared collector runtime helpers.
+
+This module is intentionally broad: collectors use it for benchmark timing,
+power sampling, subprocess/restart control, device detection, perf logging,
+case IDs, routing-logit synthesis, and small distributed-workload utilities.
+Keep collector-specific policy in the per-framework collector modules or YAML
+case files; this file should stay focused on reusable execution mechanics.
+"""
+
 import csv
 import functools
 import heapq
@@ -9,8 +18,10 @@ import logging
 import math
 import multiprocessing as mp
 import os
+import shutil
 import signal
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Iterable
@@ -174,7 +185,7 @@ def benchmark_with_power(
     power_min_duration: float | None = None,  # Auto-detect from environment if None
     allow_graph_fail: bool = False,  # Enable graceful fallback on graph capture failure
     use_cuda_graph: bool = True,  # set False to force eager execution (ops whose captured
-    # private pools retain memory across tasks — see collect_mla_module_v3 DSA context).
+    # private pools retain memory across tasks — see collect_mla_module DSA context).
 ):
     """
     Context manager that handles warmup, graph capture, timing, and power monitoring.
@@ -1359,7 +1370,7 @@ def power_law_logits_v3(
 ):
     """Generate power law distributed router logits for MoE.
 
-    Used by: sglang/collect_moe.py, vllm/collect_moe.py, trtllm/collect_moe_v*.py
+    Used by: sglang/collect_moe.py, vllm/collect_moe.py, trtllm/collect_moe.py
 
     Args:
         num_tokens: Number of tokens
@@ -1484,7 +1495,7 @@ def build_rank0_local_workload(rank0_info: dict) -> dict[str, object]:
 def power_law_deepep_prefill(num_tokens, num_experts, topk, ep, alpha):
     """Generate power law distribution for DeepEP MoE prefill phase.
 
-    Used by: sglang/collect_wideep_deepep_moe.py
+    Used by: wideep/sglang/collect_deepep_moe.py
 
     Args:
         num_tokens: Number of tokens
@@ -1528,7 +1539,7 @@ def power_law_deepep_decode(num_tokens, num_experts, topk, ep, alpha):
     Creates a power law token distribution across all experts, then returns
     the distribution for the EP rank that has the highest total token count.
 
-    Used by: sglang/collect_wideep_deepep_moe.py
+    Used by: wideep/sglang/collect_deepep_moe.py
 
     Args:
         num_tokens: Number of tokens
@@ -1546,100 +1557,115 @@ def power_law_deepep_decode(num_tokens, num_experts, topk, ep, alpha):
     return num_tokens_per_expert.view(ep, experts_per_rank)[0]
 
 
-def _get_deepseek_model_path():
-    """Get DeepSeek model path, downloading config files from HuggingFace if needed.
+# AIC's cached HuggingFace model configs — avoids HF downloads in CI.
+_AIC_MODEL_CONFIG_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "src",
+    "aiconfigurator",
+    "model_configs",
+)
 
-    If DEEPSEEK_MODEL_PATH is set, use that path.
-    Otherwise, download only the necessary config files from HuggingFace.
-    This allows running the collector without downloading the full model weights.
+
+def _materialize_aic_cached_config(model_id: str, slug: str, cached_config: str) -> str:
+    """Copy a bundled AIC config into a deterministic per-model tempdir.
+
+    ``auto_map`` is stripped so that ``trust_remote_code=True`` consumers
+    (e.g. SGLang's ServerArgs) do not try to import ``configuration_*.py``
+    files that AIC does not ship. A deterministic path (no random suffix,
+    no pid) lets parallel subprocesses / pytest-xdist workers converge on
+    the same directory; the JSON write is atomic via ``os.replace``.
     """
-    env_path = os.environ.get("DEEPSEEK_MODEL_PATH")
-    if env_path:
-        return env_path
+    tmp_dir = os.path.join(tempfile.gettempdir(), f"aic_model_config_{slug}")
+    os.makedirs(tmp_dir, exist_ok=True)
 
-    # Download config files from HuggingFace (no model weights needed)
+    target = os.path.join(tmp_dir, "config.json")
+    if not os.path.exists(target):
+        with open(cached_config) as f:
+            config = json.load(f)
+        config.pop("auto_map", None)
+        tmp_target = f"{target}.{os.getpid()}.tmp"
+        with open(tmp_target, "w") as f:
+            json.dump(config, f)
+        os.replace(tmp_target, target)
+
+    quant_side_car = os.path.join(_AIC_MODEL_CONFIG_DIR, f"{slug}_hf_quant_config.json")
+    quant_target = os.path.join(tmp_dir, "hf_quant_config.json")
+    if os.path.exists(quant_side_car) and not os.path.exists(quant_target):
+        tmp_quant = f"{quant_target}.{os.getpid()}.tmp"
+        shutil.copy(quant_side_car, tmp_quant)
+        os.replace(tmp_quant, quant_target)
+
+    print(f"Resolved {model_id} from AIC model_configs cache: {tmp_dir}")
+    return tmp_dir
+
+
+def _resolve_local_model_path(model_id: str) -> str:
+    """Resolve a model identifier to a local directory containing ``config.json``.
+
+    Resolution order:
+        1. Existing filesystem path. Must be a directory containing
+           ``config.json`` — a file path or a directory without ``config.json``
+           raises rather than silently falling through to HF download.
+        2. AIC's bundled configs in ``src/aiconfigurator/model_configs/``
+           (``<owner>--<name>_config.json``, with an optional
+           ``..._hf_quant_config.json`` side-car).
+        3. HuggingFace ``hf_hub_download``: ``config.json`` is required
+           and downloaded first; tokenizer files are best-effort.
+
+    Raises ``FileNotFoundError`` if none of the above resolves. There is
+    no hardcoded ``/deepseek-v3`` (or any other model-specific) fallback —
+    callers must supply a real ``model_id``.
+    """
+    if not model_id:
+        raise ValueError("_resolve_local_model_path requires a non-empty model_id")
+
+    # Step 1: existing filesystem path. Be strict about shape so a bogus
+    # MOE_MODEL_PATH (e.g. pointing at a single file) fails loudly here
+    # instead of silently triggering an HF download.
+    if os.path.exists(model_id):
+        if not os.path.isdir(model_id):
+            raise NotADirectoryError(
+                f"model_id '{model_id}' is an existing path but not a directory; "
+                "expected a directory containing config.json"
+            )
+        if not os.path.exists(os.path.join(model_id, "config.json")):
+            raise FileNotFoundError(f"model_id '{model_id}' is a directory but does not contain config.json")
+        return model_id
+
+    # Step 2: AIC bundled cache.
+    slug = model_id.replace("/", "--")
+    cached_config = os.path.join(_AIC_MODEL_CONFIG_DIR, f"{slug}_config.json")
+    if os.path.exists(cached_config):
+        return _materialize_aic_cached_config(model_id, slug, cached_config)
+
+    # Step 3: HuggingFace download. config.json is mandatory and must
+    # succeed before we accept the resulting snapshot directory.
     try:
         from huggingface_hub import hf_hub_download
+    except ImportError as e:
+        raise FileNotFoundError(
+            f"Model '{model_id}' not found under {_AIC_MODEL_CONFIG_DIR} and "
+            "huggingface_hub is not installed — cannot download config."
+        ) from e
 
-        repo_id = "deepseek-ai/DeepSeek-V3"
-        config_files = [
-            "config.json",
-            "configuration_deepseek.py",
-            "tokenizer_config.json",
-            "tokenizer.json",
-        ]
-
-        snapshot_dir = None
-        for filename in config_files:
-            try:
-                path = hf_hub_download(repo_id=repo_id, filename=filename)
-                if snapshot_dir is None:
-                    snapshot_dir = os.path.dirname(path)
-            except Exception as e:
-                print(f"Warning: Failed to download {filename}: {e}")
-
-        if snapshot_dir:
-            print(f"Using DeepSeek-V3 config from HuggingFace cache: {snapshot_dir}")
-            return snapshot_dir
-    except ImportError:
-        print("Warning: huggingface_hub not installed, cannot auto-download config")
-    except Exception as e:
-        print(f"Warning: Failed to download DeepSeek-V3 config: {e}")
-
-    # Fallback to default path
-    return "/deepseek-v3"
-
-
-def _get_moe_model_path():
-    """Get MoE model path, supporting multiple MoE models (DeepSeek, Qwen3, etc.).
-
-    Checks environment variables in priority order:
-    1. MOE_MODEL_PATH - generic, for any MoE model
-    2. DEEPSEEK_MODEL_PATH - backward compatibility for DeepSeek models
-    Otherwise, download only the necessary config files from HuggingFace.
-    This allows running the collector without downloading the full model weights.
-    """
-    # Try MOE_MODEL_PATH first (generic)
-    env_path = os.environ.get("MOE_MODEL_PATH")
-    if env_path:
-        return env_path
-
-    # Backward compatibility: try DEEPSEEK_MODEL_PATH
-    env_path = os.environ.get("DEEPSEEK_MODEL_PATH")
-    if env_path:
-        return env_path
-
-    # Download config files from HuggingFace (no model weights needed)
     try:
-        from huggingface_hub import hf_hub_download
-
-        repo_id = "deepseek-ai/DeepSeek-V3"
-        config_files = [
-            "config.json",
-            "configuration_deepseek.py",
-            "tokenizer_config.json",
-            "tokenizer.json",
-        ]
-
-        snapshot_dir = None
-        for filename in config_files:
-            try:
-                path = hf_hub_download(repo_id=repo_id, filename=filename)
-                if snapshot_dir is None:
-                    snapshot_dir = os.path.dirname(path)
-            except Exception as e:
-                print(f"Warning: Failed to download {filename}: {e}")
-
-        if snapshot_dir:
-            print(f"Using DeepSeek-V3 config from HuggingFace cache: {snapshot_dir}")
-            return snapshot_dir
-    except ImportError:
-        print("Warning: huggingface_hub not installed, cannot auto-download config")
+        config_path = hf_hub_download(repo_id=model_id, filename="config.json")
     except Exception as e:
-        print(f"Warning: Failed to download DeepSeek-V3 config: {e}")
+        raise FileNotFoundError(
+            f"Model '{model_id}' not found under {_AIC_MODEL_CONFIG_DIR} and "
+            f"HuggingFace download of config.json failed: {e}"
+        ) from e
+    snapshot_dir = os.path.dirname(config_path)
 
-    # Fallback to default path
-    return "/deepseek-v3"
+    for filename in ("tokenizer_config.json", "tokenizer.json"):
+        try:
+            hf_hub_download(repo_id=model_id, filename=filename)
+        except Exception as e:
+            # Tokenizer files are best-effort — many MoE configs ship without them.
+            print(f"Warning: failed to download {filename} for {model_id}: {e}")
+
+    print(f"Resolved {model_id} from HuggingFace cache: {snapshot_dir}")
+    return snapshot_dir
 
 
 @functools.lru_cache(maxsize=1)
