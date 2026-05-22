@@ -127,10 +127,12 @@ def _support_matrix_row_command(
     engine_step_frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
     engine_step_frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
 ) -> str:
-    """Return the CLI command that checks this model/system/backend path."""
+    """Return the repo-local CLI command that checks this model/system/backend path."""
     if constraints is None:
         constraints = _get_test_constraints(model)
     parts = [
+        "uv",
+        "run",
         "aiconfigurator",
         "cli",
         "default",

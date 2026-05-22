@@ -96,7 +96,7 @@ def test_run_single_test_can_return_row_replay_commands(monkeypatch):
     assert errors == {"agg": None}
     assert commands == {
         "agg": (
-            "aiconfigurator cli default --model zai-org/GLM-5 --total-gpus 32 "
+            "uv run aiconfigurator cli default --model zai-org/GLM-5 --total-gpus 32 "
             "--system b200_sxm --backend sglang --backend-version 0.5.10 "
             "--database-mode SILICON --isl 256 --osl 256 --prefix 128 --ttft 2000.0 "
             "--tpot 50.0 --top-n 1 --no-color"

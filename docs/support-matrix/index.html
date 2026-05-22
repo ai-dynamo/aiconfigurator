@@ -192,6 +192,8 @@ function supportMatrixCliConstraints(model) {
 function supportMatrixCommand(model, system, backend, version, mode) {
   const constraints = supportMatrixCliConstraints(model);
   return [
+    'uv',
+    'run',
     'aiconfigurator',
     'cli',
     'default',
@@ -213,7 +215,11 @@ function supportMatrixCommand(model, system, backend, version, mode) {
 
 function rowCommand(row) {
   const command = (row.Command || '').trim();
-  if (command && !command.includes('tools/support_matrix/generate_support_matrix.py')) return command;
+  if (
+    command &&
+    !command.startsWith('aiconfigurator cli default') &&
+    !command.includes('tools/support_matrix/generate_support_matrix.py')
+  ) return command;
   return supportMatrixCommand(row.HuggingFaceID, row.System, row.Backend, row.Version, row.Mode);
 }
 

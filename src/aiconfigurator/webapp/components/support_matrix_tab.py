@@ -78,6 +78,8 @@ def _support_matrix_cli_constraints(model: str) -> dict[str, str]:
 def _support_matrix_command(model: str, system: str, backend: str, version: str, mode: str) -> str:
     constraints = _support_matrix_cli_constraints(model)
     parts = [
+        "uv",
+        "run",
         "aiconfigurator",
         "cli",
         "default",
@@ -123,7 +125,11 @@ def _fallback_support_matrix_command(row) -> str:
 
 def _format_row_details(row) -> str:
     command = _clean_cell_value(row["Command"]) if "Command" in row.index else None
-    if command is None or "tools/support_matrix/generate_support_matrix.py" in command:
+    if (
+        command is None
+        or command.startswith("aiconfigurator cli default")
+        or "tools/support_matrix/generate_support_matrix.py" in command
+    ):
         command = _fallback_support_matrix_command(row)
     error_msg = _clean_cell_value(row["ErrMsg"]) if "ErrMsg" in row.index else None
 
