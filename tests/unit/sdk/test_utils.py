@@ -1383,6 +1383,7 @@ class TestQwen3VLVisionEncoderParsing:
 
     def test_vision_encoder_deepstack_visual_indexes_populated(self):
         """deepstack_visual_indexes is parsed as a tuple when present in vision_config."""
-        cfg = {**_QWEN3VL_HF_CONFIG, "vision_config": {**_QWEN3VL_HF_CONFIG["vision_config"], "deepstack_visual_indexes": [8, 17, 26]}}
+        vision_cfg = {**_QWEN3VL_HF_CONFIG["vision_config"], "deepstack_visual_indexes": [8, 17, 26]}
+        cfg = {**_QWEN3VL_HF_CONFIG, "vision_config": vision_cfg}
         result = _parse_hf_config_json(cfg)
         assert result["extra_params"].deepstack_visual_indexes == (8, 17, 26)

@@ -450,12 +450,19 @@ class BaseBackend:
             context_source_dict,
             generation_source_dict,
         ) = self._run_static_breakdown(
-            model, database, runtime_config, mode, stride, latency_correction_scale,
+            model,
+            database,
+            runtime_config,
+            mode,
+            stride,
+            latency_correction_scale,
             img_ctx_tokens=img_ctx_tokens,
         )
 
         if mode == "static_ctx":
-            memory = self._get_memory_usage(model, database, batch_size, beam_width, isl + img_ctx_tokens, 1, prefix=prefix)
+            memory = self._get_memory_usage(
+                model, database, batch_size, beam_width, isl + img_ctx_tokens, 1, prefix=prefix
+            )
         elif mode == "static_gen":
             memory = self._get_memory_usage(
                 model,
@@ -468,7 +475,9 @@ class BaseBackend:
                 prefix=prefix,
             )
         else:
-            memory = self._get_memory_usage(model, database, batch_size, beam_width, isl + img_ctx_tokens, osl, prefix=prefix)
+            memory = self._get_memory_usage(
+                model, database, batch_size, beam_width, isl + img_ctx_tokens, osl, prefix=prefix
+            )
 
         # Calculate total latencies and energies (simple sums - decoupled!)
         encoder_latency_ms = sum(encoder_latency_dict.values())  # milliseconds
@@ -878,7 +887,7 @@ class BaseBackend:
         enc_cfg = getattr(model, "encoder_config", None)
         activations = 0.0
         if enc_cfg is not None and num_tokens > 0:
-            # ~3× hidden_size per patch covers QKV, attention output, and FFN intermediates (bfloat16)
+            # ~3x hidden_size per patch covers QKV, attention output, and FFN intermediates (bfloat16)
             activations = 2 * num_tokens * enc_cfg.hidden_size * 3
         activations = max(activations, 32 * 1024 * 1024)  # 32 MiB minimum
         nccl_mem = database.system_spec["misc"]["nccl_mem"][min(model.config.tp_size, 8)]

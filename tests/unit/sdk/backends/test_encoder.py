@@ -28,8 +28,14 @@ class TestEncoderTokenFormula:
     @pytest.fixture
     def enc_cfg(self):
         return common.VisionEncoderConfig(
-            depth=27, hidden_size=1152, num_heads=16, intermediate_size=4304,
-            patch_size=16, temporal_patch_size=2, spatial_merge_size=2, out_hidden_size=5120,
+            depth=27,
+            hidden_size=1152,
+            num_heads=16,
+            intermediate_size=4304,
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            out_hidden_size=5120,
             deepstack_visual_indexes=(8, 16, 24),
         )
 
@@ -75,11 +81,11 @@ class TestEncoderTokenFormula:
         assert pre_merge == 3136
 
     def test_pre_merge_is_spatial_merge_squared_times_post_merge(self, enc_cfg):
-        """pre_merge = post_merge × spatial_merge_size² (merge factor = 4 for merge=2)."""
+        """pre_merge = post_merge x spatial_merge_size^2 (merge factor = 4 for merge=2)."""
         stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
-        post_merge = (448 // stride) * (448 // stride)          # 196
-        pre_merge  = (448 // enc_cfg.patch_size) * (448 // enc_cfg.patch_size)  # 784
-        assert pre_merge == post_merge * (enc_cfg.spatial_merge_size ** 2)
+        post_merge = (448 // stride) * (448 // stride)  # 196
+        pre_merge = (448 // enc_cfg.patch_size) * (448 // enc_cfg.patch_size)  # 784
+        assert pre_merge == post_merge * (enc_cfg.spatial_merge_size**2)
 
     def test_projector_ops_use_post_merge_by_name(self):
         """Projector ops are detected by 'encoder_projector' in op name."""
@@ -89,16 +95,21 @@ class TestEncoderTokenFormula:
     def test_transformer_ops_do_not_match_encoder_projector(self):
         """ViT transformer ops must NOT match 'encoder_projector'."""
         transformer_ops = [
-            "encoder_add_norm_1", "encoder_qkv_gemm", "encoder_attention",
-            "encoder_proj_gemm", "encoder_add_norm_2", "encoder_ffn1_gemm",
-            "encoder_act", "encoder_ffn2_gemm",
+            "encoder_add_norm_1",
+            "encoder_qkv_gemm",
+            "encoder_attention",
+            "encoder_proj_gemm",
+            "encoder_add_norm_2",
+            "encoder_ffn1_gemm",
+            "encoder_act",
+            "encoder_ffn2_gemm",
         ]
         for name in transformer_ops:
             assert "encoder_projector" not in name
 
     def test_merger_dim_is_vit_hidden_times_spatial_merge_squared(self, enc_cfg):
         """merger_dim = hidden_size * spatial_merge_size² = 1152 * 4 = 4608."""
-        merger_dim = enc_cfg.hidden_size * (enc_cfg.spatial_merge_size ** 2)
+        merger_dim = enc_cfg.hidden_size * (enc_cfg.spatial_merge_size**2)
         assert merger_dim == 4608
 
     def test_n_mergers_includes_final_plus_deepstack(self, enc_cfg):
@@ -109,8 +120,14 @@ class TestEncoderTokenFormula:
     def test_deepstack_visual_indexes_default_empty(self):
         """VisionEncoderConfig without deepstack_visual_indexes defaults to empty tuple."""
         cfg = common.VisionEncoderConfig(
-            depth=27, hidden_size=1152, num_heads=16, intermediate_size=4304,
-            patch_size=16, temporal_patch_size=2, spatial_merge_size=2, out_hidden_size=5120,
+            depth=27,
+            hidden_size=1152,
+            num_heads=16,
+            intermediate_size=4304,
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            out_hidden_size=5120,
         )
         assert cfg.deepstack_visual_indexes == ()
         assert 1 + len(cfg.deepstack_visual_indexes) == 1  # no deepstack → 1 merger
@@ -118,8 +135,14 @@ class TestEncoderTokenFormula:
     def test_n_mergers_no_deepstack(self):
         """Model with no deepstack should have n_mergers=1."""
         cfg = common.VisionEncoderConfig(
-            depth=27, hidden_size=1152, num_heads=16, intermediate_size=4304,
-            patch_size=16, temporal_patch_size=2, spatial_merge_size=2, out_hidden_size=5120,
+            depth=27,
+            hidden_size=1152,
+            num_heads=16,
+            intermediate_size=4304,
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            out_hidden_size=5120,
         )
         assert 1 + len(cfg.deepstack_visual_indexes) == 1
 
@@ -146,8 +169,14 @@ class TestFixBEffectiveISL:
     @pytest.fixture
     def enc_cfg(self):
         return common.VisionEncoderConfig(
-            depth=27, hidden_size=1152, num_heads=16, intermediate_size=4304,
-            patch_size=16, temporal_patch_size=2, spatial_merge_size=2, out_hidden_size=5120,
+            depth=27,
+            hidden_size=1152,
+            num_heads=16,
+            intermediate_size=4304,
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            out_hidden_size=5120,
             deepstack_visual_indexes=(8, 16, 24),
         )
 
@@ -156,25 +185,25 @@ class TestFixBEffectiveISL:
         return (h // stride) * (w // stride)
 
     def test_effective_isl_adds_single_image_448(self, enc_cfg):
-        """isl=512, 1×448×448 → effective_isl = 512 + 196 = 708."""
+        """isl=512, 1x448x448 -> effective_isl = 512 + 196 = 708."""
         isl = 512
         img_ctx = self._post_merge(enc_cfg, 448, 448) * 1  # n_img=1
         assert isl + img_ctx == 708
 
     def test_effective_isl_adds_single_image_896(self, enc_cfg):
-        """isl=512, 1×896×896 → effective_isl = 512 + 784 = 1296."""
+        """isl=512, 1x896x896 -> effective_isl = 512 + 784 = 1296."""
         isl = 512
         img_ctx = self._post_merge(enc_cfg, 896, 896) * 1
         assert isl + img_ctx == 1296
 
     def test_effective_isl_adds_four_images_448(self, enc_cfg):
-        """isl=64, 4×448×448 → effective_isl = 64 + 784 = 848."""
+        """isl=64, 4x448x448 -> effective_isl = 64 + 784 = 848."""
         isl = 64
         img_ctx = self._post_merge(enc_cfg, 448, 448) * 4  # n_img=4
         assert isl + img_ctx == 848
 
     def test_effective_isl_adds_two_images_448(self, enc_cfg):
-        """isl=512, 2×448×448 → effective_isl = 512 + 392 = 904."""
+        """isl=512, 2x448x448 -> effective_isl = 512 + 392 = 904."""
         isl = 512
         img_ctx = self._post_merge(enc_cfg, 448, 448) * 2
         assert isl + img_ctx == 904
@@ -186,16 +215,16 @@ class TestFixBEffectiveISL:
         assert isl + img_ctx == 512
 
     def test_effective_isl_four_small_images_224(self, enc_cfg):
-        """isl=256, 4×224×224 → effective_isl = 256 + 196 = 452 (4×49=196 total)."""
+        """isl=256, 4x224x224 -> effective_isl = 256 + 196 = 452 (4x49=196 total)."""
         isl = 256
         img_ctx = self._post_merge(enc_cfg, 224, 224) * 4  # 4 * 49 = 196
         assert isl + img_ctx == 452
 
     def test_img_ctx_tokens_equals_n_img_times_post_merge(self, enc_cfg):
-        """img_ctx_tokens = n_img × tokens_per_image (post-merge), not pre-merge."""
+        """img_ctx_tokens = n_img x tokens_per_image (post-merge), not pre-merge."""
         n_img = 3
-        post_merge = self._post_merge(enc_cfg, 448, 448)   # 196
-        pre_merge  = (448 // enc_cfg.patch_size) ** 2       # 784
+        post_merge = self._post_merge(enc_cfg, 448, 448)  # 196
+        pre_merge = (448 // enc_cfg.patch_size) ** 2  # 784
         img_ctx = post_merge * n_img
         assert img_ctx == 588
         assert img_ctx != pre_merge * n_img  # confirm pre-merge is NOT used for LLM context
@@ -271,6 +300,7 @@ class TestInferenceSummaryEncoderFields:
     @pytest.fixture
     def summary(self):
         from aiconfigurator.sdk.inference_summary import InferenceSummary
+
         rc = RuntimeConfig(batch_size=1, isl=512, osl=128)
         return InferenceSummary(rc)
 
@@ -325,8 +355,14 @@ class TestVarlenAttentionMultiImage:
     @pytest.fixture
     def enc_cfg(self):
         return common.VisionEncoderConfig(
-            depth=27, hidden_size=1152, num_heads=16, intermediate_size=4304,
-            patch_size=16, temporal_patch_size=2, spatial_merge_size=2, out_hidden_size=5120,
+            depth=27,
+            hidden_size=1152,
+            num_heads=16,
+            intermediate_size=4304,
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            out_hidden_size=5120,
             deepstack_visual_indexes=(8, 16, 24),
         )
 
@@ -340,9 +376,15 @@ class TestVarlenAttentionMultiImage:
     def test_non_attention_ops_do_not_match_varlen(self):
         """No other encoder op name should trigger the varlen path."""
         non_attn_ops = [
-            "encoder_add_norm_1", "encoder_qkv_gemm", "encoder_proj_gemm",
-            "encoder_add_norm_2", "encoder_ffn1_gemm", "encoder_act",
-            "encoder_ffn2_gemm", "encoder_projector_fc0_gemm", "encoder_projector_fc0_act",
+            "encoder_add_norm_1",
+            "encoder_qkv_gemm",
+            "encoder_proj_gemm",
+            "encoder_add_norm_2",
+            "encoder_ffn1_gemm",
+            "encoder_act",
+            "encoder_ffn2_gemm",
+            "encoder_projector_fc0_gemm",
+            "encoder_projector_fc0_act",
             "encoder_projector_fc1_gemm",
         ]
         for name in non_attn_ops:
@@ -355,36 +397,36 @@ class TestVarlenAttentionMultiImage:
         pre_merge = self._pre_merge(enc_cfg, 448, 448)  # 784
 
         # varlen path
-        eff_batch_v = batch_size * num_images   # 2
-        eff_s_v     = pre_merge                 # 784
+        eff_batch_v = batch_size * num_images  # 2
+        eff_s_v = pre_merge  # 784
 
         # non-varlen path
-        n_img_pre   = pre_merge * num_images    # 784
-        eff_batch_n = batch_size                # 2
-        eff_s_n     = n_img_pre                 # 784
+        n_img_pre = pre_merge * num_images  # 784
+        eff_batch_n = batch_size  # 2
+        eff_s_n = n_img_pre  # 784
 
         assert eff_batch_v == eff_batch_n
         assert eff_s_v == eff_s_n
 
     def test_multi_image_varlen_avoids_quadratic_overestimate(self, enc_cfg):
-        """With 4 images, varlen uses s=784 not s=3136 (4× smaller sequence)."""
+        """With 4 images, varlen uses s=784 not s=3136 (4x smaller sequence)."""
         batch_size = 1
         num_images = 4
         pre_merge = self._pre_merge(enc_cfg, 448, 448)  # 784
 
         # varlen: each image is a separate sequence
-        eff_batch_v = batch_size * num_images   # 4
-        eff_s_v     = pre_merge                 # 784
+        eff_batch_v = batch_size * num_images  # 4
+        eff_s_v = pre_merge  # 784
 
         # naive concatenation (old wrong behaviour)
-        n_img_pre   = pre_merge * num_images    # 3136
-        eff_batch_n = batch_size                # 1
-        eff_s_n     = n_img_pre                 # 3136
+        n_img_pre = pre_merge * num_images  # 3136
+        eff_batch_n = batch_size  # 1
+        eff_s_n = n_img_pre  # 3136
 
         # same total tokens
         assert eff_batch_v * eff_s_v == eff_batch_n * eff_s_n
 
-        # but sequence length is n_img × shorter, avoiding O(s²) overestimate
+        # but sequence length is n_img x shorter, avoiding O(s^2) overestimate
         assert eff_s_v * num_images == eff_s_n
         assert eff_s_v < eff_s_n
 
@@ -403,7 +445,6 @@ class TestVarlenAttentionMultiImage:
             assert eff_batch == batch_size * n_img
 
 
-
 class TestEncoderMemoryInSummary:
     """Tests that run_static populates encoder_memory for VL models."""
 
@@ -415,11 +456,14 @@ class TestEncoderMemoryInSummary:
         """Text-only model: encoder_memory should be empty dict."""
         from types import SimpleNamespace
         from unittest.mock import MagicMock
+
         from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 
         model = get_model("Qwen/Qwen3-32B", model_config, "trtllm")
         database = SimpleNamespace(
-            backend="trtllm", version="10.0", system="h200_sxm",
+            backend="trtllm",
+            version="10.0",
+            system="h200_sxm",
             system_spec={
                 "gpu": {"mem_capacity": 80 * (1 << 30)},
                 "misc": {"nccl_mem": {1: 500 * 1024 * 1024, 8: 1024 * 1024 * 1024}, "other_mem": 200 * 1024 * 1024},
@@ -439,11 +483,14 @@ class TestEncoderMemoryInSummary:
         """VL model with num_images>0: encoder_memory must contain weights/activations/kvcache."""
         from types import SimpleNamespace
         from unittest.mock import MagicMock
+
         from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 
         model = get_model("Qwen/Qwen3-VL-32B-Instruct", model_config, "trtllm")
         database = SimpleNamespace(
-            backend="trtllm", version="10.0", system="h200_sxm",
+            backend="trtllm",
+            version="10.0",
+            system="h200_sxm",
             system_spec={
                 "gpu": {"mem_capacity": 80 * (1 << 30)},
                 "misc": {"nccl_mem": {1: 500 * 1024 * 1024, 8: 1024 * 1024 * 1024}, "other_mem": 200 * 1024 * 1024},
@@ -453,8 +500,7 @@ class TestEncoderMemoryInSummary:
         for op in model.context_ops + model.generation_ops + model.encoder_ops:
             op.query = MagicMock(return_value=MagicMock(__float__=lambda s: 1.0, energy=0.0, source="silicon"))
 
-        rc = RuntimeConfig(batch_size=1, isl=512, osl=64,
-                           image_height=448, image_width=448, num_images_per_request=1)
+        rc = RuntimeConfig(batch_size=1, isl=512, osl=64, image_height=448, image_width=448, num_images_per_request=1)
         backend = TRTLLMBackend()
         summary = backend.run_static(model, database, rc, mode="static")
 

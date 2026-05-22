@@ -219,7 +219,10 @@ class EventFn:
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
                 runtime_config = config.RuntimeConfig(
-                    batch_size=batch_size, isl=isl, osl=osl, prefix=prefix,
+                    batch_size=batch_size,
+                    isl=isl,
+                    osl=osl,
+                    prefix=prefix,
                     image_height=int(image_height or 0),
                     image_width=int(image_width or 0),
                     num_images_per_request=int(num_images or 1),

@@ -108,8 +108,8 @@ from aiconfigurator.sdk.models.llama import LLAMAModel
 from aiconfigurator.sdk.models.moe import MOEModel, SGLangEPMOEModel
 from aiconfigurator.sdk.models.nemotron_h import NemotronHModel
 from aiconfigurator.sdk.models.nemotron_nas import NemotronNas
-from aiconfigurator.sdk.models.qwen35 import Qwen35Model
 from aiconfigurator.sdk.models.qwen3vl import Qwen3VLModel, Qwen3VLMoEModel
+from aiconfigurator.sdk.models.qwen35 import Qwen35Model
 
 __all__ = [
     "BaseModel",
@@ -123,9 +123,9 @@ __all__ = [
     "MOEModel",
     "NemotronHModel",
     "NemotronNas",
-    "Qwen35Model",
-    "Qwen3VLModel",
     "Qwen3VLMoEModel",
+    "Qwen3VLModel",
+    "Qwen35Model",
     "SGLangEPMOEModel",
     "TrtllmWideEPDeepSeekModel",
     "TrtllmWideEPDeepSeekV32Model",

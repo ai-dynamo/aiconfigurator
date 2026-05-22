@@ -297,7 +297,9 @@ def create_runtime_config(
 
         if with_images:
             with gr.Row():
-                gr.HTML("<span style='color: var(--body-text-color-subdued);'>Vision-language image config (set to 0 to skip encoder)</span>")
+                gr.HTML(
+                    "<span style='color: var(--body-text-color-subdued);'>Vision-language image config (set to 0 to skip encoder)</span>"
+                )
             with gr.Row():
                 image_height = gr.Number(value=448, label="image height (px)", interactive=True)
                 image_width = gr.Number(value=448, label="image width (px)", interactive=True)
