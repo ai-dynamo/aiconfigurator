@@ -8,7 +8,8 @@ parallel groups -- one consumed by the A-worker (attention) pool and
 one by the F-worker (FFN / MoE) pool -- so each pool's per-step
 latency can be estimated independently. The AFD session wraps the
 partitioned lists with cross-pool transfer and intra-pool collective
-ops (see ``AFDTransfer``).
+ops (see ``AFDTransfer``, ``AFDFAllGather``, ``AFDFReduceScatter``,
+``AFDCombine``).
 """
 
 from __future__ import annotations
@@ -203,7 +204,7 @@ def _is_skipped_model_internal_op(op: operations.Operation, name: str) -> bool:
     # appears inside an ``OverlapOp`` (e.g. ``generation_moe_overlap``), this
     # skip-list only excludes it from the overlap *classification vote* --
     # its cost is still folded into the OverlapOp's F-pool latency via
-    # ``OverlapOp.query()`` and stays invisible to ``AFDTransfer`` /
+    # ``OverlapOp.query()`` and stays invisible to the AFD comm ops /
     # ``_pipeline_tcycle``. That hides the MoE EP all-to-all from the AFD
     # pipeline overlap math, so contention between the MoE all-to-all and
     # the cross-pool A<->F transfer on the same NIC fabric is silently

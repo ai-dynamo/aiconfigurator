@@ -16,7 +16,7 @@ Public surface preserves the prior import pattern:
 
 from __future__ import annotations
 
-from aiconfigurator.sdk.operations.afd_transfer import AFDTransfer
+from aiconfigurator.sdk.operations.afd_transfer import AFDCombine, AFDFAllGather, AFDFReduceScatter, AFDTransfer
 from aiconfigurator.sdk.operations.attention import ContextAttention, EncoderAttention, GenerationAttention
 from aiconfigurator.sdk.operations.base import Operation, clear_all_op_caches, warm_all_op_data
 from aiconfigurator.sdk.operations.communication import NCCL, P2P, CustomAllReduce
@@ -49,6 +49,9 @@ from aiconfigurator.sdk.operations.overlap import FallbackOp, OverlapOp
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 __all__ = [
+    "AFDCombine",
+    "AFDFAllGather",
+    "AFDFReduceScatter",
     "AFDTransfer",
     "GEMM",
     "NCCL",
