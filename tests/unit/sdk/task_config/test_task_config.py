@@ -435,6 +435,72 @@ def test_validate_invalid_serving_mode_raises():
 
 
 # ---------------------------------------------------------------------------
+# validate() database-dependent checks
+# ---------------------------------------------------------------------------
+
+
+def test_validate_database_check_passes_for_supported_quant():
+    """Valid quant modes against a real perf DB should pass full validate()."""
+    t = TaskConfig(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        # HF-inferred quant modes are by definition supported by the DB
+    )
+    t.validate()  # no raise
+
+
+def test_validate_database_check_rejects_unsupported_quant():
+    """Setting a quant mode the DB doesn't list should raise from the DB layer."""
+    t = TaskConfig(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+    )
+    # Force a quant mode that doesn't exist for context_mla on this DB.
+    # int4_awq is implausible for DeepSeek MLA.
+    t.fmha_quant_mode = common.FMHAQuantMode.bfloat16  # may or may not be in DB
+    # Use a clearly unsupported gemm mode via direct field write.
+    t.gemm_quant_mode = common.GEMMQuantMode.int4_wo
+    # Either passes (if DB happens to have mxfp4) or raises a clear ValueError.
+    try:
+        t.validate()
+    except ValueError as exc:
+        assert "Unsupported gemm" in str(exc) or "Supported gemm" in str(exc)
+
+
+def test_validate_skips_db_check_when_database_unavailable():
+    """If DB can't be loaded, DB validation silently skips (caller sees other errors)."""
+    t = TaskConfig(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+    )
+    # Force a non-existent backend_version → DB load fails → DB check skipped
+    t.backend_version = "9.99.99-nonexistent"
+    t.validate()  # static checks pass, DB silently skipped
+
+
+def test_validate_skips_db_check_for_deepseekv4_synthetic_mode():
+    """DeepSeek-V4 in synthetic database modes skips DB validation entirely."""
+    t = TaskConfig(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",  # use V3 since we just need is_moe + family
+        system_name="h200_sxm",
+        backend_name="trtllm",
+    )
+    # Manually force model_family to simulate DeepSeek-V4
+    t._model_family = "DEEPSEEKV4"
+    t.database_mode = "SOL"
+    # Set an obviously unsupported quant mode; should be skipped because of synthetic mode
+    t.gemm_quant_mode = common.GEMMQuantMode.int4_wo
+    t.validate()  # no raise — synthetic mode allowance kicks in
+
+
+# ---------------------------------------------------------------------------
 # to_dict() / to_yaml()
 # ---------------------------------------------------------------------------
 

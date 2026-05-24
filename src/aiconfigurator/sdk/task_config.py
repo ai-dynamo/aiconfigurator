@@ -700,15 +700,27 @@ class TaskConfig:
     # =====================================================================
 
     def validate(self) -> None:
-        """Check that the resolved task is internally consistent.
+        """Check that the resolved task is internally consistent and supported.
 
-        Pure read-only check; does not modify state.  Raises ``ValueError``
-        or ``NotImplementedError`` on the first inconsistency.  Heavier
-        checks (full database support-matrix verification) are out of
-        scope — those happen lazily at sweep time.
+        Two layers:
+        - Static checks: required fields, fp8_static→trtllm constraint,
+          DeepSeek+vLLM exclusion.  Always run, no I/O.
+        - Database-dependent checks: each user-selected quant mode is in
+          the perf database's ``supported_quant_mode`` list for its op
+          (gemm, moe / wideep_*_moe, context_attention / context_mla /
+          dsa_context_module / deepseek_v4_context_module / wideep_context_mla,
+          and the corresponding generation_* op).  Skipped silently if
+          the DB cannot be loaded, or if the model is DeepSeek-V4 in a
+          synthetic database mode (SOL / SOL_FULL / EMPIRICAL / HYBRID).
 
-        Call this after construction and before passing the config to
-        ``sweep_agg`` / ``sweep_disagg`` to fail fast on bad inputs.
+        Database load is cheap (``get_database`` is module-level cached),
+        and the load happens later in sweep anyway — failing here just
+        moves the error to a friendlier point.
+
+        Raises:
+            ValueError / NotImplementedError on a contradiction.
+            UnsupportedWideepConfigError specifically for wideep_* ops
+            (lets callers distinguish from generic ``ValueError``).
         """
         if self.serving_mode == "agg":
             self._validate_agg()
@@ -716,6 +728,7 @@ class TaskConfig:
             self._validate_disagg()
         else:
             raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
+        self._validate_database_quant_modes()
 
     def _validate_agg(self) -> None:
         if not self.model_path:
@@ -746,6 +759,110 @@ class TaskConfig:
                 raise NotImplementedError(
                     f"AIConfigurator does not yet support the DeepSeek family on the vLLM backend ({role} side)."
                 )
+
+    def _validate_database_quant_modes(self) -> None:
+        """Validate user's quant modes against the perf database's supported list.
+
+        Mirrors the per-op check in V1's ``TaskConfig.validate``.  Skipped
+        silently if the DB can't be loaded or for DeepSeek-V4 in synthetic
+        modes (where the supported_quant_mode table is incomplete).
+        """
+        # DeepSeek-V4 in synthetic database modes: DB's supported_quant_mode
+        # list is incomplete; skip entirely (V1 parity).
+        if self._model_family == "DEEPSEEKV4" and self.database_mode in (
+            "SOL",
+            "SOL_FULL",
+            "EMPIRICAL",
+            "HYBRID",
+        ):
+            return
+
+        if self.serving_mode == "agg":
+            self._check_role_against_db("agg", validate_context=True, validate_generation=True)
+        else:
+            self._check_role_against_db("prefill", validate_context=True, validate_generation=False)
+            self._check_role_against_db("decode", validate_context=False, validate_generation=True)
+
+    def _check_role_against_db(
+        self,
+        role: str,
+        *,
+        validate_context: bool,
+        validate_generation: bool,
+    ) -> None:
+        """For one role, fetch its perf DB and verify each quant mode is supported."""
+        from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
+        from aiconfigurator.sdk.perf_database import get_database
+
+        system = self._role_attr(role, "system_name")
+        backend = self._role_attr(role, "backend_name")
+        version = self._role_attr(role, "backend_version")
+        if not (system and backend and version):
+            return  # nothing to validate against
+
+        try:
+            database = get_database(system, backend, version)
+        except Exception:
+            # DB unavailable; let sweep surface the real error later.
+            return
+
+        supported: dict = getattr(database, "supported_quant_mode", {}) or {}
+        enable_wideep = bool(self._role_attr(role, "enable_wideep"))
+        moe_backend = self.moe_backend  # shared across roles
+        is_moe = self._is_moe
+        fam = self._model_family
+
+        # Pick the attention-module op keys for this (model family, backend, wideep).
+        if fam == "DEEPSEEKV4":
+            ctx_op, gen_op = "deepseek_v4_context_module", "deepseek_v4_generation_module"
+        elif fam == "DEEPSEEKV32":
+            ctx_op, gen_op = "dsa_context_module", "dsa_generation_module"
+        elif fam in ("DEEPSEEK", "KIMIK25") and backend != "vllm":
+            if backend == "sglang" and enable_wideep:
+                ctx_op, gen_op = "wideep_context_mla", "wideep_generation_mla"
+            else:
+                ctx_op, gen_op = "context_mla", "generation_mla"
+        else:
+            ctx_op, gen_op = "context_attention", "generation_attention"
+
+        def _check(op: str, mode: Any) -> None:
+            if mode is None:
+                return
+            modes = supported.get(op, []) or []
+            if not modes:
+                return  # DB doesn't record support for this op; skip
+            name = mode.name if hasattr(mode, "name") else str(mode)
+            if name in modes:
+                return
+            exc_type = UnsupportedWideepConfigError if op.startswith("wideep_") else ValueError
+            raise exc_type(
+                f"Unsupported {op} quant mode {name!r} for system={system!r}, "
+                f"backend={backend!r}, version={version!r}. "
+                f"Supported {op} modes: {sorted(modes)}"
+            )
+
+        # GEMM is always validated (applies to all worker shapes).
+        _check("gemm", self._role_attr(role, "gemm_quant_mode"))
+
+        # MoE — only when model is MoE.
+        if is_moe:
+            moe_mode = self._role_attr(role, "moe_quant_mode")
+            if backend == "sglang" and moe_backend == "deepep_moe":
+                # WideEP MoE: per-phase op keys (raises UnsupportedWideepConfigError).
+                if validate_context:
+                    _check("wideep_context_moe", moe_mode)
+                if validate_generation:
+                    _check("wideep_generation_moe", moe_mode)
+            else:
+                _check("moe", moe_mode)
+
+        # FMHA: only meaningful for context-using workers (agg, prefill).
+        if validate_context:
+            _check(ctx_op, self._role_attr(role, "fmha_quant_mode"))
+
+        # KV cache: only meaningful for generation-using workers (agg, decode).
+        if validate_generation:
+            _check(gen_op, self._role_attr(role, "kvcache_quant_mode"))
 
     # =====================================================================
     # Properties
