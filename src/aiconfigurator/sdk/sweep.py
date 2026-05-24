@@ -183,6 +183,14 @@ def _rate_match_dict(
         "(d)backend": d.get("backend", ""),
         "(d)version": d.get("version", ""),
         "(d)system": d.get("system", ""),
+        # Encoder worker fields — non-multimodal default placeholders.
+        # ColumnsDisagg added these in the Qwen3-VL vision-encoder commit;
+        # rate-match for text-only models leaves them at zero/empty.
+        "(e)workers": 0,
+        "(e)tp": 0,
+        "(e)pp": 0,
+        "(e)parallel": "",
+        "(e)memory": 0.0,
         "power_w": disagg_power_avg,
     }
 
