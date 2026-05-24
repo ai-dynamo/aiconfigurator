@@ -2,20 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Search / sweep functions for finding Pareto-optimal worker configurations.
+Search / sweep functions for finding feasible worker configurations under SLA.
 
 Two entry points:
 
 - :func:`sweep_agg` — sweep parallel x batch x ctx_tokens for an aggregated
-  IFB worker; filter by SLA; return a Pareto DataFrame.
+  IFB worker; filter by SLA; return a feasible-candidate DataFrame.
 - :func:`sweep_disagg` — sweep prefill_parallel x decode_parallel x
-  batches x num_workers with rate matching; return a Pareto DataFrame.
+  batches x num_workers with rate matching; return a feasible-candidate DataFrame.
 
 Both functions own the entire search loop themselves and call
 ``predict.predict_*`` for per-point evaluation.  They replace the
 ``InferenceSession.find_best_*`` / ``DisaggInferenceSession.find_best_*``
 search paths and the ``pareto_analysis.agg_pareto`` / ``disagg_pareto``
 proxies.
+
+Note on "Pareto": these functions return the SLA-feasible candidate set,
+NOT a Pareto frontier.  The Pareto frontier is a downstream view computed
+in :mod:`aiconfigurator.sdk.picking` (``get_pareto_front``) for plotting.
+Selecting the best config under SLA is done by sorting + group-by on this
+candidate set, not by traversing the frontier.
 
 Output DataFrame schema is ``common.ColumnsAgg`` for agg and
 ``common.ColumnsDisagg`` for disagg, so downstream picking in
@@ -343,11 +349,14 @@ def sweep_agg(
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
 ) -> pd.DataFrame:
-    """Sweep parallel x batch x ctx_tokens for agg; return Pareto DataFrame.
+    """Sweep parallel x batch x ctx_tokens for agg; return feasible-candidate DataFrame.
 
     Replaces ``pareto_analysis.agg_pareto`` -> ``InferenceSession.find_best_agg``
     -> ``backend.find_best_agg_result_under_constraints``.  Output schema is
-    ``common.ColumnsAgg``, sorted by ``tokens/s/gpu`` descending.
+    ``common.ColumnsAgg``, sorted by ``tokens/s/gpu`` descending.  This is
+    the SLA-feasible candidate set; Pareto frontier is a downstream view in
+    ``aiconfigurator.sdk.picking`` (used for plotting only — config selection
+    works directly on this candidate set).
 
     Per-tpot sweeping (``runtime_config.tpot`` may be a list) and
     request-latency-derived constraints are handled here as in the legacy
@@ -372,7 +381,7 @@ def sweep_agg(
         max_seq_len: TRT-LLM-only per-slot KV cache budget.
 
     Returns:
-        Deduped, sorted Pareto DataFrame with schema ``common.ColumnsAgg``.
+        Deduped, sorted feasible-candidate DataFrame with schema ``common.ColumnsAgg``.
 
     Raises:
         RuntimeError: When all configs OOM or no point meets SLA.

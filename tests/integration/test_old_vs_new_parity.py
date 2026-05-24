@@ -271,3 +271,279 @@ def test_old_vs_new_pareto_parity_disagg():
     assert len(new_df) > 0, "new path returned empty DataFrame"
 
     pd.testing.assert_frame_equal(_normalize(old_df), _normalize(new_df), check_like=True)
+
+
+# ---------------------------------------------------------------------------
+# Extended parity tests: request_latency mode, autoscale, hetero-disagg
+# ---------------------------------------------------------------------------
+
+
+def _old_path_agg_request_latency(params: dict, request_latency: float) -> pd.DataFrame:
+    """Old path with request_latency-driven (ttft, tpot) constraint pairs."""
+    from aiconfigurator.sdk.task import TaskConfig as V1TaskConfig
+    from aiconfigurator.sdk.task import TaskRunner
+
+    yaml_config = {
+        "config": {
+            "worker_config": {
+                "num_gpu_per_worker": params["agg_num_gpu_candidates"],
+                "tp_list": params["agg_tp_candidates"],
+                "pp_list": params["agg_pp_candidates"],
+                "dp_list": params["agg_dp_candidates"],
+                "moe_tp_list": params["agg_moe_tp_candidates"],
+                "moe_ep_list": params["agg_moe_ep_candidates"],
+            },
+        },
+    }
+    v1 = V1TaskConfig(
+        serving_mode="agg",
+        model_path=params["model_path"],
+        system_name=params["system_name"],
+        backend_name=params["backend_name"],
+        backend_version=params["backend_version"],
+        total_gpus=params["total_gpus"],
+        isl=params["isl"],
+        osl=params["osl"],
+        ttft=params["ttft"],
+        tpot=params["tpot"],
+        request_latency=request_latency,
+        yaml_config=yaml_config,
+    )
+    return TaskRunner().run(v1)["pareto_df"]
+
+
+def _new_path_agg_request_latency(params: dict, request_latency: float) -> pd.DataFrame:
+    from aiconfigurator.sdk.perf_database import get_database
+    from aiconfigurator.sdk.sweep import sweep_agg
+    from aiconfigurator.sdk.task_config import TaskConfig
+
+    yaml_data = {"serving_mode": "agg", **params, "request_latency": request_latency}
+    task = TaskConfig.from_yaml(yaml_data)
+    db = get_database(task.system_name, task.backend_name, task.backend_version)
+    kwargs = task.sweep_agg_kwargs(database=db)
+    # In request_latency mode the SDK derives (ttft, tpot) pairs internally;
+    # do NOT override runtime_config.tpot here.
+    return sweep_agg(**kwargs)
+
+
+def test_old_vs_new_pareto_parity_agg_request_latency():
+    """Verify request_latency-driven (ttft, tpot) constraint enumeration parity."""
+    _skip_if_no_db(AGG_PARAMS["system_name"], AGG_PARAMS["backend_name"], AGG_PARAMS["backend_version"])
+    request_latency = 10000.0  # 10s end-to-end
+
+    old_df = _old_path_agg_request_latency(AGG_PARAMS, request_latency)
+    new_df = _new_path_agg_request_latency(AGG_PARAMS, request_latency)
+
+    assert old_df is not None and len(old_df) > 0, "legacy path returned empty DataFrame"
+    assert len(new_df) > 0, "new path returned empty DataFrame"
+
+    pd.testing.assert_frame_equal(_normalize(old_df), _normalize(new_df), check_like=True)
+
+
+def _old_path_disagg_autoscale(params: dict) -> pd.DataFrame:
+    """Old disagg autoscale path (picks prefill and decode independently)."""
+    from aiconfigurator.sdk.task import TaskConfig as V1TaskConfig
+    from aiconfigurator.sdk.task import TaskRunner
+
+    yaml_config = {
+        "config": {
+            "prefill_worker_config": {
+                "num_gpu_per_worker": params["prefill_num_gpu_candidates"],
+                "tp_list": params["prefill_tp_candidates"],
+                "pp_list": params["prefill_pp_candidates"],
+                "dp_list": params["prefill_dp_candidates"],
+                "moe_tp_list": params["prefill_moe_tp_candidates"],
+                "moe_ep_list": params["prefill_moe_ep_candidates"],
+            },
+            "decode_worker_config": {
+                "num_gpu_per_worker": params["decode_num_gpu_candidates"],
+                "tp_list": params["decode_tp_candidates"],
+                "pp_list": params["decode_pp_candidates"],
+                "dp_list": params["decode_dp_candidates"],
+                "moe_tp_list": params["decode_moe_tp_candidates"],
+                "moe_ep_list": params["decode_moe_ep_candidates"],
+            },
+            "replica_config": {
+                "num_gpu_per_replica": params["num_gpu_per_replica"],
+                "max_gpu_per_replica": params["max_gpu_per_replica"],
+                "max_prefill_worker": params["max_prefill_workers"],
+                "max_decode_worker": params["max_decode_workers"],
+            },
+        },
+    }
+    v1 = V1TaskConfig(
+        serving_mode="disagg",
+        model_path=params["model_path"],
+        system_name=params["system_name"],
+        decode_system_name=params["system_name"],
+        backend_name=params["backend_name"],
+        backend_version=params["backend_version"],
+        total_gpus=params["total_gpus"],
+        isl=params["isl"],
+        osl=params["osl"],
+        ttft=params["ttft"],
+        tpot=params["tpot"],
+        yaml_config=yaml_config,
+    )
+    return TaskRunner().run(v1, autoscale=True)["pareto_df"]
+
+
+def _new_path_disagg_autoscale(params: dict) -> pd.DataFrame:
+    from aiconfigurator.sdk.perf_database import get_database
+    from aiconfigurator.sdk.sweep import sweep_disagg
+    from aiconfigurator.sdk.task_config import TaskConfig
+
+    yaml_data: dict = {
+        "serving_mode": "disagg",
+        "isl": params["isl"],
+        "osl": params["osl"],
+        "ttft": params["ttft"],
+        "tpot": params["tpot"],
+        "total_gpus": params["total_gpus"],
+        "num_gpu_per_replica": params["num_gpu_per_replica"],
+        "max_gpu_per_replica": params["max_gpu_per_replica"],
+        "max_prefill_workers": params["max_prefill_workers"],
+        "max_decode_workers": params["max_decode_workers"],
+    }
+    for role in ("prefill", "decode"):
+        yaml_data[f"{role}_model_path"] = params["model_path"]
+        yaml_data[f"{role}_system_name"] = params["system_name"]
+        yaml_data[f"{role}_backend_name"] = params["backend_name"]
+        yaml_data[f"{role}_backend_version"] = params["backend_version"]
+        for dim in ("num_gpu", "tp", "pp", "dp", "moe_tp", "moe_ep"):
+            yaml_data[f"{role}_{dim}_candidates"] = params[f"{role}_{dim}_candidates"]
+
+    task = TaskConfig.from_yaml(yaml_data)
+    p_db = get_database(task.prefill_system_name, task.prefill_backend_name, task.prefill_backend_version)
+    d_db = get_database(task.decode_system_name, task.decode_backend_name, task.decode_backend_version)
+    kwargs = task.sweep_disagg_kwargs(prefill_database=p_db, decode_database=d_db)
+    kwargs["runtime_config"].tpot = list(range(1, 20, 1)) + list(range(20, 300, 5))
+    kwargs["autoscale"] = True
+    return sweep_disagg(**kwargs)
+
+
+def test_old_vs_new_pareto_parity_disagg_autoscale():
+    """Verify autoscale path (picks P and D independently, no rate matching)."""
+    _skip_if_no_db(DISAGG_PARAMS["system_name"], DISAGG_PARAMS["backend_name"], DISAGG_PARAMS["backend_version"])
+
+    old_df = _old_path_disagg_autoscale(DISAGG_PARAMS)
+    new_df = _new_path_disagg_autoscale(DISAGG_PARAMS)
+
+    assert old_df is not None and len(old_df) > 0, "legacy path returned empty DataFrame"
+    assert len(new_df) > 0, "new path returned empty DataFrame"
+
+    pd.testing.assert_frame_equal(_normalize(old_df), _normalize(new_df), check_like=True)
+
+
+HETERO_DISAGG_PARAMS = {
+    **DISAGG_PARAMS,
+    "prefill_system": "h200_sxm",
+    "decode_system": "h100_sxm",
+}
+
+
+def _old_path_hetero_disagg(params: dict) -> pd.DataFrame:
+    """Hetero-disagg: prefill on one system, decode on another."""
+    from aiconfigurator.sdk.task import TaskConfig as V1TaskConfig
+    from aiconfigurator.sdk.task import TaskRunner
+
+    yaml_config = {
+        "config": {
+            "prefill_worker_config": {
+                "num_gpu_per_worker": params["prefill_num_gpu_candidates"],
+                "tp_list": params["prefill_tp_candidates"],
+                "pp_list": params["prefill_pp_candidates"],
+                "dp_list": params["prefill_dp_candidates"],
+                "moe_tp_list": params["prefill_moe_tp_candidates"],
+                "moe_ep_list": params["prefill_moe_ep_candidates"],
+            },
+            "decode_worker_config": {
+                "num_gpu_per_worker": params["decode_num_gpu_candidates"],
+                "tp_list": params["decode_tp_candidates"],
+                "pp_list": params["decode_pp_candidates"],
+                "dp_list": params["decode_dp_candidates"],
+                "moe_tp_list": params["decode_moe_tp_candidates"],
+                "moe_ep_list": params["decode_moe_ep_candidates"],
+            },
+            "replica_config": {
+                "num_gpu_per_replica": params["num_gpu_per_replica"],
+                "max_gpu_per_replica": params["max_gpu_per_replica"],
+                "max_prefill_worker": params["max_prefill_workers"],
+                "max_decode_worker": params["max_decode_workers"],
+            },
+        },
+    }
+    v1 = V1TaskConfig(
+        serving_mode="disagg",
+        model_path=params["model_path"],
+        system_name=params["prefill_system"],
+        decode_system_name=params["decode_system"],
+        backend_name=params["backend_name"],
+        backend_version=params["backend_version"],
+        total_gpus=params["total_gpus"],
+        isl=params["isl"],
+        osl=params["osl"],
+        ttft=params["ttft"],
+        tpot=params["tpot"],
+        yaml_config=yaml_config,
+    )
+    return TaskRunner().run(v1)["pareto_df"]
+
+
+def _new_path_hetero_disagg(params: dict) -> pd.DataFrame:
+    from aiconfigurator.sdk.perf_database import get_database
+    from aiconfigurator.sdk.sweep import sweep_disagg
+    from aiconfigurator.sdk.task_config import TaskConfig
+
+    yaml_data: dict = {
+        "serving_mode": "disagg",
+        "isl": params["isl"],
+        "osl": params["osl"],
+        "ttft": params["ttft"],
+        "tpot": params["tpot"],
+        "total_gpus": params["total_gpus"],
+        "num_gpu_per_replica": params["num_gpu_per_replica"],
+        "max_gpu_per_replica": params["max_gpu_per_replica"],
+        "max_prefill_workers": params["max_prefill_workers"],
+        "max_decode_workers": params["max_decode_workers"],
+        "prefill_model_path": params["model_path"],
+        "prefill_system_name": params["prefill_system"],
+        "prefill_backend_name": params["backend_name"],
+        "prefill_backend_version": params["backend_version"],
+        "decode_model_path": params["model_path"],
+        "decode_system_name": params["decode_system"],
+        "decode_backend_name": params["backend_name"],
+        "decode_backend_version": params["backend_version"],
+    }
+    for role in ("prefill", "decode"):
+        for dim in ("num_gpu", "tp", "pp", "dp", "moe_tp", "moe_ep"):
+            yaml_data[f"{role}_{dim}_candidates"] = params[f"{role}_{dim}_candidates"]
+
+    task = TaskConfig.from_yaml(yaml_data)
+    p_db = get_database(task.prefill_system_name, task.prefill_backend_name, task.prefill_backend_version)
+    d_db = get_database(task.decode_system_name, task.decode_backend_name, task.decode_backend_version)
+    kwargs = task.sweep_disagg_kwargs(prefill_database=p_db, decode_database=d_db)
+    kwargs["runtime_config"].tpot = list(range(1, 20, 1)) + list(range(20, 300, 5))
+    return sweep_disagg(**kwargs)
+
+
+def test_old_vs_new_pareto_parity_hetero_disagg():
+    """Verify hetero-disagg path: prefill on h200_sxm, decode on h100_sxm."""
+    _skip_if_no_db(
+        HETERO_DISAGG_PARAMS["prefill_system"],
+        HETERO_DISAGG_PARAMS["backend_name"],
+        HETERO_DISAGG_PARAMS["backend_version"],
+    )
+    _skip_if_no_db(
+        HETERO_DISAGG_PARAMS["decode_system"],
+        HETERO_DISAGG_PARAMS["backend_name"],
+        HETERO_DISAGG_PARAMS["backend_version"],
+    )
+
+    old_df = _old_path_hetero_disagg(HETERO_DISAGG_PARAMS)
+    new_df = _new_path_hetero_disagg(HETERO_DISAGG_PARAMS)
+
+    assert old_df is not None and len(old_df) > 0, "legacy path returned empty DataFrame"
+    assert len(new_df) > 0, "new path returned empty DataFrame"
+
+    pd.testing.assert_frame_equal(_normalize(old_df), _normalize(new_df), check_like=True)

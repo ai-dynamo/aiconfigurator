@@ -339,3 +339,148 @@ def test_sweep_kwargs_mode_mismatch_raises():
     t_agg = TaskConfig(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
     with pytest.raises(ValueError, match="got 'agg'"):
         t_agg.sweep_disagg_kwargs(prefill_database=None, decode_database=None)
+
+
+# ---------------------------------------------------------------------------
+# validate()
+# ---------------------------------------------------------------------------
+
+
+def test_validate_agg_happy_path():
+    t = TaskConfig(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+    )
+    t.validate()  # no raise
+
+
+def test_validate_agg_requires_model_path():
+    t = TaskConfig(serving_mode="agg")
+    with pytest.raises(ValueError, match="agg mode requires model_path"):
+        t.validate()
+
+
+def test_validate_agg_requires_system_name():
+    t = TaskConfig(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3")
+    with pytest.raises(ValueError, match="agg mode requires system_name"):
+        t.validate()
+
+
+def test_validate_agg_rejects_deepseek_on_vllm():
+    t = TaskConfig(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="vllm",
+    )
+    with pytest.raises(NotImplementedError, match="DeepSeek family on the vLLM backend"):
+        t.validate()
+
+
+def test_validate_agg_rejects_fp8_static_on_non_trtllm():
+    t = TaskConfig(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        gemm_quant_mode=common.GEMMQuantMode.fp8_static,
+    )
+    with pytest.raises(ValueError, match="fp8_static GEMM mode is only supported on the trtllm backend"):
+        t.validate()
+
+
+def test_validate_disagg_happy_path():
+    t = TaskConfig(
+        serving_mode="disagg",
+        prefill_model_path="deepseek-ai/DeepSeek-V3",
+        prefill_system_name="h200_sxm",
+        decode_model_path="deepseek-ai/DeepSeek-V3",
+        decode_system_name="h200_sxm",
+    )
+    t.validate()  # no raise
+
+
+def test_validate_disagg_requires_both_role_model_paths():
+    t = TaskConfig(
+        serving_mode="disagg",
+        prefill_model_path="deepseek-ai/DeepSeek-V3",
+        prefill_system_name="h200_sxm",
+        decode_system_name="h200_sxm",
+        # decode_model_path missing
+    )
+    with pytest.raises(ValueError, match="both prefill_model_path and decode_model_path"):
+        t.validate()
+
+
+def test_validate_disagg_rejects_fp8_static_on_non_trtllm_per_role():
+    t = TaskConfig(
+        serving_mode="disagg",
+        prefill_model_path="deepseek-ai/DeepSeek-V3",
+        prefill_system_name="h200_sxm",
+        prefill_backend_name="sglang",
+        prefill_gemm_quant_mode=common.GEMMQuantMode.fp8_static,
+        decode_model_path="deepseek-ai/DeepSeek-V3",
+        decode_system_name="h200_sxm",
+    )
+    with pytest.raises(ValueError, match="prefill_backend_name='sglang'"):
+        t.validate()
+
+
+def test_validate_invalid_serving_mode_raises():
+    t = TaskConfig(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
+    t.serving_mode = "weird"  # type: ignore[assignment]
+    with pytest.raises(ValueError, match="Invalid serving_mode"):
+        t.validate()
+
+
+# ---------------------------------------------------------------------------
+# to_dict() / to_yaml()
+# ---------------------------------------------------------------------------
+
+
+def test_to_dict_emits_resolved_state_with_enum_names():
+    t = TaskConfig(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        quant_preset="fp8",
+    )
+    d = t.to_dict()
+    assert d["serving_mode"] == "agg"
+    assert d["model_path"] == "deepseek-ai/DeepSeek-V3"
+    # Enums emitted as .name strings (round-trippable through from_yaml)
+    assert d["gemm_quant_mode"] == "fp8"
+    assert d["kvcache_quant_mode"] == "fp8"
+    # Backend version resolved automatically
+    assert d["backend_version"] is not None
+    # Search candidates populated
+    assert d["agg_tp_candidates"] == [1, 2, 4, 8]
+
+
+def test_to_dict_excludes_internal_fields():
+    t = TaskConfig(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
+    d = t.to_dict()
+    # Internal underscore-prefixed fields not exposed
+    assert not any(k.startswith("_") for k in d)
+
+
+def test_to_yaml_round_trips_through_from_yaml():
+    """Ensure to_yaml output is parseable by from_yaml (modulo HF re-resolution)."""
+    import yaml
+
+    t1 = TaskConfig(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        quant_preset="bfloat16",
+    )
+    yaml_text = t1.to_yaml()
+    yaml_data = yaml.safe_load(yaml_text)
+    t2 = TaskConfig.from_yaml(yaml_data)
+
+    # Core fields preserved
+    assert t2.serving_mode == t1.serving_mode
+    assert t2.model_path == t1.model_path
+    assert t2.gemm_quant_mode == t1.gemm_quant_mode
+    assert t2.agg_tp_candidates == t1.agg_tp_candidates
