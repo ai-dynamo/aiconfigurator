@@ -696,6 +696,58 @@ class TaskConfig:
         )
 
     # =====================================================================
+    # Validation
+    # =====================================================================
+
+    def validate(self) -> None:
+        """Check that the resolved task is internally consistent.
+
+        Pure read-only check; does not modify state.  Raises ``ValueError``
+        or ``NotImplementedError`` on the first inconsistency.  Heavier
+        checks (full database support-matrix verification) are out of
+        scope — those happen lazily at sweep time.
+
+        Call this after construction and before passing the config to
+        ``sweep_agg`` / ``sweep_disagg`` to fail fast on bad inputs.
+        """
+        if self.serving_mode == "agg":
+            self._validate_agg()
+        elif self.serving_mode == "disagg":
+            self._validate_disagg()
+        else:
+            raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
+
+    def _validate_agg(self) -> None:
+        if not self.model_path:
+            raise ValueError("agg mode requires model_path")
+        if not self.system_name:
+            raise ValueError("agg mode requires system_name")
+        if self.backend_name == "vllm" and self._model_family == "DEEPSEEK":
+            raise NotImplementedError("AIConfigurator does not yet support the DeepSeek family on the vLLM backend.")
+        if self.gemm_quant_mode == common.GEMMQuantMode.fp8_static and self.backend_name != "trtllm":
+            raise ValueError(
+                f"fp8_static GEMM mode is only supported on the trtllm backend, got backend={self.backend_name!r}."
+            )
+
+    def _validate_disagg(self) -> None:
+        if not self.prefill_model_path or not self.decode_model_path:
+            raise ValueError("disagg mode requires both prefill_model_path and decode_model_path.")
+        if not self.prefill_system_name or not self.decode_system_name:
+            raise ValueError("disagg mode requires both prefill_system_name and decode_system_name.")
+        for role in ("prefill", "decode"):
+            backend = self._role_attr(role, "backend_name")
+            gemm = self._role_attr(role, "gemm_quant_mode")
+            if gemm == common.GEMMQuantMode.fp8_static and backend != "trtllm":
+                raise ValueError(
+                    f"fp8_static GEMM mode is only supported on the trtllm backend, "
+                    f"got {role}_backend_name={backend!r}."
+                )
+            if backend == "vllm" and self._model_family == "DEEPSEEK":
+                raise NotImplementedError(
+                    f"AIConfigurator does not yet support the DeepSeek family on the vLLM backend ({role} side)."
+                )
+
+    # =====================================================================
     # Properties
     # =====================================================================
 
@@ -706,6 +758,42 @@ class TaskConfig:
     @property
     def model_family(self) -> str:
         return self._model_family
+
+    # =====================================================================
+    # Serialization
+    # =====================================================================
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a flat dict snapshot of every user-facing field after resolution.
+
+        Internal fields (those starting with ``_``) are excluded.  Enum
+        values are emitted as their ``.name`` string (e.g.
+        ``GEMMQuantMode.fp8_block`` → ``"fp8_block"``).  None values
+        are kept (so the caller can see which fields are still unresolved).
+
+        Useful for debugging ("what did the user actually get after
+        __post_init__?") and for writing an "effective config" report.
+        """
+        out: dict[str, Any] = {}
+        for f in dataclasses.fields(self):
+            if f.name.startswith("_") or not f.init:
+                continue
+            value = getattr(self, f.name)
+            if hasattr(value, "name") and hasattr(value, "value"):
+                # Enum — emit its name
+                value = value.name
+            out[f.name] = value
+        return out
+
+    def to_yaml(self) -> str:
+        """Return a YAML string of :func:`to_dict` output.
+
+        The result is round-trippable through :func:`from_yaml` (modulo
+        None fields which are accepted by the constructor as defaults).
+        """
+        import yaml
+
+        return yaml.safe_dump(self.to_dict(), sort_keys=False)
 
     # =====================================================================
     # sweep.py kwargs builders
