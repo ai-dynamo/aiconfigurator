@@ -7,11 +7,13 @@ Unit tests for common SDK configurations.
 Tests supported systems, model families, and other common configurations.
 """
 
+import csv
+from collections import Counter
 from pathlib import Path
 
 import pytest
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, perf_database
 
 pytestmark = pytest.mark.unit
 
@@ -83,6 +85,23 @@ class TestSupportMatrix:
         assert "Mode" in matrix[0]
         assert "Status" in matrix[0]
 
+    def test_support_matrix_files_are_split_by_system(self):
+        """Each split support matrix CSV should contain rows for exactly one system."""
+        repo_root = _find_repo_root(Path(__file__))
+        systems_dir = repo_root / "src" / "aiconfigurator" / "systems"
+        split_dir = systems_dir / "support_matrix"
+
+        assert split_dir.is_dir()
+        assert not (systems_dir / "support_matrix.csv").exists()
+
+        csv_paths = sorted(split_dir.glob("*.csv"))
+        assert csv_paths
+
+        for csv_path in csv_paths:
+            with csv_path.open(newline="") as f:
+                systems = {row["System"] for row in csv.DictReader(f)}
+            assert systems == {csv_path.stem}
+
     @pytest.mark.parametrize(
         "model,system,backend,version,architecture,expected_agg,expected_disagg",
         [
@@ -103,6 +122,49 @@ class TestSupportMatrix:
         agg, disagg = common.check_support(model, system, backend, version, architecture)
         assert agg is expected_agg
         assert disagg is expected_disagg
+
+    @pytest.mark.parametrize(
+        "model,backend,version,expected_agg,expected_disagg",
+        [
+            ("zai-org/GLM-5-FP8", "sglang", "0.5.10", True, True),
+            ("zai-org/GLM-5-FP8", "trtllm", "1.3.0rc10", False, False),
+            ("nvidia/GLM-5-NVFP4", "sglang", "0.5.10", True, True),
+            ("nvidia/GLM-5-NVFP4", "vllm", "0.19.0", True, True),
+        ],
+    )
+    def test_check_support_uses_exact_glm5_b200_variant_rows(
+        self, model, backend, version, expected_agg, expected_disagg
+    ):
+        """GLM-5 quantized variants should not inherit BF16 support results."""
+        result = common.check_support(model, "b200_sxm", backend, version, "GlmMoeDsaForCausalLM")
+
+        assert result.agg_supported is expected_agg
+        assert result.disagg_supported is expected_disagg
+        assert result.exact_match is True
+
+    def test_glm5_quantized_variants_cover_all_database_combinations(self):
+        """GLM-5 quantized variants should have exact rows for every support-matrix target."""
+        supported_databases = perf_database.get_supported_databases()
+        expected_keys = {
+            (system, backend, version, mode)
+            for system, backend_versions in supported_databases.items()
+            for backend, versions in backend_versions.items()
+            for version in versions
+            for mode in ("agg", "disagg")
+        }
+
+        matrix = common.get_support_matrix()
+        for model in ("zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"):
+            model_rows = [row for row in matrix if row["HuggingFaceID"] == model]
+            model_key_counts = Counter(
+                (row["System"], row["Backend"], row["Version"], row["Mode"]) for row in model_rows
+            )
+            model_keys = set(model_key_counts)
+
+            assert model_keys == expected_keys
+            assert all(count == 1 for count in model_key_counts.values()), (
+                f"{model} has duplicate support-matrix rows for one or more keys"
+            )
 
     def test_check_support_matches_architecture_fallback_case_insensitively(self, monkeypatch):
         """Test system/backend case normalization for architecture-based fallback."""
@@ -142,3 +204,76 @@ class TestSupportMatrix:
         assert result.agg_supported is True
         assert result.disagg_supported is True
         assert result.exact_match is False
+
+    def test_check_support_ignores_hardware_incompatible_rows_for_architecture_fallback(self, monkeypatch):
+        """Hardware-incompatible quantized variants should not skew architecture majority voting."""
+        monkeypatch.setattr(
+            common,
+            "get_support_matrix",
+            lambda: [
+                {
+                    "HuggingFaceID": "Qwen/Qwen3-32B",
+                    "Architecture": "Qwen3ForCausalLM",
+                    "System": "a100_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.0.0",
+                    "Mode": "agg",
+                    "Status": "PASS",
+                },
+                {
+                    "HuggingFaceID": "Qwen/Qwen3-32B-FP8",
+                    "Architecture": "Qwen3ForCausalLM",
+                    "System": "a100_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.0.0",
+                    "Mode": "agg",
+                    "Status": "HW_INCOMPATIBLE",
+                },
+                {
+                    "HuggingFaceID": "Qwen/Qwen3-32B",
+                    "Architecture": "Qwen3ForCausalLM",
+                    "System": "a100_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.0.0",
+                    "Mode": "disagg",
+                    "Status": "PASS",
+                },
+                {
+                    "HuggingFaceID": "Qwen/Qwen3-32B-FP8",
+                    "Architecture": "Qwen3ForCausalLM",
+                    "System": "a100_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.0.0",
+                    "Mode": "disagg",
+                    "Status": "HW_INCOMPATIBLE",
+                },
+            ],
+        )
+
+        result = common.check_support(
+            "local-qwen-variant",
+            "a100_sxm",
+            backend="trtllm",
+            version="1.0.0",
+            architecture="Qwen3ForCausalLM",
+        )
+
+        assert result.agg_supported is True
+        assert result.disagg_supported is True
+        assert result.agg_pass_count == 1
+        assert result.agg_total_count == 1
+
+
+class TestEncoderLatencyColumn:
+    """Test encoder_latency column is in ColumnsStatic in the correct position."""
+
+    def test_encoder_latency_in_columns_static(self):
+        assert "encoder_latency" in common.ColumnsStatic
+
+    def test_encoder_latency_before_context_latency(self):
+        cols = common.ColumnsStatic
+        assert cols.index("encoder_latency") < cols.index("context_latency")
+
+    def test_encoder_latency_before_generation_latency(self):
+        cols = common.ColumnsStatic
+        assert cols.index("encoder_latency") < cols.index("generation_latency")

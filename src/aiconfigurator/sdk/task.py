@@ -15,9 +15,15 @@ import yaml
 from munch import DefaultMunch, Munch
 
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import _apply_model_quant_defaults, check_is_moe, get_model_family
 from aiconfigurator.sdk.pareto_analysis import get_pareto_front
-from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version, load_system_spec
+from aiconfigurator.sdk.perf_database import (
+    get_database,
+    get_latest_database_version,
+    has_perf_data_not_available_cause,
+    load_system_spec,
+)
 from aiconfigurator.sdk.utils import ListFlowDumper, enumerate_parallel_config, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -165,6 +171,10 @@ class TaskContext:
     database_mode: str | None = None
     free_gpu_memory_fraction: float | None = None
     max_seq_len: int | None = None
+    engine_step_backend: str | None = None
+    image_height: int = 0
+    image_width: int = 0
+    num_images_per_request: int = 1
     profiles: list[str] = field(default_factory=list)
     yaml_patch: dict = field(default_factory=dict)
     yaml_mode: Literal["patch", "replace"] = "patch"
@@ -521,10 +531,14 @@ class TaskConfigFactory:
             "runtime_config": {
                 "isl": ctx.isl,
                 "osl": ctx.osl,
+                "image_height": ctx.image_height,
+                "image_width": ctx.image_width,
+                "num_images_per_request": ctx.num_images_per_request,
                 "prefix": ctx.prefix,
                 "ttft": ctx.ttft,
                 "tpot": ctx.tpot,
                 "request_latency": ctx.request_latency,
+                "engine_step_backend": ctx.engine_step_backend,
             },
             "enable_wideep": ctx.enable_wideep,
             "enable_chunked_prefill": ctx.enable_chunked_prefill,
@@ -812,6 +826,9 @@ class TaskConfig:
         backend_version: str | None = None,
         isl: int = 4000,
         osl: int = 1000,
+        image_height: int = 0,
+        image_width: int = 0,
+        num_images_per_request: int = 1,
         prefix: int = 0,
         ttft: float = 1000,
         tpot: float = 50,
@@ -826,6 +843,7 @@ class TaskConfig:
         database_mode: str | None = None,
         free_gpu_memory_fraction: float | None = None,
         max_seq_len: int | None = None,
+        engine_step_backend: str | None = None,
     ) -> None:
         """
         Initialize a TaskConfig object.
@@ -912,6 +930,9 @@ class TaskConfig:
             backend_version=backend_version,
             isl=isl,
             osl=osl,
+            image_height=image_height,
+            image_width=image_width,
+            num_images_per_request=num_images_per_request,
             prefix=prefix,
             ttft=ttft,
             tpot=tpot,
@@ -926,6 +947,7 @@ class TaskConfig:
             yaml_mode=yaml_mode,
             free_gpu_memory_fraction=free_gpu_memory_fraction,
             max_seq_len=max_seq_len,
+            engine_step_backend=engine_step_backend,
         )
 
         self.config, applied_layers = TaskConfigFactory.create(ctx)
@@ -943,9 +965,13 @@ class TaskConfig:
         self.total_gpus = total_gpus
         self.free_gpu_memory_fraction = free_gpu_memory_fraction
         self.max_seq_len = max_seq_len
+        self.engine_step_backend = engine_step_backend
         self.yaml_mode = yaml_mode
         self.yaml_patch = yaml_patch
         self.profiles = list(effective_profiles)
+
+        if engine_step_backend not in {None, "python", "rust"}:
+            raise ValueError(f"Invalid engine_step_backend: {engine_step_backend!r}. Use 'python' or 'rust'.")
 
         if serving_mode == "agg":
             effective_backend_version = self.config.worker_config.backend_version
@@ -1018,6 +1044,7 @@ class TaskConfig:
         )
 
         model_family = get_model_family(self.model_path)
+        model_is_moe = check_is_moe(self.model_path)
         is_deepseek_fam = model_family in ("DEEPSEEK", "KIMIK25")
         is_deepseek_v32 = model_family == "DEEPSEEKV32"
         is_deepseek_v4 = model_family == "DEEPSEEKV4"
@@ -1132,6 +1159,7 @@ class TaskConfig:
         def _validate_worker_config(
             wc: object, *, validate_context: bool, validate_generation: bool, worker_name: str
         ) -> None:
+            explicit_fmha_mode = _config_get(wc, "fmha_quant_mode") is not None
             _resolve_model_quant_modes(wc, worker_name)
             supported, system_name, backend_version = _load_worker_supported_quant_modes(wc)
             gemm_mode = _to_name(_config_get(wc, "gemm_quant_mode"))
@@ -1139,25 +1167,44 @@ class TaskConfig:
 
             moe_mode = _to_name(_config_get(wc, "moe_quant_mode"))
             wc_moe_backend = _config_get(wc, "moe_backend") or moe_backend
-            if self.backend_name == "sglang" and wc_moe_backend == "megamoe":
-                if not is_deepseek_v4:
-                    raise ValueError("moe_backend='megamoe' is currently supported only for DeepSeek-V4 models.")
-                if not supported.get("dsv4_megamoe_module"):
-                    raise ValueError(
-                        "moe_backend='megamoe' requires dsv4_megamoe_module performance data for "
-                        f"system='{system_name}', backend='{self.backend_name}', version='{backend_version}'."
-                    )
-                _supported_or_raise("dsv4_megamoe_module", moe_mode, supported, system_name, backend_version)
-            elif self.backend_name == "sglang" and wc_moe_backend == "deepep_moe":
-                if validate_context:
-                    _supported_or_raise("wideep_context_moe", moe_mode, supported, system_name, backend_version)
-                if validate_generation:
-                    _supported_or_raise("wideep_generation_moe", moe_mode, supported, system_name, backend_version)
-            else:
-                _supported_or_raise("moe", moe_mode, supported, system_name, backend_version)
+            if model_is_moe:
+                if self.backend_name == "sglang" and wc_moe_backend == "megamoe":
+                    if not is_deepseek_v4:
+                        raise ValueError("moe_backend='megamoe' is currently supported only for DeepSeek-V4 models.")
+                    if not supported.get("dsv4_megamoe_module"):
+                        raise ValueError(
+                            "moe_backend='megamoe' requires dsv4_megamoe_module performance data for "
+                            f"system='{system_name}', backend='{self.backend_name}', version='{backend_version}'."
+                        )
+                    _supported_or_raise("dsv4_megamoe_module", moe_mode, supported, system_name, backend_version)
+                elif self.backend_name == "sglang" and wc_moe_backend == "deepep_moe":
+                    if validate_context:
+                        _supported_or_raise("wideep_context_moe", moe_mode, supported, system_name, backend_version)
+                    if validate_generation:
+                        _supported_or_raise("wideep_generation_moe", moe_mode, supported, system_name, backend_version)
+                else:
+                    _supported_or_raise("moe", moe_mode, supported, system_name, backend_version)
 
             if validate_context:
                 fmha_mode = _to_name(_config_get(wc, "fmha_quant_mode"))
+                context_modes = supported.get(context_attn_key, []) or []
+                if (
+                    not explicit_fmha_mode
+                    and model_architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
+                    and fmha_mode == common.FMHAQuantMode.fp8.name
+                    and context_modes
+                    and common.FMHAQuantMode.fp8.name not in context_modes
+                    and common.FMHAQuantMode.bfloat16.name in context_modes
+                ):
+                    wc["fmha_quant_mode"] = common.FMHAQuantMode.bfloat16
+                    fmha_mode = common.FMHAQuantMode.bfloat16.name
+                    logger.info(
+                        "Using bfloat16 FMHA for %s because %s/%s %s data does not support fp8",
+                        worker_name,
+                        system_name,
+                        self.backend_name,
+                        context_attn_key,
+                    )
                 _supported_or_raise(context_attn_key, fmha_mode, supported, system_name, backend_version)
 
             if validate_generation:
@@ -1217,7 +1264,7 @@ class TaskConfig:
         printable.update(
             {
                 k: runtime_dict.get(k)
-                for k in ("isl", "osl", "prefix", "ttft", "tpot", "request_latency")
+                for k in ("isl", "osl", "prefix", "ttft", "tpot", "request_latency", "engine_step_backend")
                 if runtime_dict.get(k) is not None
             }
         )
@@ -1341,10 +1388,14 @@ class TaskRunner:
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
             osl=task_config.runtime_config.osl,
+            image_height=getattr(task_config.runtime_config, "image_height", 0),
+            image_width=getattr(task_config.runtime_config, "image_width", 0),
+            num_images_per_request=getattr(task_config.runtime_config, "num_images_per_request", 1),
             prefix=task_config.runtime_config.prefix,
             ttft=task_config.runtime_config.ttft,
             tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
             request_latency=getattr(task_config.runtime_config, "request_latency", None),
+            engine_step_backend=getattr(task_config.runtime_config, "engine_step_backend", None),
         )
         logger.debug("Task %s: Setting up database", task_config.task_name)
         try:
@@ -1434,10 +1485,14 @@ class TaskRunner:
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
             osl=task_config.runtime_config.osl,
+            image_height=getattr(task_config.runtime_config, "image_height", 0),
+            image_width=getattr(task_config.runtime_config, "image_width", 0),
+            num_images_per_request=getattr(task_config.runtime_config, "num_images_per_request", 1),
             prefix=task_config.runtime_config.prefix,
             ttft=task_config.runtime_config.ttft,
             tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
             request_latency=getattr(task_config.runtime_config, "request_latency", None),
+            engine_step_backend=getattr(task_config.runtime_config, "engine_step_backend", None),
         )
 
         # Get database mode from config
@@ -1652,12 +1707,30 @@ class TaskRunner:
                 result = self.run_disagg(task_config.config, autoscale=autoscale)
             else:
                 raise ValueError(f"Invalid serving mode: {serving_mode}")
-        except Exception:
-            logger.exception(
-                "Error running pareto analysis for %s in %s mode",
+        except NoFeasibleConfigError as exc:
+            logger.warning(
+                "No feasible configuration found for %s in %s mode: %s",
                 task_config.task_name,
                 serving_mode,
+                exc,
             )
+            result = None
+            raise
+        except Exception as exc:
+            if has_perf_data_not_available_cause(exc):
+                logger.log(
+                    logging.ERROR,
+                    "Error running pareto analysis for %s in %s mode: %s",
+                    task_config.task_name,
+                    serving_mode,
+                    exc,
+                )
+            else:
+                logger.exception(
+                    "Error running pareto analysis for %s in %s mode",
+                    task_config.task_name,
+                    serving_mode,
+                )
             result = None
             raise
 

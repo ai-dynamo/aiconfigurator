@@ -14,6 +14,7 @@ from aiconfigurator.logging_utils import use_plain_cli_output
 from aiconfigurator.sdk import config
 from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.common import ColumnsAgg
+from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.inference_session import DisaggInferenceSession, InferenceSession
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
@@ -173,7 +174,7 @@ def agg_pareto(
                 "parallel configurations. Try reducing --batch-size, increasing "
                 "--free-gpu-memory-fraction, or using a system with more VRAM per GPU."
             )
-        raise RuntimeError(
+        raise NoFeasibleConfigError(
             "No results found for any parallel configuration. No configuration satisfied the "
             "TTFT/TPOT or request-latency constraints. Try relaxing --ttft, --tpot, or "
             "--request_latency (e.g., higher ttft/tpot or higher request_latency)."
@@ -254,7 +255,18 @@ def disagg_pareto(
     prefill_backend = get_backend(prefill_backend_name)
     decode_backend = get_backend(decode_backend_name)
 
-    disagg_sess = DisaggInferenceSession(prefill_database, prefill_backend, decode_database, decode_backend)
+    encoder_database = kwargs.get("encoder_database")
+    encoder_backend_name = kwargs.get("encoder_backend_name")
+    encoder_backend = get_backend(encoder_backend_name) if encoder_backend_name else None
+
+    disagg_sess = DisaggInferenceSession(
+        prefill_database,
+        prefill_backend,
+        decode_database,
+        decode_backend,
+        encoder_database=encoder_database,
+        encoder_backend=encoder_backend,
+    )
     disagg_sess.set_latency_correction_scales(prefill_latency_correction_scale, decode_latency_correction_scale)
 
     # None means we use internally tuned default values for rate-matching degradation factors.

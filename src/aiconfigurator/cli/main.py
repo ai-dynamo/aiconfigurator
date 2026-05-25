@@ -13,15 +13,18 @@ import pandas as pd
 import yaml
 
 from aiconfigurator import __version__
+from aiconfigurator.cli.estimate_detail_report import detail_requests_time, format_estimate_detail_report
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
 from aiconfigurator.cli.utils import merge_experiment_results_by_mode, process_experiment_result
 from aiconfigurator.generator.api import (
     add_generator_override_arguments,
     generate_naive_config,
     generator_cli_helper,
+    load_generator_overrides_from_args,
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner, UnsupportedWideepConfigError
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
@@ -124,6 +127,13 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
         help="Deployment target platform. Options: dynamo-j2 (default, Jinja2 templates), "
         "dynamo-python (Dynamo Python config modifiers), llm-d (llm-d Helm values).",
     )
+    common_parser.add_argument(
+        "--engine-step-backend",
+        choices=["python", "rust"],
+        default=None,
+        help="Experimental static latency backend. Default keeps the existing Python SDK path; "
+        "use 'rust' to route static step estimates through the Rust FPM estimator.",
+    )
     add_generator_override_arguments(common_parser)
     return common_parser
 
@@ -217,6 +227,21 @@ def _add_default_mode_arguments(parser):
     )
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length. Default: 4000.")
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length. Default: 1000.")
+    parser.add_argument(
+        "--image-height",
+        type=int,
+        default=0,
+        help="Image height in pixels for vision-language models. Default: 0 (disabled).",
+    )
+    parser.add_argument(
+        "--image-width",
+        type=int,
+        default=0,
+        help="Image width in pixels for vision-language models. Default: 0 (disabled).",
+    )
+    parser.add_argument(
+        "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
+    )
     parser.add_argument(
         "--ttft",
         type=float,
@@ -361,10 +386,12 @@ def _add_estimate_mode_arguments(parser):
     )
     parser.add_argument(
         "--estimate-mode",
-        choices=["agg", "disagg"],
+        choices=["agg", "disagg", "static", "static_ctx", "static_gen"],
         type=str,
         default="agg",
-        help="Estimation mode: 'agg' for aggregated (default), 'disagg' for disaggregated.",
+        help="Estimation mode: 'agg' (default, IFB), 'disagg' (separate prefill/decode workers), "
+        "or one of the static modes 'static' / 'static_ctx' / 'static_gen' for a single-pass, "
+        "no-IFB latency/memory breakdown (mirrors the webapp Static Tab).",
     )
     parser.add_argument(
         "--system",
@@ -397,78 +424,176 @@ def _add_estimate_mode_arguments(parser):
     parser.add_argument("--isl", type=int, default=1024, help="Input sequence length. Default: 1024.")
     parser.add_argument("--osl", type=int, default=1024, help="Output sequence length. Default: 1024.")
     parser.add_argument(
-        "--batch-size", type=int, default=128, help="Batch size (max concurrent requests, used for agg). Default: 128."
+        "--batch-size",
+        "--bs",
+        dest="batch_size",
+        type=int,
+        default=128,
+        help="Batch size (max concurrent requests, used for agg/static). Default: 128. Alias: --bs.",
     )
     parser.add_argument(
         "--ctx-tokens",
         type=int,
         default=None,
-        help="Context tokens budget for IFB scheduling. Default: same as ISL.",
+        help="Context tokens budget for IFB scheduling (agg only). Default: same as ISL.",
     )
 
     # Shared parallelism defaults (also used as fallback for prefill/decode-specific args)
-    parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallelism size. Default: 1.")
-    parser.add_argument("--pp-size", type=int, default=1, help="Pipeline parallelism size. Default: 1.")
-    parser.add_argument("--attention-dp-size", type=int, default=1, help="Attention data parallelism size. Default: 1.")
-    parser.add_argument("--moe-tp-size", type=int, default=None, help="MoE tensor parallelism size.")
-    parser.add_argument("--moe-ep-size", type=int, default=None, help="MoE expert parallelism size.")
+    parser.add_argument(
+        "--tp-size",
+        "--tp",
+        dest="tp_size",
+        type=int,
+        default=1,
+        help="Tensor parallelism size. Default: 1. Alias: --tp.",
+    )
+    parser.add_argument(
+        "--pp-size",
+        "--pp",
+        dest="pp_size",
+        type=int,
+        default=1,
+        help="Pipeline parallelism size. Default: 1. Alias: --pp.",
+    )
+    parser.add_argument(
+        "--attention-dp-size",
+        "--dp",
+        dest="attention_dp_size",
+        type=int,
+        default=1,
+        help="Attention data parallelism size. Default: 1. Alias: --dp.",
+    )
+    parser.add_argument(
+        "--moe-tp-size",
+        "--etp",
+        dest="moe_tp_size",
+        type=int,
+        default=None,
+        help="MoE tensor parallelism size. Alias: --etp.",
+    )
+    parser.add_argument(
+        "--moe-ep-size",
+        "--ep",
+        dest="moe_ep_size",
+        type=int,
+        default=None,
+        help="MoE expert parallelism size. Alias: --ep.",
+    )
 
     # Disagg: prefill-specific overrides (fall back to shared args when None)
     parser.add_argument(
-        "--prefill-tp-size", type=int, default=None, help="Prefill TP size (disagg). Defaults to --tp-size."
+        "--prefill-tp-size",
+        "--p-tp",
+        dest="prefill_tp_size",
+        type=int,
+        default=None,
+        help="Prefill TP size (disagg). Defaults to --tp-size. Alias: --p-tp.",
     )
     parser.add_argument(
-        "--prefill-pp-size", type=int, default=None, help="Prefill PP size (disagg). Defaults to --pp-size."
+        "--prefill-pp-size",
+        "--p-pp",
+        dest="prefill_pp_size",
+        type=int,
+        default=None,
+        help="Prefill PP size (disagg). Defaults to --pp-size. Alias: --p-pp.",
     )
     parser.add_argument(
         "--prefill-attention-dp-size",
+        "--p-dp",
+        dest="prefill_attention_dp_size",
         type=int,
         default=None,
-        help="Prefill attention DP size (disagg). Defaults to --attention-dp-size.",
+        help="Prefill attention DP size (disagg). Defaults to --attention-dp-size. Alias: --p-dp.",
     )
     parser.add_argument(
-        "--prefill-moe-tp-size", type=int, default=None, help="Prefill MoE TP size (disagg). Defaults to --moe-tp-size."
+        "--prefill-moe-tp-size",
+        "--p-etp",
+        dest="prefill_moe_tp_size",
+        type=int,
+        default=None,
+        help="Prefill MoE TP size (disagg). Defaults to --moe-tp-size. Alias: --p-etp.",
     )
     parser.add_argument(
-        "--prefill-moe-ep-size", type=int, default=None, help="Prefill MoE EP size (disagg). Defaults to --moe-ep-size."
+        "--prefill-moe-ep-size",
+        "--p-ep",
+        dest="prefill_moe_ep_size",
+        type=int,
+        default=None,
+        help="Prefill MoE EP size (disagg). Defaults to --moe-ep-size. Alias: --p-ep.",
     )
     parser.add_argument(
-        "--prefill-batch-size", type=int, default=None, help="Prefill batch size (disagg). Required for disagg mode."
+        "--prefill-batch-size",
+        "--p-bs",
+        dest="prefill_batch_size",
+        type=int,
+        default=None,
+        help="Prefill batch size (disagg). Required for disagg mode. Alias: --p-bs.",
     )
     parser.add_argument(
         "--prefill-num-workers",
+        "--p-workers",
+        dest="prefill_num_workers",
         type=int,
         default=None,
-        help="Number of prefill workers (disagg). Required for disagg mode.",
+        help="Number of prefill workers (disagg). Required for disagg mode. Alias: --p-workers.",
     )
 
     # Disagg: decode-specific overrides (fall back to shared args when None)
     parser.add_argument(
-        "--decode-tp-size", type=int, default=None, help="Decode TP size (disagg). Defaults to --tp-size."
+        "--decode-tp-size",
+        "--d-tp",
+        dest="decode_tp_size",
+        type=int,
+        default=None,
+        help="Decode TP size (disagg). Defaults to --tp-size. Alias: --d-tp.",
     )
     parser.add_argument(
-        "--decode-pp-size", type=int, default=None, help="Decode PP size (disagg). Defaults to --pp-size."
+        "--decode-pp-size",
+        "--d-pp",
+        dest="decode_pp_size",
+        type=int,
+        default=None,
+        help="Decode PP size (disagg). Defaults to --pp-size. Alias: --d-pp.",
     )
     parser.add_argument(
         "--decode-attention-dp-size",
+        "--d-dp",
+        dest="decode_attention_dp_size",
         type=int,
         default=None,
-        help="Decode attention DP size (disagg). Defaults to --attention-dp-size.",
+        help="Decode attention DP size (disagg). Defaults to --attention-dp-size. Alias: --d-dp.",
     )
     parser.add_argument(
-        "--decode-moe-tp-size", type=int, default=None, help="Decode MoE TP size (disagg). Defaults to --moe-tp-size."
+        "--decode-moe-tp-size",
+        "--d-etp",
+        dest="decode_moe_tp_size",
+        type=int,
+        default=None,
+        help="Decode MoE TP size (disagg). Defaults to --moe-tp-size. Alias: --d-etp.",
     )
     parser.add_argument(
-        "--decode-moe-ep-size", type=int, default=None, help="Decode MoE EP size (disagg). Defaults to --moe-ep-size."
+        "--decode-moe-ep-size",
+        "--d-ep",
+        dest="decode_moe_ep_size",
+        type=int,
+        default=None,
+        help="Decode MoE EP size (disagg). Defaults to --moe-ep-size. Alias: --d-ep.",
     )
     parser.add_argument(
-        "--decode-batch-size", type=int, default=None, help="Decode batch size (disagg). Required for disagg mode."
+        "--decode-batch-size",
+        "--d-bs",
+        dest="decode_batch_size",
+        type=int,
+        default=None,
+        help="Decode batch size (disagg). Required for disagg mode. Alias: --d-bs.",
     )
     parser.add_argument(
         "--decode-num-workers",
+        "--d-workers",
+        dest="decode_num_workers",
         type=int,
         default=None,
-        help="Number of decode workers (disagg). Required for disagg mode.",
+        help="Number of decode workers (disagg). Required for disagg mode. Alias: --d-workers.",
     )
 
     # Quantization
@@ -520,10 +645,44 @@ def _add_estimate_mode_arguments(parser):
         "EMPIRICAL: SOL+empirical factor only. SOL: theoretical Speed-of-Light only.",
     )
     parser.add_argument(
-        "--print-per-ops-latency",
-        action="store_true",
-        default=False,
-        help="Print per-operation latency breakdown for mix step and generation-only step.",
+        "--detail",
+        type=str,
+        default=None,
+        help="Comma-separated breakdown sections to print after the summary box. "
+        "Choices: summary, memory, time, energy, source, all. "
+        "Example: --detail memory,time. Default: no extra detail. "
+        "Use 'all' to print every section.",
+    )
+    # Common workload extras — apply to agg / disagg / static / static_ctx / static_gen.
+    parser.add_argument(
+        "--prefix",
+        type=int,
+        default=0,
+        help="(common) Prefix cache length (subset of ISL already cached per request). Default: 0. "
+        "Applied to agg, disagg, and all static modes.",
+    )
+    parser.add_argument(
+        "--nextn",
+        type=int,
+        default=0,
+        help="(common) Number of MTP/speculative draft tokens. Default: 0 (disabled). "
+        "Applied to agg, disagg, and all static modes. "
+        "Note: unlike `cli default`, `cli estimate` does NOT auto-set nextn=1 for "
+        "DeepSeek/Qwen3.5 — pass --nextn 1 explicitly when you want MTP.",
+    )
+    parser.add_argument(
+        "--nextn-accept-rates",
+        type=str,
+        default="0.85,0.3,0,0,0",
+        help="(common) Comma-separated acceptance rates for the MTP draft tokens "
+        "(only the first --nextn are used). Default: '0.85,0.3,0,0,0'.",
+    )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=32,
+        help="(static-only) Stride used by run_static to accelerate the OSL sweep. "
+        "Ignored for agg / disagg modes. Default: 32.",
     )
     parser.add_argument(
         "--free-gpu-memory-fraction",
@@ -683,6 +842,55 @@ def _get_backend_data_path(system_name: str, backend_name: str, backend_version:
     return None
 
 
+_SGLANG_DEEPEP_REQUIRED_FILES = (
+    common.PerfDataFilename.wideep_deepep_normal.value,
+    common.PerfDataFilename.wideep_deepep_ll.value,
+)
+
+
+def _sglang_deepep_perf_data_skip_reason(
+    system_name: str,
+    decode_system_name: str | None,
+    backend_version: str | None,
+) -> str | None:
+    """Return a concise skip reason when optional SGLang DeepEP data is absent."""
+    missing_paths: list[str] = []
+    missing_versions: list[str] = []
+
+    systems_to_check = [system_name]
+    if decode_system_name and decode_system_name != system_name:
+        systems_to_check.append(decode_system_name)
+
+    for system_to_check in systems_to_check:
+        resolved_version = backend_version or perf_database.get_latest_database_version(
+            system=system_to_check,
+            backend=common.BackendName.sglang.value,
+        )
+        if resolved_version is None:
+            missing_versions.append(f"{system_to_check}/{common.BackendName.sglang.value}")
+            continue
+
+        data_path = _get_backend_data_path(system_to_check, common.BackendName.sglang.value, resolved_version)
+        if data_path is None:
+            missing_paths.extend(
+                f"{system_to_check}/{common.BackendName.sglang.value}/{resolved_version}/{filename}"
+                for filename in _SGLANG_DEEPEP_REQUIRED_FILES
+            )
+            continue
+
+        missing_paths.extend(
+            os.path.join(data_path, filename)
+            for filename in _SGLANG_DEEPEP_REQUIRED_FILES
+            if not os.path.isfile(os.path.join(data_path, filename))
+        )
+
+    if missing_versions:
+        return "no database version available for " + ", ".join(missing_versions)
+    if missing_paths:
+        return "missing required DeepEP perf data: " + ", ".join(missing_paths)
+    return None
+
+
 def _ensure_backend_version_available(system_name: str, backend_name: str, backend_version: str | None = None) -> None:
     """
     Validate that the backend is supported for the given system and version.
@@ -752,6 +960,9 @@ def build_default_task_configs(
     database_mode: str = "SILICON",
     isl: int = 4000,
     osl: int = 1000,
+    image_height: int = 0,
+    image_width: int = 0,
+    num_images: int = 1,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -763,6 +974,7 @@ def build_default_task_configs(
     max_seq_len: int | None = None,
     enable_wideep: bool = False,
     moe_backend: str | None = None,
+    engine_step_backend: str | None = None,
 ) -> dict[str, TaskConfig]:
     """Build agg and disagg task configs for default mode comparison.
 
@@ -786,6 +998,7 @@ def build_default_task_configs(
         enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
         enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
         moe_backend: Explicit SGLang MoE backend override.
+        engine_step_backend: Experimental static latency backend ("python" or "rust").
 
     Returns:
         Dict with TaskConfig objects. When backend='auto', returns 6 configs
@@ -895,6 +1108,9 @@ def build_default_task_configs(
         "total_gpus": total_gpus,
         "isl": isl,
         "osl": osl,
+        "image_height": image_height,
+        "image_width": image_width,
+        "num_images_per_request": num_images,
         "ttft": ttft,
         "tpot": tpot,
         "request_latency": request_latency,
@@ -904,6 +1120,7 @@ def build_default_task_configs(
         "free_gpu_memory_fraction": free_gpu_memory_fraction,
         "max_seq_len": max_seq_len,
         "enable_wideep": enable_wideep,
+        "engine_step_backend": engine_step_backend,
     }
 
     def _sglang_moe_backend_override(backend_name: str) -> str | None:
@@ -940,15 +1157,19 @@ def build_default_task_configs(
 
         # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
         if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
-            deepep_kwargs = dict(agg_kwargs)
-            deepep_kwargs["moe_backend"] = "deepep_moe"
-            try:
-                deepep_task = TaskConfig(serving_mode="agg", **deepep_kwargs)
-            except UnsupportedWideepConfigError as exc:
-                logger.info("Skipping SGLang DeepEP agg sweep: %s", exc)
+            skip_reason = _sglang_deepep_perf_data_skip_reason(system, None, backend_version)
+            if skip_reason:
+                logger.info("Skipping SGLang DeepEP agg sweep: %s", skip_reason)
             else:
-                deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
-                task_configs[deepep_name] = deepep_task
+                deepep_kwargs = dict(agg_kwargs)
+                deepep_kwargs["moe_backend"] = "deepep_moe"
+                try:
+                    deepep_task = TaskConfig(serving_mode="agg", **deepep_kwargs)
+                except UnsupportedWideepConfigError as exc:
+                    logger.info("Skipping SGLang DeepEP agg sweep: %s", exc)
+                else:
+                    deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
+                    task_configs[deepep_name] = deepep_task
 
         if total_gpus < 2:
             logger.warning("Skipping disagg since it requires at least 2 GPUs.")
@@ -968,15 +1189,19 @@ def build_default_task_configs(
 
         # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
         if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
-            deepep_disagg_kwargs = dict(disagg_kwargs)
-            deepep_disagg_kwargs["moe_backend"] = "deepep_moe"
-            try:
-                deepep_disagg_task = TaskConfig(serving_mode="disagg", **deepep_disagg_kwargs)
-            except UnsupportedWideepConfigError as exc:
-                logger.info("Skipping SGLang DeepEP disagg sweep: %s", exc)
+            skip_reason = _sglang_deepep_perf_data_skip_reason(system, decode_system, backend_version)
+            if skip_reason:
+                logger.info("Skipping SGLang DeepEP disagg sweep: %s", skip_reason)
             else:
-                deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
-                task_configs[deepep_name] = deepep_disagg_task
+                deepep_disagg_kwargs = dict(disagg_kwargs)
+                deepep_disagg_kwargs["moe_backend"] = "deepep_moe"
+                try:
+                    deepep_disagg_task = TaskConfig(serving_mode="disagg", **deepep_disagg_kwargs)
+                except UnsupportedWideepConfigError as exc:
+                    logger.info("Skipping SGLang DeepEP disagg sweep: %s", exc)
+                else:
+                    deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
+                    task_configs[deepep_name] = deepep_disagg_task
     return task_configs
 
 
@@ -1000,6 +1225,7 @@ _EXPERIMENT_RESERVED_KEYS = {
     "enable_eplb",
     "total_gpus",
     "database_mode",
+    "engine_step_backend",
 }
 
 
@@ -1022,6 +1248,7 @@ def _build_yaml_config(exp_config: dict, config_section: dict) -> dict | None:
 def build_experiment_task_configs(
     yaml_path: str | None = None,
     config: dict[str, Any] | None = None,
+    engine_step_backend: str | None = None,
 ) -> dict[str, TaskConfig]:
     """Build task configs from YAML file or config dict.
 
@@ -1029,6 +1256,8 @@ def build_experiment_task_configs(
         yaml_path: Path to a YAML file containing experiment definitions.
         config: Dict containing experiment definitions (alternative to yaml_path).
             Keys are experiment names, values are experiment configs.
+        engine_step_backend: Optional global experimental static-latency backend.
+            Per-experiment ``engine_step_backend`` entries take precedence.
 
     Returns:
         Dict mapping experiment names to TaskConfig objects.
@@ -1139,6 +1368,9 @@ def build_experiment_task_configs(
             task_kwargs["enable_chunked_prefill"] = exp_config["enable_chunked_prefill"]
         if "database_mode" in exp_config:
             task_kwargs["database_mode"] = exp_config["database_mode"]
+        effective_engine_step_backend = exp_config.get("engine_step_backend", engine_step_backend)
+        if effective_engine_step_backend is not None:
+            task_kwargs["engine_step_backend"] = effective_engine_step_backend
 
         yaml_config = _build_yaml_config(exp_config, config_section)
         if yaml_config:
@@ -1219,8 +1451,15 @@ def _execute_task_configs(
                 )
                 logger.warning(msg)
                 failure_messages.append(msg)
+        except NoFeasibleConfigError as exc:
+            msg = f"Experiment {exp_name} found no SLA-feasible configuration: {exc}"
+            logger.warning(msg)
+            failure_messages.append(msg)
         except Exception as exc:
-            logger.exception("Error running experiment %s", exp_name)
+            if perf_database.has_perf_data_not_available_cause(exc):
+                logger.log(logging.ERROR, "Error running experiment %s: %s", exp_name, exc)
+            else:
+                logger.exception("Error running experiment %s", exp_name)
             failure_messages.append(f"Experiment {exp_name} failed: {exc}")
 
     if len(results) < 1:
@@ -1291,6 +1530,8 @@ def _run_generate_mode(args):
     model_path = args.model_path
     logger.info("Generating naive agg configuration for %s on %d GPUs", model_path, args.total_gpus)
 
+    generator_overrides = load_generator_overrides_from_args(args)
+
     # Use the public API function
     result = generate_naive_config(
         model_path=model_path,
@@ -1298,6 +1539,9 @@ def _run_generate_mode(args):
         system=args.system,
         backend=args.backend,
         output_dir=args.save_dir or "./output",
+        generated_config_version=getattr(args, "generated_config_version", None),
+        generator_dynamo_version=getattr(args, "generator_dynamo_version", None),
+        generator_overrides=generator_overrides,
         deployment_target=getattr(args, "deployment_target", "dynamo-j2"),
     )
 
@@ -1322,7 +1566,7 @@ def _run_generate_mode(args):
     print(f"  Total GPUs:      {args.total_gpus} (using {gpus_used})")
     print(f"  Parallelism:     TP={tp}, PP={pp}")
     print(f"  Replicas:        {replicas} (each using {gpus_per_worker} GPUs)")
-    print(f"  Max Batch Size:  {generator_params['params']['agg']['max_batch_size']}")
+    print(f"  Max Batch Size:  {_get_naive_summary_max_batch_size(generator_params)}")
     print(f"  Output:          {output_dir}")
     print("=" * 60)
     print("\nGenerated files:")
@@ -1344,6 +1588,20 @@ def _run_generate_mode(args):
     print("-" * 60)
     print("\nTo deploy, run the generated shell script or apply the k8s manifest.")
     print("=" * 60 + "\n")
+
+
+def _get_naive_summary_max_batch_size(generator_params: dict[str, Any]) -> Any:
+    params = generator_params.get("params", {})
+    if not isinstance(params, dict):
+        return "n/a"
+    for role in ("agg", "prefill", "decode"):
+        role_params = params.get(role)
+        if isinstance(role_params, dict) and role_params.get("max_batch_size") is not None:
+            return role_params["max_batch_size"]
+    for role_params in params.values():
+        if isinstance(role_params, dict) and role_params.get("max_batch_size") is not None:
+            return role_params["max_batch_size"]
+    return "n/a"
 
 
 def _run_support_matrix_mode(args):
@@ -1500,49 +1758,6 @@ def _run_support_mode(args):
     print("=" * 60 + "\n")
 
 
-def _print_per_ops_section(title: str, ops: dict) -> None:
-    """Print a single section of per-op latency breakdown."""
-    total = sum(ops.values())
-    print(f"  {title} (total: {total:.3f} ms)")
-    for op_name, latency in sorted(ops.items(), key=lambda x: -x[1]):
-        pct = latency / total * 100 if total > 0 else 0
-        print(f"    {op_name:<40s} {latency:>10.3f} ms  ({pct:>5.1f}%)")
-
-
-def _print_per_ops_latency(per_ops_data: dict) -> None:
-    """Print per-operation latency breakdown from run_agg or run_disagg."""
-    print("\n" + "-" * 60)
-    print("  Per-Operation Latency Breakdown")
-    print("-" * 60)
-
-    # Agg mode: mix_step + genonly_step + scheduling
-    scheduling = per_ops_data.get("scheduling")
-    if scheduling:
-        num_mix = scheduling.get("num_mix_steps", 0)
-        num_genonly = scheduling.get("num_genonly_steps", 0)
-        print(f"  Scheduling: {num_mix:.0f} mix steps + {num_genonly:.0f} gen-only steps")
-        print()
-
-    mix_ops = per_ops_data.get("mix_step", {})
-    if mix_ops:
-        _print_per_ops_section("Mix Step", mix_ops)
-
-    genonly_ops = per_ops_data.get("genonly_step", {})
-    if genonly_ops:
-        print()
-        _print_per_ops_section("Gen-Only Step", genonly_ops)
-
-    # Disagg mode: prefill + decode
-    prefill_ops = per_ops_data.get("prefill", {})
-    if prefill_ops:
-        _print_per_ops_section("Prefill (static_ctx)", prefill_ops)
-
-    decode_ops = per_ops_data.get("decode", {})
-    if decode_ops:
-        print()
-        _print_per_ops_section("Decode (static_gen)", decode_ops)
-
-
 def _run_estimate_mode(args):
     """Run the estimate mode to predict TTFT, TPOT, and power for a single config."""
     from aiconfigurator.cli.api import cli_estimate
@@ -1559,7 +1774,25 @@ def _run_estimate_mode(args):
         args.batch_size,
     )
 
-    # Build kwargs shared between agg and disagg
+    # Parse nextn accept rates (string form on CLI -> list of floats for API).
+    nextn_accept_rates = None
+    if args.nextn_accept_rates:
+        try:
+            nextn_accept_rates = [float(x) for x in args.nextn_accept_rates.split(",") if x.strip() != ""]
+        except ValueError as exc:
+            raise SystemExit(
+                f"Invalid --nextn-accept-rates {args.nextn_accept_rates!r}; expected comma-separated floats."
+            ) from exc
+
+    # Resolve --detail before running the estimate so time detail can compare
+    # against a second SOL-mode result.
+    detail_arg = (args.detail or "").strip()
+    try:
+        needs_sol_detail = bool(detail_arg) and detail_requests_time(detail_arg)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    # Build kwargs shared between agg, disagg, and static
     estimate_kwargs = dict(
         model_path=args.model_path,
         system_name=args.system,
@@ -1583,6 +1816,11 @@ def _run_estimate_mode(args):
         comm_quant_mode=args.comm_quant_mode,
         free_gpu_memory_fraction=args.free_gpu_memory_fraction,
         max_seq_len=args.max_seq_len,
+        engine_step_backend=args.engine_step_backend,
+        prefix=args.prefix,
+        nextn=args.nextn,
+        nextn_accept_rates=nextn_accept_rates,
+        stride=args.stride,
     )
 
     if estimate_mode == "disagg":
@@ -1605,6 +1843,14 @@ def _run_estimate_mode(args):
         )
 
     result = cli_estimate(**estimate_kwargs)
+    sol_result = None
+    if needs_sol_detail:
+        if args.database_mode == common.DatabaseMode.SOL.name:
+            sol_result = result
+        else:
+            sol_estimate_kwargs = dict(estimate_kwargs)
+            sol_estimate_kwargs["database_mode"] = common.DatabaseMode.SOL.name
+            sol_result = cli_estimate(**sol_estimate_kwargs)
 
     print("\n" + "=" * 60)
     print(f"  Performance Estimate ({result.mode})")
@@ -1616,12 +1862,15 @@ def _run_estimate_mode(args):
     print(f"  ISL:              {result.isl}")
     print(f"  OSL:              {result.osl}")
 
-    if result.mode == "agg":
-        print(f"  Batch Size:       {result.batch_size}")
-        print(f"  Context Tokens:   {result.ctx_tokens}")
-        print(f"  TP Size:          {result.tp_size}")
-        print(f"  PP Size:          {result.pp_size}")
-    else:
+    # ``--prefix`` and ``--nextn`` are common parameters applied to every
+    # mode (agg / disagg / static*), so surface them in the summary box for
+    # all modes rather than gating on mode.
+    if args.prefix:
+        print(f"  Prefix:           {args.prefix}")
+    if args.nextn:
+        print(f"  MTP nextn:        {args.nextn} (accept_rates={args.nextn_accept_rates})")
+
+    if result.mode == "disagg":
         raw = result.raw
         print(f"  (p) TP:           {raw.get('(p)tp', 'N/A')}")
         print(f"  (p) PP:           {raw.get('(p)pp', 'N/A')}")
@@ -1632,11 +1881,28 @@ def _run_estimate_mode(args):
         print(f"  (d) BS:           {raw.get('(d)bs', 'N/A')}")
         print(f"  (d) Workers:      {raw.get('(d)workers', 'N/A')}")
         print(f"  Total GPUs:       {raw.get('num_total_gpus', 'N/A')}")
+    else:
+        # agg / static / static_ctx / static_gen share the same single-replica shape.
+        print(f"  Batch Size:       {result.batch_size}")
+        if result.mode == "agg":
+            print(f"  Context Tokens:   {result.ctx_tokens}")
+        print(f"  TP Size:          {result.tp_size}")
+        print(f"  PP Size:          {result.pp_size}")
+        if args.attention_dp_size and args.attention_dp_size != 1:
+            print(f"  Attention DP:     {args.attention_dp_size}")
 
     print("-" * 60)
-    print(f"  TTFT:             {result.ttft:.3f} ms")
-    print(f"  TPOT:             {result.tpot:.3f} ms")
-    print(f"  Request Latency:  {result.request_latency:.3f} ms")
+    if result.mode == "static_gen":
+        # ttft is zero by construction; surface generation_latency instead.
+        gen_lat = float(result.raw.get("generation_latency", 0.0) or 0.0)
+        print(f"  Generation lat.:  {gen_lat:.3f} ms")
+        print(f"  TPOT:             {result.tpot:.3f} ms")
+    elif result.mode == "static_ctx":
+        print(f"  TTFT:             {result.ttft:.3f} ms")
+    else:
+        print(f"  TTFT:             {result.ttft:.3f} ms")
+        print(f"  TPOT:             {result.tpot:.3f} ms")
+        print(f"  Request Latency:  {result.request_latency:.3f} ms")
     print(f"  Power (per GPU):  {result.power_w:.1f} W")
     print("-" * 60)
     print(f"  tokens/s:         {result.tokens_per_second:,.2f}")
@@ -1644,19 +1910,29 @@ def _run_estimate_mode(args):
     print(f"  tokens/s/user:    {result.tokens_per_second_per_user:,.2f}")
     print(f"  seq/s:            {result.seq_per_second:,.3f}")
     print(f"  Concurrency:      {result.concurrency:.0f}")
-    if result.mode == "agg":
-        print(f"  Memory (GPU):     {result.memory:.2f} GB")
-    else:
+    if result.mode == "disagg":
         raw = result.raw
         print(f"  (p) Memory:       {raw.get('(p)memory', 'N/A')} GB")
         print(f"  (d) Memory:       {raw.get('(d)memory', 'N/A')} GB")
+    else:
+        print(f"  Memory (GPU):     {result.memory:.2f} GB")
     print("=" * 60)
 
     if result.kv_cache_warning:
         logger.warning(result.kv_cache_warning)
 
-    if args.print_per_ops_latency and result.per_ops_data:
-        _print_per_ops_latency(result.per_ops_data)
+    if detail_arg:
+        try:
+            report = format_estimate_detail_report(result, sol_result, detail=detail_arg)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        if report:
+            print("\n" + "-" * 60)
+            print(f"  Detailed Breakdown ({detail_arg})")
+            print("-" * 60)
+            print(report)
+        else:
+            logger.warning("--detail requested but no breakdown data is available for this mode.")
 
     print()
 
@@ -1723,6 +1999,9 @@ def main(args):
             database_mode=args.database_mode,
             isl=args.isl,
             osl=args.osl,
+            image_height=args.image_height,
+            image_width=args.image_width,
+            num_images=args.num_images,
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,
@@ -1732,12 +2011,16 @@ def main(args):
             enable_chunked_prefill=args.enable_chunked_prefill,
             free_gpu_memory_fraction=args.free_gpu_memory_fraction,
             max_seq_len=args.max_seq_len,
+            engine_step_backend=args.engine_step_backend,
             enable_wideep=getattr(args, "enable_wideep", False),
             moe_backend=getattr(args, "moe_backend", None),
         )
     elif args.mode == "exp":
         try:
-            task_configs = build_experiment_task_configs(yaml_path=args.yaml_path)
+            build_kwargs: dict[str, Any] = {"yaml_path": args.yaml_path}
+            if args.engine_step_backend is not None:
+                build_kwargs["engine_step_backend"] = args.engine_step_backend
+            task_configs = build_experiment_task_configs(**build_kwargs)
         except (ValueError, TypeError) as exc:
             logger.exception("Failed to build experiment task configs")
             raise SystemExit(1) from exc

@@ -42,26 +42,157 @@ Prepare a clean env with the target framework and nccl lib installed.
 # Collect comm data
 ```bash
 export PATH=$PATH:${NCCL_TEST_BIN_PATH}/
-collect_comm.sh #all_reduce data will be collected using default trtllm backend
-collect_comm.sh --all_reduce_backend vllm #all_reduce data will be collected using vllm backend
-collect_comm.sh --all_reduce_backend vllm --device xpu #all_reduce data will be collected using vllm backend on XPU
+network/collect_comm.sh #all_reduce data will be collected using default trtllm backend
+network/collect_comm.sh --all_reduce_backend vllm #all_reduce data will be collected using vllm backend
+network/collect_comm.sh --all_reduce_backend vllm --device xpu #all_reduce data will be collected using vllm backend on XPU
 ```
 Today we only collect intra-node comm. This script will collect custom allreduce data for trtllm within a node.
-It will also collect nccl allreudce, all_gather, all2all, reduce_scatter using nccl.
-The generated file is comm_perf.txt and custom_all_reduce.txt.
+It will also collect nccl allreduce, all_gather, all2all, reduce_scatter using nccl.
+The generated files are nccl_perf.txt, oneccl_perf.txt, and custom_allreduce_perf.txt.
+
+# Collector v2: model-centric cases
+
+Collector v2 is model-centric. A healing run should collect cases for a specific
+model/GPU pair, with hardware exceptions resolved by SM version, instead of
+running every op bucket and hoping the support matrix improves. Use
+`--model-cases-full` when you want collector v2 YAML to define a full
+model-centric run. Omitting all model-case flags runs the backend registry
+directly without a collector v2 case plan.
+
+```bash
+# Heal one model on one GPU type.
+python3 collect.py --backend sglang \
+  --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
+  --gpu b200_sxm
+
+# Inspect the resolved model/SM plan without collecting.
+python3 collect.py --backend sglang \
+  --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
+  --gpu b200_sxm \
+  --plan-only
+
+# Select the architecture case file directly.
+python3 collect.py --backend trtllm \
+  --model-architecture Qwen3MoeForCausalLM \
+  --gpu b200_sxm \
+  --plan-only
+
+# Collector v2 full run: aggregate base ops plus every model case YAML file.
+# Runs only ops/cases represented in collector v2 YAML.
+python3 collect.py --backend trtllm --model-cases-full
+
+# Raw backend registry run: no collector v2 case plan.
+# Runs every op registered by the backend with each collector's default cases.
+python3 collect.py --backend trtllm
+```
+
+Case files:
+
+```text
+cases/base_ops/<op>.yaml             — shared common case values and op cases
+cases/models/<architecture>_cases.yaml — architecture-specific all/framework op cases
+cases/sm_exceptions/sm<version>_exceptions.yaml — SM-specific all/framework op exceptions
+model_cases.py                       — merges base op + model + SM exceptions
+```
+
+Each model file is named after the HuggingFace architecture and lists the model
+paths that should resolve to it:
+
+```yaml
+schema_version: 1
+architecture: Qwen3MoeForCausalLM
+model_path: Qwen/Qwen3-235B-A22B
+model_paths:
+  - Qwen/Qwen3-30B-A3B
+  - Qwen/Qwen3-235B-A22B
+include_base: true
+```
+
+It can include shared base op cases with `include_base: true`, then add:
+
+```yaml
+model_ops:
+  - moe
+
+all_frameworks_op_cases:
+  moe:
+    cases: all
+
+framework_specific_op_cases:
+  sglang:
+    wideep_moe:
+      cases: all
+```
+
+SM exceptions are separate and hardware-centric:
+
+```yaml
+all_frameworks_op_exceptions:
+  attention_generation:
+    drop: true
+
+framework_specific_op_exceptions:
+  sglang:
+    wideep_moe:
+      contains:
+        - "tp=32"
+```
+
+Collector v2 applies those exception selectors before running an op, so known
+unsupported cases are skipped instead of sent to workers. The optional
+`known_exceptions` section in the same SM file is used as a runtime safety net
+for failures that happen inside a collector after top-level filtering: matching
+failures are logged and stored as `expected_failed` in the resume checkpoint
+instead of failing the full collector run.
+
+For simple common ops, `cases` can also contain exact generator specs. The base
+GEMM sweep uses `token_counts` for the GEMM M dimension, `input_feature_sizes`
+for K, and `output_feature_sizes` for N; `feature_sizes` is shorthand when K and
+N use the same explicit size list. Base attention specs use `batch_sizes`,
+`sequence_lengths`, `query_head_counts`, `kv_head_options`, and `head_dims`;
+`kv_head_options: self` means the KV head count equals the query head count.
+
+For targeted support-matrix healing, a case selector can run a subset using
+exact `case_ids`, string `contains` matches, `indices`, `ranges`, or `limit`.
+These filters are applied after the op collector generates cases for the
+selected model, so every op collector gets subset support through the central
+planner. Collectors that accept `model_path` receive it directly; legacy
+collectors use the same value through `COLLECTOR_MODEL_PATH` while they are
+being migrated.
+
+To add a new architecture, create one `cases/models/<architecture>_cases.yaml`
+file. To add a new model in an existing architecture, add the model path to that
+architecture's `model_paths` list. Add shared op sweeps to the matching
+`cases/base_ops/<op>.yaml` file. Add a new op collector only when the existing
+ops cannot generate the needed data points. To add a new hardware exception,
+create one `cases/sm_exceptions/sm<version>_exceptions.yaml` file instead of
+editing every model case. `--gpu b200_sxm` resolves the SM version from
+`src/aiconfigurator/systems/b200_sxm.yaml`; use `--sm 100` when collecting on an
+unregistered GPU with a known SM version.
 
 # Version Management
 
 ## Overview
 
-Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps ops to collector modules, and a **version resolver** (`version_resolver.py`) that picks the right module at runtime. Individual collector files declare their compatibility via `__compat__`.
+Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps ops to collector modules, and a **version resolver** (`version_resolver.py`) that picks the right module at runtime. Individual collector files declare their compatibility via `__compat__`. The current collector framework versions and runtime images are declared in `framework_manifest.yaml`.
 
-```
+```text
+framework_manifest.yaml — current collector framework versions and images
+framework_manifest.py   — manifest loader/validator
+model_cases.py       — collector v2 model/SM case planner
 registry.py          — declares which module handles which version range
 version_resolver.py  — routes runtime version → module (packaging.version)
 collect.py/collect_ops — validates __compat__ and fails incompatible ops
 __compat__           — per-file metadata declaring supported framework versions
+cases/               — model-centric case manifests and SM exceptions
+wideep/              — WideEP collector namespace for special images/runtimes
+wideep/*/registry.py — WideEP-only ops appended when the v2 plan requests them
+network/             — collective communication collectors and Slurm network jobs
 ```
+
+WideEP entries in `framework_manifest.yaml` must keep the same framework version
+as their non-WideEP framework entry. If a WideEP collector needs a special image,
+put only the image override in the WideEP entry and keep the version aligned.
 
 ## File Naming Convention
 
@@ -100,10 +231,9 @@ from collector.registry_types import OpEntry, VersionRoute
 OpEntry(op="gemm", module="collector.trtllm.collect_gemm", get_func="...", run_func="...")
 
 # Versioned (has forks) — VersionRoutes in descending min_version order:
-OpEntry(op="moe", get_func="...", run_func="...", versions=(
-    VersionRoute("1.1.0", "collector.trtllm.collect_moe_v3"),
-    VersionRoute("0.21.0", "collector.trtllm.collect_moe_v2"),
-    VersionRoute("0.20.0", "collector.trtllm.collect_moe_v1"),
+OpEntry(op="myop", get_func="...", run_func="...", versions=(
+    VersionRoute("X.Y.Z", "collector.<backend>.collect_myop_v2"),
+    VersionRoute("0.0.0", "collector.<backend>.collect_myop_v1"),
 ))
 ```
 
@@ -135,8 +265,8 @@ When upstream framework `X.Y.Z` changes an API that a collector depends on:
 
    # After (versioned — all forks carry explicit _vN suffix):
    OpEntry(op="gemm", versions=(
-       VersionRoute("X.Y.Z", "collector.trtllm.collect_gemm_v2"),
-       VersionRoute("0.0.0", "collector.trtllm.collect_gemm_v1"),
+       VersionRoute("X.Y.Z", "collector.<backend>.collect_gemm_v2"),
+       VersionRoute("0.0.0", "collector.<backend>.collect_gemm_v1"),
    ), ...)
    ```
 6. Run tests to validate
@@ -328,9 +458,9 @@ This collects all SGLang ops in a single pass, including:
 ### DeepEP multi-node collector
 For **DeepSeek V3** models with DeepEP MoE, inter-node communication data requires a separate multi-node setup:
 ```bash
-# Follow instructions in deep_collector/README.md
+# Follow instructions in wideep/sglang/deepep/README.md
 ```
-See `deep_collector/README.md` for complete multi-node setup instructions.
+See `wideep/sglang/deepep/README.md` for complete multi-node setup instructions.
 
 # Test
 Rebuild and install the new aiconfigurator. Please make sure you have your new system definition file prepared. It's src/aiconfigurator/systems/xxx.yaml

@@ -24,8 +24,6 @@ import math
 import numpy as np
 from scipy import interpolate
 
-from aiconfigurator.sdk.performance_result import PerformanceResult
-
 logger = logging.getLogger(__name__)
 
 
@@ -592,49 +590,3 @@ def extrapolate_data_grid(
                         data_dict[x][y] = {z: value}
                     else:
                         data_dict[x][y][z] = value
-
-
-# ---------------------------------------------------------------------------
-# Analytical memory-bound latency estimate (used by ElementWise / Embedding)
-# ---------------------------------------------------------------------------
-
-
-def estimate_mem_op(
-    mem_bytes: int,
-    gpu_spec: dict,
-    database_mode=None,
-    default_database_mode=None,
-) -> PerformanceResult | tuple[float, float, float]:
-    """Compute memory-operation latency analytically (no CSV data).
-
-    ``gpu_spec`` is consulted lazily — SOL/SOL_FULL paths read only ``mem_bw``,
-    while EMPIRICAL/SILICON/HYBRID paths additionally need
-    ``mem_bw_empirical_scaling_factor`` and ``mem_empirical_constant_latency``.
-    A spec missing those latter keys raises ``KeyError`` only when an empirical
-    path is taken — same behavior as the original closure-based implementation.
-
-    Returns:
-        ``PerformanceResult`` for SOL/EMPIRICAL/HYBRID/SILICON modes, or a
-        ``(sol_time, 0, sol_time)`` tuple for ``SOL_FULL``.
-    """
-    # Lazy import to avoid circular imports at module load.
-    from aiconfigurator.sdk import common
-
-    def get_sol(mb: int) -> tuple[float, float, float]:
-        sol_time = mb / gpu_spec["mem_bw"] * 1000
-        return sol_time, 0, sol_time
-
-    def get_empirical(mb: int) -> float:
-        return (
-            mb / (gpu_spec["mem_bw"] * gpu_spec["mem_bw_empirical_scaling_factor"])
-            + gpu_spec["mem_empirical_constant_latency"]
-        ) * 1000
-
-    if database_mode is None:
-        database_mode = default_database_mode
-    if database_mode == common.DatabaseMode.SOL:
-        return PerformanceResult(get_sol(mem_bytes)[0], energy=0.0)
-    if database_mode == common.DatabaseMode.SOL_FULL:
-        return get_sol(mem_bytes)
-    # EMPIRICAL / SILICON / HYBRID share the same empirical formula.
-    return PerformanceResult(get_empirical(mem_bytes), energy=0.0)

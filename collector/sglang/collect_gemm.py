@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""SGLang GEMM collector.
+
+Benchmarks SGLang/sgl-kernel matrix multiplication paths for shared GEMM case
+specs, including BF16, FP8, FP8 block/DeepGEMM, and FP4-capable kernels where
+available. The module owns SGLang-specific kernel selection, quantization
+helpers, SM filters, and perf logging.
+"""
+
 __compat__ = "sglang>=0.5.10rc0"
 
 import os
@@ -14,7 +22,7 @@ from sgl_kernel import (
     sgl_per_token_quant_fp8,
 )
 
-from collector.common_test_cases import get_gemm_common_test_cases
+from collector.case_generator import get_gemm_case_specs
 
 try:
     from flashinfer import fp4_quantize as flashinfer_fp4_quantize
@@ -58,7 +66,7 @@ def get_gemm_test_cases():
         # SM120+ (RTX PRO 6000 Blackwell workstation): no DeepGEMM recipe for fp8_block
         gemm_list = ["bfloat16", "fp8", "nvfp4"]
 
-    for gemm_common_testcase in get_gemm_common_test_cases():
+    for gemm_common_testcase in get_gemm_case_specs():
         x = gemm_common_testcase.x
         n = gemm_common_testcase.n
         k = gemm_common_testcase.k

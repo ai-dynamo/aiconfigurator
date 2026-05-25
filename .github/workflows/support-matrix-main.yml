@@ -19,6 +19,7 @@ jobs:
       pull-requests: write
     env:
       TARGET_BRANCH: ${{ inputs.branch || github.ref_name }}
+      SUPPORT_MATRIX_DOCKER_MEMORY_LIMIT: ${{ vars.SUPPORT_MATRIX_DOCKER_MEMORY_LIMIT || '24g' }}
     steps:
       - name: Clean workspace
         run: |
@@ -40,15 +41,17 @@ jobs:
 
       - name: Backup old support matrix
         run: |
-          cp src/aiconfigurator/systems/support_matrix.csv src/aiconfigurator/systems/support_matrix_old.csv
+          rm -rf src/aiconfigurator/systems/support_matrix_old
+          cp -R src/aiconfigurator/systems/support_matrix src/aiconfigurator/systems/support_matrix_old
 
       - name: Generate new support matrix
         run: |
           docker run --rm \
+            --memory "${SUPPORT_MATRIX_DOCKER_MEMORY_LIMIT}" \
             -v ${{ github.workspace }}/src/aiconfigurator/systems:/app/src/aiconfigurator/systems \
             aiconfigurator:matrix \
             python3 tools/support_matrix/generate_support_matrix.py \
-              --output /app/src/aiconfigurator/systems/support_matrix.csv
+              --output /app/src/aiconfigurator/systems/support_matrix
 
       - name: Compare support matrices
         id: compare
@@ -57,12 +60,13 @@ jobs:
 
           set +e
           docker run --rm \
+            --memory "${SUPPORT_MATRIX_DOCKER_MEMORY_LIMIT}" \
             -v ${{ github.workspace }}/src/aiconfigurator/systems:/app/src/aiconfigurator/systems \
             -v ${{ github.workspace }}/diff_output:/app/diff_output \
             aiconfigurator:matrix \
             python3 tools/support_matrix/compare_support_matrix.py \
-              --old /app/src/aiconfigurator/systems/support_matrix_old.csv \
-              --new /app/src/aiconfigurator/systems/support_matrix.csv \
+              --old /app/src/aiconfigurator/systems/support_matrix_old \
+              --new /app/src/aiconfigurator/systems/support_matrix \
               --output-diff /app/diff_output/diff.json
           EXIT_CODE=$?
           set -e
@@ -84,7 +88,7 @@ jobs:
 
       - name: Cleanup old support matrix backup
         run: |
-          rm -f src/aiconfigurator/systems/support_matrix_old.csv
+          rm -rf src/aiconfigurator/systems/support_matrix_old
 
       - name: Extract PR description
         if: steps.compare.outputs.needs_pr == 'true'
@@ -122,7 +126,7 @@ jobs:
           base: ${{ env.TARGET_BRANCH }}
           delete-branch: true
           add-paths: |
-            src/aiconfigurator/systems/support_matrix.csv
+            src/aiconfigurator/systems/support_matrix
           labels: |
             automated
             support-matrix

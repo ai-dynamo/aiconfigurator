@@ -29,16 +29,16 @@ if THIS_DIR not in sys.path:
     sys.path.append(THIS_DIR)
 
 try:
-    from common_test_cases import get_common_mhc_test_cases
+    from case_generator import get_common_mhc_test_cases
     from registry_types import PerfFile
 
-    from helper import EXIT_CODE_RESTART, benchmark_with_power, log_perf
+    from helper import benchmark_with_power, log_perf
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from common_test_cases import get_common_mhc_test_cases
+    from case_generator import get_common_mhc_test_cases
     from registry_types import PerfFile
 
-    from helper import EXIT_CODE_RESTART, benchmark_with_power, log_perf
+    from helper import benchmark_with_power, log_perf
 
 
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Pro"
@@ -75,10 +75,10 @@ def _read_model_config(model_id: str) -> dict:
 
 
 def _default_num_tokens(model_path: str) -> list[int]:
-    """Return the default num_tokens sweep for ``model_path`` from common_test_cases.
+    """Return the default num_tokens sweep for ``model_path`` from case_generator.
 
     Falls back to the first registered mHC test case when ``model_path`` is not
-    listed in ``common_test_cases.py`` (e.g. custom / local model ids). All
+    listed in ``case_generator.py`` (e.g. custom / local model ids). All
     registered models share the same sweep, so the fallback is equivalent.
     """
     cases = get_common_mhc_test_cases()
@@ -91,12 +91,26 @@ def _default_num_tokens(model_path: str) -> list[int]:
 
 
 def get_mhc_module_test_cases() -> list[dict]:
-    """Return one task per op; each worker sweeps all num_tokens internally.
+    """Return one task per model/op; each worker sweeps all num_tokens internally.
 
     Loading the one-layer runner is expensive, so we pay it once per op
-    (pre/post) instead of per (op, num_tokens) combo.
+    and model instead of per (op, model, num_tokens) combo.
     """
-    return [{"id": f"mhc_{op}_all", "params": [op]} for op in ("pre", "post")]
+    cases: list[dict] = []
+    seen: set[tuple[str, int, int]] = set()
+    for case in get_common_mhc_test_cases():
+        key = (case.phase, case.hidden_size, case.hc_mult)
+        if key in seen:
+            continue
+        seen.add(key)
+        model_id = case.model_name.replace("/", "_")
+        cases.append(
+            {
+                "id": f"mhc_{case.phase}_hs{case.hidden_size}_hcm{case.hc_mult}_{model_id}",
+                "params": [case.phase, case.model_name],
+            }
+        )
+    return cases
 
 
 def _resolve_perf_path(output_path: str | None, filename: str | None) -> str:
@@ -277,11 +291,12 @@ def _log_result(
     *,
     output_path: str | None,
     perf_filename: str | None,
-    model_path: str,
     op: str,
     num_tokens: int,
+    num_sites: int,
     hc_mult: int,
     hidden_size: int,
+    sinkhorn_iters: int,
     latency_ms: float,
     version: str,
     device_name: str,
@@ -290,11 +305,12 @@ def _log_result(
     log_perf(
         item_list=[
             {
-                "model": model_path,
                 "architecture": "DeepseekV4ForCausalLM",
                 "num_tokens": num_tokens,
+                "num_sites": num_sites,
                 "hc_mult": hc_mult,
                 "hidden_size": hidden_size,
+                "sinkhorn_iters": sinkhorn_iters,
                 "latency": f"{latency_ms:.4f}",
             }
         ],
@@ -370,11 +386,12 @@ def run_mhc_module(
                 _log_result(
                     output_path=output_path,
                     perf_filename=perf_filename,
-                    model_path=model_path,
                     op=op,
                     num_tokens=num_tokens,
+                    num_sites=len(_mhc_call_args(layer)),
                     hc_mult=layer.hc_mult,
                     hidden_size=hidden_size,
+                    sinkhorn_iters=int(getattr(layer.config, "hc_sinkhorn_iters", 20)),
                     latency_ms=latency_ms,
                     version=version,
                     device_name=device_name,
@@ -401,19 +418,20 @@ def run_mhc_module(
 
 def run_mhc_module_worker(
     op: str,
+    model_path: str | None = None,
     *,
     perf_filename: str,
     device: str = "cuda:0",
 ) -> None:
     """Worker-compatible wrapper used by collector/collect.py.
 
-    Each call sweeps all num_tokens for a single op (pre or post) in
-    one subprocess. ``model_path`` is read from ``COLLECTOR_MODEL_PATH``
-    (set by ``collect.py --model-path``). ``perf_filename`` and ``device``
-    are keyword-only args supplied by collect.py via functools.partial
-    and the worker dispatch loop.
+    Each call sweeps all num_tokens for a single model/op pair in one
+    subprocess. Direct callers that pass only ``op`` still use
+    ``COLLECTOR_MODEL_PATH`` (set by ``collect.py --model-path``) or the
+    default Pro model. ``perf_filename`` and ``device`` are keyword-only args
+    supplied by collect.py via functools.partial and the worker dispatch loop.
     """
-    model_path = os.environ.get("COLLECTOR_MODEL_PATH") or DEFAULT_MODEL
+    model_path = model_path or os.environ.get("COLLECTOR_MODEL_PATH") or DEFAULT_MODEL
     output_path = os.path.dirname(perf_filename) or os.getcwd()
     run_mhc_module(
         ops=[op],
@@ -423,7 +441,6 @@ def run_mhc_module_worker(
         output_path=output_path,
         perf_filename=os.path.basename(perf_filename),
     )
-    sys.exit(EXIT_CODE_RESTART)
 
 
 def main() -> None:

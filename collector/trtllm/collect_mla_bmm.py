@@ -1,94 +1,42 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""TensorRT-LLM MLA generation BMM micro-collector.
+
+Benchmarks the auxiliary MLA generation BMM shapes used by TRT-LLM modeling. It
+consumes the YAML-backed shape grid, sets up BF16/FP8 tensors, runs benchmarks,
+and logs MLA BMM perf rows for pre/post generation operations.
+"""
 
 import tensorrt_llm
 import torch
+from case_generator import get_mla_bmm_case_specs
 
 from helper import benchmark_with_power, get_sm_version, log_perf
 
 
-def get_mla_gen_pre_test_cases():
-    test_cases = []
-    gen_num_tokens = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        320,
-        384,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-    ]
-    num_heads = [128, 64, 32, 16, 8, 4, 2, 1]
+def _supported_dtypes() -> set[str]:
     dtype_list = ["bfloat16"]
     if 86 < get_sm_version() < 100:
         dtype_list += ["fp8"]
-    for num_tokens in gen_num_tokens:
-        for num_head in num_heads:
-            for dtype in dtype_list:
-                test_cases.append([num_tokens, num_head, dtype, 2, 10])
-    return test_cases
+    return set(dtype_list)
+
+
+def _get_mla_bmm_test_cases(op_name: str):
+    supported_dtypes = _supported_dtypes()
+    return [
+        [case.num_tokens, case.num_heads, case.dtype, case.num_warmups, case.num_runs]
+        for case in get_mla_bmm_case_specs("trtllm", op_name)
+        if case.dtype in supported_dtypes
+    ]
+
+
+def get_mla_gen_pre_test_cases():
+    return _get_mla_bmm_test_cases("mla_bmm_gen_pre")
 
 
 def get_mla_gen_post_test_cases():
-    test_cases = []
-    ctx_num_tokens = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        320,
-        384,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-        12288,
-        16384,
-        20480,
-    ]
-    num_heads = [128, 64, 32, 16, 8, 4, 2, 1]
-    dtype_list = ["bfloat16"]
-    if 86 < get_sm_version() < 100:
-        dtype_list += ["fp8"]
-    for num_tokens in ctx_num_tokens:
-        for num_head in num_heads:
-            for dtype in dtype_list:
-                test_cases.append([num_tokens, num_head, dtype, 2, 10])
-    return test_cases
+    return _get_mla_bmm_test_cases("mla_bmm_gen_post")
 
 
 def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, *, perf_filename, device="cuda:0"):

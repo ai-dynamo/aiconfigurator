@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: Qwen3_5ForConditionalGeneration
+model_path: Qwen/Qwen3.5-27B
+model_paths:
+  - Qwen/Qwen3.5-0.8B
+  - Qwen/Qwen3.5-2B
+  - Qwen/Qwen3.5-4B
+  - Qwen/Qwen3.5-9B
+  - Qwen/Qwen3.5-27B
+include_base: true
+description: >
+  Qwen3.5 dense/GDN model-centric collection plan.
+
+model_case_values:
+  gdn:
+    - model_path: Qwen/Qwen3.5-0.8B
+      d_model: 1024
+      d_conv: 4
+      num_k_heads: 16
+      head_k_dim: 128
+      num_v_heads: 16
+      head_v_dim: 128
+    - model_path: Qwen/Qwen3.5-2B
+      d_model: 2048
+      d_conv: 4
+      num_k_heads: 16
+      head_k_dim: 128
+      num_v_heads: 16
+      head_v_dim: 128
+    - model_path: Qwen/Qwen3.5-4B
+      d_model: 2560
+      d_conv: 4
+      num_k_heads: 16
+      head_k_dim: 128
+      num_v_heads: 32
+      head_v_dim: 128
+    - model_path: Qwen/Qwen3.5-9B
+      d_model: 4096
+      d_conv: 4
+      num_k_heads: 16
+      head_k_dim: 128
+      num_v_heads: 32
+      head_v_dim: 128
+    - model_path: Qwen/Qwen3.5-27B
+      d_model: 5120
+      d_conv: 4
+      num_k_heads: 16
+      head_k_dim: 128
+      num_v_heads: 48
+      head_v_dim: 128
+
+all_frameworks_op_cases:
+  gdn:
+    cases: all
