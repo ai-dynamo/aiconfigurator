@@ -300,13 +300,12 @@ class NemotronHModel(BaseModel):
                         False,
                         quant_mode=moe_quant_mode,
                     ),
-                    # TRT-LLM does allreduce after combining routed + shared outputs when TP>1
-                    ops.CustomAllReduce("context_moe_ar", count, h, tp_size),
                 ]
             )
             if cfg.moe_latent_size > 0:
-                # fc2_latent_proj (latent -> h) runs after expert combine, before
-                # adding the shared-expert output. Modeled as a row-parallel GEMM.
+                # fc2_latent_proj (latent -> h) runs after expert combine,
+                # before the post-MoE allreduce. Modeled as a row-parallel GEMM
+                # whose partial sums are aggregated by the following AllReduce.
                 self.context_ops.append(
                     ops.GEMM(
                         "context_fc2_latent_proj_gemm",
@@ -317,6 +316,8 @@ class NemotronHModel(BaseModel):
                         low_precision_input=True,
                     )
                 )
+            # TRT-LLM does allreduce after combining routed + shared outputs when TP>1
+            self.context_ops.append(ops.CustomAllReduce("context_moe_ar", count, h, tp_size))
 
         # MLP layers (-) - not present in Nemotron-3 Nano but in NemotronH model
         if layer_counts["-"] > 0:
@@ -588,13 +589,12 @@ class NemotronHModel(BaseModel):
                         False,
                         quant_mode=moe_quant_mode,
                     ),
-                    # TRT-LLM does allreduce after combining routed + shared outputs when TP>1
-                    ops.CustomAllReduce("generation_moe_ar", count, h, tp_size),
                 ]
             )
             if cfg.moe_latent_size > 0:
-                # fc2_latent_proj (latent -> h) runs after expert combine, before
-                # adding the shared-expert output. Modeled as a row-parallel GEMM.
+                # fc2_latent_proj (latent -> h) runs after expert combine,
+                # before the post-MoE allreduce. Modeled as a row-parallel GEMM
+                # whose partial sums are aggregated by the following AllReduce.
                 self.generation_ops.append(
                     ops.GEMM(
                         "generation_fc2_latent_proj_gemm",
@@ -605,6 +605,8 @@ class NemotronHModel(BaseModel):
                         low_precision_input=True,
                     )
                 )
+            # TRT-LLM does allreduce after combining routed + shared outputs when TP>1
+            self.generation_ops.append(ops.CustomAllReduce("generation_moe_ar", count, h, tp_size))
 
         # MLP layers (-)
         if layer_counts["-"] > 0:
