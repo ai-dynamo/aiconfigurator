@@ -60,6 +60,9 @@ class NemotronHConfig:
         n_groups (int): Number of groups for Mamba2
         chunk_size (int): Chunk size for Mamba2 chunked scan
         moe_shared_expert_intermediate_size (int): Intermediate size for shared expert
+        moe_latent_size (int): Latent dim for routed-expert projections (0 disables
+            latent compression and routed experts run on hidden_size directly).
+            Used by latent-MoE variants like Nemotron-3-Super.
     """
 
     hybrid_override_pattern: str
@@ -70,6 +73,7 @@ class NemotronHConfig:
     n_groups: int
     chunk_size: int
     moe_shared_expert_intermediate_size: int = 0  # Optional: 0 for non-MoE NemotronH models
+    moe_latent_size: int = 0  # Optional: 0 means routed experts use hidden_size directly
 
 
 @dataclass(frozen=True)
