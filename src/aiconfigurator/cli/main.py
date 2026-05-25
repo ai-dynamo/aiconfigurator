@@ -677,10 +677,14 @@ def _add_estimate_mode_arguments(parser):
     )
     parser.add_argument(
         "--afd-combined-with-pd",
-        action="store_true",
-        default=False,
-        help="Mark this AFD estimate as running in combination with a separate "
-        "P/D disaggregated deployment (purely informational — surfaced in the output).",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Combine the single-phase AFD estimate with a regular static "
+        "estimate for the other phase. When enabled (default), --afd-phase=decode "
+        "also runs a static prefill estimate (and vice versa), merging TTFT/TPOT, "
+        "throughput (rate-matched on min seq/s), and GPU budget into one result. "
+        "Pass --no-afd-combined-with-pd to report only the AFD phase. Required to "
+        "be off when --afd-phase=both (AFD covers both phases internally).",
     )
     parser.add_argument(
         "--boundary-on-ffn",
@@ -2028,7 +2032,7 @@ def _run_estimate_mode(args):
             pipeline_model=args.pipeline_model,
             comm_overhead_factor=args.comm_overhead_factor,
             afd_phase=args.afd_phase,
-            afd_combined_with_pd=getattr(args, "afd_combined_with_pd", False),
+            afd_combined_with_pd=getattr(args, "afd_combined_with_pd", True),
             afd_boundary_on_attn=not getattr(args, "boundary_on_ffn", False),
         )
 
@@ -2111,13 +2115,44 @@ def _run_estimate_mode(args):
         print(f"  TTFT:             {result.ttft:.3f} ms")
     elif result.mode == "afd":
         raw = result.raw
-        print(f"  T_a_layer:        {raw.get('t_a_layer', 0):.3f} ms")
-        print(f"  T_f_layer:        {raw.get('t_f_layer', 0):.3f} ms")
-        print(f"  T_a2f_layer:      {raw.get('t_a2f_layer', 0):.3f} ms")
-        print(f"  T_f2a_layer:      {raw.get('t_f2a_layer', 0):.3f} ms")
-        print(f"  T_c_layer:        {raw.get('t_c_layer', 0):.3f} ms  (round-trip = a2f + f2a)")
-        print(f"  T_step:           {raw.get('t_step', 0):.3f} ms")
-        print(f"  Balance Ratio:    {raw.get('balance_ratio', 0):.3f}")
+        afd_phase = raw.get("phase")
+        if afd_phase == "both":
+            # phase="both" runs prefill + decode through AFD; un-prefixed
+            # layer scalars are deliberately NaN to keep the two estimates
+            # distinguishable. Render the paired ``prefill_*`` / ``decode_*``
+            # blocks instead so users can compare A/F balance per phase.
+            print("  -- Prefill (AFD) --")
+            print(f"  T_a_layer:        {raw.get('prefill_t_a_layer', 0):.3f} ms")
+            print(f"  T_f_layer:        {raw.get('prefill_t_f_layer', 0):.3f} ms")
+            print(f"  T_a2f_layer:      {raw.get('prefill_t_a2f_layer', 0):.3f} ms")
+            print(f"  T_f2a_layer:      {raw.get('prefill_t_f2a_layer', 0):.3f} ms")
+            print(f"  T_c_layer:        {raw.get('prefill_t_c_layer', 0):.3f} ms  (round-trip = a2f + f2a)")
+            print(f"  T_step:           {raw.get('prefill_t_step', 0):.3f} ms")
+            print(f"  Balance Ratio:    {raw.get('prefill_balance_ratio', 0):.3f}")
+            print("  -- Decode (AFD) --")
+            print(f"  T_a_layer:        {raw.get('decode_t_a_layer', 0):.3f} ms")
+            print(f"  T_f_layer:        {raw.get('decode_t_f_layer', 0):.3f} ms")
+            print(f"  T_a2f_layer:      {raw.get('decode_t_a2f_layer', 0):.3f} ms")
+            print(f"  T_f2a_layer:      {raw.get('decode_t_f2a_layer', 0):.3f} ms")
+            print(f"  T_c_layer:        {raw.get('decode_t_c_layer', 0):.3f} ms  (round-trip = a2f + f2a)")
+            print(f"  T_step:           {raw.get('decode_t_step', 0):.3f} ms")
+            print(f"  Balance Ratio:    {raw.get('decode_balance_ratio', 0):.3f}")
+        else:
+            print(f"  T_a_layer:        {raw.get('t_a_layer', 0):.3f} ms")
+            print(f"  T_f_layer:        {raw.get('t_f_layer', 0):.3f} ms")
+            print(f"  T_a2f_layer:      {raw.get('t_a2f_layer', 0):.3f} ms")
+            print(f"  T_f2a_layer:      {raw.get('t_f2a_layer', 0):.3f} ms")
+            print(f"  T_c_layer:        {raw.get('t_c_layer', 0):.3f} ms  (round-trip = a2f + f2a)")
+            print(f"  T_step:           {raw.get('t_step', 0):.3f} ms")
+            print(f"  Balance Ratio:    {raw.get('balance_ratio', 0):.3f}")
+        # Composition row: shown when the combined-with-PD merge has
+        # written (p)impl/(d)impl markers, i.e. when the AFD result was
+        # merged with a static estimate of the other phase. Lets the user
+        # see at a glance which phase is AFD vs static.
+        p_impl = raw.get("(p)impl")
+        d_impl = raw.get("(d)impl")
+        if p_impl or d_impl:
+            print(f"  Composition:      (p)={p_impl or 'unmodeled'}  (d)={d_impl or 'unmodeled'}")
         print(f"  TTFT:             {result.ttft:.3f} ms")
         print(f"  TPOT:             {result.tpot:.3f} ms")
         print(f"  Request Latency:  {result.request_latency:.3f} ms")

@@ -5,7 +5,7 @@ import copy
 import functools
 import logging
 import warnings
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 
 import pandas as pd
 
@@ -842,6 +842,12 @@ class DisaggInferenceSession:
         return disagg_summary
 
 
+# Private helper: bundles the five comm-side ops a single AFD layer needs.
+# Kept module-private; if a second consumer appears in the future, promote
+# to a public dataclass at that point.
+_AFDCommOps = namedtuple("_AFDCommOps", ["a2f", "f2a", "f_ag", "f_rs", "a_combine"])
+
+
 class AFDInferenceSession:
     """Attention-FFN Disaggregated inference session.
 
@@ -935,38 +941,91 @@ class AFDInferenceSession:
             per_op[op._name] += float(result)
         return sum(per_op.values()), per_op
 
-    def _build_afd_transfer_op(self, a_model, f_model, *, rank_mapping: str = "one_to_one"):
-        """Construct the single AFDTransfer op covering all AFD comm.
+    def _build_afd_comm_ops(self, a_model, f_model, *, rank_mapping: str = "one_to_one") -> _AFDCommOps:
+        """Construct the five comm-side ops modeling AFD per-layer traffic.
 
-        ``AFDTransfer.query()`` returns a breakdown dict with the
-        cross-pool A→F / F→A latencies plus the F-side intra-node AG/RS
-        and A-side combine, so one op per layer is sufficient.
+        AFD comm decomposes into five independent pieces. Each is now its
+        own op returning :class:`PerformanceResult` (a float-like with
+        ``.energy`` / ``.source``); the session synthesizes them into the
+        per-layer ``t_a2f`` / ``t_f2a`` / ``t_a`` / ``t_f`` ingredients
+        consumed by ``_pipeline_tcycle``.
+
+        * ``a2f`` / ``f2a`` — cross-pool single-direction P2P transfers.
+        * ``f_ag`` / ``f_rs`` — F-node intra-node AllGather (dispatch)
+          and ReduceScatter (combine) along the token dimension. They
+          return 0 when ``f_local <= 1`` or under broadcast mapping, so
+          the session can sum them unconditionally.
+        * ``a_combine`` — A-side local HBM reduce-add over EP partial
+          results. Returns 0 when ``f_moe_ep_size <= 1``.
 
         ``rank_mapping`` selects the dispatch topology:
-        ``"one_to_one"`` (current default) keeps the F-side AG/RS;
+        ``"one_to_one"`` (default) keeps the F-side AG/RS;
         ``"broadcast"`` reports them as 0 (placeholder for future
         modeling of A-rank → all-F-ranks fan-out).
+
+        MoE dispatch probability is driven by ``f_model._num_experts`` /
+        ``f_model._topk`` (combinatorial formula when both present and
+        ``num_f_nodes > 1``); for dense models the AFD ops fall back to a
+        uniform ``1 / num_f_nodes`` split. EP=1 MoE models still use the
+        combinatorial form since each token activates only ``topk``
+        experts regardless of EP layout.
         """
-        from aiconfigurator.sdk.operations import AFDTransfer
+        from aiconfigurator.sdk.operations import (
+            AFDCombine,
+            AFDFAllGather,
+            AFDFReduceScatter,
+            AFDTransfer,
+        )
 
         cfg = self._afd_config
-        is_moe = hasattr(f_model, "_topk") and hasattr(f_model, "_num_experts")
-        transfer_mode = "moe_selective" if (is_moe and cfg.f_moe_ep_size > 1) else "p2p"
-        return AFDTransfer(
-            name="afd_transfer",
+        comm_quant = self._a_model_config.comm_quant_mode
+        num_experts = int(getattr(f_model, "_num_experts", 0) or 0)
+        topk = int(getattr(f_model, "_topk", 0) or 0)
+
+        shared = dict(
             hidden_size=a_model._hidden_size,
             n_a_workers=cfg.n_a_workers,
             n_f_workers=cfg.n_f_workers,
             gpus_per_node=cfg.gpus_per_node,
-            tp_a=cfg.tp_a,
-            tp_f=cfg.tp_f,
-            f_moe_ep_size=cfg.f_moe_ep_size,
-            topk=getattr(f_model, "_topk", 1),
-            num_experts=getattr(f_model, "_num_experts", 1),
-            comm_quant_mode=self._a_model_config.comm_quant_mode,
-            comm_overhead_factor=cfg.comm_overhead_factor,
-            transfer_mode=transfer_mode,
-            rank_mapping=rank_mapping,
+            num_experts=num_experts,
+            topk=topk,
+            comm_quant_mode=comm_quant,
+        )
+        return _AFDCommOps(
+            a2f=AFDTransfer(
+                name="afd_a2f_transfer",
+                scale_factor=1.0,
+                direction="a2f",
+                comm_overhead_factor=cfg.comm_overhead_factor,
+                **shared,
+            ),
+            f2a=AFDTransfer(
+                name="afd_f2a_transfer",
+                scale_factor=1.0,
+                direction="f2a",
+                comm_overhead_factor=cfg.comm_overhead_factor,
+                **shared,
+            ),
+            f_ag=AFDFAllGather(
+                name="afd_f_node_allgather",
+                scale_factor=1.0,
+                rank_mapping=rank_mapping,
+                **shared,
+            ),
+            f_rs=AFDFReduceScatter(
+                name="afd_f_node_reducescatter",
+                scale_factor=1.0,
+                rank_mapping=rank_mapping,
+                **shared,
+            ),
+            a_combine=AFDCombine(
+                name="afd_a_side_combine",
+                scale_factor=1.0,
+                hidden_size=a_model._hidden_size,
+                tp_a=cfg.tp_a,
+                f_moe_ep_size=cfg.f_moe_ep_size,
+                comm_quant_mode=comm_quant,
+            ),
         )
 
     def _pipeline_tcycle(
@@ -1142,10 +1201,11 @@ class AFDInferenceSession:
         per-op dicts are *per-step* totals (averaged across the trace)
         in the same units as ``_sum_latency`` output.
 
-        ``brk_t_a_per_layer`` / ``brk_t_f_per_layer`` are the
-        AFDTransfer per-layer intra-pool contributions (s-independent);
-        they are folded into ``t_a_layer_i`` / ``t_f_layer_i`` *before*
-        the per-step ``_pipeline_tcycle`` call so the pipeline max is
+        ``brk_t_a_per_layer`` / ``brk_t_f_per_layer`` are the per-layer
+        intra-pool comm contributions (A-side combine, F-side AG+RS) —
+        s-independent — folded into ``t_a_layer_i`` / ``t_f_layer_i``
+        *before* the per-step ``_pipeline_tcycle`` call so the pipeline
+        max is
         evaluated on the full per-layer time, not on the compute-only
         time.
         """
@@ -1264,41 +1324,59 @@ class AFDInferenceSession:
 
         isl = runtime_config.isl
         osl = runtime_config.osl or 1
+        effective_prefill_len = max(isl - int(runtime_config.prefix or 0), 1)
         num_layers = max(int(getattr(a_model, "_num_layers", 1)), 1)
 
         # A-Worker sees its local batch (a_batch_size); F-Worker sees the full
         # combined batch post-AllGather.
         b_total = cfg.n_a_workers * cfg.a_batch_size
 
-        # AFD cross-pool comm (AFDTransfer, F-node AllGather/ReduceScatter,
-        # A-side combine) bills by *token* volume per step, not request
-        # count.  In prefill each request contributes ``isl`` tokens per
-        # layer; in decode it contributes 1 token per step.  Pre-compute
-        # the per-step token totals to feed into the AFD ops so the
-        # per-link byte volume is correctly scaled by sequence length
-        # (without this, prefill comm latency is under-estimated by ``isl``).
-        tokens_per_req = isl if phase == "prefill" else 1
-        afd_b_tokens = b_total * tokens_per_req
+        # AFD comm (A↔F cross-pool transfers, F-node AllGather /
+        # ReduceScatter, A-side combine) bills by *token* volume per
+        # step, not request count.  In prefill each request contributes
+        # the uncached suffix
+        # (``isl - prefix``) per layer; in decode it contributes 1 token per
+        # step.  Each comm op's ``query(x=...)`` takes the number of tokens
+        # held by a single A-rank; the op internally fans this out to the
+        # global token count via ``n_a_workers``.
+        tokens_per_req = effective_prefill_len if phase == "prefill" else 1
         afd_a_batch_tokens = cfg.a_batch_size * tokens_per_req
 
-        # Single AFDTransfer op covers cross-pool A→F / F→A and the
-        # F-side intra-node AG/RS + A-side combine.  ``query()`` returns
-        # a per-layer latency breakdown keyed by ``t_a2f`` / ``t_f2a``
-        # (cross-pool, *one-direction*) and ``t_a`` / ``t_f`` (intra-pool
-        # additions to each side's per-layer compute).  AFDTransfer
-        # bills by token volume only — it is independent of ``s`` — so
-        # we query it once outside the decode stride loop.
-        transfer_op = self._build_afd_transfer_op(a_model, f_model)
-        brk = transfer_op.query(
-            self._database,
-            b_total=afd_b_tokens,
-            a_batch_size=afd_a_batch_tokens,
-        )
-        t_a2f_layer = sum(brk["t_a2f"].values())
-        t_f2a_layer = sum(brk["t_f2a"].values())
+        # Five comm-side ops model the per-layer AFD traffic:
+        #   * a2f / f2a — cross-pool single-direction P2P transfers.
+        #   * f_ag / f_rs — F-node intra-node AG (dispatch) and RS (combine)
+        #     along the token dimension; return 0 outside one-to-one mapping.
+        #   * a_combine — A-side local HBM reduce-add over EP partials;
+        #     returns 0 for dense FFN (``f_moe_ep_size <= 1``).
+        # All five bill by token volume only — independent of ``s`` — so
+        # one query each, outside the decode stride loop, is sufficient.
+        # Each op's name flows into ``a_per_op`` / ``f_per_op`` as a
+        # distinct label so the --detail report can attribute comm cost
+        # back to the specific collective rather than a single bucket.
+        comm_ops = self._build_afd_comm_ops(a_model, f_model)
+        r_a2f = comm_ops.a2f.query(self._database, x=afd_a_batch_tokens)
+        r_f2a = comm_ops.f2a.query(self._database, x=afd_a_batch_tokens)
+        r_ag = comm_ops.f_ag.query(self._database, x=afd_a_batch_tokens)
+        r_rs = comm_ops.f_rs.query(self._database, x=afd_a_batch_tokens)
+        r_cmb = comm_ops.a_combine.query(self._database, x=afd_a_batch_tokens)
+
+        # Re-pack into the legacy per-bucket breakdown so the downstream
+        # per-op fold-in and per-step pipeline stay unchanged. Keys are
+        # the op ``_name`` values from ``_build_afd_comm_ops``.
+        brk = {
+            "t_a2f": {comm_ops.a2f._name: float(r_a2f)},
+            "t_f2a": {comm_ops.f2a._name: float(r_f2a)},
+            "t_f": {
+                comm_ops.f_ag._name: float(r_ag),
+                comm_ops.f_rs._name: float(r_rs),
+            },
+            "t_a": {comm_ops.a_combine._name: float(r_cmb)},
+        }
+        t_a2f_layer = float(r_a2f)
+        t_f2a_layer = float(r_f2a)
         t_c_layer = t_a2f_layer + t_f2a_layer
-        brk_t_a_per_layer = sum(brk["t_a"].values())
-        brk_t_f_per_layer = sum(brk["t_f"].values())
+        brk_t_a_per_layer = float(r_cmb)
+        brk_t_f_per_layer = float(r_ag) + float(r_rs)
 
         # Ops in :mod:`aiconfigurator.sdk.models` are constructed with
         # ``scale_factor=num_layers`` (per-layer ops such as qkv_gemm) or
@@ -1336,9 +1414,9 @@ class AFDInferenceSession:
                 t_a_layer, t_f_layer, t_a2f_layer, t_f2a_layer
             )
         else:
-            # Prefill: single shot over the full input sequence; no
-            # need to integrate, ``s == isl`` everywhere.
-            seq_len_query = max(isl, 1)
+            # Prefill: single shot over the uncached input suffix; no
+            # need to integrate, ``s == isl - prefix`` everywhere.
+            seq_len_query = effective_prefill_len
             t_a_total, a_per_op = self._sum_latency(
                 a_partition.attn_ops,
                 batch_size=cfg.a_batch_size,
@@ -1522,6 +1600,42 @@ class AFDInferenceSession:
             max_seq_len=max_seq_len,
         )
 
+    # Per-phase layer scalars surfaced both un-prefixed (headline) and with
+    # ``prefill_`` / ``decode_`` prefixes (paired). Keeping this in one place
+    # avoids drift between the un-prefixed picker below, the prefixed
+    # writer, and the CLI/CSV consumers.
+    _PHASE_SCALAR_KEYS = (
+        "t_a_layer",
+        "t_f_layer",
+        "t_a2f_layer",
+        "t_f2a_layer",
+        "t_c_layer",
+        "t_step",
+        "balance_ratio",
+        "comm_hidden",
+    )
+
+    @classmethod
+    def _phase_scalars(cls, metrics: dict | None) -> dict:
+        """Return the 8 per-phase layer scalars (rounded), or NaN/None when
+        the phase was not run.
+
+        ``comm_hidden`` is the only boolean among them; surface it as
+        ``None`` (cleanly serialized to ``NaN`` in DataFrames) when the
+        phase did not run, so consumers can distinguish "the phase ran and
+        comm was not hidden" from "the phase did not run at all".
+        """
+        if metrics is None:
+            return {key: float("nan") if key != "comm_hidden" else None for key in cls._PHASE_SCALAR_KEYS}
+        out: dict = {}
+        for key in cls._PHASE_SCALAR_KEYS:
+            value = metrics[key]
+            if key == "comm_hidden":
+                out[key] = bool(value)
+            else:
+                out[key] = round(float(value), 3)
+        return out
+
     def _build_summary(
         self,
         *,
@@ -1532,27 +1646,45 @@ class AFDInferenceSession:
     ) -> InferenceSummary:
         """Construct the InferenceSummary (result dict + per-ops + OOM flag).
 
-        Output schema follows :data:`common.ColumnsAFD`. Metrics that do not
-        apply to the current phase are populated with zero.
+        Output schema follows :data:`common.ColumnsAFD`. Per-phase layer
+        scalars appear as paired ``prefill_<x>`` / ``decode_<x>`` columns
+        plus an un-prefixed "headline" form. The un-prefixed form refuses
+        to pick a single value in ``phase="both"`` (it is NaN/None) -- the
+        paired columns are the source of truth in that mode.
+
+        In AFD-with-PD combined runs the static side does not produce these
+        scalars at all; ``_combine_afd_static_estimate_results`` inherits
+        the AFD-side raw dict unchanged, so the NaN/None ``prefill_<x>`` or
+        ``decode_<x>`` block produced here correctly flags the static side
+        as non-AFD.
         """
         cfg = self._afd_config
         isl = runtime_config.isl
         osl = runtime_config.osl or 1
         b_total = cfg.n_a_workers * cfg.a_batch_size
 
-        # Pick the metrics that drive latency/throughput headline numbers.
-        drive = decode_metrics if decode_metrics is not None else prefill_metrics
-        assert drive is not None, "At least one phase must be simulated"
+        prefill_scalars = self._phase_scalars(prefill_metrics)
+        decode_scalars = self._phase_scalars(decode_metrics)
 
-        # Per-phase scalar metrics (zero-fill the ones we didn't run).
-        t_a_layer = drive["t_a_layer"]
-        t_f_layer = drive["t_f_layer"]
-        t_a2f_layer = drive["t_a2f_layer"]
-        t_f2a_layer = drive["t_f2a_layer"]
-        t_c_layer = drive["t_c_layer"]
-        t_step = drive["t_step"]
-        comm_hidden = drive["comm_hidden"]
-        balance_ratio = drive["balance_ratio"]
+        # Un-prefixed "headline" scalars: tied to the single ran phase in
+        # single-phase mode, deliberately NaN/None in ``both`` mode so
+        # downstream readers cannot accidentally treat the decode (or
+        # prefill) value as covering both phases when the two estimates
+        # generally disagree.
+        if phase == "prefill":
+            headline = prefill_scalars
+        elif phase == "decode":
+            headline = decode_scalars
+        else:
+            headline = self._phase_scalars(None)
+        t_a_layer = headline["t_a_layer"]
+        t_f_layer = headline["t_f_layer"]
+        t_a2f_layer = headline["t_a2f_layer"]
+        t_f2a_layer = headline["t_f2a_layer"]
+        t_c_layer = headline["t_c_layer"]
+        t_step = headline["t_step"]
+        balance_ratio = headline["balance_ratio"]
+        comm_hidden = headline["comm_hidden"]
 
         if decode_metrics is not None:
             tpot = decode_metrics["t_step"]
@@ -1624,12 +1756,35 @@ class AFDInferenceSession:
             "(f)workers": cfg.n_f_workers,
             "(f)memory": round(f_memory_gb, 2),
             "(f)is_oom": bool(f_is_oom),
-            "t_a_layer": round(t_a_layer, 3),
-            "t_f_layer": round(t_f_layer, 3),
-            "t_a2f_layer": round(t_a2f_layer, 3),
-            "t_f2a_layer": round(t_f2a_layer, 3),
-            "t_c_layer": round(t_c_layer, 3),
-            "t_step": round(t_step, 3),
+            # Un-prefixed "headline" layer scalars: populated for the single
+            # phase that ran; deliberately NaN/None when phase="both" so
+            # downstream readers do not silently treat decode-only values
+            # as covering both phases.  ``prefill_*`` / ``decode_*`` below
+            # are the source of truth in that mode.
+            "t_a_layer": t_a_layer,
+            "t_f_layer": t_f_layer,
+            "t_a2f_layer": t_a2f_layer,
+            "t_f2a_layer": t_f2a_layer,
+            "t_c_layer": t_c_layer,
+            "t_step": t_step,
+            "balance_ratio": balance_ratio,
+            "comm_hidden": comm_hidden,
+            "prefill_t_a_layer": prefill_scalars["t_a_layer"],
+            "prefill_t_f_layer": prefill_scalars["t_f_layer"],
+            "prefill_t_a2f_layer": prefill_scalars["t_a2f_layer"],
+            "prefill_t_f2a_layer": prefill_scalars["t_f2a_layer"],
+            "prefill_t_c_layer": prefill_scalars["t_c_layer"],
+            "prefill_t_step": prefill_scalars["t_step"],
+            "prefill_balance_ratio": prefill_scalars["balance_ratio"],
+            "prefill_comm_hidden": prefill_scalars["comm_hidden"],
+            "decode_t_a_layer": decode_scalars["t_a_layer"],
+            "decode_t_f_layer": decode_scalars["t_f_layer"],
+            "decode_t_a2f_layer": decode_scalars["t_a2f_layer"],
+            "decode_t_f2a_layer": decode_scalars["t_f2a_layer"],
+            "decode_t_c_layer": decode_scalars["t_c_layer"],
+            "decode_t_step": decode_scalars["t_step"],
+            "decode_balance_ratio": decode_scalars["balance_ratio"],
+            "decode_comm_hidden": decode_scalars["comm_hidden"],
             "ttft": round(ttft, 3),
             "tpot": round(tpot, 3),
             "request_latency": round(request_latency, 3),
@@ -1638,10 +1793,13 @@ class AFDInferenceSession:
             "tokens/s/gpu": round(tokens_per_s_per_gpu, 2),
             "tokens/s/user": round(tokens_per_s_per_user, 2),
             "seq/s": round(seq_per_s, 3),
-            "concurrency": b_total,
-            "tpuc": round(tokens_per_s_per_gpu, 2),
-            "balance_ratio": round(balance_ratio, 3),
-            "comm_hidden": comm_hidden,
+            # AFD runs ``num_microbatches`` activation sets in flight at any
+            # given time (each microbatch carries its own b_total requests),
+            # so the user-visible concurrency is the K-stage pipeline depth
+            # times ``b_total`` -- matches the "total in-flight" semantics used
+            # by the agg / disagg ``concurrency`` columns.  ``b_total`` is
+            # still reported separately above as the per-microbatch batch.
+            "concurrency": cfg.num_microbatches * b_total,
             "pipeline_model": cfg.pipeline_model,
             "num_microbatches": cfg.num_microbatches,
             "combined_with_pd": bool(cfg.combined_with_pd),

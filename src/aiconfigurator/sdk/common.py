@@ -759,14 +759,27 @@ ColumnsDisagg = [
 Columns for AFD (Attention-FFN Disaggregated) inference summary dataframe
 
 AFD is orthogonal to P/D disaggregation: the same schema is used whether
-AFD is applied to the prefill phase, the decode phase, or both.  Fields
-that do not apply to a given phase are populated with zero:
+AFD is applied to the prefill phase, the decode phase, or both.
 
-* Prefill-only run: ``tpot``/``seq/s``-style decode metrics are 0, ``ttft``
-  and per-step context metrics are populated.
-* Decode-only run: ``ttft`` is 0 and generation-side metrics are populated.
-* Combined run ("both"): ``ttft`` and ``tpot`` together describe the
-  end-to-end request.
+Per-phase layer scalars (``t_a_layer`` / ``t_f_layer`` / ``t_a2f_layer`` /
+``t_f2a_layer`` / ``t_c_layer`` / ``t_step`` / ``balance_ratio`` /
+``comm_hidden``) appear in three forms:
+
+* ``<scalar>``                       -- un-prefixed "headline" value.
+* ``prefill_<scalar>`` / ``decode_<scalar>``  -- per-phase paired values.
+
+Filling rules:
+
+* ``phase="prefill"`` -- un-prefixed and ``prefill_*`` reflect the prefill
+  estimate; ``decode_*`` are NaN/None.
+* ``phase="decode"``  -- mirror of the above.
+* ``phase="both"``    -- ``prefill_*`` and ``decode_*`` carry the two
+  estimates; the un-prefixed scalars are NaN/None (refusing to pick a single
+  "headline" value when two phases run and may diverge).
+* AFD-with-PD combined runs always have ``phase`` set to the AFD side
+  (``"prefill"`` or ``"decode"``); the static side's scalars are NaN/None
+  in the corresponding ``prefill_*``/``decode_*`` slot to flag "this side
+  was not estimated under AFD".
 """
 ColumnsAFD = [
     "model",
@@ -792,6 +805,24 @@ ColumnsAFD = [
     "t_f2a_layer",
     "t_c_layer",
     "t_step",
+    "balance_ratio",
+    "comm_hidden",
+    "prefill_t_a_layer",
+    "prefill_t_f_layer",
+    "prefill_t_a2f_layer",
+    "prefill_t_f2a_layer",
+    "prefill_t_c_layer",
+    "prefill_t_step",
+    "prefill_balance_ratio",
+    "prefill_comm_hidden",
+    "decode_t_a_layer",
+    "decode_t_f_layer",
+    "decode_t_a2f_layer",
+    "decode_t_f2a_layer",
+    "decode_t_c_layer",
+    "decode_t_step",
+    "decode_balance_ratio",
+    "decode_comm_hidden",
     "ttft",
     "tpot",
     "request_latency",
@@ -801,9 +832,6 @@ ColumnsAFD = [
     "tokens/s/user",
     "seq/s",
     "concurrency",
-    "tpuc",
-    "balance_ratio",
-    "comm_hidden",
     "pipeline_model",
     "num_microbatches",
     "combined_with_pd",

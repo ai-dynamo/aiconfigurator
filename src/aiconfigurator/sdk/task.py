@@ -481,6 +481,10 @@ class TaskConfigFactory:
 
         # On Blackwell, GPT-OSS defaults to w4a8_mxfp4_mxfp8 (MXFP8 activations)
         # for higher tensor core throughput. Profiles applied after this can override.
+        # The three serving modes consume the override from different keys, so
+        # each gets an explicit branch -- collapsing afd into the disagg ``else``
+        # silently lost this promotion (AFD reads ``worker_config``, not the
+        # ``prefill_/decode_worker_config`` keys the disagg branch writes).
         # In disagg mode, prefill and decode may run on different hardware, so only
         # promote the workers that are actually on Blackwell.
         if ctx.backend_name == "trtllm" and ctx.model_path in ("openai/gpt-oss-120b", "openai/gpt-oss-20b"):
@@ -489,7 +493,21 @@ class TaskConfigFactory:
                 if _is_blackwell_system(ctx.system_name):
                     _deep_merge(config_dict, {"worker_config": quant_override})
                     applied_layers.append("gptoss-blackwell-mxfp8")
-            else:
+            elif ctx.serving_mode == "afd":
+                # AFD is single-system (A/F pools share ``ctx.system_name``)
+                # and consumes ``worker_config`` -- same shape as agg.
+                # TODO(afd-heterogeneous): once a later phase lets the A-pool
+                # and F-pool run on different hardware (e.g. Hopper-attn +
+                # Blackwell-ffn), ``ctx.system_name`` will no longer
+                # uniquely describe the F-pool. Split this check into
+                # ``a_system_name`` / ``f_system_name`` like the disagg
+                # branch below does for prefill/decode, and promote
+                # ``worker_config.moe_quant_mode`` only when the F-pool
+                # (where the MoE GEMM actually runs) is on Blackwell.
+                if ctx.system_name in _blackwell_systems:
+                    _deep_merge(config_dict, {"worker_config": quant_override})
+                    applied_layers.append("gptoss-blackwell-mxfp8-afd")
+            elif ctx.serving_mode == "disagg":
                 prefill_system = ctx.system_name
                 decode_system = ctx.decode_system_name or ctx.system_name
                 promoted = {}
@@ -808,7 +826,7 @@ class TaskConfigFactory:
                 "pipeline_model": "optimistic",
                 "comm_overhead_factor": 1.0,
                 "phase": "decode",
-                "combined_with_pd": False,
+                "combined_with_pd": True,
                 "boundary_on_attn": True,
             },
             "worker_config": {
@@ -1878,7 +1896,7 @@ class TaskRunner:
             pipeline_model=str(afd_cfg_dict.get("pipeline_model", "optimistic")),
             comm_overhead_factor=float(afd_cfg_dict.get("comm_overhead_factor", 1.0)),
             phase=str(afd_cfg_dict.get("phase", "decode")),
-            combined_with_pd=bool(afd_cfg_dict.get("combined_with_pd", False)),
+            combined_with_pd=bool(afd_cfg_dict.get("combined_with_pd", True)),
             boundary_on_attn=bool(afd_cfg_dict.get("boundary_on_attn", True)),
         )
 

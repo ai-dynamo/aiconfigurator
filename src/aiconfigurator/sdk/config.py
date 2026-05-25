@@ -189,26 +189,35 @@ class AFDConfig:
     # the context phase; "both" produces an aggregated estimate combining
     # prefill (TTFT) and decode (TPOT).
     phase: str = "decode"  # "prefill" | "decode" | "both"
-    # Whether this AFD pool is used together with a separate P/D disagg
-    # deployment.  Currently this is *purely informational* -- the flag is
-    # surfaced in the result dataframe (see ``InferenceSummary``) but no
-    # code path branches on it.
-    # TODO(afd, Phase-2): wire ``combined_with_pd`` into the estimate so
-    # it is more than a metadata tag.  Specifically:
-    #   * ``inference_session`` / ``_simulate_phase`` do not adjust
-    #     latency / throughput when combined with a separate P/D disagg
-    #     deployment (no rate-matching between the AFD-decoded tokens and
-    #     the upstream prefill pool, no shared SLA).
-    #   * ``task._finalize_afd`` only counts ``n_a_nodes + n_f_nodes``
-    #     against the GPU budget; the GPUs of the "other side" P/D
-    #     workers are not added to ``total_requested``.
-    #   * ``pareto_analysis`` does not merge the AFD frontier with the
-    #     agg / disagg frontiers, so a deployment that uses AFD on one
-    #     phase and standard P/D on the other cannot be Pareto-evaluated
-    #     end-to-end today.
-    # Either drop the flag entirely, or add proper rate-matching /
-    # resource-budget / frontier-merging code to make it meaningful.
-    combined_with_pd: bool = False
+    # Whether this AFD pool runs together with a separate static
+    # (non-AFD) pool covering the *other* phase. Concretely, in CLI
+    # ``estimate`` mode:
+    #
+    #   * ``phase`` ∈ {"prefill", "decode"} + ``combined_with_pd=True``
+    #     → the AFD path estimates only its own phase and the CLI
+    #     orchestration layer (``cli/api._combine_afd_static_estimate_results``)
+    #     runs a standard static estimate for the other phase, then
+    #     merges TTFT/TPOT, throughput (rate-matched on min seq/s), GPU
+    #     budget (``afd_gpus + static_gpus``) and per-phase impl labels
+    #     into a single ``EstimateResult``.
+    #   * ``phase`` ∈ {"prefill", "decode"} + ``combined_with_pd=False``
+    #     → the CLI returns the AFD-only estimate for the chosen phase
+    #     (the other phase is left unmodeled; user is on their own to
+    #     size it). Use this when you only care about that single phase.
+    #   * ``phase == "both"`` → AFD covers both phases internally;
+    #     ``combined_with_pd`` must be ``False`` (the two are
+    #     mutually exclusive and ``__post_init__`` enforces this).
+    #
+    # Default is ``True`` because the typical AFD deployment pairs an
+    # AFD decode pool with a regular prefill pool (or vice versa); the
+    # combined estimate is the number a sizing exercise actually needs.
+    #
+    # TODO(afd, Phase-2): extend pareto_analysis to merge the AFD
+    # frontier with the agg / disagg frontiers so end-to-end Pareto
+    # evaluation across mixed AFD + P/D deployments is possible. Today
+    # the CLI single-point combine path is in place, but the Pareto
+    # sweep does not yet enumerate AFD-combined-with-PD points.
+    combined_with_pd: bool = True
     # Boundary-op assignment: ``add_norm_2`` and ``logits_gemm`` sit at
     # the natural Attention/FFN boundary and can be assigned to either
     # pool.  Defaults to A-Worker, but exposed here as a configurable
@@ -232,6 +241,13 @@ class AFDConfig:
             raise ValueError(
                 f"tp_a ({self.tp_a}) must be a positive divisor of "
                 f"gpus_per_node ({self.gpus_per_node})."
+            )
+        if self.phase == "both" and self.combined_with_pd:
+            raise ValueError(
+                "combined_with_pd=True is incompatible with phase='both': "
+                "'both' means AFD covers prefill+decode internally, so there "
+                "is no separate static pool to combine with. Set "
+                "combined_with_pd=False, or pick phase in {'prefill','decode'}."
             )
         self.n_a_workers = self.n_a_nodes * self.gpus_per_node // self.tp_a
         self.n_f_workers = self.n_f_nodes * self.gpus_per_node

@@ -674,7 +674,7 @@ def cli_estimate(
     pipeline_model: str = "optimistic",
     comm_overhead_factor: float = 1.0,
     afd_phase: str = "decode",
-    afd_combined_with_pd: bool = False,
+    afd_combined_with_pd: bool = True,
     afd_boundary_on_attn: bool = True,
 ) -> EstimateResult:
     """
@@ -962,9 +962,21 @@ def cli_estimate(
             raise ValueError(
                 f"afd_phase must be 'prefill', 'decode', or 'both'; got {afd_phase!r}."
             )
+        # ``combined_with_pd`` only makes sense for single-phase AFD: when
+        # AFD covers prefill+decode internally there is no separate static
+        # pool to combine with. ``AFDConfig.__post_init__`` enforces the
+        # same invariant, but checking up-front gives a clearer CLI-level
+        # error before any database/model loading happens.
+        if afd_phase == "both" and afd_combined_with_pd:
+            raise ValueError(
+                "afd_combined_with_pd=True is incompatible with afd_phase='both': "
+                "'both' means AFD covers prefill+decode internally; there is no "
+                "separate static pool to combine with. Pass --no-afd-combined-with-pd, "
+                "or pick afd_phase in {'prefill','decode'}."
+            )
 
         resolved_version = _resolve_version_for(system_name)
-        return _run_afd_estimate(
+        afd_result = _run_afd_estimate(
             model_path=model_path,
             system_name=system_name,
             backend_name=backend_name,
@@ -993,6 +1005,58 @@ def cli_estimate(
             get_model=get_model,
             free_gpu_memory_fraction=free_gpu_memory_fraction,
             max_seq_len=max_seq_len,
+            prefix=prefix,
+            nextn=nextn,
+            nextn_accept_rates=nextn_accept_rates,
+        )
+        # ``phase == "both"`` covers prefill+decode inside AFD; no static
+        # complement is needed. When ``combined_with_pd`` is False the
+        # caller explicitly asked for the AFD-only estimate of a single
+        # phase (the other phase is left unmodeled and the result's GPU
+        # budget only counts the AFD pool). In both cases we short-circuit
+        # before running the static estimate.
+        if afd_phase == "both" or not afd_combined_with_pd:
+            return afd_result
+
+        static_mode = "static_gen" if afd_phase == "prefill" else "static_ctx"
+        static_result = _run_static_estimate(
+            static_mode=static_mode,
+            model_path=model_path,
+            system_name=system_name,
+            backend_name=backend_name,
+            resolved_version=resolved_version,
+            isl=isl,
+            osl=osl,
+            batch_size=batch_size,
+            prefix=prefix,
+            tp_size=tp_size,
+            pp_size=pp_size,
+            attention_dp_size=attention_dp_size,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+            gemm_quant_mode=gemm_quant_mode,
+            kvcache_quant_mode=kvcache_quant_mode,
+            fmha_quant_mode=fmha_quant_mode,
+            moe_quant_mode=moe_quant_mode,
+            comm_quant_mode=comm_quant_mode,
+            nextn=nextn,
+            nextn_accept_rates=nextn_accept_rates,
+            stride=stride,
+            engine_step_backend=engine_step_backend,
+            load_database=_load_database,
+            get_backend=get_backend,
+            get_model=get_model,
+        )
+        if static_result.summary is not None and static_result.summary.check_oom():
+            phase_label = "decode" if static_mode == "static_gen" else "prefill"
+            raise RuntimeError(
+                f"OOM: the model '{model_path}' does not fit in GPU memory on system "
+                f"'{system_name}' for the regular {phase_label} phase."
+            )
+        return _combine_afd_static_estimate_results(
+            afd_result=afd_result,
+            static_result=static_result,
+            afd_phase=afd_phase,
         )
     else:
         raise ValueError(
@@ -1402,6 +1466,106 @@ def _run_disagg_estimate(
     )
 
 
+def _combine_afd_static_estimate_results(
+    *,
+    afd_result: EstimateResult,
+    static_result: EstimateResult,
+    afd_phase: str,
+) -> EstimateResult:
+    """Merge an AFD phase with the regular static phase into one estimate result."""
+    if afd_phase not in ("prefill", "decode"):
+        raise ValueError(f"afd_phase must be 'prefill' or 'decode', got {afd_phase!r}.")
+
+    afd_raw = afd_result.raw
+    afd_gpus = afd_result.num_total_gpus
+    static_gpus = static_result.num_total_gpus
+    total_gpus = afd_gpus + static_gpus
+
+    if afd_phase == "decode":
+        ttft = static_result.ttft
+        tpot = afd_result.tpot
+        prefill_seq_s = static_result.seq_per_second
+        decode_seq_s = afd_result.seq_per_second
+        concurrency = afd_result.concurrency
+        prefill_impl = "static_ctx"
+        decode_impl = "afd"
+        prefill_power = static_result.power_w
+        decode_power = afd_result.power_w
+    else:
+        ttft = afd_result.ttft
+        tpot = static_result.tpot
+        afd_batch = float(afd_raw.get("b_total", afd_result.concurrency) or 0.0)
+        prefill_seq_s = afd_batch / (ttft / 1000.0) if ttft > 0.0 else 0.0
+        decode_seq_s = static_result.seq_per_second
+        concurrency = static_result.concurrency
+        prefill_impl = "afd"
+        decode_impl = "static_gen"
+        prefill_power = afd_result.power_w
+        decode_power = static_result.power_w
+
+    seq_candidates = [v for v in (prefill_seq_s, decode_seq_s) if v > 0.0]
+    seq_s = min(seq_candidates) if seq_candidates else 0.0
+    tokens_s = seq_s * afd_result.osl
+    decode_time = tpot * max(afd_result.osl - 1, 0)
+    request_latency = ttft + decode_time
+    power_w = (
+        (prefill_power * ttft + decode_power * decode_time) / request_latency
+        if request_latency > 0.0
+        else 0.0
+    )
+
+    result_dict = dict(afd_raw)
+    result_dict.update(
+        {
+            "ttft": round(ttft, 3),
+            "tpot": round(tpot, 3),
+            "request_latency": round(request_latency, 3),
+            "seq/s": round(seq_s, 3),
+            "tokens/s": round(tokens_s, 2),
+            "tokens/s/gpu": round(tokens_s / total_gpus, 2) if total_gpus > 0 else 0.0,
+            "tokens/s/user": round(1000.0 / tpot, 2) if tpot > 0.0 else 0.0,
+            "concurrency": concurrency,
+            "num_total_gpus": total_gpus,
+            "memory": round(max(afd_result.memory, static_result.memory), 2),
+            "power_w": round(power_w, 3),
+            "(p)impl": prefill_impl,
+            "(d)impl": decode_impl,
+        }
+    )
+
+    per_ops_data = dict(afd_result.per_ops_data or {})
+    static_summary = static_result.summary
+    if static_summary is not None:
+        if static_result.mode == "static_ctx":
+            prefill_ctx_latency = static_summary.get_context_latency_dict()
+            if prefill_ctx_latency:
+                per_ops_data["prefill"] = dict(prefill_ctx_latency)
+        elif static_result.mode == "static_gen":
+            decode_gen_latency = static_summary.get_generation_latency_dict()
+            if decode_gen_latency:
+                per_ops_data["decode"] = dict(decode_gen_latency)
+
+    return EstimateResult(
+        ttft=result_dict.get("ttft", 0.0),
+        tpot=result_dict.get("tpot", 0.0),
+        power_w=result_dict.get("power_w", 0.0),
+        isl=afd_result.isl,
+        osl=afd_result.osl,
+        batch_size=afd_result.batch_size,
+        ctx_tokens=afd_result.ctx_tokens,
+        tp_size=afd_result.tp_size,
+        pp_size=afd_result.pp_size,
+        model_path=afd_result.model_path,
+        system_name=afd_result.system_name,
+        backend_name=afd_result.backend_name,
+        backend_version=afd_result.backend_version,
+        raw=result_dict,
+        mode="afd",
+        per_ops_data=per_ops_data,
+        kv_cache_warning=static_result.kv_cache_warning,
+    )
+
+
 def _run_afd_estimate(
     *,
     model_path,
@@ -1432,6 +1596,9 @@ def _run_afd_estimate(
     get_model,
     free_gpu_memory_fraction,
     max_seq_len,
+    prefix: int = 0,
+    nextn: int = 0,
+    nextn_accept_rates: list[float] | None = None,
 ) -> EstimateResult:
     """Run AFD (Attention-FFN Disaggregated) estimation.
 
@@ -1485,6 +1652,11 @@ def _run_afd_estimate(
         gemm_quant_mode, kvcache_quant_mode, fmha_quant_mode,
         moe_quant_mode, comm_quant_mode,
     )
+    # Pass speculative decode knobs through to A/F model configs. TODO:
+    # AFDTransfer still models committed decode-token volume only; recalibrate
+    # MTP transfer amplification once the serving semantics are finalized.
+    _apply_nextn(a_model_config, nextn, nextn_accept_rates)
+    _apply_nextn(f_model_config, nextn, nextn_accept_rates)
 
     afd_config = AFDConfig(
         n_a_nodes=n_a_nodes,
@@ -1501,7 +1673,12 @@ def _run_afd_estimate(
         combined_with_pd=bool(afd_combined_with_pd),
         boundary_on_attn=bool(afd_boundary_on_attn),
     )
-    runtime_config = RuntimeConfig(isl=isl, osl=osl, batch_size=afd_config.n_a_workers * a_batch_size)
+    runtime_config = RuntimeConfig(
+        isl=isl,
+        osl=osl,
+        batch_size=afd_config.n_a_workers * a_batch_size,
+        prefix=prefix,
+    )
 
     session = AFDInferenceSession(
         model_path=model_path,
@@ -1530,6 +1707,10 @@ def _run_afd_estimate(
     result_dict = summary.get_result_dict()
     if result_dict is None:
         raise RuntimeError("AFD estimation produced no results. The configuration may be invalid.")
+    result_dict = dict(result_dict)
+    if afd_phase == "both":
+        result_dict.setdefault("(p)impl", "afd")
+        result_dict.setdefault("(d)impl", "afd")
 
     return EstimateResult(
         ttft=result_dict.get("ttft", 0.0),
