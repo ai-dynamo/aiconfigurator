@@ -23,6 +23,7 @@ except ImportError:
 
 SAMPLED_POWER_LAW_DISTRIBUTION = "power_law_sampled_1.9"
 SAMPLED_POWER_LAW_ALPHA = 1.9
+SAMPLED_POWER_LAW_XMAX = 1024.0
 SUPPORTED_DISTRIBUTIONS = (
     "balanced",
     "power_law_<alpha>",
@@ -156,9 +157,9 @@ def _swap_max_rank_to_rank0(topk_ids: torch.Tensor, *, num_experts: int, ep: int
     return swapped
 
 
-def _sampled_power_law_xmax(global_num_tokens: int) -> float:
-    """Hybrid xmax for top-k sampled synthetic routing."""
-    return max(512.0, float(global_num_tokens) * 0.8)
+def _sampled_power_law_xmax(_global_num_tokens: int) -> float:
+    """Fixed xmax for top-k sampled synthetic routing."""
+    return SAMPLED_POWER_LAW_XMAX
 
 
 def sampled_power_law_logits(num_tokens: int, num_experts: int, topk: int, ep: int, alpha: float) -> torch.Tensor:

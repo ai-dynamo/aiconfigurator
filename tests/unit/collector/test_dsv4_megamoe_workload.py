@@ -106,11 +106,10 @@ def test_sampled_power_law_builds_valid_routing_plan():
 
 
 @pytest.mark.unit
-def test_sampled_power_law_xmax_has_fixed_floor_then_scales():
-    assert _sampled_power_law_xmax(64) == pytest.approx(512.0)
-    assert _sampled_power_law_xmax(128) == pytest.approx(512.0)
-    assert _sampled_power_law_xmax(1024) == pytest.approx(819.2)
-    assert _sampled_power_law_xmax(131072) == pytest.approx(104857.6)
+def test_sampled_power_law_xmax_is_fixed_to_collected_default():
+    assert _sampled_power_law_xmax(64) == pytest.approx(1024.0)
+    assert _sampled_power_law_xmax(1024) == pytest.approx(1024.0)
+    assert _sampled_power_law_xmax(131072) == pytest.approx(1024.0)
 
 
 @pytest.mark.unit

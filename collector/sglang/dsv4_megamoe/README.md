@@ -106,8 +106,8 @@ The collector supports:
 The distribution helpers are AIC's existing `collector.helper.balanced_logits`
 and `collector.helper.power_law_logits_v3`.  `power_law_sampled_1.9` keeps
 the same inverse-CDF power-law weight family, samples the curve with
-`xmax=max(512, global_num_tokens * 0.8)`, then samples each token's top-k
-experts without replacement.  The default MegaMoE collection includes
+`xmax=1024`, then samples each token's top-k experts without replacement.
+The default MegaMoE collection includes
 `power_law_sampled_1.9`.  When this sampled distribution is requested without
 an explicit `--routing-seeds` list, collection expands it to ten consecutive
 routing seeds starting at `--routing-seed` and writes one perf row whose latency
