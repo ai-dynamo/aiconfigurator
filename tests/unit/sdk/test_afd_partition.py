@@ -234,3 +234,127 @@ def test_build_afd_ops_partition_can_allow_unknown_ops():
 
     assert partition.attn_ops == []
     assert _names(partition.ffn_ops) == ["generation_future_kernel"]
+
+
+# ---------------------------------------------------------------------------
+# Classifier-consistency regressions: HF-style FFN ``proj_gemm`` names
+# stay on F, canonical attention ``proj_gemm`` names stay on A, and the
+# OverlapOp wrappers honor the same attn -> ffn marker order as bare ops.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "ffn_proj_name",
+    [
+        "generation_down_proj_gemm",
+        "generation_up_proj_gemm",
+        "generation_gate_proj_gemm",
+        # Phase prefix may be absent on HF-naming ports.
+        "down_proj_gemm",
+        "up_proj_gemm",
+        "gate_proj_gemm",
+    ],
+)
+def test_build_afd_ops_partition_hf_style_ffn_proj_gemm_lands_on_ffn(ffn_proj_name):
+    """HF-style FFN names containing ``proj_gemm`` must classify as FFN, not Attention.
+
+    The bare ``proj_gemm`` substring is the attention out-projection
+    marker; without an explicit exclusion guard ``down_proj_gemm`` /
+    ``up_proj_gemm`` / ``gate_proj_gemm`` would match
+    ``_is_attention_side_op`` first (attn precedes ffn in the unified
+    classifier) and the FFN GEMM cost would be silently routed into the
+    A-pool latency. This pins that the guard plus the explicit FFN
+    markers route them to F.
+    """
+    model = _Model(generation_ops=[_NamedOp(ffn_proj_name)])
+
+    partition = build_afd_ops_partition(model, phase="generation")
+
+    assert _names(partition.attn_ops) == [], (
+        f"{ffn_proj_name} must not classify as attn-side"
+    )
+    assert _names(partition.ffn_ops) == [ffn_proj_name]
+
+
+def test_build_afd_ops_partition_canonical_attn_proj_gemm_still_attn():
+    """The canonical attention out-projection ``<phase>_proj_gemm`` must stay on the A-pool.
+
+    Every model under ``models/`` (deepseek, llama, gpt, moe, hybrid_moe,
+    qwen35, nemotron) uses ``<phase>_proj_gemm`` for the attention
+    output projection. The FFN-style exclusion guard only filters
+    ``down_/up_/gate_proj_gemm``; the canonical name must still route
+    to A-pool.
+    """
+    model = _Model(
+        generation_ops=[
+            _NamedOp("generation_attention"),
+            _NamedOp("generation_proj_gemm"),
+            _NamedOp("generation_global_proj_gemm"),
+            _NamedOp("generation_swa_proj_gemm"),
+        ]
+    )
+
+    partition = build_afd_ops_partition(model, phase="generation")
+
+    assert _names(partition.attn_ops) == [
+        "generation_attention",
+        "generation_proj_gemm",
+        "generation_global_proj_gemm",
+        "generation_swa_proj_gemm",
+    ]
+    assert partition.ffn_ops == []
+
+
+def test_build_afd_ops_partition_overlap_no_inner_uses_unified_order():
+    """OverlapOp with no inner ops must classify by the same attn -> ffn order as bare ops.
+
+    Names can hit both attn and ffn substrings (e.g.
+    ``moe_attention_overlap`` -- contains ``moe`` AND ``attention``).
+    With ``_classify_op`` / ``_classify_overlap_op`` (no-inner branch) /
+    ``_classify_inner_overlap_op`` all funneled through
+    ``_classify_by_markers``, such a name must resolve to attn from
+    every callsite -- if any callsite reversed the order it would
+    classify the same name into a different pool.
+    """
+    # An OverlapOp with no inner ops, named to hit both attn ("attention")
+    # and ffn ("moe") substrings. Attn precedes ffn in the unified order.
+    overlap_no_inner = operations.OverlapOp("generation_moe_attention_overlap", group_a=[], group_b=[])
+    standalone = _NamedOp("generation_moe_attention_overlap")
+    model = _Model(generation_ops=[overlap_no_inner, standalone])
+
+    partition = build_afd_ops_partition(model, phase="generation")
+
+    # Both forms (OverlapOp-no-inner + standalone op with the same name)
+    # land on attn -- the unified order makes the two callsites agree
+    # by construction; if either callsite reversed the order, the
+    # OverlapOp would go to ffn and the standalone op to attn,
+    # diverging silently.
+    assert _names(partition.attn_ops) == [
+        "generation_moe_attention_overlap",
+        "generation_moe_attention_overlap",
+    ]
+    assert partition.ffn_ops == []
+
+
+def test_build_afd_ops_partition_inner_overlap_uses_unified_order():
+    """An OverlapOp whose inner ops are HF-style FFN GEMMs must settle on F.
+
+    The inner-op classifier shares ``_classify_by_markers`` with the
+    bare-op path, so the FFN-style ``proj_gemm`` exclusion guard
+    applies inside ``OverlapOp`` too. Without it, ``down_proj_gemm``
+    would hit the bare ``proj_gemm`` attn marker first; combined with
+    the OverlapOp inner sides being unanimous, the whole OverlapOp
+    would have landed on attn even though every inner op is an FFN
+    GEMM.
+    """
+    overlap = operations.OverlapOp(
+        "generation_hf_ffn_overlap",
+        group_a=[_NamedOp("generation_gate_proj_gemm"), _NamedOp("generation_up_proj_gemm")],
+        group_b=[_NamedOp("generation_down_proj_gemm")],
+    )
+    model = _Model(generation_ops=[overlap])
+
+    partition = build_afd_ops_partition(model, phase="generation")
+
+    assert partition.attn_ops == []
+    assert partition.ffn_ops == [overlap]

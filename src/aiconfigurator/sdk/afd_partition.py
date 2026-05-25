@@ -93,16 +93,24 @@ def _append_partition_op(
         partition.skipped_ops.append(op)
 
 
-def _classify_op(
+def _classify_by_markers(
     op: operations.Operation,
+    name: str,
     *,
     allow_unknown_ops: bool,
     unknown_side: Literal["attn", "ffn"],
 ) -> AFDSide:
-    name = _op_name(op)
+    """Single-source marker dispatch shared by all AFD op classifiers.
 
-    if isinstance(op, operations.OverlapOp):
-        return _classify_overlap_op(op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
+    ``_classify_op`` / ``_classify_overlap_op`` (no-inner branch) /
+    ``_classify_inner_overlap_op`` all need the same skip / boundary /
+    attn / ffn / fallback decision. Substring markers can overlap
+    (``proj_gemm`` is the canonical example), so the attn-vs-ffn check
+    order materially affects classification and must stay identical at
+    every callsite. Funneling all three through this helper locks the
+    order down to attn -> ffn in exactly one place, so future edits
+    stay coherent by construction.
+    """
     if _is_skipped_model_internal_op(op, name):
         return "skip"
     _raise_if_unclassifiable_layer_family(op)
@@ -112,8 +120,20 @@ def _classify_op(
         return "attn"
     if _is_ffn_side_op(name):
         return "ffn"
-
     return _unknown_or_default(op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
+
+
+def _classify_op(
+    op: operations.Operation,
+    *,
+    allow_unknown_ops: bool,
+    unknown_side: Literal["attn", "ffn"],
+) -> AFDSide:
+    if isinstance(op, operations.OverlapOp):
+        return _classify_overlap_op(op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
+    return _classify_by_markers(
+        op, _op_name(op), allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side
+    )
 
 
 def _classify_overlap_op(
@@ -137,16 +157,9 @@ def _classify_overlap_op(
 
         raise AFDPartitionError(f"OverlapOp '{name}' spans A/F boundaries and cannot be kept atomic.")
 
-    if _is_skipped_model_internal_op(op, name):
-        return "skip"
-    _raise_if_unclassifiable_layer_family(op)
-    if _is_boundary_op(name):
-        return "boundary"
-    if _is_ffn_side_op(name):
-        return "ffn"
-    if _is_attention_side_op(name):
-        return "attn"
-    return _unknown_or_default(op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
+    return _classify_by_markers(
+        op, name, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side
+    )
 
 
 def _classify_inner_overlap_op(
@@ -157,18 +170,9 @@ def _classify_inner_overlap_op(
 ) -> AFDSide:
     if isinstance(op, operations.OverlapOp):
         return _classify_overlap_op(op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
-
-    name = _op_name(op)
-    if _is_skipped_model_internal_op(op, name):
-        return "skip"
-    _raise_if_unclassifiable_layer_family(op)
-    if _is_boundary_op(name):
-        return "boundary"
-    if _is_attention_side_op(name):
-        return "attn"
-    if _is_ffn_side_op(name):
-        return "ffn"
-    return _unknown_or_default(op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
+    return _classify_by_markers(
+        op, _op_name(op), allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side
+    )
 
 
 def _validate_phase(phase: str) -> AFDPhase:
@@ -260,8 +264,19 @@ def _is_boundary_op(name: str) -> bool:
     ) or name.endswith("_combine")
 
 
+# Names that look like FFN GEMMs but contain ``"proj_gemm"`` as a
+# substring. HF-style checkpoints often name FFN GEMMs
+# ``down_proj_gemm`` / ``up_proj_gemm`` / ``gate_proj_gemm``; without
+# this guard the bare ``"proj_gemm"`` attention marker would pull those
+# ops into the A-pool. No model under ``models/`` uses these names
+# today, but new ports (e.g. straight-from-HF naming) would otherwise
+# regress silently, so we exclude them explicitly here and re-claim
+# them on the FFN side via ``_is_ffn_side_op``.
+_FFN_PROJ_GEMM_MARKERS = ("down_proj_gemm", "up_proj_gemm", "gate_proj_gemm")
+
+
 def _is_attention_side_op(name: str) -> bool:
-    return any(
+    if any(
         marker in name
         for marker in (
             "embedding",
@@ -276,9 +291,19 @@ def _is_attention_side_op(name: str) -> bool:
             "mla",
             "bmm",
             "rope",
-            "proj_gemm",
         )
-    )
+    ):
+        return True
+    # ``proj_gemm`` is the canonical attention output projection (``W_O``)
+    # name used across deepseek / llama / gpt / moe / hybrid_moe / qwen35
+    # / nemotron, but the bare substring also matches HF-style FFN names
+    # (see ``_FFN_PROJ_GEMM_MARKERS`` above). Allow ``proj_gemm`` only
+    # when none of the FFN-style forms is present; the matching FFN
+    # markers added to ``_is_ffn_side_op`` below pick up the excluded
+    # names on the second-pass attn -> ffn check.
+    if "proj_gemm" in name and not any(ffn in name for ffn in _FFN_PROJ_GEMM_MARKERS):
+        return True
+    return False
 
 
 def _is_ffn_side_op(name: str) -> bool:
@@ -306,6 +331,12 @@ def _is_ffn_side_op(name: str) -> bool:
             "gate_ffn",
             "up_gemm",
             "down_gemm",
+            # HF-style FFN GEMM names. Kept in sync with
+            # ``_FFN_PROJ_GEMM_MARKERS`` so ``_is_attention_side_op``'s
+            # ``proj_gemm`` exclusion has a matching positive marker here.
+            "down_proj",
+            "up_proj",
+            "gate_proj",
             "relu",
         )
     )
