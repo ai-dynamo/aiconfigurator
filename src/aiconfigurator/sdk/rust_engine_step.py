@@ -13,6 +13,7 @@ import platform
 import shutil
 import subprocess
 import tempfile
+import uuid
 from functools import cache
 from importlib import resources as pkg_resources
 from pathlib import Path
@@ -547,7 +548,7 @@ def _materialize_rust_perf_csv(systems_root: Path, overlay_root: Path, relative_
         ) from exc
 
     target_txt.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = target_txt.with_name(f".{target_txt.name}.tmp")
+    tmp_path = target_txt.with_name(f".{target_txt.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
         pc.write_csv(pq.read_table(source_parquet), tmp_path)
         os.replace(tmp_path, target_txt)

@@ -21,20 +21,22 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
           lfs: true
+          persist-credentials: false
 
       - name: Fetch base ref and LFS objects
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          BASE_REF="${{ github.event.pull_request.base.ref }}"
           git fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}"
           git lfs install
           git lfs fetch origin "refs/remotes/origin/${BASE_REF}"
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
 
@@ -44,21 +46,17 @@ jobs:
           pip install pyarrow
 
       - name: Create parquet diff report
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          BASE_REF="${{ github.event.pull_request.base.ref }}"
           python tools/perf_database/parquet_diff.py \
             --base-ref "origin/${BASE_REF}" \
             --head-ref HEAD \
             --output comment.md
 
-      - name: Save PR number for downstream comment workflow
-        run: echo "${{ github.event.pull_request.number }}" > pr-number.txt
-
       - name: Upload parquet diff artifact bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: perf-parquet-diff
-          path: |
-            comment.md
-            pr-number.txt
+          path: comment.md
           retention-days: 30
