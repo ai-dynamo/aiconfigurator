@@ -49,11 +49,14 @@ class Embedding(Operation):
             raise ValueError("Embedding.query requires 'x' (num tokens).")
         d2d_bytes = x * self._column_size * 2
 
-        result = database.query_mem_op(d2d_bytes)
+        gpu_spec = database.system_spec["gpu"]
+        latency = (
+            d2d_bytes / (gpu_spec["mem_bw"] * self._empirical_bw_scaling_factor) + self._constant_latency
+        ) * 1000
         return PerformanceResult(
-            float(result) * self._scale_factor,
-            energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            latency * self._scale_factor,
+            energy=0.0,
+            source="empirical",
         )
 
     def get_weights(self, **kwargs):

@@ -55,11 +55,15 @@ class ElementWise(Operation):
         read_bytes = x * self._dim_in * 2  # bfloat16 for act
         write_bytes = x * self._dim_out * 2
 
-        result = database.query_mem_op(read_bytes + write_bytes)
+        mem_bytes = read_bytes + write_bytes
+        gpu_spec = database.system_spec["gpu"]
+        latency = (
+            mem_bytes / (gpu_spec["mem_bw"] * self._empirical_bw_scaling_factor) + self._constant_latency
+        ) * 1000
         return PerformanceResult(
-            float(result) * self._scale_factor,
-            energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            latency * self._scale_factor,
+            energy=0.0,
+            source="empirical",
         )
 
     def get_weights(self, **kwargs):

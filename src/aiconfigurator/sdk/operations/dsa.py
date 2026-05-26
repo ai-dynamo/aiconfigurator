@@ -403,7 +403,7 @@ class ContextDSAModule(Operation):
                     result = database._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
-            except (KeyError, TypeError, ValueError, AssertionError) as exc:
+            except (KeyError, TypeError, AssertionError) as exc:
                 raise missing_context_dsa_error() from exc
             if prefix > 0:
                 base_sol = get_sol(b, full_s, 0, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
@@ -693,7 +693,7 @@ class GenerationDSAModule(Operation):
                 result = database._interp_3d(num_heads, b, s, dsa_dict, "cubic")
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
-            except (KeyError, TypeError, ValueError, AssertionError) as exc:
+            except (KeyError, TypeError, AssertionError) as exc:
                 raise missing_generation_dsa_error() from exc
             return database._interp_pr(latency, energy=energy)
         except Exception as e:

@@ -363,6 +363,8 @@ class NCCL(Operation):
         cls.load_data(database)
 
         def get_silicon():
+            from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
             if num_gpus == 1:
                 return PerformanceResult(0.0, energy=0.0, source="empirical")
 
@@ -372,8 +374,11 @@ class NCCL(Operation):
                 nccl_source = database._oneccl_data
             nccl_source.raise_if_not_loaded()
 
-            max_num_gpus = max(nccl_source[dtype][operation].keys())
-            nccl_dict = nccl_source[dtype][operation][min(num_gpus, max_num_gpus)]
+            op_dict = nccl_source.get(dtype, {}).get(operation, {})
+            if not op_dict:
+                raise PerfDataNotAvailableError(f"No NCCL silicon data for {dtype=}, {operation=}.")
+            max_num_gpus = max(op_dict.keys())
+            nccl_dict = op_dict[min(num_gpus, max_num_gpus)]
             size_left, size_right = database._nearest_1d_point_helper(
                 message_size,
                 list(nccl_dict.keys()),

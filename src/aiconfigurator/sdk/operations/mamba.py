@@ -550,6 +550,14 @@ class Mamba2(Operation):
         self._tp_size = tp_size
         self._quant_mode = quant_mode
 
+        if self._tp_size <= 0:
+            raise ValueError(f"Mamba2 requires tp_size > 0, got {self._tp_size}.")
+        if self._nheads % self._tp_size != 0 or self._n_groups % self._tp_size != 0:
+            raise ValueError(
+                "Mamba2 requires tp_size to evenly divide both nheads and n_groups "
+                f"(got nheads={self._nheads}, n_groups={self._n_groups}, tp_size={self._tp_size})."
+            )
+
         # Calculate dimensions matching TensorRT-LLM mamba2_mixer.py lines 76-78:
         # d_inner = head_dim * nheads
         # d_in_proj = 2 * d_inner + 2 * n_groups * d_state + nheads
