@@ -79,10 +79,14 @@ class Operation:
     @classmethod
     def clear_cache(cls):
         """Clear this op's data cache and any LRU on ``query``. Subclasses
-        with their own ``_data_cache`` override the class attribute; this
-        default implementation also clears the shared base-class cache."""
-        if "_data_cache" in cls.__dict__:
-            cls.__dict__["_data_cache"].clear()
+        with their own ``_data_cache`` override the class attribute; if a
+        subclass never declared one, fall back to evicting the shared
+        ``Operation._data_cache`` so ``clear_all_op_caches()`` doesn't
+        silently skip it."""
+        cache = cls.__dict__.get("_data_cache")
+        if cache is None:
+            cache = Operation._data_cache
+        cache.clear()
         # query may be wrapped in functools.lru_cache — clear if present.
         query = cls.__dict__.get("query")
         if query is not None and hasattr(query, "cache_clear"):

@@ -47,6 +47,10 @@ class ElementWise(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query element-wise operation latency with power data."""
         x = kwargs.get("x")  # num tokens
+        if x is None:
+            raise ValueError("ElementWise.query requires 'x' (num tokens).")
+        if self._scale_num_tokens <= 0:
+            raise ValueError(f"ElementWise.query: scale_num_tokens must be > 0, got {self._scale_num_tokens}.")
         x //= self._scale_num_tokens
         read_bytes = x * self._dim_in * 2  # bfloat16 for act
         write_bytes = x * self._dim_out * 2

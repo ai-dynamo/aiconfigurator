@@ -45,6 +45,8 @@ class Embedding(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query embedding latency with power data."""
         x = kwargs.get("x")
+        if x is None:
+            raise ValueError("Embedding.query requires 'x' (num tokens).")
         d2d_bytes = x * self._column_size * 2
 
         result = database.query_mem_op(d2d_bytes)

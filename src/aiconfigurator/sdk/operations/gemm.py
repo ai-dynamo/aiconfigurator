@@ -114,7 +114,7 @@ class GEMM(Operation):
         )
 
         key = cls._cache_key(database)
-        if key not in cls._data_cache:
+        if key not in cls._data_cache or key not in cls._compute_scale_cache or key not in cls._scale_matrix_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
             data_dir = os.path.join(system_data_root, database.backend, database.version)
 
@@ -123,9 +123,13 @@ class GEMM(Operation):
                 sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
                 return LoadedOpData(loader(sources), filename_enum, primary_path)
 
-            cls._data_cache[key] = _load(PerfDataFilename.gemm, load_gemm_data)
-            cls._compute_scale_cache[key] = _load(PerfDataFilename.compute_scale, load_compute_scale_data)
-            cls._scale_matrix_cache[key] = _load(PerfDataFilename.scale_matrix, load_scale_matrix_data)
+            # Load all three into locals first so a loader failure on the second
+            # or third file doesn't leave the cache half-populated (which would
+            # let a subsequent ``key in cls._data_cache`` early-out skip past
+            # the missing siblings and crash downstream).
+            gemm_loaded = _load(PerfDataFilename.gemm, load_gemm_data)
+            compute_scale_loaded = _load(PerfDataFilename.compute_scale, load_compute_scale_data)
+            scale_matrix_loaded = _load(PerfDataFilename.scale_matrix, load_scale_matrix_data)
 
             # Correct + extrapolate the CANONICAL class-cache values directly
             # (not via ``database._gemm_data``) so a pre-set test override
@@ -140,8 +144,14 @@ class GEMM(Operation):
             # ``PerfDatabase._correct_data`` re-clamps via the backward-compat
             # forward when called from ``__init__``, but standalone callers
             # of ``GEMM.load_data`` get the legacy single-pass semantics.
-            cls._correct_sol(database, cls._data_cache[key])
-            cls._extrapolate_gemm_data(cls._data_cache[key])
+            cls._correct_sol(database, gemm_loaded)
+            cls._extrapolate_gemm_data(gemm_loaded)
+
+            # All three loads + correction + extrapolation succeeded — commit
+            # atomically so partially-populated cache state can never be observed.
+            cls._data_cache[key] = gemm_loaded
+            cls._compute_scale_cache[key] = compute_scale_loaded
+            cls._scale_matrix_cache[key] = scale_matrix_loaded
 
             cls._record_load()
 
@@ -406,7 +416,15 @@ class GEMM(Operation):
 
                 Interpolated/extrapolated GEMM values are still derived from
                 silicon table data; only explicit formula fallbacks are
-                tagged as empirical."""
+                tagged as empirical.
+
+                If ``result`` is already a ``PerformanceResult``, return it
+                unchanged so upstream attribution (e.g. ``"empirical"`` /
+                ``"mixed"`` set by an inner ``_query_silicon_or_hybrid`` /
+                ``_interp_pr`` call) is preserved instead of being silently
+                overwritten with the ``source`` default."""
+                if isinstance(result, PerformanceResult):
+                    return result
                 if isinstance(result, dict):
                     return PerformanceResult(result["latency"], energy=result.get("energy", 0.0), source=source)
                 return PerformanceResult(result, energy=0.0, source=source)
