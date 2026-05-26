@@ -566,6 +566,9 @@ def _parse_hf_config_json(config: dict) -> dict:
             chunk_size=config["chunk_size"],
             # Optional: 0 for non-MoE NemotronH models (e.g., Nemotron-H-56B)
             moe_shared_expert_intermediate_size=config.get("moe_shared_expert_intermediate_size", 0),
+            # Optional: latent compression dim for routed experts (Nemotron-3-Super).
+            # HF config uses None to mean "no compression"; map to 0 here.
+            moe_latent_size=config.get("moe_latent_size") or 0,
         )
         logger.info(
             f"NemotronH hybrid config: pattern={extra_params.hybrid_override_pattern}, "
