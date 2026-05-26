@@ -52,6 +52,12 @@ def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]
 def set_systems_paths(raw_paths: str | Iterable[str] | None) -> None:
     """
     Override the system search paths for the current process.
+
+    Also evicts every Operation subclass's class-level CSV cache via
+    ``clear_all_op_caches()`` — those caches are keyed by ``systems_root``
+    among other things, so changing the path set could otherwise serve
+    stale rows on a subsequent ``PerfDatabase`` construction that aliases
+    a previously-loaded key tuple.
     """
     global _SYSTEMS_PATHS
     resolved_paths = _normalize_systems_paths(raw_paths)
@@ -62,6 +68,9 @@ def set_systems_paths(raw_paths: str | Iterable[str] | None) -> None:
             f"Invalid entries: {', '.join(invalid_paths)}"
         )
     _SYSTEMS_PATHS = resolved_paths
+    from aiconfigurator.sdk.operations.base import clear_all_op_caches
+
+    clear_all_op_caches()
 
 
 def get_systems_paths() -> list[str]:
@@ -563,7 +572,13 @@ def _store_loaded_database(
 
 
 def clear_database_runtime_caches(system: str, backend: str, version: str) -> None:
-    """Clear per-query/interpolation caches for one loaded database."""
+    """Clear per-query/interpolation caches for one loaded database.
+
+    Also evicts every Operation subclass's class-level CSV cache via
+    ``clear_all_op_caches()`` so a subsequent reload reads fresh rows
+    from disk — the per-class caches survive the per-instance
+    ``clear_runtime_caches()`` and would otherwise serve the prior data.
+    """
     seen_database_ids: set[int] = set()
     for cache_key, systems_cache in databases_cache.items():
         _, cached_system, _ = cache_key
@@ -583,9 +598,20 @@ def clear_database_runtime_caches(system: str, backend: str, version: str) -> No
         if callable(clear_runtime_caches):
             clear_runtime_caches()
 
+    from aiconfigurator.sdk.operations.base import clear_all_op_caches
+
+    clear_all_op_caches()
+
 
 def unload_database(system: str, backend: str, version: str) -> None:
-    """Remove one loaded database from every systems-root/shared-mode cache."""
+    """Remove one loaded database from every systems-root/shared-mode cache.
+
+    Also evicts every Operation subclass's class-level CSV cache via
+    ``clear_all_op_caches()`` so a future ``get_database(...)`` for the
+    same ``(system, backend, version)`` rebuilds the op-level caches from
+    disk instead of aliasing the stale tables that survived the database
+    pop.
+    """
     for cache_key in list(databases_cache.keys()):
         _, cached_system, _ = cache_key
         if cached_system != system:
@@ -604,6 +630,10 @@ def unload_database(system: str, backend: str, version: str) -> None:
             systems_cache.pop(backend, None)
         if not systems_cache:
             databases_cache.pop(cache_key, None)
+
+    from aiconfigurator.sdk.operations.base import clear_all_op_caches
+
+    clear_all_op_caches()
 
 
 def _load_database_ref_in_parent(ref: DatabaseRef) -> PerfDatabase | None:
@@ -2869,10 +2899,11 @@ class PerfDatabase:
                 return tuple(_wrap_data_dict(item) for item in result)
             return _wrap_data_dict(result)
 
-        # Core ops
-        self._gemm_data = _load_op_data(PerfDataFilename.gemm)
-        self._context_attention_data = _load_op_data(PerfDataFilename.context_attention)
-        self._generation_attention_data = _load_op_data(PerfDataFilename.generation_attention)
+        # Core ops. GEMM / ContextAttention / GenerationAttention moved to
+        # operations/*: data loading, SOL correction, and grid extrapolation
+        # now live there. Their ``load_data`` classmethods are invoked once
+        # below (after the other ``_load_op_data`` calls) so the loaders are
+        # still patched in unit-test setups.
         self._moe_data, self._moe_low_latency_data = _load_op_data(PerfDataFilename.moe)
 
         # Comm ops
@@ -2888,8 +2919,7 @@ class PerfDatabase:
         self._generation_mla_module_data = _load_op_data(PerfDataFilename.mla_generation_module)
         self._mamba2_data = _load_op_data(PerfDataFilename.mamba2)
         self._gdn_data = _load_op_data(PerfDataFilename.gdn)
-        self._compute_scale_data = _load_op_data(PerfDataFilename.compute_scale)
-        self._scale_matrix_data = _load_op_data(PerfDataFilename.scale_matrix)
+        # compute_scale + scale_matrix are GEMM-owned (loaded by GEMM.load_data below)
         self._context_dsa_module_data = _load_op_data(PerfDataFilename.dsa_context_module)
         self._generation_dsa_module_data = _load_op_data(PerfDataFilename.dsa_generation_module)
         self._mhc_module_data = _load_op_data(PerfDataFilename.mhc_module)
@@ -2952,251 +2982,32 @@ class PerfDatabase:
             self._wideep_moe_compute_data = _load_op_data(PerfDataFilename.wideep_moe_compute)
             self._trtllm_alltoall_data = _load_op_data(PerfDataFilename.trtllm_alltoall)
 
-        # pre-correction
+        # GEMM / ContextAttention / GenerationAttention own their CSV tables +
+        # SOL correction + grid extrapolation. The eager invocations here are
+        # a transition compromise — Pattern A is supposed to be lazy-on-first-
+        # query, but the existing test surface (stub_perf_db,
+        # comprehensive_perf_db) patches loaders only during ``__init__``,
+        # so a lazy load triggered later would hit unpatched real-disk
+        # loaders. ISSUE-16 retires these eager calls once test fixtures
+        # migrate to the lazy contract.
+        from aiconfigurator.sdk.operations.attention import ContextAttention, GenerationAttention
+        from aiconfigurator.sdk.operations.gemm import GEMM
+
+        GEMM.load_data(self)
+        ContextAttention.load_data(self)
+        GenerationAttention.load_data(self)
+
+        # pre-correction (non-migrated ops; migrated ops apply their own
+        # SOL correction during ``load_data``)
         self._correct_data()
 
-        # regular context attention
-        if self._context_attention_data:
-            for quant_mode in self._context_attention_data:
-                for kv_cache_dtype in self._context_attention_data[quant_mode]:
-                    for num_kv_heads in self._context_attention_data[quant_mode][kv_cache_dtype]:
-                        for head_size in self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads]:
-                            for window_size in self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads][
-                                head_size
-                            ]:
-                                data_dict = self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads][
-                                    head_size
-                                ][window_size]
-                                min_x = min(data_dict.keys())
-                                target_x_list = [
-                                    1,
-                                    2,
-                                    3,
-                                    4,
-                                    5,
-                                    6,
-                                    8,
-                                    9,
-                                    10,
-                                    12,
-                                    14,
-                                    16,
-                                    18,
-                                    20,
-                                    24,
-                                    28,
-                                    32,
-                                    36,
-                                    40,
-                                    48,
-                                    56,
-                                    72,
-                                    96,
-                                    128,
-                                ]  # n
-                                # currently, support max seq to 1M. Because all the system is linear for
-                                # now. it will be difficult to do square interpolation. Use more points
-                                # to do the approximation.
-                                # Note: start from 1 to make sure any small ISL can be interpolated,
-                                # even if the ISL is smaller than what exists in the collected data.
-                                target_y_list = (
-                                    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-                                    + [4096 + i * 2048 for i in range(14)]
-                                    + [32768 + 16384 * i for i in range(6)]
-                                    + [131072 + 32768 * i for i in range(12)]
-                                    + [524288 + 65536 * i for i in range(9)]
-                                )  # s
-                                target_z_list = [
-                                    1,
-                                    2,
-                                    4,
-                                    8,
-                                    16,
-                                    32,
-                                    64,
-                                    128,
-                                    256,
-                                    512,
-                                    384,
-                                    1024,
-                                    2048,
-                                ]  # b
+        # Context + Generation attention extrapolation moved to
+        # operations/attention.py (ContextAttention._extrapolate /
+        # GenerationAttention._extrapolate, invoked from their respective
+        # load_data classmethods above).
 
-                                filtered_x_list = []
-                                for i in target_x_list:
-                                    if i >= min_x:
-                                        filtered_x_list.append(i)
-                                self._extrapolate_data_grid(
-                                    data_dict=data_dict,  # nsb
-                                    target_x_list=filtered_x_list,
-                                    target_y_list=target_y_list,
-                                    target_z_list=target_z_list,
-                                    sqrt_y_value=True,
-                                )
-
-        # regular generation attention
-        if self._generation_attention_data:
-            for kv_cache_dtype in self._generation_attention_data:
-                for num_kv_heads in self._generation_attention_data[kv_cache_dtype]:
-                    for head_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads]:
-                        for window_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads][head_size]:
-                            target_x_list = [
-                                1,
-                                2,
-                                3,
-                                4,
-                                5,
-                                6,
-                                8,
-                                9,
-                                10,
-                                12,
-                                14,
-                                16,
-                                18,
-                                20,
-                                24,
-                                28,
-                                32,
-                                36,
-                                40,
-                                48,
-                                56,
-                                72,
-                                96,
-                                128,
-                            ]  # n
-                            target_y_list = [
-                                1,
-                                2,
-                                4,
-                                8,
-                                16,
-                                32,
-                                64,
-                                128,
-                                256,
-                                384,
-                                512,
-                                1024,
-                                2048,
-                                8192,
-                            ]  # b
-                            target_z_list = [
-                                1,
-                                2,
-                                4,
-                                8,
-                                16,
-                                32,
-                                64,
-                                128,
-                                256,
-                                512,
-                                1024,
-                                2048,
-                                4096,
-                                8192,
-                                16384,
-                                32768,
-                                65536,
-                                131072,
-                                262144,
-                                2097152 * 8,
-                            ]  # s
-                            data_dict = self._generation_attention_data[kv_cache_dtype][num_kv_heads][head_size][
-                                window_size
-                            ]
-                            min_x = min(data_dict.keys())
-                            filtered_x_list = []
-                            for i in target_x_list:
-                                if i >= min_x:
-                                    filtered_x_list.append(i)
-
-                            self._extrapolate_data_grid(
-                                data_dict=data_dict,  # nbs
-                                target_x_list=filtered_x_list,
-                                target_y_list=target_y_list,
-                                target_z_list=target_z_list,
-                            )
-
-        # regular gemm
-        if self._gemm_data:
-            for quant_mode, data_dict in self._gemm_data.items():
-                target_x_list = [
-                    1,
-                    2,
-                    4,
-                    8,
-                    16,
-                    32,
-                    48,
-                    64,
-                    80,
-                    96,
-                    128,
-                    160,
-                    192,
-                    224,
-                    256,
-                    320,
-                    384,
-                    448,
-                    512,
-                    640,
-                    768,
-                    896,
-                    1024,
-                    2048,
-                    4096,
-                    8192,
-                    16384,
-                    32768,
-                    131072,
-                    524288,
-                    1048576,
-                    2097152 * 8,
-                ]  # num_tokens
-                target_y_list = [
-                    32,
-                    64,
-                    128,
-                    256,
-                    512,
-                    768,
-                    1024,
-                    1536,
-                    2048,
-                    2560,
-                    3072,
-                    3584,
-                    4096,
-                    5120,
-                    6144,
-                    7168,
-                    8192,
-                    10240,
-                    12288,
-                    14336,
-                    16384,
-                    20480,
-                    24576,
-                    28672,
-                    32768,
-                    40960,
-                    49152,
-                    57344,
-                    65536,
-                    131072,
-                    262144,
-                ]  # to fit vocab gemm
-                target_z_list = target_y_list
-                self._extrapolate_data_grid(
-                    data_dict=data_dict,
-                    target_x_list=target_x_list,
-                    target_y_list=target_y_list,
-                    target_z_list=target_z_list,
-                )
+        # GEMM extrapolation moved to operations/gemm.py (GEMM._extrapolate_gemm_data,
+        # invoked from GEMM.load_data above).
 
         # mla
         # wideep context mla
@@ -4075,27 +3886,14 @@ class PerfDatabase:
     def _get_quant_tc_flops(self, quant_mode) -> float:
         """Resolve actual tensor-core FLOPS for a given quant mode.
 
-        Maps the quant mode's compute factor (1/2/4) to the corresponding
-        ``*_tc_flops`` entry in the system GPU spec.  Falls back to
-        ``bfloat16_tc_flops * compute_factor`` when the spec entry is missing.
+        Thin wrapper around ``GEMM._get_quant_tc_flops``; kept on
+        ``PerfDatabase`` because the DSV4 / MLA / attention SOL paths
+        still reference it as ``self._get_quant_tc_flops(...)``.
+        ISSUE-16 retires this wrapper once those callers migrate.
         """
-        compute_to_flops_key = {1: "bfloat16_tc_flops", 2: "fp8_tc_flops", 4: "fp4_tc_flops"}
-        gpu = self.system_spec["gpu"]
-        key = compute_to_flops_key.get(quant_mode.value.compute)
-        if key is not None and key in gpu:
-            return gpu[key]
-        return gpu["bfloat16_tc_flops"] * quant_mode.value.compute
+        from aiconfigurator.sdk.operations.gemm import GEMM
 
-    @staticmethod
-    def _normalize_gemm_quant_mode_for_table(quant_mode: common.GEMMQuantMode) -> common.GEMMQuantMode:
-        """
-        Normalize GEMM quant modes for perf table lookup.
-
-        `fp8_static` is a behavioral mode that reuses `fp8` perf tables.
-        """
-        if quant_mode == common.GEMMQuantMode.fp8_static:
-            return common.GEMMQuantMode.fp8
-        return quant_mode
+        return GEMM._get_quant_tc_flops(self.system_spec, quant_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_gemm(
@@ -4107,14 +3905,8 @@ class PerfDatabase:
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
-        Query GEMM operation latency and energy.
-
-        Args:
-            m: Number of rows in output matrix
-            n: Number of columns in output matrix
-            k: Inner dimension
-            quant_mode: Quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+        Query GEMM operation latency and energy. Delegates to ``GEMM``;
+        see ``aiconfigurator.sdk.operations.gemm.GEMM._query_gemm_table``.
 
         Returns:
             PerformanceResult: Acts as float (latency in ms).
@@ -4127,84 +3919,9 @@ class PerfDatabase:
             >>> energy_wms = result.energy
             >>> power_w = result.power  # or result.energy / float(result)
         """
+        from aiconfigurator.sdk.operations.gemm import GEMM
 
-        def get_sol(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            tc_flops = self._get_quant_tc_flops(quant_mode)
-            sol_math = 2 * m * n * k / tc_flops * 1000
-            sol_mem = quant_mode.value.memory * (m * n + m * k + n * k) / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> float:
-            """
-            Get the empirical time
-            """
-            sol_time = get_sol(m, n, k, quant_mode)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
-
-        # SOL and EMPIRICAL modes don't have power/energy data
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(m, n, k, quant_mode)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(m, n, k, quant_mode), energy=0.0, source="empirical")
-
-        # TODO: remove "else" and unindent
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                def _to_performance_result(result, *, source: str = "silicon"):
-                    """Normalize GEMM table entries into a PerformanceResult.
-
-                    Interpolated/extrapolated GEMM values are still derived from
-                    silicon table data; only explicit formula fallbacks are
-                    tagged as empirical.
-                    """
-                    if isinstance(result, dict):
-                        return PerformanceResult(result["latency"], energy=result.get("energy", 0.0), source=source)
-                    return PerformanceResult(result, energy=0.0, source=source)
-
-                self._gemm_data.raise_if_not_loaded()
-                if table_quant_mode not in self._gemm_data:
-                    supported = sorted([k.name for k in self._gemm_data])
-                    raise PerfDataNotAvailableError(
-                        "GEMM perf data not available for requested quant mode. "
-                        f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
-                        f"quant_mode='{quant_mode.name}'. "
-                        f"Supported gemm modes: {supported}"
-                    )
-
-                gemm_data = self._gemm_data[table_quant_mode]
-
-                if m in gemm_data and n in gemm_data[m] and k in gemm_data[m][n]:
-                    result = gemm_data[m][n][k]
-                    return _to_performance_result(result)
-
-                m_values = sorted(m_key for m_key in gemm_data if n in gemm_data[m_key] and k in gemm_data[m_key][n])
-                if len(m_values) >= 2:
-                    m_left, m_right = self._nearest_1d_point_helper(m, m_values, inner_only=False)
-                    result = self._interp_1d([m_left, m_right], [gemm_data[m_left][n][k], gemm_data[m_right][n][k]], m)
-                    return _to_performance_result(result)
-
-                result = self._interp_3d(m, n, k, gemm_data, "cubic")
-                return _to_performance_result(result)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(m, n, k, quant_mode),
-                database_mode=database_mode,
-                error_msg=f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}",
-            )
+        return GEMM._query_gemm_table(self, m, n, k, quant_mode, database_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_compute_scale(
@@ -4214,88 +3931,11 @@ class PerfDatabase:
         quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query compute scale latency (dynamic quantization - static quantization).
+        """Query compute scale latency. Delegates to
+        ``GEMM._query_compute_scale_table``."""
+        from aiconfigurator.sdk.operations.gemm import GEMM
 
-        Args:
-            m: Number of rows in input matrix
-            k: Number of columns in input matrix
-            quant_mode: Quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(m: int, k: int) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            sol_mem = 2 * m * k / self.system_spec["gpu"]["mem_bw"] * 1000.0
-            sol_time = sol_mem
-            return sol_time, 0, sol_mem
-
-        def get_empirical(m: int, k: int) -> float:
-            """
-            Get the empirical time
-            """
-            sol_time = get_sol(m, k)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
-
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(m, k)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(m, k), energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._compute_scale_data.raise_if_not_loaded()
-                if table_quant_mode not in self._compute_scale_data:
-                    supported = sorted([k.name for k in self._compute_scale_data])
-                    raise PerfDataNotAvailableError(
-                        "Compute scale perf data not available for requested quant mode. "
-                        f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
-                        f"quant_mode='{quant_mode.name}'. "
-                        f"Supported modes: {supported}"
-                    )
-                table = self._compute_scale_data[table_quant_mode]
-                m_i = int(m)
-                k_i = int(k)
-
-                m_keys = sorted(table.keys())
-                m_i = max(m_keys[0], min(m_i, m_keys[-1]))
-
-                k_min = None
-                k_max = None
-                for row in table.values():
-                    if not row:
-                        continue
-                    row_min = min(row.keys())
-                    row_max = max(row.keys())
-                    k_min = row_min if k_min is None else min(k_min, row_min)
-                    k_max = row_max if k_max is None else max(k_max, row_max)
-
-                if k_min is not None and k_max is not None:
-                    k_i = max(k_min, min(k_i, k_max))
-
-                result = self._interp_2d_linear(m_i, k_i, table)
-                return self._interp_pr(result["latency"], energy=result.get("energy", 0.0))
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(m, k),
-                database_mode=database_mode,
-                error_msg=f"Failed to query compute_scale data for {m=}, {k=}, {quant_mode=}",
-            )
+        return GEMM._query_compute_scale_table(self, m, k, quant_mode, database_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_scale_matrix(
@@ -4305,94 +3945,17 @@ class PerfDatabase:
         quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query scale matrix (static quantization) latency.
+        """Query scale matrix latency. Delegates to
+        ``GEMM._query_scale_matrix_table``."""
+        from aiconfigurator.sdk.operations.gemm import GEMM
 
-        Args:
-            m: Number of rows in input matrix
-            k: Number of columns in input matrix
-            quant_mode: Quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(m: int, k: int) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            sol_mem = 3 * m * k / self.system_spec["gpu"]["mem_bw"] * 1000.0
-            sol_time = sol_mem
-            return sol_time, 0, sol_mem
-
-        def get_empirical(m: int, k: int) -> float:
-            """
-            Get the empirical time
-            """
-            sol_time = get_sol(m, k)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
-
-        if database_mode == common.DatabaseMode.SOL:
-            return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(m, k)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return PerformanceResult(get_empirical(m, k), energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._scale_matrix_data.raise_if_not_loaded()
-                if table_quant_mode not in self._scale_matrix_data:
-                    supported = sorted([k.name for k in self._scale_matrix_data])
-                    raise PerfDataNotAvailableError(
-                        "Scale matrix perf data not available for requested quant mode. "
-                        f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
-                        f"quant_mode='{quant_mode.name}'. "
-                        f"Supported modes: {supported}"
-                    )
-                table = self._scale_matrix_data[table_quant_mode]
-                m_i = int(m)
-                k_i = int(k)
-
-                m_keys = sorted(table.keys())
-                m_i = max(m_keys[0], min(m_i, m_keys[-1]))
-
-                k_min = None
-                k_max = None
-                for row in table.values():
-                    if not row:
-                        continue
-                    row_min = min(row.keys())
-                    row_max = max(row.keys())
-                    k_min = row_min if k_min is None else min(k_min, row_min)
-                    k_max = row_max if k_max is None else max(k_max, row_max)
-
-                if k_min is not None and k_max is not None:
-                    k_i = max(k_min, min(k_i, k_max))
-
-                result = self._interp_2d_linear(m_i, k_i, table)
-                return self._interp_pr(result["latency"], energy=result.get("energy", 0.0))
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(m, k),
-                database_mode=database_mode,
-                error_msg=f"Failed to query scale_matrix data for {m=}, {k=}, {quant_mode=}",
-            )
+        return GEMM._query_scale_matrix_table(self, m, k, quant_mode, database_mode)
 
     @functools.lru_cache(maxsize=32768)
     def query_context_attention(
         self,
         b: int,
-        s: int,  # s is the seq len to be computed, full_s = s + prefix
+        s: int,
         prefix: int,
         n: int,
         n_kv: int,
@@ -4402,140 +3965,23 @@ class PerfDatabase:
         window_size: int = 0,
         head_size: int = 128,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query context (prefill) attention latency and energy.
+        """Query context attention latency. Delegates to
+        ``ContextAttention._query_context_attention_table``."""
+        from aiconfigurator.sdk.operations.attention import ContextAttention
 
-        Args:
-            b: Batch size
-            s: Sequence length to be computed
-            prefix: Prefix cache length
-            n: Number of attention heads
-            n_kv: Number of KV heads (for GQA)
-            kvcache_quant_mode: KV cache quantization mode
-            fmha_quant_mode: Attention computation quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-            window_size: Sliding window size (0 for no window)
-            head_size: Dimension per head
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(
-            b: int,
-            s: int,
-            prefix: int,
-            n: int,
-            n_kv: int,
-            h: int,
-            w: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-            fmha_quant_mode: common.FMHAQuantMode,
-        ) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            full_s = s + prefix
-            if w > 0 and full_s > w:
-                # Sliding window attention
-                # Each position attends to at most w previous positions
-                ops = 2 * b * (full_s - prefix) * w * n * h * 2
-            else:
-                # Normal no sliding window
-                ops = (
-                    2 * b * (full_s * full_s - prefix * prefix) * n * h * 2 / 2
-                )  # 2 for fma, 2 for q*k^t+*v, /2 for causality.
-            mem_bytes = (
-                2
-                * b
-                * (
-                    n * (full_s - prefix) * h  # Q read, assuming 16 bits
-                    + n * (full_s - prefix) * h  # Output write, assuming 16 bits
-                )
-                + kvcache_quant_mode.value.memory * b * (2 * n_kv * full_s * h)  # K,V read
-            )  # TODO fp8 io
-            sol_math = ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
-            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(
-            b: int,
-            s: int,
-            prefix: int,
-            n: int,
-            n_kv: int,
-            head_size: int,
-            window_size: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-            fmha_quant_mode: common.FMHAQuantMode,
-        ) -> float:
-            """
-            Get the empirical time
-            """
-            latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.6
-            return latency / scale_factor
-
-        # query logic starts
-        assert n_kv <= n, "n_kv must be less than or equal to n"
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(
-                b,
-                s,
-                prefix,
-                n,
-                n_kv,
-                head_size,
-                window_size,
-                kvcache_quant_mode,
-                fmha_quant_mode,
-            )
-            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._context_attention_data.raise_if_not_loaded()
-                full_s = s + prefix
-                prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-                # In self._context_attention_data, we use n_kv = 0 to mean n_kv == n.
-                n_kv_lookup = 0 if n == n_kv else n_kv
-                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][
-                    head_size
-                ][window_size]
-                result = self._interp_3d(n, full_s, b, attention_dict, "cubic")
-                latency = result["latency"] * prefix_correction
-                energy = result.get("energy", 0.0) * prefix_correction
-                return self._interp_pr(latency, energy=energy)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(
-                    b,
-                    s,
-                    prefix,
-                    n,
-                    n_kv,
-                    head_size,
-                    window_size,
-                    kvcache_quant_mode,
-                    fmha_quant_mode,
-                ),
-                database_mode=database_mode,
-                error_msg=(
-                    f"Failed to query context attention data for {b=}, {s=}, {prefix=}, {n=}, {n_kv=}, "
-                    f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, {fmha_quant_mode=}"
-                ),
-            )
+        return ContextAttention._query_context_attention_table(
+            self,
+            b,
+            s,
+            prefix,
+            n,
+            n_kv,
+            kvcache_quant_mode,
+            fmha_quant_mode,
+            database_mode,
+            window_size,
+            head_size,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_generation_attention(
@@ -4549,125 +3995,21 @@ class PerfDatabase:
         window_size: int = 0,
         head_size: int = 128,
     ) -> PerformanceResult | tuple[float, float, float]:
-        """
-        Query generation (decode) attention latency and energy.
+        """Query generation attention latency. Delegates to
+        ``GenerationAttention._query_generation_attention_table``."""
+        from aiconfigurator.sdk.operations.attention import GenerationAttention
 
-        Args:
-            b: Batch size
-            s: KV cache length
-            n: Number of attention heads
-            n_kv: Number of KV heads (for GQA)
-            kvcache_quant_mode: KV cache quantization mode
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-            window_size: Sliding window size (0 for no window)
-            head_size: Dimension per head
-
-        Returns:
-            PerformanceResult: Acts as float (latency in ms).
-                              Energy accessible via .energy attribute (W·ms).
-        """
-
-        def get_sol(
-            b: int,
-            s: int,
-            n: int,
-            n_kv: int,
-            h: int,
-            w: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-        ) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            if kvcache_quant_mode == common.KVCacheQuantMode.fp8:
-                quant_mode_gen = common.FMHAQuantMode.fp8
-            else:
-                quant_mode_gen = common.FMHAQuantMode.bfloat16
-            if w > 0:
-                kv_len = min(s - 1, w)
-            else:
-                kv_len = s - 1
-            # only consider bfloat16 mmha
-            ops = 2 * b * n * h * 2 * (kv_len)  # 2 for fma, 2 for q*k^t+*v
-            # kvcache load bytes will depend on kvcache quant. while input q and output might be in
-            # bfloat16.
-            mem_bytes = b * (
-                n * h * 2  # Query read, assuming 16bits
-                + 2 * n_kv * (kv_len) * h * kvcache_quant_mode.value.memory  # K, V cache read
-                + n * h * 2  # Output write, assuming 16bits
-            )
-
-            sol_math = ops / self.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / quant_mode_gen.value.compute
-            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(
-            b: int,
-            s: int,
-            n: int,
-            n_kv: int,
-            h: int,
-            w: int,
-            kvcache_quant_mode: common.KVCacheQuantMode,
-        ) -> float:
-            """
-            Get the hybrid time
-            """
-            latency = get_sol(b, s, n, n_kv, h, w, kvcache_quant_mode)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
-
-        # query logic starts
-        assert n_kv <= n, "n_kv must be less than or equal to n"
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            sol_latency = get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
-            return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
-            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-        else:
-            # SILICON or HYBRID mode - use database
-            def get_silicon():
-                self._generation_attention_data.raise_if_not_loaded()
-                # In self._generation_attention_data, we use n_kv = 0 to mean n_kv == n.
-                n_kv_lookup = n_kv if n_kv != n else 0
-
-                attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv_lookup][head_size][
-                    window_size
-                ]
-                # Decode batches often contain a mix of sequence lengths around the nominal KV length `s`.
-                # Using a single point (n,b,s) can be noisy/inaccurate, so average a small neighborhood.
-                s_min = max(1, int(s * 0.9))
-                s_max = max(s_min, int(s * 1.1))
-                sample_cnt = 5
-                s_samples = [s_min + (s_max - s_min) * i // (sample_cnt - 1) for i in range(sample_cnt)]
-
-                latency_sum = 0.0
-                energy_sum = 0.0
-                for s_i in s_samples:
-                    r = self._interp_3d(n, b, s_i, attention_dict, "bilinear")
-                    latency_sum += float(r["latency"])
-                    energy_sum += float(r.get("energy", 0.0))
-
-                latency = latency_sum / sample_cnt
-                energy = energy_sum / sample_cnt
-                return self._interp_pr(latency, energy=energy)
-
-            return self._query_silicon_or_hybrid(
-                get_silicon=get_silicon,
-                get_empirical=lambda: get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode),
-                database_mode=database_mode,
-                error_msg=(
-                    f"Failed to query generation attention data for {b=}, {s=}, {n=}, {n_kv=}, "
-                    f"{head_size=}, {window_size=}, {kvcache_quant_mode=}"
-                ),
-            )
+        return GenerationAttention._query_generation_attention_table(
+            self,
+            b,
+            s,
+            n,
+            n_kv,
+            kvcache_quant_mode,
+            database_mode,
+            window_size,
+            head_size,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_context_mla(
@@ -6468,75 +5810,24 @@ class PerfDatabase:
 
     def _correct_data(self) -> None:
         """
-        Correct the data based on sol time reference.
-        """
-        # regular gemm
-        if self._gemm_data:
-            for quant_mode in self._gemm_data:
-                for m in self._gemm_data[quant_mode]:
-                    for n in self._gemm_data[quant_mode][m]:
-                        for k in self._gemm_data[quant_mode][m][n]:
-                            sol = self.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
-                            data = self._gemm_data[quant_mode][m][n][k]
-                            current_latency = data["latency"] if isinstance(data, dict) else data
-                            if sol > current_latency:
-                                logger.debug(
-                                    f"gemm quant {quant_mode} m{m} n{n} k{k}: sol {sol} > perf_db {current_latency}"
-                                )
-                                if isinstance(data, dict):
-                                    # Update only latency, keep power unchanged
-                                    # Convert PerformanceResult to float
-                                    self._gemm_data[quant_mode][m][n][k]["latency"] = float(max(sol, current_latency))
-                                else:
-                                    # Legacy format (float)
-                                    self._gemm_data[quant_mode][m][n][k] = float(max(sol, current_latency))
+        Correct the data based on sol time reference. GEMM + GenerationAttention
+        SOL clamping live in their respective ``_correct_sol`` classmethods
+        (invoked from each ``load_data``); we forward here for backward compat
+        with tests that mutate the data and then call ``_correct_data()`` to
+        re-clamp.
 
-        # regular generation attention
-        if self._generation_attention_data:
-            for quant_mode in self._generation_attention_data:
-                for n_kv in self._generation_attention_data[quant_mode]:
-                    for head_size in self._generation_attention_data[quant_mode][n_kv]:
-                        for window_size in self._generation_attention_data[quant_mode][n_kv][head_size]:
-                            for n in self._generation_attention_data[quant_mode][n_kv][head_size][window_size]:
-                                for b in self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n]:
-                                    for s in self._generation_attention_data[quant_mode][n_kv][head_size][window_size][
-                                        n
-                                    ][b]:
-                                        if n_kv == 0:
-                                            n_kv_local = n
-                                        else:
-                                            n_kv_local = n_kv
-                                        sol = self.query_generation_attention(
-                                            b,
-                                            s,
-                                            n,
-                                            n_kv_local,
-                                            quant_mode,
-                                            database_mode=common.DatabaseMode.SOL,
-                                            window_size=window_size,
-                                            head_size=head_size,
-                                        )
-                                        data = self._generation_attention_data[quant_mode][n_kv][head_size][
-                                            window_size
-                                        ][n][b][s]
-                                        current_latency = data["latency"] if isinstance(data, dict) else data
-                                        if sol > current_latency:
-                                            logger.debug(
-                                                f"generation attention quant {quant_mode} n{n} "
-                                                f"n_kv{n_kv_local} b{b} s{s}: sol {sol} > "
-                                                f"perf_db {current_latency}"
-                                            )
-                                            if isinstance(data, dict):
-                                                # Update only latency, keep power unchanged
-                                                # Convert PerformanceResult to float
-                                                self._generation_attention_data[quant_mode][n_kv][head_size][
-                                                    window_size
-                                                ][n][b][s]["latency"] = float(sol)
-                                            else:
-                                                # Legacy format (float)
-                                                self._generation_attention_data[quant_mode][n_kv][head_size][
-                                                    window_size
-                                                ][n][b][s] = float(sol)
+        The init path runs this immediately after ``load_data`` already
+        applied SOL correction, so there are duplicate full-table passes.
+        They are harmless — SOL clamping is idempotent (``max(sol, current)``
+        is a no-op when ``current >= sol`` after the first pass) — but the
+        duplicate iterations are O(n) over each table. ISSUE-16 can route
+        the init call directly and drop these forwards.
+        """
+        from aiconfigurator.sdk.operations.attention import GenerationAttention
+        from aiconfigurator.sdk.operations.gemm import GEMM
+
+        GEMM._correct_sol(self)
+        GenerationAttention._correct_sol(self)
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_moe_compute(
