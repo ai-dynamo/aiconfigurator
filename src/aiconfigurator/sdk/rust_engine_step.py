@@ -54,6 +54,10 @@ class RustEngineStepEstimator:
         return float(out_ms.value)
 
     def close(self) -> None:
+        """API: `model.close() -> None`.
+
+        Description: release the underlying Rust forward-pass perf model handle.
+        """
         handle = getattr(self, "_handle", None)
         if handle is None or not handle.value:
             return
@@ -106,7 +110,9 @@ class RustForwardPassPerfModel:
         *,
         autobuild: bool | None = None,
     ) -> RustForwardPassPerfModel:
-        """Create a strict native AIC forward-pass model.
+        """API: `RustForwardPassPerfModel.from_native(config, options=None, *, autobuild=None)`.
+
+        Description: create a strict native AIC forward-pass model.
 
         This constructor raises `RustCoreError` if the config is unsupported by
         the native estimator. Use `auto()` when unsupported configs should fall
@@ -127,7 +133,10 @@ class RustForwardPassPerfModel:
         *,
         autobuild: bool | None = None,
     ) -> RustForwardPassPerfModel:
-        """Create a native model when possible, otherwise fall back to regression.
+        """API: `RustForwardPassPerfModel.auto(config, options=None, *, autobuild=None)`.
+
+        Description: create a native model when possible, otherwise fall back to
+        regression.
 
         Fallback reason is available from `diagnostics()["last_warning"]`.
         """
@@ -145,7 +154,9 @@ class RustForwardPassPerfModel:
         *,
         autobuild: bool | None = None,
     ) -> RustForwardPassPerfModel:
-        """Create a regression-only forward-pass model.
+        """API: `RustForwardPassPerfModel.from_regression(options=None, *, autobuild=None)`.
+
+        Description: create a regression-only forward-pass model.
 
         Regression models return `None` for non-empty estimates until enough
         samples have been provided for the inferred shape through
@@ -179,7 +190,9 @@ class RustForwardPassPerfModel:
         return cls(handle, lib)
 
     def estimate_forward_pass_time_ms(self, metrics: dict[str, Any] | list[dict[str, Any]]) -> float | None:
-        """Estimate one forward-pass iteration in milliseconds.
+        """API: `model.estimate_forward_pass_time_ms(metrics) -> float | None`.
+
+        Description: estimate one forward-pass iteration in milliseconds.
 
         `metrics` represents one iteration. Pass a list of FPM dictionaries for
         attention-DP ranks, or a single FPM dictionary for a single-rank
@@ -203,7 +216,9 @@ class RustForwardPassPerfModel:
         return float(out_ms.value) if out_has_value.value else None
 
     def tune_with_fpms(self, iterations: dict[str, Any] | list[Any]) -> None:
-        """Tune the model with one or more observed FPM iterations.
+        """API: `model.tune_with_fpms(iterations) -> None`.
+
+        Description: tune the model with one or more observed FPM iterations.
 
         The canonical input is a nested list:
         `[[iter0_rank0, iter0_rank1], [iter1_rank0, iter1_rank1]]`.
@@ -223,7 +238,11 @@ class RustForwardPassPerfModel:
         _raise_for_error(self._lib, err)
 
     def diagnostics(self) -> dict[str, Any]:
-        """Return source, readiness, retained sample count, and fallback warning."""
+        """API: `model.diagnostics() -> dict[str, Any]`.
+
+        Description: return source, readiness, retained sample count, and
+        fallback warning.
+        """
         out_json = ctypes.c_void_p()
         err = self._lib.aic_forward_pass_perf_model_diagnostics_json(
             self._handle,
@@ -237,7 +256,9 @@ class RustForwardPassPerfModel:
             self._lib.aic_engine_step_string_free(out_json)
 
     def get_min_correction_factor(self) -> float | None:
-        """Return the smallest ready native correction factor, or `None`.
+        """API: `model.get_min_correction_factor() -> float | None`.
+
+        Description: return the smallest ready native correction factor.
 
         Regression-only models return `None`. Native models return `None` until
         at least one correction bucket has enough observations.
@@ -245,7 +266,9 @@ class RustForwardPassPerfModel:
         return self._get_correction_factor("aic_forward_pass_perf_model_min_correction_factor")
 
     def get_max_correction_factor(self) -> float | None:
-        """Return the largest ready native correction factor, or `None`.
+        """API: `model.get_max_correction_factor() -> float | None`.
+
+        Description: return the largest ready native correction factor.
 
         Regression-only models return `None`. Native models return `None` until
         at least one correction bucket has enough observations.
@@ -253,7 +276,9 @@ class RustForwardPassPerfModel:
         return self._get_correction_factor("aic_forward_pass_perf_model_max_correction_factor")
 
     def get_avg_correction_factor(self) -> float | None:
-        """Return the average ready native correction factor, or `None`.
+        """API: `model.get_avg_correction_factor() -> float | None`.
+
+        Description: return the average ready native correction factor.
 
         Regression-only models return `None`. Native models return `None` until
         at least one correction bucket has enough observations.

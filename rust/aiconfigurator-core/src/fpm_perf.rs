@@ -129,7 +129,10 @@ enum ForwardPassPerfMode {
 }
 
 impl ForwardPassPerfModel {
-    /// Create a strict native AIC forward-pass model.
+    /// API:
+    /// `ForwardPassPerfModel::from_native(config, options) -> Result<Self, AicError>`
+    ///
+    /// Description: create a strict native AIC forward-pass model.
     ///
     /// This constructor fails if `config` cannot be served by the native AIC
     /// estimator. Use `auto` when unsupported native configs should fall back
@@ -150,7 +153,11 @@ impl ForwardPassPerfModel {
         })
     }
 
-    /// Create a strict native AIC forward-pass model with explicit data roots.
+    /// API:
+    /// `ForwardPassPerfModel::from_native_with_roots(config, options, systems_root, model_configs_root) -> Result<Self, AicError>`
+    ///
+    /// Description: create a strict native AIC forward-pass model with explicit
+    /// data roots.
     ///
     /// This is the testable/root-overridable variant of `from_native` and has
     /// the same tuning and failure behavior.
@@ -173,7 +180,10 @@ impl ForwardPassPerfModel {
         })
     }
 
-    /// Create a regression-only forward-pass model.
+    /// API:
+    /// `ForwardPassPerfModel::from_regression(options) -> Result<Self, AicError>`
+    ///
+    /// Description: create a regression-only forward-pass model.
     ///
     /// This mode is for native-AIC-unsupported models. It returns `None` from
     /// `estimate_forward_pass_time_ms` for non-empty iterations until the
@@ -190,7 +200,11 @@ impl ForwardPassPerfModel {
         })
     }
 
-    /// Create a native model when possible, otherwise fall back to regression.
+    /// API:
+    /// `ForwardPassPerfModel::auto(config, options) -> Result<Self, AicError>`
+    ///
+    /// Description: create a native model when possible, otherwise fall back to
+    /// regression.
     ///
     /// Fallback reason is preserved in `diagnostics().last_warning`. The
     /// resulting model still uses the same FPM shape inference and tuning input
@@ -202,7 +216,10 @@ impl ForwardPassPerfModel {
         }
     }
 
-    /// Create an `auto` model with explicit data roots.
+    /// API:
+    /// `ForwardPassPerfModel::auto_with_roots(config, options, systems_root, model_configs_root) -> Result<Self, AicError>`
+    ///
+    /// Description: create an `auto` model with explicit data roots.
     pub fn auto_with_roots(
         config: EngineConfig,
         options: ForwardPassPerfOptions,
@@ -231,7 +248,10 @@ impl ForwardPassPerfModel {
         Ok(model)
     }
 
-    /// Estimate one forward-pass iteration in milliseconds.
+    /// API:
+    /// `model.estimate_forward_pass_time_ms(metrics_by_rank) -> Result<Option<f64>, AicError>`
+    ///
+    /// Description: estimate one forward-pass iteration in milliseconds.
     ///
     /// `metrics_by_rank` must contain the FPMs for a single engine iteration,
     /// one entry per attention-DP rank. Single-rank callers pass a one-element
@@ -271,7 +291,10 @@ impl ForwardPassPerfModel {
         }
     }
 
-    /// Tune the model from observed FPM iterations.
+    /// API:
+    /// `model.tune_with_fpms(iterations) -> Result<(), AicError>`
+    ///
+    /// Description: tune the model from observed FPM iterations.
     ///
     /// The outer slice is a list of observed iterations. Each inner slice is
     /// the per-attention-DP-rank FPM list for one iteration:
@@ -315,7 +338,11 @@ impl ForwardPassPerfModel {
         Ok(())
     }
 
-    /// Return the current backend, readiness, retained sample count, and fallback warning.
+    /// API:
+    /// `model.diagnostics() -> ForwardPassPerfDiagnostics`
+    ///
+    /// Description: return the current backend, readiness, retained sample
+    /// count, and fallback warning.
     pub fn diagnostics(&self) -> ForwardPassPerfDiagnostics {
         match &self.mode {
             ForwardPassPerfMode::Native { corrections, .. } => {
@@ -351,7 +378,11 @@ impl ForwardPassPerfModel {
         }
     }
 
-    /// Return the smallest ready native correction factor across all shapes.
+    /// API:
+    /// `model.min_correction_factor() -> Option<f64>`
+    ///
+    /// Description: return the smallest ready native correction factor across
+    /// all shapes.
     ///
     /// Returns `None` before any native correction bucket has enough samples.
     /// Regression-only models also return `None`.
@@ -361,7 +392,11 @@ impl ForwardPassPerfModel {
             .reduce(|a, b| a.min(b))
     }
 
-    /// Return the largest ready native correction factor across all shapes.
+    /// API:
+    /// `model.max_correction_factor() -> Option<f64>`
+    ///
+    /// Description: return the largest ready native correction factor across
+    /// all shapes.
     ///
     /// Returns `None` before any native correction bucket has enough samples.
     /// Regression-only models also return `None`.
@@ -371,7 +406,11 @@ impl ForwardPassPerfModel {
             .reduce(|a, b| a.max(b))
     }
 
-    /// Return the arithmetic mean of ready native correction factors across all shapes.
+    /// API:
+    /// `model.avg_correction_factor() -> Option<f64>`
+    ///
+    /// Description: return the arithmetic mean of ready native correction
+    /// factors across all shapes.
     ///
     /// Returns `None` before any native correction bucket has enough samples.
     /// Regression-only models also return `None`.
@@ -384,7 +423,10 @@ impl ForwardPassPerfModel {
         }
     }
 
-    /// Return the immutable tuning options used by this model.
+    /// API:
+    /// `model.options() -> &ForwardPassPerfOptions`
+    ///
+    /// Description: return the immutable tuning options used by this model.
     pub fn options(&self) -> &ForwardPassPerfOptions {
         &self.options
     }

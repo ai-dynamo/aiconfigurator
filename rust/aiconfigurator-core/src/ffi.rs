@@ -77,6 +77,11 @@ pub extern "C" fn aic_engine_step_forward_pass_time_ms(
     })
 }
 
+/// API:
+/// `aic_forward_pass_perf_model_from_native(config_json, options_json, out_model) -> error_string`
+///
+/// Description: create a strict native forward-pass perf model from
+/// JSON-serialized `EngineConfig` and optional `ForwardPassPerfOptions`.
 #[no_mangle]
 pub extern "C" fn aic_forward_pass_perf_model_from_native(
     config_json: *const c_char,
@@ -101,6 +106,11 @@ pub extern "C" fn aic_forward_pass_perf_model_from_native(
     })
 }
 
+/// API:
+/// `aic_forward_pass_perf_model_auto(config_json, options_json, out_model) -> error_string`
+///
+/// Description: create a native forward-pass perf model when supported,
+/// otherwise create a fallback regression model with diagnostics.
 #[no_mangle]
 pub extern "C" fn aic_forward_pass_perf_model_auto(
     config_json: *const c_char,
@@ -124,6 +134,11 @@ pub extern "C" fn aic_forward_pass_perf_model_auto(
     })
 }
 
+/// API:
+/// `aic_forward_pass_perf_model_from_regression(options_json, out_model) -> error_string`
+///
+/// Description: create a regression-only forward-pass perf model from optional
+/// JSON-serialized `ForwardPassPerfOptions`.
 #[no_mangle]
 pub extern "C" fn aic_forward_pass_perf_model_from_regression(
     options_json: *const c_char,
@@ -146,6 +161,11 @@ pub extern "C" fn aic_forward_pass_perf_model_from_regression(
     })
 }
 
+/// API:
+/// `aic_forward_pass_perf_model_estimate_forward_pass_time_ms(model, metrics_json, out_ms, out_has_value) -> error_string`
+///
+/// Description: estimate one FPM iteration and encode Rust `Option<f64>` as
+/// `out_ms` plus `out_has_value`.
 #[no_mangle]
 pub extern "C" fn aic_forward_pass_perf_model_estimate_forward_pass_time_ms(
     model: *mut AicForwardPassPerfModelHandle,
@@ -186,6 +206,10 @@ pub extern "C" fn aic_forward_pass_perf_model_estimate_forward_pass_time_ms(
     })
 }
 
+/// API:
+/// `aic_forward_pass_perf_model_tune_with_fpms(model, iterations_json) -> error_string`
+///
+/// Description: tune the model with JSON-serialized observed FPM iterations.
 #[no_mangle]
 pub extern "C" fn aic_forward_pass_perf_model_tune_with_fpms(
     model: *mut AicForwardPassPerfModelHandle,
@@ -207,6 +231,11 @@ pub extern "C" fn aic_forward_pass_perf_model_tune_with_fpms(
     })
 }
 
+/// API:
+/// `aic_forward_pass_perf_model_diagnostics_json(model, out_json) -> error_string`
+///
+/// Description: return JSON-serialized `ForwardPassPerfDiagnostics`; the caller
+/// must free `out_json` with `aic_engine_step_string_free`.
 #[no_mangle]
 pub extern "C" fn aic_forward_pass_perf_model_diagnostics_json(
     model: *mut AicForwardPassPerfModelHandle,
@@ -229,6 +258,10 @@ pub extern "C" fn aic_forward_pass_perf_model_diagnostics_json(
     })
 }
 
+/// API:
+/// `aic_forward_pass_perf_model_min_correction_factor(model, out_value, out_has_value) -> error_string`
+///
+/// Description: return the smallest ready native correction factor, if any.
 #[no_mangle]
 pub extern "C" fn aic_forward_pass_perf_model_min_correction_factor(
     model: *mut AicForwardPassPerfModelHandle,
@@ -240,6 +273,10 @@ pub extern "C" fn aic_forward_pass_perf_model_min_correction_factor(
     })
 }
 
+/// API:
+/// `aic_forward_pass_perf_model_max_correction_factor(model, out_value, out_has_value) -> error_string`
+///
+/// Description: return the largest ready native correction factor, if any.
 #[no_mangle]
 pub extern "C" fn aic_forward_pass_perf_model_max_correction_factor(
     model: *mut AicForwardPassPerfModelHandle,
@@ -251,6 +288,10 @@ pub extern "C" fn aic_forward_pass_perf_model_max_correction_factor(
     })
 }
 
+/// API:
+/// `aic_forward_pass_perf_model_avg_correction_factor(model, out_value, out_has_value) -> error_string`
+///
+/// Description: return the average ready native correction factor, if any.
 #[no_mangle]
 pub extern "C" fn aic_forward_pass_perf_model_avg_correction_factor(
     model: *mut AicForwardPassPerfModelHandle,
@@ -306,6 +347,9 @@ pub extern "C" fn aic_engine_step_estimator_free(estimator: *mut AicEngineStepEs
     }
 }
 
+/// API: `aic_forward_pass_perf_model_free(model) -> void`
+///
+/// Description: release a forward-pass perf model handle created by this C ABI.
 #[no_mangle]
 pub extern "C" fn aic_forward_pass_perf_model_free(model: *mut AicForwardPassPerfModelHandle) {
     if model.is_null() {
