@@ -10,8 +10,26 @@ import pytest
 import yaml
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.operations.base import Operation
+from aiconfigurator.sdk.operations.base import Operation, _all_operation_subclasses
 from aiconfigurator.sdk.perf_database import PerfDatabase
+
+
+def _warm_lazy_op_caches(db: PerfDatabase) -> None:
+    """Eagerly call ``load_data`` on every imported ``Operation`` subclass
+    while loader patches are still active.
+
+    Replaces the eager ``OpClass.load_data(self)`` loop that
+    ``PerfDatabase.__init__`` used to run as a transition compromise. With
+    the fixture taking over that warm-up, the next commit can retire the
+    eager calls in ``__init__`` and leave production code fully lazy.
+
+    Dynamic discovery (``_all_operation_subclasses``) avoids the
+    conftest carrying a parallel list of op classes that would drift from
+    ``__init__`` as new ops are added. ``load_data`` is idempotent and
+    the base ``Operation.load_data`` is a no-op, so walking every
+    subclass is safe."""
+    for cls in _all_operation_subclasses():
+        cls.load_data(db)
 
 
 @pytest.fixture(autouse=True)
@@ -163,7 +181,9 @@ def stub_perf_db(tmp_path, monkeypatch):
     yaml_file = tmp_path / f"{system}.yaml"
     yaml_file.write_text("dummy: data")  # Content doesn't matter because yaml.load is patched
 
-    return PerfDatabase(system, backend, version, systems_dir)
+    db = PerfDatabase(system, backend, version, systems_dir)
+    _warm_lazy_op_caches(db)
+    return db
 
 
 def _build_comprehensive_test_data():
@@ -369,6 +389,7 @@ def _get_comprehensive_db_singleton() -> PerfDatabase:
         p.start()
     try:
         _comprehensive_db_singleton = PerfDatabase("test_system", "trtllm", "v1", tmp_dir)
+        _warm_lazy_op_caches(_comprehensive_db_singleton)
     finally:
         for p in patches:
             p.stop()
