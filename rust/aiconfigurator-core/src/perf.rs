@@ -83,6 +83,12 @@ impl PerfDatabase {
         })
     }
 
+    pub(crate) fn clear_query_cache(&self) {
+        if let Ok(mut cache) = self.query_cache.lock() {
+            *cache = QueryCache::default();
+        }
+    }
+
     pub(crate) fn query_gemm(&self, quant: &str, m: u32, n: u32, k: u32) -> Result<f64, AicError> {
         let key = (quant.to_string(), m, n, k);
         if let Ok(cache) = self.query_cache.lock() {

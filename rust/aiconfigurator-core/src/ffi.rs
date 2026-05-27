@@ -70,6 +70,19 @@ pub extern "C" fn aic_engine_step_forward_pass_time_ms(
     })
 }
 
+#[no_mangle]
+pub extern "C" fn aic_engine_step_estimator_clear_runtime_caches(
+    estimator: *mut AicEngineStepEstimatorHandle,
+) -> *mut c_char {
+    ffi_result(|| {
+        if estimator.is_null() {
+            return Err("estimator handle must not be null".to_string());
+        }
+        unsafe { &*estimator }.estimator.clear_runtime_caches();
+        Ok(())
+    })
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ForwardPassMetricsInput {
