@@ -746,6 +746,88 @@ class TestGemma4MoEModelBuilder:
         with pytest.raises(ValueError, match="layer_types length"):
             model.set_gemma4_config(bad_cfg)
 
+    def test_dense_variant_builds_without_moe_ops(self):
+        """Dense Gemma 4 variants (e.g. gemma-4-31B-it: topk=0, num_experts=None) have
+        no routed-MoE block: every layer is just shared dense MLP + attention.
+
+        Regression test for the assertion crash when num_experts is None.
+        """
+        layer_types = (["sliding_attention"] * 5 + ["full_attention"]) * 2  # 12 layers
+        cfg = common.Gemma4MoEConfig(
+            layer_types=tuple(layer_types),
+            swa_num_kv_heads=16,
+            swa_head_dim=256,
+            global_num_kv_heads=4,
+            global_head_dim=512,
+            sliding_window_size=1024,
+            attention_k_eq_v=True,
+        )
+        model = Gemma4MoEModel(
+            0,  # topk = 0 (dense)
+            None,  # num_experts = None (dense)
+            21504,  # moe_inter_size (unused for dense, but kept aligned with HF config)
+            "google/gemma-4-31B-it",
+            "GEMMA4MOE",
+            "Gemma4ForConditionalGeneration",
+            len(layer_types),
+            32,
+            16,
+            256,
+            5376,
+            21504,
+            262144,
+            262144,
+            self._make_model_config(),  # tp=1, moe_tp=1, moe_ep=1
+            None,
+        )
+        model.set_gemma4_config(cfg)
+
+        op_names = {op._name for op in model.context_ops}
+        # Shared dense MLP ops MUST be present.
+        assert "context_swa_shared_mlp_gate_up_gemm" in op_names
+        assert "context_global_shared_mlp_gate_up_gemm" in op_names
+        # Routed-MoE ops MUST NOT be present.
+        assert not any("moe" in n.lower() or "router" in n.lower() for n in op_names), (
+            f"dense variant should not emit MoE/router ops, found: "
+            f"{[n for n in op_names if 'moe' in n.lower() or 'router' in n.lower()]}"
+        )
+        gen_names = {op._name for op in model.generation_ops}
+        assert not any("moe" in n.lower() or "router" in n.lower() for n in gen_names)
+
+    def test_dense_variant_rejects_moe_ep_gt_1(self):
+        """Dense Gemma 4 has no experts, so any moe_ep_size > 1 must be rejected
+        (otherwise pareto search would enumerate equivalent dense configurations)."""
+        bad_config = config.ModelConfig(
+            tp_size=2,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=2,
+            attention_dp_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.bfloat16,
+        )
+        with pytest.raises(AssertionError, match="moe_ep_size=1"):
+            Gemma4MoEModel(
+                0,
+                None,
+                21504,
+                "google/gemma-4-31B-it",
+                "GEMMA4MOE",
+                "Gemma4ForConditionalGeneration",
+                2,
+                32,
+                16,
+                256,
+                5376,
+                21504,
+                262144,
+                262144,
+                bad_config,
+                None,
+            )
+
 
 class TestHybridMoEModelBuilder:
     """Builder-level tests that verify HybridMoEModel wiring through set_hybrid_config."""
