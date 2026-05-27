@@ -275,9 +275,31 @@ fn moe_dispatch_rejects_invalid_attention_dp_topology() {
         ..Default::default()
     };
 
-    let err = estimator.forward_pass_time_ms(&[metrics]).unwrap_err();
+    let err = estimator
+        .forward_pass_time_ms(&[metrics.clone(), metrics])
+        .unwrap_err();
 
     assert!(err.to_string().contains("invalid MoE dispatch topology"));
+}
+
+#[test]
+fn attention_dp_rank_count_must_match_config() {
+    let fixture = Fixture::new();
+    let mut config = engine_config();
+    config.attention_dp_size = Some(2);
+    let estimator = fixture.estimator_with_config(config);
+    let metrics = ForwardPassMetrics {
+        scheduled_requests: ScheduledRequestMetrics {
+            num_prefill_requests: 1,
+            sum_prefill_tokens: 60,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let err = estimator.forward_pass_time_ms(&[metrics]).unwrap_err();
+
+    assert!(err.to_string().contains("expected 2 attention-DP rank"));
 }
 
 #[test]
@@ -565,7 +587,10 @@ bfloat16,bfloat16,1,20,4,2,8,3.0\n\
 bfloat16,bfloat16,2,20,4,2,8,7.0\n",
     )
     .unwrap();
-    let estimator = fixture.estimator();
+    let estimator = fixture.estimator_with_config(EngineConfig {
+        attention_dp_size: Some(2),
+        ..engine_config()
+    });
     let rank0 = ForwardPassMetrics {
         scheduled_requests: ScheduledRequestMetrics {
             num_prefill_requests: 1,
@@ -641,9 +666,13 @@ fn all_checked_in_model_configs_are_classified_or_auto_fallback() {
         match ModelSpec::load_path(&path) {
             Ok(_) => {}
             Err(_) => {
+                let model_name = file_name
+                    .strip_suffix("_config.json")
+                    .unwrap()
+                    .replace("--", "/");
                 let model = ForwardPassPerfModel::auto(
                     EngineConfig {
-                        model_name: path.to_string_lossy().to_string(),
+                        model_name,
                         ..engine_config()
                     },
                     ForwardPassPerfOptions::default(),
@@ -664,6 +693,37 @@ fn all_checked_in_model_configs_are_classified_or_auto_fallback() {
         fallback_ready > 0,
         "expected at least one checked-in config to exercise auto fallback"
     );
+}
+
+#[test]
+fn forward_pass_perf_options_reject_min_observations_above_max() {
+    let err = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        max_observations: 2,
+        min_observations: 3,
+        bucket_count: 16,
+    })
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("min_observations must be <= max_observations"));
+}
+
+#[test]
+fn forward_pass_perf_auto_does_not_fallback_on_invalid_schema() {
+    let fixture = Fixture::new();
+    let err = ForwardPassPerfModel::auto_with_roots(
+        EngineConfig {
+            schema_version: ENGINE_CONFIG_SCHEMA_VERSION + 1,
+            ..engine_config()
+        },
+        ForwardPassPerfOptions::default(),
+        fixture.systems_root(),
+        fixture.model_configs_root(),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("unsupported schema version for EngineConfig"));
 }
 
 #[test]
@@ -773,6 +833,57 @@ fn fallback_regression_predicts_prefill_decode_and_mixed_shapes() {
             .unwrap()
             .unwrap(),
         30.0,
+    );
+}
+
+#[test]
+fn fallback_regression_predicts_with_rank_deficient_samples() {
+    let mut model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        min_observations: 3,
+        ..Default::default()
+    })
+    .unwrap();
+
+    model
+        .tune_with_fpms(&[
+            vec![prefill_fpm(10, 0.010)],
+            vec![prefill_fpm(10, 0.012)],
+            vec![prefill_fpm(10, 0.014)],
+        ])
+        .unwrap();
+
+    let prediction = model
+        .estimate_forward_pass_time_ms(&[prefill_fpm(10, 0.0)])
+        .unwrap()
+        .unwrap();
+    assert!((prediction - 12.0).abs() < 1e-6);
+}
+
+#[test]
+fn tune_with_fpms_uses_one_rank_feature_vector() {
+    let mut model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        min_observations: 1,
+        ..Default::default()
+    })
+    .unwrap();
+
+    model
+        .tune_with_fpms(&[vec![prefill_fpm(10, 0.010), decode_fpm(1, 100_000, 0.020)]])
+        .unwrap();
+
+    assert!(
+        model
+            .estimate_forward_pass_time_ms(&[decode_fpm(1, 100_000, 0.0)])
+            .unwrap()
+            .is_some(),
+        "max-rank decode feature should be tuned"
+    );
+    assert_eq!(
+        model
+            .estimate_forward_pass_time_ms(&[mixed_fpm(10, 100_000, 0.0)])
+            .unwrap(),
+        None,
+        "rank merge should not synthesize a mixed feature from separate ranks"
     );
 }
 

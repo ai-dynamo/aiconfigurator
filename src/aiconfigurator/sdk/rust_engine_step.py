@@ -180,6 +180,7 @@ class RustForwardPassPerfModel:
     ) -> RustForwardPassPerfModel:
         _configure_default_data_roots()
         lib = _load_library(bool(autobuild) or _truthy(os.environ.get(RUST_CORE_AUTOBUILD_ENV)))
+        _bind_forward_pass_perf_model_api(lib)
         handle = ctypes.c_void_p()
         constructor = getattr(lib, function_name)
         if config is None:
@@ -515,6 +516,29 @@ def _load_library(autobuild: bool) -> ctypes.CDLL:
     lib.aic_engine_step_forward_pass_time_ms.restype = ctypes.c_void_p
     lib.aic_engine_step_estimator_free.argtypes = [ctypes.c_void_p]
     lib.aic_engine_step_estimator_free.restype = None
+    lib.aic_engine_step_string_free.argtypes = [ctypes.c_void_p]
+    lib.aic_engine_step_string_free.restype = None
+    return lib
+
+
+def _bind_forward_pass_perf_model_api(lib: ctypes.CDLL) -> None:
+    if lib.__dict__.get("_aic_forward_pass_perf_model_api_bound", False):
+        return
+
+    try:
+        _bind_forward_pass_perf_model_symbols(lib)
+    except AttributeError as exc:
+        raise RustCoreUnavailableError(
+            "Rust core shared library does not expose the ForwardPassPerfModel API. "
+            "Build a newer aiconfigurator-core shared library with "
+            "`cargo build --release --manifest-path rust/aiconfigurator-core/Cargo.toml`, "
+            f"set {RUST_CORE_LIB_ENV} to that library, or set {RUST_CORE_AUTOBUILD_ENV}=1."
+        ) from exc
+
+    lib.__dict__["_aic_forward_pass_perf_model_api_bound"] = True
+
+
+def _bind_forward_pass_perf_model_symbols(lib: ctypes.CDLL) -> None:
     lib.aic_forward_pass_perf_model_from_native.argtypes = [
         ctypes.c_char_p,
         ctypes.c_char_p,
@@ -563,9 +587,6 @@ def _load_library(autobuild: bool) -> ctypes.CDLL:
         function.restype = ctypes.c_void_p
     lib.aic_forward_pass_perf_model_free.argtypes = [ctypes.c_void_p]
     lib.aic_forward_pass_perf_model_free.restype = None
-    lib.aic_engine_step_string_free.argtypes = [ctypes.c_void_p]
-    lib.aic_engine_step_string_free.restype = None
-    return lib
 
 
 def _find_library(*, include_debug: bool = True) -> Path | None:

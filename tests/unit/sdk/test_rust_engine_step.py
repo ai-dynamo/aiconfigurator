@@ -214,6 +214,55 @@ def test_engine_config_json_preserves_moe_specific_quant_mode() -> None:
     assert config["moe_dtype"] == "w4a16_mxfp4"
 
 
+def test_engine_step_estimator_can_load_old_core_without_forward_pass_perf_symbols(tmp_path, monkeypatch) -> None:
+    rust_engine_step._load_library.cache_clear()
+    calls = []
+
+    class _FakeFunc:
+        def __init__(self, name, callback):
+            self.name = name
+            self.callback = callback
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *args):
+            calls.append(self.name)
+            return self.callback(*args)
+
+    class _OldCoreLib:
+        def __init__(self):
+            self.aic_engine_step_estimator_new = _FakeFunc("estimator_new", self._new_estimator)
+            self.aic_engine_step_forward_pass_time_ms = _FakeFunc("forward_pass_time_ms", self._estimate)
+            self.aic_engine_step_estimator_free = _FakeFunc("estimator_free", lambda handle: None)
+            self.aic_engine_step_string_free = _FakeFunc("string_free", lambda message: None)
+
+        def _new_estimator(self, config_json, out_handle):
+            assert json.loads(config_json) == {"config": True}
+            ctypes.cast(out_handle, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.c_void_p(123)
+            return None
+
+        def _estimate(self, handle, metrics_json, out_ms):
+            assert handle.value == 123
+            assert json.loads(metrics_json) == {"version": 1}
+            ctypes.cast(out_ms, ctypes.POINTER(ctypes.c_double))[0] = ctypes.c_double(7.0)
+            return None
+
+    library_path = tmp_path / rust_engine_step._library_name()
+    library_path.touch()
+    fake_lib = _OldCoreLib()
+    monkeypatch.setattr(rust_engine_step, "_find_library", lambda include_debug: library_path)
+    monkeypatch.setattr(rust_engine_step.ctypes, "CDLL", lambda path: fake_lib)
+
+    estimator = rust_engine_step.RustEngineStepEstimator({"config": True})
+    assert estimator.forward_pass_time_ms({"version": 1}) == 7.0
+    estimator.close()
+
+    assert calls == ["estimator_new", "forward_pass_time_ms", "estimator_free"]
+    with pytest.raises(rust_engine_step.RustCoreUnavailableError, match="ForwardPassPerfModel API"):
+        rust_engine_step.RustForwardPassPerfModel.from_regression()
+    rust_engine_step._load_library.cache_clear()
+
+
 def test_forward_pass_perf_model_fake_library_wrapper(monkeypatch) -> None:
     calls = []
     buffers = []

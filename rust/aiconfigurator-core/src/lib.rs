@@ -312,6 +312,13 @@ impl EngineStepEstimator {
                 "at least one attention-DP rank metric is required".to_string(),
             ));
         }
+        let expected_ranks = self.config.attention_dp_size.unwrap_or(1).max(1) as usize;
+        if metrics_by_rank.len() != expected_ranks {
+            return Err(AicError::InvalidForwardPassMetrics(format!(
+                "expected {expected_ranks} attention-DP rank metric(s), got {}",
+                metrics_by_rank.len()
+            )));
+        }
         for metrics in metrics_by_rank {
             validate_forward_pass_metrics(metrics)?;
         }
@@ -866,8 +873,6 @@ pub enum AicError {
     InvalidEngineConfig(String),
     #[error("invalid forward pass metrics: {0}")]
     InvalidForwardPassMetrics(String),
-    #[error("invalid forward pass perf options: {0}")]
-    InvalidForwardPassPerfOptions(String),
     #[error("unsupported model for Rust core estimator: {0}")]
     UnsupportedModel(String),
     #[error("failed to find AIC data roots: {0}")]

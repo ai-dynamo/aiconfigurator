@@ -212,7 +212,10 @@ impl ForwardPassPerfModel {
     pub fn auto(config: EngineConfig, options: ForwardPassPerfOptions) -> Result<Self, AicError> {
         match Self::from_native(config, options.clone()) {
             Ok(model) => Ok(model),
-            Err(err) => Self::regression_with_warning(options, err),
+            Err(err) if can_fallback_to_regression(&err) => {
+                Self::regression_with_warning(options, err)
+            }
+            Err(err) => Err(err),
         }
     }
 
@@ -233,7 +236,10 @@ impl ForwardPassPerfModel {
             model_configs_root,
         ) {
             Ok(model) => Ok(model),
-            Err(err) => Self::regression_with_warning(options, err),
+            Err(err) if can_fallback_to_regression(&err) => {
+                Self::regression_with_warning(options, err)
+            }
+            Err(err) => Err(err),
         }
     }
 
@@ -463,40 +469,46 @@ impl IterationFeatures {
             validate_forward_pass_metrics(metrics)?;
         }
 
-        let mut max_prefill_tokens = 0_u32;
-        let mut max_decode_requests = 0_u32;
-        let mut max_decode_kv_tokens = 0_u32;
-        for metrics in metrics_by_rank {
-            let scheduled = &metrics.scheduled_requests;
-            max_prefill_tokens = max_prefill_tokens.max(scheduled.sum_prefill_tokens);
-            max_decode_requests = max_decode_requests.max(scheduled.num_decode_requests);
-            max_decode_kv_tokens = max_decode_kv_tokens.max(scheduled.sum_decode_kv_tokens);
-        }
+        Ok(metrics_by_rank
+            .iter()
+            .filter_map(Self::from_single_rank)
+            .max_by(|left, right| {
+                left.load_score()
+                    .partial_cmp(&right.load_score())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }))
+    }
 
-        let has_prefill = max_prefill_tokens > 0;
-        let has_decode = max_decode_requests > 0 || max_decode_kv_tokens > 0;
+    fn from_single_rank(metrics: &ForwardPassMetrics) -> Option<Self> {
+        let scheduled = &metrics.scheduled_requests;
+        let has_prefill = scheduled.sum_prefill_tokens > 0;
+        let has_decode = scheduled.num_decode_requests > 0 || scheduled.sum_decode_kv_tokens > 0;
         let feature = match (has_prefill, has_decode) {
-            (false, false) => return Ok(None),
+            (false, false) => return None,
             (true, false) => Self {
                 shape: FeatureShape::Prefill,
-                x: vec![f64::from(max_prefill_tokens)],
+                x: vec![f64::from(scheduled.sum_prefill_tokens)],
             },
             (false, true) => Self {
                 shape: FeatureShape::Decode,
                 x: vec![
-                    f64::from(max_decode_requests),
-                    f64::from(max_decode_kv_tokens),
+                    f64::from(scheduled.num_decode_requests),
+                    f64::from(scheduled.sum_decode_kv_tokens),
                 ],
             },
             (true, true) => Self {
                 shape: FeatureShape::Mixed,
                 x: vec![
-                    f64::from(max_prefill_tokens),
-                    f64::from(max_decode_kv_tokens),
+                    f64::from(scheduled.sum_prefill_tokens),
+                    f64::from(scheduled.sum_decode_kv_tokens),
                 ],
             },
         };
-        Ok(Some(feature))
+        Some(feature)
+    }
+
+    fn load_score(&self) -> f64 {
+        self.x.iter().sum()
     }
 }
 
@@ -880,7 +892,8 @@ fn fit_linear(
         }
     }
 
-    let solution = solve_linear_system(lhs, rhs)?;
+    let solution = solve_linear_system(lhs.clone(), rhs.clone())
+        .or_else(|| solve_regularized_linear_system(lhs, rhs))?;
     let mut coefficients = solution[1..].to_vec();
     let mut has_non_relaxable_negative = false;
     for (idx, coef) in coefficients.iter_mut().enumerate() {
@@ -901,6 +914,20 @@ fn fit_linear(
         intercept: solution[0],
         coefficients,
     })
+}
+
+fn solve_regularized_linear_system(mut lhs: Vec<Vec<f64>>, rhs: Vec<f64>) -> Option<Vec<f64>> {
+    let scale = lhs
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| row[idx].abs())
+        .sum::<f64>()
+        .max(1.0);
+    let ridge = scale * 1e-9;
+    for (idx, row) in lhs.iter_mut().enumerate().skip(1) {
+        row[idx] += ridge;
+    }
+    solve_linear_system(lhs, rhs)
 }
 
 fn solve_linear_system(mut lhs: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Option<Vec<f64>> {
@@ -959,27 +986,42 @@ fn median_ratio(values: impl Iterator<Item = f64>) -> Option<f64> {
 
 fn validate_options(options: &ForwardPassPerfOptions) -> Result<(), AicError> {
     if options.max_observations == 0 {
-        return Err(AicError::InvalidForwardPassPerfOptions(
-            "max_observations must be >= 1".to_string(),
-        ));
+        return Err(invalid_perf_options("max_observations must be >= 1"));
     }
     if options.min_observations == 0 {
-        return Err(AicError::InvalidForwardPassPerfOptions(
-            "min_observations must be >= 1".to_string(),
-        ));
+        return Err(invalid_perf_options("min_observations must be >= 1"));
     }
     if options.bucket_count == 0 {
-        return Err(AicError::InvalidForwardPassPerfOptions(
-            "bucket_count must be >= 1".to_string(),
+        return Err(invalid_perf_options("bucket_count must be >= 1"));
+    }
+    if options.min_observations > options.max_observations {
+        return Err(invalid_perf_options(
+            "min_observations must be <= max_observations",
         ));
     }
     let sqrt = integer_sqrt(options.bucket_count);
     if sqrt * sqrt != options.bucket_count {
-        return Err(AicError::InvalidForwardPassPerfOptions(
-            "bucket_count must be a perfect square".to_string(),
+        return Err(invalid_perf_options(
+            "bucket_count must be a perfect square",
         ));
     }
     Ok(())
+}
+
+fn invalid_perf_options(message: &str) -> AicError {
+    AicError::InvalidEngineConfig(format!("invalid forward pass perf options: {message}"))
+}
+
+fn can_fallback_to_regression(err: &AicError) -> bool {
+    matches!(
+        err,
+        AicError::UnsupportedModel(_)
+            | AicError::DataRoot(_)
+            | AicError::ModelConfig(_)
+            | AicError::PerfDatabase(_)
+            | AicError::Io { .. }
+            | AicError::Csv { .. }
+    )
 }
 
 fn integer_sqrt(value: usize) -> usize {
