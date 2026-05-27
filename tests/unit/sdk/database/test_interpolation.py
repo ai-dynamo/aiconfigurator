@@ -302,11 +302,17 @@ class TestExtrapolateDataGrid:
 
 
 class TestCorrectData:
-    """Test cases for _correct_data method."""
+    """Test cases for per-op ``_correct_sol`` SOL clamping.
+
+    Post-AIC-533 the ``PerfDatabase._correct_data`` wrapper is gone;
+    callers invoke ``GEMM._correct_sol(db)`` / ``GenerationAttention._correct_sol(db)``
+    directly. These tests exercise the SOL clamp on a database whose
+    instance attributes have been mutated to artificially low values."""
 
     def test_correct_gemm_data(self, mutable_comprehensive_perf_db, caplog):
-        """Test that _correct_data adjusts GEMM data based on SOL."""
-        # Manually set a GEMM value that's too optimistic (lower than SOL)
+        """``GEMM._correct_sol`` clamps GEMM data to >= SOL."""
+        from aiconfigurator.sdk.operations.gemm import GEMM
+
         db = mutable_comprehensive_perf_db
         quant_mode = common.GEMMQuantMode.bfloat16
         m, n, k = 64, 128, 256
@@ -317,16 +323,16 @@ class TestCorrectData:
         # Set an artificially low value
         db._gemm_data[quant_mode][m][n][k] = sol_value * 0.5
 
-        # Run correction
         with caplog.at_level("DEBUG"):
-            db._correct_data()
+            GEMM._correct_sol(db)
 
-        # Check that the value was corrected
         assert db._gemm_data[quant_mode][m][n][k] >= sol_value
         assert f"sol {sol_value} > perf_db" in caplog.text or "gemm quant" in caplog.text
 
     def test_correct_generation_attention_data(self, mutable_comprehensive_perf_db, caplog):
-        """Test that _correct_data adjusts generation attention data."""
+        """``GenerationAttention._correct_sol`` clamps generation attention data to >= SOL."""
+        from aiconfigurator.sdk.operations.attention import GenerationAttention
+
         db = mutable_comprehensive_perf_db
         kv_cache_quant_mode = common.KVCacheQuantMode.bfloat16
         n_kv = 0  # MHA case
@@ -340,11 +346,9 @@ class TestCorrectData:
         # Set an artificially low value
         db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][s] = sol_value * 0.5
 
-        # Run correction
         with caplog.at_level("DEBUG"):
-            db._correct_data()
+            GenerationAttention._correct_sol(db)
 
-        # Check that the value was corrected
         corrected_value = db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][s]
         assert corrected_value >= sol_value
 

@@ -1630,13 +1630,6 @@ def _dsv4_normalize_dtype(name: str) -> str:
 # head count for SOL math and the native-head/tp_size keys for silicon lookup.
 
 
-# ``_dsv4_robust_3d_lookup`` moved to ``operations.dsv4`` along with the
-# rest of the DSV4 family (AIC-1095 / ISSUE-11). Re-exported via
-# ``__getattr__`` at the bottom of this module so tests importing it via
-# ``from aiconfigurator.sdk.perf_database import _dsv4_robust_3d_lookup``
-# keep working without triggering operations/__init__.py at import time.
-
-
 def load_context_dsv4_kind_module_data(file_path: str):
     """Load ONE DeepSeek-V4 context CSV (single attn_kind / compress_ratio).
 
@@ -1742,13 +1735,6 @@ def load_generation_dsv4_kind_module_data(file_path: str):
             "energy": power * latency,
         }
     return data
-
-
-# ``_deep_merge_dsv4_dicts`` moved to ``operations.dsv4`` (AIC-1095 /
-# ISSUE-11). Re-exported via ``__getattr__`` at the bottom of this module
-# so tests importing it via
-# ``from aiconfigurator.sdk.perf_database import _deep_merge_dsv4_dicts``
-# keep working without triggering operations/__init__.py at import time.
 
 
 def load_dsv4_sparse_kernel_data(file_path: str):
@@ -3473,18 +3459,6 @@ class PerfDatabase:
                 e.args = (exception_msg,)
             raise
 
-    def _get_quant_tc_flops(self, quant_mode) -> float:
-        """Resolve actual tensor-core FLOPS for a given quant mode.
-
-        Thin wrapper around ``GEMM._get_quant_tc_flops``; kept on
-        ``PerfDatabase`` because the DSV4 / MLA / attention SOL paths
-        still reference it as ``self._get_quant_tc_flops(...)``.
-        ISSUE-16 retires this wrapper once those callers migrate.
-        """
-        from aiconfigurator.sdk.operations.gemm import GEMM
-
-        return GEMM._get_quant_tc_flops(self.system_spec, quant_mode)
-
     @functools.lru_cache(maxsize=32768)
     def query_gemm(
         self,
@@ -3997,27 +3971,6 @@ class PerfDatabase:
             database_mode=database_mode,
         )
 
-    def _correct_data(self) -> None:
-        """
-        Correct the data based on sol time reference. GEMM + GenerationAttention
-        SOL clamping live in their respective ``_correct_sol`` classmethods
-        (invoked from each ``load_data``); we forward here for backward compat
-        with tests that mutate the data and then call ``_correct_data()`` to
-        re-clamp.
-
-        The init path runs this immediately after ``load_data`` already
-        applied SOL correction, so there are duplicate full-table passes.
-        They are harmless — SOL clamping is idempotent (``max(sol, current)``
-        is a no-op when ``current >= sol`` after the first pass) — but the
-        duplicate iterations are O(n) over each table. ISSUE-16 can route
-        the init call directly and drop these forwards.
-        """
-        from aiconfigurator.sdk.operations.attention import GenerationAttention
-        from aiconfigurator.sdk.operations.gemm import GEMM
-
-        GEMM._correct_sol(self)
-        GenerationAttention._correct_sol(self)
-
     @functools.lru_cache(maxsize=32768)
     def query_wideep_moe_compute(
         self,
@@ -4225,33 +4178,6 @@ class PerfDatabase:
             database_mode=database_mode,
         )
 
-    def _lookup_dsv4_sparse_kernel(
-        self,
-        kernel: str,
-        bs: int,
-        isl: int,
-        past_kv: int,
-        tp_size: int,
-        native_heads: int,
-    ) -> Optional[float]:
-        """Delegates to ``ContextDeepSeekV4AttentionModule._lookup_sparse_kernel``.
-
-        Kept as an instance method for tests that invoke it via the
-        unbound form ``PerfDatabase._lookup_dsv4_sparse_kernel(db, ...)``;
-        ISSUE-16 cleanup retires this wrapper once those tests migrate.
-        """
-        from aiconfigurator.sdk.operations.dsv4 import ContextDeepSeekV4AttentionModule
-
-        return ContextDeepSeekV4AttentionModule._lookup_sparse_kernel(
-            self,
-            kernel=kernel,
-            bs=bs,
-            isl=isl,
-            past_kv=past_kv,
-            tp_size=tp_size,
-            native_heads=native_heads,
-        )
-
     @functools.lru_cache(maxsize=32768)
     def query_context_deepseek_v4_attention_module(
         self,
@@ -4360,21 +4286,6 @@ class PerfDatabase:
             gemm_quant_mode=gemm_quant_mode,
             database_mode=database_mode,
         )
-
-
-def __getattr__(name):
-    """Lazy re-export of DSV4 helpers moved to ``operations.dsv4``.
-
-    Avoids the circular import that would occur if these were imported
-    eagerly at module level (``operations/__init__.py`` pulls in
-    ``_legacy.py`` which imports ``PerfDatabase``, which is not yet
-    bound while ``perf_database`` is loading).
-    """
-    if name in ("_dsv4_robust_3d_lookup", "_deep_merge_dsv4_dicts"):
-        from aiconfigurator.sdk.operations import dsv4 as _dsv4_module
-
-        return getattr(_dsv4_module, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 if __name__ == "__main__":
