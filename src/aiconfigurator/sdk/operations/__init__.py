@@ -26,20 +26,14 @@ from __future__ import annotations
 # log calls until their owning issue lands.
 from aiconfigurator.sdk.operations._legacy import (
     ContextDeepSeekV4AttentionModule,
-    ContextMLA,
     DeepSeekV4MHCModule,
     FallbackOp,
     GenerationDeepSeekV4AttentionModule,
-    GenerationMLA,
-    MLABmm,
-    MLAModule,
     MoE,
     MoEDispatch,
     OverlapOp,
     TrtLLMWideEPMoE,
     TrtLLMWideEPMoEDispatch,
-    WideEPContextMLA,
-    WideEPGenerationMLA,
     _BaseDeepSeekV4AttentionModule,
     logger,  # noqa: F401
 )
@@ -56,6 +50,14 @@ from aiconfigurator.sdk.operations.elementwise import ElementWise
 from aiconfigurator.sdk.operations.embedding import Embedding
 from aiconfigurator.sdk.operations.gemm import GEMM
 from aiconfigurator.sdk.operations.mamba import GDNKernel, Mamba2, Mamba2Kernel
+from aiconfigurator.sdk.operations.mla import (
+    ContextMLA,
+    GenerationMLA,
+    MLABmm,
+    MLAModule,
+    WideEPContextMLA,
+    WideEPGenerationMLA,
+)
 
 # Re-export commonly-imported names that the prior monolithic operations.py
 # exposed at module level. Some test files and external callers do
