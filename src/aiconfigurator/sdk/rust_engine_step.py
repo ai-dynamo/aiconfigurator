@@ -53,6 +53,7 @@ class RustEngineStepEstimator:
         _raise_for_error(self._lib, err)
         return float(out_ms.value)
 
+    # TODO(remove-after-rust-migration): parity check/benchmark-only cache reset.
     def clear_runtime_caches(self) -> None:
         err = self._lib.aic_engine_step_estimator_clear_runtime_caches(self._handle)
         _raise_for_error(self._lib, err)

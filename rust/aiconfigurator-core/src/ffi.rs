@@ -71,6 +71,7 @@ pub extern "C" fn aic_engine_step_forward_pass_time_ms(
 }
 
 #[no_mangle]
+// TODO(remove-after-rust-migration): parity check/benchmark-only cache reset.
 pub extern "C" fn aic_engine_step_estimator_clear_runtime_caches(
     estimator: *mut AicEngineStepEstimatorHandle,
 ) -> *mut c_char {

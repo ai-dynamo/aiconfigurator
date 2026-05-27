@@ -351,6 +351,7 @@ impl EngineStepEstimator {
         self.forward_pass_time_ms(metrics_by_rank)
     }
 
+    // TODO(remove-after-rust-migration): parity check/benchmark-only cache reset.
     pub fn clear_runtime_caches(&self) {
         self.perf.clear_query_cache();
     }

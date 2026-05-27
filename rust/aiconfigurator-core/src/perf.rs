@@ -83,6 +83,7 @@ impl PerfDatabase {
         })
     }
 
+    // TODO(remove-after-rust-migration): parity check/benchmark-only cache reset.
     pub(crate) fn clear_query_cache(&self) {
         if let Ok(mut cache) = self.query_cache.lock() {
             *cache = QueryCache::default();
