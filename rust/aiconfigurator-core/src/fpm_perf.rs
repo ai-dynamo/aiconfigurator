@@ -26,7 +26,8 @@ pub struct ForwardPassPerfOptions {
     /// Maximum retained observations across all buckets for each inferred FPM shape.
     #[serde(default = "default_max_observations")]
     pub max_observations: usize,
-    /// Minimum observations required before a regression fit or native correction is used.
+    /// Minimum retained observations required before a regression fit or native
+    /// correction is used for an inferred FPM shape.
     #[serde(default = "default_min_observations")]
     pub min_observations: usize,
     /// Target bucket count for shape-specific sample retirement and correction lookup.
@@ -48,14 +49,15 @@ impl Default for ForwardPassPerfOptions {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ForwardPassPerfDiagnostics {
     /// Active prediction source. Native models become `aic_with_correction`
-    /// after at least one correction bucket is ready.
+    /// after at least one inferred FPM shape has enough correction samples.
     pub source: ForwardPassPerfSource,
     /// Whether the model can currently produce learned estimates for at least
     /// one shape, or why it cannot.
     pub readiness: ForwardPassPerfReadiness,
     /// Number of retained tuning observations across all inferred shapes.
     pub retained_observations: usize,
-    /// Number of native-correction buckets with at least `min_observations`.
+    /// Number of populated native-correction regions whose shape has at least
+    /// `min_observations` total retained samples.
     pub correction_ready_buckets: usize,
     /// Fallback reason when `auto` had to use regression instead of native AIC.
     pub last_warning: Option<String>,
@@ -65,11 +67,11 @@ pub struct ForwardPassPerfDiagnostics {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ForwardPassPerfSource {
-    /// Strict native AIC estimator with no correction bucket ready yet.
+    /// Strict native AIC estimator with no correction shape ready yet.
     Aic,
     /// Shape-specific regression fallback, used without native AIC support.
     FallbackRegression,
-    /// Native AIC estimator with at least one learned correction bucket.
+    /// Native AIC estimator with at least one learned correction shape.
     AicWithCorrection,
 }
 
@@ -267,10 +269,11 @@ impl ForwardPassPerfModel {
     ///
     /// Native models return an AIC estimate immediately, multiplied by the
     /// correction factor for the matching in-range shape region. Correction
-    /// factors default to `1.0` for regions with insufficient samples and for
-    /// queries outside the retained observation bounds. Regression models return
-    /// `Ok(None)` until the matching inferred shape has enough tuning samples.
-    /// Empty scheduled work returns `Ok(Some(0.0))`.
+    /// factors default to `1.0` for inferred shapes with fewer than
+    /// `min_observations` total samples, empty regions, and queries outside the
+    /// retained observation bounds. Regression models return `Ok(None)` until
+    /// the matching inferred shape has enough tuning samples. Empty scheduled
+    /// work returns `Ok(Some(0.0))`.
     pub fn estimate_forward_pass_time_ms(
         &self,
         metrics_by_rank: &[ForwardPassMetrics],
@@ -313,9 +316,10 @@ impl ForwardPassPerfModel {
     /// finite positive `wall_time` across ranks as the observed latency target
     /// in milliseconds. Iterations with no scheduled work or no positive
     /// `wall_time` are ignored. Native models update the matching region's
-    /// median `observed_ms / native_ms` correction factor; empty and
-    /// insufficiently sampled regions keep the default factor `1.0`. Regression
-    /// models learn a shape-specific linear fit.
+    /// median `observed_ms / native_ms` correction factor. Regions are used only
+    /// after their inferred shape has `min_observations` total samples; empty
+    /// regions keep the default factor `1.0`. Regression models learn a
+    /// shape-specific linear fit.
     pub fn tune_with_fpms(
         &mut self,
         iterations: &[Vec<ForwardPassMetrics>],
@@ -392,7 +396,7 @@ impl ForwardPassPerfModel {
     /// Description: return the smallest ready native correction factor across
     /// all shapes.
     ///
-    /// Returns `None` before any native correction bucket has enough samples.
+    /// Returns `None` before any native correction shape has enough samples.
     /// Regression-only models also return `None`.
     pub fn min_correction_factor(&self) -> Option<f64> {
         self.correction_factors()
@@ -406,7 +410,7 @@ impl ForwardPassPerfModel {
     /// Description: return the largest ready native correction factor across
     /// all shapes.
     ///
-    /// Returns `None` before any native correction bucket has enough samples.
+    /// Returns `None` before any native correction shape has enough samples.
     /// Regression-only models also return `None`.
     pub fn max_correction_factor(&self) -> Option<f64> {
         self.correction_factors()
@@ -420,7 +424,7 @@ impl ForwardPassPerfModel {
     /// Description: return the arithmetic mean of ready native correction
     /// factors across all shapes.
     ///
-    /// Returns `None` before any native correction bucket has enough samples.
+    /// Returns `None` before any native correction shape has enough samples.
     /// Regression-only models also return `None`.
     pub fn avg_correction_factor(&self) -> Option<f64> {
         let factors = self.correction_factors();
@@ -685,7 +689,7 @@ impl StoreStats for CorrectionBuckets {
     }
 
     fn is_ready(&self) -> bool {
-        self.ready_bucket_count() > 0
+        self.samples.total_observations >= self.min_observations
     }
 }
 
@@ -704,15 +708,15 @@ impl CorrectionBuckets {
     }
 
     fn correction_factor_for(&self, x: &[f64]) -> f64 {
+        if !self.is_ready() {
+            return 1.0;
+        }
         let Some(key) = self.samples.bucket_key_if_in_bounds(x) else {
             return 1.0;
         };
         let Some(bucket) = self.samples.buckets.get(&key) else {
             return 1.0;
         };
-        if bucket.len() < self.min_observations {
-            return 1.0;
-        }
         median_ratio(
             bucket
                 .iter()
@@ -722,18 +726,20 @@ impl CorrectionBuckets {
     }
 
     fn ready_bucket_count(&self) -> usize {
-        self.samples
-            .buckets
-            .values()
-            .filter(|bucket| bucket.len() >= self.min_observations)
-            .count()
+        if self.is_ready() {
+            self.samples.buckets.len()
+        } else {
+            0
+        }
     }
 
     fn correction_factors(&self) -> Vec<f64> {
+        if !self.is_ready() {
+            return Vec::new();
+        }
         self.samples
             .buckets
             .values()
-            .filter(|bucket| bucket.len() >= self.min_observations)
             .filter_map(|bucket| {
                 median_ratio(
                     bucket

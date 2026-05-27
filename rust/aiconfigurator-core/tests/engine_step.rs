@@ -983,7 +983,7 @@ fn native_correction_applies_after_bucket_is_ready() {
 }
 
 #[test]
-fn native_correction_defaults_to_one_for_empty_and_out_of_range_regions() {
+fn native_correction_min_observations_is_shape_wide_and_empty_regions_default_to_one() {
     let fixture = Fixture::new();
     let mut model = ForwardPassPerfModel::from_native_with_roots(
         engine_config(),
@@ -1041,7 +1041,7 @@ fn native_correction_defaults_to_one_for_empty_and_out_of_range_regions() {
             .estimate_forward_pass_time_ms(&[prefill_fpm(50, 0.0)])
             .unwrap()
             .unwrap(),
-        native_50,
+        native_50 * 3.0,
     );
     assert_close(
         model
@@ -1050,7 +1050,10 @@ fn native_correction_defaults_to_one_for_empty_and_out_of_range_regions() {
             .unwrap(),
         native_100,
     );
-    assert_eq!(model.diagnostics().correction_ready_buckets, 1);
+    assert_close(model.min_correction_factor().unwrap(), 2.0);
+    assert_close(model.max_correction_factor().unwrap(), 3.0);
+    assert_close(model.avg_correction_factor().unwrap(), 2.5);
+    assert_eq!(model.diagnostics().correction_ready_buckets, 2);
 }
 
 #[test]

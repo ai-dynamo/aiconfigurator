@@ -201,11 +201,11 @@ class RustForwardPassPerfModel:
         queued fields and `wall_time` are ignored for estimation.
 
         Native models return an estimate immediately, multiplied by the
-        correction factor for the matching in-range shape region. Empty regions,
-        insufficiently sampled regions, and out-of-range queries use the default
-        factor `1.0`. Regression models return `None` until the matching
-        inferred shape has enough tuned observations. Empty scheduled work
-        returns `0.0`.
+        correction factor for the matching in-range shape region. Inferred
+        shapes with fewer than `min_observations` total samples, empty regions,
+        and out-of-range queries use the default factor `1.0`. Regression models
+        return `None` until the matching inferred shape has enough tuned
+        observations. Empty scheduled work returns `0.0`.
         """
         out_ms = ctypes.c_double()
         out_has_value = ctypes.c_bool()
@@ -232,8 +232,9 @@ class RustForwardPassPerfModel:
         Tuning infers the shape from scheduled request fields. It ignores empty
         iterations and iterations with no positive finite `wall_time`. For
         native models, each observation updates only its matching correction
-        region. For multi-rank input, one observation is recorded using max-rank
-        load features and max positive `wall_time` across ranks.
+        region; those regions are used after the inferred shape has enough total
+        samples. For multi-rank input, one observation is recorded using
+        max-rank load features and max positive `wall_time` across ranks.
         """
         err = self._lib.aic_forward_pass_perf_model_tune_with_fpms(
             self._handle,
