@@ -17,11 +17,16 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod ffi;
+mod fpm_perf;
 mod model;
 mod perf;
 
 use perf::PerfDatabase;
 
+pub use fpm_perf::{
+    ForwardPassPerfDiagnostics, ForwardPassPerfModel, ForwardPassPerfOptions,
+    ForwardPassPerfReadiness, ForwardPassPerfSource,
+};
 pub use model::{ModelFamily, ModelSpec};
 
 pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
@@ -859,6 +864,8 @@ pub enum AicError {
     InvalidEngineConfig(String),
     #[error("invalid forward pass metrics: {0}")]
     InvalidForwardPassMetrics(String),
+    #[error("invalid forward pass perf options: {0}")]
+    InvalidForwardPassPerfOptions(String),
     #[error("unsupported model for Rust core estimator: {0}")]
     UnsupportedModel(String),
     #[error("failed to find AIC data roots: {0}")]

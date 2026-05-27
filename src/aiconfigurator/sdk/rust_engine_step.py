@@ -67,6 +67,142 @@ class RustEngineStepEstimator:
             pass
 
 
+class RustForwardPassPerfModel:
+    """ctypes wrapper over the tuned/fallback Rust forward-pass perf model."""
+
+    def __init__(self, handle: ctypes.c_void_p, lib: ctypes.CDLL) -> None:
+        self._handle = handle
+        self._lib = lib
+
+    @classmethod
+    def from_native(
+        cls,
+        config: dict[str, Any],
+        options: dict[str, Any] | None = None,
+        *,
+        autobuild: bool | None = None,
+    ) -> RustForwardPassPerfModel:
+        return cls._create(
+            "aic_forward_pass_perf_model_from_native",
+            config=config,
+            options=options,
+            autobuild=autobuild,
+        )
+
+    @classmethod
+    def auto(
+        cls,
+        config: dict[str, Any],
+        options: dict[str, Any] | None = None,
+        *,
+        autobuild: bool | None = None,
+    ) -> RustForwardPassPerfModel:
+        return cls._create(
+            "aic_forward_pass_perf_model_auto",
+            config=config,
+            options=options,
+            autobuild=autobuild,
+        )
+
+    @classmethod
+    def from_regression(
+        cls,
+        options: dict[str, Any] | None = None,
+        *,
+        autobuild: bool | None = None,
+    ) -> RustForwardPassPerfModel:
+        return cls._create(
+            "aic_forward_pass_perf_model_from_regression",
+            options=options,
+            autobuild=autobuild,
+        )
+
+    @classmethod
+    def _create(
+        cls,
+        function_name: str,
+        *,
+        config: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+        autobuild: bool | None = None,
+    ) -> RustForwardPassPerfModel:
+        _configure_default_data_roots()
+        lib = _load_library(bool(autobuild) or _truthy(os.environ.get(RUST_CORE_AUTOBUILD_ENV)))
+        handle = ctypes.c_void_p()
+        constructor = getattr(lib, function_name)
+        if config is None:
+            err = constructor(_optional_json_bytes(options), ctypes.byref(handle))
+        else:
+            err = constructor(_json_bytes(config), _optional_json_bytes(options), ctypes.byref(handle))
+        _raise_for_error(lib, err)
+        return cls(handle, lib)
+
+    def estimate_forward_pass_time_ms(self, metrics: dict[str, Any] | list[dict[str, Any]]) -> float | None:
+        out_ms = ctypes.c_double()
+        out_has_value = ctypes.c_bool()
+        err = self._lib.aic_forward_pass_perf_model_estimate_forward_pass_time_ms(
+            self._handle,
+            _json_bytes(metrics),
+            ctypes.byref(out_ms),
+            ctypes.byref(out_has_value),
+        )
+        _raise_for_error(self._lib, err)
+        return float(out_ms.value) if out_has_value.value else None
+
+    def tune_with_fpms(self, iterations: dict[str, Any] | list[Any]) -> None:
+        err = self._lib.aic_forward_pass_perf_model_tune_with_fpms(
+            self._handle,
+            _json_bytes(_normalize_tuning_iterations(iterations)),
+        )
+        _raise_for_error(self._lib, err)
+
+    def diagnostics(self) -> dict[str, Any]:
+        out_json = ctypes.c_void_p()
+        err = self._lib.aic_forward_pass_perf_model_diagnostics_json(
+            self._handle,
+            ctypes.byref(out_json),
+        )
+        _raise_for_error(self._lib, err)
+        try:
+            message = ctypes.cast(out_json, ctypes.c_char_p).value
+            return json.loads((message or b"{}").decode("utf-8", errors="replace"))
+        finally:
+            self._lib.aic_engine_step_string_free(out_json)
+
+    def get_min_correction_factor(self) -> float | None:
+        return self._get_correction_factor("aic_forward_pass_perf_model_min_correction_factor")
+
+    def get_max_correction_factor(self) -> float | None:
+        return self._get_correction_factor("aic_forward_pass_perf_model_max_correction_factor")
+
+    def get_avg_correction_factor(self) -> float | None:
+        return self._get_correction_factor("aic_forward_pass_perf_model_avg_correction_factor")
+
+    def _get_correction_factor(self, function_name: str) -> float | None:
+        out_value = ctypes.c_double()
+        out_has_value = ctypes.c_bool()
+        err = getattr(self._lib, function_name)(
+            self._handle,
+            ctypes.byref(out_value),
+            ctypes.byref(out_has_value),
+        )
+        _raise_for_error(self._lib, err)
+        return float(out_value.value) if out_has_value.value else None
+
+    def close(self) -> None:
+        handle = getattr(self, "_handle", None)
+        if handle is None or not handle.value:
+            return
+        self._lib.aic_forward_pass_perf_model_free(handle)
+        self._handle = ctypes.c_void_p()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 def should_use_rust_engine_step(runtime_config: RuntimeConfig) -> bool:
     backend = getattr(runtime_config, "engine_step_backend", None) or os.environ.get(ENGINE_STEP_BACKEND_ENV)
     return str(backend or "python").lower() == "rust"
@@ -272,6 +408,54 @@ def _load_library(autobuild: bool) -> ctypes.CDLL:
     lib.aic_engine_step_forward_pass_time_ms.restype = ctypes.c_void_p
     lib.aic_engine_step_estimator_free.argtypes = [ctypes.c_void_p]
     lib.aic_engine_step_estimator_free.restype = None
+    lib.aic_forward_pass_perf_model_from_native.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    lib.aic_forward_pass_perf_model_from_native.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_auto.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    lib.aic_forward_pass_perf_model_auto.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_from_regression.argtypes = [
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    lib.aic_forward_pass_perf_model_from_regression.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_estimate_forward_pass_time_ms.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_bool),
+    ]
+    lib.aic_forward_pass_perf_model_estimate_forward_pass_time_ms.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_tune_with_fpms.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+    ]
+    lib.aic_forward_pass_perf_model_tune_with_fpms.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_diagnostics_json.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    lib.aic_forward_pass_perf_model_diagnostics_json.restype = ctypes.c_void_p
+    for name in [
+        "aic_forward_pass_perf_model_min_correction_factor",
+        "aic_forward_pass_perf_model_max_correction_factor",
+        "aic_forward_pass_perf_model_avg_correction_factor",
+    ]:
+        function = getattr(lib, name)
+        function.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_bool),
+        ]
+        function.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_free.argtypes = [ctypes.c_void_p]
+    lib.aic_forward_pass_perf_model_free.restype = None
     lib.aic_engine_step_string_free.argtypes = [ctypes.c_void_p]
     lib.aic_engine_step_string_free.restype = None
     return lib
@@ -345,8 +529,24 @@ def _raise_for_error(lib: ctypes.CDLL, error_ptr: int | None) -> None:
         lib.aic_engine_step_string_free(error_ptr)
 
 
-def _json_bytes(value: dict[str, Any]) -> bytes:
+def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def _optional_json_bytes(value: dict[str, Any] | None) -> bytes | None:
+    if value is None:
+        return None
+    return _json_bytes(value)
+
+
+def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list[Any]:
+    if isinstance(iterations, dict):
+        return [[iterations]]
+    if not iterations:
+        return []
+    if all(isinstance(item, dict) for item in iterations):
+        return [iterations]
+    return iterations
 
 
 def _backend_name(value: Any) -> str:

@@ -6,8 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aiconfigurator_core::{
-    BackendKind, DataType, EngineConfig, EngineStepEstimator, ForwardPassMetrics, ModelSpec,
-    ScheduledRequestMetrics, ENGINE_CONFIG_SCHEMA_VERSION, FPM_VERSION,
+    BackendKind, DataType, EngineConfig, EngineStepEstimator, ForwardPassMetrics,
+    ForwardPassPerfModel, ForwardPassPerfOptions, ForwardPassPerfReadiness, ForwardPassPerfSource,
+    ModelSpec, ScheduledRequestMetrics, ENGINE_CONFIG_SCHEMA_VERSION, FPM_VERSION,
 };
 use tempfile::TempDir;
 
@@ -621,13 +622,14 @@ fn default_fpm_version_matches_constant() {
 }
 
 #[test]
-fn all_checked_in_model_configs_are_classified() {
+fn all_checked_in_model_configs_are_classified_or_auto_fallback() {
     let root = repo_model_configs_root();
     if !root.is_dir() {
         return;
     }
 
     let mut checked = 0;
+    let mut fallback_ready = 0;
     for entry in fs::read_dir(&root).unwrap() {
         let path = entry.unwrap().path();
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -636,12 +638,246 @@ fn all_checked_in_model_configs_are_classified() {
         if !file_name.ends_with("_config.json") {
             continue;
         }
-        ModelSpec::load_path(&path)
-            .unwrap_or_else(|err| panic!("failed to classify {}: {err}", path.display()));
+        match ModelSpec::load_path(&path) {
+            Ok(_) => {}
+            Err(_) => {
+                let model = ForwardPassPerfModel::auto(
+                    EngineConfig {
+                        model_name: path.to_string_lossy().to_string(),
+                        ..engine_config()
+                    },
+                    ForwardPassPerfOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    model.diagnostics().source,
+                    ForwardPassPerfSource::FallbackRegression
+                );
+                fallback_ready += 1;
+            }
+        }
         checked += 1;
     }
 
     assert!(checked >= 40, "expected checked-in AIC model configs");
+    assert!(
+        fallback_ready > 0,
+        "expected at least one checked-in config to exercise auto fallback"
+    );
+}
+
+#[test]
+fn forward_pass_perf_auto_falls_back_when_native_is_unsupported() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture
+            .model_configs_root()
+            .join("Test--Unsupported_config.json"),
+        r#"{
+  "architectures": ["UnsupportedForCausalLM"],
+  "num_hidden_layers": 2,
+  "num_attention_heads": 4,
+  "hidden_size": 32,
+  "vocab_size": 160
+}
+"#,
+    )
+    .unwrap();
+
+    let model = ForwardPassPerfModel::auto_with_roots(
+        EngineConfig {
+            model_name: "Test/Unsupported".to_string(),
+            ..engine_config()
+        },
+        ForwardPassPerfOptions::default(),
+        fixture.systems_root(),
+        fixture.model_configs_root(),
+    )
+    .unwrap();
+
+    let diagnostics = model.diagnostics();
+    assert_eq!(
+        diagnostics.source,
+        ForwardPassPerfSource::FallbackRegression
+    );
+    assert_eq!(
+        diagnostics.readiness,
+        ForwardPassPerfReadiness::UnsupportedConfig
+    );
+    assert!(diagnostics
+        .last_warning
+        .unwrap()
+        .contains("fallback regression"));
+}
+
+#[test]
+fn fallback_regression_returns_none_until_sufficient_data() {
+    let model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        min_observations: 3,
+        ..Default::default()
+    })
+    .unwrap();
+    let metrics = prefill_fpm(10, 0.01);
+
+    assert_eq!(
+        model.estimate_forward_pass_time_ms(&[metrics]).unwrap(),
+        None
+    );
+    assert_eq!(
+        model
+            .estimate_forward_pass_time_ms(&[ForwardPassMetrics::default()])
+            .unwrap(),
+        Some(0.0)
+    );
+}
+
+#[test]
+fn fallback_regression_predicts_prefill_decode_and_mixed_shapes() {
+    let mut model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        min_observations: 3,
+        ..Default::default()
+    })
+    .unwrap();
+
+    model
+        .tune_with_fpms(&[
+            vec![prefill_fpm(10, 0.010)],
+            vec![prefill_fpm(20, 0.020)],
+            vec![prefill_fpm(30, 0.030)],
+            vec![decode_fpm(1, 10, 0.007)],
+            vec![decode_fpm(2, 10, 0.009)],
+            vec![decode_fpm(1, 20, 0.012)],
+            vec![mixed_fpm(10, 10, 0.015)],
+            vec![mixed_fpm(20, 10, 0.025)],
+            vec![mixed_fpm(10, 20, 0.020)],
+        ])
+        .unwrap();
+
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(40, 0.0)])
+            .unwrap()
+            .unwrap(),
+        40.0,
+    );
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[decode_fpm(2, 20, 0.0)])
+            .unwrap()
+            .unwrap(),
+        14.0,
+    );
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[mixed_fpm(20, 20, 0.0)])
+            .unwrap()
+            .unwrap(),
+        30.0,
+    );
+}
+
+#[test]
+fn tune_with_fpms_handles_multiple_iterations_and_attention_dp_ranks() {
+    let mut model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        min_observations: 2,
+        ..Default::default()
+    })
+    .unwrap();
+
+    model
+        .tune_with_fpms(&[
+            vec![prefill_fpm(10, 0.010), prefill_fpm(20, 0.020)],
+            vec![prefill_fpm(30, 0.030), prefill_fpm(40, 0.040)],
+        ])
+        .unwrap();
+
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(60, 0.0)])
+            .unwrap()
+            .unwrap(),
+        60.0,
+    );
+}
+
+#[test]
+fn tuning_ignores_idle_wall_time_and_queued_only_work() {
+    let mut model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        min_observations: 2,
+        ..Default::default()
+    })
+    .unwrap();
+    let mut queued_only = ForwardPassMetrics::default();
+    queued_only.queued_requests.sum_prefill_tokens = 10_000;
+    queued_only.wall_time = 1.0;
+
+    model
+        .tune_with_fpms(&[
+            vec![prefill_fpm(10, 0.0)],
+            vec![queued_only],
+            vec![prefill_fpm(10, 0.010)],
+            vec![prefill_fpm(20, 0.020)],
+        ])
+        .unwrap();
+
+    assert_eq!(model.diagnostics().retained_observations, 2);
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(30, 0.0)])
+            .unwrap()
+            .unwrap(),
+        30.0,
+    );
+}
+
+#[test]
+fn native_correction_applies_after_bucket_is_ready() {
+    let fixture = Fixture::new();
+    let mut model = ForwardPassPerfModel::from_native_with_roots(
+        engine_config(),
+        ForwardPassPerfOptions {
+            min_observations: 2,
+            ..Default::default()
+        },
+        fixture.systems_root(),
+        fixture.model_configs_root(),
+    )
+    .unwrap();
+    let native_metrics = prefill_fpm(20, 0.0);
+    let native_ms = model
+        .estimate_forward_pass_time_ms(&[native_metrics.clone()])
+        .unwrap()
+        .unwrap();
+    let metrics = prefill_fpm(20, native_ms * 2.0 / 1000.0);
+
+    assert_eq!(model.min_correction_factor(), None);
+    model
+        .tune_with_fpms(&[vec![metrics.clone()], vec![metrics.clone()]])
+        .unwrap();
+
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[metrics])
+            .unwrap()
+            .unwrap(),
+        native_ms * 2.0,
+    );
+    assert_close(model.min_correction_factor().unwrap(), 2.0);
+    assert_close(model.max_correction_factor().unwrap(), 2.0);
+    assert_close(model.avg_correction_factor().unwrap(), 2.0);
+    assert_eq!(
+        model.diagnostics().source,
+        ForwardPassPerfSource::AicWithCorrection
+    );
+}
+
+#[test]
+fn fallback_regression_has_no_correction_factors() {
+    let model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions::default()).unwrap();
+
+    assert_eq!(model.min_correction_factor(), None);
+    assert_eq!(model.max_correction_factor(), None);
+    assert_eq!(model.avg_correction_factor(), None);
 }
 
 #[test]
@@ -969,6 +1205,52 @@ fn assert_close(actual: f64, expected: f64) {
         (actual - expected).abs() < 1e-9,
         "actual={actual}, expected={expected}"
     );
+}
+
+fn prefill_fpm(sum_prefill_tokens: u32, wall_time: f64) -> ForwardPassMetrics {
+    ForwardPassMetrics {
+        wall_time,
+        scheduled_requests: ScheduledRequestMetrics {
+            num_prefill_requests: 1,
+            sum_prefill_tokens,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn decode_fpm(
+    num_decode_requests: u32,
+    sum_decode_kv_tokens: u32,
+    wall_time: f64,
+) -> ForwardPassMetrics {
+    ForwardPassMetrics {
+        wall_time,
+        scheduled_requests: ScheduledRequestMetrics {
+            num_decode_requests,
+            sum_decode_kv_tokens,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn mixed_fpm(
+    sum_prefill_tokens: u32,
+    sum_decode_kv_tokens: u32,
+    wall_time: f64,
+) -> ForwardPassMetrics {
+    ForwardPassMetrics {
+        wall_time,
+        scheduled_requests: ScheduledRequestMetrics {
+            num_prefill_requests: 1,
+            sum_prefill_tokens,
+            num_decode_requests: 1,
+            sum_decode_kv_tokens,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 fn repo_model_configs_root() -> PathBuf {
