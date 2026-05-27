@@ -28,10 +28,11 @@ config tuples (``(d_model, d_state, ...)``) rather than dense
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.operations.base import Operation
+from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -109,7 +110,7 @@ class Mamba2Kernel(Operation):
         structural config tuples, not a dense grid)."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_mamba2_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -330,7 +331,7 @@ class GDNKernel(Operation):
         """Idempotent. Loads gdn_perf CSV, binds ``database._gdn_data``."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_gdn_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -660,3 +661,150 @@ class Mamba2(Operation):
 
     def get_weights(self, **kwargs):  # Mamba2 weights
         return self._weights * self._scale_factor
+
+
+# ─────────────────────────────────────────────────────────
+# CSV loaders (moved from perf_database.py in AIC-533 cleanup)
+# ─────────────────────────────────────────────────────────
+
+
+def load_mamba2_data(mamba2_file: str):
+    """
+    Load Mamba2 Conv1D + SSM kernel performance data from mamba2_perf.txt.
+
+    CSV columns: framework, version, device, op_name, kernel_source, phase,
+    batch_size, seq_len, num_tokens, d_model, d_state, d_conv, nheads, head_dim,
+    n_groups, chunk_size, model_name, latency (optional: power).
+    All rows must have the same columns (context and generation both include
+    seq_len and num_tokens so columns align).
+
+    Returns:
+        dict: data[kernel_source][phase][model_key] where model_key is
+              (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size).
+              For phase "context" the leaf is [batch_size][seq_len] -> {latency, power, energy}.
+              For phase "generation" the leaf is [batch_size] -> {latency, power, energy}.
+              Returns None if file does not exist.
+    """
+    rows = _read_filtered_rows(mamba2_file)
+    if rows is None:
+        logger.debug(f"Mamba2 data file {mamba2_file} not found.")
+        return None
+
+    # data[kernel_source][phase][model_key] -> nested batch_size [seq_len] -> {latency, power, energy}
+    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (mamba2) - power will default to 0.0")
+
+    for row in rows:
+        kernel_source = row["kernel_source"]
+        phase = row["phase"]
+        batch_size = int(row["batch_size"])
+        seq_len = int(row["seq_len"])
+        d_model = int(row["d_model"])
+        d_state = int(row["d_state"])
+        d_conv = int(row["d_conv"])
+        nheads = int(row["nheads"])
+        head_dim = int(row["head_dim"])
+        n_groups = int(row["n_groups"])
+        chunk_size = int(row["chunk_size"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0))
+        energy = power * latency
+
+        model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
+        entry = {"latency": latency, "power": power, "energy": energy}
+
+        try:
+            if phase == "context":
+                data[kernel_source][phase][model_key][batch_size][seq_len]
+                logger.debug(
+                    f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size} {seq_len}"
+                )
+            else:
+                data[kernel_source][phase][model_key][batch_size]
+                logger.debug(f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size}")
+        except KeyError:
+            if phase == "context":
+                data[kernel_source][phase][model_key][batch_size][seq_len] = entry
+            else:
+                data[kernel_source][phase][model_key][batch_size] = entry
+
+    # Convert default dicts to regular dicts for predictable behavior; keep generation as 1D
+    result = {}
+    for ks, by_phase in data.items():
+        result[ks] = {}
+        for ph, by_key in by_phase.items():
+            result[ks][ph] = dict(by_key)
+
+    return result
+
+
+def load_gdn_data(gdn_file: str):
+    """
+    Load GDN (Gated DeltaNet) kernel performance data from gdn_perf.txt.
+
+    CSV columns: framework, version, device, op_name, kernel_source, phase,
+    batch_size, seq_len, num_tokens, d_model, d_conv, num_k_heads, head_k_dim,
+    num_v_heads, head_v_dim, model_name, latency (optional: power).
+    All rows must have the same columns (context and generation both include
+    seq_len and num_tokens so columns align).
+
+    Returns:
+        dict: data[kernel_source][phase][model_key] where model_key is
+              (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv).
+              For phase "context" the leaf is [batch_size][seq_len] -> {latency, power, energy}.
+              For phase "generation" the leaf is [batch_size] -> {latency, power, energy}.
+              Returns None if file does not exist.
+    """
+    rows = _read_filtered_rows(gdn_file)
+    if rows is None:
+        logger.debug(f"GDN data file {gdn_file} not found.")
+        return None
+
+    # data[kernel_source][phase][model_key] -> nested batch_size [seq_len] -> {latency, power, energy}
+    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (gdn) - power will default to 0.0")
+
+    for row in rows:
+        kernel_source = row["kernel_source"]
+        phase = row["phase"]
+        batch_size = int(row["batch_size"])
+        seq_len = int(row["seq_len"])
+        d_model = int(row["d_model"])
+        d_conv = int(row["d_conv"])
+        num_k_heads = int(row["num_k_heads"])
+        head_k_dim = int(row["head_k_dim"])
+        num_v_heads = int(row["num_v_heads"])
+        head_v_dim = int(row["head_v_dim"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0))
+        energy = power * latency
+
+        model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
+        entry = {"latency": latency, "power": power, "energy": energy}
+
+        by_model = data[kernel_source][phase][model_key]
+        if phase == "context":
+            if batch_size in by_model and seq_len in by_model[batch_size]:
+                logger.debug(f"value conflict in gdn data: {kernel_source} {phase} {model_key} {batch_size} {seq_len}")
+            else:
+                by_model.setdefault(batch_size, {})[seq_len] = entry
+        else:
+            if batch_size in by_model:
+                logger.debug(f"value conflict in gdn data: {kernel_source} {phase} {model_key} {batch_size}")
+            else:
+                by_model[batch_size] = entry
+
+    # Convert defaultdicts to regular dicts for predictable behavior
+    result = {}
+    for ks, by_phase in data.items():
+        result[ks] = {}
+        for ph, by_key in by_phase.items():
+            result[ks][ph] = dict(by_key)
+
+    return result

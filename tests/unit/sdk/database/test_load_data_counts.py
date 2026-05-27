@@ -88,15 +88,24 @@ def test_clear_all_op_caches_resets_counter_and_class_cache():
     as a manual eviction lever.
 
     The save/restore around the call keeps the comprehensive_perf_db
-    singleton's cache entry alive for sibling tests — clearing it would
-    force a fresh disk load with no loader patches active."""
-    from aiconfigurator.sdk.operations.base import clear_all_op_caches
+    singleton's cache entries alive for sibling tests — clearing them
+    would force fresh disk loads with no loader patches active. Post-
+    AIC-533, op-class ``_query_*_table`` methods invoke
+    ``cls.load_data(database)`` at the top, so EVERY op class's class
+    cache must be preserved here (not just GEMM's, which was sufficient
+    before the lazy-query contract landed)."""
+    from aiconfigurator.sdk.operations.base import Operation as _OpBase
+    from aiconfigurator.sdk.operations.base import _all_operation_subclasses, clear_all_op_caches
 
-    saved = {
-        "data": dict(GEMM._data_cache),
-        "compute_scale": dict(GEMM._compute_scale_cache),
-        "scale_matrix": dict(GEMM._scale_matrix_cache),
-    }
+    # Snapshot every class-level dict cache on every Operation subclass so
+    # ``clear_all_op_caches()`` doesn't permanently evict the
+    # comprehensive_perf_db singleton's entries for sibling tests.
+    saved: list[tuple[type, str, dict]] = []
+    for cls in _all_operation_subclasses(_OpBase):
+        for attr_name in list(cls.__dict__):
+            if attr_name.endswith("_cache") and isinstance(cls.__dict__[attr_name], dict):
+                saved.append((cls, attr_name, dict(cls.__dict__[attr_name])))
+
     try:
         sentinel_key = ("/dev/null", "test", "test", "test", False)
         GEMM._data_cache[sentinel_key] = "sentinel"
@@ -114,6 +123,5 @@ def test_clear_all_op_caches_resets_counter_and_class_cache():
         assert sentinel_key not in GEMM._scale_matrix_cache
         assert Operation._load_data_call_count.get(GEMM, 0) == 0
     finally:
-        GEMM._data_cache.update(saved["data"])
-        GEMM._compute_scale_cache.update(saved["compute_scale"])
-        GEMM._scale_matrix_cache.update(saved["scale_matrix"])
+        for cls, attr_name, contents in saved:
+            getattr(cls, attr_name).update(contents)

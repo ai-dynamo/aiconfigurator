@@ -42,10 +42,11 @@ corresponding cache slot is ``None`` and consumers must guard.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.operations.base import Operation
+from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -144,13 +145,7 @@ class MoE(Operation):
         """
         import os
 
-        from aiconfigurator.sdk.perf_database import (
-            LoadedOpData,
-            PerfDataFilename,
-            load_moe_data,
-            load_wideep_context_moe_data,
-            load_wideep_generation_moe_data,
-        )
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -726,12 +721,7 @@ class MoEDispatch(Operation):
         """
         import os
 
-        from aiconfigurator.sdk.perf_database import (
-            LoadedOpData,
-            PerfDataFilename,
-            load_wideep_deepep_ll_data,
-            load_wideep_deepep_normal_data,
-        )
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._normal_data_cache:
@@ -1250,11 +1240,7 @@ class TrtLLMWideEPMoE(Operation):
         """
         import os
 
-        from aiconfigurator.sdk.perf_database import (
-            LoadedOpData,
-            PerfDataFilename,
-            load_wideep_moe_compute_data,
-        )
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -1618,11 +1604,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
         """
         import os
 
-        from aiconfigurator.sdk.perf_database import (
-            LoadedOpData,
-            PerfDataFilename,
-            load_trtllm_alltoall_data,
-        )
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -2015,3 +1997,554 @@ class TrtLLMWideEPMoEDispatch(Operation):
     def get_weights(self, **kwargs):
         """MoE dispatch has no weight memory."""
         return 0.0
+
+
+# ─────────────────────────────────────────────────────────
+# CSV loaders (moved from perf_database.py in AIC-533 cleanup)
+# ─────────────────────────────────────────────────────────
+
+
+def load_moe_data(moe_file):
+    """
+    Load the moe data with power support (backward compatible).
+
+    Returns:
+        tuple: (moe_default_data, moe_low_latency_data) where leaf values are dicts
+               with 'latency', 'power', and 'energy' keys. For old formats,
+               power/energy default to 0.0. Both elements are `None` when the file
+               is missing.
+    """
+    rows = _read_filtered_rows(moe_file)
+    if rows is None:
+        logger.debug(f"MOE data file {moe_file} not found.")
+        return None, None
+
+    moe_default_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                    )
+                )
+            )
+        )
+    )
+    moe_low_latency_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                    )
+                )
+            )
+        )
+    )
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (moe) - power will default to 0.0")
+
+    for row in rows:
+        (
+            quant_mode,
+            num_tokens,
+            hidden_size,
+            inter_size,
+            topk,
+            num_experts,
+            moe_tp_size,
+            moe_ep_size,
+            workload_distribution,
+            latency,
+        ) = (
+            row["moe_dtype"],
+            row["num_tokens"],
+            row["hidden_size"],
+            row["inter_size"],
+            row["topk"],
+            row["num_experts"],
+            row["moe_tp_size"],
+            row["moe_ep_size"],
+            row["distribution"],
+            row["latency"],
+        )
+        kernel_source = row["kernel_source"]  # moe_torch_flow, moe_torch_flow_min_latency, moe_torch_flow
+        num_tokens = int(num_tokens)
+        hidden_size = int(hidden_size)
+        inter_size = int(inter_size)
+        topk = int(topk)
+        num_experts = int(num_experts)
+        moe_tp_size = int(moe_tp_size)
+        moe_ep_size = int(moe_ep_size)
+        latency = float(latency)
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # NEW: Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds
+
+        quant_mode = common.MoEQuantMode[quant_mode]
+
+        moe_data = moe_low_latency_data if kernel_source == "moe_torch_flow_min_latency" else moe_default_data
+
+        try:
+            # Check for conflict
+            moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
+                moe_ep_size
+            ][num_tokens]
+            logger.debug(
+                f"value conflict in moe data: {workload_distribution} {quant_mode} {topk} "
+                f"{num_experts} {hidden_size} {inter_size} {moe_tp_size} {moe_ep_size} "
+                f"{num_tokens}"
+            )
+        except KeyError:
+            # Store all three values
+            moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
+                moe_ep_size
+            ][num_tokens] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,  # NEW: precomputed energy
+            }
+
+    return moe_default_data, moe_low_latency_data
+
+
+def load_wideep_context_moe_data(wideep_context_moe_file):
+    """
+    Load the SGLang wideep context MoE data from wideep_context_moe_perf.txt
+    with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+    """
+    rows = _read_filtered_rows(wideep_context_moe_file)
+    if rows is None:
+        logger.debug(f"Context MoE data file {wideep_context_moe_file} not found.")
+        return None
+
+    wideep_context_moe_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                    )
+                )
+            )
+        )
+    )
+
+    logger.debug(f"Loading SGLang wideep context MoE data from: {wideep_context_moe_file}")
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (wideep_context_moe) - power will default to 0.0")
+
+    for row in rows:
+        # Parse the CSV format with num_tokens instead of batch_size and input_len
+        quant_mode = row["moe_dtype"]
+        num_tokens = int(row["num_tokens"])
+        hidden_size = int(row["hidden_size"])
+        inter_size = int(row["inter_size"])
+        topk = int(row["topk"])
+        num_experts = int(row["num_experts"])
+        moe_tp_size = int(row["moe_tp_size"])
+        moe_ep_size = int(row["moe_ep_size"])
+        distribution = row["distribution"]
+        latency = float(row["latency"])
+        quant_mode = common.MoEQuantMode[quant_mode]
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # NEW: Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds
+
+        # Store all three values
+        wideep_context_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
+            moe_ep_size
+        ][num_tokens] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,  # NEW: precomputed energy
+        }
+        logger.debug(
+            f"Loaded SGLang wideep context MoE data: {quant_mode}, {distribution}, {topk}, "
+            f"{num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, "
+            f"{moe_ep_size}, {num_tokens} -> {latency}"
+        )
+
+    return wideep_context_moe_data
+
+
+def load_wideep_generation_moe_data(wideep_generation_moe_file):
+    """
+    Load the SGLang wideep generation MoE data from wideep_generation_moe_perf.txt
+    with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+    """
+    rows = _read_filtered_rows(wideep_generation_moe_file)
+    if rows is None:
+        logger.debug(f"Generation MoE data file {wideep_generation_moe_file} not found.")
+        return None
+
+    wideep_generation_moe_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                    )
+                )
+            )
+        )
+    )
+
+    logger.debug(f"Loading SGLang wideep generation MoE data from: {wideep_generation_moe_file}")
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (wideep_generation_moe) - power will default to 0.0")
+
+    for row in rows:
+        # Parse the CSV format with num_tokens instead of batch_size and input_len
+        quant_mode = row["moe_dtype"]
+        num_tokens = int(row["num_tokens"])
+        hidden_size = int(row["hidden_size"])
+        inter_size = int(row["inter_size"])
+        topk = int(row["topk"])
+        num_experts = int(row["num_experts"])
+        moe_tp_size = int(row["moe_tp_size"])
+        moe_ep_size = int(row["moe_ep_size"])
+        distribution = row["distribution"]
+        latency = float(row["latency"])
+        quant_mode = common.MoEQuantMode[quant_mode]
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # NEW: Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds
+
+        # Store all three values
+        wideep_generation_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
+            moe_ep_size
+        ][num_tokens] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,  # NEW: precomputed energy
+        }
+        logger.debug(
+            f"Loaded SGLang wideep generation MoE data: {quant_mode}, {distribution}, {topk}, "
+            f"{num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, "
+            f"{moe_ep_size}, {num_tokens} -> {latency}"
+        )
+
+    return wideep_generation_moe_data
+
+
+def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
+    """
+    Load the SGLang wideep deepep LL operation data from wideep_deepep_ll_perf.txt
+    with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+    """
+    rows = _read_filtered_rows(wideep_deepep_ll_file)
+    if rows is None:
+        logger.debug(f"SGLang wideep deepep LL operation data file {wideep_deepep_ll_file} not found.")
+        return None
+
+    wideep_deepep_ll_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (wideep_deepep_ll) - power will default to 0.0")
+
+    for row in rows:
+        hidden_size = int(row["hidden_size"])
+        node_num = int(row["node_num"])
+        num_token = int(row["num_token"])
+        num_topk = int(row["num_topk"])
+        num_experts = int(row["num_experts"])
+        combine_avg_t_us = float(row["combine_avg_t_us"])
+        dispatch_avg_t_us = float(row["dispatch_avg_t_us"])
+        lat = combine_avg_t_us + dispatch_avg_t_us
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # NEW: Calculate energy from power and latency
+        energy = power * lat  # watt-milliseconds
+
+        # Store the data with key structure: [hidden_size][num_topk][num_experts][num_token]
+        # -> timing data
+        if num_token in wideep_deepep_ll_data[node_num][hidden_size][num_topk][num_experts]:
+            logger.debug(
+                f"value conflict in SGLang wideep deepep LL operation data: "
+                f"{hidden_size} {num_topk} {num_experts} {num_token}"
+            )
+        else:
+            # Store all three values
+            wideep_deepep_ll_data[node_num][hidden_size][num_topk][num_experts][num_token] = {
+                "latency": lat,
+                "power": power,
+                "energy": energy,  # NEW: precomputed energy
+            }
+
+    return wideep_deepep_ll_data
+
+
+def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
+    """
+    Load the SGLang wideep deepep normal operation data from wideep_deepep_normal_perf.txt
+    with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+    """
+    rows = _read_filtered_rows(wideep_deepep_normal_file)
+    if rows is None:
+        logger.debug(f"SGLang wideep deepep normal operation data file {wideep_deepep_normal_file} not found.")
+        return None
+
+    wideep_deepep_normal_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+    )
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (wideep_deepep_normal) - power will default to 0.0")
+
+    for row in rows:
+        num_token = int(row["num_token"])
+        topk = int(row["num_topk"])
+        node_num = int(row["node_num"])
+        num_experts = int(row["num_experts"])
+        hidden_size = int(row["hidden_size"])
+        dispatch_sms = int(row["dispatch_sms"])
+        dispatch_transmit_us = float(row["dispatch_transmit_us"])
+        dispatch_notify_us = float(row["dispatch_notify_us"])
+        combine_transmit_us = float(row["combine_transmit_us"])
+        combine_notify_us = float(row["combine_notify_us"])
+        lat = dispatch_transmit_us + dispatch_notify_us + combine_transmit_us + combine_notify_us
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # NEW: Calculate energy from power and latency
+        energy = power * lat  # watt-milliseconds
+
+        # Store the data with key structure:
+        # [hidden_size][topk][num_experts][dispatch_sms][num_token] -> timing data
+        if num_token in wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][dispatch_sms]:
+            logger.debug(
+                f"value conflict in deepep normal data: {hidden_size} {topk} {num_experts} {dispatch_sms} {num_token}"
+            )
+        else:
+            # Store all three values
+            wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][dispatch_sms][num_token] = {
+                "latency": lat,
+                "power": power,
+                "energy": energy,  # NEW: precomputed energy
+            }
+
+    return wideep_deepep_normal_data
+
+
+def load_wideep_moe_compute_data(wideep_moe_compute_file):
+    """
+    Load the TensorRT-LLM wideep MoE compute data from wideep_moe_compute_perf.txt.
+    This data represents pure computation time (excluding All2All communication).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+        Structure: [kernel_source][quant_mode][distribution][topk][num_experts][hidden_size][inter_size]
+                   [num_slots][moe_tp_size][moe_ep_size][num_tokens] -> {latency, power, energy}
+
+    Note:
+        kernel_source identifies the MoE computation kernel:
+        - "moe_torch_flow": Cutlass-based kernel (default for SM < 100)
+        - "deepgemm": DeepGemm kernel (SM >= 100 with fp8_block)
+        If data file does not have 'kernel_source' column, it defaults to "moe_torch_flow".
+    """
+    rows = _read_filtered_rows(wideep_moe_compute_file)
+    if rows is None:
+        logger.debug(f"TensorRT-LLM wideep MoE compute data file {wideep_moe_compute_file} not found.")
+        return None
+
+    wideep_moe_compute_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(
+                            lambda: defaultdict(
+                                lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+
+    logger.debug(f"Loading TensorRT-LLM wideep MoE compute data from: {wideep_moe_compute_file}")
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (wideep_moe_compute) - power will default to 0.0")
+
+    # Check if kernel_source column exists
+    has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
+    if not has_kernel_source:
+        logger.debug("kernel_source column not found (wideep_moe_compute) - will default to 'moe_torch_flow'")
+
+    for row in rows:
+        quant_mode = row["moe_dtype"]
+        num_tokens = int(row["num_tokens"])
+        hidden_size = int(row["hidden_size"])
+        inter_size = int(row["inter_size"])
+        topk = int(row["topk"])
+        num_experts = int(row["num_experts"])
+        num_slots = int(row["num_slots"])
+        moe_tp_size = int(row["moe_tp_size"])
+        moe_ep_size = int(row["moe_ep_size"])
+        distribution = row["distribution"]
+        latency = float(row["latency"])
+        quant_mode = common.MoEQuantMode[quant_mode]
+
+        # Get kernel_source from data or use default
+        kernel_source = row.get("kernel_source", "moe_torch_flow")
+
+        # Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+        energy = power * latency  # watt-milliseconds
+
+        # Store all three values with kernel_source dimension
+        wideep_moe_compute_data[kernel_source][quant_mode][distribution][topk][num_experts][hidden_size][inter_size][
+            num_slots
+        ][moe_tp_size][moe_ep_size][num_tokens] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
+        # logger.debug(
+        #     f"Loaded TensorRT-LLM wideep MoE compute data: kernel={kernel_source}, {quant_mode}, "
+        #     f"{distribution}, {topk}, {num_experts}, {hidden_size}, {inter_size}, {num_slots}, "
+        #     f"{moe_tp_size}, {moe_ep_size}, {num_tokens} -> {latency}"
+        # )
+
+    return wideep_moe_compute_data
+
+
+def load_trtllm_alltoall_data(trtllm_alltoall_file):
+    """
+    Load TensorRT-LLM AlltoAll communication perf data from trtllm_alltoall_perf.txt.
+    Covers both WideEP (NVLinkTwoSided) and CutlassFusedMoE (NVLinkOneSided) paths.
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+        Structure: [kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts]
+                   [moe_ep_size][num_tokens] -> {latency, power, energy}
+        op_name can be: alltoall_prepare, alltoall_dispatch, alltoall_combine, alltoall_combine_low_precision
+
+    Note:
+        kernel_source identifies the All2All communication method:
+        - "NVLinkTwoSided": NVLink Two-Sided via MNNVL (GB200, SM >= 100)
+        - "NVLinkOneSided": NVLink One-Sided (CutlassFusedMoE on GB200)
+        - "DeepEP": DeepEP normal mode (H100/H200, cross-node)
+        - "DeepEPLowLatency": DeepEP low-latency mode (H100/H200, intra-node)
+        - "NCCL": Standard NCCL communication (fallback)
+        If data file does not have 'kernel_source' column, it defaults to "NVLinkTwoSided".
+
+        If data file does not have 'num_nodes' column, it will be computed as moe_ep_size // 4.
+        This assumes 4 GPUs per node (e.g., GB200 NVL4).
+    """
+    rows = _read_filtered_rows(trtllm_alltoall_file)
+    if rows is None:
+        logger.debug(f"TensorRT-LLM AlltoAll data file {trtllm_alltoall_file} not found.")
+        return None
+
+    trtllm_alltoall_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                    )
+                )
+            )
+        )
+    )
+
+    logger.debug(f"Loading TensorRT-LLM AlltoAll data from: {trtllm_alltoall_file}")
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (trtllm_alltoall) - power will default to 0.0")
+
+    # Check if num_nodes column exists
+    has_num_nodes = len(rows) > 0 and "num_nodes" in rows[0]
+    if not has_num_nodes:
+        logger.debug("num_nodes column not found (trtllm_alltoall) - will be computed as moe_ep_size // 4")
+
+    # Check if kernel_source column exists
+    has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
+    if not has_kernel_source:
+        logger.debug("kernel_source column not found (trtllm_alltoall) - will default to 'NVLinkTwoSided'")
+
+    for row in rows:
+        op_name = row["op_name"]  # alltoall_prepare, alltoall_dispatch, alltoall_combine, etc.
+        quant_mode = row["moe_dtype"]
+        num_tokens = int(row["num_tokens"])
+        hidden_size = int(row["hidden_size"])
+        topk = int(row["topk"])
+        num_experts = int(row["num_experts"])
+        moe_ep_size = int(row["moe_ep_size"])
+        latency = float(row["latency"])
+        quant_mode = common.MoEQuantMode[quant_mode]
+
+        # Get kernel_source from data or use default
+        kernel_source = row.get("kernel_source", "NVLinkTwoSided")
+
+        # Get num_nodes from data or compute from moe_ep_size
+        if has_num_nodes:
+            num_nodes = int(row["num_nodes"])
+        else:
+            # Default: assume 4 GPUs per node
+            if moe_ep_size % 4 != 0:  # FIXME this is only for GB200 needs to be generalized for other systems
+                logger.warning(
+                    f"moe_ep_size={moe_ep_size} is not divisible by 4, using moe_ep_size // 4 = {moe_ep_size // 4}"
+                )
+            num_nodes = max(1, moe_ep_size // 4)
+
+        # Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+        energy = power * latency  # watt-milliseconds
+
+        # Store all three values with kernel_source and num_nodes dimensions
+        trtllm_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
+            moe_ep_size
+        ][num_tokens] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
+        # logger.debug(
+        #     f"Loaded TensorRT-LLM wideep All2All data: kernel={kernel_source}, {op_name}, {quant_mode}, "
+        #     f"num_nodes={num_nodes}, {hidden_size}, {topk}, {num_experts}, {moe_ep_size}, "
+        #     f"{num_tokens} -> {latency}"
+        # )
+
+    return trtllm_alltoall_data

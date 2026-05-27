@@ -21,10 +21,11 @@ enable_shared_layer)``, same as GEMM (and every other migrated op).
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.base import Operation
+from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -134,7 +135,7 @@ class ContextAttention(Operation):
         attr is bound, respecting any pre-set test override."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_context_attention_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -381,7 +382,7 @@ class GenerationAttention(Operation):
         attr is bound, respecting any pre-set test override."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_generation_attention_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -612,3 +613,166 @@ class GenerationAttention(Operation):
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
+
+
+# ─────────────────────────────────────────────────────────
+# CSV loaders (moved from perf_database.py in AIC-533 cleanup)
+# ─────────────────────────────────────────────────────────
+
+
+def load_context_attention_data(context_attention_file):
+    """
+    Load the context attention data with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+    """
+    rows = _read_filtered_rows(context_attention_file)
+    if rows is None:
+        logger.debug(f"Context attention data file {context_attention_file} not found.")
+        return None
+    context_attention_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                )
+            )
+        )
+    )
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (context_attention) - power will default to 0.0")
+
+    for row in rows:
+        try:
+            window_size = row["window_size"]
+        except KeyError:  # catch potential error for backward comptability
+            window_size = 0
+        quant_mode, kv_cache_dtype, b, s, n, kv_n, head_size, latency = (
+            row["attn_dtype"],
+            row["kv_cache_dtype"],
+            row["batch_size"],
+            row["isl"],
+            row["num_heads"],
+            row["num_key_value_heads"],
+            row["head_dim"],
+            row["latency"],
+        )
+        b = int(b)
+        s = int(s)
+        n = int(n)
+        kv_n = int(kv_n)
+        head_size = int(head_size)
+        window_size = int(window_size)
+        latency = float(latency)
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # NEW: Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds
+
+        # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads.
+        # Use kv_n = 0 to mean n_kv == n.
+        kv_n = 0 if n == kv_n else kv_n
+
+        quant_mode = common.FMHAQuantMode[quant_mode]
+        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
+
+        try:
+            # Check for conflict
+            context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b]
+            logger.debug(
+                f"value conflict in context attention data: {quant_mode} {kv_cache_dtype} "
+                f"{head_size} {window_size} {kv_n} {n} {s}"
+            )
+        except KeyError:
+            # Store all three values
+            context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,  # NEW: precomputed energy
+            }
+
+    return context_attention_data
+
+
+def load_generation_attention_data(generation_attention_file):
+    """
+    Load the generation attention data with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+    """
+    rows = _read_filtered_rows(generation_attention_file)
+    if rows is None:
+        logger.debug(f"Generation attention data file {generation_attention_file} not found.")
+        return None
+    generation_attention_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+        )
+    )
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (generation_attention) - power will default to 0.0")
+
+    for row in rows:
+        try:
+            window_size = row["window_size"]
+        except KeyError:
+            window_size = 0
+        quant_mode, kv_cache_dtype, b, s, n, kv_n, head_size, step, latency = (  # noqa: F841
+            row["attn_dtype"],
+            row["kv_cache_dtype"],
+            row["batch_size"],
+            row["isl"],
+            row["num_heads"],
+            row["num_key_value_heads"],
+            row["head_dim"],
+            row["step"],
+            row["latency"],
+        )
+        b = int(b)
+        s = int(s)
+        n = int(n)
+        kv_n = int(kv_n)
+        head_size = int(head_size)
+        window_size = int(window_size)
+        step = int(step)
+        latency = float(latency)
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # NEW: Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds
+
+        # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads.
+        # Use kv_n = 0 to mean n_kv == n.
+        kv_n = 0 if n == kv_n else kv_n
+        s = s + step
+
+        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
+
+        try:
+            # Check for conflict
+            generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s]
+            logger.debug(
+                f"value conflict in generation attention data: {kv_cache_dtype} {kv_n} "
+                f"{head_size} {window_size} {n} {b}"
+            )
+        except KeyError:
+            # Store all three values
+            generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,  # NEW: precomputed energy
+            }
+
+    return generation_attention_data

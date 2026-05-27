@@ -46,45 +46,50 @@ def _reset_op_load_counts():
 
 
 # ---------------------------------------------------------------------------
-# Single source of truth: every loader function that PerfDatabase.__init__
-# can call via its internal _load_op_data / func_map.
+# Single source of truth: every loader function that any op class's
+# ``load_data`` may invoke via its module-local reference.
 #
-# Mapping: function_name -> default stub return value.
-#   * Most loaders return None when the perf file is absent.
-#   * load_moe_data is special: it returns a *tuple* of two dicts.
-#   * load_nccl_data covers both nccl and oneccl keys in func_map.
+# Each entry maps ``loader_name -> (target_module, default_stub_return)``.
+# ``target_module`` is where the function is defined post-AIC-533 (each
+# loader lives in the op module that owns the data it parses); patches
+# must target that location, not the legacy ``perf_database`` re-exports.
 #
-# When PerfDatabase adds a new loader, add a line here.  Both
-# _patch_all_loaders_and_yaml() and _get_comprehensive_db_singleton()
-# derive their patch lists from this dict, so they cannot drift.
+#   * Most loaders return ``None`` when the perf file is absent.
+#   * ``load_moe_data`` is special: it returns a *tuple* of two dicts.
+#   * ``load_nccl_data`` covers both nccl and oneccl keys.
+#
+# Both ``_patch_all_loaders_and_yaml()`` and
+# ``_get_comprehensive_db_singleton()`` derive their patch lists from
+# this dict so they cannot drift.
 # ---------------------------------------------------------------------------
-_LOADER_STUBS: dict[str, object] = {
-    "load_gemm_data": None,
-    "load_context_attention_data": None,
-    "load_generation_attention_data": None,
-    "load_moe_data": (None, None),  # returns tuple
-    "load_custom_allreduce_data": None,
-    "load_nccl_data": None,  # also used for oneccl
-    "load_context_mla_data": None,
-    "load_generation_mla_data": None,
-    "load_mla_bmm_data": None,
-    "load_mamba2_data": None,
-    "load_gdn_data": None,
-    "load_compute_scale_data": None,
-    "load_scale_matrix_data": None,
-    "load_wideep_context_moe_data": None,
-    "load_wideep_generation_moe_data": None,
-    "load_wideep_context_mla_data": None,
-    "load_wideep_generation_mla_data": None,
-    "load_wideep_deepep_normal_data": None,
-    "load_wideep_deepep_ll_data": None,
-    "load_wideep_moe_compute_data": None,
-    "load_trtllm_alltoall_data": None,
-    "load_context_mla_module_data": None,
-    "load_generation_mla_module_data": None,
-    "load_context_dsa_module_data": None,
-    "load_generation_dsa_module_data": None,
-    "load_mhc_module_data": None,
+_OPS_PKG = "aiconfigurator.sdk.operations"
+_LOADER_STUBS: dict[str, tuple[str, object]] = {
+    "load_gemm_data": (f"{_OPS_PKG}.gemm", None),
+    "load_compute_scale_data": (f"{_OPS_PKG}.gemm", None),
+    "load_scale_matrix_data": (f"{_OPS_PKG}.gemm", None),
+    "load_context_attention_data": (f"{_OPS_PKG}.attention", None),
+    "load_generation_attention_data": (f"{_OPS_PKG}.attention", None),
+    "load_moe_data": (f"{_OPS_PKG}.moe", (None, None)),  # returns tuple
+    "load_wideep_context_moe_data": (f"{_OPS_PKG}.moe", None),
+    "load_wideep_generation_moe_data": (f"{_OPS_PKG}.moe", None),
+    "load_wideep_deepep_normal_data": (f"{_OPS_PKG}.moe", None),
+    "load_wideep_deepep_ll_data": (f"{_OPS_PKG}.moe", None),
+    "load_wideep_moe_compute_data": (f"{_OPS_PKG}.moe", None),
+    "load_trtllm_alltoall_data": (f"{_OPS_PKG}.moe", None),
+    "load_context_mla_data": (f"{_OPS_PKG}.mla", None),
+    "load_generation_mla_data": (f"{_OPS_PKG}.mla", None),
+    "load_mla_bmm_data": (f"{_OPS_PKG}.mla", None),
+    "load_wideep_context_mla_data": (f"{_OPS_PKG}.mla", None),
+    "load_wideep_generation_mla_data": (f"{_OPS_PKG}.mla", None),
+    "load_context_mla_module_data": (f"{_OPS_PKG}.mla", None),
+    "load_generation_mla_module_data": (f"{_OPS_PKG}.mla", None),
+    "load_context_dsa_module_data": (f"{_OPS_PKG}.dsa", None),
+    "load_generation_dsa_module_data": (f"{_OPS_PKG}.dsa", None),
+    "load_mhc_module_data": (f"{_OPS_PKG}.dsv4", None),
+    "load_custom_allreduce_data": (f"{_OPS_PKG}.communication", None),
+    "load_nccl_data": (f"{_OPS_PKG}.communication", None),  # also used for oneccl
+    "load_mamba2_data": (f"{_OPS_PKG}.mamba", None),
+    "load_gdn_data": (f"{_OPS_PKG}.mamba", None),
 }
 
 
@@ -160,9 +165,9 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
         "load_moe_data": ({}, {}),
     }
 
-    for name, default_value in _LOADER_STUBS.items():
+    for name, (target_module, default_value) in _LOADER_STUBS.items():
         ret = overrides.get(name, default_value)
-        monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{name}", lambda path, _r=ret: _r)
+        monkeypatch.setattr(f"{target_module}.{name}", lambda path, _r=ret: _r)
 
 
 @pytest.fixture
@@ -381,9 +386,9 @@ def _get_comprehensive_db_singleton() -> PerfDatabase:
     patches = [
         patch("yaml.load", side_effect=lambda stream, Loader=None: system_spec),  # noqa: N803
     ]
-    for name, default_value in _LOADER_STUBS.items():
+    for name, (target_module, default_value) in _LOADER_STUBS.items():
         ret = overrides.get(name, default_value)
-        patches.append(patch(f"aiconfigurator.sdk.perf_database.{name}", return_value=ret))
+        patches.append(patch(f"{target_module}.{name}", return_value=ret))
 
     for p in patches:
         p.start()

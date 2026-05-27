@@ -32,12 +32,16 @@ Cache key matches every other migrated op:
 from __future__ import annotations
 
 import copy
+import logging
+from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar, Optional
 
 import numpy as np
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.operations.base import Operation
+from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+
+logger = logging.getLogger(__name__)
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -367,7 +371,7 @@ class DeepSeekV4MHCModule(Operation):
         """Idempotent. Loads mhc_module CSV, binds ``database._mhc_module_data``."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_mhc_module_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -659,12 +663,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         """
         import os
 
-        from aiconfigurator.sdk.perf_database import (
-            LoadedOpData,
-            PerfDataFilename,
-            load_context_dsv4_kind_module_data,
-            load_dsv4_sparse_kernel_data,
-        )
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -1119,11 +1118,7 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         """
         import os
 
-        from aiconfigurator.sdk.perf_database import (
-            LoadedOpData,
-            PerfDataFilename,
-            load_generation_dsv4_kind_module_data,
-        )
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -1311,3 +1306,201 @@ def _load_dsv4_split(loaded_list):
     if not merged:
         return None
     return LoadedOpData(merged, first_loaded.op_name_enum, first_loaded.filepath)
+
+
+# ─────────────────────────────────────────────────────────
+# CSV loaders (moved from perf_database.py in AIC-533 cleanup)
+# ─────────────────────────────────────────────────────────
+
+
+def load_mhc_module_data(mhc_file: str):
+    """Load DeepSeek-V4 mHC pre/post module-level performance data.
+
+    CSV columns: framework, version, device, op_name, kernel_source,
+    architecture, num_tokens, hc_mult, hidden_size, latency [, power]
+    Optional metadata columns: num_sites, sinkhorn_iters
+    Legacy rows may include a ``model`` column; it is ignored because mHC is
+    selected by compute shape.
+
+    ``op_name`` is ``pre`` or ``post``, matching the ``op`` arg of
+    ``query_mhc_module``.
+
+    Dict structure (matches query_mhc_module silicon path):
+        data[op][hc_mult][hidden_size][num_tokens]
+    """
+    rows = _read_filtered_rows(mhc_file)
+    if rows is None:
+        logger.debug(f"mHC module data file {mhc_file} not found.")
+        return None
+
+    mhc_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+
+    for row in rows:
+        op = row["op_name"]
+        hc_mult = int(row["hc_mult"])
+        hidden_size = int(row["hidden_size"])
+        num_tokens = int(row["num_tokens"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+        energy = power * latency
+
+        mhc_data[op][hc_mult][hidden_size][num_tokens] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
+
+    return mhc_data
+
+
+_DSV4_DTYPE_ALIASES = {
+    # CSV columns use sglang naming; aic_dev enums use canonical short names.
+    "fp8_e4m3": "fp8",
+}
+
+
+def _dsv4_normalize_dtype(name: str) -> str:
+    return _DSV4_DTYPE_ALIASES.get(name, name)
+
+
+def load_context_dsv4_kind_module_data(file_path: str):
+    """Load ONE DeepSeek-V4 context CSV (single attn_kind / compress_ratio).
+
+    Returns an 8-level nested dict:
+        data[fmha_quant][kv_quant][gemm_quant][native_heads][compress_ratio]
+            [tp_size][s][b] = {"latency": ms, "power": W, "energy": J}
+
+    ``tp_size`` is the data axis. The model layer passes it through the
+    attention operation for silicon lookup.
+
+    Multiple files (csa/hca/swa) merge cleanly because compress_ratio is
+    the differentiating leaf dimension.
+    """
+    rows = _read_filtered_rows(file_path)
+    if rows is None:
+        logger.debug(f"DSV4 module data file {file_path} not found.")
+        return None
+
+    # 8-level nesting: fmha → kv → gemm → native_heads → cr → tp → s → b
+    def _make_nested(depth: int):
+        if depth == 0:
+            return defaultdict()
+        return defaultdict(lambda d=depth: _make_nested(d - 1))
+
+    data = _make_nested(7)
+    has_power = bool(rows) and "power" in rows[0]
+
+    for row in rows:
+        if row.get("batch_size") in (None, "", "batch_size"):
+            continue  # skip duplicate header rows from appended runs
+        try:
+            b = int(row["batch_size"])
+            s = int(row["isl"])
+            tp_size = int(row.get("tp_size", 1))
+            cr = int(row["compress_ratio"])
+            latency = float(row["latency"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+
+        native_heads = int(row["num_heads"])
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
+        kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
+
+        # The row-distinguishing axis is ``tp_size`` itself.
+        data[fmha_mode][kv_dtype][gemm_mode][native_heads][cr][tp_size][s][b] = {
+            "latency": latency,
+            "power": power,
+            "energy": power * latency,
+        }
+    return data
+
+
+def load_generation_dsv4_kind_module_data(file_path: str):
+    """Load ONE DeepSeek-V4 generation CSV.
+
+    Generation lookup uses absolute KV length ``s_total = isl + step`` (decode
+    is q_len=1 with past_kv = step).  Dict shape:
+        data[kv_quant][gemm_quant][native_heads][compress_ratio]
+            [tp_size][b][s_total]
+
+    ``tp_size`` is passed by the attention operation for silicon lookup.
+    """
+    rows = _read_filtered_rows(file_path)
+    if rows is None:
+        logger.debug(f"DSV4 module data file {file_path} not found.")
+        return None
+
+    # 7-level nesting: kv → gemm → native_heads → cr → tp → b → s_total
+    def _make_nested(depth: int):
+        if depth == 0:
+            return defaultdict()
+        return defaultdict(lambda d=depth: _make_nested(d - 1))
+
+    data = _make_nested(6)
+    has_power = bool(rows) and "power" in rows[0]
+
+    for row in rows:
+        if row.get("batch_size") in (None, "", "batch_size"):
+            continue
+        try:
+            b = int(row["batch_size"])
+            s_total = int(row["isl"]) + int(row["step"])
+            tp_size = int(row.get("tp_size", 1))
+            cr = int(row["compress_ratio"])
+            latency = float(row["latency"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+
+        native_heads = int(row["num_heads"])
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
+
+        # DeepSeek-V4: tp_size is the axis that differentiates rows.  See note
+        # at the top of the file.  Generation convention puts ``b`` before
+        # ``s_total`` (matches existing ``_interp_3d(num_heads, b, s, ...)``
+        # call order in ``query_generation_*``).
+        data[kv_dtype][gemm_mode][native_heads][cr][tp_size][b][s_total] = {
+            "latency": latency,
+            "power": power,
+            "energy": power * latency,
+        }
+    return data
+
+
+def load_dsv4_sparse_kernel_data(file_path: str):
+    """Load DeepSeek-V4 sparse-kernel CSV (paged_mqa_logits or hca_attn).
+
+    Emitted by ``collector.sglang.deepseekv4_sparse_modules``.  Used for
+    kernel-level past_kv Δ correction on top of the chunk-0 module baseline.
+
+    Dict structure:
+        data[native_heads][tp_size][past_kv][isl][bs] = {"latency": ms}
+    """
+    rows = _read_filtered_rows(file_path)
+    if rows is None:
+        logger.debug(f"DSV4 sparse-kernel data file {file_path} not found.")
+        return None
+
+    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+
+    for row in rows:
+        # Skip duplicate header rows (file may be appended to across runs)
+        if row.get("batch_size") in (None, "", "batch_size"):
+            continue
+        try:
+            bs = int(row["batch_size"])
+            isl = int(row["isl"])
+            past_kv = int(row["step"])
+            tp_size = int(row.get("tp_size", 1))
+            latency = float(row["latency"])
+        except (TypeError, ValueError):
+            continue
+        native_heads = int(row["num_heads"])
+        data[native_heads][tp_size][past_kv][isl][bs] = {"latency": latency}
+
+    return data

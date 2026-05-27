@@ -27,7 +27,9 @@ lever for long-running webapps.
 
 from __future__ import annotations
 
+import csv
 import logging
+import os
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
@@ -37,6 +39,47 @@ if TYPE_CHECKING:
     from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+
+
+def _read_filtered_rows(file_or_sources):
+    """Read CSV rows from one or more sources. Used by every ``load_*_data``
+    in this package.
+
+    Accepts:
+      - A single path string: yields all rows. Returns ``None`` if the file is
+        missing, an empty list if it exists but has no rows. Preserves the
+        legacy distinction the per-op ``load_*`` functions rely on.
+      - An iterable of ``(path, kernel_source_filter)`` tuples: yields rows
+        from each source in order; missing files are skipped; rows are
+        filtered by ``kernel_source`` when a filter is provided. Returns
+        ``None`` only if **every** path is missing.
+
+    The order of the returned list mirrors the order of the input sources, so
+    when the per-row loaders skip on key conflict, the earliest source wins on
+    every coordinate — same first-wins semantic the shared-layer loader needs
+    without a separate merge step.
+
+    Lives here (not in ``perf_database``) so the per-op-module loaders can
+    import it without a circular dependency on ``perf_database`` at module
+    load time.
+    """
+    if isinstance(file_or_sources, str):
+        if not os.path.exists(file_or_sources):
+            return None
+        with open(file_or_sources, encoding="utf-8") as f:
+            return list(csv.DictReader(f))
+
+    rows: list[dict] = []
+    any_exists = False
+    for path, ks_filter in file_or_sources:
+        if not os.path.exists(path):
+            continue
+        any_exists = True
+        with open(path, encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if ks_filter is None or row.get("kernel_source") in ks_filter:
+                    rows.append(row)
+    return rows if any_exists else None
 
 
 class Operation:
