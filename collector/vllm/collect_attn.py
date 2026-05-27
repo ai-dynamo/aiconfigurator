@@ -345,21 +345,25 @@ def run_attention_torch(
         kv_cache_dtype="fp8" if use_fp8_kv_cache else "auto",
     )
 
-    # Create mock layer and output buffer
+    # Create mock layer
     mock_layer = MockAttentionLayer(device)
-    output = torch.empty_like(query_vllm)
 
     # Run forward pass
 
     test_ite = 6
     warm_up = 3
 
-    # vLLM's FP8 KV cache path keeps Q/K/V tensors in BF16; only the paged
-    # KV cache storage uses FP8.
+    # vLLM >=0.11.0 sets supports_quant_query_input=True, expecting the caller
+    # to pass an FP8 query; older versions quantise internally and expect BF16.
+    needs_fp8_query = use_fp8_kv_cache and getattr(impl, "supports_quant_query_input", False)
+    query_fwd = query_vllm.to(current_platform.fp8_dtype()) if needs_fp8_query else query_vllm
+    # Output buffer is always BF16 — the impl dequantises internally.
+    output = torch.empty_like(query_vllm)
+
     def run():
         impl.forward(
             mock_layer,
-            query_vllm,
+            query_fwd,
             key_vllm,
             value_vllm,
             kv_cache,
