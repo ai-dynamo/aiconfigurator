@@ -689,6 +689,9 @@ impl StoreStats for CorrectionBuckets {
     }
 
     fn is_ready(&self) -> bool {
+        // Match planner's regression readiness semantics: min_observations is
+        // checked across the whole inferred shape, not per region. Regions only
+        // decide which correction factor to apply once the shape is ready.
         self.samples.total_observations >= self.min_observations
     }
 }
@@ -711,6 +714,9 @@ impl CorrectionBuckets {
         if !self.is_ready() {
             return 1.0;
         }
+        // Every region has an implicit correction factor of 1.0. A populated
+        // in-range region overrides that default with its local median
+        // observed/native ratio after the shape-wide readiness gate passes.
         let Some(key) = self.samples.bucket_key_if_in_bounds(x) else {
             return 1.0;
         };
@@ -821,6 +827,9 @@ impl<T: Clone> BucketedSamples<T> {
             return None;
         }
 
+        // Estimation must not clamp out-of-range queries into edge regions.
+        // A new observation can expand the bounds and rebuild regions, but an
+        // estimate outside current bounds uses the implicit factor 1.0.
         let mut key = Vec::with_capacity(x.len());
         for (i, value) in x.iter().enumerate() {
             let lo = self.axis_min[i];
