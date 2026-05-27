@@ -31,7 +31,7 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -202,7 +202,7 @@ class Mamba2Kernel(Operation):
             if seq_len is None or seq_len <= 0:
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             try:
-                result = database._interp_2d_linear(batch_size, seq_len, table)
+                result = interpolation.interp_2d_linear(batch_size, seq_len, table, database._extracted_metrics_cache)
             except (KeyError, ValueError):
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             return database._interp_pr(
@@ -211,7 +211,7 @@ class Mamba2Kernel(Operation):
             )
         else:
             try:
-                batch_left, batch_right = database._nearest_1d_point_helper(
+                batch_left, batch_right = interpolation.nearest_1d_point_helper(
                     batch_size, list(table.keys()), inner_only=False
                 )
             except (KeyError, ValueError):
@@ -231,7 +231,7 @@ class Mamba2Kernel(Operation):
             y_right = _mamba2_gen_entry(table[batch_right])
             if y_left is None or y_right is None:
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            result = database._interp_1d(
+            result = interpolation.interp_1d(
                 [batch_left, batch_right],
                 [y_left, y_right],
                 batch_size,
@@ -437,7 +437,7 @@ class GDNKernel(Operation):
             if seq_len is None or seq_len <= 0:
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             try:
-                result = database._interp_2d_linear(batch_size, seq_len, table)
+                result = interpolation.interp_2d_linear(batch_size, seq_len, table, database._extracted_metrics_cache)
             except (KeyError, ValueError):
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             return database._interp_pr(
@@ -446,7 +446,7 @@ class GDNKernel(Operation):
             )
         else:
             try:
-                batch_left, batch_right = database._nearest_1d_point_helper(
+                batch_left, batch_right = interpolation.nearest_1d_point_helper(
                     batch_size, list(table.keys()), inner_only=False
                 )
             except (KeyError, ValueError):
@@ -465,7 +465,7 @@ class GDNKernel(Operation):
             y_right = _gdn_gen_entry(table[batch_right])
             if y_left is None or y_right is None:
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            result = database._interp_1d(
+            result = interpolation.interp_1d(
                 [batch_left, batch_right],
                 [y_left, y_right],
                 batch_size,

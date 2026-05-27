@@ -431,7 +431,9 @@ class ContextDSAModule(Operation):
                     num_heads, full_s, b, raw_dsa_dict, index_topk
                 )
                 if result is None:
-                    result = database._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
+                    result = interpolation.interp_3d(
+                        num_heads, full_s, b, dsa_dict, "cubic", database._extracted_metrics_cache
+                    )
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
             except (KeyError, TypeError, ValueError, AssertionError) as exc:
@@ -723,7 +725,7 @@ class GenerationDSAModule(Operation):
                 )
             try:
                 dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
-                result = database._interp_3d(num_heads, b, s, dsa_dict, "cubic")
+                result = interpolation.interp_3d(num_heads, b, s, dsa_dict, "cubic", database._extracted_metrics_cache)
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
             except (KeyError, TypeError, ValueError, AssertionError) as exc:

@@ -5,7 +5,7 @@ from collections import defaultdict
 
 import pytest
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, interpolation
 
 pytestmark = pytest.mark.unit
 
@@ -18,17 +18,17 @@ class TestInterpolationMethods:
         values = [1, 5, 10, 20, 30]
 
         # Test value in the middle
-        left, right = comprehensive_perf_db._nearest_1d_point_helper(7, values, inner_only=True)
+        left, right = interpolation.nearest_1d_point_helper(7, values, inner_only=True)
         assert left == 5
         assert right == 10
 
         # Test exact match
-        left, right = comprehensive_perf_db._nearest_1d_point_helper(10, values, inner_only=True)
+        left, right = interpolation.nearest_1d_point_helper(10, values, inner_only=True)
         assert left == 10
         assert right == 20
 
         # Test at boundaries
-        left, right = comprehensive_perf_db._nearest_1d_point_helper(1, values, inner_only=True)
+        left, right = interpolation.nearest_1d_point_helper(1, values, inner_only=True)
         assert left == 1
         assert right == 5
 
@@ -37,12 +37,12 @@ class TestInterpolationMethods:
         values = [10, 20, 30]
 
         # Test value below range
-        left, right = comprehensive_perf_db._nearest_1d_point_helper(5, values, inner_only=False)
+        left, right = interpolation.nearest_1d_point_helper(5, values, inner_only=False)
         assert left == 10
         assert right == 20
 
         # Test value above range
-        left, right = comprehensive_perf_db._nearest_1d_point_helper(40, values, inner_only=False)
+        left, right = interpolation.nearest_1d_point_helper(40, values, inner_only=False)
         assert left == 20
         assert right == 30
 
@@ -50,30 +50,30 @@ class TestInterpolationMethods:
         """Test error cases for _nearest_1d_point_helper."""
         # Empty list
         with pytest.raises(AssertionError):
-            comprehensive_perf_db._nearest_1d_point_helper(10, [], inner_only=True)
+            interpolation.nearest_1d_point_helper(10, [], inner_only=True)
 
         # Single value list with mismatched x
         with pytest.raises(ValueError):
-            comprehensive_perf_db._nearest_1d_point_helper(10, [5], inner_only=True)
+            interpolation.nearest_1d_point_helper(10, [5], inner_only=True)
 
         # Value out of range with inner_only=True
         with pytest.raises(ValueError):
-            comprehensive_perf_db._nearest_1d_point_helper(0, [10, 20], inner_only=True)
+            interpolation.nearest_1d_point_helper(0, [10, 20], inner_only=True)
 
         with pytest.raises(ValueError):
-            comprehensive_perf_db._nearest_1d_point_helper(30, [10, 20], inner_only=True)
+            interpolation.nearest_1d_point_helper(30, [10, 20], inner_only=True)
 
     def test_validate(self, comprehensive_perf_db, caplog):
         """Test _validate method for negative value detection."""
         # Positive value should pass through
-        assert comprehensive_perf_db._validate(10.5) == 10.5
+        assert interpolation.validate_interpolation_result(10.5) == 10.5
 
         # Zero should pass through
-        assert comprehensive_perf_db._validate(0.0) == 0.0
+        assert interpolation.validate_interpolation_result(0.0) == 0.0
 
         # Negative value should log debug but still return
         with caplog.at_level("DEBUG"):
-            result = comprehensive_perf_db._validate(-5.0)
+            result = interpolation.validate_interpolation_result(-5.0)
             assert result == -5.0
             assert "Negative value detected" in caplog.text
 
@@ -81,7 +81,7 @@ class TestInterpolationMethods:
     def test_validate_rejects_non_finite_values(self, comprehensive_perf_db, value):
         """Non-finite interpolation results should fail instead of propagating."""
         with pytest.raises(ValueError, match="Non-finite value detected"):
-            comprehensive_perf_db._validate(value)
+            interpolation.validate_interpolation_result(value)
 
     def test_interp_1d(self, comprehensive_perf_db):
         """Test 1D interpolation."""
@@ -90,18 +90,18 @@ class TestInterpolationMethods:
         y = [100, 200]
 
         # Middle value
-        result = comprehensive_perf_db._interp_1d(x, y, 15)
+        result = interpolation.interp_1d(x, y, 15)
         assert result == 150.0
 
         # At boundaries
-        result = comprehensive_perf_db._interp_1d(x, y, 10)
+        result = interpolation.interp_1d(x, y, 10)
         assert result == 100.0
 
-        result = comprehensive_perf_db._interp_1d(x, y, 20)
+        result = interpolation.interp_1d(x, y, 20)
         assert result == 200.0
 
         # Extrapolation
-        result = comprehensive_perf_db._interp_1d(x, y, 25)
+        result = interpolation.interp_1d(x, y, 25)
         assert result == 250.0
 
     def test_bilinear_interpolation(self, comprehensive_perf_db):
@@ -110,16 +110,16 @@ class TestInterpolationMethods:
         data = {10: {20: 100, 40: 200}, 30: {20: 300, 40: 400}}
 
         # Test interpolation in the middle
-        result = comprehensive_perf_db._bilinear_interpolation([10, 30], [20, 40], 20, 30, data)
+        result = interpolation.bilinear_interpolation([10, 30], [20, 40], 20, 30, data)
         expected = 250.0  # Average of all four corners
         assert abs(result - expected) < 1e-6
 
         # Test at corner points
-        result = comprehensive_perf_db._bilinear_interpolation([10, 30], [20, 40], 10, 20, data)
+        result = interpolation.bilinear_interpolation([10, 30], [20, 40], 10, 20, data)
         assert result == 100.0
 
         # Test along edges
-        result = comprehensive_perf_db._bilinear_interpolation([10, 30], [20, 40], 10, 30, data)
+        result = interpolation.bilinear_interpolation([10, 30], [20, 40], 10, 30, data)
         assert result == 150.0  # Average of 100 and 200
 
     def test_interp_3d_linear(self, comprehensive_perf_db):
@@ -133,12 +133,12 @@ class TestInterpolationMethods:
                     data[x][y][z] = x + y + z
 
         # Test interpolation at center
-        result = comprehensive_perf_db._interp_3d_linear(15, 35, 55, data)
+        result = interpolation.interp_3d_linear(15, 35, 55, data)
         expected = 15 + 35 + 55  # Linear function
         assert abs(result - expected) < 1e-6
 
         # Test at corner point
-        result = comprehensive_perf_db._interp_3d_linear(10, 30, 50, data)
+        result = interpolation.interp_3d_linear(10, 30, 50, data)
         assert result == 90.0
 
     def test_interp_2d_1d(self, comprehensive_perf_db):
@@ -151,7 +151,7 @@ class TestInterpolationMethods:
                     data[x][y][z] = x * 0.1 + y * 0.2 + z * 0.3
 
         # Test bilinear method
-        result_bilinear = comprehensive_perf_db._interp_2d_1d(15, 35, 55, data, method="bilinear")
+        result_bilinear = interpolation.interp_2d_1d(15, 35, 55, data, method="bilinear")
         # Result can be dict (new format) or float (legacy)
         if isinstance(result_bilinear, dict):
             assert result_bilinear["latency"] > 0
@@ -160,7 +160,7 @@ class TestInterpolationMethods:
             assert result_bilinear > 0
 
         # Test cubic method (if scipy is available)
-        result_cubic = comprehensive_perf_db._interp_2d_1d(15, 35, 55, data, method="cubic")
+        result_cubic = interpolation.interp_2d_1d(15, 35, 55, data, method="cubic")
         # Result can be dict (new format) or float (legacy)
         if isinstance(result_cubic, dict):
             assert result_cubic["latency"] > 0
@@ -170,7 +170,7 @@ class TestInterpolationMethods:
 
         # Invalid method should raise error
         with pytest.raises(NotImplementedError):
-            comprehensive_perf_db._interp_2d_1d(15, 35, 55, data, method="invalid")
+            interpolation.interp_2d_1d(15, 35, 55, data, method="invalid")
 
     def test_interp_3d(self, comprehensive_perf_db):
         """Test general 3D interpolation dispatcher."""
@@ -181,7 +181,9 @@ class TestInterpolationMethods:
                     data[x][y][z] = x + y + z
 
         # Test linear method
-        result_linear = comprehensive_perf_db._interp_3d(15, 35, 55, data, "linear")
+        result_linear = interpolation.interp_3d(
+            15, 35, 55, data, "linear", comprehensive_perf_db._extracted_metrics_cache
+        )
         # Result can be dict (new format) or float (legacy)
         if isinstance(result_linear, dict):
             assert result_linear["latency"] > 0
@@ -190,7 +192,9 @@ class TestInterpolationMethods:
             assert result_linear > 0
 
         # Test fallback to 2D-1D
-        result_bilinear = comprehensive_perf_db._interp_3d(15, 35, 55, data, "bilinear")
+        result_bilinear = interpolation.interp_3d(
+            15, 35, 55, data, "bilinear", comprehensive_perf_db._extracted_metrics_cache
+        )
         # Result can be dict (new format) or float (legacy)
         if isinstance(result_bilinear, dict):
             assert result_bilinear["latency"] > 0
@@ -221,7 +225,7 @@ class TestExtrapolateDataGrid:
         target_z_list = [30, 35, 40]
 
         # Apply extrapolation
-        comprehensive_perf_db._extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
+        interpolation.extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
 
         # Check that new points were created
         assert 15 in data_dict  # New x value
@@ -247,9 +251,7 @@ class TestExtrapolateDataGrid:
         target_z_list = [10, 15, 20]
 
         # Apply extrapolation with sqrt
-        comprehensive_perf_db._extrapolate_data_grid(
-            data_dict, target_x_list, target_y_list, target_z_list, sqrt_y_value=True
-        )
+        interpolation.extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list, sqrt_y_value=True)
 
         # Check that interpolation happened
         assert 9 in data_dict[10]
@@ -268,7 +270,7 @@ class TestExtrapolateDataGrid:
         target_z_list = [30, 40]  # Try to extrapolate in z
 
         with caplog.at_level("WARNING"):
-            comprehensive_perf_db._extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
+            interpolation.extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
             # Should warn about insufficient data
             assert "only one data point" in caplog.text
 
@@ -286,7 +288,7 @@ class TestExtrapolateDataGrid:
         target_y_list = [20, 30, 40, 50]  # 20 and 50 are outside
         target_z_list = [40, 50, 60, 70]  # 40 and 70 are outside
 
-        comprehensive_perf_db._extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
+        interpolation.extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
 
         # Check extrapolated values exist
         assert 5 in data_dict

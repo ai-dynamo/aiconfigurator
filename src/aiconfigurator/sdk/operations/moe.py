@@ -45,7 +45,7 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -457,12 +457,12 @@ class MoE(Operation):
                             quant_mode,
                             workload_distribution,
                         )
-                    num_left, num_right = database._nearest_1d_point_helper(
+                    num_left, num_right = interpolation.nearest_1d_point_helper(
                         num_tokens_corrected,
                         list(moe_dict.keys()),
                         inner_only=False,
                     )
-                    result = database._interp_1d(
+                    result = interpolation.interp_1d(
                         [num_left, num_right],
                         [moe_dict[num_left], moe_dict[num_right]],
                         num_tokens_corrected,
@@ -542,12 +542,12 @@ class MoE(Operation):
                             quant_mode,
                             workload_distribution,
                         )
-                    num_left, num_right = database._nearest_1d_point_helper(
+                    num_left, num_right = interpolation.nearest_1d_point_helper(
                         num_tokens,
                         list(moe_dict.keys()),
                         inner_only=False,
                     )
-                    result = database._interp_1d(
+                    result = interpolation.interp_1d(
                         [num_left, num_right],
                         [moe_dict[num_left], moe_dict[num_right]],
                         num_tokens,
@@ -581,10 +581,10 @@ class MoE(Operation):
                             quant_mode,
                             workload_distribution,
                         )
-                    num_left, num_right = database._nearest_1d_point_helper(
+                    num_left, num_right = interpolation.nearest_1d_point_helper(
                         num_tokens, list(moe_dict.keys()), inner_only=False
                     )
-                    result = database._interp_1d(
+                    result = interpolation.interp_1d(
                         [num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens
                     )
                     if isinstance(result, dict):
@@ -799,8 +799,8 @@ class MoEDispatch(Operation):
             return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0, source="empirical")
         else:
             data = database._wideep_deepep_ll_data[node_num][hidden_size][topk][num_experts]
-            num_left, num_right = database._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
-            result = database._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
+            num_left, num_right = interpolation.nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
+            result = interpolation.interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
             lat = result["latency"] if isinstance(result, dict) else result
             energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
             return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
@@ -841,13 +841,15 @@ class MoEDispatch(Operation):
         else:
             if node_num == 1 and sms == 20:  # only collect sm=20 for now
                 data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
-                num_left, num_right = database._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
-                result = database._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
+                num_left, num_right = interpolation.nearest_1d_point_helper(
+                    num_tokens, list(data.keys()), inner_only=False
+                )
+                result = interpolation.interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
                 lat = result["latency"] if isinstance(result, dict) else result
                 energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
             else:
                 data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
-                result = database._interp_2d_linear(sms, num_tokens, data)
+                result = interpolation.interp_2d_linear(sms, num_tokens, data, database._extracted_metrics_cache)
                 lat = result["latency"] if isinstance(result, dict) else result
                 energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
             return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
@@ -1464,12 +1466,12 @@ class TrtLLMWideEPMoE(Operation):
                 num_slots
             ][moe_tp_size][moe_ep_size]
 
-            num_left, num_right = database._nearest_1d_point_helper(
+            num_left, num_right = interpolation.nearest_1d_point_helper(
                 num_tokens,
                 list(moe_dict.keys()),
                 inner_only=False,
             )
-            result = database._interp_1d(
+            result = interpolation.interp_1d(
                 [num_left, num_right],
                 [moe_dict[num_left], moe_dict[num_right]],
                 num_tokens,
@@ -1876,12 +1878,12 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 moe_ep_size
             ]
 
-            num_left, num_right = database._nearest_1d_point_helper(
+            num_left, num_right = interpolation.nearest_1d_point_helper(
                 num_tokens,
                 list(alltoall_dict.keys()),
                 inner_only=False,
             )
-            result = database._interp_1d(
+            result = interpolation.interp_1d(
                 [num_left, num_right],
                 [alltoall_dict[num_left], alltoall_dict[num_right]],
                 num_tokens,

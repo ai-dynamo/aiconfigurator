@@ -265,7 +265,7 @@ class ContextAttention(Operation):
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             n_kv_lookup = 0 if n == n_kv else n_kv
             attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
-            result = database._interp_3d(n, full_s, b, attention_dict, "cubic")
+            result = interpolation.interp_3d(n, full_s, b, attention_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"] * prefix_correction
             energy = result.get("energy", 0.0) * prefix_correction
             return database._interp_pr(latency, energy=energy)
@@ -558,7 +558,7 @@ class GenerationAttention(Operation):
             latency_sum = 0.0
             energy_sum = 0.0
             for s_i in s_samples:
-                r = database._interp_3d(n, b, s_i, attention_dict, "bilinear")
+                r = interpolation.interp_3d(n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache)
                 latency_sum += float(r["latency"])
                 energy_sum += float(r.get("energy", 0.0))
 

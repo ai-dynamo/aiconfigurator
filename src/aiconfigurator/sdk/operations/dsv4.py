@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, ClassVar, Optional
 
 import numpy as np
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 
 logger = logging.getLogger(__name__)
@@ -120,7 +120,7 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
         return value is not None and bool(np.all(np.isfinite(np.asarray(value))))
 
     try:
-        result = self._interp_3d(x, y, z, dict_, "cubic")
+        result = interpolation.interp_3d(x, y, z, dict_, "cubic", self._extracted_metrics_cache)
         if _finite_result(result):
             return result
     except Exception:
@@ -164,13 +164,13 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
                 return None
             if not allow_extrapolate and not (ss[0] <= query_s <= ss[-1]):
                 return None
-            sl, sr = self._nearest_1d_point_helper(query_s, ss, inner_only=not allow_extrapolate)
+            sl, sr = interpolation.nearest_1d_point_helper(query_s, ss, inner_only=not allow_extrapolate)
             left = _leaf_at(sl, bp)
             right = _leaf_at(sr, bp)
             if not isinstance(left, dict) or not isinstance(right, dict):
                 return None
             return {
-                field: self._interp_1d([sl, sr], [left.get(field, 0.0), right.get(field, 0.0)], query_s)
+                field: interpolation.interp_1d([sl, sr], [left.get(field, 0.0), right.get(field, 0.0)], query_s)
                 for field in ("latency", "power", "energy")
             }
 
@@ -485,8 +485,8 @@ class DeepSeekV4MHCModule(Operation):
                         f"No mHC silicon data for op='{op_name}', hc_mult={hc_mult}, hidden_size={hidden_size}."
                     )
                 mhc_dict = mhc_data[op_name][hc_mult][hidden_size]
-                left, right = database._nearest_1d_point_helper(num_tokens, list(mhc_dict.keys()), inner_only=False)
-                result = database._interp_1d([left, right], [mhc_dict[left], mhc_dict[right]], num_tokens)
+                left, right = interpolation.nearest_1d_point_helper(num_tokens, list(mhc_dict.keys()), inner_only=False)
+                result = interpolation.interp_1d([left, right], [mhc_dict[left], mhc_dict[right]], num_tokens)
                 latency = result["latency"] if isinstance(result, dict) else result
                 energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
                 return database._interp_pr(latency, energy=energy)
@@ -767,7 +767,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 return float(np.asarray(latency))
 
         try:
-            result = database._interp_3d(past_kv, isl, bs, per_tp_dict, "cubic")
+            result = interpolation.interp_3d(past_kv, isl, bs, per_tp_dict, "cubic", database._extracted_metrics_cache)
             latency = result.get("latency") if isinstance(result, dict) else None
             if _finite_latency(latency):
                 return float(np.asarray(latency))
@@ -800,7 +800,9 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 return None
 
             try:
-                latency = database._interp_2d_linear(past_kv, isl, batch_slice)["latency"]
+                latency = interpolation.interp_2d_linear(past_kv, isl, batch_slice, database._extracted_metrics_cache)[
+                    "latency"
+                ]
                 if _finite_latency(latency):
                     return latency
             except Exception:
@@ -817,8 +819,8 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     return None
                 if not allow_extrapolate and not (isl_points[0] <= isl <= isl_points[-1]):
                     return None
-                left, right = database._nearest_1d_point_helper(isl, isl_points, inner_only=not allow_extrapolate)
-                latency = database._interp_1d(
+                left, right = interpolation.nearest_1d_point_helper(isl, isl_points, inner_only=not allow_extrapolate)
+                latency = interpolation.interp_1d(
                     [left, right],
                     [isl_dict[left].get("latency"), isl_dict[right].get("latency")],
                     isl,
@@ -835,12 +837,12 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 return None
             if not allow_extrapolate and not (past_points[0] <= past_kv <= past_points[-1]):
                 return None
-            left, right = database._nearest_1d_point_helper(past_kv, past_points, inner_only=not allow_extrapolate)
+            left, right = interpolation.nearest_1d_point_helper(past_kv, past_points, inner_only=not allow_extrapolate)
             left_latency = _lookup_isl_at_past(left)
             right_latency = _lookup_isl_at_past(right)
             if left_latency is None or right_latency is None:
                 return None
-            return database._interp_1d([left, right], [left_latency, right_latency], past_kv)
+            return interpolation.interp_1d([left, right], [left_latency, right_latency], past_kv)
 
         for allow_extrapolate in (False, True):
             for bp in batch_points:
@@ -992,7 +994,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                         raw_dict = None if raw_native_dict is None else raw_native_dict[compress_ratio]
                     except KeyError:
                         raw_dict = None
-                result = database._interp_context_topk_piecewise_from_raw(
+                result = interpolation.interp_context_topk_piecewise_from_raw(
                     tp_size, lookup_s, b, raw_dict, index_topk * compress_ratio
                 )
             if result is None:

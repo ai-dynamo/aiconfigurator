@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.perf_database import DEFAULT_DSA_ARCHITECTURE, LoadedOpData, PerfDataNotAvailableError
 
 pytestmark = pytest.mark.unit
@@ -75,8 +75,8 @@ class TestContextDSAModule:
             }
         }
 
-        below = stub_perf_db._interp_dsa_context_topk_piecewise_from_raw(32, 2047, 1, raw_dsa_dict, 2048)
-        above = stub_perf_db._interp_dsa_context_topk_piecewise_from_raw(32, 2049, 1, raw_dsa_dict, 2048)
+        below = interpolation.interp_dsa_context_topk_piecewise_from_raw(32, 2047, 1, raw_dsa_dict, 2048)
+        above = interpolation.interp_dsa_context_topk_piecewise_from_raw(32, 2049, 1, raw_dsa_dict, 2048)
 
         assert below is not None
         assert above is not None
@@ -110,7 +110,7 @@ class TestContextDSAModule:
         def fail_interp_3d(*args, **kwargs):
             raise AssertionError("_interp_3d should not be used for topk + 1 when raw right-regime anchors exist")
 
-        monkeypatch.setattr(stub_perf_db, "_interp_3d", fail_interp_3d)
+        monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", fail_interp_3d)
 
         result = stub_perf_db.query_context_dsa_module(
             b=1,
@@ -146,7 +146,7 @@ class TestContextDSAModule:
             cubic_calls.append((args, kwargs))
             return {"latency": 123.0, "power": 0.0, "energy": 456.0}
 
-        monkeypatch.setattr(stub_perf_db, "_interp_3d", fake_interp_3d)
+        monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", fake_interp_3d)
 
         result = stub_perf_db.query_context_dsa_module(
             b=1,

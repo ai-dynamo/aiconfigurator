@@ -250,7 +250,7 @@ class ContextMLA(Operation):
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             mla_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode]
-            result = database._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
+            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"] * prefix_correction
             energy = result.get("energy", 0.0) * prefix_correction
             return database._interp_pr(latency, energy=energy)
@@ -419,7 +419,7 @@ class GenerationMLA(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             mla_dict = data_wrapper[kvcache_quant_mode]
-            result = database._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
             latency = result["latency"]
             energy = result.get("energy", 0.0)
             return database._interp_pr(latency, energy=energy)
@@ -563,12 +563,12 @@ class MLABmm(Operation):
             data_wrapper.raise_if_not_loaded()
             quant_mode_lookup = quant_mode if quant_mode in data_wrapper else common.GEMMQuantMode.bfloat16
             mla_bmm_dict = data_wrapper[quant_mode_lookup]["mla_gen_pre" if if_pre else "mla_gen_post"][num_heads]
-            num_left, num_right = database._nearest_1d_point_helper(
+            num_left, num_right = interpolation.nearest_1d_point_helper(
                 num_tokens,
                 list(mla_bmm_dict.keys()),
                 inner_only=False,
             )
-            result = database._interp_1d(
+            result = interpolation.interp_1d(
                 [num_left, num_right],
                 [mla_bmm_dict[num_left], mla_bmm_dict[num_right]],
                 num_tokens,
@@ -798,7 +798,7 @@ class MLAModule(Operation):
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             mla_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
-            result = database._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
+            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"] * prefix_correction
             energy = result.get("energy", 0.0) * prefix_correction
             return database._interp_pr(latency, energy=energy)
@@ -877,7 +877,7 @@ class MLAModule(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             mla_dict = data_wrapper[fmha_quant_mode][kv_cache_dtype][gemm_quant_mode]
-            result = database._interp_3d(num_heads, b, s, mla_dict, "cubic")
+            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"]
             energy = result.get("energy", 0.0)
             return database._interp_pr(latency, energy=energy)
@@ -1147,7 +1147,7 @@ class WideEPGenerationMLA(Operation):
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
             mla_dict = attn_data[kvcache_quant_mode]
-            result = database._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
             latency = result["latency"]
             energy = result.get("energy", 0.0)
             return database._interp_pr(latency, energy=energy)
@@ -1402,7 +1402,7 @@ class WideEPContextMLA(Operation):
             mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            result = database._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
+            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"] * prefix_correction
             energy = result.get("energy", 0.0) * prefix_correction
             return database._interp_pr(latency, energy=energy)

@@ -444,11 +444,13 @@ class GEMM(Operation):
 
             m_values = sorted(m_key for m_key in gemm_data if n in gemm_data[m_key] and k in gemm_data[m_key][n])
             if len(m_values) >= 2:
-                m_left, m_right = database._nearest_1d_point_helper(m, m_values, inner_only=False)
-                result = database._interp_1d([m_left, m_right], [gemm_data[m_left][n][k], gemm_data[m_right][n][k]], m)
+                m_left, m_right = interpolation.nearest_1d_point_helper(m, m_values, inner_only=False)
+                result = interpolation.interp_1d(
+                    [m_left, m_right], [gemm_data[m_left][n][k], gemm_data[m_right][n][k]], m
+                )
                 return _to_performance_result(result)
 
-            result = database._interp_3d(m, n, k, gemm_data, "cubic")
+            result = interpolation.interp_3d(m, n, k, gemm_data, "cubic", database._extracted_metrics_cache)
             return _to_performance_result(result)
 
         return database._query_silicon_or_hybrid(
@@ -526,7 +528,7 @@ class GEMM(Operation):
             if k_min is not None and k_max is not None:
                 k_i = max(k_min, min(k_i, k_max))
 
-            result = database._interp_2d_linear(m_i, k_i, table)
+            result = interpolation.interp_2d_linear(m_i, k_i, table, database._extracted_metrics_cache)
             return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
 
         return database._query_silicon_or_hybrid(
@@ -604,7 +606,7 @@ class GEMM(Operation):
             if k_min is not None and k_max is not None:
                 k_i = max(k_min, min(k_i, k_max))
 
-            result = database._interp_2d_linear(m_i, k_i, table)
+            result = interpolation.interp_2d_linear(m_i, k_i, table, database._extracted_metrics_cache)
             return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
 
         return database._query_silicon_or_hybrid(

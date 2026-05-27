@@ -30,7 +30,7 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -176,8 +176,12 @@ class CustomAllReduce(Operation):
                     "Consider using HYBRID mode, or supply custom_allreduce_perf.txt rows "
                     "covering this tp_size."
                 )
-            size_left, size_right = database._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
-            result = database._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
+            size_left, size_right = interpolation.nearest_1d_point_helper(
+                size, list(comm_dict.keys()), inner_only=False
+            )
+            result = interpolation.interp_1d(
+                [size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size
+            )
 
             if isinstance(result, dict):
                 lat = result["latency"]
@@ -375,12 +379,12 @@ class NCCL(Operation):
 
             max_num_gpus = max(nccl_source[dtype][operation].keys())
             nccl_dict = nccl_source[dtype][operation][min(num_gpus, max_num_gpus)]
-            size_left, size_right = database._nearest_1d_point_helper(
+            size_left, size_right = interpolation.nearest_1d_point_helper(
                 message_size,
                 list(nccl_dict.keys()),
                 inner_only=False,
             )
-            result = database._interp_1d(
+            result = interpolation.interp_1d(
                 [size_left, size_right],
                 [nccl_dict[size_left], nccl_dict[size_right]],
                 message_size,

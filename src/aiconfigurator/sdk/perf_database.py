@@ -15,7 +15,7 @@ from typing import ClassVar, Optional
 
 import yaml
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.common import PerfDataFilename, parse_support_matrix_version
 from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.system_spec import SystemSpec
@@ -1411,127 +1411,9 @@ class PerfDatabase:
         """
         return num_gpus > self.system_spec["node"]["num_gpus_per_node"]
 
-    def _get_value(self, data_value, metric: str = "latency"):
-        """Thin wrapper — delegates to ``interpolation.get_value``."""
-        return interpolation.get_value(data_value, metric)
-
-    def _extract_latency_and_energy_2d(self, data: dict) -> tuple[dict, dict]:
-        """Thin wrapper — delegates to ``interpolation.extract_latency_and_energy_2d``."""
-        return interpolation.extract_latency_and_energy_2d(data)
-
-    def _extract_latency_and_energy_3d(self, data: dict) -> tuple[dict, dict]:
-        """Thin wrapper — delegates to ``interpolation.extract_latency_and_energy_3d``."""
-        return interpolation.extract_latency_and_energy_3d(data)
-
-    def _extrapolate_data_grid(
-        self,
-        data_dict: dict[int, dict[int, dict[int, float]]],
-        target_x_list: list[int],
-        target_y_list: list[int],
-        target_z_list: list[int],
-        sqrt_y_value: bool = False,
-    ) -> None:
-        """Thin wrapper — delegates to ``interpolation.extrapolate_data_grid``."""
-        return interpolation.extrapolate_data_grid(
-            data_dict, target_x_list, target_y_list, target_z_list, sqrt_y_value=sqrt_y_value
-        )
-
-    def _nearest_1d_point_helper(self, x: int, values: list[int], inner_only: bool = True) -> tuple[int, int]:
-        """Thin wrapper — delegates to ``interpolation.nearest_1d_point_helper``."""
-        return interpolation.nearest_1d_point_helper(x, values, inner_only)
-
-    def _validate(self, value):
-        """Thin wrapper — delegates to ``interpolation.validate_interpolation_result``."""
-        return interpolation.validate_interpolation_result(value)
-
-    def _interp_3d_linear(self, x: int, y: int, z: int, data: dict) -> float:
-        """Thin wrapper — delegates to ``interpolation.interp_3d_linear``."""
-        return interpolation.interp_3d_linear(x, y, z, data)
-
-    def _interp_2d_linear(self, x: int, y: int, data: dict) -> dict:
-        """Thin wrapper — delegates to ``interpolation.interp_2d_linear``."""
-        return interpolation.interp_2d_linear(x, y, data, self._extracted_metrics_cache)
-
-    def _interp_3d(self, x: int, y: int, z: int, data: dict, method: str) -> dict:
-        """Thin wrapper — delegates to ``interpolation.interp_3d``."""
-        return interpolation.interp_3d(x, y, z, data, method, self._extracted_metrics_cache)
-
-    def _interp_context_topk_piecewise_from_raw(
-        self,
-        num_heads: int,
-        full_s: int,
-        b: int,
-        raw_dict: dict | None,
-        boundary_seq_len: int | None,
-    ) -> dict | None:
-        """Thin wrapper — delegates to ``interpolation.interp_context_topk_piecewise_from_raw``."""
-        return interpolation.interp_context_topk_piecewise_from_raw(num_heads, full_s, b, raw_dict, boundary_seq_len)
-
-    def _interp_dsa_context_topk_piecewise_from_raw(
-        self,
-        num_heads: int,
-        full_s: int,
-        b: int,
-        dsa_dict: dict | None,
-        index_topk: int | None,
-    ) -> dict | None:
-        """Thin wrapper — delegates to ``interpolation.interp_dsa_context_topk_piecewise_from_raw``."""
-        return interpolation.interp_dsa_context_topk_piecewise_from_raw(num_heads, full_s, b, dsa_dict, index_topk)
-
-    # TODO(ISSUE-16 cleanup PR): remove these two helpers — moved to
-    # ``operations/dsa.py`` as module-level functions. The copies here
-    # have no remaining callers in ``perf_database.py`` after Phase 3.4
-    # (``9a37aef``); the cleanup PR prunes them once it can no longer break
-    # downstream code that might still import them as PerfDatabase methods.
-    @staticmethod
-    def _is_dsa_interpolation_miss(error: Exception) -> bool:
-        message = str(error)
-        return isinstance(error, ValueError) and (
-            "x is not equal to the only value in the list" in message
-            or "x is less than the smallest value in the list" in message
-            or "x is greater than the largest value in the list" in message
-        )
-
-    @staticmethod
-    def _format_dsa_unavailable_message(
-        phase: str,
-        error: Exception,
-        *,
-        b: int,
-        s: int,
-        num_heads: int,
-        architecture: str,
-        index_n_heads: int,
-        index_head_dim: int,
-        index_topk: int,
-        prefix: int | None = None,
-    ) -> str:
-        prefix_part = "" if prefix is None else f", prefix={prefix}"
-        return (
-            f"{phase} DSA module perf data unavailable for candidate "
-            f"b={b}, s={s}{prefix_part}, num_heads={num_heads}, architecture={architecture}, "
-            f"index_n_heads={index_n_heads}, index_head_dim={index_head_dim}, index_topk={index_topk}: {error}"
-        )
-
-    def _get_sample_leaf_value(self, data: dict):
-        """Thin wrapper — delegates to ``interpolation.get_sample_leaf_value``."""
-        return interpolation.get_sample_leaf_value(data)
-
     def _get_p2p_bandwidth(self, num_gpus: int) -> float:
         """Thin wrapper — delegates to ``SystemSpec.get_p2p_bandwidth``."""
         return self.system_spec.get_p2p_bandwidth(num_gpus)
-
-    def _bilinear_interpolation(self, x_list: list[int], y_list: list[int], x: int, y: int, data: dict) -> float:
-        """Thin wrapper — delegates to ``interpolation.bilinear_interpolation``."""
-        return interpolation.bilinear_interpolation(x_list, y_list, x, y, data)
-
-    def _interp_2d_1d(self, x: int, y: int, z: int, data: dict, method: str = "bilinear") -> float:
-        """Thin wrapper — delegates to ``interpolation.interp_2d_1d``."""
-        return interpolation.interp_2d_1d(x, y, z, data, method)
-
-    def _interp_1d(self, x: list[int], y: list, value: int):
-        """Thin wrapper — delegates to ``interpolation.interp_1d``."""
-        return interpolation.interp_1d(x, y, value)
 
     def set_default_database_mode(self, mode: common.DatabaseMode) -> None:
         """
