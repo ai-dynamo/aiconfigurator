@@ -25,20 +25,12 @@ from __future__ import annotations
 # logger lives in ``_legacy.py``; per-family migrations don't redirect their
 # log calls until their owning issue lands.
 from aiconfigurator.sdk.operations._legacy import (
-    NCCL,
-    P2P,
     ContextDeepSeekV4AttentionModule,
-    ContextDSAModule,
     ContextMLA,
-    CustomAllReduce,
     DeepSeekV4MHCModule,
     FallbackOp,
-    GDNKernel,
     GenerationDeepSeekV4AttentionModule,
-    GenerationDSAModule,
     GenerationMLA,
-    Mamba2,
-    Mamba2Kernel,
     MLABmm,
     MLAModule,
     MoE,
@@ -58,9 +50,12 @@ from aiconfigurator.sdk.operations._legacy import (
 # alphabetical convention here.
 from aiconfigurator.sdk.operations.attention import ContextAttention, GenerationAttention
 from aiconfigurator.sdk.operations.base import Operation, clear_all_op_caches
+from aiconfigurator.sdk.operations.communication import NCCL, P2P, CustomAllReduce
+from aiconfigurator.sdk.operations.dsa import ContextDSAModule, GenerationDSAModule
 from aiconfigurator.sdk.operations.elementwise import ElementWise
 from aiconfigurator.sdk.operations.embedding import Embedding
 from aiconfigurator.sdk.operations.gemm import GEMM
+from aiconfigurator.sdk.operations.mamba import GDNKernel, Mamba2, Mamba2Kernel
 
 # Re-export commonly-imported names that the prior monolithic operations.py
 # exposed at module level. Some test files and external callers do
