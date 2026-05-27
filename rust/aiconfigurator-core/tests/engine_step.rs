@@ -983,6 +983,77 @@ fn native_correction_applies_after_bucket_is_ready() {
 }
 
 #[test]
+fn native_correction_defaults_to_one_for_empty_and_out_of_range_regions() {
+    let fixture = Fixture::new();
+    let mut model = ForwardPassPerfModel::from_native_with_roots(
+        engine_config(),
+        ForwardPassPerfOptions {
+            min_observations: 2,
+            bucket_count: 4,
+            ..Default::default()
+        },
+        fixture.systems_root(),
+        fixture.model_configs_root(),
+    )
+    .unwrap();
+
+    let native_10 = model
+        .estimate_forward_pass_time_ms(&[prefill_fpm(10, 0.0)])
+        .unwrap()
+        .unwrap();
+    let native_30 = model
+        .estimate_forward_pass_time_ms(&[prefill_fpm(30, 0.0)])
+        .unwrap()
+        .unwrap();
+    let native_50 = model
+        .estimate_forward_pass_time_ms(&[prefill_fpm(50, 0.0)])
+        .unwrap()
+        .unwrap();
+    let native_100 = model
+        .estimate_forward_pass_time_ms(&[prefill_fpm(100, 0.0)])
+        .unwrap()
+        .unwrap();
+
+    model
+        .tune_with_fpms(&[
+            vec![prefill_fpm(10, native_10 * 2.0 / 1000.0)],
+            vec![prefill_fpm(10, native_10 * 2.0 / 1000.0)],
+            vec![prefill_fpm(50, native_50 * 3.0 / 1000.0)],
+        ])
+        .unwrap();
+
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(10, 0.0)])
+            .unwrap()
+            .unwrap(),
+        native_10 * 2.0,
+    );
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(30, 0.0)])
+            .unwrap()
+            .unwrap(),
+        native_30,
+    );
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(50, 0.0)])
+            .unwrap()
+            .unwrap(),
+        native_50,
+    );
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(100, 0.0)])
+            .unwrap()
+            .unwrap(),
+        native_100,
+    );
+    assert_eq!(model.diagnostics().correction_ready_buckets, 1);
+}
+
+#[test]
 fn fallback_regression_has_no_correction_factors() {
     let model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions::default()).unwrap();
 

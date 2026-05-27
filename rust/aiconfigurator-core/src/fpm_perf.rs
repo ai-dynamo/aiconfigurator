@@ -265,10 +265,12 @@ impl ForwardPassPerfModel {
     /// `ForwardPassPerfModel`; queued fields and `wall_time` are ignored for
     /// estimation.
     ///
-    /// Native models return an AIC estimate immediately, optionally multiplied
-    /// by a ready correction factor for the matching shape bucket. Regression
-    /// models return `Ok(None)` until the matching inferred shape has enough
-    /// tuning samples. Empty scheduled work returns `Ok(Some(0.0))`.
+    /// Native models return an AIC estimate immediately, multiplied by the
+    /// correction factor for the matching in-range shape region. Correction
+    /// factors default to `1.0` for regions with insufficient samples and for
+    /// queries outside the retained observation bounds. Regression models return
+    /// `Ok(None)` until the matching inferred shape has enough tuning samples.
+    /// Empty scheduled work returns `Ok(Some(0.0))`.
     pub fn estimate_forward_pass_time_ms(
         &self,
         metrics_by_rank: &[ForwardPassMetrics],
@@ -284,11 +286,10 @@ impl ForwardPassPerfModel {
                 corrections,
             } => {
                 let native = estimator.forward_pass_time_ms(metrics_by_rank)?;
-                let corrected = corrections
-                    .store(feature.shape)
-                    .correction_for(&feature.x)
-                    .map(|factor| native * factor)
-                    .unwrap_or(native);
+                let corrected = native
+                    * corrections
+                        .store(feature.shape)
+                        .correction_factor_for(&feature.x);
                 Ok(Some(corrected))
             }
             ForwardPassPerfMode::Regression { regressions } => {
@@ -311,9 +312,10 @@ impl ForwardPassPerfModel {
     /// scheduled request fields, takes max-rank load features, and uses the max
     /// finite positive `wall_time` across ranks as the observed latency target
     /// in milliseconds. Iterations with no scheduled work or no positive
-    /// `wall_time` are ignored. Native models learn per-bucket median
-    /// `observed_ms / native_ms` correction factors; regression models learn a
-    /// shape-specific linear fit.
+    /// `wall_time` are ignored. Native models update the matching region's
+    /// median `observed_ms / native_ms` correction factor; empty and
+    /// insufficiently sampled regions keep the default factor `1.0`. Regression
+    /// models learn a shape-specific linear fit.
     pub fn tune_with_fpms(
         &mut self,
         iterations: &[Vec<ForwardPassMetrics>],
@@ -701,17 +703,22 @@ impl CorrectionBuckets {
         }
     }
 
-    fn correction_for(&self, x: &[f64]) -> Option<f64> {
-        let key = self.samples.bucket_key(x);
-        let bucket = self.samples.buckets.get(&key)?;
+    fn correction_factor_for(&self, x: &[f64]) -> f64 {
+        let Some(key) = self.samples.bucket_key_if_in_bounds(x) else {
+            return 1.0;
+        };
+        let Some(bucket) = self.samples.buckets.get(&key) else {
+            return 1.0;
+        };
         if bucket.len() < self.min_observations {
-            return None;
+            return 1.0;
         }
         median_ratio(
             bucket
                 .iter()
                 .map(|(_, obs)| obs.observed_ms / obs.native_ms),
         )
+        .unwrap_or(1.0)
     }
 
     fn ready_bucket_count(&self) -> usize {
@@ -801,6 +808,35 @@ impl<T: Clone> BucketedSamples<T> {
                 }
             })
             .collect()
+    }
+
+    fn bucket_key_if_in_bounds(&self, x: &[f64]) -> Option<Vec<usize>> {
+        if self.total_observations == 0 || x.len() != self.axis_min.len() {
+            return None;
+        }
+
+        let mut key = Vec::with_capacity(x.len());
+        for (i, value) in x.iter().enumerate() {
+            let lo = self.axis_min[i];
+            let hi = self.axis_max[i];
+            if !value.is_finite() || !lo.is_finite() || !hi.is_finite() {
+                return None;
+            }
+            if hi <= lo {
+                if *value != lo {
+                    return None;
+                }
+                key.push(0);
+                continue;
+            }
+            if *value < lo || *value > hi {
+                return None;
+            }
+
+            let idx = ((*value - lo) / (hi - lo) * self.buckets_per_axis as f64) as isize;
+            key.push(idx.clamp(0, self.buckets_per_axis as isize - 1) as usize);
+        }
+        Some(key)
     }
 
     fn update_axis_bounds(&mut self, x: &[f64]) -> bool {
