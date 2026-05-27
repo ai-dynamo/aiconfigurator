@@ -16,12 +16,20 @@ const DEFAULT_MIN_OBSERVATIONS: usize = 5;
 const DEFAULT_BUCKET_COUNT: usize = 16;
 const RELAXABLE_NEG_TOLERANCE: f64 = 1e-6;
 
+/// In-memory tuning controls for `ForwardPassPerfModel`.
+///
+/// These defaults match the current planner regression behavior: retain a
+/// bounded sliding sample set, wait for enough observations before predicting
+/// from learned data, and bucket observations by request shape.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ForwardPassPerfOptions {
+    /// Maximum retained observations across all buckets for each inferred FPM shape.
     #[serde(default = "default_max_observations")]
     pub max_observations: usize,
+    /// Minimum observations required before a regression fit or native correction is used.
     #[serde(default = "default_min_observations")]
     pub min_observations: usize,
+    /// Target bucket count for shape-specific sample retirement and correction lookup.
     #[serde(default = "default_bucket_count")]
     pub bucket_count: usize,
 }
@@ -36,32 +44,72 @@ impl Default for ForwardPassPerfOptions {
     }
 }
 
+/// Current readiness and tuning state for a `ForwardPassPerfModel`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ForwardPassPerfDiagnostics {
+    /// Active prediction source. Native models become `aic_with_correction`
+    /// after at least one correction bucket is ready.
     pub source: ForwardPassPerfSource,
+    /// Whether the model can currently produce learned estimates for at least
+    /// one shape, or why it cannot.
     pub readiness: ForwardPassPerfReadiness,
+    /// Number of retained tuning observations across all inferred shapes.
     pub retained_observations: usize,
+    /// Number of native-correction buckets with at least `min_observations`.
     pub correction_ready_buckets: usize,
+    /// Fallback reason when `auto` had to use regression instead of native AIC.
     pub last_warning: Option<String>,
 }
 
+/// Prediction backend currently used by `ForwardPassPerfModel`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ForwardPassPerfSource {
+    /// Strict native AIC estimator with no correction bucket ready yet.
     Aic,
+    /// Shape-specific regression fallback, used without native AIC support.
     FallbackRegression,
+    /// Native AIC estimator with at least one learned correction bucket.
     AicWithCorrection,
 }
 
+/// Readiness state reported by `ForwardPassPerfDiagnostics`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ForwardPassPerfReadiness {
+    /// The model has either native AIC support or enough learned data.
     Ready,
+    /// Regression fallback exists, but does not yet have enough observations.
     InsufficientData,
+    /// Native AIC was unavailable and `auto` fell back to regression.
     UnsupportedConfig,
+    /// Reserved for callers that surface rejected FPM input as diagnostics.
     InvalidInput,
 }
 
+/// Forward-pass-level performance model with optional online tuning.
+///
+/// This API intentionally stays at AIC's forward-pass abstraction. It does not
+/// model TTFT, ITL, SLA, engine capacity, queueing policy, or Dynamo engine
+/// limits. Callers pass FPMs for one engine iteration and receive one
+/// forward-pass latency estimate in milliseconds.
+///
+/// The prefill/decode/mixed shape is inferred from each iteration's
+/// `scheduled_requests` fields; it is not chosen at construction:
+///
+/// - prefill: scheduled prefill tokens and no scheduled decode work, using
+///   `[sum_prefill_tokens]`
+/// - decode: scheduled decode work and no scheduled prefill tokens, using
+///   `[num_decode_requests, sum_decode_kv_tokens]`
+/// - mixed/agg: both scheduled prefill and decode work, using
+///   `[sum_prefill_tokens, sum_decode_kv_tokens]`
+/// - empty: no scheduled prefill or decode work, estimates `0.0` and is not
+///   used for tuning
+///
+/// Queued request fields are accepted for FPM schema parity but ignored by this
+/// forward-pass-level model. For attention-DP configurations, the input for one
+/// iteration is one FPM per attention-DP rank; tuning merges that list into one
+/// observation by taking max-rank load features and max nonzero `wall_time`.
 #[derive(Clone, Debug)]
 pub struct ForwardPassPerfModel {
     mode: ForwardPassPerfMode,
@@ -81,6 +129,11 @@ enum ForwardPassPerfMode {
 }
 
 impl ForwardPassPerfModel {
+    /// Create a strict native AIC forward-pass model.
+    ///
+    /// This constructor fails if `config` cannot be served by the native AIC
+    /// estimator. Use `auto` when unsupported native configs should fall back
+    /// to the learned regression model.
     pub fn from_native(
         config: EngineConfig,
         options: ForwardPassPerfOptions,
@@ -97,6 +150,10 @@ impl ForwardPassPerfModel {
         })
     }
 
+    /// Create a strict native AIC forward-pass model with explicit data roots.
+    ///
+    /// This is the testable/root-overridable variant of `from_native` and has
+    /// the same tuning and failure behavior.
     pub fn from_native_with_roots(
         config: EngineConfig,
         options: ForwardPassPerfOptions,
@@ -116,6 +173,12 @@ impl ForwardPassPerfModel {
         })
     }
 
+    /// Create a regression-only forward-pass model.
+    ///
+    /// This mode is for native-AIC-unsupported models. It returns `None` from
+    /// `estimate_forward_pass_time_ms` for non-empty iterations until the
+    /// inferred shape has at least `options.min_observations` tuning samples.
+    /// Correction factor getters always return `None` in this mode.
     pub fn from_regression(options: ForwardPassPerfOptions) -> Result<Self, AicError> {
         validate_options(&options)?;
         Ok(Self {
@@ -127,6 +190,11 @@ impl ForwardPassPerfModel {
         })
     }
 
+    /// Create a native model when possible, otherwise fall back to regression.
+    ///
+    /// Fallback reason is preserved in `diagnostics().last_warning`. The
+    /// resulting model still uses the same FPM shape inference and tuning input
+    /// contract as `from_native` and `from_regression`.
     pub fn auto(config: EngineConfig, options: ForwardPassPerfOptions) -> Result<Self, AicError> {
         match Self::from_native(config, options.clone()) {
             Ok(model) => Ok(model),
@@ -134,6 +202,7 @@ impl ForwardPassPerfModel {
         }
     }
 
+    /// Create an `auto` model with explicit data roots.
     pub fn auto_with_roots(
         config: EngineConfig,
         options: ForwardPassPerfOptions,
@@ -162,6 +231,18 @@ impl ForwardPassPerfModel {
         Ok(model)
     }
 
+    /// Estimate one forward-pass iteration in milliseconds.
+    ///
+    /// `metrics_by_rank` must contain the FPMs for a single engine iteration,
+    /// one entry per attention-DP rank. Single-rank callers pass a one-element
+    /// slice. The inferred shape uses only `scheduled_requests` as described on
+    /// `ForwardPassPerfModel`; queued fields and `wall_time` are ignored for
+    /// estimation.
+    ///
+    /// Native models return an AIC estimate immediately, optionally multiplied
+    /// by a ready correction factor for the matching shape bucket. Regression
+    /// models return `Ok(None)` until the matching inferred shape has enough
+    /// tuning samples. Empty scheduled work returns `Ok(Some(0.0))`.
     pub fn estimate_forward_pass_time_ms(
         &self,
         metrics_by_rank: &[ForwardPassMetrics],
@@ -190,6 +271,20 @@ impl ForwardPassPerfModel {
         }
     }
 
+    /// Tune the model from observed FPM iterations.
+    ///
+    /// The outer slice is a list of observed iterations. Each inner slice is
+    /// the per-attention-DP-rank FPM list for one iteration:
+    /// `[[iter0_rank0, iter0_rank1], [iter1_rank0, iter1_rank1]]`.
+    /// Single-rank callers still use one FPM per inner slice.
+    ///
+    /// For each non-empty iteration, this method infers the shape from
+    /// scheduled request fields, takes max-rank load features, and uses the max
+    /// finite positive `wall_time` across ranks as the observed latency target
+    /// in milliseconds. Iterations with no scheduled work or no positive
+    /// `wall_time` are ignored. Native models learn per-bucket median
+    /// `observed_ms / native_ms` correction factors; regression models learn a
+    /// shape-specific linear fit.
     pub fn tune_with_fpms(
         &mut self,
         iterations: &[Vec<ForwardPassMetrics>],
@@ -220,6 +315,7 @@ impl ForwardPassPerfModel {
         Ok(())
     }
 
+    /// Return the current backend, readiness, retained sample count, and fallback warning.
     pub fn diagnostics(&self) -> ForwardPassPerfDiagnostics {
         match &self.mode {
             ForwardPassPerfMode::Native { corrections, .. } => {
@@ -255,18 +351,30 @@ impl ForwardPassPerfModel {
         }
     }
 
+    /// Return the smallest ready native correction factor across all shapes.
+    ///
+    /// Returns `None` before any native correction bucket has enough samples.
+    /// Regression-only models also return `None`.
     pub fn min_correction_factor(&self) -> Option<f64> {
         self.correction_factors()
             .into_iter()
             .reduce(|a, b| a.min(b))
     }
 
+    /// Return the largest ready native correction factor across all shapes.
+    ///
+    /// Returns `None` before any native correction bucket has enough samples.
+    /// Regression-only models also return `None`.
     pub fn max_correction_factor(&self) -> Option<f64> {
         self.correction_factors()
             .into_iter()
             .reduce(|a, b| a.max(b))
     }
 
+    /// Return the arithmetic mean of ready native correction factors across all shapes.
+    ///
+    /// Returns `None` before any native correction bucket has enough samples.
+    /// Regression-only models also return `None`.
     pub fn avg_correction_factor(&self) -> Option<f64> {
         let factors = self.correction_factors();
         if factors.is_empty() {
@@ -276,6 +384,7 @@ impl ForwardPassPerfModel {
         }
     }
 
+    /// Return the immutable tuning options used by this model.
     pub fn options(&self) -> &ForwardPassPerfOptions {
         &self.options
     }

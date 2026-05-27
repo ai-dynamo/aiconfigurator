@@ -205,9 +205,11 @@ pub struct QueuedRequestMetrics {
 /// Per-iteration forward-pass metrics.
 ///
 /// In Dynamo this struct is telemetry emitted after an engine iteration. In
-/// AIC Phase 1, the scheduled portion is also the estimator input. `wall_time`
-/// and `queued_requests` are accepted for schema parity but ignored by the
-/// latency estimator.
+/// AIC Phase 1, the scheduled portion is also the estimator input. The strict
+/// native `EngineStepEstimator` ignores `wall_time` and `queued_requests`. The
+/// tuned `ForwardPassPerfModel` uses `wall_time` only when observations are
+/// passed to `tune_with_fpms`; queued fields remain schema-only at the
+/// forward-pass layer.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ForwardPassMetrics {
     #[serde(default = "default_fpm_version")]
