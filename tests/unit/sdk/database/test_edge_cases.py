@@ -135,7 +135,12 @@ class TestInitializationEdgeCases:
     """Test edge cases during PerfDatabase initialization."""
 
     def test_extrapolation_during_init(self, tmp_path, monkeypatch, caplog):
-        """Test that extrapolation runs during initialization."""
+        """Test that extrapolation runs when ContextAttention's data is loaded.
+
+        Pre-AIC-533 ``PerfDatabase.__init__`` warmed every op eagerly, so
+        extrapolation ran during construction. Post-AIC-533 the load is
+        lazy: we explicitly trigger ``ContextAttention.load_data`` below
+        (with the loader patches still active) and assert on the result."""
         # Set up minimal system spec
         import yaml
 
@@ -212,8 +217,12 @@ class TestInitializationEdgeCases:
                 loader_func = lambda path, d=depth: create_nested_defaultdict(d)
             monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{loader}", loader_func)
 
-        # Initialize database - should trigger extrapolation
+        # Initialize database, then trigger the lazy load explicitly so
+        # extrapolation runs while loader patches are still active.
+        from aiconfigurator.sdk.operations.attention import ContextAttention
+
         db = PerfDatabase("test", "backend", "v1", str(tmp_path))
+        ContextAttention.load_data(db)
 
         # Check that extrapolation created new data points
         # Should have more than the 4 original points

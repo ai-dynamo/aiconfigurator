@@ -17,13 +17,53 @@ from aiconfigurator.sdk.operations.base import Operation
 from aiconfigurator.sdk.operations.gemm import GEMM
 
 
+def test_perf_database_init_opens_no_csvs(tmp_path, monkeypatch):
+    """Pattern A's headline guarantee: ``PerfDatabase()`` triggers no
+    ``load_data`` calls. Op data is loaded only when the matrix is read
+    or a query fires.
+
+    Regression: pre-AIC-533 ``__init__`` warmed all 22 ops eagerly to
+    accommodate the old test-fixture loader-patch pattern. Test fixtures
+    now own the warm-up explicitly, so production code can be fully
+    lazy."""
+    import yaml
+
+    from aiconfigurator.sdk.operations.base import Operation
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+
+    # Patch yaml + every loader so ``__init__`` doesn't try to read real CSVs
+    # (it shouldn't try anyway — that's what this test asserts).
+    monkeypatch.setattr(
+        yaml,
+        "load",
+        lambda stream, Loader=None: {  # noqa: N803
+            "data_dir": "data",
+            "misc": {"nccl_version": "v1"},
+            "gpu": {"bfloat16_tc_flops": 1.0, "mem_bw": 1.0, "mem_empirical_constant_latency": 1.0},
+            "node": {"inter_node_bw": 1.0, "intra_node_bw": 1.0, "num_gpus_per_node": 8, "p2p_latency": 1.0},
+        },
+    )
+
+    yaml_file = tmp_path / "any_system.yaml"
+    yaml_file.write_text("dummy: data")  # content irrelevant — yaml.load is patched
+
+    Operation._load_data_call_count.clear()
+    PerfDatabase("any_system", "any_backend", "v1", str(tmp_path))
+    assert dict(Operation._load_data_call_count) == {}, (
+        "PerfDatabase.__init__ must not trigger any OpClass.load_data — the "
+        "lazy-first-query contract is the headline goal of the AIC-479 refactor"
+    )
+
+
 def test_gemm_loads_exactly_once_across_many_queries(stub_perf_db):
     """A single GEMM.load_data call covers an arbitrary number of queries."""
     # The autouse ``_reset_op_load_counts`` fixture cleared the counter
-    # before this test ran. ``stub_perf_db`` already triggered one eager
-    # load during construction.
+    # before this test ran. ``stub_perf_db`` triggered one load during
+    # its explicit ``_warm_lazy_op_caches`` step (post-AIC-533, the
+    # fixture warms while loader patches are still active rather than
+    # relying on ``PerfDatabase.__init__`` to do it eagerly).
     initial_count = Operation._load_data_call_count.get(GEMM, 0)
-    assert initial_count <= 1, "GEMM should load at most once during db construction"
+    assert initial_count <= 1, "GEMM should load at most once during fixture warm-up"
 
     quant_mode = common.GEMMQuantMode.bfloat16
     for m, n, k in [(64, 128, 256), (64, 128, 512), (64, 256, 256), (128, 128, 256), (128, 256, 512)]:

@@ -239,6 +239,8 @@ class MoE(Operation):
         """Verbatim port of legacy ``PerfDatabase.query_moe`` body."""
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
+        cls.load_data(database)
+
         num_gemms = 3 if is_gated else 2  # gated (SwiGLU): 3 GEMMs; non-gated (Relu2): 2 GEMMs
 
         def get_sol(
@@ -787,6 +789,7 @@ class MoEDispatch(Operation):
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_wideep_deepep_ll``."""
+        cls.load_data(database)
 
         def get_sol(num_tokens: int, topk: int, num_experts: int) -> tuple[float, float, float]:
             raise NotImplementedError("WideEP deepep ll operation's sol is not implemented yet")
@@ -825,6 +828,7 @@ class MoEDispatch(Operation):
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_wideep_deepep_normal``."""
+        cls.load_data(database)
 
         def get_sol(num_tokens: int, num_experts: int, topk: int, hidden_size: int) -> tuple[float, float, float]:
             raise NotImplementedError("WideEP deepep normal operation's sol is not implemented yet")
@@ -1341,6 +1345,8 @@ class TrtLLMWideEPMoE(Operation):
         is_gated: bool = True,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_wideep_moe_compute``."""
+        cls.load_data(database)
+
         num_gemms = 3 if is_gated else 2
 
         def get_sol(
@@ -1749,6 +1755,8 @@ class TrtLLMWideEPMoEDispatch(Operation):
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_trtllm_alltoall``."""
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        cls.load_data(database)
 
         def get_sol(
             num_tokens: int,

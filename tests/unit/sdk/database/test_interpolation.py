@@ -354,9 +354,14 @@ class TestUpdateSupportMatrix:
 
     def test_support_matrix_creation(self, comprehensive_perf_db):
         """Test that supported_quant_mode is properly created."""
-        # The fixture should have already called _update_support_matrix
+        # Post-AIC-533 ``supported_quant_mode`` is a ``_LazySupportMatrix``
+        # (dict-like view that resolves keys on first read) rather than a
+        # plain dict. Both shapes support the same per-key access pattern
+        # the rest of this test exercises.
+        from aiconfigurator.sdk.perf_database import _LazySupportMatrix
+
         assert hasattr(comprehensive_perf_db, "supported_quant_mode")
-        assert isinstance(comprehensive_perf_db.supported_quant_mode, dict)
+        assert isinstance(comprehensive_perf_db.supported_quant_mode, (dict, _LazySupportMatrix))
 
         # Check expected keys
         expected_keys = [

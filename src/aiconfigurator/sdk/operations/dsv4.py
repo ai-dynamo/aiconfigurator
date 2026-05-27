@@ -411,6 +411,8 @@ class DeepSeekV4MHCModule(Operation):
         from aiconfigurator.sdk.operations.gemm import GEMM
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
+        cls.load_data(database)
+
         sites = 2
         hc_dim = hc_mult * hidden_size
         mix_hc = (2 + hc_mult) * hc_mult
@@ -888,6 +890,8 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         """Verbatim port of legacy ``PerfDatabase.query_context_deepseek_v4_attention_module``."""
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
+        cls.load_data(database)
+
         def get_sol() -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(
                 database,
@@ -1177,6 +1181,8 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_generation_deepseek_v4_attention_module``."""
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        cls.load_data(database)
 
         def get_sol() -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(

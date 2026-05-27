@@ -12,7 +12,7 @@ import traceback
 from collections import UserDict, defaultdict
 from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Optional
+from typing import ClassVar, Optional
 
 import yaml
 
@@ -2599,7 +2599,14 @@ class LoadedOpData(UserDict):
 
         super().__init__()
         if dict_data:
-            super().update(dict_data)
+            # Freeze any defaultdicts so missing-key access at query time
+            # raises ``KeyError`` instead of silently creating empty
+            # branches. Pre-AIC-533 this was handled by a one-shot
+            # ``_finalize_loaded_data()`` walk at the end of
+            # ``PerfDatabase.__init__``; the lazy contract means each
+            # load_data may bind data long after construction, so freezing
+            # at wrap time covers every entry point uniformly.
+            super().update(_finalize_loaded_value(dict_data))
 
     def raise_if_not_loaded(self):
         if self.loaded:
@@ -2630,6 +2637,294 @@ class LoadedOpData(UserDict):
     def __contains__(self, key):
         self.raise_if_not_loaded()
         return super().__contains__(key)
+
+
+class _LazySupportMatrix:
+    """Dict-like ``database.supported_quant_mode`` that resolves each key
+    on first read.
+
+    Reading a key triggers ``OpClass.load_data(database)`` on the op class
+    that owns the relevant table, then extracts the supported modes from
+    the freshly-bound instance attribute. Subsequent reads of the same
+    key return the memoized list. ``load_data`` itself is idempotent and
+    early-exits on cache hit, so repeated access is O(1).
+
+    The catalog of valid keys is fixed per backend at construction time
+    and mirrors the four branches of the previous ``_update_support_matrix``.
+    Reading a key that doesn't apply to the active backend raises
+    ``KeyError``, matching the previous dict semantics — callers that
+    expect ``key in db.supported_quant_mode`` checks (e.g.
+    ``supported.get(context_attn_key, [])`` in ``task.py``) work
+    unchanged because ``get()`` returns the default for both unknown keys
+    and resolved-to-empty keys.
+
+    Instance assignment (``db.supported_quant_mode = {...}``) replaces
+    the matrix entirely; both per-key reads and the lazy contract no
+    longer apply on the overwritten value. The pre-refactor
+    ``_update_support_matrix`` method continues to work and produces a
+    plain dict snapshot that overwrites the lazy matrix in place.
+    """
+
+    # Catalog mirrors the four branches of the previous
+    # ``_update_support_matrix``. Backends absent from the map produce an
+    # empty matrix.
+    _BACKEND_KEYS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "sglang": (
+            "gemm",
+            "context_attention",
+            "generation_attention",
+            "context_mla",
+            "generation_mla",
+            "dsa_context_module",
+            "dsa_generation_module",
+            "deepseek_v4_context_module",
+            "deepseek_v4_generation_module",
+            "mla_bmm",
+            "nccl",
+            "moe",
+            "wideep_context_moe",
+            "wideep_generation_moe",
+            "wideep_context_mla",
+            "wideep_generation_mla",
+        ),
+        "trtllm": (
+            "gemm",
+            "context_attention",
+            "generation_attention",
+            "context_mla",
+            "generation_mla",
+            "dsa_context_module",
+            "dsa_generation_module",
+            "deepseek_v4_context_module",
+            "deepseek_v4_generation_module",
+            "mla_bmm",
+            "nccl",
+            "moe",
+        ),
+        "vllm": (
+            "gemm",
+            "context_attention",
+            "generation_attention",
+            "context_mla",
+            "generation_mla",
+            "dsa_context_module",
+            "dsa_generation_module",
+            "deepseek_v4_context_module",
+            "deepseek_v4_generation_module",
+            "mla_bmm",
+            "moe",
+            "nccl",
+        ),
+    }
+
+    def __init__(self, database: PerfDatabase):
+        self._database = database
+        self._resolved: dict[str, list[str]] = {}
+        self._keys: tuple[str, ...] = self._BACKEND_KEYS.get(database.backend, ())
+
+    def __getitem__(self, key: str) -> list[str]:
+        if key in self._resolved:
+            return self._resolved[key]
+        if key not in self._keys:
+            raise KeyError(key)
+        value = self._resolve(key)
+        self._resolved[key] = value
+        return value
+
+    def get(self, key: str, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._keys
+
+    def __iter__(self):
+        return iter(self._keys)
+
+    def keys(self):
+        return list(self._keys)
+
+    def values(self):
+        return [self[k] for k in self._keys]
+
+    def items(self):
+        return [(k, self[k]) for k in self._keys]
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+    def __repr__(self) -> str:
+        return f"_LazySupportMatrix(backend={self._database.backend!r}, resolved={list(self._resolved)})"
+
+    # --- Per-key resolvers ----------------------------------------------------
+    #
+    # Each resolver triggers ``load_data`` on the relevant op class(es), then
+    # extracts the modes from the instance attributes those ``load_data`` calls
+    # bind. Local imports keep the lazy contract: building a database doesn't
+    # import op modules until the matrix is first read.
+
+    def _resolve(self, key: str) -> list[str]:
+        db = self._database
+        if key == "gemm":
+            from aiconfigurator.sdk.operations.gemm import GEMM
+
+            GEMM.load_data(db)
+            modes = _enum_key_names(getattr(db, "_gemm_data", None))
+            # ``fp8_static`` is a behavioral mode that reuses ``fp8`` GEMM perf tables.
+            if (
+                db.backend == "trtllm"
+                and common.GEMMQuantMode.fp8.name in modes
+                and common.GEMMQuantMode.fp8_static.name not in modes
+            ):
+                modes.append(common.GEMMQuantMode.fp8_static.name)
+            return modes
+
+        if key == "context_attention":
+            from aiconfigurator.sdk.operations.attention import ContextAttention
+
+            ContextAttention.load_data(db)
+            return _enum_key_names(getattr(db, "_context_attention_data", None))
+
+        if key == "generation_attention":
+            from aiconfigurator.sdk.operations.attention import GenerationAttention
+
+            GenerationAttention.load_data(db)
+            return _enum_key_names(getattr(db, "_generation_attention_data", None))
+
+        if key == "context_mla":
+            from aiconfigurator.sdk.operations.mla import ContextMLA, MLAModule
+
+            ContextMLA.load_data(db)
+            MLAModule.load_data(db)
+            return _merge_key_names(
+                getattr(db, "_context_mla_data", None),
+                getattr(db, "_context_mla_module_data", None),
+            )
+
+        if key == "generation_mla":
+            from aiconfigurator.sdk.operations.mla import GenerationMLA, MLAModule
+
+            GenerationMLA.load_data(db)
+            MLAModule.load_data(db)
+            # Granular data is keyed [kv_cache]...; module data is keyed
+            # [fmha][kv_cache][gemm]... so kv modes are at the second level there.
+            kv_modes: set[str] = set()
+            granular = getattr(db, "_generation_mla_data", None)
+            if granular:
+                kv_modes.update(_enum_key_names(granular))
+            module = getattr(db, "_generation_mla_module_data", None)
+            if module:
+                for fmha_mode in module:
+                    for kv_mode in module[fmha_mode]:
+                        kv_modes.add(kv_mode.name if hasattr(kv_mode, "name") else str(kv_mode))
+            return sorted(kv_modes)
+
+        if key == "dsa_context_module":
+            from aiconfigurator.sdk.operations.dsa import ContextDSAModule
+
+            ContextDSAModule.load_data(db)
+            return _enum_key_names(getattr(db, "_context_dsa_module_data", None))
+
+        if key == "dsa_generation_module":
+            from aiconfigurator.sdk.operations.dsa import GenerationDSAModule
+
+            GenerationDSAModule.load_data(db)
+            return _enum_key_names(getattr(db, "_generation_dsa_module_data", None))
+
+        if key == "deepseek_v4_context_module":
+            from aiconfigurator.sdk.operations.dsv4 import ContextDeepSeekV4AttentionModule
+
+            ContextDeepSeekV4AttentionModule.load_data(db)
+            return _enum_key_names(getattr(db, "_context_deepseek_v4_attention_module_data", None))
+
+        if key == "deepseek_v4_generation_module":
+            from aiconfigurator.sdk.operations.dsv4 import GenerationDeepSeekV4AttentionModule
+
+            GenerationDeepSeekV4AttentionModule.load_data(db)
+            return _enum_key_names(getattr(db, "_generation_deepseek_v4_attention_module_data", None))
+
+        if key == "mla_bmm":
+            from aiconfigurator.sdk.operations.mla import MLABmm
+
+            MLABmm.load_data(db)
+            return _enum_key_names(getattr(db, "_mla_bmm_data", None))
+
+        if key == "nccl":
+            from aiconfigurator.sdk.operations.communication import NCCL
+
+            NCCL.load_data(db)
+            # vllm matrix prefers ``_nccl_data`` but falls back to ``_oneccl_data``
+            # because the original code used ``... or getattr(self, "_oneccl_data", None)``.
+            primary = getattr(db, "_nccl_data", None)
+            if db.backend == "vllm" and not primary:
+                primary = getattr(db, "_oneccl_data", None)
+            return _enum_key_names(primary)
+
+        if key == "moe":
+            from aiconfigurator.sdk.operations.moe import MoE
+
+            MoE.load_data(db)
+            return _enum_key_names(getattr(db, "_moe_data", None))
+
+        if key == "wideep_context_moe":
+            from aiconfigurator.sdk.operations.moe import MoE
+
+            MoE.load_data(db)
+            return _enum_key_names(getattr(db, "_wideep_context_moe_data", None))
+
+        if key == "wideep_generation_moe":
+            from aiconfigurator.sdk.operations.moe import MoE
+
+            MoE.load_data(db)
+            return _enum_key_names(getattr(db, "_wideep_generation_moe_data", None))
+
+        if key == "wideep_context_mla":
+            from aiconfigurator.sdk.operations.mla import WideEPContextMLA
+
+            WideEPContextMLA.load_data(db)
+            modes: set[str] = set()
+            data = getattr(db, "_wideep_context_mla_data", None) or {}
+            for kernel_source in data:
+                for quant_mode in data[kernel_source]:
+                    modes.add(quant_mode.name if hasattr(quant_mode, "name") else str(quant_mode))
+            return sorted(modes)
+
+        if key == "wideep_generation_mla":
+            from aiconfigurator.sdk.operations.mla import WideEPGenerationMLA
+
+            WideEPGenerationMLA.load_data(db)
+            modes = set()
+            data = getattr(db, "_wideep_generation_mla_data", None) or {}
+            for kernel_source in data:
+                for kv_cache_dtype in data[kernel_source]:
+                    modes.add(kv_cache_dtype.name if hasattr(kv_cache_dtype, "name") else str(kv_cache_dtype))
+            return sorted(modes)
+
+        # Unreachable given the _keys gate in __getitem__, but stay defensive.
+        raise KeyError(key)
+
+
+def _enum_key_names(data) -> list[str]:
+    """Safely extract Enum key names from a mapping.
+
+    Many perf tables are optional and loaders return ``None`` when data
+    files are missing. Treat missing/empty tables as supporting no modes."""
+    if not data:
+        return []
+    names: list[str] = []
+    for key in data:
+        names.append(key.name if hasattr(key, "name") else str(key))
+    return names
+
+
+def _merge_key_names(*sources) -> list[str]:
+    """Merge top-level Enum key names from multiple data sources."""
+    merged: set[str] = set()
+    for source in sources:
+        merged.update(_enum_key_names(source))
+    return sorted(merged)
 
 
 class PerfDatabase:
@@ -2706,218 +3001,18 @@ class PerfDatabase:
         # Cache for extracted metric data to avoid repeated extraction in _interp_3d
         self._extracted_metrics_cache = {}
 
-        # Manifest entries grouped by op_file. Used to discover which sibling
+        # Manifest entries grouped by op_file. Used by ``_build_op_sources``
+        # (lazy-load path inside each op class) to discover which sibling
         # backend/version dirs hold rows the active backend can inherit.
         self._op_kernel_source_manifest_entries = _load_op_kernel_source_manifest_entries(systems_root)
 
-        system_data_root = os.path.join(systems_root, self.system_spec["data_dir"])
-        data_dir = os.path.join(system_data_root, backend, version)
-        nccl_data_dir = os.path.join(
-            system_data_root,
-            "nccl",
-            self.system_spec["misc"]["nccl_version"],
-        )
-        oneccl_version = self.system_spec.get("misc", {}).get("oneccl_version")
-        oneccl_data_dir = os.path.join(system_data_root, "oneccl", oneccl_version) if oneccl_version else None
-
-        def _load_op_data(op_filename_enum: PerfDataFilename) -> LoadedOpData | tuple[LoadedOpData, ...]:
-            func_map = {
-                PerfDataFilename.gemm: load_gemm_data,
-                PerfDataFilename.context_attention: load_context_attention_data,
-                PerfDataFilename.generation_attention: load_generation_attention_data,
-                PerfDataFilename.moe: load_moe_data,
-                PerfDataFilename.custom_allreduce: load_custom_allreduce_data,
-                PerfDataFilename.nccl: load_nccl_data,
-                PerfDataFilename.oneccl: load_nccl_data,
-                PerfDataFilename.context_mla: load_context_mla_data,
-                PerfDataFilename.generation_mla: load_generation_mla_data,
-                PerfDataFilename.mla_bmm: load_mla_bmm_data,
-                PerfDataFilename.mamba2: load_mamba2_data,
-                PerfDataFilename.gdn: load_gdn_data,
-                PerfDataFilename.compute_scale: load_compute_scale_data,
-                PerfDataFilename.scale_matrix: load_scale_matrix_data,
-                PerfDataFilename.wideep_context_moe: load_wideep_context_moe_data,
-                PerfDataFilename.wideep_generation_moe: load_wideep_generation_moe_data,
-                PerfDataFilename.wideep_context_mla: load_wideep_context_mla_data,
-                PerfDataFilename.wideep_generation_mla: load_wideep_generation_mla_data,
-                PerfDataFilename.wideep_deepep_normal: load_wideep_deepep_normal_data,
-                PerfDataFilename.wideep_deepep_ll: load_wideep_deepep_ll_data,
-                PerfDataFilename.wideep_moe_compute: load_wideep_moe_compute_data,
-                PerfDataFilename.trtllm_alltoall: load_trtllm_alltoall_data,
-                PerfDataFilename.mla_context_module: load_context_mla_module_data,
-                PerfDataFilename.mla_generation_module: load_generation_mla_module_data,
-                PerfDataFilename.dsa_context_module: load_context_dsa_module_data,
-                PerfDataFilename.dsa_generation_module: load_generation_dsa_module_data,
-                PerfDataFilename.mhc_module: load_mhc_module_data,
-                PerfDataFilename.dsv4_csa_context_module: load_context_dsv4_kind_module_data,
-                PerfDataFilename.dsv4_hca_context_module: load_context_dsv4_kind_module_data,
-                PerfDataFilename.dsv4_csa_generation_module: load_generation_dsv4_kind_module_data,
-                PerfDataFilename.dsv4_hca_generation_module: load_generation_dsv4_kind_module_data,
-                PerfDataFilename.dsv4_paged_mqa_logits_module: load_dsv4_sparse_kernel_data,
-                PerfDataFilename.dsv4_hca_attn_module: load_dsv4_sparse_kernel_data,
-            }
-            perf_data_dir = data_dir
-            if op_filename_enum == PerfDataFilename.nccl:
-                perf_data_dir = nccl_data_dir
-            elif op_filename_enum == PerfDataFilename.oneccl:
-                perf_data_dir = oneccl_data_dir if oneccl_data_dir else data_dir
-
-            data_filepath = os.path.join(perf_data_dir, op_filename_enum.value)
-            load_fn = func_map[op_filename_enum]
-
-            # `sources` is a list of `(path, kernel_source_filter | None)` tuples in
-            # priority order. Each loader walks them once and applies the existing
-            # first-wins-on-key-conflict logic per row, so cross-version / cross-
-            # backend inheritance falls out for free without a separate merge pass.
-            sources = self._build_op_sources(op_filename_enum, data_filepath, system_data_root)
-            result = load_fn(sources)
-
-            def _wrap_data_dict(data_dict: Optional[dict]):
-                return LoadedOpData(data_dict, op_filename_enum, data_filepath)
-
-            # `load_moe_data` is the only loader that returns a tuple — `(moe_default_data,
-            # moe_low_latency_data)` — because rows tagged `kernel_source="moe_torch_flow_min_latency"`
-            # are routed into a separate accumulator that downstream `query_moe` looks up under a
-            # different runtime mode. Every other loader returns a single `Optional[dict]`.
-            # TODO: collapse the asymmetry by either (a) making every loader return a tuple of
-            # `LoadedOpData` (1-tuple for non-moe) or (b) wrapping moe's two surfaces in a single
-            # container that downstream queries dispatch on. Both touch many call sites — defer
-            # until there's a second loader that needs row-level fan-out.
-            if isinstance(result, tuple):
-                return tuple(_wrap_data_dict(item) for item in result)
-            return _wrap_data_dict(result)
-
-        # Core ops. GEMM / ContextAttention / GenerationAttention moved to
-        # operations/*: data loading, SOL correction, and grid extrapolation
-        # now live there. Their ``load_data`` classmethods are invoked once
-        # below (after the other ``_load_op_data`` calls) so the loaders are
-        # still patched in unit-test setups.
-        # ``_moe_data`` + ``_moe_low_latency_data`` are loaded by
-        # ``MoE.load_data`` below (AIC-? / ISSUE-12). The ``load_moe_data``
-        # CSV loader is still the only loader that returns a tuple; the MoE
-        # class unpacks it.
-
-        # Comm ops (CustomAllReduce + NCCL + P2P) moved to
-        # operations/communication.py. Their ``load_data`` classmethods are
-        # invoked below after the other ``_load_op_data`` calls (same
-        # transition rationale as GEMM/Attention — loaders are still
-        # patched during ``__init__`` in unit tests).
-
-        # More model-specific ops
-        # MLA family (regular + module + BMM) moved to operations/mla.py
-        # (ContextMLA.load_data / GenerationMLA.load_data / MLABmm.load_data /
-        # MLAModule.load_data handle the loads + extrapolation).
-        # mamba2 + gdn moved to operations/mamba.py (Mamba2Kernel.load_data /
-        # GDNKernel.load_data handle the loads).
-        # compute_scale + scale_matrix are GEMM-owned (loaded by GEMM.load_data below)
-        # context_dsa_module + generation_dsa_module are DSA-owned (loaded by
-        # ContextDSAModule.load_data / GenerationDSAModule.load_data below).
-        # ``_mhc_module_data`` is loaded by ``DeepSeekV4MHCModule.load_data``
-        # below. DSV4 context / generation attention module data + raw
-        # deepcopy + sparse-kernel sidecar dict are loaded by
-        # ``Context/GenerationDeepSeekV4AttentionModule.load_data`` below
-        # (AIC-1095 / ISSUE-11).
-
-        # sglang wideep path
-        if backend == "sglang":
-            # ``_wideep_context_moe_data`` + ``_wideep_generation_moe_data``
-            # are loaded by ``MoE.load_data`` below (AIC-537 / Phase 4.1).
-            # ``_wideep_deepep_normal_data`` + ``_wideep_deepep_ll_data``
-            # are loaded by ``MoEDispatch.load_data`` below.
-            # WideEP MLA data moved to operations/mla.py
-            # (WideEPContextMLA / WideEPGenerationMLA load_data handle these,
-            # gated internally on backend == "sglang"). Note: load happens
-            # at the bottom of __init__ for every backend; non-SGLang gets None.
-            pass
-
-        # DSA module-level attention data moved to operations/dsa.py
-        # (ContextDSAModule.load_data / GenerationDSAModule.load_data handle
-        # the load + deepcopy of the raw rows + grid extrapolation).
-
-        # TensorRT-LLM wideep path: ``_wideep_moe_compute_data`` and
-        # ``_trtllm_alltoall_data`` are loaded by ``TrtLLMWideEPMoe.load_data`` /
-        # ``TrtLLMWideEPMoeDispatch.load_data`` below (ISSUE-13). Both gate on
-        # ``database.backend == "trtllm"``.
-
-        # GEMM / ContextAttention / GenerationAttention own their CSV tables +
-        # SOL correction + grid extrapolation. The eager invocations here are
-        # a transition compromise — Pattern A is supposed to be lazy-on-first-
-        # query, but the existing test surface (stub_perf_db,
-        # comprehensive_perf_db) patches loaders only during ``__init__``,
-        # so a lazy load triggered later would hit unpatched real-disk
-        # loaders. ISSUE-16 retires these eager calls once test fixtures
-        # migrate to the lazy contract.
-        from aiconfigurator.sdk.operations.attention import ContextAttention, GenerationAttention
-        from aiconfigurator.sdk.operations.communication import NCCL, CustomAllReduce
-        from aiconfigurator.sdk.operations.dsa import ContextDSAModule, GenerationDSAModule
-        from aiconfigurator.sdk.operations.dsv4 import (
-            ContextDeepSeekV4AttentionModule,
-            DeepSeekV4MHCModule,
-            GenerationDeepSeekV4AttentionModule,
-        )
-        from aiconfigurator.sdk.operations.gemm import GEMM
-        from aiconfigurator.sdk.operations.mamba import GDNKernel, Mamba2Kernel
-        from aiconfigurator.sdk.operations.mla import (
-            ContextMLA,
-            GenerationMLA,
-            MLABmm,
-            MLAModule,
-            WideEPContextMLA,
-            WideEPGenerationMLA,
-        )
-        from aiconfigurator.sdk.operations.moe import (
-            MoE,
-            MoEDispatch,
-            TrtLLMWideEPMoE,
-            TrtLLMWideEPMoEDispatch,
-        )
-
-        GEMM.load_data(self)
-        ContextAttention.load_data(self)
-        GenerationAttention.load_data(self)
-        CustomAllReduce.load_data(self)
-        NCCL.load_data(self)
-        ContextDSAModule.load_data(self)
-        GenerationDSAModule.load_data(self)
-        Mamba2Kernel.load_data(self)
-        GDNKernel.load_data(self)
-        ContextMLA.load_data(self)
-        GenerationMLA.load_data(self)
-        MLABmm.load_data(self)
-        MLAModule.load_data(self)
-        WideEPContextMLA.load_data(self)
-        WideEPGenerationMLA.load_data(self)
-        DeepSeekV4MHCModule.load_data(self)
-        ContextDeepSeekV4AttentionModule.load_data(self)
-        GenerationDeepSeekV4AttentionModule.load_data(self)
-        MoE.load_data(self)
-        MoEDispatch.load_data(self)
-        TrtLLMWideEPMoE.load_data(self)
-        TrtLLMWideEPMoEDispatch.load_data(self)
-
-        # pre-correction (non-migrated ops; migrated ops apply their own
-        # SOL correction during ``load_data``)
-        self._correct_data()
-
-        # Context + Generation attention extrapolation moved to
-        # operations/attention.py (ContextAttention._extrapolate /
-        # GenerationAttention._extrapolate, invoked from their respective
-        # load_data classmethods above).
-
-        # GEMM extrapolation moved to operations/gemm.py (GEMM._extrapolate_gemm_data,
-        # invoked from GEMM.load_data above).
-
-        # MLA family extrapolation moved to operations/mla.py
-        # (Context/Generation MLA + WideEP variants + MLAModule).
-
-        # DSA module-level extrapolation moved to operations/dsa.py
-        # (ContextDSAModule._extrapolate / GenerationDSAModule._extrapolate,
-        # invoked from their respective load_data classmethods above).
-
-        # post-correction
-        self._correct_data()
-
-        self._update_support_matrix()
+        # Pattern A: every op class owns its CSV data and loads it on first query
+        # via ``OpClass.load_data(database)``. The previous eager warm-up here
+        # (22 explicit ``OpClass.load_data(self)`` calls + the pre/post
+        # ``_correct_data`` passes) was retired in AIC-533: each op now opens its
+        # data file the first time a query (or the lazy support matrix below)
+        # needs it. ``PerfDatabase()`` opens zero CSVs.
+        self.supported_quant_mode = _LazySupportMatrix(self)
         self._finalize_loaded_data()
 
     def _finalize_loaded_data(self) -> None:
