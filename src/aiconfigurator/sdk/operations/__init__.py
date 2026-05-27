@@ -5,33 +5,17 @@
 Operations package — one file per operation family with class-owned data
 loading and querying.
 
-This package replaces the prior monolithic ``operations.py``. Migration
-proceeds family-by-family (ISSUE-04 through ISSUE-14); each issue moves a
-group of op classes out of ``_legacy.py`` into a dedicated file. ``_legacy.py``
-is deleted by ISSUE-15 once empty.
+This package replaces the prior monolithic ``operations.py``. Each family
+lives in its own module; ``Operation`` and ``clear_all_op_caches`` come
+from ``base.py``.
 
 Public surface preserves the prior import pattern:
 
     from aiconfigurator.sdk.operations import GEMM, ContextAttention, ...
-
-works whether the class lives in ``_legacy.py`` or in a per-family module.
 """
 
 from __future__ import annotations
 
-# Everything still in _legacy.py until its owning ISSUE migrates it.
-# Re-export the legacy module's logger so tests that do
-# ``mock.patch("aiconfigurator.sdk.operations.logger")`` keep working. The
-# logger lives in ``_legacy.py``; per-family migrations don't redirect their
-# log calls until their owning issue lands.
-from aiconfigurator.sdk.operations._legacy import (
-    logger,  # noqa: F401
-)
-
-# Per-family modules (migrated out of _legacy.py) plus the shared base
-# class. Import order doesn't matter for circular-import safety — Python's
-# import caching handles the dependency graph — so we follow ruff's
-# alphabetical convention here.
 from aiconfigurator.sdk.operations.attention import ContextAttention, GenerationAttention
 from aiconfigurator.sdk.operations.base import Operation, clear_all_op_caches
 from aiconfigurator.sdk.operations.communication import NCCL, P2P, CustomAllReduce
