@@ -67,16 +67,13 @@ class Gemma4MoEModel(BaseModel):
         self._is_dense = not topk or not num_experts
         if not self._is_dense:
             assert (
-                self.config.tp_size * self.config.attention_dp_size
-                == self.config.moe_tp_size * self.config.moe_ep_size
+                self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
             ), (
                 f"tp_size ({self.config.tp_size}) * attention_dp_size "
                 f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
                 f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
             )
-            assert num_experts >= self.config.moe_ep_size, (
-                f"ep size cannot be larger than num_experts {num_experts}"
-            )
+            assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
         else:
             # Dense Gemma 4: collapse the MoE search-space to ep=1 so pareto
             # iteration doesn't enumerate equivalent dense configurations.
