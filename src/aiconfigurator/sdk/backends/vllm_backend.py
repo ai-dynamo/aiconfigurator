@@ -38,6 +38,17 @@ class VLLMBackend(BaseBackend):
         super().__init__()
         self.name = common.BackendName.vllm
 
+    def _mix_step_efficiency(self, ctx_tokens: int, gen_tokens: int) -> float:
+        # vLLM v1 serialises prefill (max_num_partial_prefills=1): each mix step
+        # processes one request's full ISL alongside a handful of decode tokens
+        # from other requests. With gen_frac = (b-1)/ISL ≈ 0.001 at typical
+        # operating points, the base-class power-law formula extrapolates to
+        # ~0.19 — an 80% reduction with no physical basis. Full-corpus analysis
+        # (1928 vLLM agg entries) shows median implied efficiency of 1.115,
+        # confirming the base-class formula is inapplicable to this regime.
+        # Return 1.0: no correction applied for this backend.
+        return 1.0
+
     def _mix_step_gen_tokens(self, b: int, ctx_tokens: int, isl: int, osl: int) -> int:
         # vLLM v1 scheduler sets max_num_partial_prefills=1 by default, meaning
         # exactly one request is in partial-prefill state per forward pass.

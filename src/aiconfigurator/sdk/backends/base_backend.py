@@ -100,6 +100,28 @@ class BaseBackend:
             return max(1, int(b // (steps_to_finish_ctx / osl)))
         return max(1, b - int(np.ceil(ctx_tokens / isl)))
 
+    def _mix_step_efficiency(self, ctx_tokens: int, gen_tokens: int) -> float:
+        """GPU batching efficiency factor for a mixed prefill/decode forward pass.
+
+        Per-op silicon data measures each operation in isolation, overstating the
+        marginal cost of prefill tokens when they share a forward pass with decode
+        tokens. Weight matrices are loaded once from HBM for the combined batch.
+        Default: 1.0 (no correction — preserves existing behaviour for backends
+        without empirical efficiency data).
+        """
+        return 1.0
+
+    def _tpot_mix_steps(self, num_mix_steps: int) -> int:
+        """Return the effective mix-step count for TPOT calculation.
+
+        Engines with pipeline-drain latency at the context/decode boundary
+        (requests cannot be immediately enqueued after prefill finishes) may
+        reduce the effective step count to account for that bubble. Default:
+        use the full mix step count. Subclasses should override with an
+        empirically calibrated correction.
+        """
+        return num_mix_steps
+
     def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int) -> dict:
         """Resolve backend-specific run_agg kwargs to defaults.
 
@@ -1133,12 +1155,10 @@ class BaseBackend:
                 num_genonly_tokens = 0
                 num_mix_steps_for_tpot_calc = num_mix_steps
             else:
-                # 3-step is an empirical correction for pipelining requests where new requests
-                # cannot be enqueued immediately after last request's exit
                 num_mix_steps = steps_to_finish_ctx
                 num_genonly_steps = osl - num_mix_steps
                 num_genonly_tokens = b
-                num_mix_steps_for_tpot_calc = max(1, num_mix_steps - 3)
+                num_mix_steps_for_tpot_calc = self._tpot_mix_steps(num_mix_steps)
         elif b == 1:
             # special case for b=1
             num_mix_steps = 1
@@ -1155,6 +1175,11 @@ class BaseBackend:
         mix_step_latency_ms, mix_step_energy_wms, mix_per_ops, mix_per_ops_src = self._get_mix_step_latency(
             model, database, runtime_config, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl, prefix
         )
+        mix_efficiency = self._mix_step_efficiency(num_mix_ctx_tokens, num_mix_gen_tokens)
+        mix_step_latency_ms *= mix_efficiency
+        mix_step_energy_wms *= mix_efficiency
+        if mix_efficiency != 1.0:
+            mix_per_ops = {op: v * mix_efficiency for op, v in mix_per_ops.items()}
         per_ops_data["mix_step"] = mix_per_ops
         per_ops_source["mix_step"] = mix_per_ops_src
 
