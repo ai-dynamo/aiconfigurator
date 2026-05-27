@@ -41,10 +41,10 @@ corresponding cache slot is ``None`` and consumers must guard.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.operations import _legacy as _legacy_module
 from aiconfigurator.sdk.operations.base import Operation
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -52,16 +52,7 @@ if TYPE_CHECKING:
     from aiconfigurator.sdk.perf_database import PerfDatabase
 
 
-# Module-level ``logger`` — re-bound on each access via ``_legacy_module.logger``
-# so ``mock.patch("aiconfigurator.sdk.operations._legacy.logger")`` in tests
-# continues to capture log calls emitted from this module (the existing test
-# surface targets the ``_legacy`` namespace, not per-family modules).
-class _LoggerProxy:
-    def __getattr__(self, name):
-        return getattr(_legacy_module.logger, name)
-
-
-logger = _LoggerProxy()
+logger = logging.getLogger(__name__)
 
 
 def _cache_key(database: PerfDatabase) -> tuple:
