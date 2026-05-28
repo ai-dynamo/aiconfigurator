@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Encoder (non-causal) attention collector for multimodal / omni-modal models.
+"""TensorRT-LLM encoder (non-causal) attention collector for multimodal / omni-modal models.
 
-SM-specific FMHA kernel dispatch is handled internally by ``thop.attention``:
+Builds a single TRT-LLM torch-flow attention layer running in encoder mode:
 
 - ``kv_cache_manager=None``                        -> single-pass, no KV cache
 - ``attention_mask=PredefinedAttentionMask.FULL``  -> non-causal (padding mask)
 - ``pos_embd_params=None``                         -> RoPE applied outside FMHA
 
-Quant: bf16 only. TRT-LLM upstream does not support fp8 on the encoder path
+Quant: bf16 only. TRT-LLM upstream does not support fp8 on the encoder path.
 """
 
-__compat__ = "tensorrt_llm>=1.3.0rc5"
+__compat__ = "trtllm>=1.3.0rc5"
 
 import os
 
@@ -28,8 +28,36 @@ from tensorrt_llm._torch.metadata import KVCacheParams
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantConfig
 
+from collector.case_generator import get_attention_encoder_shape_sweeps
 from collector.helper import benchmark_with_power, log_perf
 from collector.registry_types import PerfFile
+
+
+def _int_list(values):
+    return [int(value) for value in values]
+
+
+def get_encoder_attention_test_cases():
+    test_cases = []
+
+    for shape_sweep in get_attention_encoder_shape_sweeps("trtllm"):
+        batch_sizes = _int_list(shape_sweep["batch_sizes"])
+        sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
+        head_counts = _int_list(shape_sweep["head_counts"])
+        head_dims = _int_list(shape_sweep["head_dims"])
+
+        for head_dim in head_dims:
+            for n in sorted(head_counts):
+                for s in sorted(sequence_lengths):
+                    for b in sorted(batch_sizes):
+                        # Workload token budget (128K) + 32-bit indexing safety.
+                        if b * s > 131072:
+                            continue
+                        if 4 * b * s * n * head_dim * 2 >= 2**31:
+                            continue
+                        test_cases.append([b, s, n, head_dim])
+
+    return test_cases
 
 
 def run_encoder_attention_torch(
@@ -49,7 +77,7 @@ def run_encoder_attention_torch(
 
     quant_config = QuantConfig(quant_algo=None, kv_cache_quant_algo=None, group_size=128)
 
-    # pos_embd_params=None Production ViT applies RoPE outside the FMHA kernel
+    # pos_embd_params=None: production ViT applies RoPE outside the FMHA kernel.
     attn = create_attention(
         backend_name="TRTLLM",
         layer_idx=0,
@@ -70,7 +98,7 @@ def run_encoder_attention_torch(
     attn_metadata = TrtllmAttentionMetadata(
         max_num_requests=batch_size,
         max_num_tokens=total_num_tokens,
-        # require _max_seq_len_storage field set explicitly for kv_cache_manager=None case.
+        # _max_seq_len_storage must be set explicitly when kv_cache_manager=None.
         _max_seq_len_storage=seq_len,
         kv_cache_manager=None,
         mapping=mapping,
@@ -134,72 +162,7 @@ def run_encoder_attention_torch(
     )
 
 
-def get_encoder_attention_test_cases(if_unit_test=False):
-    if not if_unit_test:
-        b_list = [1, 2, 4, 8, 16, 32, 64]
-        s_list = [
-            13,
-            16,
-            26,
-            32,
-            52,
-            64,
-            104,
-            128,
-            192,
-            256,
-            400,
-            512,
-            576,
-            1024,
-            1296,
-            1500,
-            1536,
-            2048,
-            2304,
-            3072,
-            3136,
-            4096,
-            5184,
-            6144,
-            6400,
-            7744,
-            8192,
-            9216,
-            10240,
-            10816,
-            12288,
-            12544,
-            14400,
-            16384,
-            24576,
-            32768,
-            49152,
-            65536,
-        ]
-        n_list = [2, 4, 5, 8, 10, 12, 14, 16, 20, 24, 32]
-        head_dim_list = [64, 72, 80]
-    else:
-        b_list = [1]
-        s_list = [256]
-        n_list = [16]
-        head_dim_list = [80]
-
-    test_cases = []
-    for head_dim in head_dim_list:
-        for n in sorted(n_list):
-            for s in sorted(s_list):
-                for b in sorted(b_list):
-                    # Workload token budget guard (max 128K tokens)
-                    if b * s > 131072:
-                        continue
-                    if 4 * b * s * n * head_dim * 2 >= 2**31:
-                        continue
-                    test_cases.append([b, s, n, head_dim])
-    return test_cases
-
-
 if __name__ == "__main__":
-    for test_case in get_encoder_attention_test_cases()[:5]:
-        print(f"Running encoder attention test case: {test_case}")
+    test_cases = get_encoder_attention_test_cases()
+    for test_case in test_cases:
         run_encoder_attention_torch(*test_case, perf_filename=PerfFile.ENCODER_ATTENTION)

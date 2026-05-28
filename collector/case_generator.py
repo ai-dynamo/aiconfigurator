@@ -102,6 +102,11 @@ def get_attention_generation_shape_sweeps(backend: str) -> list[dict[str, object
     return get_merged_base_op_case_specs(backend, "attention_generation")
 
 
+def get_attention_encoder_shape_sweeps(backend: str) -> list[dict[str, object]]:
+    """Return YAML-backed encoder (non-causal) attention shape sweeps for one backend."""
+    return get_merged_base_op_case_specs(backend, "attention_encoder")
+
+
 def get_base_common_case_values(name: str) -> dict[str, object]:
     """Return shared scalar/list values from base op case YAML files."""
     try:

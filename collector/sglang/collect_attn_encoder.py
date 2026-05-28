@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Encoder (non-causal) attention collector for multimodal / omni-modal models.
+"""SGLang encoder (non-causal) attention collector for multimodal / omni-modal models.
 
-SM dispatch mirrors ``VisionAttention._determine_attention_backend``
+SM dispatch mirrors ``VisionAttention._determine_attention_backend``:
 
 - CUDA SM == 90 (Hopper)     -> ``flash_attn_varlen_func``           (FA3)
 - CUDA SM == 100 (Blackwell) -> ``flash_attn_varlen_func(ver=4)``    (FA4)
 - other CUDA (SM<90, SM120)  -> ``context_attention_fwd``            (Triton)
 
-Quant: bf16 only. SGLang upstream does not support fp8 ViT FMHA
+Quant: bf16 only. SGLang upstream does not support fp8 ViT FMHA.
 """
 
 __compat__ = "sglang>=0.5.11"
@@ -19,11 +19,39 @@ from typing import NamedTuple
 import pkg_resources
 import torch
 
+from collector.case_generator import get_attention_encoder_shape_sweeps
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
 
 class Timing(NamedTuple):
     mean: float
+
+
+def _int_list(values):
+    return [int(value) for value in values]
+
+
+def get_encoder_attention_test_cases():
+    test_cases = []
+
+    for shape_sweep in get_attention_encoder_shape_sweeps("sglang"):
+        batch_sizes = _int_list(shape_sweep["batch_sizes"])
+        sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
+        head_counts = _int_list(shape_sweep["head_counts"])
+        head_dims = _int_list(shape_sweep["head_dims"])
+
+        for head_dim in head_dims:
+            for n in sorted(head_counts):
+                for s in sorted(sequence_lengths):
+                    for b in sorted(batch_sizes):
+                        # Workload token budget (128K) + 32-bit indexing safety.
+                        if b * s > 131072:
+                            continue
+                        if 4 * b * s * n * head_dim * 2 >= 2**31:
+                            continue
+                        test_cases.append([b, s, n, head_dim])
+
+    return test_cases
 
 
 def _build_kernel_runner(
@@ -94,8 +122,7 @@ def _build_kernel_runner(
 
         return run_iter, "flash_attention_v4"
 
-    # SM<90 or SM>100: Triton path
-    # matching VisionTritonAttention.forward.
+    # SM<90 or SM>100: Triton path matching VisionTritonAttention.forward.
     from sglang.srt.layers.attention.triton_ops.prefill_attention import (
         context_attention_fwd,
     )
@@ -145,7 +172,6 @@ def run_encoder_attention_torch(
         dtype=torch.bfloat16,
     )
 
-    # Use benchmark_with_power context manager
     with benchmark_with_power(
         device=torch_device,
         kernel_func=run_iter,
@@ -180,74 +206,8 @@ def run_encoder_attention_torch(
     return Timing(latency * 1e-3)
 
 
-def get_encoder_attention_test_cases(if_unit_test=False):
-    if not if_unit_test:
-        b_list = [1, 2, 4, 8, 16, 32, 64]
-        s_list = [
-            13,
-            16,
-            26,
-            32,
-            52,
-            64,
-            104,
-            128,
-            192,
-            256,
-            400,
-            512,
-            576,
-            1024,
-            1296,
-            1500,
-            1536,
-            2048,
-            2304,
-            3072,
-            3136,
-            4096,
-            5184,
-            6144,
-            6400,
-            7744,
-            8192,
-            9216,
-            10240,
-            10816,
-            12288,
-            12544,
-            14400,
-            16384,
-            24576,
-            32768,
-            49152,
-            65536,
-        ]
-        n_list = [2, 4, 5, 8, 10, 12, 14, 16, 20, 24, 32]
-        head_dim_list = [64, 72, 80]
-    else:
-        b_list = [1]
-        s_list = [256]
-        n_list = [16]
-        head_dim_list = [80]
-
-    test_cases = []
-    for head_dim in head_dim_list:
-        for n in sorted(n_list):
-            for s in sorted(s_list):
-                for b in sorted(b_list):
-                    # Workload token budget guard (max 128K tokens)
-                    if b * s > 131072:
-                        continue
-                    if 4 * b * s * n * head_dim * 2 >= 2**31:
-                        continue
-                    test_cases.append([b, s, n, head_dim])
-    return test_cases
-
-
 if __name__ == "__main__":
     from collector.registry_types import PerfFile
 
-    for test_case in get_encoder_attention_test_cases()[:5]:
-        print(f"Running encoder attention test case: {test_case}")
+    for test_case in get_encoder_attention_test_cases():
         run_encoder_attention_torch(*test_case, perf_filename=PerfFile.ENCODER_ATTENTION)

@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Encoder (non-causal) attention collector for multimodal encoders.
+"""vLLM encoder (non-causal) attention collector for multimodal encoders.
 
 Directly invokes the ViT wrappers used by vLLM's ``MMEncoderAttention`` path
 (``vit_flash_attn_wrapper`` / ``vit_triton_attn_wrapper`` / ``vit_torch_sdpa_wrapper``).
 
-Quant: bf16 only. vLLM upstream supports fp8 ViT FMHA via the FLASHINFER;
+Quant: bf16 only. vLLM upstream supports fp8 ViT FMHA via FLASHINFER;
 enabling that path here is left for the future.
 """
 
@@ -23,7 +23,35 @@ from vllm.v1.attention.ops.vit_attn_wrappers import (
 )
 from vllm.version import __version__ as vllm_version
 
+from collector.case_generator import get_attention_encoder_shape_sweeps
 from collector.helper import benchmark_with_power, log_perf
+
+
+def _int_list(values):
+    return [int(value) for value in values]
+
+
+def get_encoder_attention_test_cases():
+    test_cases = []
+
+    for shape_sweep in get_attention_encoder_shape_sweeps("vllm"):
+        batch_sizes = _int_list(shape_sweep["batch_sizes"])
+        sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
+        head_counts = _int_list(shape_sweep["head_counts"])
+        head_dims = _int_list(shape_sweep["head_dims"])
+
+        for head_dim in head_dims:
+            for n in sorted(head_counts):
+                for s in sorted(sequence_lengths):
+                    for b in sorted(batch_sizes):
+                        # Workload token budget (128K) + 32-bit indexing safety.
+                        if b * s > 131072:
+                            continue
+                        if 4 * b * s * n * head_dim * 2 >= 2**31:
+                            continue
+                        test_cases.append([b, s, n, head_dim])
+
+    return test_cases
 
 
 def run_encoder_attention_torch(
@@ -47,7 +75,7 @@ def run_encoder_attention_torch(
     k = torch.randn(batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=device)
     v = torch.randn(batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=device)
 
-    # Pre-generate cu_seqlens so the FA/Triton wrappers skip their internal ``torch.arange`` fallback
+    # Pre-generate cu_seqlens so the FA/Triton wrappers skip their internal ``torch.arange`` fallback.
     cu_seqlens = torch.arange(
         0,
         (batch_size + 1) * seq_len,
@@ -58,32 +86,38 @@ def run_encoder_attention_torch(
 
     if backend == AttentionBackendEnum.FLASH_ATTN:
         fa_version = get_flash_attn_version(head_size=head_dim)
-        run = lambda: vit_flash_attn_wrapper(
-            q,
-            k,
-            v,
-            batch_size=batch_size,
-            is_rocm_aiter=False,
-            fa_version=fa_version,
-            scale=scale,
-            cu_seqlens=cu_seqlens,
-        )
+
+        def run():
+            vit_flash_attn_wrapper(
+                q,
+                k,
+                v,
+                batch_size=batch_size,
+                is_rocm_aiter=False,
+                fa_version=fa_version,
+                scale=scale,
+                cu_seqlens=cu_seqlens,
+            )
     elif backend == AttentionBackendEnum.TRITON_ATTN:
-        run = lambda: vit_triton_attn_wrapper(
-            q,
-            k,
-            v,
-            batch_size=batch_size,
-            scale=scale,
-            cu_seqlens=cu_seqlens,
-        )
+
+        def run():
+            vit_triton_attn_wrapper(
+                q,
+                k,
+                v,
+                batch_size=batch_size,
+                scale=scale,
+                cu_seqlens=cu_seqlens,
+            )
     elif backend == AttentionBackendEnum.TORCH_SDPA:
-        run = lambda: vit_torch_sdpa_wrapper(
-            q,
-            k,
-            v,
-            scale=scale,
-        )
+
+        def run():
+            vit_torch_sdpa_wrapper(
+                q,
+                k,
+                v,
+                scale=scale,
+            )
     else:
         # FlashInfer ViT needs cu_seqlens padding + workspace; not on the ViT default path.
         raise NotImplementedError(f"ViT backend {backend} not supported by collector")
@@ -121,74 +155,9 @@ def run_encoder_attention_torch(
     )
 
 
-def get_encoder_attention_test_cases(if_unit_test=False):
-    if not if_unit_test:
-        b_list = [1, 2, 4, 8, 16, 32, 64]
-        s_list = [
-            13,
-            16,
-            26,
-            32,
-            52,
-            64,
-            104,
-            128,
-            192,
-            256,
-            400,
-            512,
-            576,
-            1024,
-            1296,
-            1500,
-            1536,
-            2048,
-            2304,
-            3072,
-            3136,
-            4096,
-            5184,
-            6144,
-            6400,
-            7744,
-            8192,
-            9216,
-            10240,
-            10816,
-            12288,
-            12544,
-            14400,
-            16384,
-            24576,
-            32768,
-            49152,
-            65536,
-        ]
-        n_list = [2, 4, 5, 8, 10, 12, 14, 16, 20, 24, 32]
-        head_dim_list = [64, 72, 80]
-    else:
-        b_list = [1]
-        s_list = [256]
-        n_list = [16]
-        head_dim_list = [80]
-
-    test_cases = []
-    for head_dim in head_dim_list:
-        for n in sorted(n_list):
-            for s in sorted(s_list):
-                for b in sorted(b_list):
-                    # Workload token budget guard (max 128K tokens)
-                    if b * s > 131072:
-                        continue
-                    if 4 * b * s * n * head_dim * 2 >= 2**31:
-                        continue
-                    test_cases.append([b, s, n, head_dim])
-    return test_cases
-
-
 if __name__ == "__main__":
     from collector.registry_types import PerfFile
 
-    for test_case in get_encoder_attention_test_cases()[:5]:
-        print(f"Running encoder attention test case: {test_case}")
+    test_cases = get_encoder_attention_test_cases()
+    for test_case in test_cases:
         run_encoder_attention_torch(*test_case, perf_filename=PerfFile.ENCODER_ATTENTION)
