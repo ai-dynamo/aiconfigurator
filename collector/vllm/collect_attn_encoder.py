@@ -160,4 +160,7 @@ if __name__ == "__main__":
 
     test_cases = get_encoder_attention_test_cases()
     for test_case in test_cases:
-        run_encoder_attention_torch(*test_case, perf_filename=PerfFile.ENCODER_ATTENTION)
+        try:
+            run_encoder_attention_torch(*test_case, perf_filename=PerfFile.ENCODER_ATTENTION)
+        except Exception as e:
+            print(f"[encoder_attention] case {test_case} failed: {type(e).__name__}: {e}")

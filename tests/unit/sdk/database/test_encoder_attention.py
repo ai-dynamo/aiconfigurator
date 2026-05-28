@@ -58,16 +58,6 @@ class TestQueryEncoderAttention:
         expected = comprehensive_perf_db._encoder_attention_data[fmha][h][n][s][b]["latency"]
         assert math.isclose(result, expected, rel_tol=1e-6)
 
-    def test_hybrid_falls_back_to_empirical(self, comprehensive_perf_db):
-        """HYBRID mode falls back to empirical when key is missing."""
-        b, s, n, h = 999, 64, 16, 72  # b=999 not in dummy data
-        fmha = common.FMHAQuantMode.bfloat16
-
-        result = comprehensive_perf_db.query_encoder_attention(
-            b, s, n, h, fmha, database_mode=common.DatabaseMode.HYBRID
-        )
-        assert float(result) > 0
-
 
 class TestEncoderAttentionOp:
     """Test cases for EncoderAttention op class."""

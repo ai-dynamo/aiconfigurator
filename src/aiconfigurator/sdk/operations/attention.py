@@ -628,8 +628,8 @@ class EncoderAttention(Operation):
 
     Owns ``_data_cache: {key: LoadedOpData}`` for the encoder attention CSV.
     Schema is simpler than context attention: MHA only (no n_kv), no KV cache
-    (no kvcache_quant_mode), no sliding window. No SOL clamp (encoder kernels
-    weren't in the legacy ``_correct_data``) and no grid extrapolation.
+    (no kvcache_quant_mode), no sliding window. No SOL clamp. Grid extrapolation
+    reuses ``_CONTEXT_ATTENTION_TARGET_*``.
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -665,9 +665,9 @@ class EncoderAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads encoder_attention CSV into the class cache and
-        binds ``database._encoder_attention_data``. No SOL correction and
-        no grid extrapolation — see class docstring."""
+        """Idempotent. Loads encoder_attention CSV into the class cache,
+        applies grid extrapolation, binds ``database._encoder_attention_data``.
+        """
         import os
 
         from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
@@ -681,6 +681,8 @@ class EncoderAttention(Operation):
             cls._data_cache[key] = LoadedOpData(
                 load_encoder_attention_data(sources), PerfDataFilename.encoder_attention, primary_path
             )
+
+            cls._extrapolate(cls._data_cache[key])
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -690,6 +692,26 @@ class EncoderAttention(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
+
+    @classmethod
+    def _extrapolate(cls, data_wrapper) -> None:
+        """Densify the (n, s, b) grid. Reuses ``_CONTEXT_ATTENTION_TARGET_*``
+        since the encoder query shape matches context attention exactly."""
+        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
+            return
+
+        for quant_mode in data_wrapper:
+            for head_size in data_wrapper[quant_mode]:
+                data_dict = data_wrapper[quant_mode][head_size]
+                min_x = min(data_dict.keys())
+                filtered_x = [i for i in _CONTEXT_ATTENTION_TARGET_X if i >= min_x]
+                interpolation.extrapolate_data_grid(
+                    data_dict=data_dict,
+                    target_x_list=filtered_x,
+                    target_y_list=_CONTEXT_ATTENTION_TARGET_Y,
+                    target_z_list=_CONTEXT_ATTENTION_TARGET_Z,
+                    sqrt_y_value=True,
+                )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_encoder_attention)
