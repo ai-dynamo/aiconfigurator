@@ -186,3 +186,26 @@ def clear_all_op_caches() -> None:
     for cls in _all_operation_subclasses():
         cls.clear_cache()
     Operation._load_data_call_count.clear()
+
+
+def warm_all_op_data(database: PerfDatabase) -> None:
+    """Eagerly call ``load_data`` on every ``Operation`` subclass against
+    ``database``.
+
+    The lazy-load contract (Pattern A) defers per-op CSV reads until the
+    first query (or the first read of ``database.supported_quant_mode``
+    for the op's key). Diagnostic tooling that walks every op's instance
+    attribute directly — notebooks, sanity-check scripts, support-matrix
+    dumpers — wants the pre-AIC-533 "everything loaded" semantics; this
+    helper restores them in one call.
+
+    Idempotent: every ``load_data`` is cache-key gated, so calling this
+    repeatedly is cheap. Op classes that don't own CSV data inherit the
+    base ``Operation.load_data`` no-op and are walked without effect.
+
+    Production callers that read ``database.supported_quant_mode[<key>]``
+    or call ``database.query_<op>(...)`` should NOT use this — those
+    paths trigger the lazy load on the ops they actually need, which is
+    the whole point of Pattern A."""
+    for cls in _all_operation_subclasses():
+        cls.load_data(database)

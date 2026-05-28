@@ -17,7 +17,7 @@ Public surface preserves the prior import pattern:
 from __future__ import annotations
 
 from aiconfigurator.sdk.operations.attention import ContextAttention, GenerationAttention
-from aiconfigurator.sdk.operations.base import Operation, clear_all_op_caches
+from aiconfigurator.sdk.operations.base import Operation, clear_all_op_caches, warm_all_op_data
 from aiconfigurator.sdk.operations.communication import NCCL, P2P, CustomAllReduce
 from aiconfigurator.sdk.operations.dsa import ContextDSAModule, GenerationDSAModule
 from aiconfigurator.sdk.operations.dsv4 import (
@@ -79,4 +79,5 @@ __all__ = [
     "WideEPGenerationMLA",
     "_BaseDeepSeekV4AttentionModule",
     "clear_all_op_caches",
+    "warm_all_op_data",
 ]

@@ -10,26 +10,15 @@ import pytest
 import yaml
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.operations.base import Operation, _all_operation_subclasses
+from aiconfigurator.sdk.operations import warm_all_op_data as _warm_lazy_op_caches
+from aiconfigurator.sdk.operations.base import Operation
 from aiconfigurator.sdk.perf_database import PerfDatabase
 
-
-def _warm_lazy_op_caches(db: PerfDatabase) -> None:
-    """Eagerly call ``load_data`` on every imported ``Operation`` subclass
-    while loader patches are still active.
-
-    Replaces the eager ``OpClass.load_data(self)`` loop that
-    ``PerfDatabase.__init__`` used to run as a transition compromise. With
-    the fixture taking over that warm-up, the next commit can retire the
-    eager calls in ``__init__`` and leave production code fully lazy.
-
-    Dynamic discovery (``_all_operation_subclasses``) avoids the
-    conftest carrying a parallel list of op classes that would drift from
-    ``__init__`` as new ops are added. ``load_data`` is idempotent and
-    the base ``Operation.load_data`` is a no-op, so walking every
-    subclass is safe."""
-    for cls in _all_operation_subclasses():
-        cls.load_data(db)
+# ``_warm_lazy_op_caches`` is a thin alias for ``warm_all_op_data`` —
+# the public helper that walks every ``Operation`` subclass and calls
+# ``load_data(database)`` on it. Used by the fixtures below to warm
+# every op's class cache while loader patches are still active so
+# subsequent test queries hit the cache instead of opening real CSVs.
 
 
 @pytest.fixture(autouse=True)
