@@ -23,10 +23,10 @@ empty defaults that suffice.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.operations import _legacy as _legacy_module
 from aiconfigurator.sdk.operations.base import Operation
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -34,15 +34,7 @@ if TYPE_CHECKING:
     from aiconfigurator.sdk.perf_database import PerfDatabase
 
 
-# Late-binding logger proxy — same trick as ``operations/moe.py`` so
-# ``mock.patch("aiconfigurator.sdk.operations._legacy.logger")`` in tests
-# captures debug log calls emitted from this module.
-class _LoggerProxy:
-    def __getattr__(self, name):
-        return getattr(_legacy_module.logger, name)
-
-
-logger = _LoggerProxy()
+logger = logging.getLogger(__name__)
 
 
 class FallbackOp(Operation):

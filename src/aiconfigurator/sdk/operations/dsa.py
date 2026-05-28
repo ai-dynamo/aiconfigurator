@@ -29,16 +29,45 @@ from __future__ import annotations
 
 import copy
 import logging
+from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.base import Operation
+from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
     from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+
+
+DSA_MODEL_DIMS: dict[str, dict] = {
+    "DeepseekV32ForCausalLM": {
+        "hidden_size": 7168,
+        "q_lora_rank": 1536,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "index_topk": 2048,
+        "index_head_dim": 128,
+        "index_n_heads": 64,
+    },
+    "GlmMoeDsaForCausalLM": {
+        "hidden_size": 6144,
+        "q_lora_rank": 2048,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 192,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 256,
+        "index_topk": 2048,
+        "index_head_dim": 128,
+        "index_n_heads": 32,
+    },
+}
+
+DEFAULT_DSA_ARCHITECTURE = "DeepseekV32ForCausalLM"
 
 
 # Extrapolation grids — lifted verbatim from the legacy blocks in
@@ -172,7 +201,7 @@ class ContextDSAModule(Operation):
         ``database._raw_context_dsa_module_data``."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_context_dsa_module_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -242,7 +271,11 @@ class ContextDSAModule(Operation):
         index_topk: int | None = None,
     ):
         """Query context DSA module table. Verbatim port of the legacy body."""
-        from aiconfigurator.sdk.perf_database import DEFAULT_DSA_ARCHITECTURE, DSA_MODEL_DIMS, PerfDataNotAvailableError
+        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        # ``DEFAULT_DSA_ARCHITECTURE`` and ``DSA_MODEL_DIMS`` live at module
+        # level in this file — use them directly rather than round-tripping
+        # through ``perf_database``'s backward-compat re-export.
 
         if architecture is None:
             architecture = DEFAULT_DSA_ARCHITECTURE
@@ -329,9 +362,11 @@ class ContextDSAModule(Operation):
             total_mem = gemm_weight_bytes + kv_cache_bytes + indexer_cache_bytes + q_io_bytes
 
             # ── SOL ─────────────────────────────────────────────────────
-            gemm_flops = database._get_quant_tc_flops(gemm_quant_mode)
-            indexer_fp8_flops = database._get_quant_tc_flops(common.FMHAQuantMode.fp8)
-            attn_flops = database._get_quant_tc_flops(fmha_quant_mode)
+            from aiconfigurator.sdk.operations.gemm import GEMM
+
+            gemm_flops = GEMM._get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+            indexer_fp8_flops = GEMM._get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+            attn_flops = GEMM._get_quant_tc_flops(database.system_spec, fmha_quant_mode)
 
             sol_math = (
                 gemm_group_ops / gemm_flops + indexer_logits_ops / indexer_fp8_flops + sparse_attn_ops / attn_flops
@@ -400,7 +435,9 @@ class ContextDSAModule(Operation):
                     num_heads, full_s, b, raw_dsa_dict, index_topk
                 )
                 if result is None:
-                    result = database._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
+                    result = interpolation.interp_3d(
+                        num_heads, full_s, b, dsa_dict, "cubic", database._extracted_metrics_cache
+                    )
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
             except (KeyError, TypeError, ValueError, AssertionError) as exc:
@@ -522,7 +559,7 @@ class GenerationDSAModule(Operation):
         extrapolation, binds ``database._generation_dsa_module_data``."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_generation_dsa_module_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -583,7 +620,11 @@ class GenerationDSAModule(Operation):
         index_topk: int | None = None,
     ):
         """Query generation DSA module table. Verbatim port of the legacy body."""
-        from aiconfigurator.sdk.perf_database import DEFAULT_DSA_ARCHITECTURE, DSA_MODEL_DIMS, PerfDataNotAvailableError
+        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        # ``DEFAULT_DSA_ARCHITECTURE`` and ``DSA_MODEL_DIMS`` live at module
+        # level in this file — use them directly rather than round-tripping
+        # through ``perf_database``'s backward-compat re-export.
 
         if architecture is None:
             architecture = DEFAULT_DSA_ARCHITECTURE
@@ -643,9 +684,11 @@ class GenerationDSAModule(Operation):
             kv_cache_bytes = b * effective_kv * attn_head_dim * kv_cache_dtype.value.memory
             total_mem = gemm_weight_bytes + indexer_cache_bytes + kv_cache_bytes
 
-            gemm_flops = database._get_quant_tc_flops(gemm_quant_mode)
-            indexer_fp8_flops = database._get_quant_tc_flops(common.FMHAQuantMode.fp8)
-            attn_flops = database._get_quant_tc_flops(fmha_mode)
+            from aiconfigurator.sdk.operations.gemm import GEMM
+
+            gemm_flops = GEMM._get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+            indexer_fp8_flops = GEMM._get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+            attn_flops = GEMM._get_quant_tc_flops(database.system_spec, fmha_mode)
 
             sol_math = (
                 gemm_group_ops / gemm_flops + indexer_logits_ops / indexer_fp8_flops + sparse_attn_ops / attn_flops
@@ -690,7 +733,7 @@ class GenerationDSAModule(Operation):
                 )
             try:
                 dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
-                result = database._interp_3d(num_heads, b, s, dsa_dict, "cubic")
+                result = interpolation.interp_3d(num_heads, b, s, dsa_dict, "cubic", database._extracted_metrics_cache)
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
             except (KeyError, TypeError, ValueError, AssertionError) as exc:
@@ -757,3 +800,104 @@ class GenerationDSAModule(Operation):
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
+
+
+# ─────────────────────────────────────────────────────────
+# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
+# ─────────────────────────────────────────────────────────
+
+
+def load_context_dsa_module_data(dsa_file: str):
+    """
+    Load context DSA data.
+
+    Dict structure:
+        data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][architecture][num_heads][s][b]
+
+    Quant modes are the outermost keys so that ``_enum_key_names`` can
+    directly extract supported FMHAQuantMode names (aligned with
+    ``_context_attention_data``).  ``architecture`` (e.g.
+    "DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM") selects the
+    model-specific structural dimensions from ``DSA_MODEL_DIMS``.
+    Legacy CSV rows without an ``architecture`` column default to
+    "DeepseekV32ForCausalLM".
+    """
+    rows = _read_filtered_rows(dsa_file)
+    if rows is None:
+        logger.debug(f"DSA context data file {dsa_file} not found.")
+        return None
+
+    dsa_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+        )
+    )
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+
+    for row in rows:
+        num_heads = int(row["num_heads"])
+        b = int(row["batch_size"])
+        s = int(row["isl"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+        energy = power * latency
+
+        arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
+        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
+
+        dsa_data[fmha_mode][kv_dtype][gemm_mode][arch][num_heads][s][b] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
+
+    return dsa_data
+
+
+def load_generation_dsa_module_data(dsa_file: str):
+    """
+    Load generation DSA data.
+
+    Dict structure:
+        data[kv_cache_quant_mode][gemm_quant_mode][architecture][num_heads][b][s]
+
+    Quant modes are the outermost keys so that ``_enum_key_names`` can
+    directly extract supported KVCacheQuantMode names (aligned with
+    ``_generation_attention_data``).  ``architecture`` selects the
+    model-specific structural dimensions from ``DSA_MODEL_DIMS``.
+    Legacy CSV rows without an ``architecture`` column default to
+    "DeepseekV32ForCausalLM".
+    """
+    rows = _read_filtered_rows(dsa_file)
+    if rows is None:
+        logger.debug(f"DSA generation data file {dsa_file} not found.")
+        return None
+
+    dsa_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    )
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+
+    for row in rows:
+        num_heads = int(row["num_heads"])
+        b = int(row["batch_size"])
+        s = int(row["isl"]) + int(row["step"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+        energy = power * latency
+
+        arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
+
+        dsa_data[kv_dtype][gemm_mode][arch][num_heads][b][s] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
+
+    return dsa_data

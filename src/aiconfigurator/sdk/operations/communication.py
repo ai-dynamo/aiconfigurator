@@ -27,10 +27,11 @@ inheritance), so HYBRID mode doesn't union sibling rows for those.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common
-from aiconfigurator.sdk.operations.base import Operation
+from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -85,7 +86,7 @@ class CustomAllReduce(Operation):
         ``database._custom_allreduce_data``."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_custom_allreduce_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -175,8 +176,12 @@ class CustomAllReduce(Operation):
                     "Consider using HYBRID mode, or supply custom_allreduce_perf.txt rows "
                     "covering this tp_size."
                 )
-            size_left, size_right = database._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
-            result = database._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
+            size_left, size_right = interpolation.nearest_1d_point_helper(
+                size, list(comm_dict.keys()), inner_only=False
+            )
+            result = interpolation.interp_1d(
+                [size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size
+            )
 
             if isinstance(result, dict):
                 lat = result["latency"]
@@ -277,7 +282,7 @@ class NCCL(Operation):
         binds ``database._nccl_data`` and ``database._oneccl_data``."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_nccl_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -374,12 +379,12 @@ class NCCL(Operation):
 
             max_num_gpus = max(nccl_source[dtype][operation].keys())
             nccl_dict = nccl_source[dtype][operation][min(num_gpus, max_num_gpus)]
-            size_left, size_right = database._nearest_1d_point_helper(
+            size_left, size_right = interpolation.nearest_1d_point_helper(
                 message_size,
                 list(nccl_dict.keys()),
                 inner_only=False,
             )
-            result = database._interp_1d(
+            result = interpolation.interp_1d(
                 [size_left, size_right],
                 [nccl_dict[size_left], nccl_dict[size_right]],
                 message_size,
@@ -504,3 +509,136 @@ class P2P(Operation):
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
+
+
+# ─────────────────────────────────────────────────────────
+# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
+# ─────────────────────────────────────────────────────────
+
+
+def load_custom_allreduce_data(custom_allreduce_file):
+    """
+    Load the custom allreduce data with power support (backward compatible).
+
+    Supports multiple data formats:
+    - TRTLLM: kernel_source="TRTLLM", last column="implementation"
+    - vLLM/SGLang: kernel_source="*_graph" or "*_eager", last column="backend"
+
+    For vLLM/SGLang with both graph and eager modes, only graph mode data is kept
+    (better performance for decode phase).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+    """
+    rows = _read_filtered_rows(custom_allreduce_file)
+    if rows is None:
+        logger.debug(f"Custom allreduce data file {custom_allreduce_file} not found.")
+        return None
+    custom_allreduce_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (custom_allreduce) - power will default to 0.0")
+
+    if isinstance(custom_allreduce_file, str):
+        is_b60 = "b60" in custom_allreduce_file
+    else:
+        is_b60 = any("b60" in path for path, _ in custom_allreduce_file)
+
+    for row in rows:
+        # Check kernel_source to filter graph vs eager mode (for vLLM/SGLang)
+        kernel_source = row.get("kernel_source", "")
+        backend = row.get("backend", "")
+
+        # For vLLM/SGLang format: only keep graph mode data (skip eager mode)
+        # kernel_source patterns: "vLLM_custom_graph", "SGLang_CustomAllReduce_graph", etc.
+        # backend patterns: "vllm_graph", "sglang_graph", etc.
+        if (kernel_source.endswith("_eager") or backend.endswith("_eager")) and not is_b60:
+            continue  # Skip eager mode, use graph mode only
+
+        dtype, tp_size, message_size, latency = (
+            row["allreduce_dtype"],
+            row["num_gpus"],
+            row["message_size"],
+            row["latency"],
+        )
+        allreduce_strategy = "AUTO"
+        message_size = int(message_size)
+        latency = float(latency)
+        tp_size = int(tp_size)
+        dtype = common.CommQuantMode.half  # TODO
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # NEW: Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds
+
+        try:
+            # Check for conflict
+            custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size]
+            logger.debug(
+                f"value conflict in custom allreduce data: {dtype} {tp_size} {allreduce_strategy} {message_size}"
+            )
+        except KeyError:
+            # Store all three values
+            custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,  # NEW: precomputed energy
+            }
+
+    return custom_allreduce_data
+
+
+def load_nccl_data(nccl_file):
+    """
+    Load the nccl data with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+    """
+    rows = _read_filtered_rows(nccl_file)
+    if rows is None:
+        logger.debug(f"NCCL data file {nccl_file} not found.")
+        return None
+    nccl_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (nccl) - power will default to 0.0")
+
+    for row in rows:
+        dtype, num_gpus, message_size, op_name, latency = (
+            row["nccl_dtype"],
+            row["num_gpus"],
+            row["message_size"],
+            row["op_name"],
+            row["latency"],
+        )
+        message_size = int(message_size)
+        latency = float(latency)
+        num_gpus = int(num_gpus)
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # NEW: Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds
+
+        dtype = common.CommQuantMode[dtype]
+        try:
+            # Check for conflict
+            nccl_data[dtype][op_name][num_gpus][message_size]
+            logger.debug(f"value conflict in nccl data: {dtype} {op_name} {num_gpus} {message_size}")
+        except KeyError:
+            # Store all three values
+            nccl_data[dtype][op_name][num_gpus][message_size] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,  # NEW: precomputed energy
+            }
+
+    return nccl_data

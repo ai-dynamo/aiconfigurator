@@ -130,12 +130,10 @@ class TestQueryDelegation:
         assert float(result) > 0
 
 
-class TestSolCorrectionForwarded:
-    """``PerfDatabase._correct_data`` still forwards to ``GEMM._correct_sol``
-    for backward compat with tests that mutate ``_gemm_data`` and then call
-    ``_correct_data()``."""
+class TestSolCorrection:
+    """``GEMM._correct_sol`` clamps mutated GEMM data back to >= SOL."""
 
-    def test_correct_data_clamps_low_gemm_latency(self, mutable_comprehensive_perf_db):
+    def test_correct_sol_clamps_low_gemm_latency(self, mutable_comprehensive_perf_db):
         db = mutable_comprehensive_perf_db
         quant_mode = common.GEMMQuantMode.bfloat16
         m, n, k = 64, 128, 256
@@ -145,7 +143,7 @@ class TestSolCorrectionForwarded:
         # Set an artificially low value (lower than SOL)
         db._gemm_data[quant_mode][m][n][k] = {"latency": sol_value * 0.5, "power": 0.0, "energy": 0.0}
 
-        db._correct_data()
+        GEMM._correct_sol(db)
 
         clamped = db._gemm_data[quant_mode][m][n][k]
         clamped_latency = clamped["latency"] if isinstance(clamped, dict) else clamped
