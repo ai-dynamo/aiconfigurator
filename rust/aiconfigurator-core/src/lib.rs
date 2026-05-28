@@ -351,6 +351,11 @@ impl EngineStepEstimator {
         self.forward_pass_time_ms(metrics_by_rank)
     }
 
+    // TODO(remove-after-rust-migration): parity check/benchmark-only cache reset.
+    pub fn clear_runtime_caches(&self) {
+        self.perf.clear_query_cache();
+    }
+
     fn prefill_attention_step_time_ms(&self, workloads: &[RankWorkload]) -> Result<f64, AicError> {
         let mut latency_ms = 0.0_f64;
         for workload in workloads {
