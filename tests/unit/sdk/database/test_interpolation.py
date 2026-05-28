@@ -120,7 +120,7 @@ class TestInterpolationMethods:
         ]
 
         # Midpoint: every metric should interpolate linearly.
-        mid = comprehensive_perf_db._interp_1d(x, y, 15)
+        mid = interpolation.interp_1d(x, y, 15)
         assert isinstance(mid, dict)
         assert mid["latency"] == pytest.approx(2.0)
         assert mid["power"] == pytest.approx(500.0)
@@ -129,13 +129,13 @@ class TestInterpolationMethods:
         )
 
         # Endpoints
-        left = comprehensive_perf_db._interp_1d(x, y, 10)
+        left = interpolation.interp_1d(x, y, 10)
         assert left["energy"] == pytest.approx(400.0)
-        right = comprehensive_perf_db._interp_1d(x, y, 20)
+        right = interpolation.interp_1d(x, y, 20)
         assert right["energy"] == pytest.approx(1800.0)
 
         # Extrapolation also preserves energy.
-        far = comprehensive_perf_db._interp_1d(x, y, 25)
+        far = interpolation.interp_1d(x, y, 25)
         assert far["energy"] == pytest.approx(2500.0)
 
     def test_bilinear_interpolation(self, comprehensive_perf_db):
@@ -333,7 +333,7 @@ class TestExtrapolateDataGrid:
         target_x_list = [10, 15, 20]
         target_y_list = [30, 35, 40]
         target_z_list = [50, 55, 60]
-        comprehensive_perf_db._extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
+        interpolation.extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
 
         # Every newly created cell must have a positive energy field.
         new_cells = [
