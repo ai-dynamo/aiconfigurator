@@ -12,7 +12,7 @@ Serves 2 purposes:
 Run the smoke parity checks:
 
 ```bash
-AICONFIGURATOR_RUST_CORE_AUTOBUILD=1 pytest -q -rx rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py
+AICONFIGURATOR_RUST_CORE_AUTOBUILD=1 uv run pytest -q -rx rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py
 ```
 
 The suite compares Python SDK output with Rust-backed output for:

@@ -195,7 +195,10 @@ def _direct_mixed_step_fpm_ms(case: EngineStepParityCase) -> float:
             "sum_decode_kv_tokens": case.batch_size * case.isl,
         },
     }
-    return estimator.forward_pass_time_ms(rust_engine_step._metrics_by_attention_dp_rank(model, metrics))
+    try:
+        return estimator.forward_pass_time_ms(rust_engine_step._metrics_by_attention_dp_rank(model, metrics))
+    finally:
+        estimator.close()
 
 
 def _parity_mismatch_reason(comparisons: dict[str, tuple[float, float]]) -> str | None:
