@@ -271,7 +271,11 @@ class ContextDSAModule(Operation):
         index_topk: int | None = None,
     ):
         """Query context DSA module table. Verbatim port of the legacy body."""
-        from aiconfigurator.sdk.perf_database import DEFAULT_DSA_ARCHITECTURE, DSA_MODEL_DIMS, PerfDataNotAvailableError
+        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        # ``DEFAULT_DSA_ARCHITECTURE`` and ``DSA_MODEL_DIMS`` live at module
+        # level in this file — use them directly rather than round-tripping
+        # through ``perf_database``'s backward-compat re-export.
 
         if architecture is None:
             architecture = DEFAULT_DSA_ARCHITECTURE
@@ -616,7 +620,11 @@ class GenerationDSAModule(Operation):
         index_topk: int | None = None,
     ):
         """Query generation DSA module table. Verbatim port of the legacy body."""
-        from aiconfigurator.sdk.perf_database import DEFAULT_DSA_ARCHITECTURE, DSA_MODEL_DIMS, PerfDataNotAvailableError
+        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        # ``DEFAULT_DSA_ARCHITECTURE`` and ``DSA_MODEL_DIMS`` live at module
+        # level in this file — use them directly rather than round-tripping
+        # through ``perf_database``'s backward-compat re-export.
 
         if architecture is None:
             architecture = DEFAULT_DSA_ARCHITECTURE

@@ -7,7 +7,8 @@ import math
 import pytest
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.perf_database import DEFAULT_DSA_ARCHITECTURE, LoadedOpData, PerfDataNotAvailableError
+from aiconfigurator.sdk.operations.dsa import DEFAULT_DSA_ARCHITECTURE
+from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataNotAvailableError
 
 pytestmark = pytest.mark.unit
 
