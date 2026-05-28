@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import shutil
 from types import SimpleNamespace
@@ -213,6 +214,159 @@ def test_engine_config_json_preserves_moe_specific_quant_mode() -> None:
     assert config["moe_dtype"] == "w4a16_mxfp4"
 
 
+def test_engine_step_estimator_can_load_old_core_without_forward_pass_perf_symbols(tmp_path, monkeypatch) -> None:
+    rust_engine_step._load_library.cache_clear()
+    calls = []
+
+    class _FakeFunc:
+        def __init__(self, name, callback):
+            self.name = name
+            self.callback = callback
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *args):
+            calls.append(self.name)
+            return self.callback(*args)
+
+    class _OldCoreLib:
+        def __init__(self):
+            self.aic_engine_step_estimator_new = _FakeFunc("estimator_new", self._new_estimator)
+            self.aic_engine_step_forward_pass_time_ms = _FakeFunc("forward_pass_time_ms", self._estimate)
+            self.aic_engine_step_estimator_free = _FakeFunc("estimator_free", lambda handle: None)
+            self.aic_engine_step_string_free = _FakeFunc("string_free", lambda message: None)
+
+        def _new_estimator(self, config_json, out_handle):
+            assert json.loads(config_json) == {"config": True}
+            ctypes.cast(out_handle, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.c_void_p(123)
+            return None
+
+        def _estimate(self, handle, metrics_json, out_ms):
+            assert handle.value == 123
+            assert json.loads(metrics_json) == {"version": 1}
+            ctypes.cast(out_ms, ctypes.POINTER(ctypes.c_double))[0] = ctypes.c_double(7.0)
+            return None
+
+    library_path = tmp_path / rust_engine_step._library_name()
+    library_path.touch()
+    fake_lib = _OldCoreLib()
+    monkeypatch.setattr(rust_engine_step, "_find_library", lambda include_debug: library_path)
+    monkeypatch.setattr(rust_engine_step.ctypes, "CDLL", lambda path: fake_lib)
+
+    estimator = rust_engine_step.RustEngineStepEstimator({"config": True})
+    assert estimator.forward_pass_time_ms({"version": 1}) == 7.0
+    estimator.close()
+
+    assert calls == ["estimator_new", "forward_pass_time_ms", "estimator_free"]
+    with pytest.raises(rust_engine_step.RustCoreUnavailableError, match="ForwardPassPerfModel API"):
+        rust_engine_step.RustForwardPassPerfModel.from_regression()
+    rust_engine_step._load_library.cache_clear()
+
+
+def test_forward_pass_perf_model_fake_library_wrapper(monkeypatch) -> None:
+    calls = []
+    buffers = []
+
+    class _FakeFunc:
+        def __init__(self, name, callback):
+            self.name = name
+            self.callback = callback
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *args):
+            calls.append(self.name)
+            return self.callback(*args)
+
+    class _FakeLib:
+        def __init__(self):
+            self.aic_forward_pass_perf_model_best_available = _FakeFunc("best_available", self._new_model)
+            self.aic_forward_pass_perf_model_from_native = _FakeFunc("from_native", self._new_model)
+            self.aic_forward_pass_perf_model_from_regression = _FakeFunc("from_regression", self._new_regression)
+            self.aic_forward_pass_perf_model_estimate_forward_pass_time_ms = _FakeFunc("estimate", self._estimate)
+            self.aic_forward_pass_perf_model_tune_with_fpms = _FakeFunc("tune", self._tune)
+            self.aic_forward_pass_perf_model_diagnostics_json = _FakeFunc("diagnostics", self._diagnostics)
+            self.aic_forward_pass_perf_model_min_correction_factor = _FakeFunc("min_factor", self._factor(1.5))
+            self.aic_forward_pass_perf_model_max_correction_factor = _FakeFunc("max_factor", self._factor(2.5))
+            self.aic_forward_pass_perf_model_avg_correction_factor = _FakeFunc("avg_factor", self._factor(2.0))
+            self.aic_forward_pass_perf_model_free = _FakeFunc("free", lambda handle: None)
+            self.aic_engine_step_string_free = _FakeFunc("string_free", lambda message: None)
+            self.tuned_iterations = None
+
+        def _write_handle(self, out_handle):
+            ctypes.cast(out_handle, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.c_void_p(123)
+
+        def _new_model(self, config_json, options_json, out_handle):
+            assert json.loads(config_json) == {"config": True}
+            if options_json is not None:
+                assert json.loads(options_json) == {"min_observations": 2}
+            self._write_handle(out_handle)
+            return None
+
+        def _new_regression(self, options_json, out_handle):
+            assert json.loads(options_json) == {"min_observations": 2}
+            self._write_handle(out_handle)
+            return None
+
+        def _estimate(self, handle, metrics_json, out_ms, out_has_value):
+            assert handle.value == 123
+            assert json.loads(metrics_json) == {"version": 1}
+            ctypes.cast(out_ms, ctypes.POINTER(ctypes.c_double))[0] = ctypes.c_double(42.0)
+            ctypes.cast(out_has_value, ctypes.POINTER(ctypes.c_bool))[0] = ctypes.c_bool(True)
+            return None
+
+        def _tune(self, handle, iterations_json):
+            assert handle.value == 123
+            self.tuned_iterations = json.loads(iterations_json)
+            return None
+
+        def _diagnostics(self, handle, out_json):
+            payload = json.dumps({"source": "aic_with_correction"}).encode()
+            buffer = ctypes.create_string_buffer(payload)
+            buffers.append(buffer)
+            ctypes.cast(out_json, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.cast(buffer, ctypes.c_void_p)
+            return None
+
+        def _factor(self, value):
+            def callback(handle, out_value, out_has_value):
+                ctypes.cast(out_value, ctypes.POINTER(ctypes.c_double))[0] = ctypes.c_double(value)
+                ctypes.cast(out_has_value, ctypes.POINTER(ctypes.c_bool))[0] = ctypes.c_bool(True)
+                return None
+
+            return callback
+
+    fake_lib = _FakeLib()
+    monkeypatch.setattr(rust_engine_step, "_load_library", lambda autobuild: fake_lib)
+
+    model = rust_engine_step.RustForwardPassPerfModel.best_available(
+        {"config": True},
+        {"min_observations": 2},
+    )
+
+    assert model.estimate_forward_pass_time_ms({"version": 1}) == 42.0
+    model.tune_with_fpms({"version": 1})
+    assert fake_lib.tuned_iterations == [[{"version": 1}]]
+    model.tune_with_fpms([{"version": 1}, {"version": 1}])
+    assert fake_lib.tuned_iterations == [[{"version": 1}, {"version": 1}]]
+    model.tune_with_fpms([[{"version": 1}], [{"version": 1}]])
+    assert fake_lib.tuned_iterations == [[{"version": 1}], [{"version": 1}]]
+    assert model.diagnostics() == {"source": "aic_with_correction"}
+    assert model.get_min_correction_factor() == 1.5
+    assert model.get_max_correction_factor() == 2.5
+    assert model.get_avg_correction_factor() == 2.0
+
+    rust_engine_step.RustForwardPassPerfModel.from_native(
+        {"config": True},
+        {"min_observations": 2},
+    ).close()
+    rust_engine_step.RustForwardPassPerfModel.from_regression({"min_observations": 2}).close()
+    model.close()
+
+    assert "best_available" in calls
+    assert "from_native" in calls
+    assert "from_regression" in calls
+
+
 @pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo is required to build the Rust core shared library")
 def test_ctypes_wrapper_calls_real_rust_core(tmp_path, monkeypatch) -> None:
     systems_root = tmp_path / "systems"
@@ -269,38 +423,97 @@ def test_ctypes_wrapper_calls_real_rust_core(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("AICONFIGURATOR_RUST_CORE_AUTOBUILD", "1")
     rust_engine_step._load_library.cache_clear()
 
-    estimator = rust_engine_step.RustEngineStepEstimator(
-        {
-            "schema_version": 1,
-            "model_name": "Test/Dense",
-            "model_arch": None,
-            "system_name": "test_sxm",
-            "backend": "vllm",
-            "backend_version": "1.0.0",
-            "tp_size": 1,
-            "pp_size": 1,
-            "moe_tp_size": None,
-            "moe_ep_size": None,
-            "attention_dp_size": None,
-            "weight_dtype": "bfloat16",
-            "activation_dtype": "bfloat16",
-            "kv_cache_dtype": "bfloat16",
-            "kv_block_size": None,
-            "extra": {},
-        }
-    )
+    config = {
+        "schema_version": 1,
+        "model_name": "Test/Dense",
+        "model_arch": None,
+        "system_name": "test_sxm",
+        "backend": "vllm",
+        "backend_version": "1.0.0",
+        "tp_size": 1,
+        "pp_size": 1,
+        "moe_tp_size": None,
+        "moe_ep_size": None,
+        "attention_dp_size": None,
+        "weight_dtype": "bfloat16",
+        "activation_dtype": "bfloat16",
+        "kv_cache_dtype": "bfloat16",
+        "kv_block_size": None,
+        "extra": {},
+    }
+    estimator = rust_engine_step.RustEngineStepEstimator(config)
 
-    latency_ms = estimator.forward_pass_time_ms(
-        [
-            {
-                "version": 1,
-                "scheduled_requests": {
-                    "num_prefill_requests": 2,
-                    "sum_prefill_tokens": 20,
-                    "sum_prefill_kv_tokens": 0,
-                },
+    metrics = [
+        {
+            "version": 1,
+            "scheduled_requests": {
+                "num_prefill_requests": 2,
+                "sum_prefill_tokens": 20,
+                "sum_prefill_kv_tokens": 0,
             },
-        ]
-    )
+        },
+    ]
+    latency_ms = estimator.forward_pass_time_ms(metrics)
 
     assert latency_ms == pytest.approx(30.5)
+
+    regression = rust_engine_step.RustForwardPassPerfModel.from_regression({"min_observations": 2})
+    assert regression.estimate_forward_pass_time_ms(metrics) is None
+    regression.tune_with_fpms(
+        [
+            [
+                {
+                    "version": 1,
+                    "wall_time": 0.010,
+                    "scheduled_requests": {
+                        "num_prefill_requests": 1,
+                        "sum_prefill_tokens": 10,
+                    },
+                }
+            ],
+            [
+                {
+                    "version": 1,
+                    "wall_time": 0.020,
+                    "scheduled_requests": {
+                        "num_prefill_requests": 1,
+                        "sum_prefill_tokens": 20,
+                    },
+                }
+            ],
+        ]
+    )
+    assert regression.estimate_forward_pass_time_ms(
+        {
+            "version": 1,
+            "scheduled_requests": {
+                "num_prefill_requests": 1,
+                "sum_prefill_tokens": 30,
+            },
+        }
+    ) == pytest.approx(30.0)
+    assert regression.get_min_correction_factor() is None
+
+    tuned = rust_engine_step.RustForwardPassPerfModel.best_available(config, {"min_observations": 2})
+    assert tuned.estimate_forward_pass_time_ms(metrics) == pytest.approx(30.5)
+    tuned.tune_with_fpms(
+        [
+            [
+                {
+                    **metrics[0],
+                    "wall_time": 0.061,
+                }
+            ],
+            [
+                {
+                    **metrics[0],
+                    "wall_time": 0.061,
+                }
+            ],
+        ]
+    )
+    assert tuned.estimate_forward_pass_time_ms(metrics) == pytest.approx(61.0)
+    assert tuned.get_min_correction_factor() == pytest.approx(2.0)
+    assert tuned.get_max_correction_factor() == pytest.approx(2.0)
+    assert tuned.get_avg_correction_factor() == pytest.approx(2.0)
+    assert tuned.diagnostics()["source"] == "aic_with_correction"
