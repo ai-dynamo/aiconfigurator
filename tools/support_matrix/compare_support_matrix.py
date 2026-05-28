@@ -34,11 +34,13 @@ from tools.support_matrix.support_matrix import (
     STATUS_FAIL,
     STATUS_HW_INCOMPATIBLE,
     STATUS_PASS,
+    SUPPORT_MATRIX_BASE_HEADER,
+    SUPPORT_MATRIX_HEADER,
     VALID_STATUSES,
     SupportMatrix,
 )
 
-EXPECTED_HEADER = ["HuggingFaceID", "Architecture", "System", "Backend", "Version", "Mode", "Status", "ErrMsg"]
+SUPPORTED_HEADERS = (SUPPORT_MATRIX_HEADER, SUPPORT_MATRIX_BASE_HEADER)
 
 
 def _read_single_csv(csv_path: Path) -> tuple[list[str], list[list[str]]]:
@@ -116,8 +118,8 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
         List of error messages (empty if all checks pass)
     """
     errors = []
-    if header != EXPECTED_HEADER:
-        errors.append(f"Invalid header: expected {EXPECTED_HEADER}, got {header}")
+    if header not in SUPPORTED_HEADERS:
+        errors.append(f"Invalid header: expected {SUPPORT_MATRIX_HEADER}, got {header}")
         return errors  # Can't continue without valid header
 
     if len(data_rows) == 0:
@@ -125,8 +127,8 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
         return errors
 
     for i, row in enumerate(data_rows, start=2):
-        if len(row) != len(EXPECTED_HEADER):
-            errors.append(f"Row {i} has {len(row)} columns, expected {len(EXPECTED_HEADER)}")
+        if len(row) != len(header):
+            errors.append(f"Row {i} has {len(row)} columns, expected {len(header)}")
             continue
 
         mode = row[5]
@@ -140,6 +142,8 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
         err_msg = row[7].strip() if len(row) > 7 else ""
         if status == STATUS_HW_INCOMPATIBLE and not err_msg:
             errors.append(f"Row {i}: {STATUS_HW_INCOMPATIBLE} rows must include a hardware incompatibility reason")
+        if header == SUPPORT_MATRIX_HEADER and not row[8].strip():
+            errors.append(f"Row {i}: Command column must include the support-matrix rerun command")
 
     return errors
 

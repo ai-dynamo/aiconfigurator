@@ -3551,13 +3551,15 @@ class PerfDatabase:
         # We need to collect quant_modes from the nested structure
         if self.backend == "sglang":
             wideep_context_mla_modes = set()
-            for kernel_source in self._wideep_context_mla_data or {}:
-                for quant_mode in (self._wideep_context_mla_data or {})[kernel_source]:
+            wideep_context_mla_data = getattr(self, "_wideep_context_mla_data", None) or {}
+            for kernel_source in wideep_context_mla_data:
+                for quant_mode in wideep_context_mla_data[kernel_source]:
                     wideep_context_mla_modes.add(quant_mode.name)
 
             wideep_generation_mla_modes = set()
-            for kernel_source in self._wideep_generation_mla_data or {}:
-                for kv_cache_dtype in (self._wideep_generation_mla_data or {})[kernel_source]:
+            wideep_generation_mla_data = getattr(self, "_wideep_generation_mla_data", None) or {}
+            for kernel_source in wideep_generation_mla_data:
+                for kv_cache_dtype in wideep_generation_mla_data[kernel_source]:
                     wideep_generation_mla_modes.add(kv_cache_dtype.name)
 
             self.supported_quant_mode = {
@@ -3607,10 +3609,6 @@ class PerfDatabase:
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
             }
-            # `fp8_static` is a behavioral mode that reuses `fp8` GEMM perf tables.
-            gemm_modes = self.supported_quant_mode.get("gemm", []) or []
-            if common.GEMMQuantMode.fp8.name in gemm_modes and common.GEMMQuantMode.fp8_static.name not in gemm_modes:
-                gemm_modes.append(common.GEMMQuantMode.fp8_static.name)
         elif self.backend == "vllm":
             self.supported_quant_mode = {
                 "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
@@ -4089,12 +4087,23 @@ class PerfDatabase:
     @staticmethod
     def _normalize_gemm_quant_mode_for_table(quant_mode: common.GEMMQuantMode) -> common.GEMMQuantMode:
         """
-        Normalize GEMM quant modes for perf table lookup.
+        Normalize fp8_static overhead table lookups.
 
-        `fp8_static` is a behavioral mode that reuses `fp8` perf tables.
+        compute_scale and scale_matrix data are stored with the `fp8` GEMM
+        table family because they model the delta between dynamic and static
+        FP8. GEMM itself may have a first-class `fp8_static` table.
         """
         if quant_mode == common.GEMMQuantMode.fp8_static:
             return common.GEMMQuantMode.fp8
+        return quant_mode
+
+    def _gemm_quant_mode_for_table(self, quant_mode: common.GEMMQuantMode) -> common.GEMMQuantMode:
+        """
+        Pick the GEMM table key for a requested quant mode.
+
+        Static FP8 is a distinct GEMM runtime path and must have first-class
+        perf rows. Do not satisfy `fp8_static` from the dynamic `fp8` table.
+        """
         return quant_mode
 
     @functools.lru_cache(maxsize=32768)
@@ -4149,7 +4158,7 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
 
-        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
+        table_quant_mode = self._gemm_quant_mode_for_table(quant_mode)
 
         # SOL and EMPIRICAL modes don't have power/energy data
         if database_mode == common.DatabaseMode.SOL:
@@ -7212,6 +7221,40 @@ class PerfDatabase:
                     result = self._interp_dsa_context_topk_piecewise_from_raw(
                         num_heads, full_s, b, raw_dsa_dict, index_topk
                     )
+                    if (
+                        result is None
+                        and num_heads in dsa_dict
+                        and full_s in dsa_dict[num_heads]
+                        and b in dsa_dict[num_heads][full_s]
+                    ):
+                        result = dsa_dict[num_heads][full_s][b]
+                    elif result is None and num_heads in dsa_dict and full_s in dsa_dict[num_heads]:
+                        batch_dict = dsa_dict[num_heads][full_s]
+                        batch_keys = sorted(batch_dict)
+                        if len(batch_keys) < 2:
+                            result = None
+                        else:
+                            left, right = self._nearest_1d_point_helper(b, batch_keys, inner_only=False)
+
+                            def interp_batch_metric(metric: str) -> float:
+                                return self._interp_1d(
+                                    [left, right],
+                                    [
+                                        self._get_value(batch_dict[left], metric),
+                                        self._get_value(batch_dict[right], metric),
+                                    ],
+                                    b,
+                                )
+
+                            result = {
+                                "latency": interp_batch_metric("latency"),
+                                "power": interp_batch_metric("power"),
+                                "energy": interp_batch_metric("energy"),
+                            }
+                    if result is None:
+                        result = self._interp_dsa_context_topk_piecewise_from_raw(
+                            num_heads, full_s, b, dsa_dict, index_topk
+                        )
                     if result is None:
                         result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
                     latency = result["latency"]
@@ -7406,7 +7449,72 @@ class PerfDatabase:
                     )
                 try:
                     dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
-                    result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
+                    # Generation callers pass ``s`` as total decode length, while
+                    # some collectors persist the same point as past-KV length.
+                    # Try both exact keys before falling back to interpolation.
+                    sequence_candidates = [s]
+                    if s > 0:
+                        sequence_candidates.append(s - 1)
+
+                    def exact_sequence_value(seq_dict):
+                        for seq_key in sequence_candidates:
+                            if seq_key in seq_dict:
+                                return seq_dict[seq_key]
+                        return None
+
+                    result = None
+                    if num_heads in dsa_dict and b in dsa_dict[num_heads]:
+                        seq_dict = dsa_dict[num_heads][b]
+                        result = exact_sequence_value(seq_dict)
+                        if result is None:
+                            seq_keys = sorted(seq_dict)
+                            if len(seq_keys) >= 2:
+                                left, right = self._nearest_1d_point_helper(s, seq_keys, inner_only=False)
+
+                                def interp_seq_metric(metric: str) -> float:
+                                    return self._interp_1d(
+                                        [left, right],
+                                        [
+                                            self._get_value(seq_dict[left], metric),
+                                            self._get_value(seq_dict[right], metric),
+                                        ],
+                                        s,
+                                    )
+
+                                result = {
+                                    "latency": interp_seq_metric("latency"),
+                                    "power": interp_seq_metric("power"),
+                                    "energy": interp_seq_metric("energy"),
+                                }
+                    if result is None and num_heads in dsa_dict:
+                        batch_dict = {}
+                        for batch_key, seq_dict in dsa_dict[num_heads].items():
+                            value = exact_sequence_value(seq_dict)
+                            if value is not None:
+                                batch_dict[batch_key] = value
+                        batch_keys = sorted(batch_dict)
+                        if len(batch_keys) >= 2:
+                            left, right = self._nearest_1d_point_helper(b, batch_keys, inner_only=False)
+
+                            def interp_batch_metric(metric: str) -> float:
+                                return self._interp_1d(
+                                    [left, right],
+                                    [
+                                        self._get_value(batch_dict[left], metric),
+                                        self._get_value(batch_dict[right], metric),
+                                    ],
+                                    b,
+                                )
+
+                            result = {
+                                "latency": interp_batch_metric("latency"),
+                                "power": interp_batch_metric("power"),
+                                "energy": interp_batch_metric("energy"),
+                            }
+                    if result is None:
+                        result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
+                    if result is None:
+                        result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
                     latency = result["latency"]
                     energy = result.get("energy", 0.0)
                 except (KeyError, TypeError, ValueError, AssertionError) as exc:

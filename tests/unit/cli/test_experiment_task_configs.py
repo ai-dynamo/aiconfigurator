@@ -72,3 +72,65 @@ def test_build_experiment_task_configs_keeps_no_config_prefix_out_of_yaml_patch(
     exported = next(iter(yaml.safe_load(task_config.to_yaml()).values()))
     assert exported["prefix"] == 1000
     assert "prefix" not in exported.get("config", {})
+
+
+def test_build_experiment_task_configs_expands_list_valued_top_level_fields():
+    task_configs = build_experiment_task_configs(
+        config={
+            "exps": ["exp_qwen"],
+            "exp_qwen": {
+                "mode": "patch",
+                "serving_mode": ["agg", "disagg"],
+                "model_path": "Qwen/Qwen3-32B",
+                "total_gpus": [4, 8],
+                "system_name": "h200_sxm",
+                "backend_name": "trtllm",
+                "isl": [4000],
+                "config": {
+                    "nextn": 0,
+                    "worker_config": {
+                        "tp_list": [1, 2],
+                    },
+                },
+            },
+        }
+    )
+
+    assert list(task_configs) == [
+        "exp_qwen__mode-agg__gpus-4",
+        "exp_qwen__mode-agg__gpus-8",
+        "exp_qwen__mode-disagg__gpus-4",
+        "exp_qwen__mode-disagg__gpus-8",
+    ]
+    assert task_configs["exp_qwen__mode-agg__gpus-4"].serving_mode == "agg"
+    assert task_configs["exp_qwen__mode-disagg__gpus-8"].serving_mode == "disagg"
+    assert task_configs["exp_qwen__mode-disagg__gpus-8"].total_gpus == 8
+    assert task_configs["exp_qwen__mode-agg__gpus-4"].yaml_patch["worker_config"]["tp_list"] == [1, 2]
+
+
+def test_build_experiment_task_configs_expands_runtime_knob_lists_without_yaml_leakage():
+    task_configs = build_experiment_task_configs(
+        config={
+            "exps": ["exp_runtime"],
+            "exp_runtime": {
+                "mode": "patch",
+                "serving_mode": "agg",
+                "model_path": "Qwen/Qwen3-32B",
+                "total_gpus": 8,
+                "system_name": "h200_sxm",
+                "backend_name": "trtllm",
+                "free_gpu_memory_fraction": [0.8, 1.0],
+                "max_seq_len": [4096],
+                "enable_chunked_prefill": [False],
+            },
+        }
+    )
+
+    assert list(task_configs) == [
+        "exp_runtime__mem_frac-0.8",
+        "exp_runtime__mem_frac-1.0",
+    ]
+    assert task_configs["exp_runtime__mem_frac-0.8"].free_gpu_memory_fraction == 0.8
+    assert task_configs["exp_runtime__mem_frac-0.8"].max_seq_len == 4096
+    assert task_configs["exp_runtime__mem_frac-0.8"].config.enable_chunked_prefill is False
+    assert task_configs["exp_runtime__mem_frac-0.8"].yaml_patch == {}

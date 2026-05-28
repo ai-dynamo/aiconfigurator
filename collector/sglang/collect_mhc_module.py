@@ -4,9 +4,8 @@
 """DeepSeek-V4 mHC pre/post module collector for SGLang."""
 
 # Requires an SGLang build with DeepSeek-V4 support. Stock lmsysorg/sglang:v*
-# images may not include the required deepseek_v4 modules; use a
-# deepseek-v4-blackwell/deepseek-v4-grace-blackwell image or matching Dynamo
-# sglang-runtime:*deepseek-v4* image.
+# images may not include the required deepseek_v4 modules; use a DeepSeek-V4
+# capable image or put a matching SGLang source tree on PYTHONPATH.
 from __future__ import annotations
 
 import argparse
@@ -23,6 +22,7 @@ from importlib.metadata import version as get_version
 import torch
 
 os.environ.setdefault("SGLANG_APPLY_CONFIG_BACKUP", "none")
+os.environ.setdefault("SGLANG_OPT_DEEPGEMM_HC_PRENORM", "0")
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if THIS_DIR not in sys.path:
@@ -140,7 +140,7 @@ def _patched_model_dir(model_id: str) -> str:
 
     num_layers = int(os.environ.get("SGLANG_TEST_NUM_LAYERS", "2"))
     config["num_hidden_layers"] = num_layers  # shrink depth to speed up collector init
-    config["model_type"] = "deepseek_ref"
+    config["model_type"] = "deepseek_v4"
 
     tmp_dir = os.path.join(
         tempfile.gettempdir(),
@@ -194,7 +194,7 @@ def _load_one_layer_runner(
         max_prefill_tokens=4096,
     )
     server_args.enable_piecewise_cuda_graph = False
-    server_args.attention_backend = "compressed"
+    server_args.attention_backend = "dsv4"
 
     print(f"[mhc-collector] model_path {model_path} -> {local_model_path}")
 
@@ -253,7 +253,7 @@ def _make_kernel(layer, op: str, residual: torch.Tensor):
         torch.cuda.synchronize()
 
         def kernel():
-            return [layer.hc_post(x, residual, post, comb) for x, post, comb in post_inputs]
+            return [layer.hc_post(x, residual, post, comb) for x, post, comb, *_ in post_inputs]
 
         return kernel
 

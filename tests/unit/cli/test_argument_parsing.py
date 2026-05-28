@@ -119,6 +119,7 @@ class TestCLIArgumentParsing:
         assert args.request_latency is None
         assert args.prefix == 0
         assert args.engine_step_backend is None
+        assert args.config_yaml is None
 
     def test_debug_mode_flag(self, cli_parser):
         """Test that debug mode can be enabled."""
