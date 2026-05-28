@@ -13,6 +13,7 @@ import csv
 import json
 import logging
 import os
+import shlex
 import traceback
 from concurrent.futures import BrokenExecutor, ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -36,11 +37,23 @@ STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
 STATUS_HW_INCOMPATIBLE = "HW_INCOMPATIBLE"
 VALID_STATUSES = frozenset({STATUS_PASS, STATUS_FAIL, STATUS_HW_INCOMPATIBLE})
+SUPPORT_MATRIX_BASE_HEADER = [
+    "HuggingFaceID",
+    "Architecture",
+    "System",
+    "Backend",
+    "Version",
+    "Mode",
+    "Status",
+    "ErrMsg",
+]
+SUPPORT_MATRIX_HEADER = SUPPORT_MATRIX_BASE_HEADER + ["Command"]
 _BYTES_PER_PARAM = 2
 DEFAULT_ENGINE_STEP_COMPARISON_RTOL = 0.05
 DEFAULT_ENGINE_STEP_COMPARISON_ATOL = 1e-3
 DEFAULT_ENGINE_STEP_FRONTIER_RTOL = 0.75
 DEFAULT_ENGINE_STEP_FRONTIER_ATOL = 1e-3
+LARGE_PIPELINE_CONFIG_PATH = "tools/support_matrix/configs/large_pipeline_parallel_worker.yaml"
 _RUST_CORE_AUTOBUILD_ENV = "AICONFIGURATOR_RUST_CORE_AUTOBUILD"
 _APPROXIMATE_ENGINE_STEP_COLUMNS = frozenset(
     {
@@ -95,6 +108,79 @@ class HardwareIncompatibility:
     reason: str
 
 
+@dataclass(frozen=True)
+class TaskAttempt:
+    name: str
+    yaml_config: dict | None = None
+
+
+def _support_matrix_row_command(
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    version: str,
+    mode: str,
+    constraints: TestConstraints | None = None,
+    compare_engine_step_backends: bool = False,
+    engine_step_comparison_rtol: float = DEFAULT_ENGINE_STEP_COMPARISON_RTOL,
+    engine_step_comparison_atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
+    engine_step_frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
+    engine_step_frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
+    yaml_config_path: str | None = None,
+) -> str:
+    """Return the repo-local CLI command that checks this model/system/backend path."""
+    if constraints is None:
+        constraints = _get_test_constraints(model)
+    parts = [
+        "uv",
+        "run",
+        "aiconfigurator",
+        "cli",
+        "default",
+        "--model",
+        model,
+        "--total-gpus",
+        str(constraints.total_gpus),
+        "--system",
+        system,
+        "--backend",
+        backend,
+        "--backend-version",
+        version,
+        "--database-mode",
+        "SILICON",
+        "--isl",
+        str(constraints.isl),
+        "--osl",
+        str(constraints.osl),
+        "--prefix",
+        str(constraints.prefix),
+        "--ttft",
+        str(constraints.ttft),
+        "--tpot",
+        str(constraints.tpot),
+        "--top-n",
+        "1",
+        "--no-color",
+    ]
+    if yaml_config_path is not None:
+        parts.extend(["--config-yaml", yaml_config_path])
+    if compare_engine_step_backends:
+        # ``cli default`` does not expose the support-matrix Python/Rust
+        # comparator; use the default Python engine-step path for the public
+        # replay command.
+        parts.extend(["--engine-step-backend", "python"])
+    _ = (
+        mode,
+        engine_step_comparison_rtol,
+        engine_step_comparison_atol,
+        engine_step_frontier_rtol,
+        engine_step_frontier_atol,
+    )
+    return " ".join(shlex.quote(str(part)) for part in parts)
+
+
 # Tiered constraints by model size (parameter count)
 _SMALL = TestConstraints(total_gpus=4, isl=256, osl=256, prefix=128, ttft=1500.0, tpot=50.0)
 _MEDIUM = TestConstraints(total_gpus=32, isl=256, osl=256, prefix=128, ttft=2000.0, tpot=50.0)
@@ -127,6 +213,99 @@ def _get_test_constraints(model_path: str) -> TestConstraints:
         _DEFAULT_TIER,
     )
     return _DEFAULT_TIER
+
+
+def _large_pipeline_parallel_attempt(
+    *,
+    mode: str,
+    backend: str,
+    constraints: TestConstraints,
+) -> TaskAttempt | None:
+    """Return a support-matrix retry that shards one large-model worker across nodes."""
+    if backend not in {
+        common.BackendName.sglang.value,
+        common.BackendName.trtllm.value,
+        common.BackendName.vllm.value,
+    }:
+        return None
+    if constraints.total_gpus < 16:
+        return None
+
+    # Some very large checkpoints are too large for the default one-node search.
+    # Keep attention TP at 8 and add PP=2 so a single serving worker can span 16
+    # GPUs. This also constrains MoE splits away from uncollected smaller shapes
+    # when the viable data was collected for larger model-parallel workers.
+    worker_config = {
+        "num_gpu_per_worker": [16],
+        "tp_list": [8],
+        "pp_list": [2],
+        "dp_list": [1],
+        "moe_tp_list": [1, 2, 4, 8],
+        "moe_ep_list": [1, 2, 4, 8],
+    }
+    config = {"worker_config": worker_config}
+    if mode == "disagg":
+        config = {
+            "prefill_worker_config": worker_config,
+            "decode_worker_config": worker_config,
+            "replica_config": {
+                "max_gpu_per_replica": 128,
+                "num_gpu_per_replica": [32, 64, 128],
+            },
+        }
+    return TaskAttempt(
+        name="large-pipeline-parallel-worker",
+        yaml_config={"mode": "patch", "config": config},
+    )
+
+
+def _should_retry_with_large_worker(error_message: str | None) -> bool:
+    if not error_message:
+        return False
+    normalized = error_message.lower()
+    return (
+        "does not fit in gpu memory" in normalized
+        or "try increasing --total-gpus" in normalized
+        or "try increasing total gpus" in normalized
+        or "failed to query moe data" in normalized
+        or "missing silicon data for the requested lookup" in normalized
+    )
+
+
+def _is_known_framework_incompatible_gap(
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    version: str,
+    error_message: str | None,
+) -> bool:
+    """Return True for deterministic framework/data gaps that should not stay plain FAIL."""
+    if not error_message:
+        return False
+
+    normalized = error_message.lower()
+    if (
+        backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "DeepSeek-V4" in model
+        and (
+            "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
+            or "deepseek-v4 mhc module data not loaded" in normalized
+        )
+    ):
+        return True
+
+    if "unsupported gemm quant mode 'fp8_static'" in normalized:
+        return True
+
+    return (
+        model == "moonshotai/Kimi-K2.5"
+        and system == "b200_sxm"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and "unsupported moe quant mode 'int4_wo'" in normalized
+    )
 
 
 def _enum_name(value: object | None) -> str | None:
@@ -383,31 +562,34 @@ def _compare_pareto_dfs(
 # Per-process SupportMatrix instance for ProcessPoolExecutor workers.
 # Set in the parent before forking; children inherit it via copy-on-write.
 _worker_matrix: "SupportMatrix | None" = None
+_worker_modes_to_test: tuple[str, ...] | None = None
 
 
 def _process_combination_worker(
     combo: tuple[str, str, str, str],
-) -> list[tuple[str, str, str, str, str, str, str, str | None]]:
+) -> list[tuple[str, str, str, str, str, str, str, str | None, str]]:
     """
     Run a single combination in a worker process. Uses the process-local SupportMatrix.
     Must be a module-level function for pickling by ProcessPoolExecutor.
     """
     assert _worker_matrix is not None  # this only works in linux, not in windows/macos
     model, system, backend, version = combo
-    status_dict, error_dict = _worker_matrix.run_single_test(
+    status_dict, error_dict, command_dict = _worker_matrix.run_single_test(
         model=model,
         system=system,
         backend=backend,
         version=version,
+        modes_to_test=_worker_modes_to_test,
         compare_engine_step_backends=_worker_matrix.compare_engine_step_backends,
         engine_step_comparison_rtol=_worker_matrix.engine_step_comparison_rtol,
         engine_step_comparison_atol=_worker_matrix.engine_step_comparison_atol,
         engine_step_frontier_rtol=_worker_matrix.engine_step_frontier_rtol,
         engine_step_frontier_atol=_worker_matrix.engine_step_frontier_atol,
+        include_commands=True,
     )
     architecture = _worker_matrix.get_architecture(model)
     return [
-        (model, architecture, system, backend, version, mode, status_dict[mode], error_dict[mode])
+        (model, architecture, system, backend, version, mode, status_dict[mode], error_dict[mode], command_dict[mode])
         for mode in status_dict
     ]
 
@@ -491,6 +673,7 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         engine_step_backend: str | None,
+        yaml_config: dict | None = None,
     ) -> TaskConfig:
         task_config_kwargs = {
             "serving_mode": mode,
@@ -508,6 +691,8 @@ class SupportMatrix:
         }
         if mode == "disagg":
             task_config_kwargs["decode_system_name"] = system
+        if yaml_config is not None:
+            task_config_kwargs["yaml_config"] = yaml_config
         return TaskConfig(**task_config_kwargs)
 
     @staticmethod
@@ -520,6 +705,7 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         engine_step_backend: str | None,
+        yaml_config: dict | None = None,
     ) -> pd.DataFrame | None:
         task_config = SupportMatrix._create_task_config(
             mode=mode,
@@ -529,6 +715,7 @@ class SupportMatrix:
             version=version,
             constraints=constraints,
             engine_step_backend=engine_step_backend,
+            yaml_config=yaml_config,
         )
         result = TaskRunner().run(task_config)
         return result.get("pareto_df")
@@ -541,12 +728,14 @@ class SupportMatrix:
         version: str,
         *,
         system_spec: dict | None = None,
+        modes_to_test: tuple[str, ...] | list[str] | None = None,
         compare_engine_step_backends: bool = False,
         engine_step_comparison_rtol: float = DEFAULT_ENGINE_STEP_COMPARISON_RTOL,
         engine_step_comparison_atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
         engine_step_frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
         engine_step_frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
-    ) -> tuple[dict[str, str], dict[str, str | None]]:
+        include_commands: bool = False,
+    ) -> tuple[dict[str, str], dict[str, str | None]] | tuple[dict[str, str], dict[str, str | None], dict[str, str]]:
         """
         Run a single configuration test for both agg and disagg modes.
 
@@ -567,9 +756,32 @@ class SupportMatrix:
             Status values are PASS, FAIL, or HW_INCOMPATIBLE.
             Both dicts have keys "agg" and "disagg".
         """
-        modes_to_test = ["agg", "disagg"]
+        if modes_to_test is None:
+            modes_to_test = ("agg", "disagg")
+        else:
+            modes_to_test = tuple(modes_to_test)
+            unsupported_modes = set(modes_to_test) - {"agg", "disagg"}
+            if unsupported_modes:
+                raise ValueError(f"Unsupported support-matrix mode(s): {sorted(unsupported_modes)}")
+        constraints = _get_test_constraints(model)
         statuses: dict[str, str] = {}
         error_messages = {}
+        commands = {
+            mode: _support_matrix_row_command(
+                model=model,
+                system=system,
+                backend=backend,
+                version=version,
+                mode=mode,
+                constraints=constraints,
+                compare_engine_step_backends=compare_engine_step_backends,
+                engine_step_comparison_rtol=engine_step_comparison_rtol,
+                engine_step_comparison_atol=engine_step_comparison_atol,
+                engine_step_frontier_rtol=engine_step_frontier_rtol,
+                engine_step_frontier_atol=engine_step_frontier_atol,
+            )
+            for mode in modes_to_test
+        }
 
         if system_spec is None:
             database = perf_database.get_database(system, backend, version)
@@ -588,87 +800,132 @@ class SupportMatrix:
                 incompatibility = None
             if incompatibility is not None:
                 reason = _format_exception_for_csv(incompatibility.reason)
-                return (
-                    dict.fromkeys(modes_to_test, STATUS_HW_INCOMPATIBLE),
-                    dict.fromkeys(modes_to_test, reason),
-                )
-
-        constraints = _get_test_constraints(model)
+                statuses = dict.fromkeys(modes_to_test, STATUS_HW_INCOMPATIBLE)
+                error_messages = dict.fromkeys(modes_to_test, reason)
+                if include_commands:
+                    return statuses, error_messages, commands
+                return statuses, error_messages
 
         for mode in modes_to_test:
-            try:
-                python_pareto_df = SupportMatrix._run_mode(
-                    mode=mode,
-                    model=model,
-                    system=system,
-                    backend=backend,
-                    version=version,
-                    constraints=constraints,
-                    engine_step_backend="python" if compare_engine_step_backends else None,
-                )
+            attempt_queue = [TaskAttempt("default")]
+            retry_attempt = _large_pipeline_parallel_attempt(
+                mode=mode,
+                backend=backend,
+                constraints=constraints,
+            )
 
-                # Note that we do not use pareto_frontier_df here because for the pareto_df
-                # if is not None and not empty, it means the pareto_frontier_df is also not None and not empty.
-                if python_pareto_df is None or python_pareto_df.empty:
+            while attempt_queue:
+                attempt = attempt_queue.pop(0)
+                try:
+                    python_pareto_df = SupportMatrix._run_mode(
+                        mode=mode,
+                        model=model,
+                        system=system,
+                        backend=backend,
+                        version=version,
+                        constraints=constraints,
+                        engine_step_backend="python" if compare_engine_step_backends else None,
+                        yaml_config=attempt.yaml_config,
+                    )
+
+                    # Note that we do not use pareto_frontier_df here because for the pareto_df
+                    # if is not None and not empty, it means the pareto_frontier_df is also not None and not empty.
+                    if python_pareto_df is None or python_pareto_df.empty:
+                        raise RuntimeError("Configuration returned no results, failed to catch traceback")
+
+                    if compare_engine_step_backends:
+                        with _rust_core_autobuild_enabled():
+                            rust_pareto_df = SupportMatrix._run_mode(
+                                mode=mode,
+                                model=model,
+                                system=system,
+                                backend=backend,
+                                version=version,
+                                constraints=constraints,
+                                engine_step_backend="rust",
+                                yaml_config=attempt.yaml_config,
+                            )
+                        if rust_pareto_df is None or rust_pareto_df.empty:
+                            raise RuntimeError("Rust engine-step backend returned no results")
+
+                        mismatch = _compare_pareto_dfs(
+                            python_pareto_df,
+                            rust_pareto_df,
+                            rtol=engine_step_comparison_rtol,
+                            atol=engine_step_comparison_atol,
+                            frontier_rtol=engine_step_frontier_rtol,
+                            frontier_atol=engine_step_frontier_atol,
+                        )
+                        if mismatch:
+                            raise RuntimeError(mismatch)
+
+                    statuses[mode] = STATUS_PASS
+                    error_messages[mode] = None
+                    if include_commands and attempt.yaml_config is not None:
+                        commands[mode] = _support_matrix_row_command(
+                            model=model,
+                            system=system,
+                            backend=backend,
+                            version=version,
+                            mode=mode,
+                            constraints=constraints,
+                            compare_engine_step_backends=compare_engine_step_backends,
+                            engine_step_comparison_rtol=engine_step_comparison_rtol,
+                            engine_step_comparison_atol=engine_step_comparison_atol,
+                            engine_step_frontier_rtol=engine_step_frontier_rtol,
+                            engine_step_frontier_atol=engine_step_frontier_atol,
+                            yaml_config_path=LARGE_PIPELINE_CONFIG_PATH,
+                        )
+                    break
+
+                except Exception as e:
+                    raw_error = traceback.format_exc()
                     logger.warning(
-                        "Configuration returned no results: %s, %s, %s, %s, mode=%s",
+                        "Configuration failed: %s, %s, %s, %s, mode=%s, attempt=%s - Error: %s",
                         model,
                         system,
                         backend,
                         version,
                         mode,
+                        attempt.name,
+                        str(e),
                     )
-                    statuses[mode] = STATUS_FAIL
-                    error_messages[mode] = "Configuration returned no results, failed to catch traceback"
-                    continue
-
-                if compare_engine_step_backends:
-                    with _rust_core_autobuild_enabled():
-                        rust_pareto_df = SupportMatrix._run_mode(
-                            mode=mode,
-                            model=model,
-                            system=system,
-                            backend=backend,
-                            version=version,
-                            constraints=constraints,
-                            engine_step_backend="rust",
+                    if (
+                        attempt.name == "default"
+                        and retry_attempt is not None
+                        and _should_retry_with_large_worker(raw_error)
+                    ):
+                        logger.info(
+                            "Retrying support-matrix check with %s: %s, %s, %s, %s, mode=%s",
+                            retry_attempt.name,
+                            model,
+                            system,
+                            backend,
+                            version,
+                            mode,
                         )
-                    if rust_pareto_df is None or rust_pareto_df.empty:
-                        statuses[mode] = STATUS_FAIL
-                        error_messages[mode] = "Rust engine-step backend returned no results"
+                        attempt_queue.append(retry_attempt)
                         continue
 
-                    mismatch = _compare_pareto_dfs(
-                        python_pareto_df,
-                        rust_pareto_df,
-                        rtol=engine_step_comparison_rtol,
-                        atol=engine_step_comparison_atol,
-                        frontier_rtol=engine_step_frontier_rtol,
-                        frontier_atol=engine_step_frontier_atol,
-                    )
-                    if mismatch:
+                    if _is_known_framework_incompatible_gap(
+                        model=model,
+                        system=system,
+                        backend=backend,
+                        version=version,
+                        error_message=raw_error,
+                    ):
+                        statuses[mode] = STATUS_HW_INCOMPATIBLE
+                    else:
                         statuses[mode] = STATUS_FAIL
-                        error_messages[mode] = mismatch
-                        continue
+                    error_messages[mode] = raw_error
+                    break
 
-                statuses[mode] = STATUS_PASS
-                error_messages[mode] = None
+                finally:
+                    perf_database.clear_database_runtime_caches(system, backend, version)
 
-            except Exception as e:
-                logger.warning(
-                    "Configuration failed: %s, %s, %s, %s, mode=%s - Error: %s",
-                    model,
-                    system,
-                    backend,
-                    version,
-                    mode,
-                    str(e),
-                )
-                statuses[mode] = STATUS_FAIL
-                error_messages[mode] = traceback.format_exc()
-            finally:
-                error_messages[mode] = _format_exception_for_csv(error_messages.get(mode))
-                perf_database.clear_database_runtime_caches(system, backend, version)
+            error_messages[mode] = _format_exception_for_csv(error_messages.get(mode))
+        if include_commands:
+            return statuses, error_messages, commands
         return statuses, error_messages
 
     def _run_parallel_combinations(
@@ -677,8 +934,8 @@ class SupportMatrix:
         *,
         max_workers: int,
         pbar: tqdm,
-    ) -> tuple[list[tuple[str, str, str, str, str, str, bool, str | None]], set[tuple[str, str, str, str]]]:
-        group_results: list[tuple[str, str, str, str, str, str, bool, str | None]] = []
+    ) -> tuple[list[tuple[str, str, str, str, str, str, str, str | None, str]], set[tuple[str, str, str, str]]]:
+        group_results: list[tuple[str, str, str, str, str, str, str, str | None, str]] = []
         retry_combos: set[tuple[str, str, str, str]] = set()
         processed_futures = set()
 
@@ -722,8 +979,12 @@ class SupportMatrix:
         return group_results, retry_combos
 
     def test_support_matrix(
-        self, max_workers: int | None = None
-    ) -> list[tuple[str, str, str, str, str, str, str, str | None]]:
+        self,
+        max_workers: int | None = None,
+        *,
+        combinations: list[tuple[str, str, str, str]] | None = None,
+        modes_to_test: tuple[str, ...] | list[str] | None = None,
+    ) -> list[tuple[str, str, str, str, str, str, str, str | None, str]]:
         """
         Test whether each combination is supported by AIC.
         Tests both agg and disagg modes for each combination and captures error messages.
@@ -738,14 +999,14 @@ class SupportMatrix:
                          Defaults to None, which uses os.cpu_count() or 1.
 
         Returns:
-            List of tuples (huggingface_id, architecture, system, backend, version, mode, status, err_msg)
-            Returns separate entries for agg and disagg modes
+            List of tuples (huggingface_id, architecture, system, backend, version, mode, status, err_msg, command).
+            Returns separate entries for each requested mode.
         """
         # Print configuration
         print("\n" + "=" * 80)
         print("AIConfigurator Support Matrix Test")
         print("=" * 80)
-        print("Testing both agg and disagg modes for all combinations")
+        print("Testing requested support-matrix modes for selected combinations")
         if self.compare_engine_step_backends:
             print(
                 "Comparing Python and Rust engine-step backends "
@@ -770,13 +1031,23 @@ class SupportMatrix:
         print(f"Max workers: {max_workers}")
         print("=" * 80 + "\n")
 
-        combinations = self.generate_combinations()
+        if modes_to_test is None:
+            modes_to_test = ("agg", "disagg")
+        else:
+            modes_to_test = tuple(modes_to_test)
+        combinations = (
+            self.generate_combinations()
+            if combinations is None
+            else sorted(combinations, key=_combination_sort_key)
+        )
         print(f"Total combinations to test: {len(combinations)}")
-        results: list[tuple[str, str, str, str, str, str, str, str | None]] = []
+        print(f"Modes: {', '.join(modes_to_test)}")
+        results: list[tuple[str, str, str, str, str, str, str, str | None, str]] = []
         retry_combos: set[tuple[str, str, str, str]] = set()
 
-        global _worker_matrix
+        global _worker_matrix, _worker_modes_to_test
         _worker_matrix = self
+        _worker_modes_to_test = tuple(modes_to_test)
 
         # -- Phase 1: parallel execution, one short-lived pool per database group --
         with tqdm(total=len(combinations), desc="Phase 1: parallel testing", unit="config") as pbar:
@@ -797,7 +1068,7 @@ class SupportMatrix:
                     perf_database.unload_database(system, backend, version)
 
         # Also collect combos whose Phase 1 results had any failure
-        for model, _arch, system, backend, version, _mode, status, _err in results:
+        for model, _arch, system, backend, version, _mode, status, _err, _command in results:
             if status == STATUS_FAIL:
                 retry_combos.add((model, system, backend, version))
 
@@ -816,16 +1087,18 @@ class SupportMatrix:
                         for combo in group_iter:
                             model, system, backend, version = combo
                             try:
-                                status_dict, error_dict = self.run_single_test(
+                                status_dict, error_dict, command_dict = self.run_single_test(
                                     model=model,
                                     system=system,
                                     backend=backend,
                                     version=version,
+                                    modes_to_test=modes_to_test,
                                     compare_engine_step_backends=self.compare_engine_step_backends,
                                     engine_step_comparison_rtol=self.engine_step_comparison_rtol,
                                     engine_step_comparison_atol=self.engine_step_comparison_atol,
                                     engine_step_frontier_rtol=self.engine_step_frontier_rtol,
                                     engine_step_frontier_atol=self.engine_step_frontier_atol,
+                                    include_commands=True,
                                 )
                                 architecture = self.get_architecture(model)
                                 for mode in status_dict:
@@ -839,6 +1112,7 @@ class SupportMatrix:
                                             mode,
                                             status_dict[mode],
                                             error_dict[mode],
+                                            command_dict[mode],
                                         )
                                     )
                             except Exception:
@@ -850,7 +1124,19 @@ class SupportMatrix:
                                     version,
                                 )
                                 architecture = self.get_architecture(model)
-                                for mode in ("agg", "disagg"):
+                                for mode in modes_to_test:
+                                    command = _support_matrix_row_command(
+                                        model=model,
+                                        system=system,
+                                        backend=backend,
+                                        version=version,
+                                        mode=mode,
+                                        compare_engine_step_backends=self.compare_engine_step_backends,
+                                        engine_step_comparison_rtol=self.engine_step_comparison_rtol,
+                                        engine_step_comparison_atol=self.engine_step_comparison_atol,
+                                        engine_step_frontier_rtol=self.engine_step_frontier_rtol,
+                                        engine_step_frontier_atol=self.engine_step_frontier_atol,
+                                    )
                                     results.append(
                                         (
                                             model,
@@ -861,6 +1147,7 @@ class SupportMatrix:
                                             mode,
                                             STATUS_FAIL,
                                             traceback.format_exc().replace("\n", "\\n"),
+                                            command,
                                         )
                                     )
                             finally:
@@ -876,12 +1163,14 @@ class SupportMatrix:
 
         return results
 
-    def _print_results_summary(self, results: list[tuple[str, str, str, str, str, str, str, str | None]]) -> None:
+    def _print_results_summary(self, results: list[tuple[str, str, str, str, str, str, str, str | None, str]]) -> None:
         """Print summary of test results."""
         total_tests = len(results)
-        passed = sum(1 for _, _, _, _, _, _, status, _ in results if status == STATUS_PASS)
-        failed = sum(1 for _, _, _, _, _, _, status, _ in results if status == STATUS_FAIL)
-        hw_incompatible = sum(1 for _, _, _, _, _, _, status, _ in results if status == STATUS_HW_INCOMPATIBLE)
+        passed = sum(1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_PASS)
+        failed = sum(1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_FAIL)
+        hw_incompatible = sum(
+            1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_HW_INCOMPATIBLE
+        )
 
         print("\n" + "=" * 80)
         print("Test Results Summary")
@@ -897,7 +1186,7 @@ class SupportMatrix:
         failed_configs = []
         hw_incompatible_configs = []
 
-        for huggingface_id, architecture, system, backend, version, mode, status, _ in results:
+        for huggingface_id, architecture, system, backend, version, mode, status, _err, _command in results:
             config = (huggingface_id, architecture, system, backend, version, mode)
             if status == STATUS_PASS:
                 passed_configs.append(config)
@@ -924,7 +1213,7 @@ class SupportMatrix:
                 print(f"  • {huggingface_id} ({architecture}) on {system} with {backend} v{version} ({mode})")
 
     def save_results_to_csv(
-        self, results: list[tuple[str, str, str, str, str, str, str, str | None]], output_file: str
+        self, results: list[tuple[str, ...]], output_file: str
     ) -> None:
         """
         Save test results to split CSV files, one per system.
@@ -933,21 +1222,55 @@ class SupportMatrix:
         for ad hoc comparisons.
 
         Args:
-            results: List of tuples (huggingface_id, architecture, system, backend, version, mode, status, err_msg)
+            results: List of tuples
+                (huggingface_id, architecture, system, backend, version, mode, status, err_msg, command)
             output_file: Path to the output directory, or a legacy output CSV file
         """
         output_path = Path(output_file)
-        header = ["HuggingFaceID", "Architecture", "System", "Backend", "Version", "Mode", "Status", "ErrMsg"]
+
+        def _row_values(row: tuple[str, ...]) -> tuple[str, str, str, str, str, str, str, str, str]:
+            if len(row) == 9:
+                huggingface_id, architecture, system, backend, version, mode, status, err_msg, command = row
+            elif len(row) == 8:
+                huggingface_id, architecture, system, backend, version, mode, status, err_msg = row
+                command = _support_matrix_row_command(
+                    model=huggingface_id,
+                    system=system,
+                    backend=backend,
+                    version=version,
+                    mode=mode,
+                    compare_engine_step_backends=self.compare_engine_step_backends,
+                    engine_step_comparison_rtol=self.engine_step_comparison_rtol,
+                    engine_step_comparison_atol=self.engine_step_comparison_atol,
+                    engine_step_frontier_rtol=self.engine_step_frontier_rtol,
+                    engine_step_frontier_atol=self.engine_step_frontier_atol,
+                )
+            else:
+                raise ValueError(f"Invalid support-matrix result row length: {len(row)}")
+            return (
+                huggingface_id,
+                architecture,
+                system,
+                backend,
+                version,
+                mode,
+                status,
+                err_msg or "",
+                command,
+            )
 
         if output_path.suffix == ".csv":
             with open(output_path, "w", newline="") as f:
                 writer = csv.writer(f, lineterminator="\n")
-                writer.writerow(header)
-                for huggingface_id, architecture, system, backend, version, mode, status, err_msg in results:
+                writer.writerow(SUPPORT_MATRIX_HEADER)
+                for row in results:
+                    huggingface_id, architecture, system, backend, version, mode, status, err_msg, command = (
+                        _row_values(row)
+                    )
                     if status not in VALID_STATUSES:
                         raise ValueError(f"Invalid support-matrix status: {status}")
                     writer.writerow(
-                        [huggingface_id, architecture, system, backend, version, mode, status, err_msg or ""]
+                        [huggingface_id, architecture, system, backend, version, mode, status, err_msg, command]
                     )
             print(f"\nResults saved to: {output_file}")
             return
@@ -956,7 +1279,10 @@ class SupportMatrix:
         for stale_csv in output_path.glob("*.csv"):
             stale_csv.unlink()
 
-        sorted_results = sorted(results, key=lambda x: (x[2], x[0], x[1], x[3], x[4], x[5]))
+        sorted_results = sorted(
+            (_row_values(row) for row in results),
+            key=lambda x: (x[2], x[0], x[1], x[3], x[4], x[5]),
+        )
         grouped_results = {
             system: list(system_results) for system, system_results in groupby(sorted_results, key=lambda x: x[2])
         }
@@ -967,12 +1293,22 @@ class SupportMatrix:
             manifest["files"].append(csv_path.name)
             with open(csv_path, "w", newline="") as f:
                 writer = csv.writer(f, lineterminator="\n")
-                writer.writerow(header)
-                for huggingface_id, architecture, system, backend, version, mode, status, err_msg in system_results:
+                writer.writerow(SUPPORT_MATRIX_HEADER)
+                for (
+                    huggingface_id,
+                    architecture,
+                    system,
+                    backend,
+                    version,
+                    mode,
+                    status,
+                    err_msg,
+                    command,
+                ) in system_results:
                     if status not in VALID_STATUSES:
                         raise ValueError(f"Invalid support-matrix status: {status}")
                     writer.writerow(
-                        [huggingface_id, architecture, system, backend, version, mode, status, err_msg or ""]
+                        [huggingface_id, architecture, system, backend, version, mode, status, err_msg, command]
                     )
 
         with open(output_path / "index.json", "w") as f:

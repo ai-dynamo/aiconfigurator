@@ -259,17 +259,19 @@ def run_moe_torch(
         # pcp_size=1: vLLM 0.17.0 added prefill context parallel to FusedMoE
         # (vllm-project/vllm#32344); without it, __init__ calls get_pcp_group()
         # which requires distributed init.
+        # The collector benchmarks the already-sharded local expert weights on
+        # one process, so keep FusedMoE's runtime parallel config single-process.
         mxfp4_vllm_cfg = VllmConfig()
         with set_current_vllm_config(mxfp4_vllm_cfg):
             moe_module = FusedMoE(
                 num_experts=num_experts,
                 top_k=topk,
                 hidden_size=hidden_size,
-                intermediate_size=inter_size,
+                intermediate_size=local_inter_size,
                 reduce_results=False,
                 renormalize=True,
                 quant_config=mxfp4_quant_config,
-                tp_size=moe_tp_size,
+                tp_size=1,
                 dp_size=1,
                 ep_size=moe_ep_size,
                 prefix="",
@@ -277,23 +279,24 @@ def run_moe_torch(
                 activation=str(mxfp4_module_config.get("activation", "silu")),
                 pcp_size=1,
             )
-        moe_module.to(device)
-        moe_module.eval()
-        moe_module.requires_grad_(False)
+            moe_module.to(device)
+            moe_module.eval()
+            moe_module.requires_grad_(False)
 
-        # Fill synthetic mxfp4 weights (uint8 packed, E2M1 format)
-        with torch.no_grad():
-            moe_module.w13_weight.data.random_(0, 255)
-            moe_module.w2_weight.data.random_(0, 255)
-            moe_module.w13_weight_scale.data.random_(0, 255)
-            moe_module.w2_weight_scale.data.random_(0, 255)
-            if hasattr(moe_module, "w13_bias"):
-                moe_module.w13_bias.data.normal_()
-            if hasattr(moe_module, "w2_bias"):
-                moe_module.w2_bias.data.normal_()
+            # Fill synthetic mxfp4 weights (uint8 packed, E2M1 format)
+            with torch.no_grad():
+                moe_module.w13_weight.data.random_(0, 255)
+                moe_module.w2_weight.data.random_(0, 255)
+                moe_module.w13_weight_scale.data.random_(0, 255)
+                moe_module.w2_weight_scale.data.random_(0, 255)
+                if hasattr(moe_module, "w13_bias"):
+                    moe_module.w13_bias.data.normal_()
+                if hasattr(moe_module, "w2_bias"):
+                    moe_module.w2_bias.data.normal_()
 
-        # Trigger backend selection + weight swizzle for current GPU
-        moe_module.quant_method.process_weights_after_loading(moe_module)
+            # vLLM 0.19.0 consults get_current_vllm_config() while building
+            # the TRTLLM MXFP4 MoE kernel, so keep the construction context open.
+            moe_module.quant_method.process_weights_after_loading(moe_module)
 
         # Free bfloat16 weights; not used for mxfp4.
         del w1, w2

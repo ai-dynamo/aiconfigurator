@@ -187,7 +187,7 @@ class GEMM(Operation):
         source = getattr(result, "source", "silicon")
 
         # Adjust for fp8_static: subtract compute_scale overhead, only fix for trtllm now
-        if is_fp8_static:
+        if is_fp8_static and getattr(database, "backend", None) == common.BackendName.trtllm.value:
             compute_scale_result = database.query_compute_scale(x, self._k, quant_mode)
             latency -= float(compute_scale_result)
             energy -= compute_scale_result.energy
