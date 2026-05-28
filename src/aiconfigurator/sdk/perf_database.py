@@ -686,6 +686,7 @@ def get_all_databases(
 # ─────────────────────────────────────────────────────────────────────────
 from aiconfigurator.sdk.operations.attention import (  # noqa: F401
     load_context_attention_data,
+    load_encoder_attention_data,
     load_generation_attention_data,
 )
 from aiconfigurator.sdk.operations.communication import (  # noqa: F401
@@ -1586,6 +1587,30 @@ class PerfDatabase:
             database_mode,
             window_size,
             head_size,
+        )
+
+    @functools.lru_cache(maxsize=32768)
+    def query_encoder_attention(
+        self,
+        b: int,
+        s: int,
+        n: int,
+        head_size: int,
+        fmha_quant_mode: common.FMHAQuantMode,
+        database_mode: Optional[common.DatabaseMode] = None,
+    ) -> PerformanceResult | tuple[float, float, float]:
+        """Query non-causal encoder attention latency. Delegates to
+        ``EncoderAttention._query_encoder_attention_table``."""
+        from aiconfigurator.sdk.operations.attention import EncoderAttention
+
+        return EncoderAttention._query_encoder_attention_table(
+            self,
+            b,
+            s,
+            n,
+            head_size,
+            fmha_quant_mode,
+            database_mode,
         )
 
     @functools.lru_cache(maxsize=32768)
