@@ -37,6 +37,11 @@ except Exception:
 # vLLM's custom ops (e.g. _vllm_ops.scaled_fp4_quant) requires vllm config to decide how to dispatch.
 from vllm.config import VllmConfig, set_current_vllm_config
 
+try:
+    from vllm.v1.worker.workspace import init_workspace_manager
+except Exception:
+    init_workspace_manager = None  # type: ignore[assignment]
+
 # NVFP4 support: requires Blackwell (SM>=100) and FlashInfer TRTLLM FP4 kernel.
 trtllm_fp4_block_scale_routed_moe = None
 _vllm_ops = None
@@ -96,6 +101,20 @@ from collector.case_generator import (
 from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
+_WORKSPACE_MANAGER_DEVICES: set[str] = set()
+
+
+def _ensure_workspace_manager(device: str) -> None:
+    if init_workspace_manager is None:
+        return
+
+    torch_device = torch.device(device)
+    device_key = str(torch_device)
+    if device_key in _WORKSPACE_MANAGER_DEVICES:
+        return
+
+    init_workspace_manager(torch_device)
+    _WORKSPACE_MANAGER_DEVICES.add(device_key)
 
 
 def get_moe_test_cases():
@@ -252,6 +271,8 @@ def run_moe_torch(
     if use_mxfp4:
         if not _mxfp4_available:
             raise ImportError("MXFP4 MoE requires vllm >= 0.17.0 with Mxfp4Config support.")
+
+        _ensure_workspace_manager(device)
 
         mxfp4_quant_config = Mxfp4Config()
         mxfp4_module_config = get_moe_quantization_module_config("vllm", moe_type, model_name=model_name)
