@@ -717,7 +717,7 @@ def _parse_hf_config_json(config: dict) -> dict:
         global_hd = config.get("global_head_dim")
         if global_hd is None:
             global_hd = swa_hd
-        extra_params = common.Gemma4MoEConfig(
+        extra_params = common.Gemma4MixConfig(
             layer_types=tuple(layer_types_raw),
             swa_num_kv_heads=swa_num_kv,
             swa_head_dim=swa_hd,

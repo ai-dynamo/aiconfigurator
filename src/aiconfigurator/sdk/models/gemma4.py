@@ -9,13 +9,13 @@ from aiconfigurator.sdk.models.base import BaseModel, register_model
 from aiconfigurator.sdk.models.helpers import calc_expectation
 
 
-@register_model("GEMMA4MOE")
-class Gemma4MoEModel(BaseModel):
+@register_model("GEMMA4MIX")
+class Gemma4MixModel(BaseModel):
     """
     Google Gemma 4 (gemma4_text): hybrid SWA/global attention + shared dense MLP
     running in parallel with routed top-k MoE on every layer.
 
-    Two layer-type recipes are emitted, driven by ``Gemma4MoEConfig.layer_types``:
+    Two layer-type recipes are emitted, driven by ``Gemma4MixConfig.layer_types``:
 
     - **sliding_attention (SWA)**: 16 Q heads x ``swa_head_dim``, ``swa_num_kv_heads``
       KV heads, separate K and V projections (standard GQA), token window =
@@ -91,25 +91,25 @@ class Gemma4MoEModel(BaseModel):
             if self._nextn > 0
             else 1.0
         )
-        self._gemma4_config: common.Gemma4MoEConfig | None = None
+        self._gemma4_config: common.Gemma4MixConfig | None = None
         self._power_law_alpha = 1.01
 
-    def set_gemma4_config(self, cfg: common.Gemma4MoEConfig) -> None:
-        """Apply Gemma4MoEConfig and rebuild context/generation ops.
+    def set_gemma4_config(self, cfg: common.Gemma4MixConfig) -> None:
+        """Apply Gemma4MixConfig and rebuild context/generation ops.
 
         Validates that ``layer_types`` length matches ``num_layers`` and contains only
         recognized values before accepting the config.
         """
-        if cfg is None or not isinstance(cfg, common.Gemma4MoEConfig):
-            raise ValueError(f"Gemma4MoEModel requires a Gemma4MoEConfig, got {type(cfg).__name__}")
+        if cfg is None or not isinstance(cfg, common.Gemma4MixConfig):
+            raise ValueError(f"Gemma4MixModel requires a Gemma4MixConfig, got {type(cfg).__name__}")
         if len(cfg.layer_types) != self._num_layers:
             raise ValueError(
-                f"Gemma4MoEConfig.layer_types length ({len(cfg.layer_types)}) "
+                f"Gemma4MixConfig.layer_types length ({len(cfg.layer_types)}) "
                 f"does not match num_layers ({self._num_layers})"
             )
         for i, lt in enumerate(cfg.layer_types):
             if lt not in ("sliding_attention", "full_attention"):
-                raise ValueError(f"Gemma4MoEConfig layer {i} has invalid type {lt!r}")
+                raise ValueError(f"Gemma4MixConfig layer {i} has invalid type {lt!r}")
         self._gemma4_config = cfg
         self._build_context_ops()
         self._build_generation_ops()

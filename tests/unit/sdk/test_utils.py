@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk.models import Gemma4MoEModel, HybridMoEModel
+from aiconfigurator.sdk.models import Gemma4MixModel, HybridMoEModel
 from aiconfigurator.sdk.utils import (
     _parse_hf_config_json,
     enumerate_parallel_config,
@@ -554,7 +554,7 @@ class TestParseHFConfig:
         assert result["vocab"] == 262144
 
         cfg = result["extra_params"]
-        assert isinstance(cfg, common.Gemma4MoEConfig)
+        assert isinstance(cfg, common.Gemma4MixConfig)
         assert cfg.layer_types == tuple(layer_types)
         assert cfg.layer_types.count("sliding_attention") == 25
         assert cfg.layer_types.count("full_attention") == 5
@@ -580,8 +580,8 @@ class TestParseHFConfig:
             _parse_hf_config_json(hf_config)
 
 
-class TestGemma4MoEModelBuilder:
-    """Builder-level tests that verify Gemma4MoEModel wiring through set_gemma4_config."""
+class TestGemma4MixModelBuilder:
+    """Builder-level tests that verify Gemma4MixModel wiring through set_gemma4_config."""
 
     @staticmethod
     def _make_model_config(tp_size=1, moe_tp_size=1, moe_ep_size=1):
@@ -599,10 +599,10 @@ class TestGemma4MoEModelBuilder:
 
     @staticmethod
     def _make_model(model_config, layer_types=None, attention_k_eq_v=True):
-        """Build a Gemma4MoEModel at the gemma-4-26B-A4B shape (or a custom layer pattern)."""
+        """Build a Gemma4MixModel at the gemma-4-26B-A4B shape (or a custom layer pattern)."""
         if layer_types is None:
             layer_types = (["sliding_attention"] * 5 + ["full_attention"]) * 5
-        cfg = common.Gemma4MoEConfig(
+        cfg = common.Gemma4MixConfig(
             layer_types=tuple(layer_types),
             swa_num_kv_heads=8,
             swa_head_dim=256,
@@ -611,12 +611,12 @@ class TestGemma4MoEModelBuilder:
             sliding_window_size=1024,
             attention_k_eq_v=attention_k_eq_v,
         )
-        model = Gemma4MoEModel(
+        model = Gemma4MixModel(
             8,  # topk
             128,  # num_experts
             704,  # moe_inter_size
             "google/gemma-4-26B-A4B",  # model_path
-            "GEMMA4MOE",  # model_family
+            "GEMMA4MIX",  # model_family
             "Gemma4ForConditionalGeneration",  # architecture
             len(layer_types),  # num_layers
             16,  # num_heads
@@ -693,13 +693,13 @@ class TestGemma4MoEModelBuilder:
         assert model.get_kvcache_bytes_per_sequence(seq_len) == expected
 
     def test_set_gemma4_config_rejects_wrong_type(self):
-        """Passing a HybridMoEConfig (or any non-Gemma4MoEConfig) raises."""
-        model = Gemma4MoEModel(
+        """Passing a HybridMoEConfig (or any non-Gemma4MixConfig) raises."""
+        model = Gemma4MixModel(
             8,
             128,
             704,
             "test",
-            "GEMMA4MOE",
+            "GEMMA4MIX",
             "Gemma4ForConditionalGeneration",
             2,
             16,
@@ -712,17 +712,17 @@ class TestGemma4MoEModelBuilder:
             self._make_model_config(),
             None,
         )
-        with pytest.raises(ValueError, match="requires a Gemma4MoEConfig"):
+        with pytest.raises(ValueError, match="requires a Gemma4MixConfig"):
             model.set_gemma4_config(common.HybridMoEConfig(attn_layer_pattern=(0, 1), moe_layer_freq=(1, 1)))
 
     def test_set_gemma4_config_rejects_wrong_layer_count(self):
         """layer_types length must match num_layers passed at construction."""
-        model = Gemma4MoEModel(
+        model = Gemma4MixModel(
             8,
             128,
             704,
             "test",
-            "GEMMA4MOE",
+            "GEMMA4MIX",
             "Gemma4ForConditionalGeneration",
             30,
             16,
@@ -735,7 +735,7 @@ class TestGemma4MoEModelBuilder:
             self._make_model_config(),
             None,
         )
-        bad_cfg = common.Gemma4MoEConfig(
+        bad_cfg = common.Gemma4MixConfig(
             layer_types=("sliding_attention",) * 5,  # only 5, but num_layers=30
             swa_num_kv_heads=8,
             swa_head_dim=256,
@@ -753,7 +753,7 @@ class TestGemma4MoEModelBuilder:
         Regression test for the assertion crash when num_experts is None.
         """
         layer_types = (["sliding_attention"] * 5 + ["full_attention"]) * 2  # 12 layers
-        cfg = common.Gemma4MoEConfig(
+        cfg = common.Gemma4MixConfig(
             layer_types=tuple(layer_types),
             swa_num_kv_heads=16,
             swa_head_dim=256,
@@ -762,12 +762,12 @@ class TestGemma4MoEModelBuilder:
             sliding_window_size=1024,
             attention_k_eq_v=True,
         )
-        model = Gemma4MoEModel(
+        model = Gemma4MixModel(
             0,  # topk = 0 (dense)
             None,  # num_experts = None (dense)
             21504,  # moe_inter_size (unused for dense, but kept aligned with HF config)
             "google/gemma-4-31B-it",
-            "GEMMA4MOE",
+            "GEMMA4MIX",
             "Gemma4ForConditionalGeneration",
             len(layer_types),
             32,
@@ -809,12 +809,12 @@ class TestGemma4MoEModelBuilder:
             moe_quant_mode=common.MoEQuantMode.bfloat16,
         )
         with pytest.raises(AssertionError, match="moe_ep_size=1"):
-            Gemma4MoEModel(
+            Gemma4MixModel(
                 0,
                 None,
                 21504,
                 "google/gemma-4-31B-it",
-                "GEMMA4MOE",
+                "GEMMA4MIX",
                 "Gemma4ForConditionalGeneration",
                 2,
                 32,
