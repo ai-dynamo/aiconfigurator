@@ -264,6 +264,15 @@ def _is_known_framework_incompatible_gap(
         if backend == common.BackendName.vllm.value and version == "0.19.0":
             return "unsupported moe quant mode 'nvfp4'" in normalized or "dsa_context_module_perf.txt" in normalized
 
+    if system == "l40s":
+        if backend in {common.BackendName.sglang.value, common.BackendName.vllm.value} and (
+            "unsupported gemm quant mode 'fp8_block'" in normalized
+        ):
+            return True
+
+        if backend == common.BackendName.trtllm.value and ("unsupported moe quant mode 'fp8_block'" in normalized):
+            return True
+
     return (
         model == "moonshotai/Kimi-K2.5"
         and system == "b200_sxm"

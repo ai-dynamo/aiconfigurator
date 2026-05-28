@@ -18,6 +18,10 @@ def _b200_system_spec() -> dict:
     return {"gpu": {"sm_version": 100, "fp8_tc_flops": 1, "fp4_tc_flops": 1}}
 
 
+def _l40s_system_spec() -> dict:
+    return {"gpu": {"sm_version": 89, "fp8_tc_flops": 1}}
+
+
 def _patch_large_constraints(monkeypatch) -> None:
     monkeypatch.setattr(
         support_matrix_module,
@@ -83,6 +87,65 @@ def test_non_dsv4_vllm_019_error_remains_fail(monkeypatch):
         backend="vllm",
         version="0.19.0",
         system_spec=_b200_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
+
+
+@pytest.mark.parametrize("backend,version", [("sglang", "0.5.10"), ("vllm", "0.14.0")])
+def test_l40s_sm89_fp8_block_gemm_gap_is_framework_incompatible(monkeypatch, backend, version):
+    def fake_run_mode(**_kwargs):
+        raise ValueError(
+            f"Unsupported gemm quant mode 'fp8_block' for system='l40s', backend='{backend}', version='{version}'."
+        )
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="Qwen/Qwen3-32B-FP8",
+        system="l40s",
+        backend=backend,
+        version=version,
+        system_spec=_l40s_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
+    assert "Unsupported gemm quant mode 'fp8_block'" in errors["agg"]
+
+
+def test_l40s_trtllm_fp8_block_moe_gap_is_framework_incompatible(monkeypatch):
+    def fake_run_mode(**_kwargs):
+        raise ValueError("Unsupported moe quant mode 'fp8_block' for system='l40s', backend='trtllm', version='1.0.0'.")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="Qwen/Qwen3-30B-A3B-FP8",
+        system="l40s",
+        backend="trtllm",
+        version="1.0.0",
+        system_spec=_l40s_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
+    assert "Unsupported moe quant mode 'fp8_block'" in errors["disagg"]
+
+
+def test_l40s_fp8_block_other_backend_error_remains_fail(monkeypatch):
+    def fake_run_mode(**_kwargs):
+        raise ValueError("Unsupported gemm quant mode 'fp8_block'")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, _errors = SupportMatrix.run_single_test(
+        model="Qwen/Qwen3-32B-FP8",
+        system="l40s",
+        backend="trtllm",
+        version="1.0.0",
+        system_spec=_l40s_system_spec(),
     )
 
     assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
