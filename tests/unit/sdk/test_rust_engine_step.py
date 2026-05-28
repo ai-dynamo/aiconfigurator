@@ -280,7 +280,7 @@ def test_forward_pass_perf_model_fake_library_wrapper(monkeypatch) -> None:
 
     class _FakeLib:
         def __init__(self):
-            self.aic_forward_pass_perf_model_auto = _FakeFunc("auto", self._new_model)
+            self.aic_forward_pass_perf_model_best_available = _FakeFunc("best_available", self._new_model)
             self.aic_forward_pass_perf_model_from_native = _FakeFunc("from_native", self._new_model)
             self.aic_forward_pass_perf_model_from_regression = _FakeFunc("from_regression", self._new_regression)
             self.aic_forward_pass_perf_model_estimate_forward_pass_time_ms = _FakeFunc("estimate", self._estimate)
@@ -338,7 +338,7 @@ def test_forward_pass_perf_model_fake_library_wrapper(monkeypatch) -> None:
     fake_lib = _FakeLib()
     monkeypatch.setattr(rust_engine_step, "_load_library", lambda autobuild: fake_lib)
 
-    model = rust_engine_step.RustForwardPassPerfModel.auto(
+    model = rust_engine_step.RustForwardPassPerfModel.best_available(
         {"config": True},
         {"min_observations": 2},
     )
@@ -362,7 +362,7 @@ def test_forward_pass_perf_model_fake_library_wrapper(monkeypatch) -> None:
     rust_engine_step.RustForwardPassPerfModel.from_regression({"min_observations": 2}).close()
     model.close()
 
-    assert "auto" in calls
+    assert "best_available" in calls
     assert "from_native" in calls
     assert "from_regression" in calls
 
@@ -494,7 +494,7 @@ def test_ctypes_wrapper_calls_real_rust_core(tmp_path, monkeypatch) -> None:
     ) == pytest.approx(30.0)
     assert regression.get_min_correction_factor() is None
 
-    tuned = rust_engine_step.RustForwardPassPerfModel.auto(config, {"min_observations": 2})
+    tuned = rust_engine_step.RustForwardPassPerfModel.best_available(config, {"min_observations": 2})
     assert tuned.estimate_forward_pass_time_ms(metrics) == pytest.approx(30.5)
     tuned.tune_with_fpms(
         [

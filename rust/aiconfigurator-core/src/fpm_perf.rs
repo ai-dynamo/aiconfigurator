@@ -20,17 +20,17 @@ const RELAXABLE_NEG_TOLERANCE: f64 = 1e-6;
 ///
 /// These defaults match the current planner regression behavior: retain a
 /// bounded sliding sample set, wait for enough observations before predicting
-/// from learned data, and bucket observations by request shape.
+/// from learned data, and bucket observations by workload kind.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ForwardPassPerfOptions {
-    /// Maximum retained observations across all buckets for each inferred FPM shape.
+    /// Maximum retained observations across all buckets for each inferred workload kind.
     #[serde(default = "default_max_observations")]
     pub max_observations: usize,
     /// Minimum retained observations required before a regression fit or native
-    /// correction is used for an inferred FPM shape.
+    /// correction is used for an inferred workload kind.
     #[serde(default = "default_min_observations")]
     pub min_observations: usize,
-    /// Target bucket count for shape-specific sample retirement and correction lookup.
+    /// Target bucket count for workload-specific sample retirement and correction lookup.
     #[serde(default = "default_bucket_count")]
     pub bucket_count: usize,
 }
@@ -49,17 +49,17 @@ impl Default for ForwardPassPerfOptions {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ForwardPassPerfDiagnostics {
     /// Active prediction source. Native models become `aic_with_correction`
-    /// after at least one inferred FPM shape has enough correction samples.
+    /// after at least one inferred workload kind has enough correction samples.
     pub source: ForwardPassPerfSource,
     /// Whether the model can currently produce learned estimates for at least
-    /// one shape, or why it cannot.
+    /// one workload kind, or why it cannot.
     pub readiness: ForwardPassPerfReadiness,
-    /// Number of retained tuning observations across all inferred shapes.
+    /// Number of retained tuning observations across all inferred workload kinds.
     pub retained_observations: usize,
-    /// Number of populated native-correction regions whose shape has at least
+    /// Number of populated native-correction regions whose workload kind has at least
     /// `min_observations` total retained samples.
     pub correction_ready_buckets: usize,
-    /// Fallback reason when `auto` had to use regression instead of native AIC.
+    /// Fallback reason when `best_available` had to use regression instead of native AIC.
     pub last_warning: Option<String>,
 }
 
@@ -67,11 +67,11 @@ pub struct ForwardPassPerfDiagnostics {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ForwardPassPerfSource {
-    /// Strict native AIC estimator with no correction shape ready yet.
+    /// Strict native AIC estimator with no correction workload kind ready yet.
     Aic,
-    /// Shape-specific regression fallback, used without native AIC support.
+    /// Workload-specific regression fallback, used without native AIC support.
     FallbackRegression,
-    /// Native AIC estimator with at least one learned correction shape.
+    /// Native AIC estimator with at least one learned correction workload kind.
     AicWithCorrection,
 }
 
@@ -83,7 +83,7 @@ pub enum ForwardPassPerfReadiness {
     Ready,
     /// Regression fallback exists, but does not yet have enough observations.
     InsufficientData,
-    /// Native AIC was unavailable and `auto` fell back to regression.
+    /// Native AIC was unavailable and `best_available` fell back to regression.
     UnsupportedConfig,
     /// Reserved for callers that surface rejected FPM input as diagnostics.
     InvalidInput,
@@ -96,7 +96,7 @@ pub enum ForwardPassPerfReadiness {
 /// limits. Callers pass FPMs for one engine iteration and receive one
 /// forward-pass latency estimate in milliseconds.
 ///
-/// The prefill/decode/mixed shape is inferred from each iteration's
+/// The prefill/decode/mixed workload kind is inferred from each iteration's
 /// `scheduled_requests` fields; it is not chosen at construction:
 ///
 /// - prefill: scheduled prefill tokens and no scheduled decode work, using
@@ -109,7 +109,11 @@ pub enum ForwardPassPerfReadiness {
 ///   used for tuning
 ///
 /// Queued request fields are accepted for FPM schema parity but ignored by this
-/// forward-pass-level model. For attention-DP configurations, the input for one
+/// forward-pass-level model. `estimate_forward_pass_time_ms` treats FPM as a
+/// workload descriptor: it uses scheduled workload fields and ignores
+/// `wall_time`. `tune_with_fpms` treats FPM as observed telemetry: it uses the
+/// same scheduled workload fields as features and uses positive `wall_time` as
+/// the observation target. For attention-DP configurations, the input for one
 /// iteration is one FPM per attention-DP rank; tuning merges that list into one
 /// observation by taking max-rank load features and max nonzero `wall_time`.
 #[derive(Clone, Debug)]
@@ -123,10 +127,10 @@ pub struct ForwardPassPerfModel {
 enum ForwardPassPerfMode {
     Native {
         estimator: EngineStepEstimator,
-        corrections: ShapeStores<CorrectionBuckets>,
+        corrections: WorkloadStores<CorrectionBuckets>,
     },
     Regression {
-        regressions: ShapeStores<BucketedRegression>,
+        regressions: WorkloadStores<BucketedRegression>,
     },
 }
 
@@ -137,8 +141,8 @@ impl ForwardPassPerfModel {
     /// Description: create a strict native AIC forward-pass model.
     ///
     /// This constructor fails if `config` cannot be served by the native AIC
-    /// estimator. Use `auto` when unsupported native configs should fall back
-    /// to the learned regression model.
+    /// estimator. Use `best_available` when unsupported native configs should
+    /// fall back to the learned regression model.
     pub fn from_native(
         config: EngineConfig,
         options: ForwardPassPerfOptions,
@@ -148,7 +152,7 @@ impl ForwardPassPerfModel {
         Ok(Self {
             mode: ForwardPassPerfMode::Native {
                 estimator,
-                corrections: ShapeStores::with_options(&options),
+                corrections: WorkloadStores::with_options(&options),
             },
             options,
             last_warning: None,
@@ -175,7 +179,7 @@ impl ForwardPassPerfModel {
         Ok(Self {
             mode: ForwardPassPerfMode::Native {
                 estimator,
-                corrections: ShapeStores::with_options(&options),
+                corrections: WorkloadStores::with_options(&options),
             },
             options,
             last_warning: None,
@@ -189,13 +193,13 @@ impl ForwardPassPerfModel {
     ///
     /// This mode is for native-AIC-unsupported models. It returns `None` from
     /// `estimate_forward_pass_time_ms` for non-empty iterations until the
-    /// inferred shape has at least `options.min_observations` tuning samples.
+    /// inferred workload kind has at least `options.min_observations` tuning samples.
     /// Correction factor getters always return `None` in this mode.
     pub fn from_regression(options: ForwardPassPerfOptions) -> Result<Self, AicError> {
         validate_options(&options)?;
         Ok(Self {
             mode: ForwardPassPerfMode::Regression {
-                regressions: ShapeStores::with_options(&options),
+                regressions: WorkloadStores::with_options(&options),
             },
             options,
             last_warning: None,
@@ -203,15 +207,18 @@ impl ForwardPassPerfModel {
     }
 
     /// API:
-    /// `ForwardPassPerfModel::auto(config, options) -> Result<Self, AicError>`
+    /// `ForwardPassPerfModel::best_available(config, options) -> Result<Self, AicError>`
     ///
     /// Description: create a native model when possible, otherwise fall back to
     /// regression.
     ///
     /// Fallback reason is preserved in `diagnostics().last_warning`. The
-    /// resulting model still uses the same FPM shape inference and tuning input
-    /// contract as `from_native` and `from_regression`.
-    pub fn auto(config: EngineConfig, options: ForwardPassPerfOptions) -> Result<Self, AicError> {
+    /// resulting model still uses the same FPM workload-kind inference and
+    /// tuning input contract as `from_native` and `from_regression`.
+    pub fn best_available(
+        config: EngineConfig,
+        options: ForwardPassPerfOptions,
+    ) -> Result<Self, AicError> {
         match Self::from_native(config, options.clone()) {
             Ok(model) => Ok(model),
             Err(err) if can_fallback_to_regression(&err) => {
@@ -222,10 +229,10 @@ impl ForwardPassPerfModel {
     }
 
     /// API:
-    /// `ForwardPassPerfModel::auto_with_roots(config, options, systems_root, model_configs_root) -> Result<Self, AicError>`
+    /// `ForwardPassPerfModel::best_available_with_roots(config, options, systems_root, model_configs_root) -> Result<Self, AicError>`
     ///
-    /// Description: create an `auto` model with explicit data roots.
-    pub fn auto_with_roots(
+    /// Description: create a `best_available` model with explicit data roots.
+    pub fn best_available_with_roots(
         config: EngineConfig,
         options: ForwardPassPerfOptions,
         systems_root: impl AsRef<Path>,
@@ -263,17 +270,19 @@ impl ForwardPassPerfModel {
     ///
     /// `metrics_by_rank` must contain the FPMs for a single engine iteration,
     /// one entry per attention-DP rank. Single-rank callers pass a one-element
-    /// slice. The inferred shape uses only `scheduled_requests` as described on
+    /// slice. The inferred workload kind uses only `scheduled_requests` as described on
     /// `ForwardPassPerfModel`; queued fields and `wall_time` are ignored for
     /// estimation.
     ///
     /// Native models return an AIC estimate immediately, multiplied by the
-    /// correction factor for the matching in-range shape region. Correction
-    /// factors default to `1.0` for inferred shapes with fewer than
-    /// `min_observations` total samples, empty regions, and queries outside the
-    /// retained observation bounds. Regression models return `Ok(None)` until
-    /// the matching inferred shape has enough tuning samples. Empty scheduled
-    /// work returns `Ok(Some(0.0))`.
+    /// correction factor for the matching workload region. Correction factors
+    /// default to `1.0` for inferred workload kinds with fewer than
+    /// `min_observations` total samples and empty regions. Workload bounds are
+    /// monotonic lifetime bounds over accepted observations, not retained-sample
+    /// bounds, so sample retirement does not shrink the correction grid.
+    /// Regression models return `Ok(None)` until the matching inferred workload
+    /// kind has enough tuning samples. Empty scheduled work returns
+    /// `Ok(Some(0.0))`.
     pub fn estimate_forward_pass_time_ms(
         &self,
         metrics_by_rank: &[ForwardPassMetrics],
@@ -291,12 +300,12 @@ impl ForwardPassPerfModel {
                 let native = estimator.forward_pass_time_ms(metrics_by_rank)?;
                 let corrected = native
                     * corrections
-                        .store(feature.shape)
+                        .store(feature.workload_kind)
                         .correction_factor_for(&feature.x);
                 Ok(Some(corrected))
             }
             ForwardPassPerfMode::Regression { regressions } => {
-                Ok(regressions.store(feature.shape).predict(&feature.x))
+                Ok(regressions.store(feature.workload_kind).predict(&feature.x))
             }
         }
     }
@@ -311,15 +320,15 @@ impl ForwardPassPerfModel {
     /// `[[iter0_rank0, iter0_rank1], [iter1_rank0, iter1_rank1]]`.
     /// Single-rank callers still use one FPM per inner slice.
     ///
-    /// For each non-empty iteration, this method infers the shape from
+    /// For each non-empty iteration, this method infers the workload kind from
     /// scheduled request fields, takes max-rank load features, and uses the max
     /// finite positive `wall_time` across ranks as the observed latency target
     /// in milliseconds. Iterations with no scheduled work or no positive
     /// `wall_time` are ignored. Native models update the matching region's
     /// median `observed_ms / native_ms` correction factor. Regions are used only
-    /// after their inferred shape has `min_observations` total samples; empty
-    /// regions keep the default factor `1.0`. Regression models learn a
-    /// shape-specific linear fit.
+    /// after their inferred workload kind has `min_observations` total samples;
+    /// empty regions keep the default factor `1.0`. Regression models learn a
+    /// workload-specific linear fit.
     pub fn tune_with_fpms(
         &mut self,
         iterations: &[Vec<ForwardPassMetrics>],
@@ -337,12 +346,12 @@ impl ForwardPassPerfModel {
                 } => {
                     let native = estimator.forward_pass_time_ms(metrics_by_rank)?;
                     corrections
-                        .store_mut(observation.feature.shape)
+                        .store_mut(observation.feature.workload_kind)
                         .add_observation(observation.feature.x, observation.wall_time_ms, native);
                 }
                 ForwardPassPerfMode::Regression { regressions } => {
                     regressions
-                        .store_mut(observation.feature.shape)
+                        .store_mut(observation.feature.workload_kind)
                         .add_observation(observation.feature.x, observation.wall_time_ms);
                 }
             }
@@ -394,9 +403,9 @@ impl ForwardPassPerfModel {
     /// `model.min_correction_factor() -> Option<f64>`
     ///
     /// Description: return the smallest ready native correction factor across
-    /// all shapes.
+    /// all workload kinds.
     ///
-    /// Returns `None` before any native correction shape has enough samples.
+    /// Returns `None` before any native correction workload kind has enough samples.
     /// Regression-only models also return `None`.
     pub fn min_correction_factor(&self) -> Option<f64> {
         self.correction_factors()
@@ -408,9 +417,9 @@ impl ForwardPassPerfModel {
     /// `model.max_correction_factor() -> Option<f64>`
     ///
     /// Description: return the largest ready native correction factor across
-    /// all shapes.
+    /// all workload kinds.
     ///
-    /// Returns `None` before any native correction shape has enough samples.
+    /// Returns `None` before any native correction workload kind has enough samples.
     /// Regression-only models also return `None`.
     pub fn max_correction_factor(&self) -> Option<f64> {
         self.correction_factors()
@@ -422,9 +431,9 @@ impl ForwardPassPerfModel {
     /// `model.avg_correction_factor() -> Option<f64>`
     ///
     /// Description: return the arithmetic mean of ready native correction
-    /// factors across all shapes.
+    /// factors across all workload kinds.
     ///
-    /// Returns `None` before any native correction shape has enough samples.
+    /// Returns `None` before any native correction workload kind has enough samples.
     /// Regression-only models also return `None`.
     pub fn avg_correction_factor(&self) -> Option<f64> {
         let factors = self.correction_factors();
@@ -452,7 +461,7 @@ impl ForwardPassPerfModel {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum FeatureShape {
+enum WorkloadKind {
     Prefill,
     Decode,
     Mixed,
@@ -460,7 +469,7 @@ enum FeatureShape {
 
 #[derive(Clone, Debug)]
 struct IterationFeatures {
-    shape: FeatureShape,
+    workload_kind: WorkloadKind,
     x: Vec<f64>,
 }
 
@@ -492,18 +501,18 @@ impl IterationFeatures {
         let feature = match (has_prefill, has_decode) {
             (false, false) => return None,
             (true, false) => Self {
-                shape: FeatureShape::Prefill,
+                workload_kind: WorkloadKind::Prefill,
                 x: vec![f64::from(scheduled.sum_prefill_tokens)],
             },
             (false, true) => Self {
-                shape: FeatureShape::Decode,
+                workload_kind: WorkloadKind::Decode,
                 x: vec![
                     f64::from(scheduled.num_decode_requests),
                     f64::from(scheduled.sum_decode_kv_tokens),
                 ],
             },
             (true, true) => Self {
-                shape: FeatureShape::Mixed,
+                workload_kind: WorkloadKind::Mixed,
                 x: vec![
                     f64::from(scheduled.sum_prefill_tokens),
                     f64::from(scheduled.sum_decode_kv_tokens),
@@ -545,13 +554,13 @@ impl IterationObservation {
 }
 
 #[derive(Clone, Debug)]
-struct ShapeStores<T> {
+struct WorkloadStores<T> {
     prefill: T,
     decode: T,
     mixed: T,
 }
 
-impl<T: WithOptions> ShapeStores<T> {
+impl<T: WithOptions> WorkloadStores<T> {
     fn with_options(options: &ForwardPassPerfOptions) -> Self {
         Self {
             prefill: T::with_options(options, 1, &[]),
@@ -561,7 +570,7 @@ impl<T: WithOptions> ShapeStores<T> {
     }
 }
 
-impl<T: StoreStats> ShapeStores<T> {
+impl<T: StoreStats> WorkloadStores<T> {
     fn observation_count(&self) -> usize {
         self.prefill.observation_count()
             + self.decode.observation_count()
@@ -573,7 +582,7 @@ impl<T: StoreStats> ShapeStores<T> {
     }
 }
 
-impl ShapeStores<CorrectionBuckets> {
+impl WorkloadStores<CorrectionBuckets> {
     fn ready_bucket_count(&self) -> usize {
         self.prefill.ready_bucket_count()
             + self.decode.ready_bucket_count()
@@ -588,20 +597,20 @@ impl ShapeStores<CorrectionBuckets> {
     }
 }
 
-impl<T> ShapeStores<T> {
-    fn store(&self, shape: FeatureShape) -> &T {
-        match shape {
-            FeatureShape::Prefill => &self.prefill,
-            FeatureShape::Decode => &self.decode,
-            FeatureShape::Mixed => &self.mixed,
+impl<T> WorkloadStores<T> {
+    fn store(&self, workload_kind: WorkloadKind) -> &T {
+        match workload_kind {
+            WorkloadKind::Prefill => &self.prefill,
+            WorkloadKind::Decode => &self.decode,
+            WorkloadKind::Mixed => &self.mixed,
         }
     }
 
-    fn store_mut(&mut self, shape: FeatureShape) -> &mut T {
-        match shape {
-            FeatureShape::Prefill => &mut self.prefill,
-            FeatureShape::Decode => &mut self.decode,
-            FeatureShape::Mixed => &mut self.mixed,
+    fn store_mut(&mut self, workload_kind: WorkloadKind) -> &mut T {
+        match workload_kind {
+            WorkloadKind::Prefill => &mut self.prefill,
+            WorkloadKind::Decode => &mut self.decode,
+            WorkloadKind::Mixed => &mut self.mixed,
         }
     }
 }
@@ -690,8 +699,9 @@ impl StoreStats for CorrectionBuckets {
 
     fn is_ready(&self) -> bool {
         // Match planner's regression readiness semantics: min_observations is
-        // checked across the whole inferred shape, not per region. Regions only
-        // decide which correction factor to apply once the shape is ready.
+        // checked across the whole inferred workload kind, not per region.
+        // Regions only decide which correction factor to apply once the
+        // workload kind is ready.
         self.samples.total_observations >= self.min_observations
     }
 }
@@ -716,7 +726,7 @@ impl CorrectionBuckets {
         }
         // Every region has an implicit correction factor of 1.0. A populated
         // in-range region overrides that default with its local median
-        // observed/native ratio after the shape-wide readiness gate passes.
+        // observed/native ratio after the workload-kind-wide readiness gate passes.
         let Some(key) = self.samples.bucket_key_if_in_bounds(x) else {
             return 1.0;
         };
@@ -827,9 +837,9 @@ impl<T: Clone> BucketedSamples<T> {
             return None;
         }
 
-        // Estimation must not clamp out-of-range queries into edge regions.
-        // A new observation can expand the bounds and rebuild regions, but an
-        // estimate outside current bounds uses the implicit factor 1.0.
+        // Estimation must not clamp outside lifetime workload bounds into edge
+        // regions. A new observation can expand those bounds and rebuild
+        // regions; retiring old samples intentionally does not shrink them.
         let mut key = Vec::with_capacity(x.len());
         for (i, value) in x.iter().enumerate() {
             let lo = self.axis_min[i];
@@ -879,6 +889,9 @@ impl<T: Clone> BucketedSamples<T> {
     }
 
     fn retire_from_fattest_bucket(&mut self) {
+        // Bounds are monotonic lifetime workload bounds. They define the
+        // largest observed correction area, so eviction only removes samples;
+        // it does not recompute or shrink the grid.
         let Some(key) = self
             .buckets
             .iter()

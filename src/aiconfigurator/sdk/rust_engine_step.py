@@ -79,7 +79,7 @@ class RustForwardPassPerfModel:
     iteration as a list of FPM dictionaries, one per attention-DP rank. Single
     rank callers may pass either one FPM dictionary or a one-element list.
 
-    The Rust model infers the tuning shape from each iteration's scheduled FPM
+    The Rust model infers the workload kind from each iteration's scheduled FPM
     fields:
 
     * prefill: scheduled prefill tokens and no scheduled decode work, using
@@ -92,10 +92,14 @@ class RustForwardPassPerfModel:
       used for tuning
 
     Queued request fields are accepted for schema compatibility but ignored by
-    this AIC forward-pass model. For tuning, `tune_with_fpms()` accepts multiple
-    iterations as `[[iter0_rank0, iter0_rank1], [iter1_rank0, iter1_rank1]]`.
-    Each iteration is merged using max-rank load features and max positive
-    `wall_time` across ranks.
+    this AIC forward-pass model. `estimate_forward_pass_time_ms()` treats FPM as
+    a workload descriptor: scheduled request fields are used, while `wall_time`
+    is ignored. `tune_with_fpms()` treats FPM as observed telemetry: scheduled
+    request fields are used as features and positive `wall_time` is the latency
+    target. For tuning, `tune_with_fpms()` accepts multiple iterations as
+    `[[iter0_rank0, iter0_rank1], [iter1_rank0, iter1_rank1]]`. Each iteration
+    is merged using max-rank load features and max positive `wall_time` across
+    ranks.
     """
 
     def __init__(self, handle: ctypes.c_void_p, lib: ctypes.CDLL) -> None:
@@ -115,8 +119,8 @@ class RustForwardPassPerfModel:
         Description: create a strict native AIC forward-pass model.
 
         This constructor raises `RustCoreError` if the config is unsupported by
-        the native estimator. Use `auto()` when unsupported configs should fall
-        back to the learned regression model.
+        the native estimator. Use `best_available()` when unsupported configs
+        should fall back to the learned regression model.
         """
         return cls._create(
             "aic_forward_pass_perf_model_from_native",
@@ -126,14 +130,14 @@ class RustForwardPassPerfModel:
         )
 
     @classmethod
-    def auto(
+    def best_available(
         cls,
         config: dict[str, Any],
         options: dict[str, Any] | None = None,
         *,
         autobuild: bool | None = None,
     ) -> RustForwardPassPerfModel:
-        """API: `RustForwardPassPerfModel.auto(config, options=None, *, autobuild=None)`.
+        """API: `RustForwardPassPerfModel.best_available(config, options=None, *, autobuild=None)`.
 
         Description: create a native model when possible, otherwise fall back to
         regression.
@@ -141,7 +145,7 @@ class RustForwardPassPerfModel:
         Fallback reason is available from `diagnostics()["last_warning"]`.
         """
         return cls._create(
-            "aic_forward_pass_perf_model_auto",
+            "aic_forward_pass_perf_model_best_available",
             config=config,
             options=options,
             autobuild=autobuild,
@@ -159,7 +163,7 @@ class RustForwardPassPerfModel:
         Description: create a regression-only forward-pass model.
 
         Regression models return `None` for non-empty estimates until enough
-        samples have been provided for the inferred shape through
+        samples have been provided for the inferred workload kind through
         `tune_with_fpms()`. Correction factor getters return `None` in this
         mode.
         """
@@ -197,14 +201,16 @@ class RustForwardPassPerfModel:
 
         `metrics` represents one iteration. Pass a list of FPM dictionaries for
         attention-DP ranks, or a single FPM dictionary for a single-rank
-        convenience form. The inferred shape uses only `scheduled_requests`;
+        convenience form. The inferred workload kind uses only `scheduled_requests`;
         queued fields and `wall_time` are ignored for estimation.
 
         Native models return an estimate immediately, multiplied by the
-        correction factor for the matching in-range shape region. Inferred
-        shapes with fewer than `min_observations` total samples, empty regions,
-        and out-of-range queries use the default factor `1.0`. Regression models
-        return `None` until the matching inferred shape has enough tuned
+        correction factor for the matching workload region. Inferred workload
+        kinds with fewer than `min_observations` total samples and empty regions
+        use the default factor `1.0`. Workload bounds are monotonic lifetime
+        bounds over accepted observations, not retained-sample bounds, so sample
+        retirement does not shrink the correction grid. Regression models return
+        `None` until the matching inferred workload kind has enough tuned
         observations. Empty scheduled work returns `0.0`.
         """
         out_ms = ctypes.c_double()
@@ -229,12 +235,13 @@ class RustForwardPassPerfModel:
         convenience, a single FPM dictionary is normalized to `[[fpm]]`, and a
         list of FPM dictionaries is normalized to one iteration.
 
-        Tuning infers the shape from scheduled request fields. It ignores empty
-        iterations and iterations with no positive finite `wall_time`. For
-        native models, each observation updates only its matching correction
-        region; those regions are used after the inferred shape has enough total
-        samples. For multi-rank input, one observation is recorded using
-        max-rank load features and max positive `wall_time` across ranks.
+        Tuning infers the workload kind from scheduled request fields. It
+        ignores empty iterations and iterations with no positive finite
+        `wall_time`. For native models, each observation updates only its
+        matching correction region; those regions are used after the inferred
+        workload kind has enough total samples. For multi-rank input, one
+        observation is recorded using max-rank load features and max positive
+        `wall_time` across ranks.
         """
         err = self._lib.aic_forward_pass_perf_model_tune_with_fpms(
             self._handle,
@@ -549,12 +556,12 @@ def _bind_forward_pass_perf_model_symbols(lib: ctypes.CDLL) -> None:
         ctypes.POINTER(ctypes.c_void_p),
     ]
     lib.aic_forward_pass_perf_model_from_native.restype = ctypes.c_void_p
-    lib.aic_forward_pass_perf_model_auto.argtypes = [
+    lib.aic_forward_pass_perf_model_best_available.argtypes = [
         ctypes.c_char_p,
         ctypes.c_char_p,
         ctypes.POINTER(ctypes.c_void_p),
     ]
-    lib.aic_forward_pass_perf_model_auto.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_best_available.restype = ctypes.c_void_p
     lib.aic_forward_pass_perf_model_from_regression.argtypes = [
         ctypes.c_char_p,
         ctypes.POINTER(ctypes.c_void_p),

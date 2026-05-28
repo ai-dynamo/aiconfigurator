@@ -647,7 +647,7 @@ fn default_fpm_version_matches_constant() {
 }
 
 #[test]
-fn all_checked_in_model_configs_are_classified_or_auto_fallback() {
+fn all_checked_in_model_configs_are_classified_or_best_available_fallback() {
     let root = repo_model_configs_root();
     if !root.is_dir() {
         return;
@@ -670,7 +670,7 @@ fn all_checked_in_model_configs_are_classified_or_auto_fallback() {
                     .strip_suffix("_config.json")
                     .unwrap()
                     .replace("--", "/");
-                let model = ForwardPassPerfModel::auto(
+                let model = ForwardPassPerfModel::best_available(
                     EngineConfig {
                         model_name,
                         ..engine_config()
@@ -691,7 +691,7 @@ fn all_checked_in_model_configs_are_classified_or_auto_fallback() {
     assert!(checked >= 40, "expected checked-in AIC model configs");
     assert!(
         fallback_ready > 0,
-        "expected at least one checked-in config to exercise auto fallback"
+        "expected at least one checked-in config to exercise best_available fallback"
     );
 }
 
@@ -709,9 +709,9 @@ fn forward_pass_perf_options_reject_min_observations_above_max() {
 }
 
 #[test]
-fn forward_pass_perf_auto_does_not_fallback_on_invalid_schema() {
+fn forward_pass_perf_best_available_does_not_fallback_on_invalid_schema() {
     let fixture = Fixture::new();
-    let err = ForwardPassPerfModel::auto_with_roots(
+    let err = ForwardPassPerfModel::best_available_with_roots(
         EngineConfig {
             schema_version: ENGINE_CONFIG_SCHEMA_VERSION + 1,
             ..engine_config()
@@ -727,7 +727,7 @@ fn forward_pass_perf_auto_does_not_fallback_on_invalid_schema() {
 }
 
 #[test]
-fn forward_pass_perf_auto_falls_back_when_native_is_unsupported() {
+fn forward_pass_perf_best_available_falls_back_when_native_is_unsupported() {
     let fixture = Fixture::new();
     fs::write(
         fixture
@@ -744,7 +744,7 @@ fn forward_pass_perf_auto_falls_back_when_native_is_unsupported() {
     )
     .unwrap();
 
-    let model = ForwardPassPerfModel::auto_with_roots(
+    let model = ForwardPassPerfModel::best_available_with_roots(
         EngineConfig {
             model_name: "Test/Unsupported".to_string(),
             ..engine_config()
@@ -792,7 +792,7 @@ fn fallback_regression_returns_none_until_sufficient_data() {
 }
 
 #[test]
-fn fallback_regression_predicts_prefill_decode_and_mixed_shapes() {
+fn fallback_regression_predicts_prefill_decode_and_mixed_workload_kinds() {
     let mut model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
         min_observations: 3,
         ..Default::default()
@@ -983,7 +983,7 @@ fn native_correction_applies_after_bucket_is_ready() {
 }
 
 #[test]
-fn native_correction_min_observations_is_shape_wide_and_empty_regions_default_to_one() {
+fn native_correction_min_observations_is_workload_kind_wide_and_empty_regions_default_to_one() {
     let fixture = Fixture::new();
     let mut model = ForwardPassPerfModel::from_native_with_roots(
         engine_config(),

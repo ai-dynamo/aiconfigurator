@@ -107,12 +107,12 @@ pub extern "C" fn aic_forward_pass_perf_model_from_native(
 }
 
 /// API:
-/// `aic_forward_pass_perf_model_auto(config_json, options_json, out_model) -> error_string`
+/// `aic_forward_pass_perf_model_best_available(config_json, options_json, out_model) -> error_string`
 ///
 /// Description: create a native forward-pass perf model when supported,
 /// otherwise create a fallback regression model with diagnostics.
 #[no_mangle]
-pub extern "C" fn aic_forward_pass_perf_model_auto(
+pub extern "C" fn aic_forward_pass_perf_model_best_available(
     config_json: *const c_char,
     options_json: *const c_char,
     out_model: *mut *mut AicForwardPassPerfModelHandle,
@@ -125,7 +125,8 @@ pub extern "C" fn aic_forward_pass_perf_model_auto(
         let config: EngineConfig = parse_json(config_json, "EngineConfig")?;
         let options: ForwardPassPerfOptions =
             parse_optional_json(options_json, "ForwardPassPerfOptions")?;
-        let model = ForwardPassPerfModel::auto(config, options).map_err(|err| err.to_string())?;
+        let model =
+            ForwardPassPerfModel::best_available(config, options).map_err(|err| err.to_string())?;
         let handle = Box::new(AicForwardPassPerfModelHandle { model });
         unsafe {
             *out_model = Box::into_raw(handle);
@@ -165,7 +166,9 @@ pub extern "C" fn aic_forward_pass_perf_model_from_regression(
 /// `aic_forward_pass_perf_model_estimate_forward_pass_time_ms(model, metrics_json, out_ms, out_has_value) -> error_string`
 ///
 /// Description: estimate one FPM iteration and encode Rust `Option<f64>` as
-/// `out_ms` plus `out_has_value`.
+/// `out_ms` plus `out_has_value`. Estimation treats FPM as a workload
+/// descriptor: scheduled request fields are used, while `wall_time` and queued
+/// request fields are ignored.
 #[no_mangle]
 pub extern "C" fn aic_forward_pass_perf_model_estimate_forward_pass_time_ms(
     model: *mut AicForwardPassPerfModelHandle,
@@ -210,6 +213,8 @@ pub extern "C" fn aic_forward_pass_perf_model_estimate_forward_pass_time_ms(
 /// `aic_forward_pass_perf_model_tune_with_fpms(model, iterations_json) -> error_string`
 ///
 /// Description: tune the model with JSON-serialized observed FPM iterations.
+/// Tuning treats FPM as telemetry: scheduled request fields are the workload
+/// features and positive `wall_time` is the observed latency target.
 #[no_mangle]
 pub extern "C" fn aic_forward_pass_perf_model_tune_with_fpms(
     model: *mut AicForwardPassPerfModelHandle,
