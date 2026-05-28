@@ -189,13 +189,13 @@ flip that case from xfail to a required test.
 Parity smoke tests:
 
 ```bash
-AICONFIGURATOR_RUST_CORE_AUTOBUILD=1 .venv/bin/pytest rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py
+AICONFIGURATOR_RUST_CORE_AUTOBUILD=1 pytest rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py
 ```
 
 Benchmark harness:
 
 ```bash
-.venv/bin/python rust/aiconfigurator-core/parity_tests/benchmark_engine_step.py --autobuild --warmup 5 --iterations 50
+python rust/aiconfigurator-core/parity_tests/benchmark_engine_step.py --warmup 5 --iterations 50
 ```
 
 The benchmark prints reproducible case parameters, Python/Rust setup cost,

@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Benchmark Python SDK and Rust engine-step latency.
 
-- `cargo build` (compilation overhead): not timed; only runs when `--autobuild`
-  needs to build or refresh the Rust shared library.
+- `cargo build` (compilation overhead): not timed; runs before benchmarking
+  when the Rust shared library needs to be built or refreshed.
 - Rust estimator setup: timed separately from step latency. Includes
   Python/ctypes shared-library load, Rust model metadata load, Rust perf DB
   load, and estimator construction, but not `cargo build`.
@@ -20,7 +20,6 @@ import contextlib
 import io
 import json
 import os
-import shutil
 import statistics
 import time
 from collections.abc import Callable
@@ -104,13 +103,9 @@ def _clear_caches(case: BenchmarkCase) -> None:
     rust_engine_step._load_library.cache_clear()
 
 
-def _ensure_rust_library_present(*, autobuild: bool) -> None:
-    if rust_engine_step._find_library(include_debug=not autobuild) is not None:
+def _ensure_rust_library_present() -> None:
+    if rust_engine_step._find_library(include_debug=False) is not None:
         return
-    if not autobuild:
-        raise RuntimeError("Rust core shared library is required for Rust benchmark; use --autobuild to build it.")
-    if shutil.which("cargo") is None:
-        raise RuntimeError("cargo is required to build the Rust core shared library")
     rust_engine_step._build_rust_core()
 
 
@@ -217,14 +212,12 @@ def _run_case(
     *,
     warmup: int,
     iterations: int,
-    autobuild: bool,
     suppress_output: bool,
     cache_mode: str,
 ) -> dict:
-    if autobuild:
-        os.environ["AICONFIGURATOR_RUST_CORE_AUTOBUILD"] = "1"
+    os.environ["AICONFIGURATOR_RUST_CORE_AUTOBUILD"] = "1"
     _clear_caches(case)
-    _ensure_rust_library_present(autobuild=autobuild)
+    _ensure_rust_library_present()
 
     python_session_setup_ms, session, runtime_config = _measure_python_session_setup_ms(
         case,
@@ -338,9 +331,6 @@ def _parse_args() -> argparse.Namespace:
             "and timed sample."
         ),
     )
-    parser.add_argument(
-        "--autobuild", action="store_true", default=True, help="Build the Rust shared library if needed."
-    )
     parser.add_argument("--show-loader-output", action="store_true", help="Do not suppress perf DB loader output.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON instead of a table.")
     return parser.parse_args()
@@ -373,7 +363,6 @@ def main() -> None:
             replace(CASES[case_name], **overrides),
             warmup=args.warmup,
             iterations=args.iterations,
-            autobuild=args.autobuild,
             suppress_output=not args.show_loader_output,
             cache_mode=args.cache_mode,
         )
