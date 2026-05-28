@@ -299,6 +299,30 @@ def _is_known_framework_incompatible_gap(
     if "unsupported gemm quant mode 'fp8_static'" in normalized:
         return True
 
+    if system == "rtx_pro_6000_server":
+        if backend == common.BackendName.sglang.value and version == "0.5.10":
+            return (
+                "unsupported gemm quant mode 'fp8_block'" in normalized
+                or "unsupported moe quant mode 'nvfp4'" in normalized
+                or (
+                    model in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
+                    and "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
+                )
+                or "dsa_context_module_perf.txt" in normalized
+            )
+        if backend == common.BackendName.trtllm.value and version == "1.3.0rc10":
+            return (
+                "unsupported moe quant mode 'fp8_block'" in normalized
+                or (
+                    model in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
+                    and "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
+                )
+                or (model == "moonshotai/Kimi-K2.5" and "unsupported moe quant mode 'int4_wo'" in normalized)
+                or "dsa_context_module_perf.txt" in normalized
+            )
+        if backend == common.BackendName.vllm.value and version == "0.19.0":
+            return "unsupported moe quant mode 'nvfp4'" in normalized or "dsa_context_module_perf.txt" in normalized
+
     return (
         model == "moonshotai/Kimi-K2.5"
         and system == "b200_sxm"
@@ -1036,9 +1060,7 @@ class SupportMatrix:
         else:
             modes_to_test = tuple(modes_to_test)
         combinations = (
-            self.generate_combinations()
-            if combinations is None
-            else sorted(combinations, key=_combination_sort_key)
+            self.generate_combinations() if combinations is None else sorted(combinations, key=_combination_sort_key)
         )
         print(f"Total combinations to test: {len(combinations)}")
         print(f"Modes: {', '.join(modes_to_test)}")
@@ -1168,9 +1190,7 @@ class SupportMatrix:
         total_tests = len(results)
         passed = sum(1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_PASS)
         failed = sum(1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_FAIL)
-        hw_incompatible = sum(
-            1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_HW_INCOMPATIBLE
-        )
+        hw_incompatible = sum(1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_HW_INCOMPATIBLE)
 
         print("\n" + "=" * 80)
         print("Test Results Summary")
@@ -1212,9 +1232,7 @@ class SupportMatrix:
             for huggingface_id, architecture, system, backend, version, mode in sorted(hw_incompatible_configs):
                 print(f"  • {huggingface_id} ({architecture}) on {system} with {backend} v{version} ({mode})")
 
-    def save_results_to_csv(
-        self, results: list[tuple[str, ...]], output_file: str
-    ) -> None:
+    def save_results_to_csv(self, results: list[tuple[str, ...]], output_file: str) -> None:
         """
         Save test results to split CSV files, one per system.
 
