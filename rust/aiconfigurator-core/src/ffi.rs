@@ -77,6 +77,20 @@ pub extern "C" fn aic_engine_step_forward_pass_time_ms(
     })
 }
 
+#[no_mangle]
+// TODO(remove-after-rust-migration): parity check/benchmark-only cache reset.
+pub extern "C" fn aic_engine_step_estimator_clear_runtime_caches(
+    estimator: *mut AicEngineStepEstimatorHandle,
+) -> *mut c_char {
+    ffi_result(|| {
+        if estimator.is_null() {
+            return Err("estimator handle must not be null".to_string());
+        }
+        unsafe { &*estimator }.estimator.clear_runtime_caches();
+        Ok(())
+    })
+}
+
 /// API:
 /// `aic_forward_pass_perf_model_from_native(config_json, options_json, out_model) -> error_string`
 ///

@@ -53,6 +53,16 @@ class RustEngineStepEstimator:
         _raise_for_error(self._lib, err)
         return float(out_ms.value)
 
+    # TODO(remove-after-rust-migration): parity check/benchmark-only cache reset.
+    def clear_runtime_caches(self) -> None:
+        if not self._lib.__dict__.get("_aic_engine_step_estimator_clear_runtime_caches_available", False):
+            raise RustCoreUnavailableError(
+                "Rust core shared library does not expose runtime cache reset. "
+                "Build a newer aiconfigurator-core shared library."
+            )
+        err = self._lib.aic_engine_step_estimator_clear_runtime_caches(self._handle)
+        _raise_for_error(self._lib, err)
+
     def close(self) -> None:
         """API: `model.close() -> None`.
 
@@ -530,6 +540,12 @@ def _load_library(autobuild: bool) -> ctypes.CDLL:
         ctypes.POINTER(ctypes.c_double),
     ]
     lib.aic_engine_step_forward_pass_time_ms.restype = ctypes.c_void_p
+    try:
+        lib.aic_engine_step_estimator_clear_runtime_caches.argtypes = [ctypes.c_void_p]
+        lib.aic_engine_step_estimator_clear_runtime_caches.restype = ctypes.c_void_p
+        lib.__dict__["_aic_engine_step_estimator_clear_runtime_caches_available"] = True
+    except AttributeError:
+        lib.__dict__["_aic_engine_step_estimator_clear_runtime_caches_available"] = False
     lib.aic_engine_step_estimator_free.argtypes = [ctypes.c_void_p]
     lib.aic_engine_step_estimator_free.restype = None
     lib.aic_engine_step_string_free.argtypes = [ctypes.c_void_p]

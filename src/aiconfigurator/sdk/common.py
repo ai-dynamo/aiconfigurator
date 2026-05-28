@@ -743,6 +743,7 @@ class PerfDataFilename(Enum):
     oneccl = "oneccl_perf.txt"
     generation_attention = "generation_attention_perf.txt"
     context_attention = "context_attention_perf.txt"
+    encoder_attention = "encoder_attention_perf.txt"
     context_mla = "context_mla_perf.txt"
     generation_mla = "generation_mla_perf.txt"
     mla_bmm = "mla_bmm_perf.txt"
@@ -777,9 +778,8 @@ class PerfDataFilename(Enum):
     dsv4_hca_context_module = "dsv4_hca_context_module_perf.txt"
     dsv4_csa_generation_module = "dsv4_csa_generation_module_perf.txt"
     dsv4_hca_generation_module = "dsv4_hca_generation_module_perf.txt"
-    # DeepSeek-V4 sparse-kernel data (kernel-level past_kv Δ correction).
-    # Indexed by ``arch -> tp -> past_kv -> isl -> bs``.
-    # topk_512 and csa_attn are modeled analytically — no CSV needed.
+    # DeepSeek-V4 sparse-kernel data retained for future prefix-aware
+    # corrections of the full attention module.
     dsv4_paged_mqa_logits_module = "dsv4_paged_mqa_logits_module_perf.txt"
     dsv4_hca_attn_module = "dsv4_hca_attn_module_perf.txt"
 

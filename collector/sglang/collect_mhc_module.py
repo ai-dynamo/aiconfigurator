@@ -140,7 +140,12 @@ def _patched_model_dir(model_id: str) -> str:
 
     num_layers = int(os.environ.get("SGLANG_TEST_NUM_LAYERS", "2"))
     config["num_hidden_layers"] = num_layers  # shrink depth to speed up collector init
-    config["model_type"] = "deepseek_ref"
+    if config.get("architectures") != ["DeepseekV4ForCausalLM"]:
+        config["architectures"] = ["DeepseekV4ForCausalLM"]
+    # Match collect_dsv4_attn.py: current Transformers does not know a
+    # native deepseek_v4 config, while SGLang selects the V4 model class from
+    # the architectures field.
+    config["model_type"] = "deepseek_v3"
 
     tmp_dir = os.path.join(
         tempfile.gettempdir(),
@@ -194,7 +199,7 @@ def _load_one_layer_runner(
         max_prefill_tokens=4096,
     )
     server_args.enable_piecewise_cuda_graph = False
-    server_args.attention_backend = "compressed"
+    server_args.attention_backend = "dsv4"
 
     print(f"[mhc-collector] model_path {model_path} -> {local_model_path}")
 
@@ -238,6 +243,15 @@ def _mhc_call_args(layer):
     )
 
 
+def _hc_pre_post_inputs(hc_pre_output):
+    if len(hc_pre_output) == 3:
+        return hc_pre_output
+    if len(hc_pre_output) == 4:
+        x, post, comb, _norm_fused = hc_pre_output
+        return x, post, comb
+    raise ValueError(f"unexpected hc_pre output arity: {len(hc_pre_output)}")
+
+
 def _make_kernel(layer, op: str, residual: torch.Tensor):
     if op == "pre":
         call_args = _mhc_call_args(layer)
@@ -249,7 +263,7 @@ def _make_kernel(layer, op: str, residual: torch.Tensor):
 
     if op == "post":
         with torch.no_grad():
-            post_inputs = [layer.hc_pre(residual, *args) for args in _mhc_call_args(layer)]
+            post_inputs = [_hc_pre_post_inputs(layer.hc_pre(residual, *args)) for args in _mhc_call_args(layer)]
         torch.cuda.synchronize()
 
         def kernel():

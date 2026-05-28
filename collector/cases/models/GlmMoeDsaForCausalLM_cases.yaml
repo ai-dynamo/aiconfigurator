@@ -8,7 +8,7 @@ model_paths:
   - zai-org/GLM-5
   - zai-org/GLM-5-FP8
   - nvidia/GLM-5-NVFP4
-include_base: true
+include_base: false
 description: >
   GLM-5 DSA/MoE model-centric collection plan.
 
@@ -32,6 +32,8 @@ model_case_values:
       native_num_heads: 64
 
 all_frameworks_op_cases:
+  gemm:
+    cases: all
   moe:
     cases: all
 

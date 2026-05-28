@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import csv
 import functools
 import importlib.resources as pkg_resources
 import logging
@@ -12,11 +11,11 @@ import traceback
 from collections import UserDict, defaultdict
 from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Optional
+from typing import ClassVar, Optional
 
 import yaml
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.common import PerfDataFilename, parse_support_matrix_version
 from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.system_spec import SystemSpec
@@ -142,40 +141,11 @@ def _load_op_kernel_source_manifest_entries(systems_root: str) -> dict[str, tupl
     return {key: tuple(value) for key, value in accum.items()}
 
 
-def _read_filtered_rows(file_or_sources):
-    """Read CSV rows from one or more sources.
-
-    Accepts:
-      - A single path string: yields all rows. Returns `None` if the file is missing,
-        an empty list if it exists but has no rows. Preserves the legacy distinction
-        the per-op `load_*` functions rely on.
-      - An iterable of `(path, kernel_source_filter)` tuples: yields rows from each
-        source in order; missing files are skipped; rows are filtered by
-        `kernel_source` when a filter is provided. Returns `None` only if **every**
-        path is missing.
-
-    The order of the returned list mirrors the order of the input sources, so when
-    the per-row loaders skip on key conflict, the earliest source wins on every
-    coordinate — same first-wins semantic the shared-layer loader needs without
-    a separate merge step.
-    """
-    if isinstance(file_or_sources, str):
-        if not os.path.exists(file_or_sources):
-            return None
-        with open(file_or_sources, encoding="utf-8") as f:
-            return list(csv.DictReader(f))
-
-    rows: list[dict] = []
-    any_exists = False
-    for path, ks_filter in file_or_sources:
-        if not os.path.exists(path):
-            continue
-        any_exists = True
-        with open(path, encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                if ks_filter is None or row.get("kernel_source") in ks_filter:
-                    rows.append(row)
-    return rows if any_exists else None
+# ``_read_filtered_rows`` lives in ``operations.base`` so the per-op-module
+# loaders can import it without a circular dependency on ``perf_database``
+# at module load time. Re-exported here for any external callers that may
+# still import it via ``aiconfigurator.sdk.perf_database._read_filtered_rows``.
+from aiconfigurator.sdk.operations.base import _read_filtered_rows  # noqa: F401
 
 
 def get_supported_databases(
@@ -704,1887 +674,65 @@ def get_all_databases(
     return database_dict
 
 
-# by default bfloat16
-def load_custom_allreduce_data(custom_allreduce_file):
-    """
-    Load the custom allreduce data with power support (backward compatible).
-
-    Supports multiple data formats:
-    - TRTLLM: kernel_source="TRTLLM", last column="implementation"
-    - vLLM/SGLang: kernel_source="*_graph" or "*_eager", last column="backend"
-
-    For vLLM/SGLang with both graph and eager modes, only graph mode data is kept
-    (better performance for decode phase).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(custom_allreduce_file)
-    if rows is None:
-        logger.debug(f"Custom allreduce data file {custom_allreduce_file} not found.")
-        return None
-    custom_allreduce_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (custom_allreduce) - power will default to 0.0")
-
-    if isinstance(custom_allreduce_file, str):
-        is_b60 = "b60" in custom_allreduce_file
-    else:
-        is_b60 = any("b60" in path for path, _ in custom_allreduce_file)
-
-    for row in rows:
-        # Check kernel_source to filter graph vs eager mode (for vLLM/SGLang)
-        kernel_source = row.get("kernel_source", "")
-        backend = row.get("backend", "")
-
-        # For vLLM/SGLang format: only keep graph mode data (skip eager mode)
-        # kernel_source patterns: "vLLM_custom_graph", "SGLang_CustomAllReduce_graph", etc.
-        # backend patterns: "vllm_graph", "sglang_graph", etc.
-        if (kernel_source.endswith("_eager") or backend.endswith("_eager")) and not is_b60:
-            continue  # Skip eager mode, use graph mode only
-
-        dtype, tp_size, message_size, latency = (
-            row["allreduce_dtype"],
-            row["num_gpus"],
-            row["message_size"],
-            row["latency"],
-        )
-        allreduce_strategy = "AUTO"
-        message_size = int(message_size)
-        latency = float(latency)
-        tp_size = int(tp_size)
-        dtype = common.CommQuantMode.half  # TODO
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        try:
-            # Check for conflict
-            custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size]
-            logger.debug(
-                f"value conflict in custom allreduce data: {dtype} {tp_size} {allreduce_strategy} {message_size}"
-            )
-        except KeyError:
-            # Store all three values
-            custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return custom_allreduce_data
-
-
-def load_nccl_data(nccl_file):
-    """
-    Load the nccl data with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(nccl_file)
-    if rows is None:
-        logger.debug(f"NCCL data file {nccl_file} not found.")
-        return None
-    nccl_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (nccl) - power will default to 0.0")
-
-    for row in rows:
-        dtype, num_gpus, message_size, op_name, latency = (
-            row["nccl_dtype"],
-            row["num_gpus"],
-            row["message_size"],
-            row["op_name"],
-            row["latency"],
-        )
-        message_size = int(message_size)
-        latency = float(latency)
-        num_gpus = int(num_gpus)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        dtype = common.CommQuantMode[dtype]
-        try:
-            # Check for conflict
-            nccl_data[dtype][op_name][num_gpus][message_size]
-            logger.debug(f"value conflict in nccl data: {dtype} {op_name} {num_gpus} {message_size}")
-        except KeyError:
-            # Store all three values
-            nccl_data[dtype][op_name][num_gpus][message_size] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return nccl_data
-
-
-def load_gemm_data(gemm_file):
-    """
-    Load the gemm data with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with
-              'latency', 'power', and 'energy' keys.
-              For old database formats without power, defaults to power=0.0 and energy=0.0.
-    """
-    rows = _read_filtered_rows(gemm_file)
-    if rows is None:
-        logger.debug(f"GEMM data file {gemm_file} not found.")
-        return None
-    gemm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (gemm) - power will default to 0.0")
-
-    for row in rows:
-        quant_mode, m, n, k, latency = (
-            row["gemm_dtype"],
-            row["m"],
-            row["n"],
-            row["k"],
-            row["latency"],
-        )
-        m = int(m)
-        n = int(n)
-        k = int(k)
-        latency = float(latency)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-        # Note: power_limit is available in row.get("power_limit") if needed for validation
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds (W·ms)
-
-        quant_mode = common.GEMMQuantMode[quant_mode]
-
-        try:
-            # Check for conflict
-            gemm_data[quant_mode][m][n][k]
-            logger.debug(f"value conflict in gemm data: {quant_mode} {m} {n} {k}")
-        except KeyError:
-            # Store all three values
-            gemm_data[quant_mode][m][n][k] = {
-                "latency": latency,
-                "power": power,  # Keep for reference
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return gemm_data
-
-
-def load_compute_scale_data(compute_scale_file):
-    """
-    Load the compute scale data with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure {quant_mode: {m: {k: {latency, power, energy}}}}
-              For old database formats without power, defaults to power=0.0 and energy=0.0.
-    """
-    rows = _read_filtered_rows(compute_scale_file)
-    if rows is None:
-        logger.debug(f"Compute scale data file {compute_scale_file} not found.")
-        return None
-    compute_scale_data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (compute_scale) - power will default to 0.0")
-
-    for row in rows:
-        quant_mode, m, k, latency = (
-            row["quant_dtype"],
-            row["m"],
-            row["k"],
-            row["latency"],
-        )
-        m = int(m)
-        k = int(k)
-        latency = float(latency)
-
-        # Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds (W·ms)
-
-        quant_mode = common.GEMMQuantMode[quant_mode]
-
-        try:
-            # Check for conflict
-            compute_scale_data[quant_mode][m][k]
-            logger.debug(f"value conflict in compute_scale data: {quant_mode} {m} {k}")
-        except KeyError:
-            # Store all three values
-            compute_scale_data[quant_mode][m][k] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,
-            }
-
-    return compute_scale_data
-
-
-def load_scale_matrix_data(scale_matrix_file):
-    """
-    Load the scale matrix data with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure {quant_mode: {m: {k: {latency, power, energy}}}}
-              For old database formats without power, defaults to power=0.0 and energy=0.0.
-    """
-    rows = _read_filtered_rows(scale_matrix_file)
-    if rows is None:
-        logger.debug(f"Scale matrix data file {scale_matrix_file} not found.")
-        return None
-    scale_matrix_data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (scale_matrix) - power will default to 0.0")
-
-    for row in rows:
-        quant_mode, m, k, latency = (
-            row["quant_dtype"],
-            row["m"],
-            row["k"],
-            row["latency"],
-        )
-        m = int(m)
-        k = int(k)
-        latency = float(latency)
-
-        # Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds (W·ms)
-
-        quant_mode = common.GEMMQuantMode[quant_mode]
-
-        try:
-            # Check for conflict
-            scale_matrix_data[quant_mode][m][k]
-            logger.debug(f"value conflict in scale_matrix data: {quant_mode} {m} {k}")
-        except KeyError:
-            # Store all three values
-            scale_matrix_data[quant_mode][m][k] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,
-            }
-
-    return scale_matrix_data
-
-
-def load_moe_data(moe_file):
-    """
-    Load the moe data with power support (backward compatible).
-
-    Returns:
-        tuple: (moe_default_data, moe_low_latency_data) where leaf values are dicts
-               with 'latency', 'power', and 'energy' keys. For old formats,
-               power/energy default to 0.0. Both elements are `None` when the file
-               is missing.
-    """
-    rows = _read_filtered_rows(moe_file)
-    if rows is None:
-        logger.debug(f"MOE data file {moe_file} not found.")
-        return None, None
-
-    moe_default_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(
-                    lambda: defaultdict(
-                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-                    )
-                )
-            )
-        )
-    )
-    moe_low_latency_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(
-                    lambda: defaultdict(
-                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-                    )
-                )
-            )
-        )
-    )
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (moe) - power will default to 0.0")
-
-    for row in rows:
-        (
-            quant_mode,
-            num_tokens,
-            hidden_size,
-            inter_size,
-            topk,
-            num_experts,
-            moe_tp_size,
-            moe_ep_size,
-            workload_distribution,
-            latency,
-        ) = (
-            row["moe_dtype"],
-            row["num_tokens"],
-            row["hidden_size"],
-            row["inter_size"],
-            row["topk"],
-            row["num_experts"],
-            row["moe_tp_size"],
-            row["moe_ep_size"],
-            row["distribution"],
-            row["latency"],
-        )
-        kernel_source = row["kernel_source"]  # moe_torch_flow, moe_torch_flow_min_latency, moe_torch_flow
-        num_tokens = int(num_tokens)
-        hidden_size = int(hidden_size)
-        inter_size = int(inter_size)
-        topk = int(topk)
-        num_experts = int(num_experts)
-        moe_tp_size = int(moe_tp_size)
-        moe_ep_size = int(moe_ep_size)
-        latency = float(latency)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        quant_mode = common.MoEQuantMode[quant_mode]
-
-        moe_data = moe_low_latency_data if kernel_source == "moe_torch_flow_min_latency" else moe_default_data
-
-        try:
-            # Check for conflict
-            moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
-                moe_ep_size
-            ][num_tokens]
-            logger.debug(
-                f"value conflict in moe data: {workload_distribution} {quant_mode} {topk} "
-                f"{num_experts} {hidden_size} {inter_size} {moe_tp_size} {moe_ep_size} "
-                f"{num_tokens}"
-            )
-        except KeyError:
-            # Store all three values
-            moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
-                moe_ep_size
-            ][num_tokens] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return moe_default_data, moe_low_latency_data
-
-
-def load_context_attention_data(context_attention_file):
-    """
-    Load the context attention data with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(context_attention_file)
-    if rows is None:
-        logger.debug(f"Context attention data file {context_attention_file} not found.")
-        return None
-    context_attention_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(
-                    lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-                )
-            )
-        )
-    )
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (context_attention) - power will default to 0.0")
-
-    for row in rows:
-        try:
-            window_size = row["window_size"]
-        except KeyError:  # catch potential error for backward comptability
-            window_size = 0
-        quant_mode, kv_cache_dtype, b, s, n, kv_n, head_size, latency = (
-            row["attn_dtype"],
-            row["kv_cache_dtype"],
-            row["batch_size"],
-            row["isl"],
-            row["num_heads"],
-            row["num_key_value_heads"],
-            row["head_dim"],
-            row["latency"],
-        )
-        b = int(b)
-        s = int(s)
-        n = int(n)
-        kv_n = int(kv_n)
-        head_size = int(head_size)
-        window_size = int(window_size)
-        latency = float(latency)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads.
-        # Use kv_n = 0 to mean n_kv == n.
-        kv_n = 0 if n == kv_n else kv_n
-
-        quant_mode = common.FMHAQuantMode[quant_mode]
-        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
-
-        try:
-            # Check for conflict
-            context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b]
-            logger.debug(
-                f"value conflict in context attention data: {quant_mode} {kv_cache_dtype} "
-                f"{head_size} {window_size} {kv_n} {n} {s}"
-            )
-        except KeyError:
-            # Store all three values
-            context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return context_attention_data
-
-
-def load_generation_attention_data(generation_attention_file):
-    """
-    Load the generation attention data with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(generation_attention_file)
-    if rows is None:
-        logger.debug(f"Generation attention data file {generation_attention_file} not found.")
-        return None
-    generation_attention_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
-        )
-    )
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (generation_attention) - power will default to 0.0")
-
-    for row in rows:
-        try:
-            window_size = row["window_size"]
-        except KeyError:
-            window_size = 0
-        quant_mode, kv_cache_dtype, b, s, n, kv_n, head_size, step, latency = (  # noqa: F841
-            row["attn_dtype"],
-            row["kv_cache_dtype"],
-            row["batch_size"],
-            row["isl"],
-            row["num_heads"],
-            row["num_key_value_heads"],
-            row["head_dim"],
-            row["step"],
-            row["latency"],
-        )
-        b = int(b)
-        s = int(s)
-        n = int(n)
-        kv_n = int(kv_n)
-        head_size = int(head_size)
-        window_size = int(window_size)
-        step = int(step)
-        latency = float(latency)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads.
-        # Use kv_n = 0 to mean n_kv == n.
-        kv_n = 0 if n == kv_n else kv_n
-        s = s + step
-
-        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
-
-        try:
-            # Check for conflict
-            generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s]
-            logger.debug(
-                f"value conflict in generation attention data: {kv_cache_dtype} {kv_n} "
-                f"{head_size} {window_size} {n} {b}"
-            )
-        except KeyError:
-            # Store all three values
-            generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return generation_attention_data
-
-
-def load_context_mla_data(context_mla_file):
-    """
-    Load the context mla data for trtllm with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(context_mla_file)
-    if rows is None:
-        logger.debug(f"Context mla data file {context_mla_file} not found.")
-        return None
-    context_mla_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (context_mla) - power will default to 0.0")
-
-    for row in rows:
-        (
-            quant_mode,
-            kv_cache_dtype,
-            b,
-            s,
-            latency,
-        ) = row["mla_dtype"], row["kv_cache_dtype"], row["batch_size"], row["isl"], row["latency"]
-
-        if "num_heads" not in row:
-            tp_size = int(row["tp_size"])
-            num_heads = 128 // tp_size
-        else:
-            num_heads = int(row["num_heads"])
-
-        b = int(b)
-        s = int(s)
-        latency = float(latency)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        quant_mode = common.FMHAQuantMode[quant_mode]
-        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
-
-        try:
-            # Check for conflict
-            context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b]
-            logger.debug(f"value conflict in context mla data: {quant_mode} {kv_cache_dtype} {num_heads} {s} {b}")
-        except KeyError:
-            # Store all three values
-            context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return context_mla_data
-
-
-def load_generation_mla_data(generation_mla_file):
-    """
-    Load the generation mla data for trtllm with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(generation_mla_file)
-    if rows is None:
-        logger.debug(f"Generation mla data file {generation_mla_file} not found.")
-        return None
-    generation_mla_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (generation_mla) - power will default to 0.0")
-
-    for row in rows:
-        quant_mode, kv_cache_dtype, b, s, step, latency = (  # noqa: F841
-            row["mla_dtype"],
-            row["kv_cache_dtype"],
-            row["batch_size"],
-            row["isl"],
-            row["step"],
-            row["latency"],
-        )
-
-        if "num_heads" not in row:
-            tp_size = int(row["tp_size"])
-            num_heads = 128 // tp_size
-        else:
-            num_heads = int(row["num_heads"])
-
-        b = int(b)
-        s = int(s)
-        step = int(step)
-        latency = float(latency)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        s = s + step
-
-        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
-
-        try:
-            # Check for conflict
-            generation_mla_data[kv_cache_dtype][num_heads][b][s]
-            logger.debug(f"value conflict in generation mla data: {kv_cache_dtype} {num_heads} {b} {s} ")
-        except KeyError:
-            # Store all three values
-            generation_mla_data[kv_cache_dtype][num_heads][b][s] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return generation_mla_data
-
-
-def load_mla_bmm_data(mla_bmm_file):
-    """
-    Load the mla bmm data for trtllm with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(mla_bmm_file)
-    if rows is None:
-        logger.debug(f"MLA BMM data file {mla_bmm_file} not found.")
-        return None
-    mla_bmm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (mla_bmm) - power will default to 0.0")
-
-    for row in rows:
-        quant_mode, num_tokens, num_heads, latency, op_name = (
-            row["bmm_dtype"],
-            row["num_tokens"],
-            row["num_heads"],
-            row["latency"],
-            row["op_name"],
-        )
-        num_tokens = int(num_tokens)
-        num_heads = int(num_heads)
-        latency = float(latency)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        quant_mode = common.GEMMQuantMode[quant_mode]
-
-        try:
-            # Check for conflict
-            mla_bmm_data[quant_mode][op_name][num_heads][num_tokens]
-            logger.debug(f"value conflict in mla bmm data: {op_name} {quant_mode} {num_heads} {num_tokens} ")
-        except KeyError:
-            # Store all three values
-            mla_bmm_data[quant_mode][op_name][num_heads][num_tokens] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return mla_bmm_data
-
-
-DSA_MODEL_DIMS: dict[str, dict] = {
-    "DeepseekV32ForCausalLM": {
-        "hidden_size": 7168,
-        "q_lora_rank": 1536,
-        "kv_lora_rank": 512,
-        "qk_nope_head_dim": 128,
-        "qk_rope_head_dim": 64,
-        "v_head_dim": 128,
-        "index_topk": 2048,
-        "index_head_dim": 128,
-        "index_n_heads": 64,
-    },
-    "GlmMoeDsaForCausalLM": {
-        "hidden_size": 6144,
-        "q_lora_rank": 2048,
-        "kv_lora_rank": 512,
-        "qk_nope_head_dim": 192,
-        "qk_rope_head_dim": 64,
-        "v_head_dim": 256,
-        "index_topk": 2048,
-        "index_head_dim": 128,
-        "index_n_heads": 32,
-    },
-}
-
-DEFAULT_DSA_ARCHITECTURE = "DeepseekV32ForCausalLM"
-
-
-def load_context_dsa_module_data(dsa_file: str):
-    """
-    Load context DSA data.
-
-    Dict structure:
-        data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][architecture][num_heads][s][b]
-
-    Quant modes are the outermost keys so that ``_enum_key_names`` can
-    directly extract supported FMHAQuantMode names (aligned with
-    ``_context_attention_data``).  ``architecture`` (e.g.
-    "DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM") selects the
-    model-specific structural dimensions from ``DSA_MODEL_DIMS``.
-    Legacy CSV rows without an ``architecture`` column default to
-    "DeepseekV32ForCausalLM".
-    """
-    rows = _read_filtered_rows(dsa_file)
-    if rows is None:
-        logger.debug(f"DSA context data file {dsa_file} not found.")
-        return None
-
-    dsa_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
-        )
-    )
-
-    has_power = len(rows) > 0 and "power" in rows[0]
-
-    for row in rows:
-        num_heads = int(row["num_heads"])
-        b = int(row["batch_size"])
-        s = int(row["isl"])
-        latency = float(row["latency"])
-        power = float(row.get("power", 0.0)) if has_power else 0.0
-        energy = power * latency
-
-        arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
-        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
-        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
-        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
-
-        dsa_data[fmha_mode][kv_dtype][gemm_mode][arch][num_heads][s][b] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
-
-    return dsa_data
-
-
-def load_generation_dsa_module_data(dsa_file: str):
-    """
-    Load generation DSA data.
-
-    Dict structure:
-        data[kv_cache_quant_mode][gemm_quant_mode][architecture][num_heads][b][s]
-
-    Quant modes are the outermost keys so that ``_enum_key_names`` can
-    directly extract supported KVCacheQuantMode names (aligned with
-    ``_generation_attention_data``).  ``architecture`` selects the
-    model-specific structural dimensions from ``DSA_MODEL_DIMS``.
-    Legacy CSV rows without an ``architecture`` column default to
-    "DeepseekV32ForCausalLM".
-    """
-    rows = _read_filtered_rows(dsa_file)
-    if rows is None:
-        logger.debug(f"DSA generation data file {dsa_file} not found.")
-        return None
-
-    dsa_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
-    )
-
-    has_power = len(rows) > 0 and "power" in rows[0]
-
-    for row in rows:
-        num_heads = int(row["num_heads"])
-        b = int(row["batch_size"])
-        s = int(row["isl"]) + int(row["step"])
-        latency = float(row["latency"])
-        power = float(row.get("power", 0.0)) if has_power else 0.0
-        energy = power * latency
-
-        arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
-        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
-        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
-
-        dsa_data[kv_dtype][gemm_mode][arch][num_heads][b][s] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
-
-    return dsa_data
-
-
-def load_mhc_module_data(mhc_file: str):
-    """Load DeepSeek-V4 mHC pre/post module-level performance data.
-
-    CSV columns: framework, version, device, op_name, kernel_source,
-    architecture, num_tokens, hc_mult, hidden_size, latency [, power]
-    Optional metadata columns: num_sites, sinkhorn_iters
-    Legacy rows may include a ``model`` column; it is ignored because mHC is
-    selected by compute shape.
-
-    ``op_name`` is ``pre`` or ``post``, matching the ``op`` arg of
-    ``query_mhc_module``.
-
-    Dict structure (matches query_mhc_module silicon path):
-        data[op][hc_mult][hidden_size][num_tokens]
-    """
-    rows = _read_filtered_rows(mhc_file)
-    if rows is None:
-        logger.debug(f"mHC module data file {mhc_file} not found.")
-        return None
-
-    mhc_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-
-    has_power = len(rows) > 0 and "power" in rows[0]
-
-    for row in rows:
-        op = row["op_name"]
-        hc_mult = int(row["hc_mult"])
-        hidden_size = int(row["hidden_size"])
-        num_tokens = int(row["num_tokens"])
-        latency = float(row["latency"])
-        power = float(row.get("power", 0.0)) if has_power else 0.0
-        energy = power * latency
-
-        mhc_data[op][hc_mult][hidden_size][num_tokens] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
-
-    return mhc_data
-
-
-_DSV4_DTYPE_ALIASES = {
-    # CSV columns use sglang naming; aic_dev enums use canonical short names.
-    "fp8_e4m3": "fp8",
-}
-
-
-def _dsv4_normalize_dtype(name: str) -> str:
-    return _DSV4_DTYPE_ALIASES.get(name, name)
-
-
-# DeepSeek-V4 special-case for the data axis that distinguishes TP variants.
+# ─────────────────────────────────────────────────────────────────────────
+# CSV loader re-exports.
 #
-# The generic MLA convention in ``models/deepseek_v4.py`` computes
-# ``local_heads = self._num_heads // tp_size`` and passes it into the op as
-# ``num_heads``.  That math reflects real head sharding for DSv2/DSv3 — but
-# DeepSeek-V4 attention backends may pad Q for sparse kernels; the persisted
-# rows use ``tp_size`` as the axis that differentiates TP variants.
-#
-# Rather than touch that generic math, the V4 operation passes both the local
-# head count for SOL math and the native-head/tp_size keys for silicon lookup.
-
-
-# ``_dsv4_robust_3d_lookup`` moved to ``operations.dsv4`` along with the
-# rest of the DSV4 family (AIC-1095 / ISSUE-11). Re-exported via
-# ``__getattr__`` at the bottom of this module so tests importing it via
-# ``from aiconfigurator.sdk.perf_database import _dsv4_robust_3d_lookup``
-# keep working without triggering operations/__init__.py at import time.
-
-
-def load_context_dsv4_kind_module_data(file_path: str):
-    """Load ONE DeepSeek-V4 context CSV (single attn_kind / compress_ratio).
-
-    Returns an 8-level nested dict:
-        data[fmha_quant][kv_quant][gemm_quant][native_heads][compress_ratio]
-            [tp_size][s][b] = {"latency": ms, "power": W, "energy": J}
-
-    ``tp_size`` is the data axis. The model layer passes it through the
-    attention operation for silicon lookup.
-
-    Multiple files (csa/hca/swa) merge cleanly because compress_ratio is
-    the differentiating leaf dimension.
-    """
-    rows = _read_filtered_rows(file_path)
-    if rows is None:
-        logger.debug(f"DSV4 module data file {file_path} not found.")
-        return None
-
-    # 8-level nesting: fmha → kv → gemm → native_heads → cr → tp → s → b
-    def _make_nested(depth: int):
-        if depth == 0:
-            return defaultdict()
-        return defaultdict(lambda d=depth: _make_nested(d - 1))
-
-    data = _make_nested(7)
-    has_power = bool(rows) and "power" in rows[0]
-
-    for row in rows:
-        if row.get("batch_size") in (None, "", "batch_size"):
-            continue  # skip duplicate header rows from appended runs
-        try:
-            b = int(row["batch_size"])
-            s = int(row["isl"])
-            tp_size = int(row.get("tp_size", 1))
-            cr = int(row["compress_ratio"])
-            latency = float(row["latency"])
-        except (TypeError, ValueError, KeyError):
-            continue
-        power = float(row.get("power", 0.0)) if has_power else 0.0
-
-        native_heads = int(row["num_heads"])
-        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
-        fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
-        kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
-
-        # The row-distinguishing axis is ``tp_size`` itself.
-        data[fmha_mode][kv_dtype][gemm_mode][native_heads][cr][tp_size][s][b] = {
-            "latency": latency,
-            "power": power,
-            "energy": power * latency,
-        }
-    return data
-
-
-def load_generation_dsv4_kind_module_data(file_path: str):
-    """Load ONE DeepSeek-V4 generation CSV.
-
-    Generation lookup uses absolute KV length ``s_total = isl + step`` (decode
-    is q_len=1 with past_kv = step).  Dict shape:
-        data[kv_quant][gemm_quant][native_heads][compress_ratio]
-            [tp_size][b][s_total]
-
-    ``tp_size`` is passed by the attention operation for silicon lookup.
-    """
-    rows = _read_filtered_rows(file_path)
-    if rows is None:
-        logger.debug(f"DSV4 module data file {file_path} not found.")
-        return None
-
-    # 7-level nesting: kv → gemm → native_heads → cr → tp → b → s_total
-    def _make_nested(depth: int):
-        if depth == 0:
-            return defaultdict()
-        return defaultdict(lambda d=depth: _make_nested(d - 1))
-
-    data = _make_nested(6)
-    has_power = bool(rows) and "power" in rows[0]
-
-    for row in rows:
-        if row.get("batch_size") in (None, "", "batch_size"):
-            continue
-        try:
-            b = int(row["batch_size"])
-            s_total = int(row["isl"]) + int(row["step"])
-            tp_size = int(row.get("tp_size", 1))
-            cr = int(row["compress_ratio"])
-            latency = float(row["latency"])
-        except (TypeError, ValueError, KeyError):
-            continue
-        power = float(row.get("power", 0.0)) if has_power else 0.0
-
-        native_heads = int(row["num_heads"])
-        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
-        kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
-
-        # DeepSeek-V4: tp_size is the axis that differentiates rows.  See note
-        # at the top of the file.  Generation convention puts ``b`` before
-        # ``s_total`` (matches existing ``_interp_3d(num_heads, b, s, ...)``
-        # call order in ``query_generation_*``).
-        data[kv_dtype][gemm_mode][native_heads][cr][tp_size][b][s_total] = {
-            "latency": latency,
-            "power": power,
-            "energy": power * latency,
-        }
-    return data
-
-
-# ``_deep_merge_dsv4_dicts`` moved to ``operations.dsv4`` (AIC-1095 /
-# ISSUE-11). Re-exported via ``__getattr__`` at the bottom of this module
-# so tests importing it via
-# ``from aiconfigurator.sdk.perf_database import _deep_merge_dsv4_dicts``
-# keep working without triggering operations/__init__.py at import time.
-
-
-def load_dsv4_sparse_kernel_data(file_path: str):
-    """Load DeepSeek-V4 sparse-kernel CSV (paged_mqa_logits or hca_attn).
-
-    Emitted by ``collector.sglang.deepseekv4_sparse_modules``.  Used for
-    kernel-level past_kv Δ correction on top of the chunk-0 module baseline.
-
-    Dict structure:
-        data[native_heads][tp_size][past_kv][isl][bs] = {"latency": ms}
-    """
-    rows = _read_filtered_rows(file_path)
-    if rows is None:
-        logger.debug(f"DSV4 sparse-kernel data file {file_path} not found.")
-        return None
-
-    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
-
-    for row in rows:
-        # Skip duplicate header rows (file may be appended to across runs)
-        if row.get("batch_size") in (None, "", "batch_size"):
-            continue
-        try:
-            bs = int(row["batch_size"])
-            isl = int(row["isl"])
-            past_kv = int(row["step"])
-            tp_size = int(row.get("tp_size", 1))
-            latency = float(row["latency"])
-        except (TypeError, ValueError):
-            continue
-        native_heads = int(row["num_heads"])
-        data[native_heads][tp_size][past_kv][isl][bs] = {"latency": latency}
-
-    return data
-
-
-def load_context_mla_module_data(mla_module_file: str):
-    """
-    Load context MLA module-level performance data.
-
-    CSV columns: framework, version, device, op_name, kernel_source, model,
-    architecture, mla_dtype, kv_cache_dtype, gemm_type, num_heads,
-    batch_size, isl, tp_size, step, latency [, power]
-
-    Dict structure (matches context_mla_data nesting):
-        data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][num_heads][s][b]
-    """
-    rows = _read_filtered_rows(mla_module_file)
-    if rows is None:
-        logger.debug(f"MLA context module data file {mla_module_file} not found.")
-        return None
-
-    mla_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
-    )
-
-    has_power = len(rows) > 0 and "power" in rows[0]
-
-    for row in rows:
-        num_heads = int(row["num_heads"])
-        b = int(row["batch_size"])
-        s = int(row["isl"])
-        latency = float(row["latency"])
-        power = float(row.get("power", 0.0)) if has_power else 0.0
-        energy = power * latency
-
-        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
-        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
-        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
-
-        mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
-
-    return mla_data
-
-
-def load_generation_mla_module_data(mla_module_file: str):
-    """
-    Load generation MLA module-level performance data.
-
-    CSV columns: framework, version, device, op_name, kernel_source, model,
-    architecture, mla_dtype, kv_cache_dtype, gemm_type, num_heads,
-    batch_size, isl, tp_size, step, latency [, power]
-
-    Dict structure:
-        data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][num_heads][b][s]
-    """
-    rows = _read_filtered_rows(mla_module_file)
-    if rows is None:
-        logger.debug(f"MLA generation module data file {mla_module_file} not found.")
-        return None
-
-    mla_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
-    )
-
-    has_power = len(rows) > 0 and "power" in rows[0]
-
-    for row in rows:
-        num_heads = int(row["num_heads"])
-        b = int(row["batch_size"])
-        s = int(row["isl"]) + int(row["step"])
-        latency = float(row["latency"])
-        power = float(row.get("power", 0.0)) if has_power else 0.0
-        energy = power * latency
-
-        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
-        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
-        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
-
-        mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][b][s] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
-
-    return mla_data
-
-
-def load_mamba2_data(mamba2_file: str):
-    """
-    Load Mamba2 Conv1D + SSM kernel performance data from mamba2_perf.txt.
-
-    CSV columns: framework, version, device, op_name, kernel_source, phase,
-    batch_size, seq_len, num_tokens, d_model, d_state, d_conv, nheads, head_dim,
-    n_groups, chunk_size, model_name, latency (optional: power).
-    All rows must have the same columns (context and generation both include
-    seq_len and num_tokens so columns align).
-
-    Returns:
-        dict: data[kernel_source][phase][model_key] where model_key is
-              (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size).
-              For phase "context" the leaf is [batch_size][seq_len] -> {latency, power, energy}.
-              For phase "generation" the leaf is [batch_size] -> {latency, power, energy}.
-              Returns None if file does not exist.
-    """
-    rows = _read_filtered_rows(mamba2_file)
-    if rows is None:
-        logger.debug(f"Mamba2 data file {mamba2_file} not found.")
-        return None
-
-    # data[kernel_source][phase][model_key] -> nested batch_size [seq_len] -> {latency, power, energy}
-    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
-
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (mamba2) - power will default to 0.0")
-
-    for row in rows:
-        kernel_source = row["kernel_source"]
-        phase = row["phase"]
-        batch_size = int(row["batch_size"])
-        seq_len = int(row["seq_len"])
-        d_model = int(row["d_model"])
-        d_state = int(row["d_state"])
-        d_conv = int(row["d_conv"])
-        nheads = int(row["nheads"])
-        head_dim = int(row["head_dim"])
-        n_groups = int(row["n_groups"])
-        chunk_size = int(row["chunk_size"])
-        latency = float(row["latency"])
-        power = float(row.get("power", 0.0))
-        energy = power * latency
-
-        model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
-        entry = {"latency": latency, "power": power, "energy": energy}
-
-        try:
-            if phase == "context":
-                data[kernel_source][phase][model_key][batch_size][seq_len]
-                logger.debug(
-                    f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size} {seq_len}"
-                )
-            else:
-                data[kernel_source][phase][model_key][batch_size]
-                logger.debug(f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size}")
-        except KeyError:
-            if phase == "context":
-                data[kernel_source][phase][model_key][batch_size][seq_len] = entry
-            else:
-                data[kernel_source][phase][model_key][batch_size] = entry
-
-    # Convert default dicts to regular dicts for predictable behavior; keep generation as 1D
-    result = {}
-    for ks, by_phase in data.items():
-        result[ks] = {}
-        for ph, by_key in by_phase.items():
-            result[ks][ph] = dict(by_key)
-
-    return result
-
-
-def load_gdn_data(gdn_file: str):
-    """
-    Load GDN (Gated DeltaNet) kernel performance data from gdn_perf.txt.
-
-    CSV columns: framework, version, device, op_name, kernel_source, phase,
-    batch_size, seq_len, num_tokens, d_model, d_conv, num_k_heads, head_k_dim,
-    num_v_heads, head_v_dim, model_name, latency (optional: power).
-    All rows must have the same columns (context and generation both include
-    seq_len and num_tokens so columns align).
-
-    Returns:
-        dict: data[kernel_source][phase][model_key] where model_key is
-              (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv).
-              For phase "context" the leaf is [batch_size][seq_len] -> {latency, power, energy}.
-              For phase "generation" the leaf is [batch_size] -> {latency, power, energy}.
-              Returns None if file does not exist.
-    """
-    rows = _read_filtered_rows(gdn_file)
-    if rows is None:
-        logger.debug(f"GDN data file {gdn_file} not found.")
-        return None
-
-    # data[kernel_source][phase][model_key] -> nested batch_size [seq_len] -> {latency, power, energy}
-    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
-
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (gdn) - power will default to 0.0")
-
-    for row in rows:
-        kernel_source = row["kernel_source"]
-        phase = row["phase"]
-        batch_size = int(row["batch_size"])
-        seq_len = int(row["seq_len"])
-        d_model = int(row["d_model"])
-        d_conv = int(row["d_conv"])
-        num_k_heads = int(row["num_k_heads"])
-        head_k_dim = int(row["head_k_dim"])
-        num_v_heads = int(row["num_v_heads"])
-        head_v_dim = int(row["head_v_dim"])
-        latency = float(row["latency"])
-        power = float(row.get("power", 0.0))
-        energy = power * latency
-
-        model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
-        entry = {"latency": latency, "power": power, "energy": energy}
-
-        by_model = data[kernel_source][phase][model_key]
-        if phase == "context":
-            if batch_size in by_model and seq_len in by_model[batch_size]:
-                logger.debug(f"value conflict in gdn data: {kernel_source} {phase} {model_key} {batch_size} {seq_len}")
-            else:
-                by_model.setdefault(batch_size, {})[seq_len] = entry
-        else:
-            if batch_size in by_model:
-                logger.debug(f"value conflict in gdn data: {kernel_source} {phase} {model_key} {batch_size}")
-            else:
-                by_model[batch_size] = entry
-
-    # Convert defaultdicts to regular dicts for predictable behavior
-    result = {}
-    for ks, by_phase in data.items():
-        result[ks] = {}
-        for ph, by_key in by_phase.items():
-            result[ks][ph] = dict(by_key)
-
-    return result
-
-
-def load_wideep_context_moe_data(wideep_context_moe_file):
-    """
-    Load the SGLang wideep context MoE data from wideep_context_moe_perf.txt
-    with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(wideep_context_moe_file)
-    if rows is None:
-        logger.debug(f"Context MoE data file {wideep_context_moe_file} not found.")
-        return None
-
-    wideep_context_moe_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(
-                    lambda: defaultdict(
-                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-                    )
-                )
-            )
-        )
-    )
-
-    logger.debug(f"Loading SGLang wideep context MoE data from: {wideep_context_moe_file}")
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (wideep_context_moe) - power will default to 0.0")
-
-    for row in rows:
-        # Parse the CSV format with num_tokens instead of batch_size and input_len
-        quant_mode = row["moe_dtype"]
-        num_tokens = int(row["num_tokens"])
-        hidden_size = int(row["hidden_size"])
-        inter_size = int(row["inter_size"])
-        topk = int(row["topk"])
-        num_experts = int(row["num_experts"])
-        moe_tp_size = int(row["moe_tp_size"])
-        moe_ep_size = int(row["moe_ep_size"])
-        distribution = row["distribution"]
-        latency = float(row["latency"])
-        quant_mode = common.MoEQuantMode[quant_mode]
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        # Store all three values
-        wideep_context_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
-            moe_ep_size
-        ][num_tokens] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,  # NEW: precomputed energy
-        }
-        logger.debug(
-            f"Loaded SGLang wideep context MoE data: {quant_mode}, {distribution}, {topk}, "
-            f"{num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, "
-            f"{moe_ep_size}, {num_tokens} -> {latency}"
-        )
-
-    return wideep_context_moe_data
-
-
-def load_wideep_generation_moe_data(wideep_generation_moe_file):
-    """
-    Load the SGLang wideep generation MoE data from wideep_generation_moe_perf.txt
-    with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(wideep_generation_moe_file)
-    if rows is None:
-        logger.debug(f"Generation MoE data file {wideep_generation_moe_file} not found.")
-        return None
-
-    wideep_generation_moe_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(
-                    lambda: defaultdict(
-                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-                    )
-                )
-            )
-        )
-    )
-
-    logger.debug(f"Loading SGLang wideep generation MoE data from: {wideep_generation_moe_file}")
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (wideep_generation_moe) - power will default to 0.0")
-
-    for row in rows:
-        # Parse the CSV format with num_tokens instead of batch_size and input_len
-        quant_mode = row["moe_dtype"]
-        num_tokens = int(row["num_tokens"])
-        hidden_size = int(row["hidden_size"])
-        inter_size = int(row["inter_size"])
-        topk = int(row["topk"])
-        num_experts = int(row["num_experts"])
-        moe_tp_size = int(row["moe_tp_size"])
-        moe_ep_size = int(row["moe_ep_size"])
-        distribution = row["distribution"]
-        latency = float(row["latency"])
-        quant_mode = common.MoEQuantMode[quant_mode]
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        # Store all three values
-        wideep_generation_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
-            moe_ep_size
-        ][num_tokens] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,  # NEW: precomputed energy
-        }
-        logger.debug(
-            f"Loaded SGLang wideep generation MoE data: {quant_mode}, {distribution}, {topk}, "
-            f"{num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, "
-            f"{moe_ep_size}, {num_tokens} -> {latency}"
-        )
-
-    return wideep_generation_moe_data
-
-
-def load_wideep_context_mla_data(wideep_context_mla_file):
-    """
-    Load the SGLang wideep context mla data from wideep_context_mla_perf.txt
-    with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(wideep_context_mla_file)
-    if rows is None:
-        logger.debug(f"SGLang wideep context mla data file {wideep_context_mla_file} not found.")
-        return None
-    wideep_context_mla_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
-    )
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (wideep_context_mla) - power will default to 0.0")
-
-    for row in rows:
-        (
-            quant_mode,
-            kv_cache_dtype,
-            b,
-            s,
-            latency,
-        ) = row["mla_dtype"], row["kv_cache_dtype"], row["batch_size"], row["isl"], row["latency"]
-
-        kernel_source = row.get("kernel_source", "flashinfer")
-
-        if "num_heads" not in row:
-            tp_size = int(row["tp_size"])
-            num_heads = 128 // tp_size
-        else:
-            num_heads = int(row["num_heads"])
-
-        b = int(b)
-        s = int(s)
-        latency = float(latency)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        quant_mode = common.FMHAQuantMode[quant_mode]
-        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
-
-        try:
-            # Check for conflict
-            wideep_context_mla_data[kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b]
-            logger.debug(
-                f"value conflict in context mla data: {kernel_source} {quant_mode} {kv_cache_dtype} {num_heads} {s} {b}"
-            )
-        except KeyError:
-            # Store all three values
-            wideep_context_mla_data[kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return wideep_context_mla_data
-
-
-def load_wideep_generation_mla_data(wideep_generation_mla_file):
-    """
-    Load the SGLang wideep generation mla data from wideep_generation_mla_perf.txt
-    with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(wideep_generation_mla_file)
-    if rows is None:
-        logger.debug(f"SGLang wideep generation mla data file {wideep_generation_mla_file} not found.")
-        return None
-    wideep_generation_mla_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-    )
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (wideep_generation_mla) - power will default to 0.0")
-
-    for row in rows:
-        kv_cache_dtype, b, s, step, latency = (
-            row["kv_cache_dtype"],
-            row["batch_size"],
-            row["isl"],
-            row["step"],
-            row["latency"],
-        )
-
-        kernel_source = row.get("kernel_source", "flashinfer")
-
-        if "num_heads" not in row:
-            tp_size = int(row["tp_size"])
-            num_heads = 128 // tp_size
-        else:
-            num_heads = int(row["num_heads"])
-
-        b = int(b)
-        s = int(s)
-        step = int(step)
-        latency = float(latency)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        s = s + step
-
-        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
-
-        try:
-            # Check for conflict
-            wideep_generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s]
-            logger.debug(
-                f"value conflict in generation mla data: {kernel_source} {kv_cache_dtype} {num_heads} {b} {s} "
-            )
-        except KeyError:
-            # Store all three values
-            wideep_generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return wideep_generation_mla_data
-
-
-def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
-    """
-    Load the SGLang wideep deepep LL operation data from wideep_deepep_ll_perf.txt
-    with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(wideep_deepep_ll_file)
-    if rows is None:
-        logger.debug(f"SGLang wideep deepep LL operation data file {wideep_deepep_ll_file} not found.")
-        return None
-
-    wideep_deepep_ll_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (wideep_deepep_ll) - power will default to 0.0")
-
-    for row in rows:
-        hidden_size = int(row["hidden_size"])
-        node_num = int(row["node_num"])
-        num_token = int(row["num_token"])
-        num_topk = int(row["num_topk"])
-        num_experts = int(row["num_experts"])
-        combine_avg_t_us = float(row["combine_avg_t_us"])
-        dispatch_avg_t_us = float(row["dispatch_avg_t_us"])
-        lat = combine_avg_t_us + dispatch_avg_t_us
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * lat  # watt-milliseconds
-
-        # Store the data with key structure: [hidden_size][num_topk][num_experts][num_token]
-        # -> timing data
-        if num_token in wideep_deepep_ll_data[node_num][hidden_size][num_topk][num_experts]:
-            logger.debug(
-                f"value conflict in SGLang wideep deepep LL operation data: "
-                f"{hidden_size} {num_topk} {num_experts} {num_token}"
-            )
-        else:
-            # Store all three values
-            wideep_deepep_ll_data[node_num][hidden_size][num_topk][num_experts][num_token] = {
-                "latency": lat,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return wideep_deepep_ll_data
-
-
-def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
-    """
-    Load the SGLang wideep deepep normal operation data from wideep_deepep_normal_perf.txt
-    with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(wideep_deepep_normal_file)
-    if rows is None:
-        logger.debug(f"SGLang wideep deepep normal operation data file {wideep_deepep_normal_file} not found.")
-        return None
-
-    wideep_deepep_normal_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
-    )
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (wideep_deepep_normal) - power will default to 0.0")
-
-    for row in rows:
-        num_token = int(row["num_token"])
-        topk = int(row["num_topk"])
-        node_num = int(row["node_num"])
-        num_experts = int(row["num_experts"])
-        hidden_size = int(row["hidden_size"])
-        dispatch_sms = int(row["dispatch_sms"])
-        dispatch_transmit_us = float(row["dispatch_transmit_us"])
-        dispatch_notify_us = float(row["dispatch_notify_us"])
-        combine_transmit_us = float(row["combine_transmit_us"])
-        combine_notify_us = float(row["combine_notify_us"])
-        lat = dispatch_transmit_us + dispatch_notify_us + combine_transmit_us + combine_notify_us
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * lat  # watt-milliseconds
-
-        # Store the data with key structure:
-        # [hidden_size][topk][num_experts][dispatch_sms][num_token] -> timing data
-        if num_token in wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][dispatch_sms]:
-            logger.debug(
-                f"value conflict in deepep normal data: {hidden_size} {topk} {num_experts} {dispatch_sms} {num_token}"
-            )
-        else:
-            # Store all three values
-            wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][dispatch_sms][num_token] = {
-                "latency": lat,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return wideep_deepep_normal_data
-
-
-def load_wideep_moe_compute_data(wideep_moe_compute_file):
-    """
-    Load the TensorRT-LLM wideep MoE compute data from wideep_moe_compute_perf.txt.
-    This data represents pure computation time (excluding All2All communication).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-        Structure: [kernel_source][quant_mode][distribution][topk][num_experts][hidden_size][inter_size]
-                   [num_slots][moe_tp_size][moe_ep_size][num_tokens] -> {latency, power, energy}
-
-    Note:
-        kernel_source identifies the MoE computation kernel:
-        - "moe_torch_flow": Cutlass-based kernel (default for SM < 100)
-        - "deepgemm": DeepGemm kernel (SM >= 100 with fp8_block)
-        If data file does not have 'kernel_source' column, it defaults to "moe_torch_flow".
-    """
-    rows = _read_filtered_rows(wideep_moe_compute_file)
-    if rows is None:
-        logger.debug(f"TensorRT-LLM wideep MoE compute data file {wideep_moe_compute_file} not found.")
-        return None
-
-    wideep_moe_compute_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(
-                    lambda: defaultdict(
-                        lambda: defaultdict(
-                            lambda: defaultdict(
-                                lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-                            )
-                        )
-                    )
-                )
-            )
-        )
-    )
-
-    logger.debug(f"Loading TensorRT-LLM wideep MoE compute data from: {wideep_moe_compute_file}")
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (wideep_moe_compute) - power will default to 0.0")
-
-    # Check if kernel_source column exists
-    has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
-    if not has_kernel_source:
-        logger.debug("kernel_source column not found (wideep_moe_compute) - will default to 'moe_torch_flow'")
-
-    for row in rows:
-        quant_mode = row["moe_dtype"]
-        num_tokens = int(row["num_tokens"])
-        hidden_size = int(row["hidden_size"])
-        inter_size = int(row["inter_size"])
-        topk = int(row["topk"])
-        num_experts = int(row["num_experts"])
-        num_slots = int(row["num_slots"])
-        moe_tp_size = int(row["moe_tp_size"])
-        moe_ep_size = int(row["moe_ep_size"])
-        distribution = row["distribution"]
-        latency = float(row["latency"])
-        quant_mode = common.MoEQuantMode[quant_mode]
-
-        # Get kernel_source from data or use default
-        kernel_source = row.get("kernel_source", "moe_torch_flow")
-
-        # Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-        energy = power * latency  # watt-milliseconds
-
-        # Store all three values with kernel_source dimension
-        wideep_moe_compute_data[kernel_source][quant_mode][distribution][topk][num_experts][hidden_size][inter_size][
-            num_slots
-        ][moe_tp_size][moe_ep_size][num_tokens] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
-        # logger.debug(
-        #     f"Loaded TensorRT-LLM wideep MoE compute data: kernel={kernel_source}, {quant_mode}, "
-        #     f"{distribution}, {topk}, {num_experts}, {hidden_size}, {inter_size}, {num_slots}, "
-        #     f"{moe_tp_size}, {moe_ep_size}, {num_tokens} -> {latency}"
-        # )
-
-    return wideep_moe_compute_data
-
-
-def load_trtllm_alltoall_data(trtllm_alltoall_file):
-    """
-    Load TensorRT-LLM AlltoAll communication perf data from trtllm_alltoall_perf.txt.
-    Covers both WideEP (NVLinkTwoSided) and CutlassFusedMoE (NVLinkOneSided) paths.
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-        Structure: [kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts]
-                   [moe_ep_size][num_tokens] -> {latency, power, energy}
-        op_name can be: alltoall_prepare, alltoall_dispatch, alltoall_combine, alltoall_combine_low_precision
-
-    Note:
-        kernel_source identifies the All2All communication method:
-        - "NVLinkTwoSided": NVLink Two-Sided via MNNVL (GB200, SM >= 100)
-        - "NVLinkOneSided": NVLink One-Sided (CutlassFusedMoE on GB200)
-        - "DeepEP": DeepEP normal mode (H100/H200, cross-node)
-        - "DeepEPLowLatency": DeepEP low-latency mode (H100/H200, intra-node)
-        - "NCCL": Standard NCCL communication (fallback)
-        If data file does not have 'kernel_source' column, it defaults to "NVLinkTwoSided".
-
-        If data file does not have 'num_nodes' column, it will be computed as moe_ep_size // 4.
-        This assumes 4 GPUs per node (e.g., GB200 NVL4).
-    """
-    rows = _read_filtered_rows(trtllm_alltoall_file)
-    if rows is None:
-        logger.debug(f"TensorRT-LLM AlltoAll data file {trtllm_alltoall_file} not found.")
-        return None
-
-    trtllm_alltoall_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(
-                    lambda: defaultdict(
-                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-                    )
-                )
-            )
-        )
-    )
-
-    logger.debug(f"Loading TensorRT-LLM AlltoAll data from: {trtllm_alltoall_file}")
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (trtllm_alltoall) - power will default to 0.0")
-
-    # Check if num_nodes column exists
-    has_num_nodes = len(rows) > 0 and "num_nodes" in rows[0]
-    if not has_num_nodes:
-        logger.debug("num_nodes column not found (trtllm_alltoall) - will be computed as moe_ep_size // 4")
-
-    # Check if kernel_source column exists
-    has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
-    if not has_kernel_source:
-        logger.debug("kernel_source column not found (trtllm_alltoall) - will default to 'NVLinkTwoSided'")
-
-    for row in rows:
-        op_name = row["op_name"]  # alltoall_prepare, alltoall_dispatch, alltoall_combine, etc.
-        quant_mode = row["moe_dtype"]
-        num_tokens = int(row["num_tokens"])
-        hidden_size = int(row["hidden_size"])
-        topk = int(row["topk"])
-        num_experts = int(row["num_experts"])
-        moe_ep_size = int(row["moe_ep_size"])
-        latency = float(row["latency"])
-        quant_mode = common.MoEQuantMode[quant_mode]
-
-        # Get kernel_source from data or use default
-        kernel_source = row.get("kernel_source", "NVLinkTwoSided")
-
-        # Get num_nodes from data or compute from moe_ep_size
-        if has_num_nodes:
-            num_nodes = int(row["num_nodes"])
-        else:
-            # Default: assume 4 GPUs per node
-            if moe_ep_size % 4 != 0:  # FIXME this is only for GB200 needs to be generalized for other systems
-                logger.warning(
-                    f"moe_ep_size={moe_ep_size} is not divisible by 4, using moe_ep_size // 4 = {moe_ep_size // 4}"
-                )
-            num_nodes = max(1, moe_ep_size // 4)
-
-        # Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-        energy = power * latency  # watt-milliseconds
-
-        # Store all three values with kernel_source and num_nodes dimensions
-        trtllm_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
-            moe_ep_size
-        ][num_tokens] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
-        # logger.debug(
-        #     f"Loaded TensorRT-LLM wideep All2All data: kernel={kernel_source}, {op_name}, {quant_mode}, "
-        #     f"num_nodes={num_nodes}, {hidden_size}, {topk}, {num_experts}, {moe_ep_size}, "
-        #     f"{num_tokens} -> {latency}"
-        # )
-
-    return trtllm_alltoall_data
+# Every ``load_*_data`` function lives in the op module that owns the
+# data it parses (lazy per-op data ownership). The re-exports below keep the previous
+# import paths working for external callers and for legacy
+# ``aiconfigurator.sdk.perf_database.<loader>`` patch sites in test
+# fixtures (the conftest now patches the new locations directly; these
+# survive for code outside this repo).
+# ─────────────────────────────────────────────────────────────────────────
+from aiconfigurator.sdk.operations.attention import (  # noqa: F401
+    load_context_attention_data,
+    load_encoder_attention_data,
+    load_generation_attention_data,
+)
+from aiconfigurator.sdk.operations.communication import (  # noqa: F401
+    load_custom_allreduce_data,
+    load_nccl_data,
+)
+from aiconfigurator.sdk.operations.dsa import (  # noqa: F401
+    DEFAULT_DSA_ARCHITECTURE,
+    DSA_MODEL_DIMS,
+    load_context_dsa_module_data,
+    load_generation_dsa_module_data,
+)
+from aiconfigurator.sdk.operations.dsv4 import (  # noqa: F401
+    _dsv4_normalize_dtype,
+    load_context_dsv4_kind_module_data,
+    load_dsv4_sparse_kernel_data,
+    load_generation_dsv4_kind_module_data,
+    load_mhc_module_data,
+)
+from aiconfigurator.sdk.operations.gemm import (  # noqa: F401
+    load_compute_scale_data,
+    load_gemm_data,
+    load_scale_matrix_data,
+)
+from aiconfigurator.sdk.operations.mamba import (  # noqa: F401
+    load_gdn_data,
+    load_mamba2_data,
+)
+from aiconfigurator.sdk.operations.mla import (  # noqa: F401
+    load_context_mla_data,
+    load_context_mla_module_data,
+    load_generation_mla_data,
+    load_generation_mla_module_data,
+    load_mla_bmm_data,
+    load_wideep_context_mla_data,
+    load_wideep_generation_mla_data,
+)
+from aiconfigurator.sdk.operations.moe import (  # noqa: F401
+    load_moe_data,
+    load_trtllm_alltoall_data,
+    load_wideep_context_moe_data,
+    load_wideep_deepep_ll_data,
+    load_wideep_deepep_normal_data,
+    load_wideep_generation_moe_data,
+    load_wideep_moe_compute_data,
+)
 
 
 class LoadedOpData(UserDict):
@@ -2599,7 +747,14 @@ class LoadedOpData(UserDict):
 
         super().__init__()
         if dict_data:
-            super().update(dict_data)
+            # Freeze any defaultdicts so missing-key access at query time
+            # raises ``KeyError`` instead of silently creating empty
+            # branches. Previously this was handled by a one-shot
+            # ``_finalize_loaded_data()`` walk at the end of
+            # ``PerfDatabase.__init__``; the lazy contract means each
+            # load_data may bind data long after construction, so freezing
+            # at wrap time covers every entry point uniformly.
+            super().update(_finalize_loaded_value(dict_data))
 
     def raise_if_not_loaded(self):
         if self.loaded:
@@ -2630,6 +785,294 @@ class LoadedOpData(UserDict):
     def __contains__(self, key):
         self.raise_if_not_loaded()
         return super().__contains__(key)
+
+
+class _LazySupportMatrix:
+    """Dict-like ``database.supported_quant_mode`` that resolves each key
+    on first read.
+
+    Reading a key triggers ``OpClass.load_data(database)`` on the op class
+    that owns the relevant table, then extracts the supported modes from
+    the freshly-bound instance attribute. Subsequent reads of the same
+    key return the memoized list. ``load_data`` itself is idempotent and
+    early-exits on cache hit, so repeated access is O(1).
+
+    The catalog of valid keys is fixed per backend at construction time
+    and mirrors the four branches of the previous ``_update_support_matrix``.
+    Reading a key that doesn't apply to the active backend raises
+    ``KeyError``, matching the previous dict semantics — callers that
+    expect ``key in db.supported_quant_mode`` checks (e.g.
+    ``supported.get(context_attn_key, [])`` in ``task.py``) work
+    unchanged because ``get()`` returns the default for both unknown keys
+    and resolved-to-empty keys.
+
+    Instance assignment (``db.supported_quant_mode = {...}``) replaces
+    the matrix entirely; both per-key reads and the lazy contract no
+    longer apply on the overwritten value. The pre-refactor
+    ``_update_support_matrix`` method continues to work and produces a
+    plain dict snapshot that overwrites the lazy matrix in place.
+    """
+
+    # Catalog mirrors the four branches of the previous
+    # ``_update_support_matrix``. Backends absent from the map produce an
+    # empty matrix.
+    _BACKEND_KEYS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "sglang": (
+            "gemm",
+            "context_attention",
+            "generation_attention",
+            "context_mla",
+            "generation_mla",
+            "dsa_context_module",
+            "dsa_generation_module",
+            "deepseek_v4_context_module",
+            "deepseek_v4_generation_module",
+            "mla_bmm",
+            "nccl",
+            "moe",
+            "wideep_context_moe",
+            "wideep_generation_moe",
+            "wideep_context_mla",
+            "wideep_generation_mla",
+        ),
+        "trtllm": (
+            "gemm",
+            "context_attention",
+            "generation_attention",
+            "context_mla",
+            "generation_mla",
+            "dsa_context_module",
+            "dsa_generation_module",
+            "deepseek_v4_context_module",
+            "deepseek_v4_generation_module",
+            "mla_bmm",
+            "nccl",
+            "moe",
+        ),
+        "vllm": (
+            "gemm",
+            "context_attention",
+            "generation_attention",
+            "context_mla",
+            "generation_mla",
+            "dsa_context_module",
+            "dsa_generation_module",
+            "deepseek_v4_context_module",
+            "deepseek_v4_generation_module",
+            "mla_bmm",
+            "moe",
+            "nccl",
+        ),
+    }
+
+    def __init__(self, database: PerfDatabase):
+        self._database = database
+        self._resolved: dict[str, list[str]] = {}
+        self._keys: tuple[str, ...] = self._BACKEND_KEYS.get(database.backend, ())
+
+    def __getitem__(self, key: str) -> list[str]:
+        if key in self._resolved:
+            return self._resolved[key]
+        if key not in self._keys:
+            raise KeyError(key)
+        value = self._resolve(key)
+        self._resolved[key] = value
+        return value
+
+    def get(self, key: str, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._keys
+
+    def __iter__(self):
+        return iter(self._keys)
+
+    def keys(self):
+        return list(self._keys)
+
+    def values(self):
+        return [self[k] for k in self._keys]
+
+    def items(self):
+        return [(k, self[k]) for k in self._keys]
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+    def __repr__(self) -> str:
+        return f"_LazySupportMatrix(backend={self._database.backend!r}, resolved={list(self._resolved)})"
+
+    # --- Per-key resolvers ----------------------------------------------------
+    #
+    # Each resolver triggers ``load_data`` on the relevant op class(es), then
+    # extracts the modes from the instance attributes those ``load_data`` calls
+    # bind. Local imports keep the lazy contract: building a database doesn't
+    # import op modules until the matrix is first read.
+
+    def _resolve(self, key: str) -> list[str]:
+        db = self._database
+        if key == "gemm":
+            from aiconfigurator.sdk.operations.gemm import GEMM
+
+            GEMM.load_data(db)
+            modes = _enum_key_names(getattr(db, "_gemm_data", None))
+            # ``fp8_static`` is a behavioral mode that reuses ``fp8`` GEMM perf tables.
+            if (
+                db.backend == "trtllm"
+                and common.GEMMQuantMode.fp8.name in modes
+                and common.GEMMQuantMode.fp8_static.name not in modes
+            ):
+                modes.append(common.GEMMQuantMode.fp8_static.name)
+            return modes
+
+        if key == "context_attention":
+            from aiconfigurator.sdk.operations.attention import ContextAttention
+
+            ContextAttention.load_data(db)
+            return _enum_key_names(getattr(db, "_context_attention_data", None))
+
+        if key == "generation_attention":
+            from aiconfigurator.sdk.operations.attention import GenerationAttention
+
+            GenerationAttention.load_data(db)
+            return _enum_key_names(getattr(db, "_generation_attention_data", None))
+
+        if key == "context_mla":
+            from aiconfigurator.sdk.operations.mla import ContextMLA, MLAModule
+
+            ContextMLA.load_data(db)
+            MLAModule.load_data(db)
+            return _merge_key_names(
+                getattr(db, "_context_mla_data", None),
+                getattr(db, "_context_mla_module_data", None),
+            )
+
+        if key == "generation_mla":
+            from aiconfigurator.sdk.operations.mla import GenerationMLA, MLAModule
+
+            GenerationMLA.load_data(db)
+            MLAModule.load_data(db)
+            # Granular data is keyed [kv_cache]...; module data is keyed
+            # [fmha][kv_cache][gemm]... so kv modes are at the second level there.
+            kv_modes: set[str] = set()
+            granular = getattr(db, "_generation_mla_data", None)
+            if granular:
+                kv_modes.update(_enum_key_names(granular))
+            module = getattr(db, "_generation_mla_module_data", None)
+            if module:
+                for fmha_mode in module:
+                    for kv_mode in module[fmha_mode]:
+                        kv_modes.add(kv_mode.name if hasattr(kv_mode, "name") else str(kv_mode))
+            return sorted(kv_modes)
+
+        if key == "dsa_context_module":
+            from aiconfigurator.sdk.operations.dsa import ContextDSAModule
+
+            ContextDSAModule.load_data(db)
+            return _enum_key_names(getattr(db, "_context_dsa_module_data", None))
+
+        if key == "dsa_generation_module":
+            from aiconfigurator.sdk.operations.dsa import GenerationDSAModule
+
+            GenerationDSAModule.load_data(db)
+            return _enum_key_names(getattr(db, "_generation_dsa_module_data", None))
+
+        if key == "deepseek_v4_context_module":
+            from aiconfigurator.sdk.operations.dsv4 import ContextDeepSeekV4AttentionModule
+
+            ContextDeepSeekV4AttentionModule.load_data(db)
+            return _enum_key_names(getattr(db, "_context_deepseek_v4_attention_module_data", None))
+
+        if key == "deepseek_v4_generation_module":
+            from aiconfigurator.sdk.operations.dsv4 import GenerationDeepSeekV4AttentionModule
+
+            GenerationDeepSeekV4AttentionModule.load_data(db)
+            return _enum_key_names(getattr(db, "_generation_deepseek_v4_attention_module_data", None))
+
+        if key == "mla_bmm":
+            from aiconfigurator.sdk.operations.mla import MLABmm
+
+            MLABmm.load_data(db)
+            return _enum_key_names(getattr(db, "_mla_bmm_data", None))
+
+        if key == "nccl":
+            from aiconfigurator.sdk.operations.communication import NCCL
+
+            NCCL.load_data(db)
+            # vllm matrix prefers ``_nccl_data`` but falls back to ``_oneccl_data``
+            # because the original code used ``... or getattr(self, "_oneccl_data", None)``.
+            primary = getattr(db, "_nccl_data", None)
+            if db.backend == "vllm" and not primary:
+                primary = getattr(db, "_oneccl_data", None)
+            return _enum_key_names(primary)
+
+        if key == "moe":
+            from aiconfigurator.sdk.operations.moe import MoE
+
+            MoE.load_data(db)
+            return _enum_key_names(getattr(db, "_moe_data", None))
+
+        if key == "wideep_context_moe":
+            from aiconfigurator.sdk.operations.moe import MoE
+
+            MoE.load_data(db)
+            return _enum_key_names(getattr(db, "_wideep_context_moe_data", None))
+
+        if key == "wideep_generation_moe":
+            from aiconfigurator.sdk.operations.moe import MoE
+
+            MoE.load_data(db)
+            return _enum_key_names(getattr(db, "_wideep_generation_moe_data", None))
+
+        if key == "wideep_context_mla":
+            from aiconfigurator.sdk.operations.mla import WideEPContextMLA
+
+            WideEPContextMLA.load_data(db)
+            modes: set[str] = set()
+            data = getattr(db, "_wideep_context_mla_data", None) or {}
+            for kernel_source in data:
+                for quant_mode in data[kernel_source]:
+                    modes.add(quant_mode.name if hasattr(quant_mode, "name") else str(quant_mode))
+            return sorted(modes)
+
+        if key == "wideep_generation_mla":
+            from aiconfigurator.sdk.operations.mla import WideEPGenerationMLA
+
+            WideEPGenerationMLA.load_data(db)
+            modes = set()
+            data = getattr(db, "_wideep_generation_mla_data", None) or {}
+            for kernel_source in data:
+                for kv_cache_dtype in data[kernel_source]:
+                    modes.add(kv_cache_dtype.name if hasattr(kv_cache_dtype, "name") else str(kv_cache_dtype))
+            return sorted(modes)
+
+        # Unreachable given the _keys gate in __getitem__, but stay defensive.
+        raise KeyError(key)
+
+
+def _enum_key_names(data) -> list[str]:
+    """Safely extract Enum key names from a mapping.
+
+    Many perf tables are optional and loaders return ``None`` when data
+    files are missing. Treat missing/empty tables as supporting no modes."""
+    if not data:
+        return []
+    names: list[str] = []
+    for key in data:
+        names.append(key.name if hasattr(key, "name") else str(key))
+    return names
+
+
+def _merge_key_names(*sources) -> list[str]:
+    """Merge top-level Enum key names from multiple data sources."""
+    merged: set[str] = set()
+    for source in sources:
+        merged.update(_enum_key_names(source))
+    return sorted(merged)
 
 
 class PerfDatabase:
@@ -2706,218 +1149,16 @@ class PerfDatabase:
         # Cache for extracted metric data to avoid repeated extraction in _interp_3d
         self._extracted_metrics_cache = {}
 
-        # Manifest entries grouped by op_file. Used to discover which sibling
+        # Manifest entries grouped by op_file. Used by ``_build_op_sources``
+        # (lazy-load path inside each op class) to discover which sibling
         # backend/version dirs hold rows the active backend can inherit.
         self._op_kernel_source_manifest_entries = _load_op_kernel_source_manifest_entries(systems_root)
 
-        system_data_root = os.path.join(systems_root, self.system_spec["data_dir"])
-        data_dir = os.path.join(system_data_root, backend, version)
-        nccl_data_dir = os.path.join(
-            system_data_root,
-            "nccl",
-            self.system_spec["misc"]["nccl_version"],
-        )
-        oneccl_version = self.system_spec.get("misc", {}).get("oneccl_version")
-        oneccl_data_dir = os.path.join(system_data_root, "oneccl", oneccl_version) if oneccl_version else None
-
-        def _load_op_data(op_filename_enum: PerfDataFilename) -> LoadedOpData | tuple[LoadedOpData, ...]:
-            func_map = {
-                PerfDataFilename.gemm: load_gemm_data,
-                PerfDataFilename.context_attention: load_context_attention_data,
-                PerfDataFilename.generation_attention: load_generation_attention_data,
-                PerfDataFilename.moe: load_moe_data,
-                PerfDataFilename.custom_allreduce: load_custom_allreduce_data,
-                PerfDataFilename.nccl: load_nccl_data,
-                PerfDataFilename.oneccl: load_nccl_data,
-                PerfDataFilename.context_mla: load_context_mla_data,
-                PerfDataFilename.generation_mla: load_generation_mla_data,
-                PerfDataFilename.mla_bmm: load_mla_bmm_data,
-                PerfDataFilename.mamba2: load_mamba2_data,
-                PerfDataFilename.gdn: load_gdn_data,
-                PerfDataFilename.compute_scale: load_compute_scale_data,
-                PerfDataFilename.scale_matrix: load_scale_matrix_data,
-                PerfDataFilename.wideep_context_moe: load_wideep_context_moe_data,
-                PerfDataFilename.wideep_generation_moe: load_wideep_generation_moe_data,
-                PerfDataFilename.wideep_context_mla: load_wideep_context_mla_data,
-                PerfDataFilename.wideep_generation_mla: load_wideep_generation_mla_data,
-                PerfDataFilename.wideep_deepep_normal: load_wideep_deepep_normal_data,
-                PerfDataFilename.wideep_deepep_ll: load_wideep_deepep_ll_data,
-                PerfDataFilename.wideep_moe_compute: load_wideep_moe_compute_data,
-                PerfDataFilename.trtllm_alltoall: load_trtllm_alltoall_data,
-                PerfDataFilename.mla_context_module: load_context_mla_module_data,
-                PerfDataFilename.mla_generation_module: load_generation_mla_module_data,
-                PerfDataFilename.dsa_context_module: load_context_dsa_module_data,
-                PerfDataFilename.dsa_generation_module: load_generation_dsa_module_data,
-                PerfDataFilename.mhc_module: load_mhc_module_data,
-                PerfDataFilename.dsv4_csa_context_module: load_context_dsv4_kind_module_data,
-                PerfDataFilename.dsv4_hca_context_module: load_context_dsv4_kind_module_data,
-                PerfDataFilename.dsv4_csa_generation_module: load_generation_dsv4_kind_module_data,
-                PerfDataFilename.dsv4_hca_generation_module: load_generation_dsv4_kind_module_data,
-                PerfDataFilename.dsv4_paged_mqa_logits_module: load_dsv4_sparse_kernel_data,
-                PerfDataFilename.dsv4_hca_attn_module: load_dsv4_sparse_kernel_data,
-            }
-            perf_data_dir = data_dir
-            if op_filename_enum == PerfDataFilename.nccl:
-                perf_data_dir = nccl_data_dir
-            elif op_filename_enum == PerfDataFilename.oneccl:
-                perf_data_dir = oneccl_data_dir if oneccl_data_dir else data_dir
-
-            data_filepath = os.path.join(perf_data_dir, op_filename_enum.value)
-            load_fn = func_map[op_filename_enum]
-
-            # `sources` is a list of `(path, kernel_source_filter | None)` tuples in
-            # priority order. Each loader walks them once and applies the existing
-            # first-wins-on-key-conflict logic per row, so cross-version / cross-
-            # backend inheritance falls out for free without a separate merge pass.
-            sources = self._build_op_sources(op_filename_enum, data_filepath, system_data_root)
-            result = load_fn(sources)
-
-            def _wrap_data_dict(data_dict: Optional[dict]):
-                return LoadedOpData(data_dict, op_filename_enum, data_filepath)
-
-            # `load_moe_data` is the only loader that returns a tuple — `(moe_default_data,
-            # moe_low_latency_data)` — because rows tagged `kernel_source="moe_torch_flow_min_latency"`
-            # are routed into a separate accumulator that downstream `query_moe` looks up under a
-            # different runtime mode. Every other loader returns a single `Optional[dict]`.
-            # TODO: collapse the asymmetry by either (a) making every loader return a tuple of
-            # `LoadedOpData` (1-tuple for non-moe) or (b) wrapping moe's two surfaces in a single
-            # container that downstream queries dispatch on. Both touch many call sites — defer
-            # until there's a second loader that needs row-level fan-out.
-            if isinstance(result, tuple):
-                return tuple(_wrap_data_dict(item) for item in result)
-            return _wrap_data_dict(result)
-
-        # Core ops. GEMM / ContextAttention / GenerationAttention moved to
-        # operations/*: data loading, SOL correction, and grid extrapolation
-        # now live there. Their ``load_data`` classmethods are invoked once
-        # below (after the other ``_load_op_data`` calls) so the loaders are
-        # still patched in unit-test setups.
-        # ``_moe_data`` + ``_moe_low_latency_data`` are loaded by
-        # ``MoE.load_data`` below (AIC-? / ISSUE-12). The ``load_moe_data``
-        # CSV loader is still the only loader that returns a tuple; the MoE
-        # class unpacks it.
-
-        # Comm ops (CustomAllReduce + NCCL + P2P) moved to
-        # operations/communication.py. Their ``load_data`` classmethods are
-        # invoked below after the other ``_load_op_data`` calls (same
-        # transition rationale as GEMM/Attention — loaders are still
-        # patched during ``__init__`` in unit tests).
-
-        # More model-specific ops
-        # MLA family (regular + module + BMM) moved to operations/mla.py
-        # (ContextMLA.load_data / GenerationMLA.load_data / MLABmm.load_data /
-        # MLAModule.load_data handle the loads + extrapolation).
-        # mamba2 + gdn moved to operations/mamba.py (Mamba2Kernel.load_data /
-        # GDNKernel.load_data handle the loads).
-        # compute_scale + scale_matrix are GEMM-owned (loaded by GEMM.load_data below)
-        # context_dsa_module + generation_dsa_module are DSA-owned (loaded by
-        # ContextDSAModule.load_data / GenerationDSAModule.load_data below).
-        # ``_mhc_module_data`` is loaded by ``DeepSeekV4MHCModule.load_data``
-        # below. DSV4 context / generation attention module data + raw
-        # deepcopy + sparse-kernel sidecar dict are loaded by
-        # ``Context/GenerationDeepSeekV4AttentionModule.load_data`` below
-        # (AIC-1095 / ISSUE-11).
-
-        # sglang wideep path
-        if backend == "sglang":
-            # ``_wideep_context_moe_data`` + ``_wideep_generation_moe_data``
-            # are loaded by ``MoE.load_data`` below (AIC-537 / Phase 4.1).
-            # ``_wideep_deepep_normal_data`` + ``_wideep_deepep_ll_data``
-            # are loaded by ``MoEDispatch.load_data`` below.
-            # WideEP MLA data moved to operations/mla.py
-            # (WideEPContextMLA / WideEPGenerationMLA load_data handle these,
-            # gated internally on backend == "sglang"). Note: load happens
-            # at the bottom of __init__ for every backend; non-SGLang gets None.
-            pass
-
-        # DSA module-level attention data moved to operations/dsa.py
-        # (ContextDSAModule.load_data / GenerationDSAModule.load_data handle
-        # the load + deepcopy of the raw rows + grid extrapolation).
-
-        # TensorRT-LLM wideep path: ``_wideep_moe_compute_data`` and
-        # ``_trtllm_alltoall_data`` are loaded by ``TrtLLMWideEPMoe.load_data`` /
-        # ``TrtLLMWideEPMoeDispatch.load_data`` below (ISSUE-13). Both gate on
-        # ``database.backend == "trtllm"``.
-
-        # GEMM / ContextAttention / GenerationAttention own their CSV tables +
-        # SOL correction + grid extrapolation. The eager invocations here are
-        # a transition compromise — Pattern A is supposed to be lazy-on-first-
-        # query, but the existing test surface (stub_perf_db,
-        # comprehensive_perf_db) patches loaders only during ``__init__``,
-        # so a lazy load triggered later would hit unpatched real-disk
-        # loaders. ISSUE-16 retires these eager calls once test fixtures
-        # migrate to the lazy contract.
-        from aiconfigurator.sdk.operations.attention import ContextAttention, GenerationAttention
-        from aiconfigurator.sdk.operations.communication import NCCL, CustomAllReduce
-        from aiconfigurator.sdk.operations.dsa import ContextDSAModule, GenerationDSAModule
-        from aiconfigurator.sdk.operations.dsv4 import (
-            ContextDeepSeekV4AttentionModule,
-            DeepSeekV4MHCModule,
-            GenerationDeepSeekV4AttentionModule,
-        )
-        from aiconfigurator.sdk.operations.gemm import GEMM
-        from aiconfigurator.sdk.operations.mamba import GDNKernel, Mamba2Kernel
-        from aiconfigurator.sdk.operations.mla import (
-            ContextMLA,
-            GenerationMLA,
-            MLABmm,
-            MLAModule,
-            WideEPContextMLA,
-            WideEPGenerationMLA,
-        )
-        from aiconfigurator.sdk.operations.moe import (
-            MoE,
-            MoEDispatch,
-            TrtLLMWideEPMoE,
-            TrtLLMWideEPMoEDispatch,
-        )
-
-        GEMM.load_data(self)
-        ContextAttention.load_data(self)
-        GenerationAttention.load_data(self)
-        CustomAllReduce.load_data(self)
-        NCCL.load_data(self)
-        ContextDSAModule.load_data(self)
-        GenerationDSAModule.load_data(self)
-        Mamba2Kernel.load_data(self)
-        GDNKernel.load_data(self)
-        ContextMLA.load_data(self)
-        GenerationMLA.load_data(self)
-        MLABmm.load_data(self)
-        MLAModule.load_data(self)
-        WideEPContextMLA.load_data(self)
-        WideEPGenerationMLA.load_data(self)
-        DeepSeekV4MHCModule.load_data(self)
-        ContextDeepSeekV4AttentionModule.load_data(self)
-        GenerationDeepSeekV4AttentionModule.load_data(self)
-        MoE.load_data(self)
-        MoEDispatch.load_data(self)
-        TrtLLMWideEPMoE.load_data(self)
-        TrtLLMWideEPMoEDispatch.load_data(self)
-
-        # pre-correction (non-migrated ops; migrated ops apply their own
-        # SOL correction during ``load_data``)
-        self._correct_data()
-
-        # Context + Generation attention extrapolation moved to
-        # operations/attention.py (ContextAttention._extrapolate /
-        # GenerationAttention._extrapolate, invoked from their respective
-        # load_data classmethods above).
-
-        # GEMM extrapolation moved to operations/gemm.py (GEMM._extrapolate_gemm_data,
-        # invoked from GEMM.load_data above).
-
-        # MLA family extrapolation moved to operations/mla.py
-        # (Context/Generation MLA + WideEP variants + MLAModule).
-
-        # DSA module-level extrapolation moved to operations/dsa.py
-        # (ContextDSAModule._extrapolate / GenerationDSAModule._extrapolate,
-        # invoked from their respective load_data classmethods above).
-
-        # post-correction
-        self._correct_data()
-
-        self._update_support_matrix()
+        # lazy per-op data ownership: every op class owns its CSV data and loads it on first query
+        # via ``OpClass.load_data(database)``. No eager warm-up here — each op
+        # opens its data file the first time a query (or the lazy support
+        # matrix below) needs it. ``PerfDatabase()`` opens zero CSVs.
+        self.supported_quant_mode = _LazySupportMatrix(self)
         self._finalize_loaded_data()
 
     def _finalize_loaded_data(self) -> None:
@@ -3169,127 +1410,9 @@ class PerfDatabase:
         """
         return num_gpus > self.system_spec["node"]["num_gpus_per_node"]
 
-    def _get_value(self, data_value, metric: str = "latency"):
-        """Thin wrapper — delegates to ``interpolation.get_value``."""
-        return interpolation.get_value(data_value, metric)
-
-    def _extract_latency_and_energy_2d(self, data: dict) -> tuple[dict, dict]:
-        """Thin wrapper — delegates to ``interpolation.extract_latency_and_energy_2d``."""
-        return interpolation.extract_latency_and_energy_2d(data)
-
-    def _extract_latency_and_energy_3d(self, data: dict) -> tuple[dict, dict]:
-        """Thin wrapper — delegates to ``interpolation.extract_latency_and_energy_3d``."""
-        return interpolation.extract_latency_and_energy_3d(data)
-
-    def _extrapolate_data_grid(
-        self,
-        data_dict: dict[int, dict[int, dict[int, float]]],
-        target_x_list: list[int],
-        target_y_list: list[int],
-        target_z_list: list[int],
-        sqrt_y_value: bool = False,
-    ) -> None:
-        """Thin wrapper — delegates to ``interpolation.extrapolate_data_grid``."""
-        return interpolation.extrapolate_data_grid(
-            data_dict, target_x_list, target_y_list, target_z_list, sqrt_y_value=sqrt_y_value
-        )
-
-    def _nearest_1d_point_helper(self, x: int, values: list[int], inner_only: bool = True) -> tuple[int, int]:
-        """Thin wrapper — delegates to ``interpolation.nearest_1d_point_helper``."""
-        return interpolation.nearest_1d_point_helper(x, values, inner_only)
-
-    def _validate(self, value):
-        """Thin wrapper — delegates to ``interpolation.validate_interpolation_result``."""
-        return interpolation.validate_interpolation_result(value)
-
-    def _interp_3d_linear(self, x: int, y: int, z: int, data: dict) -> float:
-        """Thin wrapper — delegates to ``interpolation.interp_3d_linear``."""
-        return interpolation.interp_3d_linear(x, y, z, data)
-
-    def _interp_2d_linear(self, x: int, y: int, data: dict) -> dict:
-        """Thin wrapper — delegates to ``interpolation.interp_2d_linear``."""
-        return interpolation.interp_2d_linear(x, y, data, self._extracted_metrics_cache)
-
-    def _interp_3d(self, x: int, y: int, z: int, data: dict, method: str) -> dict:
-        """Thin wrapper — delegates to ``interpolation.interp_3d``."""
-        return interpolation.interp_3d(x, y, z, data, method, self._extracted_metrics_cache)
-
-    def _interp_context_topk_piecewise_from_raw(
-        self,
-        num_heads: int,
-        full_s: int,
-        b: int,
-        raw_dict: dict | None,
-        boundary_seq_len: int | None,
-    ) -> dict | None:
-        """Thin wrapper — delegates to ``interpolation.interp_context_topk_piecewise_from_raw``."""
-        return interpolation.interp_context_topk_piecewise_from_raw(num_heads, full_s, b, raw_dict, boundary_seq_len)
-
-    def _interp_dsa_context_topk_piecewise_from_raw(
-        self,
-        num_heads: int,
-        full_s: int,
-        b: int,
-        dsa_dict: dict | None,
-        index_topk: int | None,
-    ) -> dict | None:
-        """Thin wrapper — delegates to ``interpolation.interp_dsa_context_topk_piecewise_from_raw``."""
-        return interpolation.interp_dsa_context_topk_piecewise_from_raw(num_heads, full_s, b, dsa_dict, index_topk)
-
-    # TODO(ISSUE-16 cleanup PR): remove these two helpers — moved to
-    # ``operations/dsa.py`` as module-level functions. The copies here
-    # have no remaining callers in ``perf_database.py`` after Phase 3.4
-    # (``9a37aef``); the cleanup PR prunes them once it can no longer break
-    # downstream code that might still import them as PerfDatabase methods.
-    @staticmethod
-    def _is_dsa_interpolation_miss(error: Exception) -> bool:
-        message = str(error)
-        return isinstance(error, ValueError) and (
-            "x is not equal to the only value in the list" in message
-            or "x is less than the smallest value in the list" in message
-            or "x is greater than the largest value in the list" in message
-        )
-
-    @staticmethod
-    def _format_dsa_unavailable_message(
-        phase: str,
-        error: Exception,
-        *,
-        b: int,
-        s: int,
-        num_heads: int,
-        architecture: str,
-        index_n_heads: int,
-        index_head_dim: int,
-        index_topk: int,
-        prefix: int | None = None,
-    ) -> str:
-        prefix_part = "" if prefix is None else f", prefix={prefix}"
-        return (
-            f"{phase} DSA module perf data unavailable for candidate "
-            f"b={b}, s={s}{prefix_part}, num_heads={num_heads}, architecture={architecture}, "
-            f"index_n_heads={index_n_heads}, index_head_dim={index_head_dim}, index_topk={index_topk}: {error}"
-        )
-
-    def _get_sample_leaf_value(self, data: dict):
-        """Thin wrapper — delegates to ``interpolation.get_sample_leaf_value``."""
-        return interpolation.get_sample_leaf_value(data)
-
     def _get_p2p_bandwidth(self, num_gpus: int) -> float:
         """Thin wrapper — delegates to ``SystemSpec.get_p2p_bandwidth``."""
         return self.system_spec.get_p2p_bandwidth(num_gpus)
-
-    def _bilinear_interpolation(self, x_list: list[int], y_list: list[int], x: int, y: int, data: dict) -> float:
-        """Thin wrapper — delegates to ``interpolation.bilinear_interpolation``."""
-        return interpolation.bilinear_interpolation(x_list, y_list, x, y, data)
-
-    def _interp_2d_1d(self, x: int, y: int, z: int, data: dict, method: str = "bilinear") -> float:
-        """Thin wrapper — delegates to ``interpolation.interp_2d_1d``."""
-        return interpolation.interp_2d_1d(x, y, z, data, method)
-
-    def _interp_1d(self, x: list[int], y: list, value: int):
-        """Thin wrapper — delegates to ``interpolation.interp_1d``."""
-        return interpolation.interp_1d(x, y, value)
 
     def set_default_database_mode(self, mode: common.DatabaseMode) -> None:
         """
@@ -3378,18 +1501,6 @@ class PerfDatabase:
                 e.args = (exception_msg,)
             raise
 
-    def _get_quant_tc_flops(self, quant_mode) -> float:
-        """Resolve actual tensor-core FLOPS for a given quant mode.
-
-        Thin wrapper around ``GEMM._get_quant_tc_flops``; kept on
-        ``PerfDatabase`` because the DSV4 / MLA / attention SOL paths
-        still reference it as ``self._get_quant_tc_flops(...)``.
-        ISSUE-16 retires this wrapper once those callers migrate.
-        """
-        from aiconfigurator.sdk.operations.gemm import GEMM
-
-        return GEMM._get_quant_tc_flops(self.system_spec, quant_mode)
-
     @functools.lru_cache(maxsize=32768)
     def query_gemm(
         self,
@@ -3476,6 +1587,30 @@ class PerfDatabase:
             database_mode,
             window_size,
             head_size,
+        )
+
+    @functools.lru_cache(maxsize=32768)
+    def query_encoder_attention(
+        self,
+        b: int,
+        s: int,
+        n: int,
+        head_size: int,
+        fmha_quant_mode: common.FMHAQuantMode,
+        database_mode: Optional[common.DatabaseMode] = None,
+    ) -> PerformanceResult | tuple[float, float, float]:
+        """Query non-causal encoder attention latency. Delegates to
+        ``EncoderAttention._query_encoder_attention_table``."""
+        from aiconfigurator.sdk.operations.attention import EncoderAttention
+
+        return EncoderAttention._query_encoder_attention_table(
+            self,
+            b,
+            s,
+            n,
+            head_size,
+            fmha_quant_mode,
+            database_mode,
         )
 
     @functools.lru_cache(maxsize=32768)
@@ -3902,27 +2037,6 @@ class PerfDatabase:
             database_mode=database_mode,
         )
 
-    def _correct_data(self) -> None:
-        """
-        Correct the data based on sol time reference. GEMM + GenerationAttention
-        SOL clamping live in their respective ``_correct_sol`` classmethods
-        (invoked from each ``load_data``); we forward here for backward compat
-        with tests that mutate the data and then call ``_correct_data()`` to
-        re-clamp.
-
-        The init path runs this immediately after ``load_data`` already
-        applied SOL correction, so there are duplicate full-table passes.
-        They are harmless — SOL clamping is idempotent (``max(sol, current)``
-        is a no-op when ``current >= sol`` after the first pass) — but the
-        duplicate iterations are O(n) over each table. ISSUE-16 can route
-        the init call directly and drop these forwards.
-        """
-        from aiconfigurator.sdk.operations.attention import GenerationAttention
-        from aiconfigurator.sdk.operations.gemm import GEMM
-
-        GEMM._correct_sol(self)
-        GenerationAttention._correct_sol(self)
-
     @functools.lru_cache(maxsize=32768)
     def query_wideep_moe_compute(
         self,
@@ -4130,33 +2244,6 @@ class PerfDatabase:
             database_mode=database_mode,
         )
 
-    def _lookup_dsv4_sparse_kernel(
-        self,
-        kernel: str,
-        bs: int,
-        isl: int,
-        past_kv: int,
-        tp_size: int,
-        native_heads: int,
-    ) -> Optional[float]:
-        """Delegates to ``ContextDeepSeekV4AttentionModule._lookup_sparse_kernel``.
-
-        Kept as an instance method for tests that invoke it via the
-        unbound form ``PerfDatabase._lookup_dsv4_sparse_kernel(db, ...)``;
-        ISSUE-16 cleanup retires this wrapper once those tests migrate.
-        """
-        from aiconfigurator.sdk.operations.dsv4 import ContextDeepSeekV4AttentionModule
-
-        return ContextDeepSeekV4AttentionModule._lookup_sparse_kernel(
-            self,
-            kernel=kernel,
-            bs=bs,
-            isl=isl,
-            past_kv=past_kv,
-            tp_size=tp_size,
-            native_heads=native_heads,
-        )
-
     @functools.lru_cache(maxsize=32768)
     def query_context_deepseek_v4_attention_module(
         self,
@@ -4265,21 +2352,6 @@ class PerfDatabase:
             gemm_quant_mode=gemm_quant_mode,
             database_mode=database_mode,
         )
-
-
-def __getattr__(name):
-    """Lazy re-export of DSV4 helpers moved to ``operations.dsv4``.
-
-    Avoids the circular import that would occur if these were imported
-    eagerly at module level (``operations/__init__.py`` pulls in
-    ``_legacy.py`` which imports ``PerfDatabase``, which is not yet
-    bound while ``perf_database`` is loading).
-    """
-    if name in ("_dsv4_robust_3d_lookup", "_deep_merge_dsv4_dicts"):
-        from aiconfigurator.sdk.operations import dsv4 as _dsv4_module
-
-        return getattr(_dsv4_module, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 if __name__ == "__main__":

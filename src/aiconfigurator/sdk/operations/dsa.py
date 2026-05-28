@@ -29,16 +29,46 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
+from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.base import Operation
+from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
     from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+
+
+DSA_MODEL_DIMS: dict[str, dict] = {
+    "DeepseekV32ForCausalLM": {
+        "hidden_size": 7168,
+        "q_lora_rank": 1536,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "index_topk": 2048,
+        "index_head_dim": 128,
+        "index_n_heads": 64,
+    },
+    "GlmMoeDsaForCausalLM": {
+        "hidden_size": 6144,
+        "q_lora_rank": 2048,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 192,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 256,
+        "index_topk": 2048,
+        "index_head_dim": 128,
+        "index_n_heads": 32,
+    },
+}
+
+DEFAULT_DSA_ARCHITECTURE = "DeepseekV32ForCausalLM"
 
 
 # Extrapolation grids — lifted verbatim from the legacy blocks in
@@ -172,7 +202,7 @@ class ContextDSAModule(Operation):
         ``database._raw_context_dsa_module_data``."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_context_dsa_module_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -211,13 +241,51 @@ class ContextDSAModule(Operation):
                 for gemm_mode in data_wrapper[fmha_mode][kv_cache_dtype]:
                     for arch in data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode]:
                         data_dict = data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode][arch]
-                        num_heads_list = list(data_dict.keys())
-                        interpolation.extrapolate_data_grid(
-                            data_dict=data_dict,
-                            target_x_list=num_heads_list,
-                            target_y_list=_CONTEXT_DSA_TARGET_Y,
-                            target_z_list=_CONTEXT_DSA_TARGET_Z,
-                        )
+
+                        def _is_latency_leaf(value):
+                            return isinstance(value, dict) and "latency" in value
+
+                        def _has_prefix_axis(module_dict):
+                            for head_data in module_dict.values():
+                                if not isinstance(head_data, dict):
+                                    continue
+                                for first_slice in head_data.values():
+                                    if not isinstance(first_slice, dict):
+                                        continue
+                                    # Legacy shape: [num_heads][s][b].
+                                    return not any(_is_latency_leaf(v) for v in first_slice.values())
+                            return False
+
+                        if _has_prefix_axis(data_dict):
+                            prefix_values = sorted(
+                                {
+                                    prefix
+                                    for head_data in data_dict.values()
+                                    if isinstance(head_data, dict)
+                                    for prefix in head_data
+                                }
+                            )
+                            for prefix in prefix_values:
+                                prefix_slice = {
+                                    head: head_data[prefix]
+                                    for head, head_data in data_dict.items()
+                                    if isinstance(head_data, dict) and prefix in head_data
+                                }
+                                interpolation.extrapolate_data_grid(
+                                    data_dict=prefix_slice,
+                                    target_x_list=list(prefix_slice.keys()),
+                                    target_y_list=_CONTEXT_DSA_TARGET_Y,
+                                    target_z_list=_CONTEXT_DSA_TARGET_Z,
+                                )
+                                for head, head_slice in prefix_slice.items():
+                                    data_dict[head][prefix] = head_slice
+                        else:
+                            interpolation.extrapolate_data_grid(
+                                data_dict=data_dict,
+                                target_x_list=list(data_dict.keys()),
+                                target_y_list=_CONTEXT_DSA_TARGET_Y,
+                                target_z_list=_CONTEXT_DSA_TARGET_Z,
+                            )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_context_dsa_module)
@@ -242,7 +310,11 @@ class ContextDSAModule(Operation):
         index_topk: int | None = None,
     ):
         """Query context DSA module table. Verbatim port of the legacy body."""
-        from aiconfigurator.sdk.perf_database import DEFAULT_DSA_ARCHITECTURE, DSA_MODEL_DIMS, PerfDataNotAvailableError
+        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        # ``DEFAULT_DSA_ARCHITECTURE`` and ``DSA_MODEL_DIMS`` live at module
+        # level in this file — use them directly rather than round-tripping
+        # through ``perf_database``'s backward-compat re-export.
 
         if architecture is None:
             architecture = DEFAULT_DSA_ARCHITECTURE
@@ -329,9 +401,11 @@ class ContextDSAModule(Operation):
             total_mem = gemm_weight_bytes + kv_cache_bytes + indexer_cache_bytes + q_io_bytes
 
             # ── SOL ─────────────────────────────────────────────────────
-            gemm_flops = database._get_quant_tc_flops(gemm_quant_mode)
-            indexer_fp8_flops = database._get_quant_tc_flops(common.FMHAQuantMode.fp8)
-            attn_flops = database._get_quant_tc_flops(fmha_quant_mode)
+            from aiconfigurator.sdk.operations.gemm import GEMM
+
+            gemm_flops = GEMM._get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+            indexer_fp8_flops = GEMM._get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+            attn_flops = GEMM._get_quant_tc_flops(database.system_spec, fmha_quant_mode)
 
             sol_math = (
                 gemm_group_ops / gemm_flops + indexer_logits_ops / indexer_fp8_flops + sparse_attn_ops / attn_flops
@@ -385,7 +459,6 @@ class ContextDSAModule(Operation):
                 dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
             except (KeyError, TypeError) as exc:
                 raise missing_context_dsa_error() from exc
-            full_s = s + prefix
             raw_dsa_dict = None
             raw_dsa_module_data = database._raw_context_dsa_module_data
             if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
@@ -395,22 +468,117 @@ class ContextDSAModule(Operation):
                     ]
                 except (KeyError, TypeError):
                     raw_dsa_dict = None
-            try:
-                result = interpolation.interp_dsa_context_topk_piecewise_from_raw(
-                    num_heads, full_s, b, raw_dsa_dict, index_topk
+
+            def _finite_result(result):
+                if not isinstance(result, dict):
+                    return False
+                value = result.get("latency")
+                if value is None:
+                    return False
+                try:
+                    return math.isfinite(float(value))
+                except (TypeError, ValueError):
+                    return False
+
+            def _is_latency_leaf(value):
+                return isinstance(value, dict) and "latency" in value
+
+            def _context_prefix_data(module_dict, require_prefix_axis: bool = False):
+                if not isinstance(module_dict, dict):
+                    return None, False
+                for head_data in module_dict.values():
+                    if not isinstance(head_data, dict):
+                        continue
+                    for maybe_batch_slice in head_data.values():
+                        if not isinstance(maybe_batch_slice, dict):
+                            continue
+                        # Legacy shape: [num_heads][s][b].
+                        if any(_is_latency_leaf(v) for v in maybe_batch_slice.values()):
+                            if require_prefix_axis:
+                                return None, False
+                            return {0: module_dict}, False
+                        break
+                    break
+
+                prefix_data = {}
+                for head, head_data in module_dict.items():
+                    if not isinstance(head_data, dict):
+                        continue
+                    for prefix_value, prefix_slice in head_data.items():
+                        if isinstance(prefix_slice, dict):
+                            prefix_data.setdefault(prefix_value, {})[head] = prefix_slice
+                return (prefix_data or None), True
+
+            require_prefix_axis = architecture == "GlmMoeDsaForCausalLM"
+            prefix_data, has_prefix_axis = _context_prefix_data(dsa_dict, require_prefix_axis)
+            raw_prefix_data, _ = _context_prefix_data(raw_dsa_dict, require_prefix_axis)
+
+            def _lookup_prefix_module_at(prefix_value: int):
+                if not isinstance(prefix_data, dict):
+                    return None
+                prefix_slice = prefix_data.get(prefix_value)
+                if not isinstance(prefix_slice, dict):
+                    return None
+
+                result = None
+                raw_slice = (
+                    raw_prefix_data.get(prefix_value)
+                    if isinstance(raw_prefix_data, dict) and isinstance(raw_prefix_data.get(prefix_value), dict)
+                    else None
                 )
+                if index_topk is not None:
+                    boundary = index_topk - prefix_value
+                    result = interpolation.interp_dsa_context_topk_piecewise_from_raw(
+                        num_heads, s, b, raw_slice, boundary
+                    )
+                    if not _finite_result(result):
+                        result = None
                 if result is None:
-                    result = database._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
+                    try:
+                        from aiconfigurator.sdk.operations.dsv4 import _dsv4_robust_3d_lookup
+
+                        result = _dsv4_robust_3d_lookup(database, prefix_slice, num_heads, s, b)
+                    except Exception:
+                        return None
+                return result if _finite_result(result) else None
+
+            def _interp_results_1d(x0, x1, r0, r1, x):
+                return {
+                    field: interpolation.interp_1d([x0, x1], [r0.get(field, 0.0), r1.get(field, 0.0)], x)
+                    for field in ("latency", "power", "energy")
+                }
+
+            try:
+                result = _lookup_prefix_module_at(prefix)
+                if result is None:
+                    if not has_prefix_axis:
+                        raise missing_context_dsa_error()
+                    prefix_points = sorted(p for p, slice_ in prefix_data.items() if isinstance(slice_, dict))
+                    result_by_prefix = {}
+                    for prefix_point in prefix_points:
+                        prefix_result = _lookup_prefix_module_at(prefix_point)
+                        if prefix_result is not None:
+                            result_by_prefix[prefix_point] = prefix_result
+                    if len(result_by_prefix) < 2:
+                        raise missing_context_dsa_error()
+                    left, right = interpolation.nearest_1d_point_helper(
+                        prefix, list(result_by_prefix.keys()), inner_only=False
+                    )
+                    result = (
+                        result_by_prefix[left]
+                        if left == right
+                        else _interp_results_1d(
+                            left,
+                            right,
+                            result_by_prefix[left],
+                            result_by_prefix[right],
+                            prefix,
+                        )
+                    )
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
             except (KeyError, TypeError, ValueError, AssertionError) as exc:
                 raise missing_context_dsa_error() from exc
-            if prefix > 0:
-                base_sol = get_sol(b, full_s, 0, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-                target_sol = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-                correction = 1.0 if base_sol <= 0 else target_sol / base_sol
-                latency *= correction
-                energy *= correction
             return database._interp_pr(latency, energy=energy)
         except Exception as e:
             if database_mode == common.DatabaseMode.HYBRID:
@@ -522,7 +690,7 @@ class GenerationDSAModule(Operation):
         extrapolation, binds ``database._generation_dsa_module_data``."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_generation_dsa_module_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -583,7 +751,11 @@ class GenerationDSAModule(Operation):
         index_topk: int | None = None,
     ):
         """Query generation DSA module table. Verbatim port of the legacy body."""
-        from aiconfigurator.sdk.perf_database import DEFAULT_DSA_ARCHITECTURE, DSA_MODEL_DIMS, PerfDataNotAvailableError
+        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        # ``DEFAULT_DSA_ARCHITECTURE`` and ``DSA_MODEL_DIMS`` live at module
+        # level in this file — use them directly rather than round-tripping
+        # through ``perf_database``'s backward-compat re-export.
 
         if architecture is None:
             architecture = DEFAULT_DSA_ARCHITECTURE
@@ -643,9 +815,11 @@ class GenerationDSAModule(Operation):
             kv_cache_bytes = b * effective_kv * attn_head_dim * kv_cache_dtype.value.memory
             total_mem = gemm_weight_bytes + indexer_cache_bytes + kv_cache_bytes
 
-            gemm_flops = database._get_quant_tc_flops(gemm_quant_mode)
-            indexer_fp8_flops = database._get_quant_tc_flops(common.FMHAQuantMode.fp8)
-            attn_flops = database._get_quant_tc_flops(fmha_mode)
+            from aiconfigurator.sdk.operations.gemm import GEMM
+
+            gemm_flops = GEMM._get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+            indexer_fp8_flops = GEMM._get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+            attn_flops = GEMM._get_quant_tc_flops(database.system_spec, fmha_mode)
 
             sol_math = (
                 gemm_group_ops / gemm_flops + indexer_logits_ops / indexer_fp8_flops + sparse_attn_ops / attn_flops
@@ -690,7 +864,7 @@ class GenerationDSAModule(Operation):
                 )
             try:
                 dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
-                result = database._interp_3d(num_heads, b, s, dsa_dict, "cubic")
+                result = interpolation.interp_3d(num_heads, b, s, dsa_dict, "cubic", database._extracted_metrics_cache)
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
             except (KeyError, TypeError, ValueError, AssertionError) as exc:
@@ -757,3 +931,111 @@ class GenerationDSAModule(Operation):
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
+
+
+# ─────────────────────────────────────────────────────────
+# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
+# ─────────────────────────────────────────────────────────
+
+
+def load_context_dsa_module_data(dsa_file: str):
+    """
+    Load context DSA data.
+
+    Dict structure:
+        data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][architecture][num_heads][prefix][s][b]
+
+    Quant modes are the outermost keys so that ``_enum_key_names`` can
+    directly extract supported FMHAQuantMode names (aligned with
+    ``_context_attention_data``).  ``architecture`` (e.g.
+    "DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM") selects the
+    model-specific structural dimensions from ``DSA_MODEL_DIMS``.
+    Legacy CSV rows without an ``architecture`` column default to
+    "DeepseekV32ForCausalLM".
+    """
+    rows = _read_filtered_rows(dsa_file)
+    if rows is None:
+        logger.debug(f"DSA context data file {dsa_file} not found.")
+        return None
+
+    dsa_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                )
+            )
+        )
+    )
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+
+    for row in rows:
+        num_heads = int(row["num_heads"])
+        b = int(row["batch_size"])
+        s = int(row["isl"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+        energy = power * latency
+
+        arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
+        if arch == "GlmMoeDsaForCausalLM" and not row.get("step"):
+            raise ValueError("GLM-5 context DSA module data requires a non-empty step column for prefix/past_kv length")
+        prefix = int(row.get("step", 0) or 0)
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
+        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
+
+        dsa_data[fmha_mode][kv_dtype][gemm_mode][arch][num_heads][prefix][s][b] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
+
+    return dsa_data
+
+
+def load_generation_dsa_module_data(dsa_file: str):
+    """
+    Load generation DSA data.
+
+    Dict structure:
+        data[kv_cache_quant_mode][gemm_quant_mode][architecture][num_heads][b][s]
+
+    Quant modes are the outermost keys so that ``_enum_key_names`` can
+    directly extract supported KVCacheQuantMode names (aligned with
+    ``_generation_attention_data``).  ``architecture`` selects the
+    model-specific structural dimensions from ``DSA_MODEL_DIMS``.
+    Legacy CSV rows without an ``architecture`` column default to
+    "DeepseekV32ForCausalLM".
+    """
+    rows = _read_filtered_rows(dsa_file)
+    if rows is None:
+        logger.debug(f"DSA generation data file {dsa_file} not found.")
+        return None
+
+    dsa_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    )
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+
+    for row in rows:
+        num_heads = int(row["num_heads"])
+        b = int(row["batch_size"])
+        s = int(row["isl"]) + int(row["step"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+        energy = power * latency
+
+        arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
+
+        dsa_data[kv_dtype][gemm_mode][arch][num_heads][b][s] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
+
+    return dsa_data

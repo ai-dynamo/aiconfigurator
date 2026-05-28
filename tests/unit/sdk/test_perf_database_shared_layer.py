@@ -135,6 +135,13 @@ def _build_db(systems_root: Path, *, database_mode: str | None = "HYBRID") -> Pe
 
 def _gemm_lookup(db: PerfDatabase, m: int, n: int, k: int) -> float | None:
     """Read latency for a single (m, n, k) triple from the loaded gemm dict."""
+    from aiconfigurator.sdk.operations.gemm import GEMM
+
+    # Under lazy per-op data ownership ``PerfDatabase()`` no longer
+    # opens any CSV, so we explicitly trigger ``GEMM.load_data``
+    # (idempotent) before reading the gemm dict. These tests assert on
+    # the loader's tier-merge behavior, not on the lazy contract.
+    GEMM.load_data(db)
     qmode = common.GEMMQuantMode["bfloat16"]
     table = db._gemm_data.data
     if qmode not in table or m not in table[qmode] or n not in table[qmode][m] or k not in table[qmode][m][n]:

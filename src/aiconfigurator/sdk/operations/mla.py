@@ -32,14 +32,18 @@ constraint (cache misses on non-SGLang backends).
 
 from __future__ import annotations
 
+import logging
+from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.base import Operation
+from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
     from aiconfigurator.sdk.perf_database import PerfDatabase
+
+logger = logging.getLogger(__name__)
 
 
 def _cache_key(database: PerfDatabase) -> tuple:
@@ -139,7 +143,7 @@ class ContextMLA(Operation):
         ``database._context_mla_data``."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_context_mla_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -246,7 +250,7 @@ class ContextMLA(Operation):
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             mla_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode]
-            result = database._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
+            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"] * prefix_correction
             energy = result.get("energy", 0.0) * prefix_correction
             return database._interp_pr(latency, energy=energy)
@@ -322,7 +326,7 @@ class GenerationMLA(Operation):
         ``database._generation_mla_data``."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_generation_mla_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -415,7 +419,7 @@ class GenerationMLA(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             mla_dict = data_wrapper[kvcache_quant_mode]
-            result = database._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
             latency = result["latency"]
             energy = result.get("energy", 0.0)
             return database._interp_pr(latency, energy=energy)
@@ -487,7 +491,7 @@ class MLABmm(Operation):
         No extrapolation (1D table)."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_mla_bmm_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -559,12 +563,12 @@ class MLABmm(Operation):
             data_wrapper.raise_if_not_loaded()
             quant_mode_lookup = quant_mode if quant_mode in data_wrapper else common.GEMMQuantMode.bfloat16
             mla_bmm_dict = data_wrapper[quant_mode_lookup]["mla_gen_pre" if if_pre else "mla_gen_post"][num_heads]
-            num_left, num_right = database._nearest_1d_point_helper(
+            num_left, num_right = interpolation.nearest_1d_point_helper(
                 num_tokens,
                 list(mla_bmm_dict.keys()),
                 inner_only=False,
             )
-            result = database._interp_1d(
+            result = interpolation.interp_1d(
                 [num_left, num_right],
                 [mla_bmm_dict[num_left], mla_bmm_dict[num_right]],
                 num_tokens,
@@ -657,12 +661,7 @@ class MLAModule(Operation):
         ``database._generation_mla_module_data``."""
         import os
 
-        from aiconfigurator.sdk.perf_database import (
-            LoadedOpData,
-            PerfDataFilename,
-            load_context_mla_module_data,
-            load_generation_mla_module_data,
-        )
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._context_data_cache:
@@ -799,7 +798,7 @@ class MLAModule(Operation):
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             mla_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
-            result = database._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
+            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"] * prefix_correction
             energy = result.get("energy", 0.0) * prefix_correction
             return database._interp_pr(latency, energy=energy)
@@ -878,7 +877,7 @@ class MLAModule(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             mla_dict = data_wrapper[fmha_quant_mode][kv_cache_dtype][gemm_quant_mode]
-            result = database._interp_3d(num_heads, b, s, mla_dict, "cubic")
+            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"]
             energy = result.get("energy", 0.0)
             return database._interp_pr(latency, energy=energy)
@@ -977,7 +976,7 @@ class WideEPGenerationMLA(Operation):
         ``if backend == "sglang"`` guard in ``__init__``)."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_wideep_generation_mla_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -1148,7 +1147,7 @@ class WideEPGenerationMLA(Operation):
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
             mla_dict = attn_data[kvcache_quant_mode]
-            result = database._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
             latency = result["latency"]
             energy = result.get("energy", 0.0)
             return database._interp_pr(latency, energy=energy)
@@ -1228,7 +1227,7 @@ class WideEPContextMLA(Operation):
         applies extrapolation, binds ``database._wideep_context_mla_data``."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_wideep_context_mla_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -1403,7 +1402,7 @@ class WideEPContextMLA(Operation):
             mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            result = database._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
+            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"] * prefix_correction
             energy = result.get("energy", 0.0) * prefix_correction
             return database._interp_pr(latency, energy=energy)
@@ -1445,3 +1444,410 @@ class WideEPContextMLA(Operation):
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
+
+
+# ─────────────────────────────────────────────────────────
+# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
+# ─────────────────────────────────────────────────────────
+
+
+def load_context_mla_data(context_mla_file):
+    """
+    Load the context mla data for trtllm with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+    """
+    rows = _read_filtered_rows(context_mla_file)
+    if rows is None:
+        logger.debug(f"Context mla data file {context_mla_file} not found.")
+        return None
+    context_mla_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (context_mla) - power will default to 0.0")
+
+    for row in rows:
+        (
+            quant_mode,
+            kv_cache_dtype,
+            b,
+            s,
+            latency,
+        ) = row["mla_dtype"], row["kv_cache_dtype"], row["batch_size"], row["isl"], row["latency"]
+
+        if "num_heads" not in row:
+            tp_size = int(row["tp_size"])
+            num_heads = 128 // tp_size
+        else:
+            num_heads = int(row["num_heads"])
+
+        b = int(b)
+        s = int(s)
+        latency = float(latency)
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # NEW: Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds
+
+        quant_mode = common.FMHAQuantMode[quant_mode]
+        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
+
+        try:
+            # Check for conflict
+            context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b]
+            logger.debug(f"value conflict in context mla data: {quant_mode} {kv_cache_dtype} {num_heads} {s} {b}")
+        except KeyError:
+            # Store all three values
+            context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,  # NEW: precomputed energy
+            }
+
+    return context_mla_data
+
+
+def load_generation_mla_data(generation_mla_file):
+    """
+    Load the generation mla data for trtllm with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+    """
+    rows = _read_filtered_rows(generation_mla_file)
+    if rows is None:
+        logger.debug(f"Generation mla data file {generation_mla_file} not found.")
+        return None
+    generation_mla_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (generation_mla) - power will default to 0.0")
+
+    for row in rows:
+        quant_mode, kv_cache_dtype, b, s, step, latency = (  # noqa: F841
+            row["mla_dtype"],
+            row["kv_cache_dtype"],
+            row["batch_size"],
+            row["isl"],
+            row["step"],
+            row["latency"],
+        )
+
+        if "num_heads" not in row:
+            tp_size = int(row["tp_size"])
+            num_heads = 128 // tp_size
+        else:
+            num_heads = int(row["num_heads"])
+
+        b = int(b)
+        s = int(s)
+        step = int(step)
+        latency = float(latency)
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # NEW: Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds
+
+        s = s + step
+
+        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
+
+        try:
+            # Check for conflict
+            generation_mla_data[kv_cache_dtype][num_heads][b][s]
+            logger.debug(f"value conflict in generation mla data: {kv_cache_dtype} {num_heads} {b} {s} ")
+        except KeyError:
+            # Store all three values
+            generation_mla_data[kv_cache_dtype][num_heads][b][s] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,  # NEW: precomputed energy
+            }
+
+    return generation_mla_data
+
+
+def load_mla_bmm_data(mla_bmm_file):
+    """
+    Load the mla bmm data for trtllm with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+    """
+    rows = _read_filtered_rows(mla_bmm_file)
+    if rows is None:
+        logger.debug(f"MLA BMM data file {mla_bmm_file} not found.")
+        return None
+    mla_bmm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (mla_bmm) - power will default to 0.0")
+
+    for row in rows:
+        quant_mode, num_tokens, num_heads, latency, op_name = (
+            row["bmm_dtype"],
+            row["num_tokens"],
+            row["num_heads"],
+            row["latency"],
+            row["op_name"],
+        )
+        num_tokens = int(num_tokens)
+        num_heads = int(num_heads)
+        latency = float(latency)
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # NEW: Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds
+
+        quant_mode = common.GEMMQuantMode[quant_mode]
+
+        try:
+            # Check for conflict
+            mla_bmm_data[quant_mode][op_name][num_heads][num_tokens]
+            logger.debug(f"value conflict in mla bmm data: {op_name} {quant_mode} {num_heads} {num_tokens} ")
+        except KeyError:
+            # Store all three values
+            mla_bmm_data[quant_mode][op_name][num_heads][num_tokens] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,  # NEW: precomputed energy
+            }
+
+    return mla_bmm_data
+
+
+def load_wideep_context_mla_data(wideep_context_mla_file):
+    """
+    Load the SGLang wideep context mla data from wideep_context_mla_perf.txt
+    with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+    """
+    rows = _read_filtered_rows(wideep_context_mla_file)
+    if rows is None:
+        logger.debug(f"SGLang wideep context mla data file {wideep_context_mla_file} not found.")
+        return None
+    wideep_context_mla_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    )
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (wideep_context_mla) - power will default to 0.0")
+
+    for row in rows:
+        (
+            quant_mode,
+            kv_cache_dtype,
+            b,
+            s,
+            latency,
+        ) = row["mla_dtype"], row["kv_cache_dtype"], row["batch_size"], row["isl"], row["latency"]
+
+        kernel_source = row.get("kernel_source", "flashinfer")
+
+        if "num_heads" not in row:
+            tp_size = int(row["tp_size"])
+            num_heads = 128 // tp_size
+        else:
+            num_heads = int(row["num_heads"])
+
+        b = int(b)
+        s = int(s)
+        latency = float(latency)
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # NEW: Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds
+
+        quant_mode = common.FMHAQuantMode[quant_mode]
+        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
+
+        try:
+            # Check for conflict
+            wideep_context_mla_data[kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b]
+            logger.debug(
+                f"value conflict in context mla data: {kernel_source} {quant_mode} {kv_cache_dtype} {num_heads} {s} {b}"
+            )
+        except KeyError:
+            # Store all three values
+            wideep_context_mla_data[kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,  # NEW: precomputed energy
+            }
+
+    return wideep_context_mla_data
+
+
+def load_wideep_generation_mla_data(wideep_generation_mla_file):
+    """
+    Load the SGLang wideep generation mla data from wideep_generation_mla_perf.txt
+    with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+    """
+    rows = _read_filtered_rows(wideep_generation_mla_file)
+    if rows is None:
+        logger.debug(f"SGLang wideep generation mla data file {wideep_generation_mla_file} not found.")
+        return None
+    wideep_generation_mla_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+    )
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (wideep_generation_mla) - power will default to 0.0")
+
+    for row in rows:
+        kv_cache_dtype, b, s, step, latency = (
+            row["kv_cache_dtype"],
+            row["batch_size"],
+            row["isl"],
+            row["step"],
+            row["latency"],
+        )
+
+        kernel_source = row.get("kernel_source", "flashinfer")
+
+        if "num_heads" not in row:
+            tp_size = int(row["tp_size"])
+            num_heads = 128 // tp_size
+        else:
+            num_heads = int(row["num_heads"])
+
+        b = int(b)
+        s = int(s)
+        step = int(step)
+        latency = float(latency)
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # NEW: Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds
+
+        s = s + step
+
+        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
+
+        try:
+            # Check for conflict
+            wideep_generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s]
+            logger.debug(
+                f"value conflict in generation mla data: {kernel_source} {kv_cache_dtype} {num_heads} {b} {s} "
+            )
+        except KeyError:
+            # Store all three values
+            wideep_generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,  # NEW: precomputed energy
+            }
+
+    return wideep_generation_mla_data
+
+
+def load_context_mla_module_data(mla_module_file: str):
+    """
+    Load context MLA module-level performance data.
+
+    CSV columns: framework, version, device, op_name, kernel_source, model,
+    architecture, mla_dtype, kv_cache_dtype, gemm_type, num_heads,
+    batch_size, isl, tp_size, step, latency [, power]
+
+    Dict structure (matches context_mla_data nesting):
+        data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][num_heads][s][b]
+    """
+    rows = _read_filtered_rows(mla_module_file)
+    if rows is None:
+        logger.debug(f"MLA context module data file {mla_module_file} not found.")
+        return None
+
+    mla_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    )
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+
+    for row in rows:
+        num_heads = int(row["num_heads"])
+        b = int(row["batch_size"])
+        s = int(row["isl"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+        energy = power * latency
+
+        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
+        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+
+        mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
+
+    return mla_data
+
+
+def load_generation_mla_module_data(mla_module_file: str):
+    """
+    Load generation MLA module-level performance data.
+
+    CSV columns: framework, version, device, op_name, kernel_source, model,
+    architecture, mla_dtype, kv_cache_dtype, gemm_type, num_heads,
+    batch_size, isl, tp_size, step, latency [, power]
+
+    Dict structure:
+        data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][num_heads][b][s]
+    """
+    rows = _read_filtered_rows(mla_module_file)
+    if rows is None:
+        logger.debug(f"MLA generation module data file {mla_module_file} not found.")
+        return None
+
+    mla_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    )
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+
+    for row in rows:
+        num_heads = int(row["num_heads"])
+        b = int(row["batch_size"])
+        s = int(row["isl"]) + int(row["step"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+        energy = power * latency
+
+        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
+
+        mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][b][s] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
+
+    return mla_data

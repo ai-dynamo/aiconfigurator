@@ -32,12 +32,16 @@ Cache key matches every other migrated op:
 from __future__ import annotations
 
 import copy
+import logging
+from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar, Optional
 
 import numpy as np
 
-from aiconfigurator.sdk import common
-from aiconfigurator.sdk.operations.base import Operation
+from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+
+logger = logging.getLogger(__name__)
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -116,7 +120,7 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
         return value is not None and bool(np.all(np.isfinite(np.asarray(value))))
 
     try:
-        result = self._interp_3d(x, y, z, dict_, "cubic")
+        result = interpolation.interp_3d(x, y, z, dict_, "cubic", self._extracted_metrics_cache)
         if _finite_result(result):
             return result
     except Exception:
@@ -160,13 +164,13 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
                 return None
             if not allow_extrapolate and not (ss[0] <= query_s <= ss[-1]):
                 return None
-            sl, sr = self._nearest_1d_point_helper(query_s, ss, inner_only=not allow_extrapolate)
+            sl, sr = interpolation.nearest_1d_point_helper(query_s, ss, inner_only=not allow_extrapolate)
             left = _leaf_at(sl, bp)
             right = _leaf_at(sr, bp)
             if not isinstance(left, dict) or not isinstance(right, dict):
                 return None
             return {
-                field: self._interp_1d([sl, sr], [left.get(field, 0.0), right.get(field, 0.0)], query_s)
+                field: interpolation.interp_1d([sl, sr], [left.get(field, 0.0), right.get(field, 0.0)], query_s)
                 for field in ("latency", "power", "energy")
             }
 
@@ -367,7 +371,7 @@ class DeepSeekV4MHCModule(Operation):
         """Idempotent. Loads mhc_module CSV, binds ``database._mhc_module_data``."""
         import os
 
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename, load_mhc_module_data
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -410,6 +414,8 @@ class DeepSeekV4MHCModule(Operation):
         """
         from aiconfigurator.sdk.operations.gemm import GEMM
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        cls.load_data(database)
 
         sites = 2
         hc_dim = hc_mult * hidden_size
@@ -479,8 +485,8 @@ class DeepSeekV4MHCModule(Operation):
                         f"No mHC silicon data for op='{op_name}', hc_mult={hc_mult}, hidden_size={hidden_size}."
                     )
                 mhc_dict = mhc_data[op_name][hc_mult][hidden_size]
-                left, right = database._nearest_1d_point_helper(num_tokens, list(mhc_dict.keys()), inner_only=False)
-                result = database._interp_1d([left, right], [mhc_dict[left], mhc_dict[right]], num_tokens)
+                left, right = interpolation.nearest_1d_point_helper(num_tokens, list(mhc_dict.keys()), inner_only=False)
+                result = interpolation.interp_1d([left, right], [mhc_dict[left], mhc_dict[right]], num_tokens)
                 latency = result["latency"] if isinstance(result, dict) else result
                 energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
                 return database._interp_pr(latency, energy=energy)
@@ -657,12 +663,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         """
         import os
 
-        from aiconfigurator.sdk.perf_database import (
-            LoadedOpData,
-            PerfDataFilename,
-            load_context_dsv4_kind_module_data,
-            load_dsv4_sparse_kernel_data,
-        )
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -766,7 +767,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 return float(np.asarray(latency))
 
         try:
-            result = database._interp_3d(past_kv, isl, bs, per_tp_dict, "cubic")
+            result = interpolation.interp_3d(past_kv, isl, bs, per_tp_dict, "cubic", database._extracted_metrics_cache)
             latency = result.get("latency") if isinstance(result, dict) else None
             if _finite_latency(latency):
                 return float(np.asarray(latency))
@@ -799,7 +800,9 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 return None
 
             try:
-                latency = database._interp_2d_linear(past_kv, isl, batch_slice)["latency"]
+                latency = interpolation.interp_2d_linear(past_kv, isl, batch_slice, database._extracted_metrics_cache)[
+                    "latency"
+                ]
                 if _finite_latency(latency):
                     return latency
             except Exception:
@@ -816,8 +819,8 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     return None
                 if not allow_extrapolate and not (isl_points[0] <= isl <= isl_points[-1]):
                     return None
-                left, right = database._nearest_1d_point_helper(isl, isl_points, inner_only=not allow_extrapolate)
-                latency = database._interp_1d(
+                left, right = interpolation.nearest_1d_point_helper(isl, isl_points, inner_only=not allow_extrapolate)
+                latency = interpolation.interp_1d(
                     [left, right],
                     [isl_dict[left].get("latency"), isl_dict[right].get("latency")],
                     isl,
@@ -834,12 +837,12 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 return None
             if not allow_extrapolate and not (past_points[0] <= past_kv <= past_points[-1]):
                 return None
-            left, right = database._nearest_1d_point_helper(past_kv, past_points, inner_only=not allow_extrapolate)
+            left, right = interpolation.nearest_1d_point_helper(past_kv, past_points, inner_only=not allow_extrapolate)
             left_latency = _lookup_isl_at_past(left)
             right_latency = _lookup_isl_at_past(right)
             if left_latency is None or right_latency is None:
                 return None
-            return database._interp_1d([left, right], [left_latency, right_latency], past_kv)
+            return interpolation.interp_1d([left, right], [left_latency, right_latency], past_kv)
 
         for allow_extrapolate in (False, True):
             for bp in batch_points:
@@ -887,6 +890,8 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_context_deepseek_v4_attention_module``."""
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        cls.load_data(database)
 
         def get_sol() -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(
@@ -989,7 +994,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                         raw_dict = None if raw_native_dict is None else raw_native_dict[compress_ratio]
                     except KeyError:
                         raw_dict = None
-                result = database._interp_context_topk_piecewise_from_raw(
+                result = interpolation.interp_context_topk_piecewise_from_raw(
                     tp_size, lookup_s, b, raw_dict, index_topk * compress_ratio
                 )
             if result is None:
@@ -1115,11 +1120,7 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         """
         import os
 
-        from aiconfigurator.sdk.perf_database import (
-            LoadedOpData,
-            PerfDataFilename,
-            load_generation_dsv4_kind_module_data,
-        )
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -1177,6 +1178,8 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_generation_deepseek_v4_attention_module``."""
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        cls.load_data(database)
 
         def get_sol() -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(
@@ -1305,3 +1308,201 @@ def _load_dsv4_split(loaded_list):
     if not merged:
         return None
     return LoadedOpData(merged, first_loaded.op_name_enum, first_loaded.filepath)
+
+
+# ─────────────────────────────────────────────────────────
+# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
+# ─────────────────────────────────────────────────────────
+
+
+def load_mhc_module_data(mhc_file: str):
+    """Load DeepSeek-V4 mHC pre/post module-level performance data.
+
+    CSV columns: framework, version, device, op_name, kernel_source,
+    architecture, num_tokens, hc_mult, hidden_size, latency [, power]
+    Optional metadata columns: num_sites, sinkhorn_iters
+    Legacy rows may include a ``model`` column; it is ignored because mHC is
+    selected by compute shape.
+
+    ``op_name`` is ``pre`` or ``post``, matching the ``op`` arg of
+    ``query_mhc_module``.
+
+    Dict structure (matches query_mhc_module silicon path):
+        data[op][hc_mult][hidden_size][num_tokens]
+    """
+    rows = _read_filtered_rows(mhc_file)
+    if rows is None:
+        logger.debug(f"mHC module data file {mhc_file} not found.")
+        return None
+
+    mhc_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+
+    for row in rows:
+        op = row["op_name"]
+        hc_mult = int(row["hc_mult"])
+        hidden_size = int(row["hidden_size"])
+        num_tokens = int(row["num_tokens"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+        energy = power * latency
+
+        mhc_data[op][hc_mult][hidden_size][num_tokens] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
+
+    return mhc_data
+
+
+_DSV4_DTYPE_ALIASES = {
+    # CSV columns use sglang naming; aic_dev enums use canonical short names.
+    "fp8_e4m3": "fp8",
+}
+
+
+def _dsv4_normalize_dtype(name: str) -> str:
+    return _DSV4_DTYPE_ALIASES.get(name, name)
+
+
+def load_context_dsv4_kind_module_data(file_path: str):
+    """Load ONE DeepSeek-V4 context CSV (single attn_kind / compress_ratio).
+
+    Returns an 8-level nested dict:
+        data[fmha_quant][kv_quant][gemm_quant][native_heads][compress_ratio]
+            [tp_size][s][b] = {"latency": ms, "power": W, "energy": J}
+
+    ``tp_size`` is the data axis. The model layer passes it through the
+    attention operation for silicon lookup.
+
+    Multiple files (csa/hca/swa) merge cleanly because compress_ratio is
+    the differentiating leaf dimension.
+    """
+    rows = _read_filtered_rows(file_path)
+    if rows is None:
+        logger.debug(f"DSV4 module data file {file_path} not found.")
+        return None
+
+    # 8-level nesting: fmha → kv → gemm → native_heads → cr → tp → s → b
+    def _make_nested(depth: int):
+        if depth == 0:
+            return defaultdict()
+        return defaultdict(lambda d=depth: _make_nested(d - 1))
+
+    data = _make_nested(7)
+    has_power = bool(rows) and "power" in rows[0]
+
+    for row in rows:
+        if row.get("batch_size") in (None, "", "batch_size"):
+            continue  # skip duplicate header rows from appended runs
+        try:
+            b = int(row["batch_size"])
+            s = int(row["isl"])
+            tp_size = int(row.get("tp_size", 1))
+            cr = int(row["compress_ratio"])
+            latency = float(row["latency"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+
+        native_heads = int(row["num_heads"])
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
+        kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
+
+        # The row-distinguishing axis is ``tp_size`` itself.
+        data[fmha_mode][kv_dtype][gemm_mode][native_heads][cr][tp_size][s][b] = {
+            "latency": latency,
+            "power": power,
+            "energy": power * latency,
+        }
+    return data
+
+
+def load_generation_dsv4_kind_module_data(file_path: str):
+    """Load ONE DeepSeek-V4 generation CSV.
+
+    Generation lookup uses absolute KV length ``s_total = isl + step`` (decode
+    is q_len=1 with past_kv = step).  Dict shape:
+        data[kv_quant][gemm_quant][native_heads][compress_ratio]
+            [tp_size][b][s_total]
+
+    ``tp_size`` is passed by the attention operation for silicon lookup.
+    """
+    rows = _read_filtered_rows(file_path)
+    if rows is None:
+        logger.debug(f"DSV4 module data file {file_path} not found.")
+        return None
+
+    # 7-level nesting: kv → gemm → native_heads → cr → tp → b → s_total
+    def _make_nested(depth: int):
+        if depth == 0:
+            return defaultdict()
+        return defaultdict(lambda d=depth: _make_nested(d - 1))
+
+    data = _make_nested(6)
+    has_power = bool(rows) and "power" in rows[0]
+
+    for row in rows:
+        if row.get("batch_size") in (None, "", "batch_size"):
+            continue
+        try:
+            b = int(row["batch_size"])
+            s_total = int(row["isl"]) + int(row["step"])
+            tp_size = int(row.get("tp_size", 1))
+            cr = int(row["compress_ratio"])
+            latency = float(row["latency"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+
+        native_heads = int(row["num_heads"])
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
+
+        # DeepSeek-V4: tp_size is the axis that differentiates rows.  See note
+        # at the top of the file.  Generation convention puts ``b`` before
+        # ``s_total`` (matches existing ``_interp_3d(num_heads, b, s, ...)``
+        # call order in ``query_generation_*``).
+        data[kv_dtype][gemm_mode][native_heads][cr][tp_size][b][s_total] = {
+            "latency": latency,
+            "power": power,
+            "energy": power * latency,
+        }
+    return data
+
+
+def load_dsv4_sparse_kernel_data(file_path: str):
+    """Load DeepSeek-V4 sparse-kernel CSV (paged_mqa_logits or hca_attn).
+
+    Emitted by ``collector.sglang.deepseekv4_sparse_modules``.  Used for
+    kernel-level past_kv Δ correction on top of the chunk-0 module baseline.
+
+    Dict structure:
+        data[native_heads][tp_size][past_kv][isl][bs] = {"latency": ms}
+    """
+    rows = _read_filtered_rows(file_path)
+    if rows is None:
+        logger.debug(f"DSV4 sparse-kernel data file {file_path} not found.")
+        return None
+
+    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+
+    for row in rows:
+        # Skip duplicate header rows (file may be appended to across runs)
+        if row.get("batch_size") in (None, "", "batch_size"):
+            continue
+        try:
+            bs = int(row["batch_size"])
+            isl = int(row["isl"])
+            past_kv = int(row["step"])
+            tp_size = int(row.get("tp_size", 1))
+            latency = float(row["latency"])
+        except (TypeError, ValueError):
+            continue
+        native_heads = int(row["num_heads"])
+        data[native_heads][tp_size][past_kv][isl][bs] = {"latency": latency}
+
+    return data

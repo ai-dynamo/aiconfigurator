@@ -27,7 +27,9 @@ lever for long-running webapps.
 
 from __future__ import annotations
 
+import csv
 import logging
+import os
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
@@ -37,6 +39,47 @@ if TYPE_CHECKING:
     from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+
+
+def _read_filtered_rows(file_or_sources):
+    """Read CSV rows from one or more sources. Used by every ``load_*_data``
+    in this package.
+
+    Accepts:
+      - A single path string: yields all rows. Returns ``None`` if the file is
+        missing, an empty list if it exists but has no rows. Preserves the
+        legacy distinction the per-op ``load_*`` functions rely on.
+      - An iterable of ``(path, kernel_source_filter)`` tuples: yields rows
+        from each source in order; missing files are skipped; rows are
+        filtered by ``kernel_source`` when a filter is provided. Returns
+        ``None`` only if **every** path is missing.
+
+    The order of the returned list mirrors the order of the input sources, so
+    when the per-row loaders skip on key conflict, the earliest source wins on
+    every coordinate — same first-wins semantic the shared-layer loader needs
+    without a separate merge step.
+
+    Lives here (not in ``perf_database``) so the per-op-module loaders can
+    import it without a circular dependency on ``perf_database`` at module
+    load time.
+    """
+    if isinstance(file_or_sources, str):
+        if not os.path.exists(file_or_sources):
+            return None
+        with open(file_or_sources, encoding="utf-8") as f:
+            return list(csv.DictReader(f))
+
+    rows: list[dict] = []
+    any_exists = False
+    for path, ks_filter in file_or_sources:
+        if not os.path.exists(path):
+            continue
+        any_exists = True
+        with open(path, encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if ks_filter is None or row.get("kernel_source") in ks_filter:
+                    rows.append(row)
+    return rows if any_exists else None
 
 
 class Operation:
@@ -143,3 +186,26 @@ def clear_all_op_caches() -> None:
     for cls in _all_operation_subclasses():
         cls.clear_cache()
     Operation._load_data_call_count.clear()
+
+
+def warm_all_op_data(database: PerfDatabase) -> None:
+    """Eagerly call ``load_data`` on every ``Operation`` subclass against
+    ``database``.
+
+    The lazy-load contract (lazy per-op data ownership) defers per-op CSV reads until the
+    first query (or the first read of ``database.supported_quant_mode``
+    for the op's key). Diagnostic tooling that walks every op's instance
+    attribute directly — notebooks, sanity-check scripts, support-matrix
+    dumpers — wants the legacy "everything loaded" semantics; this
+    helper restores them in one call.
+
+    Idempotent: every ``load_data`` is cache-key gated, so calling this
+    repeatedly is cheap. Op classes that don't own CSV data inherit the
+    base ``Operation.load_data`` no-op and are walked without effect.
+
+    Production callers that read ``database.supported_quant_mode[<key>]``
+    or call ``database.query_<op>(...)`` should NOT use this — those
+    paths trigger the lazy load on the ops they actually need, which is
+    the whole point of lazy per-op data ownership."""
+    for cls in _all_operation_subclasses():
+        cls.load_data(database)

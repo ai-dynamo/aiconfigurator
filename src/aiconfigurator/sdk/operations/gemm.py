@@ -19,10 +19,11 @@ between tests and must get distinct cache entries.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.base import Operation
+from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -105,13 +106,7 @@ class GEMM(Operation):
 
         # Lazy import to avoid the circular dependency between gemm.py and
         # perf_database.py (perf_database delegates to GEMM at query time).
-        from aiconfigurator.sdk.perf_database import (
-            LoadedOpData,
-            PerfDataFilename,
-            load_compute_scale_data,
-            load_gemm_data,
-            load_scale_matrix_data,
-        )
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache or key not in cls._compute_scale_cache or key not in cls._scale_matrix_cache:
@@ -449,11 +444,13 @@ class GEMM(Operation):
 
             m_values = sorted(m_key for m_key in gemm_data if n in gemm_data[m_key] and k in gemm_data[m_key][n])
             if len(m_values) >= 2:
-                m_left, m_right = database._nearest_1d_point_helper(m, m_values, inner_only=False)
-                result = database._interp_1d([m_left, m_right], [gemm_data[m_left][n][k], gemm_data[m_right][n][k]], m)
+                m_left, m_right = interpolation.nearest_1d_point_helper(m, m_values, inner_only=False)
+                result = interpolation.interp_1d(
+                    [m_left, m_right], [gemm_data[m_left][n][k], gemm_data[m_right][n][k]], m
+                )
                 return _to_performance_result(result)
 
-            result = database._interp_3d(m, n, k, gemm_data, "cubic")
+            result = interpolation.interp_3d(m, n, k, gemm_data, "cubic", database._extracted_metrics_cache)
             return _to_performance_result(result)
 
         return database._query_silicon_or_hybrid(
@@ -531,7 +528,7 @@ class GEMM(Operation):
             if k_min is not None and k_max is not None:
                 k_i = max(k_min, min(k_i, k_max))
 
-            result = database._interp_2d_linear(m_i, k_i, table)
+            result = interpolation.interp_2d_linear(m_i, k_i, table, database._extracted_metrics_cache)
             return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
 
         return database._query_silicon_or_hybrid(
@@ -609,7 +606,7 @@ class GEMM(Operation):
             if k_min is not None and k_max is not None:
                 k_i = max(k_min, min(k_i, k_max))
 
-            result = database._interp_2d_linear(m_i, k_i, table)
+            result = interpolation.interp_2d_linear(m_i, k_i, table, database._extracted_metrics_cache)
             return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
 
         return database._query_silicon_or_hybrid(
@@ -690,3 +687,171 @@ class GEMM(Operation):
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
+
+
+# ─────────────────────────────────────────────────────────
+# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
+# ─────────────────────────────────────────────────────────
+
+
+def load_gemm_data(gemm_file):
+    """
+    Load the gemm data with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with
+              'latency', 'power', and 'energy' keys.
+              For old database formats without power, defaults to power=0.0 and energy=0.0.
+    """
+    rows = _read_filtered_rows(gemm_file)
+    if rows is None:
+        logger.debug(f"GEMM data file {gemm_file} not found.")
+        return None
+    gemm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (gemm) - power will default to 0.0")
+
+    for row in rows:
+        quant_mode, m, n, k, latency = (
+            row["gemm_dtype"],
+            row["m"],
+            row["n"],
+            row["k"],
+            row["latency"],
+        )
+        m = int(m)
+        n = int(n)
+        k = int(k)
+        latency = float(latency)
+
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+        # Note: power_limit is available in row.get("power_limit") if needed for validation
+
+        # NEW: Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds (W·ms)
+
+        quant_mode = common.GEMMQuantMode[quant_mode]
+
+        try:
+            # Check for conflict
+            gemm_data[quant_mode][m][n][k]
+            logger.debug(f"value conflict in gemm data: {quant_mode} {m} {n} {k}")
+        except KeyError:
+            # Store all three values
+            gemm_data[quant_mode][m][n][k] = {
+                "latency": latency,
+                "power": power,  # Keep for reference
+                "energy": energy,  # NEW: precomputed energy
+            }
+
+    return gemm_data
+
+
+def load_compute_scale_data(compute_scale_file):
+    """
+    Load the compute scale data with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure {quant_mode: {m: {k: {latency, power, energy}}}}
+              For old database formats without power, defaults to power=0.0 and energy=0.0.
+    """
+    rows = _read_filtered_rows(compute_scale_file)
+    if rows is None:
+        logger.debug(f"Compute scale data file {compute_scale_file} not found.")
+        return None
+    compute_scale_data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (compute_scale) - power will default to 0.0")
+
+    for row in rows:
+        quant_mode, m, k, latency = (
+            row["quant_dtype"],
+            row["m"],
+            row["k"],
+            row["latency"],
+        )
+        m = int(m)
+        k = int(k)
+        latency = float(latency)
+
+        # Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds (W·ms)
+
+        quant_mode = common.GEMMQuantMode[quant_mode]
+
+        try:
+            # Check for conflict
+            compute_scale_data[quant_mode][m][k]
+            logger.debug(f"value conflict in compute_scale data: {quant_mode} {m} {k}")
+        except KeyError:
+            # Store all three values
+            compute_scale_data[quant_mode][m][k] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
+
+    return compute_scale_data
+
+
+def load_scale_matrix_data(scale_matrix_file):
+    """
+    Load the scale matrix data with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure {quant_mode: {m: {k: {latency, power, energy}}}}
+              For old database formats without power, defaults to power=0.0 and energy=0.0.
+    """
+    rows = _read_filtered_rows(scale_matrix_file)
+    if rows is None:
+        logger.debug(f"Scale matrix data file {scale_matrix_file} not found.")
+        return None
+    scale_matrix_data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (scale_matrix) - power will default to 0.0")
+
+    for row in rows:
+        quant_mode, m, k, latency = (
+            row["quant_dtype"],
+            row["m"],
+            row["k"],
+            row["latency"],
+        )
+        m = int(m)
+        k = int(k)
+        latency = float(latency)
+
+        # Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds (W·ms)
+
+        quant_mode = common.GEMMQuantMode[quant_mode]
+
+        try:
+            # Check for conflict
+            scale_matrix_data[quant_mode][m][k]
+            logger.debug(f"value conflict in scale_matrix data: {quant_mode} {m} {k}")
+        except KeyError:
+            # Store all three values
+            scale_matrix_data[quant_mode][m][k] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
+
+    return scale_matrix_data

@@ -68,20 +68,20 @@ def _db_factory(tmp_path, monkeypatch):
 
     def _factory(custom_allreduce_data):
         monkeypatch.setattr(
-            "aiconfigurator.sdk.perf_database.load_custom_allreduce_data",
+            "aiconfigurator.sdk.operations.communication.load_custom_allreduce_data",
             lambda path: custom_allreduce_data,
         )
         # Minimal stubs for other loaders — we only exercise custom_allreduce.
-        monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_gemm_data", lambda p: {})
-        monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_context_attention_data", lambda p: {})
-        monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_generation_attention_data", lambda p: {})
-        monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_moe_data", lambda p: ({}, {}))
-        monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_nccl_data", lambda p: {})
-        monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_context_mla_data", lambda p: {})
-        monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_generation_mla_data", lambda p: {})
-        monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_mla_bmm_data", lambda p: {})
-        monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_context_dsa_module_data", lambda p: None)
-        monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_generation_dsa_module_data", lambda p: None)
+        monkeypatch.setattr("aiconfigurator.sdk.operations.gemm.load_gemm_data", lambda p: {})
+        monkeypatch.setattr("aiconfigurator.sdk.operations.attention.load_context_attention_data", lambda p: {})
+        monkeypatch.setattr("aiconfigurator.sdk.operations.attention.load_generation_attention_data", lambda p: {})
+        monkeypatch.setattr("aiconfigurator.sdk.operations.moe.load_moe_data", lambda p: ({}, {}))
+        monkeypatch.setattr("aiconfigurator.sdk.operations.communication.load_nccl_data", lambda p: {})
+        monkeypatch.setattr("aiconfigurator.sdk.operations.mla.load_context_mla_data", lambda p: {})
+        monkeypatch.setattr("aiconfigurator.sdk.operations.mla.load_generation_mla_data", lambda p: {})
+        monkeypatch.setattr("aiconfigurator.sdk.operations.mla.load_mla_bmm_data", lambda p: {})
+        monkeypatch.setattr("aiconfigurator.sdk.operations.dsa.load_context_dsa_module_data", lambda p: None)
+        monkeypatch.setattr("aiconfigurator.sdk.operations.dsa.load_generation_dsa_module_data", lambda p: None)
 
         yaml_file = tmp_path / "sys.yaml"
         yaml_file.write_text("dummy: data")

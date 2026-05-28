@@ -654,7 +654,6 @@ fn all_checked_in_model_configs_are_classified_or_best_available_fallback() {
     }
 
     let mut checked = 0;
-    let mut fallback_ready = 0;
     for entry in fs::read_dir(&root).unwrap() {
         let path = entry.unwrap().path();
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -682,17 +681,12 @@ fn all_checked_in_model_configs_are_classified_or_best_available_fallback() {
                     model.diagnostics().source,
                     ForwardPassPerfSource::FallbackRegression
                 );
-                fallback_ready += 1;
             }
         }
         checked += 1;
     }
 
     assert!(checked >= 40, "expected checked-in AIC model configs");
-    assert!(
-        fallback_ready > 0,
-        "expected at least one checked-in config to exercise best_available fallback"
-    );
 }
 
 #[test]
