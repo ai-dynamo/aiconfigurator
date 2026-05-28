@@ -2002,7 +2002,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
 
 
 # ─────────────────────────────────────────────────────────
-# CSV loaders (moved from perf_database.py in AIC-533 cleanup)
+# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
 # ─────────────────────────────────────────────────────────
 
 

@@ -137,10 +137,10 @@ def _gemm_lookup(db: PerfDatabase, m: int, n: int, k: int) -> float | None:
     """Read latency for a single (m, n, k) triple from the loaded gemm dict."""
     from aiconfigurator.sdk.operations.gemm import GEMM
 
-    # Pattern A is lazy: ``PerfDatabase()`` no longer opens any CSV, so we
-    # explicitly trigger ``GEMM.load_data`` (idempotent) before reading the
-    # gemm dict. Tests assert on the loader's tier-merge behavior, not on
-    # the lazy contract.
+    # Under lazy per-op data ownership ``PerfDatabase()`` no longer
+    # opens any CSV, so we explicitly trigger ``GEMM.load_data``
+    # (idempotent) before reading the gemm dict. These tests assert on
+    # the loader's tier-merge behavior, not on the lazy contract.
     GEMM.load_data(db)
     qmode = common.GEMMQuantMode["bfloat16"]
     table = db._gemm_data.data

@@ -3,7 +3,7 @@
 
 """Sanity assertions for the lazy-load instrumentation counter.
 
-The class-level cache + idempotent ``load_data`` design (Pattern A) means
+The class-level cache + idempotent ``load_data`` design (lazy per-op data ownership) means
 each op class loads its CSV-backed data exactly once per ``(systems_root,
 system, backend, version, enable_shared_layer)`` tuple regardless of how
 many queries fire after that. Demonstrated here for GEMM; later issues
@@ -18,14 +18,14 @@ from aiconfigurator.sdk.operations.gemm import GEMM
 
 
 def test_perf_database_init_opens_no_csvs(tmp_path, monkeypatch):
-    """Pattern A's headline guarantee: ``PerfDatabase()`` triggers no
-    ``load_data`` calls. Op data is loaded only when the matrix is read
-    or a query fires.
+    """The headline guarantee of lazy per-op data ownership:
+    ``PerfDatabase()`` triggers no ``load_data`` calls. Op data is
+    loaded only when the matrix is read or a query fires.
 
-    Regression: pre-AIC-533 ``__init__`` warmed all 22 ops eagerly to
-    accommodate the old test-fixture loader-patch pattern. Test fixtures
-    now own the warm-up explicitly, so production code can be fully
-    lazy."""
+    Regression: the previous implementation warmed all 22 ops eagerly in
+    ``__init__`` to accommodate an old test-fixture loader-patch
+    pattern. Test fixtures now own the warm-up explicitly, so production
+    code can be fully lazy."""
     import yaml
 
     from aiconfigurator.sdk.operations.base import Operation
@@ -50,8 +50,8 @@ def test_perf_database_init_opens_no_csvs(tmp_path, monkeypatch):
     Operation._load_data_call_count.clear()
     PerfDatabase("any_system", "any_backend", "v1", str(tmp_path))
     assert dict(Operation._load_data_call_count) == {}, (
-        "PerfDatabase.__init__ must not trigger any OpClass.load_data — the "
-        "lazy-first-query contract is the headline goal of the AIC-479 refactor"
+        "PerfDatabase.__init__ must not trigger any OpClass.load_data — "
+        "lazy-first-query is the headline contract of the operations package"
     )
 
 
@@ -59,9 +59,9 @@ def test_gemm_loads_exactly_once_across_many_queries(stub_perf_db):
     """A single GEMM.load_data call covers an arbitrary number of queries."""
     # The autouse ``_reset_op_load_counts`` fixture cleared the counter
     # before this test ran. ``stub_perf_db`` triggered one load during
-    # its explicit ``_warm_lazy_op_caches`` step (post-AIC-533, the
-    # fixture warms while loader patches are still active rather than
-    # relying on ``PerfDatabase.__init__`` to do it eagerly).
+    # its explicit ``_warm_lazy_op_caches`` step — the fixture warms
+    # while loader patches are still active rather than relying on
+    # ``PerfDatabase.__init__`` to do it eagerly.
     initial_count = Operation._load_data_call_count.get(GEMM, 0)
     assert initial_count <= 1, "GEMM should load at most once during fixture warm-up"
 
@@ -89,11 +89,10 @@ def test_clear_all_op_caches_resets_counter_and_class_cache():
 
     The save/restore around the call keeps the comprehensive_perf_db
     singleton's cache entries alive for sibling tests — clearing them
-    would force fresh disk loads with no loader patches active. Post-
-    AIC-533, op-class ``_query_*_table`` methods invoke
-    ``cls.load_data(database)`` at the top, so EVERY op class's class
-    cache must be preserved here (not just GEMM's, which was sufficient
-    before the lazy-query contract landed)."""
+    would force fresh disk loads with no loader patches active. Every
+    op-class ``_query_*_table`` method invokes ``cls.load_data(database)``
+    at the top, so EVERY op class's class cache must be preserved here
+    (not just GEMM's)."""
     from aiconfigurator.sdk.operations.base import Operation as _OpBase
     from aiconfigurator.sdk.operations.base import _all_operation_subclasses, clear_all_op_caches
 

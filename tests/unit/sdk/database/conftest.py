@@ -39,9 +39,9 @@ def _reset_op_load_counts():
 # ``load_data`` may invoke via its module-local reference.
 #
 # Each entry maps ``loader_name -> (target_module, default_stub_return)``.
-# ``target_module`` is where the function is defined post-AIC-533 (each
-# loader lives in the op module that owns the data it parses); patches
-# must target that location, not the legacy ``perf_database`` re-exports.
+# ``target_module`` is where the function is defined — each loader lives
+# in the op module that owns the data it parses, so patches must target
+# that location, not the legacy ``perf_database`` re-exports.
 #
 #   * Most loaders return ``None`` when the perf file is absent.
 #   * ``load_moe_data`` is special: it returns a *tuple* of two dicts.

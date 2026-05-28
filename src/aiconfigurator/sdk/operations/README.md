@@ -16,8 +16,9 @@ Each op class owns three things in the same module:
    external callers; the op class can be queried directly via
    `Op._query_*_table(database, ...)` too.
 
-The "data + load + query lives together" rule is **Pattern A**, the
-design that drives the whole `AIC-479` refactor. Two corollaries:
+**Lazy per-op data ownership** is the design rule the rest of this
+document refers to. "Data + load + query live together" in the same op
+module; the load is deferred to the first query. Two corollaries:
 
 - `PerfDatabase()` opens zero CSV files. Data loads on first query
   (or on first read of `database.supported_quant_mode[<key>]`).
@@ -181,8 +182,7 @@ Notes:
   with `AttributeError: 'PerfDatabase' object has no attribute
   '_my_op_data'`.
 - Interpolation / extrapolation helpers live in
-  `aiconfigurator.sdk.interpolation`. Call them directly — pre-AIC-533
-  they used to be wrapped on PerfDatabase, but those wrappers are gone.
+  `aiconfigurator.sdk.interpolation`. Call them directly.
   `interp_2d_linear` and `interp_3d` require `database._extracted_metrics_cache`
   as the last positional argument.
 
@@ -283,7 +283,7 @@ Don't blindly overwrite an existing `PerformanceResult.source`.
 A few things that look reasonable but break the lazy invariant:
 
 - Eager `load_data` calls in `PerfDatabase.__init__`. The whole point
-  of AIC-533 is that init opens no CSVs.
+  of lazy per-op data ownership is that init opens no CSVs.
 - Reading `database._my_op_data` without first calling
   `cls.load_data(database)`. The instance attr only exists after the
   first load.
@@ -311,7 +311,7 @@ A few things that look reasonable but break the lazy invariant:
   `database.supported_quant_mode`), `LoadedOpData`, the query entry
   points.
 
-## Why Pattern A
+## Why this design
 
 The design problem statement was:
 
@@ -322,7 +322,7 @@ The design problem statement was:
 3. **Startup performance** — only load the CSV data the model under
    evaluation actually needs.
 
-Pattern A solves all three in one move: each op owns its data + load +
-query, the class-level cache makes loading idempotent and shared
-across instances, and the `LazySupportMatrix` defers loading until
-something actually reads the support matrix.
+Lazy per-op data ownership solves all three in one move: each op owns
+its data + load + query, the class-level cache makes loading
+idempotent and shared across instances, and the `_LazySupportMatrix`
+defers loading until something actually reads the support matrix.

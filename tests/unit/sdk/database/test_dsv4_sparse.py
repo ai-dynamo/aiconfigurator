@@ -266,8 +266,8 @@ def test_robust_3d_lookup_exact_match_short_circuits():
 def _make_sparse_db_with_paged_mqa(tmp_path, *, lat_at_past0: float, lat_at_past8192: float):
     """Helper: build a minimal PerfDatabase-like stub carrying paged_mqa_logits at tp=1.
 
-    Post-AIC-533, ``_lookup_sparse_kernel`` calls ``interpolation.*`` directly
-    rather than ``database._interp_*`` wrappers, so the stub only needs the
+    ``_lookup_sparse_kernel`` calls ``interpolation.*`` directly rather
+    than ``database._interp_*`` wrappers, so the stub only needs the
     data attribute and the per-database extracted-metrics cache slot."""
     rows = [
         _sparse_row(kernel="paged_mqa_logits", bs=1, isl=8192, past_kv=0, tp=1, cr=4, lat=lat_at_past0),

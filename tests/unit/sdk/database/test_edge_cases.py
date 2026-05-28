@@ -137,10 +137,10 @@ class TestInitializationEdgeCases:
     def test_extrapolation_during_init(self, tmp_path, monkeypatch, caplog):
         """Test that extrapolation runs when ContextAttention's data is loaded.
 
-        Pre-AIC-533 ``PerfDatabase.__init__`` warmed every op eagerly, so
-        extrapolation ran during construction. Post-AIC-533 the load is
-        lazy: we explicitly trigger ``ContextAttention.load_data`` below
-        (with the loader patches still active) and assert on the result."""
+        Previously ``PerfDatabase.__init__`` warmed every op eagerly, so
+        extrapolation ran during construction. Now the load is lazy: we
+        explicitly trigger ``ContextAttention.load_data`` below (with
+        the loader patches still active) and assert on the result."""
         # Set up minimal system spec
         import yaml
 
@@ -188,9 +188,9 @@ class TestInitializationEdgeCases:
             lambda path: dummy_context_data,
         )
 
-        # Patch other loaders to return empty defaultdicts. Post-AIC-533
-        # each loader lives in the op module that owns the data, so the
-        # patch target is ``aiconfigurator.sdk.operations.<module>.<loader>``.
+        # Patch other loaders to return empty defaultdicts. Each loader
+        # lives in the op module that owns the data, so the patch target
+        # is ``aiconfigurator.sdk.operations.<module>.<loader>``.
         for loader, module, depth in [
             ("load_gemm_data", "gemm", 4),  # quant_mode -> m -> n -> k -> value
             ("load_generation_attention_data", "attention", 5),  # kv_cache -> num_kv -> n -> b -> s -> value

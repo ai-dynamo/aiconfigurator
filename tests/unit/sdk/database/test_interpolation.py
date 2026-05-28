@@ -306,7 +306,7 @@ class TestExtrapolateDataGrid:
 class TestCorrectData:
     """Test cases for per-op ``_correct_sol`` SOL clamping.
 
-    Post-AIC-533 the ``PerfDatabase._correct_data`` wrapper is gone;
+    The ``PerfDatabase._correct_data`` wrapper has been retired;
     callers invoke ``GEMM._correct_sol(db)`` / ``GenerationAttention._correct_sol(db)``
     directly. These tests exercise the SOL clamp on a database whose
     instance attributes have been mutated to artificially low values."""
@@ -360,10 +360,10 @@ class TestUpdateSupportMatrix:
 
     def test_support_matrix_creation(self, comprehensive_perf_db):
         """Test that supported_quant_mode is properly created."""
-        # Post-AIC-533 ``supported_quant_mode`` is a ``_LazySupportMatrix``
-        # (dict-like view that resolves keys on first read) rather than a
-        # plain dict. Both shapes support the same per-key access pattern
-        # the rest of this test exercises.
+        # ``supported_quant_mode`` is a ``_LazySupportMatrix`` (dict-like
+        # view that resolves keys on first read) rather than a plain
+        # dict. Both shapes support the same per-key access pattern the
+        # rest of this test exercises.
         from aiconfigurator.sdk.perf_database import _LazySupportMatrix
 
         assert hasattr(comprehensive_perf_db, "supported_quant_mode")

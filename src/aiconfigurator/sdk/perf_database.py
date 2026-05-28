@@ -677,12 +677,12 @@ def get_all_databases(
 # ─────────────────────────────────────────────────────────────────────────
 # CSV loader re-exports.
 #
-# AIC-533 cleanup moved every ``load_*_data`` function out of this module
-# and into the op module that owns the data they parse. The re-exports
-# below keep the previous import paths working for external callers and
-# for the legacy ``aiconfigurator.sdk.perf_database.<loader>`` patch sites
-# in test fixtures (the conftest now patches the new locations directly;
-# these survive for code outside this repo).
+# Every ``load_*_data`` function lives in the op module that owns the
+# data it parses (lazy per-op data ownership). The re-exports below keep the previous
+# import paths working for external callers and for legacy
+# ``aiconfigurator.sdk.perf_database.<loader>`` patch sites in test
+# fixtures (the conftest now patches the new locations directly; these
+# survive for code outside this repo).
 # ─────────────────────────────────────────────────────────────────────────
 from aiconfigurator.sdk.operations.attention import (  # noqa: F401
     load_context_attention_data,
@@ -748,7 +748,7 @@ class LoadedOpData(UserDict):
         if dict_data:
             # Freeze any defaultdicts so missing-key access at query time
             # raises ``KeyError`` instead of silently creating empty
-            # branches. Pre-AIC-533 this was handled by a one-shot
+            # branches. Previously this was handled by a one-shot
             # ``_finalize_loaded_data()`` walk at the end of
             # ``PerfDatabase.__init__``; the lazy contract means each
             # load_data may bind data long after construction, so freezing
@@ -1153,12 +1153,10 @@ class PerfDatabase:
         # backend/version dirs hold rows the active backend can inherit.
         self._op_kernel_source_manifest_entries = _load_op_kernel_source_manifest_entries(systems_root)
 
-        # Pattern A: every op class owns its CSV data and loads it on first query
-        # via ``OpClass.load_data(database)``. The previous eager warm-up here
-        # (22 explicit ``OpClass.load_data(self)`` calls + the pre/post
-        # ``_correct_data`` passes) was retired in AIC-533: each op now opens its
-        # data file the first time a query (or the lazy support matrix below)
-        # needs it. ``PerfDatabase()`` opens zero CSVs.
+        # lazy per-op data ownership: every op class owns its CSV data and loads it on first query
+        # via ``OpClass.load_data(database)``. No eager warm-up here — each op
+        # opens its data file the first time a query (or the lazy support
+        # matrix below) needs it. ``PerfDatabase()`` opens zero CSVs.
         self.supported_quant_mode = _LazySupportMatrix(self)
         self._finalize_loaded_data()
 
