@@ -68,6 +68,13 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.GENERATION_ATTENTION,
     ),
     OpEntry(
+        op="encoder_attention",
+        module="collector.sglang.collect_attn_encoder",
+        get_func="get_encoder_attention_test_cases",
+        run_func="run_encoder_attention_torch",
+        perf_filename=PerfFile.ENCODER_ATTENTION,
+    ),
+    OpEntry(
         op="dsa_context_module",
         module="collector.sglang.collect_mla_module",
         get_func="get_dsa_context_module_test_cases",

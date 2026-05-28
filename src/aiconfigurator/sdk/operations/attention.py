@@ -615,6 +615,203 @@ class GenerationAttention(Operation):
         return self._weights * self._scale_factor
 
 
+class EncoderAttention(Operation):
+    """
+    Non-causal encoder attention: full N^2, MHA, no KV cache, optional partial RoPE.
+
+    Used to model bidirectional encoders — ViT (vision), audio encoders, and any
+    other omni-modal encoder where the kernel runs full N^2 attention without a
+    causal mask and without writing a KV cache. The optional
+    ``partial_rotary_factor`` accounts for partial-rotation RoPE variants such as
+    Qwen3-VL (factor=0.5, rotating half of head_dim). Defaults to 0.0 (no RoPE),
+    matching CLIP / SigLIP / Whisper; set to 0.5 / 1.0 only for RoPE encoders.
+
+    Owns ``_data_cache: {key: LoadedOpData}`` for the encoder attention CSV.
+    Schema is simpler than context attention: MHA only (no n_kv), no KV cache
+    (no kvcache_quant_mode), no sliding window. No SOL clamp. Grid extrapolation
+    reuses ``_CONTEXT_ATTENTION_TARGET_*``.
+    """
+
+    _data_cache: ClassVar[dict] = {}
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        num_heads: int,
+        head_size: int,
+        fmha_quant_mode: common.FMHAQuantMode = common.FMHAQuantMode.bfloat16,
+        partial_rotary_factor: float = 0.0,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        # Encoder kernels currently only have bfloat16 perf data;
+        if fmha_quant_mode != common.FMHAQuantMode.bfloat16:
+            raise ValueError(f"EncoderAttention only supports FMHAQuantMode.bfloat16, got {fmha_quant_mode}")
+        if not 0.0 <= partial_rotary_factor <= 1.0:
+            raise ValueError(f"partial_rotary_factor must be in [0.0, 1.0], got {partial_rotary_factor}")
+        self._n = num_heads
+        self._head_size = head_size
+        self._fmha_quant_mode = fmha_quant_mode
+        self._partial_rotary_factor = partial_rotary_factor
+        self._weights = 0.0
+
+    # ------------------------------------------------------------------
+    # Data ownership
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _cache_key(cls, database: PerfDatabase) -> tuple:
+        return _cache_key(database)
+
+    @classmethod
+    def load_data(cls, database: PerfDatabase) -> None:
+        """Idempotent. Loads encoder_attention CSV into the class cache,
+        applies grid extrapolation, binds ``database._encoder_attention_data``.
+        """
+        import os
+
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
+
+        key = cls._cache_key(database)
+        if key not in cls._data_cache:
+            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+            data_dir = os.path.join(system_data_root, database.backend, database.version)
+            primary_path = os.path.join(data_dir, PerfDataFilename.encoder_attention.value)
+            sources = database._build_op_sources(PerfDataFilename.encoder_attention, primary_path, system_data_root)
+            cls._data_cache[key] = LoadedOpData(
+                load_encoder_attention_data(sources), PerfDataFilename.encoder_attention, primary_path
+            )
+
+            cls._extrapolate(cls._data_cache[key])
+            cls._record_load()
+
+        # Bind instance attr (respect intentional test pre-overrides).
+        if "_encoder_attention_data" not in database.__dict__:
+            database._encoder_attention_data = cls._data_cache[key]
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        cls._data_cache.clear()
+
+    @classmethod
+    def _extrapolate(cls, data_wrapper) -> None:
+        """Densify the (n, s, b) grid. Reuses ``_CONTEXT_ATTENTION_TARGET_*``
+        since the encoder query shape matches context attention exactly."""
+        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
+            return
+
+        for quant_mode in data_wrapper:
+            for head_size in data_wrapper[quant_mode]:
+                data_dict = data_wrapper[quant_mode][head_size]
+                min_x = min(data_dict.keys())
+                filtered_x = [i for i in _CONTEXT_ATTENTION_TARGET_X if i >= min_x]
+                interpolation.extrapolate_data_grid(
+                    data_dict=data_dict,
+                    target_x_list=filtered_x,
+                    target_y_list=_CONTEXT_ATTENTION_TARGET_Y,
+                    target_z_list=_CONTEXT_ATTENTION_TARGET_Z,
+                    sqrt_y_value=True,
+                )
+
+    # ------------------------------------------------------------------
+    # Query table (formerly PerfDatabase.query_encoder_attention)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _query_encoder_attention_table(
+        cls,
+        database: PerfDatabase,
+        b: int,
+        s: int,
+        n: int,
+        head_size: int,
+        fmha_quant_mode: common.FMHAQuantMode,
+        database_mode: common.DatabaseMode | None = None,
+    ):
+        """Query encoder attention table. Verbatim port of the legacy body."""
+
+        def get_sol(
+            b: int, s: int, n: int, h: int, fmha_quant_mode: common.FMHAQuantMode
+        ) -> tuple[float, float, float]:
+            # Non-causal full N^2: no /2 for causality
+            ops = 2 * b * s * s * n * h * 2  # 2 for fma, 2 for q*k^t + *v
+            # Encoder has no KV cache read; Q/K/V are all read once
+            mem_bytes = 2 * b * (3 * n * s * h + n * s * h)  # Q/K/V read + output write, bf16
+            sol_math = ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
+            sol_time = max(sol_math, sol_mem)
+            return sol_time, sol_math, sol_mem
+
+        def get_empirical(b: int, s: int, n: int, h: int, fmha_quant_mode: common.FMHAQuantMode) -> float:
+            latency = get_sol(b, s, n, h, fmha_quant_mode)[0]
+            scale_factor = 0.6
+            return latency / scale_factor
+
+        if database_mode is None:
+            database_mode = database._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
+            sol_latency = get_sol(b, s, n, head_size, fmha_quant_mode)[0]
+            return PerformanceResult(sol_latency, energy=0.0, source="sol")
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(b, s, n, head_size, fmha_quant_mode)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            emp_latency = get_empirical(b, s, n, head_size, fmha_quant_mode)
+            return PerformanceResult(emp_latency, energy=0.0, source="empirical")
+
+        cls.load_data(database)
+        data_wrapper = database._encoder_attention_data
+
+        def get_silicon():
+            data_wrapper.raise_if_not_loaded()
+            attention_dict = data_wrapper[fmha_quant_mode][head_size]
+            result = interpolation.interp_3d(n, s, b, attention_dict, "cubic", database._extracted_metrics_cache)
+            return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
+
+        return database._query_silicon_or_hybrid(
+            get_silicon=get_silicon,
+            get_empirical=lambda: get_empirical(b, s, n, head_size, fmha_quant_mode),
+            database_mode=database_mode,
+            error_msg=(
+                f"Failed to query encoder attention data for {b=}, {s=}, {n=}, {head_size=}, {fmha_quant_mode=}"
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Op contract: query() + get_weights()
+    # ------------------------------------------------------------------
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """Query encoder attention latency with energy data."""
+        batch_size = kwargs.get("batch_size")
+        seq_len = kwargs.get("s")
+
+        result = database.query_encoder_attention(
+            batch_size,
+            seq_len,
+            self._n,
+            self._head_size,
+            self._fmha_quant_mode,
+        )
+
+        # Partial RoPE: factor=1.0 -> full rotation (full Q+K read/write),
+        # factor=0.5 -> half head_dim rotated (Qwen3-VL), factor=0.0 -> no RoPE.
+        if self._partial_rotary_factor > 0:
+            qk_num = self._n * self._head_size  # MHA: q_num == k_num
+            # Q + K bytes (bf16) scaled by total tokens, so RoPE overhead grows with workload size.
+            qk_bytes = 2 * (qk_num * 2) * (batch_size * seq_len)
+            apply_rope_latency = self._partial_rotary_factor * 2 * database.query_mem_op(qk_bytes)
+            result += apply_rope_latency * 1.1  # correction factor
+
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
 # ─────────────────────────────────────────────────────────
 # CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
 # ─────────────────────────────────────────────────────────
@@ -776,3 +973,60 @@ def load_generation_attention_data(generation_attention_file):
             }
 
     return generation_attention_data
+
+
+def load_encoder_attention_data(encoder_attention_file):
+    """
+    Load the non-causal encoder attention data (ViT, audio encoder, etc.).
+
+    Schema is intentionally simplified vs. context attention:
+    - MHA only (n_kv == n), so no n_kv dimension
+    - No KV cache (encoder is single-pass), so no kv_cache_dtype dimension
+    - No sliding window, so no window_size dimension
+
+    Returns:
+        dict: Nested dict [fmha_quant_mode][head_size][n][s][b] -> {latency, power, energy}.
+    """
+    rows = _read_filtered_rows(encoder_attention_file)
+    if rows is None:
+        logger.debug(f"Encoder attention data file {encoder_attention_file} not found.")
+        return None
+    encoder_attention_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+    )
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (encoder_attention) - power will default to 0.0")
+
+    for row in rows:
+        quant_mode, b, s, n, head_size, latency = (
+            row["attn_dtype"],
+            row["batch_size"],
+            row["isl"],
+            row["num_heads"],
+            row["head_dim"],
+            row["latency"],
+        )
+        b = int(b)
+        s = int(s)
+        n = int(n)
+        head_size = int(head_size)
+        latency = float(latency)
+
+        power = float(row.get("power", 0.0))
+        energy = power * latency
+
+        quant_mode = common.FMHAQuantMode[quant_mode]
+
+        try:
+            encoder_attention_data[quant_mode][head_size][n][s][b]
+            logger.debug(f"value conflict in encoder attention data: {quant_mode} {head_size} {n} {s} {b}")
+        except KeyError:
+            encoder_attention_data[quant_mode][head_size][n][s][b] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
+
+    return encoder_attention_data
