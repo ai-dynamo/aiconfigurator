@@ -701,11 +701,42 @@ fn forward_pass_perf_options_reject_min_observations_above_max() {
         max_observations: 2,
         min_observations: 3,
         bucket_count: 16,
+        ..Default::default()
     })
     .unwrap_err()
     .to_string();
 
     assert!(err.contains("min_observations must be <= max_observations"));
+}
+
+#[test]
+fn forward_pass_perf_options_reject_invalid_correction_bounds() {
+    let err = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        max_num_tokens: 0,
+        ..Default::default()
+    })
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("max_num_tokens must be >= 1"));
+
+    let err = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        max_batch_size: 0,
+        ..Default::default()
+    })
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("max_batch_size must be >= 1"));
+
+    let err = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        max_kv_tokens: 0,
+        ..Default::default()
+    })
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("max_kv_tokens must be >= 1"));
 }
 
 #[test]
@@ -990,6 +1021,7 @@ fn native_correction_min_observations_is_workload_kind_wide_and_empty_regions_de
         ForwardPassPerfOptions {
             min_observations: 2,
             bucket_count: 4,
+            max_num_tokens: 100,
             ..Default::default()
         },
         fixture.systems_root(),
@@ -1054,6 +1086,45 @@ fn native_correction_min_observations_is_workload_kind_wide_and_empty_regions_de
     assert_close(model.max_correction_factor().unwrap(), 3.0);
     assert_close(model.avg_correction_factor().unwrap(), 2.5);
     assert_eq!(model.diagnostics().correction_ready_buckets, 2);
+}
+
+#[test]
+fn native_correction_uses_configured_bounds_and_ignores_out_of_range_observations() {
+    let fixture = Fixture::new();
+    let mut model = ForwardPassPerfModel::from_native_with_roots(
+        engine_config(),
+        ForwardPassPerfOptions {
+            min_observations: 2,
+            bucket_count: 4,
+            max_num_tokens: 40,
+            ..Default::default()
+        },
+        fixture.systems_root(),
+        fixture.model_configs_root(),
+    )
+    .unwrap();
+
+    let native_50 = model
+        .estimate_forward_pass_time_ms(&[prefill_fpm(50, 0.0)])
+        .unwrap()
+        .unwrap();
+
+    model
+        .tune_with_fpms(&[
+            vec![prefill_fpm(50, native_50 * 2.0 / 1000.0)],
+            vec![prefill_fpm(50, native_50 * 2.0 / 1000.0)],
+        ])
+        .unwrap();
+
+    assert_eq!(model.diagnostics().retained_observations, 0);
+    assert_eq!(model.min_correction_factor(), None);
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(50, 0.0)])
+            .unwrap()
+            .unwrap(),
+        native_50,
+    );
 }
 
 #[test]

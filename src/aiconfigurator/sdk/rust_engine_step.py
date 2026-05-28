@@ -100,6 +100,11 @@ class RustForwardPassPerfModel:
     `[[iter0_rank0, iter0_rank1], [iter1_rank0, iter1_rank1]]`. Each iteration
     is merged using max-rank load features and max positive `wall_time` across
     ranks.
+
+    Correction grids use fixed constructor-time ranges from `options`:
+    `max_num_tokens` bounds `sum_prefill_tokens` and defaults to `8192`,
+    `max_batch_size` bounds `num_decode_requests` and defaults to `512`, and
+    `max_kv_tokens` bounds `sum_decode_kv_tokens` and defaults to `2000000`.
     """
 
     def __init__(self, handle: ctypes.c_void_p, lib: ctypes.CDLL) -> None:
@@ -207,9 +212,8 @@ class RustForwardPassPerfModel:
         Native models return an estimate immediately, multiplied by the
         correction factor for the matching workload region. Inferred workload
         kinds with fewer than `min_observations` total samples and empty regions
-        use the default factor `1.0`. Workload bounds are monotonic lifetime
-        bounds over accepted observations, not retained-sample bounds, so sample
-        retirement does not shrink the correction grid. Regression models return
+        use the default factor `1.0`. Queries outside the configured correction
+        bounds in `options` also use factor `1.0`. Regression models return
         `None` until the matching inferred workload kind has enough tuned
         observations. Empty scheduled work returns `0.0`.
         """
@@ -239,9 +243,10 @@ class RustForwardPassPerfModel:
         ignores empty iterations and iterations with no positive finite
         `wall_time`. For native models, each observation updates only its
         matching correction region; those regions are used after the inferred
-        workload kind has enough total samples. For multi-rank input, one
-        observation is recorded using max-rank load features and max positive
-        `wall_time` across ranks.
+        workload kind has enough total samples. Native correction ignores
+        observations outside the configured correction bounds. For multi-rank
+        input, one observation is recorded using max-rank load features and max
+        positive `wall_time` across ranks.
         """
         err = self._lib.aic_forward_pass_perf_model_tune_with_fpms(
             self._handle,

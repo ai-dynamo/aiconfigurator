@@ -14,6 +14,9 @@ use crate::{
 const DEFAULT_MAX_OBSERVATIONS: usize = 64;
 const DEFAULT_MIN_OBSERVATIONS: usize = 5;
 const DEFAULT_BUCKET_COUNT: usize = 16;
+const DEFAULT_MAX_NUM_TOKENS: u32 = 8192;
+const DEFAULT_MAX_BATCH_SIZE: u32 = 512;
+const DEFAULT_MAX_KV_TOKENS: u32 = 2_000_000;
 const RELAXABLE_NEG_TOLERANCE: f64 = 1e-6;
 
 /// In-memory tuning controls for `ForwardPassPerfModel`.
@@ -33,6 +36,21 @@ pub struct ForwardPassPerfOptions {
     /// Target bucket count for workload-specific sample retirement and correction lookup.
     #[serde(default = "default_bucket_count")]
     pub bucket_count: usize,
+    /// Upper bound for the `sum_prefill_tokens` correction axis.
+    ///
+    /// Used by prefill and mixed/agg workload kinds. The lower bound is always `0`.
+    #[serde(default = "default_max_num_tokens")]
+    pub max_num_tokens: u32,
+    /// Upper bound for the `num_decode_requests` correction axis.
+    ///
+    /// Used by the decode workload kind. The lower bound is always `0`.
+    #[serde(default = "default_max_batch_size")]
+    pub max_batch_size: u32,
+    /// Upper bound for the `sum_decode_kv_tokens` correction axis.
+    ///
+    /// Used by decode and mixed/agg workload kinds. The lower bound is always `0`.
+    #[serde(default = "default_max_kv_tokens")]
+    pub max_kv_tokens: u32,
 }
 
 impl Default for ForwardPassPerfOptions {
@@ -41,6 +59,9 @@ impl Default for ForwardPassPerfOptions {
             max_observations: DEFAULT_MAX_OBSERVATIONS,
             min_observations: DEFAULT_MIN_OBSERVATIONS,
             bucket_count: DEFAULT_BUCKET_COUNT,
+            max_num_tokens: DEFAULT_MAX_NUM_TOKENS,
+            max_batch_size: DEFAULT_MAX_BATCH_SIZE,
+            max_kv_tokens: DEFAULT_MAX_KV_TOKENS,
         }
     }
 }
@@ -107,6 +128,11 @@ pub enum ForwardPassPerfReadiness {
 ///   `[sum_prefill_tokens, sum_decode_kv_tokens]`
 /// - empty: no scheduled prefill or decode work, estimates `0.0` and is not
 ///   used for tuning
+///
+/// Native correction grids use fixed constructor-time ranges from
+/// `ForwardPassPerfOptions`: `max_num_tokens` bounds `sum_prefill_tokens`,
+/// `max_batch_size` bounds `num_decode_requests`, and `max_kv_tokens` bounds
+/// `sum_decode_kv_tokens`.
 ///
 /// Queued request fields are accepted for FPM schema parity but ignored by this
 /// forward-pass-level model. `estimate_forward_pass_time_ms` treats FPM as a
@@ -277,12 +303,10 @@ impl ForwardPassPerfModel {
     /// Native models return an AIC estimate immediately, multiplied by the
     /// correction factor for the matching workload region. Correction factors
     /// default to `1.0` for inferred workload kinds with fewer than
-    /// `min_observations` total samples and empty regions. Workload bounds are
-    /// monotonic lifetime bounds over accepted observations, not retained-sample
-    /// bounds, so sample retirement does not shrink the correction grid.
-    /// Regression models return `Ok(None)` until the matching inferred workload
-    /// kind has enough tuning samples. Empty scheduled work returns
-    /// `Ok(Some(0.0))`.
+    /// `min_observations` total samples, empty regions, and queries outside the
+    /// configured correction bounds in `ForwardPassPerfOptions`. Regression
+    /// models return `Ok(None)` until the matching inferred workload kind has
+    /// enough tuning samples. Empty scheduled work returns `Ok(Some(0.0))`.
     pub fn estimate_forward_pass_time_ms(
         &self,
         metrics_by_rank: &[ForwardPassMetrics],
@@ -327,8 +351,9 @@ impl ForwardPassPerfModel {
     /// `wall_time` are ignored. Native models update the matching region's
     /// median `observed_ms / native_ms` correction factor. Regions are used only
     /// after their inferred workload kind has `min_observations` total samples;
-    /// empty regions keep the default factor `1.0`. Regression models learn a
-    /// workload-specific linear fit.
+    /// empty regions keep the default factor `1.0`. Observations outside the
+    /// configured correction bounds are ignored by native correction models.
+    /// Regression models learn a workload-specific linear fit.
     pub fn tune_with_fpms(
         &mut self,
         iterations: &[Vec<ForwardPassMetrics>],
@@ -563,9 +588,27 @@ struct WorkloadStores<T> {
 impl<T: WithOptions> WorkloadStores<T> {
     fn with_options(options: &ForwardPassPerfOptions) -> Self {
         Self {
-            prefill: T::with_options(options, 1, &[]),
-            decode: T::with_options(options, 2, &[0]),
-            mixed: T::with_options(options, 2, &[]),
+            prefill: T::with_options(
+                options,
+                &[AxisRange::from_zero_to(options.max_num_tokens)],
+                &[],
+            ),
+            decode: T::with_options(
+                options,
+                &[
+                    AxisRange::from_zero_to(options.max_batch_size),
+                    AxisRange::from_zero_to(options.max_kv_tokens),
+                ],
+                &[0],
+            ),
+            mixed: T::with_options(
+                options,
+                &[
+                    AxisRange::from_zero_to(options.max_num_tokens),
+                    AxisRange::from_zero_to(options.max_kv_tokens),
+                ],
+                &[],
+            ),
         }
     }
 }
@@ -616,7 +659,11 @@ impl<T> WorkloadStores<T> {
 }
 
 trait WithOptions {
-    fn with_options(options: &ForwardPassPerfOptions, ndim: usize, relaxable: &[usize]) -> Self;
+    fn with_options(
+        options: &ForwardPassPerfOptions,
+        axis_ranges: &[AxisRange],
+        relaxable: &[usize],
+    ) -> Self;
 }
 
 trait StoreStats {
@@ -634,9 +681,14 @@ struct BucketedRegression {
 }
 
 impl WithOptions for BucketedRegression {
-    fn with_options(options: &ForwardPassPerfOptions, ndim: usize, relaxable: &[usize]) -> Self {
+    fn with_options(
+        options: &ForwardPassPerfOptions,
+        axis_ranges: &[AxisRange],
+        relaxable: &[usize],
+    ) -> Self {
+        let ndim = axis_ranges.len();
         Self {
-            samples: BucketedSamples::new(options, ndim),
+            samples: BucketedSamples::new_dynamic(options, ndim),
             ndim,
             min_observations: options.min_observations,
             relaxable: relaxable.to_vec(),
@@ -657,13 +709,14 @@ impl StoreStats for BucketedRegression {
 
 impl BucketedRegression {
     fn add_observation(&mut self, x: Vec<f64>, y: f64) {
-        self.samples.add(x, y);
-        self.fit = fit_linear(
-            self.samples.observations(),
-            self.ndim,
-            self.min_observations,
-            &self.relaxable,
-        );
+        if self.samples.add(x, y) {
+            self.fit = fit_linear(
+                self.samples.observations(),
+                self.ndim,
+                self.min_observations,
+                &self.relaxable,
+            );
+        }
     }
 
     fn predict(&self, x: &[f64]) -> Option<f64> {
@@ -684,9 +737,13 @@ struct CorrectionObservation {
 }
 
 impl WithOptions for CorrectionBuckets {
-    fn with_options(options: &ForwardPassPerfOptions, ndim: usize, _relaxable: &[usize]) -> Self {
+    fn with_options(
+        options: &ForwardPassPerfOptions,
+        axis_ranges: &[AxisRange],
+        _relaxable: &[usize],
+    ) -> Self {
         Self {
-            samples: BucketedSamples::new(options, ndim),
+            samples: BucketedSamples::new_fixed(options, axis_ranges),
             min_observations: options.min_observations,
         }
     }
@@ -773,12 +830,28 @@ struct BucketedSamples<T> {
     total_observations: usize,
     axis_min: Vec<f64>,
     axis_max: Vec<f64>,
+    fixed_bounds: bool,
     buckets_per_axis: usize,
     max_observations: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AxisRange {
+    min: f64,
+    max: f64,
+}
+
+impl AxisRange {
+    fn from_zero_to(max: u32) -> Self {
+        Self {
+            min: 0.0,
+            max: f64::from(max),
+        }
+    }
+}
+
 impl<T: Clone> BucketedSamples<T> {
-    fn new(options: &ForwardPassPerfOptions, ndim: usize) -> Self {
+    fn new_dynamic(options: &ForwardPassPerfOptions, ndim: usize) -> Self {
         let buckets_per_axis = if ndim == 1 {
             options.bucket_count
         } else {
@@ -789,15 +862,34 @@ impl<T: Clone> BucketedSamples<T> {
             total_observations: 0,
             axis_min: vec![f64::INFINITY; ndim],
             axis_max: vec![f64::NEG_INFINITY; ndim],
+            fixed_bounds: false,
             buckets_per_axis: buckets_per_axis.max(1),
             max_observations: options.max_observations,
         }
     }
 
-    fn add(&mut self, x: Vec<f64>, y: T) {
-        let bounds_changed = self.update_axis_bounds(&x);
-        if bounds_changed && self.total_observations > 0 {
-            self.rebuild_buckets();
+    fn new_fixed(options: &ForwardPassPerfOptions, axis_ranges: &[AxisRange]) -> Self {
+        let mut samples = Self::new_dynamic(options, axis_ranges.len());
+        samples.axis_min = axis_ranges.iter().map(|range| range.min).collect();
+        samples.axis_max = axis_ranges.iter().map(|range| range.max).collect();
+        samples.fixed_bounds = true;
+        samples
+    }
+
+    fn add(&mut self, x: Vec<f64>, y: T) -> bool {
+        if x.len() != self.axis_min.len() || !x.iter().all(|value| value.is_finite()) {
+            return false;
+        }
+
+        if self.fixed_bounds {
+            if !self.is_in_bounds(&x) {
+                return false;
+            }
+        } else {
+            let bounds_changed = self.update_axis_bounds(&x);
+            if bounds_changed && self.total_observations > 0 {
+                self.rebuild_buckets();
+            }
         }
 
         let key = self.bucket_key(&x);
@@ -807,6 +899,7 @@ impl<T: Clone> BucketedSamples<T> {
         if self.total_observations > self.max_observations {
             self.retire_from_fattest_bucket();
         }
+        true
     }
 
     fn observations(&self) -> Vec<(Vec<f64>, T)> {
@@ -837,9 +930,8 @@ impl<T: Clone> BucketedSamples<T> {
             return None;
         }
 
-        // Estimation must not clamp outside lifetime workload bounds into edge
-        // regions. A new observation can expand those bounds and rebuild
-        // regions; retiring old samples intentionally does not shrink them.
+        // Estimation must not clamp outside configured correction bounds into
+        // edge regions.
         let mut key = Vec::with_capacity(x.len());
         for (i, value) in x.iter().enumerate() {
             let lo = self.axis_min[i];
@@ -862,6 +954,19 @@ impl<T: Clone> BucketedSamples<T> {
             key.push(idx.clamp(0, self.buckets_per_axis as isize - 1) as usize);
         }
         Some(key)
+    }
+
+    fn is_in_bounds(&self, x: &[f64]) -> bool {
+        if x.len() != self.axis_min.len() {
+            return false;
+        }
+        x.iter().enumerate().all(|(i, value)| {
+            value.is_finite()
+                && self.axis_min[i].is_finite()
+                && self.axis_max[i].is_finite()
+                && *value >= self.axis_min[i]
+                && *value <= self.axis_max[i]
+        })
     }
 
     fn update_axis_bounds(&mut self, x: &[f64]) -> bool {
@@ -889,9 +994,8 @@ impl<T: Clone> BucketedSamples<T> {
     }
 
     fn retire_from_fattest_bucket(&mut self) {
-        // Bounds are monotonic lifetime workload bounds. They define the
-        // largest observed correction area, so eviction only removes samples;
-        // it does not recompute or shrink the grid.
+        // Eviction removes samples only. Dynamic regression bounds remain
+        // monotonic; fixed correction bounds are configured at model creation.
         let Some(key) = self
             .buckets
             .iter()
@@ -1058,6 +1162,15 @@ fn validate_options(options: &ForwardPassPerfOptions) -> Result<(), AicError> {
     if options.bucket_count == 0 {
         return Err(invalid_perf_options("bucket_count must be >= 1"));
     }
+    if options.max_num_tokens == 0 {
+        return Err(invalid_perf_options("max_num_tokens must be >= 1"));
+    }
+    if options.max_batch_size == 0 {
+        return Err(invalid_perf_options("max_batch_size must be >= 1"));
+    }
+    if options.max_kv_tokens == 0 {
+        return Err(invalid_perf_options("max_kv_tokens must be >= 1"));
+    }
     if options.min_observations > options.max_observations {
         return Err(invalid_perf_options(
             "min_observations must be <= max_observations",
@@ -1102,4 +1215,16 @@ fn default_min_observations() -> usize {
 
 fn default_bucket_count() -> usize {
     DEFAULT_BUCKET_COUNT
+}
+
+fn default_max_num_tokens() -> u32 {
+    DEFAULT_MAX_NUM_TOKENS
+}
+
+fn default_max_batch_size() -> u32 {
+    DEFAULT_MAX_BATCH_SIZE
+}
+
+fn default_max_kv_tokens() -> u32 {
+    DEFAULT_MAX_KV_TOKENS
 }
