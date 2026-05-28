@@ -3,6 +3,11 @@
 
 """DeepSeek-V4 sparse-attention kernel-level collector for SGLang.
 
+DeepSeek-V4's default AIC path uses prefix-aware full CSA/HCA attention-module
+rows.  This collector is intentionally kept as auxiliary data for future
+prefix/past_kv correction and residual analysis, not as the primary modeling
+path.
+
 Benchmarks the two past_kv-sensitive kernels that bench accurately at the
 kernel level (paged_mqa_logits + hca_attn).  Inputs match upstream layouts
 (DeepGEMM ``test_attention.py`` for the indexer GEMM, FlashMLA

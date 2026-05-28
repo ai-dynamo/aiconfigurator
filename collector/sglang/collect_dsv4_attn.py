@@ -64,6 +64,41 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from helper import benchmark_with_power, log_perf
 
+try:
+    from collector.sglang.runtime_limits import (
+        alloc_prefix_indices as _alloc_prefix_indices,
+    )
+    from collector.sglang.runtime_limits import (
+        kv_pool_capacity_tokens as _kv_pool_capacity_tokens,
+    )
+    from collector.sglang.runtime_limits import (
+        required_kv_tokens,
+        required_prefill_extend_tokens,
+    )
+    from collector.sglang.runtime_limits import (
+        runtime_chunk_size as _runtime_chunk_size,
+    )
+    from collector.sglang.runtime_limits import (
+        temporarily_chunked_alloc_extend as _temporarily_chunked_alloc_extend,
+    )
+except ModuleNotFoundError:
+    from runtime_limits import (
+        alloc_prefix_indices as _alloc_prefix_indices,
+    )
+    from runtime_limits import (
+        kv_pool_capacity_tokens as _kv_pool_capacity_tokens,
+    )
+    from runtime_limits import (
+        required_kv_tokens,
+        required_prefill_extend_tokens,
+    )
+    from runtime_limits import (
+        runtime_chunk_size as _runtime_chunk_size,
+    )
+    from runtime_limits import (
+        temporarily_chunked_alloc_extend as _temporarily_chunked_alloc_extend,
+    )
+
 
 # Re-export test case generators from the centralized case generator module so
 # collect.py's registry (``module="collector.sglang.collect_dsv4_attn"``) can
@@ -585,40 +620,6 @@ def _load_model_runner(
     return model_runner
 
 
-def _alloc_prefix_indices(model_runner, batch_size: int, prefix_len: int) -> list[torch.Tensor]:
-    device = getattr(model_runner, "device", "cuda")
-    if prefix_len <= 0:
-        return [torch.empty((0,), dtype=torch.int64, device=device) for _ in range(batch_size)]
-
-    allocator = model_runner.token_to_kv_pool_allocator
-    server_args = getattr(model_runner, "server_args", None)
-    sglang_chunk = getattr(server_args, "chunked_prefill_size", None) if server_args else None
-    chunk_size = (
-        int(sglang_chunk) if isinstance(sglang_chunk, int) and sglang_chunk > 0 else _ALLOC_EXTEND_CHUNK_FALLBACK
-    )
-    alloc_extend = allocator.alloc_extend
-    if batch_size * prefix_len > chunk_size:
-        alloc_extend = _chunked_alloc_extend(alloc_extend, chunk_size=chunk_size)
-
-    prefix_lens_cpu = torch.zeros(batch_size, dtype=torch.int64)
-    seq_lens_cpu = torch.full((batch_size,), prefix_len, dtype=torch.int64)
-    prefix_lens = prefix_lens_cpu.to(device, non_blocking=True)
-    seq_lens = seq_lens_cpu.to(device, non_blocking=True)
-    last_loc = torch.full((batch_size,), -1, dtype=torch.int64, device=device)
-
-    flat = alloc_extend(
-        prefix_lens,
-        prefix_lens_cpu,
-        seq_lens,
-        seq_lens_cpu,
-        last_loc,
-        batch_size * prefix_len,
-    )
-    if flat is None:
-        raise RuntimeError(f"failed to allocate prefix cache: batch_size={batch_size}, prefix_len={prefix_len}")
-    return [flat[i * prefix_len : (i + 1) * prefix_len].contiguous() for i in range(batch_size)]
-
-
 def _make_reqs(
     batch_size: int,
     seq_len: int,
@@ -652,104 +653,6 @@ def _make_reqs(
             req.already_computed = 0
         reqs.append(req)
     return reqs
-
-
-# Fallback chunk size used only when ``server_args.chunked_prefill_size``
-# is unavailable.  The real value is read from sglang's server args at
-# wrap-time so we follow whatever sglang's GPU-memory-based default would
-# pick (8192 on H20/H100, 16384 on B200, 4096 fallback — see
-# ``server_args.py`` ``_finalize_resource_allocation``).
-_ALLOC_EXTEND_CHUNK_FALLBACK = 8192
-
-
-def _chunked_alloc_extend(orig_alloc_extend, chunk_size: int = _ALLOC_EXTEND_CHUNK_FALLBACK):
-    """Wrap ``alloc_extend`` to chunk large extends in sglang-aligned style.
-
-    Sglang's scheduler chunks any prefill into ≤``chunked_prefill_size`` token
-    rounds, with each round invoking ``alloc_extend`` with the **total** token
-    count distributed across all in-flight requests.  This wrapper mimics
-    that: every ``alloc_extend`` call has ``extend_num_tokens ≤ chunk_size``
-    by issuing N ≥ 1 sub-calls, each round advancing every request by a
-    proportional share of its remaining extend.  Per-call constexpr stays at
-    ≤ chunk_size so Triton's PTX size stays bounded.
-
-    Per-round token distribution:
-      * ``per_round_share[i] = extend_per_req[i] // n_rounds`` plus an extra
-        +1 in the first ``remainder[i]`` rounds to absorb the remainder.
-      * ``sum(chunk_extends_for_round) ≤ chunk_size`` (matches sglang's
-        per-round token budget).
-
-    Output index layout: each round's indices come back as
-    ``[req0_extends_for_round, req1_extends_for_round, ...]`` (same
-    contract as ``alloc_extend_kernel``).  We accumulate per-request lists
-    across rounds and concat them in order at the end so the final result
-    matches what a single big ``alloc_extend`` would have returned —
-    necessary for callers that index into ``out_cache_loc`` per request.
-    """
-
-    def wrapped(prefix_lens, prefix_lens_cpu, seq_lens, seq_lens_cpu, last_loc, extend_num_tokens):
-        bs = prefix_lens.shape[0]
-
-        # Fast path: small total extend, no chunking needed.
-        if extend_num_tokens <= chunk_size or bs == 0:
-            return orig_alloc_extend(prefix_lens, prefix_lens_cpu, seq_lens, seq_lens_cpu, last_loc, extend_num_tokens)
-
-        extend_per_req = (seq_lens_cpu - prefix_lens_cpu).tolist()
-        # Per-request token budget per round.  ``chunk_size // bs`` ensures
-        # ``sum(chunk_extends) ≤ chunk_size`` always — Triton constexpr
-        # ``next_pow_2(chunk_total) ≤ next_pow_2(chunk_size) = 8192``.
-        # ``max(1, ...)`` handles bs > chunk_size (shouldn't happen with our
-        # filter cap, but defensive).
-        chunk_size_per_req = max(1, chunk_size // bs)
-
-        cur_prefix = prefix_lens.clone()
-        cur_prefix_cpu = prefix_lens_cpu.clone()
-        cur_last_loc = last_loc.clone()
-        advanced = [0] * bs
-        per_req_indices: list[list[torch.Tensor]] = [[] for _ in range(bs)]
-
-        while True:
-            # Each round: every request advances by ≤ chunk_size_per_req,
-            # capped at its remaining extend.  Sum naturally ≤ chunk_size.
-            chunk_extends = [min(chunk_size_per_req, extend_per_req[i] - advanced[i]) for i in range(bs)]
-            chunk_total = sum(chunk_extends)
-            if chunk_total == 0:
-                break
-
-            chunk_tensor = torch.tensor(chunk_extends, dtype=cur_prefix_cpu.dtype)
-            new_seq_cpu = cur_prefix_cpu + chunk_tensor
-            new_seq = new_seq_cpu.to(seq_lens.device)
-
-            indices = orig_alloc_extend(cur_prefix, cur_prefix_cpu, new_seq, new_seq_cpu, cur_last_loc, chunk_total)
-            if indices is None:
-                return None
-
-            # Distribute the round's flat ``indices`` back to per-request
-            # buckets.  ``alloc_extend_kernel`` writes
-            # ``[req0_n, req1_n, ..., req(bs-1)_n]`` in order.
-            offset = 0
-            for i in range(bs):
-                n = chunk_extends[i]
-                if n > 0:
-                    req_chunk = indices[offset : offset + n]
-                    per_req_indices[i].append(req_chunk)
-                    offset += n
-                    cur_last_loc[i] = req_chunk[-1]
-                    advanced[i] += n
-            cur_prefix = new_seq
-            cur_prefix_cpu = new_seq_cpu
-
-        # Concat each request's pieces, then concat across requests in
-        # order — preserves single-call alloc_extend's index layout.
-        final = []
-        for lst in per_req_indices:
-            if lst:
-                final.append(torch.cat(lst))
-        if not final:
-            return torch.empty((0,), dtype=torch.int64, device=prefix_lens.device)
-        return torch.cat(final)
-
-    return wrapped
 
 
 def _build_forward_batch(
@@ -794,28 +697,13 @@ def _build_forward_batch(
         spec_algorithm=SpeculativeAlgorithm.NONE,
     )
 
-    server_args = getattr(model_runner, "server_args", None)
-    sglang_chunk = getattr(server_args, "chunked_prefill_size", None) if server_args else None
-    chunk_size = (
-        int(sglang_chunk) if isinstance(sglang_chunk, int) and sglang_chunk > 0 else _ALLOC_EXTEND_CHUNK_FALLBACK
-    )
-    allocator = model_runner.token_to_kv_pool_allocator
-    needs_chunking = batch_size * seq_len > chunk_size
-    saved_alloc_extend = None
-    if needs_chunking and hasattr(allocator, "alloc_extend"):
-        saved_alloc_extend = allocator.alloc_extend
-        allocator.alloc_extend = _chunked_alloc_extend(saved_alloc_extend, chunk_size=chunk_size)
-
-    try:
+    with _temporarily_chunked_alloc_extend(model_runner, batch_size * seq_len):
         if is_prefill:
             batch.prepare_for_extend()
         else:
             batch.prepare_for_extend()
             batch.output_ids = torch.randint(0, 10000, (batch_size,), dtype=torch.int64, device="cuda")
             batch.prepare_for_decode()
-    finally:
-        if saved_alloc_extend is not None:
-            allocator.alloc_extend = saved_alloc_extend
 
     if hasattr(batch, "get_model_worker_batch"):
         batch_for_forward = batch.get_model_worker_batch()
@@ -1053,6 +941,8 @@ def run_dsv4_mla_module(
     sweep_label = f"kind={attn_kind} mode={mode} tp={tp_size} gemm={gemm_type}"
     try:
         default_seq_lens = list(seq_lens)
+        kv_capacity = _kv_pool_capacity_tokens(model_runner)
+        runtime_chunk = _runtime_chunk_size(model_runner) if is_prefill else None
         for cur_prefix in prefix_values:
             seq_lens_for_prefix = (
                 seq_lens_by_prefix.get(cur_prefix, default_seq_lens)
@@ -1061,6 +951,29 @@ def run_dsv4_mla_module(
             )
             for batch_size in batch_sizes:
                 for seq_len in seq_lens_for_prefix:
+                    fresh_tokens = required_prefill_extend_tokens(batch_size, seq_len)
+                    if runtime_chunk is not None and fresh_tokens > runtime_chunk:
+                        print(
+                            f"[SKIP] dsv4-flash {sweep_label} bs={batch_size} sl={seq_len} "
+                            f"prefix={cur_prefix}: fresh_tokens={fresh_tokens} exceeds "
+                            f"SGLang runtime chunked_prefill_size={runtime_chunk}"
+                        )
+                        skipped_shapes.append((batch_size, seq_len, cur_prefix, "ChunkedPrefillSize"))
+                        continue
+                    total_tokens = required_kv_tokens(
+                        batch_size,
+                        seq_len,
+                        cur_prefix,
+                        is_prefill=is_prefill,
+                    )
+                    if kv_capacity is not None and total_tokens > kv_capacity:
+                        print(
+                            f"[SKIP] dsv4-flash {sweep_label} bs={batch_size} sl={seq_len} "
+                            f"prefix={cur_prefix}: total_tokens={total_tokens} exceeds actual "
+                            f"KV pool capacity={kv_capacity}"
+                        )
+                        skipped_shapes.append((batch_size, seq_len, cur_prefix, "KVPoolCapacity"))
+                        continue
                     print(f"\n{mode}: batch_size={batch_size}, seq_len={seq_len}, prefix_len={cur_prefix}")
                     try:
                         forward_batch = _build_forward_batch(

@@ -233,6 +233,7 @@ class MLAModuleSweepSpec:
     generation_sequence_lengths: list[int]
     inner_sweep_head_counts: list[int]
     top_level_head_counts: list[int]
+    module_tp_sizes: list[int]
     module_precision_combos: list[tuple[str, str, str]]
     context_max_tokens: int
     context_large_sequence_min: int
@@ -241,6 +242,7 @@ class MLAModuleSweepSpec:
     generation_large_sequence_min: int
     generation_large_sequence_max_batch_size: int
     generation_large_cache_tokens: int
+    context_prefix_lengths: list[int]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -418,6 +420,11 @@ def get_mla_module_sweep_spec(backend: str | None = None) -> MLAModuleSweepSpec:
         field_name="mla_module.top_level_head_counts",
         default=inner_sweep_head_counts,
     )
+    module_tp_sizes = _optional_int_list(
+        values.get("module_tp_sizes"),
+        field_name="mla_module.module_tp_sizes",
+        default=[1],
+    )
 
     return MLAModuleSweepSpec(
         batch_sizes=batch_sizes or context_batch_sizes,
@@ -428,6 +435,7 @@ def get_mla_module_sweep_spec(backend: str | None = None) -> MLAModuleSweepSpec:
         generation_sequence_lengths=generation_sequence_lengths,
         inner_sweep_head_counts=inner_sweep_head_counts,
         top_level_head_counts=top_level_head_counts,
+        module_tp_sizes=module_tp_sizes,
         module_precision_combos=precision_combos,
         context_max_tokens=int(context["max_tokens"]),
         context_large_sequence_min=_optional_int(context.get("large_sequence_min")),
@@ -436,6 +444,11 @@ def get_mla_module_sweep_spec(backend: str | None = None) -> MLAModuleSweepSpec:
         generation_large_sequence_min=_optional_int(generation.get("large_sequence_min")),
         generation_large_sequence_max_batch_size=_optional_int(generation.get("large_sequence_max_batch_size")),
         generation_large_cache_tokens=_optional_int(generation.get("large_cache_tokens")),
+        context_prefix_lengths=_optional_int_list(
+            context.get("prefix_lengths"),
+            field_name="mla_module.context.prefix_lengths",
+            default=[0],
+        ),
     )
 
 
@@ -1568,7 +1581,7 @@ def _dsv4_module_is_valid_shape(mode: str, bs: int, sl: int, past_kv: int = 0) -
     if bs <= 0 or sl <= 0 or past_kv < 0:
         return False
     if mode == "context":
-        return bs * sl <= 8192 and bs * (sl + past_kv) <= 1024 * 1024
+        return True
     if mode == "generation":
         if bs * sl > 1024 * 1024:
             return False

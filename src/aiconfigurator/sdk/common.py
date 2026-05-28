@@ -777,6 +777,10 @@ class PerfDataFilename(Enum):
     dsv4_hca_context_module = "dsv4_hca_context_module_perf.txt"
     dsv4_csa_generation_module = "dsv4_csa_generation_module_perf.txt"
     dsv4_hca_generation_module = "dsv4_hca_generation_module_perf.txt"
+    # DeepSeek-V4 sparse-kernel data retained for future prefix-aware
+    # corrections of the full attention module.
+    dsv4_paged_mqa_logits_module = "dsv4_paged_mqa_logits_module_perf.txt"
+    dsv4_hca_attn_module = "dsv4_hca_attn_module_perf.txt"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])
