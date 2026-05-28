@@ -291,7 +291,7 @@ If a test case depends on an ambiguous API or product decision, list it as an op
 Stop and ask before proceeding if:
 
 1. Python behavior and desired Rust behavior conflict.
-2. A required Python integration change violates the `./rust`primary implementation boundary.
+2. A required Python integration change violates the `./rust` primary implementation boundary.
 3. A parity case depends on deprecated or redundant Python behavior.
 4. The benchmark result depends heavily on cold startup or perf DB loading rather than hot-path calls.
 5. The existing POC architecture conflicts with the target modular design.

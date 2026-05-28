@@ -72,6 +72,14 @@ The right Rust layout is not a line-by-line translation. Python has useful
 separation of concerns; Rust should keep that shape while removing deprecated
 or duplicate paths as they are identified.
 
+Migration note: the target Rust paths below mean "Rust equivalent for the core
+engine-step path," not "delete the Python file now." Python modules such as
+`common.py` and `utils.py` must remain as compatibility surfaces while other
+Python-owned CLI, SDK, generator, and analysis code still imports them. During
+the transition, the Python/Rust boundary should translate Python objects into
+Rust schema values; Python compatibility modules can shrink only after their
+Python callers are deprecated or removed.
+
 | SDK area | Python source | Target Rust path | Role in Rust |
 | --- | --- | --- | --- |
 | Core API | `config.py` | `src/config.rs` | Public `EngineConfig`, `ModelConfig`, `RuntimeConfig`, quant/parallel enums, validation. |
