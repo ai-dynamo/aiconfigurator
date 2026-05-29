@@ -78,7 +78,7 @@ def _get_l2_cache_bytes(device_id: int = 0) -> int:
 
 def _build_weights(gemm_type: str, n: int, k: int, device, dtype, group_size, x) -> dict:
     """Allocate and return the weight tensors for one GEMM copy."""
-    if gemm_type == "fp8":
+    if gemm_type in ("fp8", "fp8_static"):
         return {
             "weight": torch.randn((n, k), dtype=torch.bfloat16, device=device).to(dtype=torch.float8_e4m3fn),
             "weight_scale": torch.randn(1, dtype=torch.float32, device=device),
