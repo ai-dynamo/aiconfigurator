@@ -17,11 +17,16 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod ffi;
+mod fpm_perf;
 mod model;
 mod perf;
 
 use perf::PerfDatabase;
 
+pub use fpm_perf::{
+    ForwardPassPerfDiagnostics, ForwardPassPerfModel, ForwardPassPerfOptions,
+    ForwardPassPerfReadiness, ForwardPassPerfSource,
+};
 pub use model::{ModelFamily, ModelSpec};
 
 pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
@@ -200,9 +205,11 @@ pub struct QueuedRequestMetrics {
 /// Per-iteration forward-pass metrics.
 ///
 /// In Dynamo this struct is telemetry emitted after an engine iteration. In
-/// AIC Phase 1, the scheduled portion is also the estimator input. `wall_time`
-/// and `queued_requests` are accepted for schema parity but ignored by the
-/// latency estimator.
+/// AIC Phase 1, the scheduled portion is also the estimator input. The strict
+/// native `EngineStepEstimator` ignores `wall_time` and `queued_requests`. The
+/// tuned `ForwardPassPerfModel` uses `wall_time` only when observations are
+/// passed to `tune_with_fpms`; queued fields remain schema-only at the
+/// forward-pass layer.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ForwardPassMetrics {
     #[serde(default = "default_fpm_version")]
@@ -305,6 +312,13 @@ impl EngineStepEstimator {
                 "at least one attention-DP rank metric is required".to_string(),
             ));
         }
+        let expected_ranks = self.config.attention_dp_size.unwrap_or(1).max(1) as usize;
+        if metrics_by_rank.len() != expected_ranks {
+            return Err(AicError::InvalidForwardPassMetrics(format!(
+                "expected {expected_ranks} attention-DP rank metric(s), got {}",
+                metrics_by_rank.len()
+            )));
+        }
         for metrics in metrics_by_rank {
             validate_forward_pass_metrics(metrics)?;
         }
@@ -349,6 +363,11 @@ impl EngineStepEstimator {
         metrics_by_rank: &[ForwardPassMetrics],
     ) -> Result<f64, AicError> {
         self.forward_pass_time_ms(metrics_by_rank)
+    }
+
+    // TODO(remove-after-rust-migration): parity check/benchmark-only cache reset.
+    pub fn clear_runtime_caches(&self) {
+        self.perf.clear_query_cache();
     }
 
     fn prefill_attention_step_time_ms(&self, workloads: &[RankWorkload]) -> Result<f64, AicError> {

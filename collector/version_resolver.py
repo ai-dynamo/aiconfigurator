@@ -32,11 +32,16 @@ def _normalize_version(v: str) -> Version:
 
     Local metadata suffixes (for example ``+cu124``) are ignored to keep the
     historical collector behavior where build tags do not affect routing.
+    Some dev wheels publish placeholder versions such as ``0.0.0.dev1`` even
+    when they contain the latest framework APIs; route those to the newest
+    collector instead of rejecting every ``>=`` compatibility check.
     Invalid version strings are treated as ``0``.
     """
     normalized = _strip_local_metadata(v)
     if not normalized:
         return Version("0")
+    if normalized.startswith("0.0.0.dev"):
+        return Version("9999.0.0")
     try:
         return Version(normalized)
     except InvalidVersion:

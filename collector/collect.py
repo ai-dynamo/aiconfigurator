@@ -12,7 +12,6 @@ modules own benchmark setup, while `model_cases.py` and YAML own case selection.
 import contextlib
 import functools
 import os
-import sys
 import warnings
 
 from helper import get_device_module, get_device_str
@@ -606,7 +605,9 @@ def worker(
                 # Flush logs again after warning
                 for handler in worker_logger.handlers:
                     handler.flush()
-                sys.exit(EXIT_CODE_RESTART)
+                # Exiting with non-zero code will add an additional error to the summary,
+                # which we don't want (error already reported above).
+                exit(0)
         finally:
             with lock:
                 progress_value.value += 1
@@ -851,11 +852,10 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 last_progress = progress_value.value
 
             # Check process health — only restart if there is still work
-            # remaining. Workers that consumed a None sentinel or requested
-            # restart via EXIT_CODE_RESTART (successful task cleanup or handled
-            # fatal CUDA error cleanup) should not be restarted once all tasks
-            # are dispatched, otherwise the new worker blocks forever on
-            # queue.get().
+            # remaining.  Workers that consumed a None sentinel or finished
+            # via sys.exit(EXIT_CODE_RESTART) should not be restarted once
+            # all tasks are dispatched, otherwise the new worker blocks
+            # forever on queue.get().
             for i, p in enumerate(processes):
                 if p is None:
                     continue
@@ -866,8 +866,8 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                     process_stats[i]["restarts"] += 1
                     if exit_code == EXIT_CODE_RESTART:
                         logger.debug(
-                            f"Process {i} requested restart after task cleanup or handled fatal error "
-                            f"(restart count: {process_stats[i]['restarts']})"
+                            f"Process {i} completed task and exited normally for release gpu memory"
+                            f"(completed tasks: {process_stats[i]['restarts']})"
                         )
                     else:
                         logger.warning(
@@ -1450,11 +1450,13 @@ def main():
     )
     args = parser.parse_args()
     ops = args.ops
+    _dsv4_auto_expand = False
     case_plan = None
     logger_message = None
     if args.plan_only and not (args.model_path or args.model_architecture or args.model_cases or args.model_cases_full):
         parser.error("--plan-only requires --model-path, --model-architecture, --model-cases, or --model-cases-full")
     if args.model_path or args.model_architecture or args.model_cases or args.model_cases_full:
+        from collector.case_generator import is_dsv4_attention_model
         from collector.model_cases import build_collection_case_plan
 
         if args.model_path:
@@ -1474,9 +1476,6 @@ def main():
         )
         if case_plan.model_path:
             os.environ["COLLECTOR_MODEL_PATH"] = case_plan.model_path
-        if args.plan_only:
-            print(json.dumps(case_plan.to_log_dict(), indent=2))
-            return
 
         planned_ops = case_plan.ops
         if args.ops is None:
@@ -1496,12 +1495,38 @@ def main():
                 f"model_path={args.model_path!r}, model_architecture={args.model_architecture!r}; "
                 "using base op cases only plus legacy model filtering."
             )
+
+        # DeepSeek-V4 Flash/Pro special-case: when no explicit ``--ops`` is
+        # given, collect the full set of AIC data needed by the model. The
+        # attention path uses prefix-aware full modules, so the old sparse
+        # kernel correction files are intentionally not part of the default.
+        if args.ops is None and args.model_path and is_dsv4_attention_model(args.model_path):
+            ops = [
+                "gemm",
+                "moe",
+                "mhc_module",
+                "dsv4_csa_context_module",
+                "dsv4_hca_context_module",
+                "dsv4_csa_generation_module",
+                "dsv4_hca_generation_module",
+            ]
+            _dsv4_auto_expand = True
+        if args.plan_only:
+            log_dict = case_plan.to_log_dict()
+            log_dict["ops"] = ops
+            print(json.dumps(log_dict, indent=2))
+            return
     else:
         os.environ.pop("COLLECTOR_MODEL_PATH", None)
 
     # Setup logging - debug flag is handled inside setup_logging
     if logger is None:
-        log_scope = ops if ops else ["all"]
+        # Use short label when V4-Flash auto-expanded ops to several names
+        # (the joined scope may exceed Linux filename length limit).
+        if _dsv4_auto_expand:
+            log_scope = ["dsv4"]
+        else:
+            log_scope = ops if ops else ["all"]
         logger = setup_logging(scope=log_scope, debug=args.debug)
     elif args.debug:
         # Update log level if debug flag changed
@@ -1513,6 +1538,8 @@ def main():
         logger.info("Collector v2 case plan active:")
         for key, value in case_plan.to_log_dict().items():
             logger.info(f"  {key}: {value}")
+        if ops and args.ops is None:
+            logger.info(f"  expanded to model-specific ops: {ops}")
     elif args.model_path:
         logger.info(f"Legacy model filter active: collecting only for '{args.model_path}'")
 
@@ -1555,8 +1582,8 @@ def main():
     limit = args.limit
     if args.smoke:
         shuffle = True
-        limit = 4
-        logger.info("Smoke test mode enabled — sampling 4 random test cases per op")
+        limit = args.limit if args.limit is not None else 4
+        logger.info(f"Smoke test mode enabled — sampling {limit} random test cases per op")
 
     # Warn if profiling without limit (profiling can be very slow)
     if args.profile and limit is None:

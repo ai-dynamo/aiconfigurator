@@ -12,6 +12,7 @@ import argparse
 import logging
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from aiconfigurator.cli.main import (
@@ -21,6 +22,7 @@ from aiconfigurator.cli.main import (
     configure_parser,
 )
 from aiconfigurator.cli.main import main as cli_main
+from aiconfigurator.cli.report_and_save import _apply_inclusive_tpot
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 
 pytestmark = pytest.mark.unit
@@ -394,3 +396,38 @@ class TestBuildExperimentTaskConfigs:
         assert set(kwargs_by_backend) == {"rust", "python"}
         assert kwargs_by_backend["rust"]["model_path"] == "Qwen/Qwen3-32B"
         assert kwargs_by_backend["python"]["model_path"] == "Qwen/Qwen3-32B"
+
+
+class TestInclusiveTpot:
+    """Unit tests for _apply_inclusive_tpot output transformation."""
+
+    def _make_df(self, ttft, tpot, osl):
+        return pd.DataFrame([{"ttft": ttft, "tpot": tpot, "osl": osl}])
+
+    def test_formula(self):
+        df = self._make_df(ttft=500.0, tpot=20.0, osl=30)
+        result = _apply_inclusive_tpot(df)
+        expected = (500.0 + 20.0 * 29) / 30
+        assert abs(result["tpot"].iloc[0] - expected) < 1e-9
+
+    def test_does_not_mutate_input(self):
+        df = self._make_df(ttft=500.0, tpot=20.0, osl=30)
+        original_tpot = df["tpot"].iloc[0]
+        _apply_inclusive_tpot(df)
+        assert df["tpot"].iloc[0] == original_tpot
+
+    def test_ttft_unchanged(self):
+        df = self._make_df(ttft=500.0, tpot=20.0, osl=30)
+        result = _apply_inclusive_tpot(df)
+        assert result["ttft"].iloc[0] == 500.0
+
+    def test_missing_columns_is_noop(self):
+        df = pd.DataFrame([{"tpot": 20.0, "osl": 30}])  # no ttft column
+        result = _apply_inclusive_tpot(df)
+        assert result["tpot"].iloc[0] == 20.0
+
+    def test_osl_one_equals_ttft(self):
+        # osl=1: zero decode tokens, inclusive TPOT collapses to TTFT/1 = TTFT
+        df = self._make_df(ttft=500.0, tpot=20.0, osl=1)
+        result = _apply_inclusive_tpot(df)
+        assert abs(result["tpot"].iloc[0] - 500.0) < 1e-9
