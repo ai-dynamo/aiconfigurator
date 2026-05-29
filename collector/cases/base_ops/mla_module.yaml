@@ -59,6 +59,9 @@ common_case_values:
       - 'generation: batch_size * sequence_length <= 262144'
       - 'generation: sequence_length >= 8192 requires batch_size <= 16'
     # top_level_head_counts keep ModelRunner-loading subprocess counts manageable.
+    top_level_head_counts:
+      - 128
+      - 64
   mla_module_sglang:
     description: SGLang full MLA/DSA module sweep. Quantized DSA checkpoints keep DSA projections in bf16 but may use fp8 KV cache.
     module_tp_sizes:
