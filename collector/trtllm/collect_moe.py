@@ -181,7 +181,9 @@ def get_moe_test_cases():
         moe_list += ["w4a16_mxfp4"]
 
     if sm_version >= 100:
-        moe_list += ["nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"]
+        # Keep plain INT4/W4A16 in the collector sweep so unsupported model rows
+        # can fail in TensorRT-LLM itself instead of stopping at AIC validation.
+        moe_list += ["int4_wo", "nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"]
 
     test_cases = []
 
@@ -223,6 +225,7 @@ def get_moe_test_cases():
                 "bfloat16": 16,
                 "fp8": 8,
                 "fp8_block": 8,
+                "int4_wo": 4,
                 "w4a16_mxfp4": 4,
                 "w4a8_mxfp4_mxfp8": 4,
                 "w4afp8": 4,
@@ -319,6 +322,8 @@ def run_moe_torch(
     elif moe_type == "fp8":
         quant_algo = QuantAlgo.FP8
         dtype = torch.float8_e4m3fn
+    elif moe_type == "int4_wo":
+        quant_algo = QuantAlgo.W4A16
     elif moe_type == "nvfp4":
         quant_algo = QuantAlgo.NVFP4
         quant_group_size = 16
