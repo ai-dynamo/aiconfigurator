@@ -53,11 +53,281 @@ class RustEngineStepEstimator:
         _raise_for_error(self._lib, err)
         return float(out_ms.value)
 
+    # TODO(remove-after-rust-migration): parity check/benchmark-only cache reset.
+    def clear_runtime_caches(self) -> None:
+        if not self._lib.__dict__.get("_aic_engine_step_estimator_clear_runtime_caches_available", False):
+            raise RustCoreUnavailableError(
+                "Rust core shared library does not expose runtime cache reset. "
+                "Build a newer aiconfigurator-core shared library."
+            )
+        err = self._lib.aic_engine_step_estimator_clear_runtime_caches(self._handle)
+        _raise_for_error(self._lib, err)
+
     def close(self) -> None:
+        """API: `model.close() -> None`.
+
+        Description: release the underlying Rust forward-pass perf model handle.
+        """
         handle = getattr(self, "_handle", None)
         if handle is None or not handle.value:
             return
         self._lib.aic_engine_step_estimator_free(handle)
+        self._handle = ctypes.c_void_p()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+class RustForwardPassPerfModel:
+    """ctypes wrapper over the tuned/fallback Rust forward-pass perf model.
+
+    This wrapper is forward-pass-level only. It does not model TTFT, ITL, SLA,
+    queueing, or engine limits. `estimate_forward_pass_time_ms()` takes one
+    iteration as a list of FPM dictionaries, one per attention-DP rank. Single
+    rank callers may pass either one FPM dictionary or a one-element list.
+
+    The Rust model infers the workload kind from each iteration's scheduled FPM
+    fields:
+
+    * prefill: scheduled prefill tokens and no scheduled decode work, using
+      `[sum_prefill_tokens]`
+    * decode: scheduled decode work and no scheduled prefill tokens, using
+      `[num_decode_requests, sum_decode_kv_tokens]`
+    * mixed/agg: both scheduled prefill and decode work, using
+      `[sum_prefill_tokens, sum_decode_kv_tokens]`
+    * empty: no scheduled prefill or decode work, estimates `0.0` and is not
+      used for tuning
+
+    Queued request fields are accepted for schema compatibility but ignored by
+    this AIC forward-pass model. `estimate_forward_pass_time_ms()` treats FPM as
+    a workload descriptor: scheduled request fields are used, while `wall_time`
+    is ignored. `tune_with_fpms()` treats FPM as observed telemetry: scheduled
+    request fields are used as features and positive `wall_time` is the latency
+    target. For tuning, `tune_with_fpms()` accepts multiple iterations as
+    `[[iter0_rank0, iter0_rank1], [iter1_rank0, iter1_rank1]]`. Each iteration
+    is merged using max-rank load features and max positive `wall_time` across
+    ranks.
+
+    Correction grids use fixed constructor-time ranges from `options`:
+    `max_num_tokens` bounds `sum_prefill_tokens` and defaults to `8192`,
+    `max_batch_size` bounds `num_decode_requests` and defaults to `512`, and
+    `max_kv_tokens` bounds `sum_decode_kv_tokens` and defaults to `2000000`.
+    """
+
+    def __init__(self, handle: ctypes.c_void_p, lib: ctypes.CDLL) -> None:
+        self._handle = handle
+        self._lib = lib
+
+    @classmethod
+    def from_native(
+        cls,
+        config: dict[str, Any],
+        options: dict[str, Any] | None = None,
+        *,
+        autobuild: bool | None = None,
+    ) -> RustForwardPassPerfModel:
+        """API: `RustForwardPassPerfModel.from_native(config, options=None, *, autobuild=None)`.
+
+        Description: create a strict native AIC forward-pass model.
+
+        This constructor raises `RustCoreError` if the config is unsupported by
+        the native estimator. Use `best_available()` when unsupported configs
+        should fall back to the learned regression model.
+        """
+        return cls._create(
+            "aic_forward_pass_perf_model_from_native",
+            config=config,
+            options=options,
+            autobuild=autobuild,
+        )
+
+    @classmethod
+    def best_available(
+        cls,
+        config: dict[str, Any],
+        options: dict[str, Any] | None = None,
+        *,
+        autobuild: bool | None = None,
+    ) -> RustForwardPassPerfModel:
+        """API: `RustForwardPassPerfModel.best_available(config, options=None, *, autobuild=None)`.
+
+        Description: create a native model when possible, otherwise fall back to
+        regression.
+
+        Fallback reason is available from `diagnostics()["last_warning"]`.
+        """
+        return cls._create(
+            "aic_forward_pass_perf_model_best_available",
+            config=config,
+            options=options,
+            autobuild=autobuild,
+        )
+
+    @classmethod
+    def from_regression(
+        cls,
+        options: dict[str, Any] | None = None,
+        *,
+        autobuild: bool | None = None,
+    ) -> RustForwardPassPerfModel:
+        """API: `RustForwardPassPerfModel.from_regression(options=None, *, autobuild=None)`.
+
+        Description: create a regression-only forward-pass model.
+
+        Regression models return `None` for non-empty estimates until enough
+        samples have been provided for the inferred workload kind through
+        `tune_with_fpms()`. Correction factor getters return `None` in this
+        mode.
+        """
+        return cls._create(
+            "aic_forward_pass_perf_model_from_regression",
+            options=options,
+            autobuild=autobuild,
+        )
+
+    @classmethod
+    def _create(
+        cls,
+        function_name: str,
+        *,
+        config: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+        autobuild: bool | None = None,
+    ) -> RustForwardPassPerfModel:
+        _configure_default_data_roots()
+        lib = _load_library(bool(autobuild) or _truthy(os.environ.get(RUST_CORE_AUTOBUILD_ENV)))
+        _bind_forward_pass_perf_model_api(lib)
+        handle = ctypes.c_void_p()
+        constructor = getattr(lib, function_name)
+        if config is None:
+            err = constructor(_optional_json_bytes(options), ctypes.byref(handle))
+        else:
+            err = constructor(_json_bytes(config), _optional_json_bytes(options), ctypes.byref(handle))
+        _raise_for_error(lib, err)
+        return cls(handle, lib)
+
+    def estimate_forward_pass_time_ms(self, metrics: dict[str, Any] | list[dict[str, Any]]) -> float | None:
+        """API: `model.estimate_forward_pass_time_ms(metrics) -> float | None`.
+
+        Description: estimate one forward-pass iteration in milliseconds.
+
+        `metrics` represents one iteration. Pass a list of FPM dictionaries for
+        attention-DP ranks, or a single FPM dictionary for a single-rank
+        convenience form. The inferred workload kind uses only `scheduled_requests`;
+        queued fields and `wall_time` are ignored for estimation.
+
+        Native models return an estimate immediately, multiplied by the
+        correction factor for the matching workload region. Inferred workload
+        kinds with fewer than `min_observations` total samples and empty regions
+        use the default factor `1.0`. Queries outside the configured correction
+        bounds in `options` also use factor `1.0`. Regression models return
+        `None` until the matching inferred workload kind has enough tuned
+        observations. Empty scheduled work returns `0.0`.
+        """
+        out_ms = ctypes.c_double()
+        out_has_value = ctypes.c_bool()
+        err = self._lib.aic_forward_pass_perf_model_estimate_forward_pass_time_ms(
+            self._handle,
+            _json_bytes(metrics),
+            ctypes.byref(out_ms),
+            ctypes.byref(out_has_value),
+        )
+        _raise_for_error(self._lib, err)
+        return float(out_ms.value) if out_has_value.value else None
+
+    def tune_with_fpms(self, iterations: dict[str, Any] | list[Any]) -> None:
+        """API: `model.tune_with_fpms(iterations) -> None`.
+
+        Description: tune the model with one or more observed FPM iterations.
+
+        The canonical input is a nested list:
+        `[[iter0_rank0, iter0_rank1], [iter1_rank0, iter1_rank1]]`.
+        Each inner list is one iteration's per-attention-DP-rank FPMs. For
+        convenience, a single FPM dictionary is normalized to `[[fpm]]`, and a
+        list of FPM dictionaries is normalized to one iteration.
+
+        Tuning infers the workload kind from scheduled request fields. It
+        ignores empty iterations and iterations with no positive finite
+        `wall_time`. For native models, each observation updates only its
+        matching correction region; those regions are used after the inferred
+        workload kind has enough total samples. Native correction ignores
+        observations outside the configured correction bounds. For multi-rank
+        input, one observation is recorded using max-rank load features and max
+        positive `wall_time` across ranks.
+        """
+        err = self._lib.aic_forward_pass_perf_model_tune_with_fpms(
+            self._handle,
+            _json_bytes(_normalize_tuning_iterations(iterations)),
+        )
+        _raise_for_error(self._lib, err)
+
+    def diagnostics(self) -> dict[str, Any]:
+        """API: `model.diagnostics() -> dict[str, Any]`.
+
+        Description: return source, readiness, retained sample count, and
+        fallback warning.
+        """
+        out_json = ctypes.c_void_p()
+        err = self._lib.aic_forward_pass_perf_model_diagnostics_json(
+            self._handle,
+            ctypes.byref(out_json),
+        )
+        _raise_for_error(self._lib, err)
+        try:
+            message = ctypes.cast(out_json, ctypes.c_char_p).value
+            return json.loads((message or b"{}").decode("utf-8", errors="replace"))
+        finally:
+            self._lib.aic_engine_step_string_free(out_json)
+
+    def get_min_correction_factor(self) -> float | None:
+        """API: `model.get_min_correction_factor() -> float | None`.
+
+        Description: return the smallest ready native correction factor.
+
+        Regression-only models return `None`. Native models return `None` until
+        at least one correction bucket has enough observations.
+        """
+        return self._get_correction_factor("aic_forward_pass_perf_model_min_correction_factor")
+
+    def get_max_correction_factor(self) -> float | None:
+        """API: `model.get_max_correction_factor() -> float | None`.
+
+        Description: return the largest ready native correction factor.
+
+        Regression-only models return `None`. Native models return `None` until
+        at least one correction bucket has enough observations.
+        """
+        return self._get_correction_factor("aic_forward_pass_perf_model_max_correction_factor")
+
+    def get_avg_correction_factor(self) -> float | None:
+        """API: `model.get_avg_correction_factor() -> float | None`.
+
+        Description: return the average ready native correction factor.
+
+        Regression-only models return `None`. Native models return `None` until
+        at least one correction bucket has enough observations.
+        """
+        return self._get_correction_factor("aic_forward_pass_perf_model_avg_correction_factor")
+
+    def _get_correction_factor(self, function_name: str) -> float | None:
+        out_value = ctypes.c_double()
+        out_has_value = ctypes.c_bool()
+        err = getattr(self._lib, function_name)(
+            self._handle,
+            ctypes.byref(out_value),
+            ctypes.byref(out_has_value),
+        )
+        _raise_for_error(self._lib, err)
+        return float(out_value.value) if out_has_value.value else None
+
+    def close(self) -> None:
+        handle = getattr(self, "_handle", None)
+        if handle is None or not handle.value:
+            return
+        self._lib.aic_forward_pass_perf_model_free(handle)
         self._handle = ctypes.c_void_p()
 
     def __del__(self) -> None:
@@ -270,11 +540,85 @@ def _load_library(autobuild: bool) -> ctypes.CDLL:
         ctypes.POINTER(ctypes.c_double),
     ]
     lib.aic_engine_step_forward_pass_time_ms.restype = ctypes.c_void_p
+    try:
+        lib.aic_engine_step_estimator_clear_runtime_caches.argtypes = [ctypes.c_void_p]
+        lib.aic_engine_step_estimator_clear_runtime_caches.restype = ctypes.c_void_p
+        lib.__dict__["_aic_engine_step_estimator_clear_runtime_caches_available"] = True
+    except AttributeError:
+        lib.__dict__["_aic_engine_step_estimator_clear_runtime_caches_available"] = False
     lib.aic_engine_step_estimator_free.argtypes = [ctypes.c_void_p]
     lib.aic_engine_step_estimator_free.restype = None
     lib.aic_engine_step_string_free.argtypes = [ctypes.c_void_p]
     lib.aic_engine_step_string_free.restype = None
     return lib
+
+
+def _bind_forward_pass_perf_model_api(lib: ctypes.CDLL) -> None:
+    if lib.__dict__.get("_aic_forward_pass_perf_model_api_bound", False):
+        return
+
+    try:
+        _bind_forward_pass_perf_model_symbols(lib)
+    except AttributeError as exc:
+        raise RustCoreUnavailableError(
+            "Rust core shared library does not expose the ForwardPassPerfModel API. "
+            "Build a newer aiconfigurator-core shared library with "
+            "`cargo build --release --manifest-path rust/aiconfigurator-core/Cargo.toml`, "
+            f"set {RUST_CORE_LIB_ENV} to that library, or set {RUST_CORE_AUTOBUILD_ENV}=1."
+        ) from exc
+
+    lib.__dict__["_aic_forward_pass_perf_model_api_bound"] = True
+
+
+def _bind_forward_pass_perf_model_symbols(lib: ctypes.CDLL) -> None:
+    lib.aic_forward_pass_perf_model_from_native.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    lib.aic_forward_pass_perf_model_from_native.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_best_available.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    lib.aic_forward_pass_perf_model_best_available.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_from_regression.argtypes = [
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    lib.aic_forward_pass_perf_model_from_regression.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_estimate_forward_pass_time_ms.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_bool),
+    ]
+    lib.aic_forward_pass_perf_model_estimate_forward_pass_time_ms.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_tune_with_fpms.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+    ]
+    lib.aic_forward_pass_perf_model_tune_with_fpms.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_diagnostics_json.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    lib.aic_forward_pass_perf_model_diagnostics_json.restype = ctypes.c_void_p
+    for name in [
+        "aic_forward_pass_perf_model_min_correction_factor",
+        "aic_forward_pass_perf_model_max_correction_factor",
+        "aic_forward_pass_perf_model_avg_correction_factor",
+    ]:
+        function = getattr(lib, name)
+        function.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_bool),
+        ]
+        function.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_free.argtypes = [ctypes.c_void_p]
+    lib.aic_forward_pass_perf_model_free.restype = None
 
 
 def _find_library(*, include_debug: bool = True) -> Path | None:
@@ -345,8 +689,24 @@ def _raise_for_error(lib: ctypes.CDLL, error_ptr: int | None) -> None:
         lib.aic_engine_step_string_free(error_ptr)
 
 
-def _json_bytes(value: dict[str, Any]) -> bytes:
+def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def _optional_json_bytes(value: dict[str, Any] | None) -> bytes | None:
+    if value is None:
+        return None
+    return _json_bytes(value)
+
+
+def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list[Any]:
+    if isinstance(iterations, dict):
+        return [[iterations]]
+    if not iterations:
+        return []
+    if all(isinstance(item, dict) for item in iterations):
+        return [iterations]
+    return iterations
 
 
 def _backend_name(value: Any) -> str:

@@ -199,6 +199,10 @@ class NemotronHModel(BaseModel):
         # MoE layers (E)
         if layer_counts["E"] > 0:
             count = layer_counts["E"]
+            # Latent-MoE (e.g. Nemotron-3-Super): experts run on a compressed
+            # `moe_latent_size` projection of hidden_states. Shared expert and the
+            # router still operate on hidden_size.
+            moe_h = cfg.moe_latent_size if cfg.moe_latent_size > 0 else h
             # Pre-norm for MoE
             self.context_ops.append(ops.ElementWise("context_moe_norm", count, 2 * h, 2 * h, 0.8))
 
@@ -244,12 +248,24 @@ class NemotronHModel(BaseModel):
             )
 
             # MoE dispatch and compute
+            # When latent-MoE is active, fc1_latent_proj (h -> latent) runs before
+            # dispatch, so dispatch/experts/combine all communicate in latent dim.
+            if cfg.moe_latent_size > 0:
+                self.context_ops.append(
+                    ops.GEMM(
+                        "context_fc1_latent_proj_gemm",
+                        count,
+                        cfg.moe_latent_size // tp_size,
+                        h,
+                        gemm_quant_mode,
+                    )
+                )
             self.context_ops.extend(
                 [
                     ops.MoEDispatch(
                         "context_moe_pre_dispatch",
                         count,
-                        h,
+                        moe_h,
                         self._topk,
                         self._num_experts,
                         moe_tp_size,
@@ -261,7 +277,7 @@ class NemotronHModel(BaseModel):
                     ops.MoE(
                         "context_moe",
                         count,
-                        h,
+                        moe_h,
                         self._moe_inter_size,
                         self._topk,
                         self._num_experts,
@@ -275,7 +291,7 @@ class NemotronHModel(BaseModel):
                     ops.MoEDispatch(
                         "context_moe_post_dispatch",
                         count,
-                        h,
+                        moe_h,
                         self._topk,
                         self._num_experts,
                         moe_tp_size,
@@ -284,10 +300,24 @@ class NemotronHModel(BaseModel):
                         False,
                         quant_mode=moe_quant_mode,
                     ),
-                    # TRT-LLM does allreduce after combining routed + shared outputs when TP>1
-                    ops.CustomAllReduce("context_moe_ar", count, h, tp_size),
                 ]
             )
+            if cfg.moe_latent_size > 0:
+                # fc2_latent_proj (latent -> h) runs after expert combine,
+                # before the post-MoE allreduce. Modeled as a row-parallel GEMM
+                # whose partial sums are aggregated by the following AllReduce.
+                self.context_ops.append(
+                    ops.GEMM(
+                        "context_fc2_latent_proj_gemm",
+                        count,
+                        h,
+                        cfg.moe_latent_size // tp_size,
+                        gemm_quant_mode,
+                        low_precision_input=True,
+                    )
+                )
+            # TRT-LLM does allreduce after combining routed + shared outputs when TP>1
+            self.context_ops.append(ops.CustomAllReduce("context_moe_ar", count, h, tp_size))
 
         # MLP layers (-) - not present in Nemotron-3 Nano but in NemotronH model
         if layer_counts["-"] > 0:
@@ -458,6 +488,10 @@ class NemotronHModel(BaseModel):
         # MoE layers (E)
         if layer_counts["E"] > 0:
             count = layer_counts["E"]
+            # Latent-MoE (e.g. Nemotron-3-Super): experts run on a compressed
+            # `moe_latent_size` projection of hidden_states. Shared expert and the
+            # router still operate on hidden_size.
+            moe_h = cfg.moe_latent_size if cfg.moe_latent_size > 0 else h
             # Pre-norm for MoE
             self.generation_ops.append(ops.ElementWise("generation_moe_norm", count, 2 * h, 2 * h, 0.8))
 
@@ -503,12 +537,24 @@ class NemotronHModel(BaseModel):
             )
 
             # MoE dispatch and compute
+            # When latent-MoE is active, fc1_latent_proj (h -> latent) runs before
+            # dispatch, so dispatch/experts/combine all communicate in latent dim.
+            if cfg.moe_latent_size > 0:
+                self.generation_ops.append(
+                    ops.GEMM(
+                        "generation_fc1_latent_proj_gemm",
+                        count,
+                        cfg.moe_latent_size // tp_size,
+                        h,
+                        gemm_quant_mode,
+                    )
+                )
             self.generation_ops.extend(
                 [
                     ops.MoEDispatch(
                         "generation_moe_pre_dispatch",
                         count,
-                        h,
+                        moe_h,
                         self._topk,
                         self._num_experts,
                         moe_tp_size,
@@ -520,7 +566,7 @@ class NemotronHModel(BaseModel):
                     ops.MoE(
                         "generation_moe",
                         count,
-                        h,
+                        moe_h,
                         self._moe_inter_size,
                         self._topk,
                         self._num_experts,
@@ -534,7 +580,7 @@ class NemotronHModel(BaseModel):
                     ops.MoEDispatch(
                         "generation_moe_post_dispatch",
                         count,
-                        h,
+                        moe_h,
                         self._topk,
                         self._num_experts,
                         moe_tp_size,
@@ -543,10 +589,24 @@ class NemotronHModel(BaseModel):
                         False,
                         quant_mode=moe_quant_mode,
                     ),
-                    # TRT-LLM does allreduce after combining routed + shared outputs when TP>1
-                    ops.CustomAllReduce("generation_moe_ar", count, h, tp_size),
                 ]
             )
+            if cfg.moe_latent_size > 0:
+                # fc2_latent_proj (latent -> h) runs after expert combine,
+                # before the post-MoE allreduce. Modeled as a row-parallel GEMM
+                # whose partial sums are aggregated by the following AllReduce.
+                self.generation_ops.append(
+                    ops.GEMM(
+                        "generation_fc2_latent_proj_gemm",
+                        count,
+                        h,
+                        cfg.moe_latent_size // tp_size,
+                        gemm_quant_mode,
+                        low_precision_input=True,
+                    )
+                )
+            # TRT-LLM does allreduce after combining routed + shared outputs when TP>1
+            self.generation_ops.append(ops.CustomAllReduce("generation_moe_ar", count, h, tp_size))
 
         # MLP layers (-)
         if layer_counts["-"] > 0:

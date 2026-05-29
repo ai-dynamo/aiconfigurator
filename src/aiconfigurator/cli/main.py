@@ -229,6 +229,21 @@ def _add_default_mode_arguments(parser):
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length. Default: 4000.")
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length. Default: 1000.")
     parser.add_argument(
+        "--image-height",
+        type=int,
+        default=0,
+        help="Image height in pixels for vision-language models. Default: 0 (disabled).",
+    )
+    parser.add_argument(
+        "--image-width",
+        type=int,
+        default=0,
+        help="Image width in pixels for vision-language models. Default: 0 (disabled).",
+    )
+    parser.add_argument(
+        "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
+    )
+    parser.add_argument(
         "--ttft",
         type=float,
         default=2000.0,
@@ -257,6 +272,15 @@ def _add_default_mode_arguments(parser):
         type=float,
         default=None,
         help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
+    )
+    parser.add_argument(
+        "--inclusive-tpot",
+        action="store_true",
+        default=False,
+        help=(
+            "Report TPOT as (ttft + tpot * (osl - 1)) / osl, spreading TTFT cost across all output tokens. "
+            "Affects terminal output and saved CSV only; SLA filtering always uses inter-token latency."
+        ),
     )
     parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
     parser.add_argument(
@@ -321,6 +345,15 @@ def _add_experiments_mode_arguments(parser):
         type=str,
         required=True,
         help="Path to a YAML file containing experiment definitions.",
+    )
+    parser.add_argument(
+        "--inclusive-tpot",
+        action="store_true",
+        default=False,
+        help=(
+            "Report TPOT as (ttft + tpot * (osl - 1)) / osl, spreading TTFT cost across all output tokens. "
+            "Affects terminal output and saved CSV only; SLA filtering always uses inter-token latency."
+        ),
     )
 
 
@@ -946,6 +979,9 @@ def build_default_task_configs(
     database_mode: str = "SILICON",
     isl: int = 4000,
     osl: int = 1000,
+    image_height: int = 0,
+    image_width: int = 0,
+    num_images: int = 1,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -1089,6 +1125,9 @@ def build_default_task_configs(
         "total_gpus": total_gpus,
         "isl": isl,
         "osl": osl,
+        "image_height": image_height,
+        "image_width": image_width,
+        "num_images_per_request": num_images,
         "ttft": ttft,
         "tpot": tpot,
         "request_latency": request_latency,
@@ -1486,6 +1525,7 @@ def _execute_task_configs(
     target_concurrency: float | None = None,
     max_total_gpus: int | None = None,
     strict_sla: bool = False,
+    inclusive_tpot: bool = False,
 ) -> tuple[str, dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, float], dict[str, dict[str, float]]]:
     """
     Execute task configs and return the chosen experiment, best configs, results, best
@@ -1502,6 +1542,8 @@ def _execute_task_configs(
         max_total_gpus: Optional upper bound on total GPUs for load-match.
         strict_sla: When True, enforce both TTFT and TPOT SLA constraints
             during picking.
+        inclusive_tpot: When True, replace TPOT in terminal and CSV output
+            with (ttft + tpot * (osl - 1)) / osl.
 
     Returns:
         tuple:
@@ -1611,6 +1653,7 @@ def _execute_task_configs(
         top_n=top_n,
         target_request_rate=target_request_rate,
         target_concurrency=target_concurrency,
+        inclusive_tpot=inclusive_tpot,
     )
 
     end_time = time.time()
@@ -1709,7 +1752,7 @@ def _run_support_matrix_mode(args):
         architecture = None
 
     matrix = common.get_support_matrix()
-    systems = sorted(common.SupportedSystems) if args.system == "all" else [args.system]
+    systems = common.sort_support_matrix_systems(common.SupportedSystems) if args.system == "all" else [args.system]
     backends = [b.value for b in common.BackendName] if args.backend == "all" else [args.backend]
     existing_combos = {(row["System"].lower(), row["Backend"].lower()) for row in matrix}
 
@@ -2093,6 +2136,9 @@ def main(args):
             database_mode=args.database_mode,
             isl=args.isl,
             osl=args.osl,
+            image_height=args.image_height,
+            image_width=args.image_width,
+            num_images=args.num_images,
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,
@@ -2124,6 +2170,8 @@ def main(args):
     execute_kwargs: dict = {}
     if getattr(args, "strict_sla", False):
         execute_kwargs["strict_sla"] = True
+    if getattr(args, "inclusive_tpot", False):
+        execute_kwargs["inclusive_tpot"] = True
     _, best_configs, pareto_fronts, _, _ = _execute_task_configs(
         task_configs,
         args.mode,

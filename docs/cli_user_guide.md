@@ -18,6 +18,7 @@ the corresponding flag is not specified:
 | TTFT (Time to First Token) | 2000 ms | `--ttft` | Max acceptable time to first token |
 | TPOT (Time per Output Token) | 30 ms | `--tpot` | Max acceptable time per output token |
 | Strict SLA | off | `--strict-sla` | Pre-filter Pareto frontier to only SLA-compliant configs |
+| Inclusive TPOT | off | `--inclusive-tpot` | Report TPOT inclusive of TTFT |
 | Backend | trtllm | `--backend` | Inference backend used for estimation |
 | Prefix Cache Length | 0 | `--prefix` | Prefix cache length for KV reuse |
 | Database Mode | SILICON | `--database-mode` | Source of performance data |
@@ -568,6 +569,12 @@ disagg Top Configurations: (Sorted by tokens/s/gpu)
 ********************************************************************************
 2025-12-01 23:36:41,892 - aiconfigurator.cli.main - INFO - All experiments completed in 1.92 seconds
 ```
+
+#### Inclusive TPOT reporting (`--inclusive-tpot`)
+
+AIC's TPOT metric is the inter-token latency during the decode phase — it does not include TTFT. Pass `--inclusive-tpot` to report TPOT as `(ttft + tpot × (osl − 1)) / osl`, which spreads the TTFT cost across all output tokens. This matches the end-to-end per-token latency reported by GuideLLM and other benchmarking tools, making predicted values directly comparable to benchmark measurements.
+
+The flag only affects terminal output and saved CSV — SLA filtering always uses inter-token latency.
 
 #### Strict SLA filtering (`--strict-sla`)
 

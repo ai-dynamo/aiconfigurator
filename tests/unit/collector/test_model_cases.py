@@ -316,7 +316,7 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
     assert sweep.batch_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     assert sweep.sequence_lengths[-2:] == [8192, 16384]
     assert sweep.inner_sweep_head_counts == [128, 64, 32, 16, 8]
-    assert sweep.top_level_head_counts == [128, 64]
+    assert sweep.top_level_head_counts == [128, 64, 32, 16, 8]
     assert sweep.module_precision_combos == [("bfloat16", "bfloat16", "bfloat16")]
 
     trtllm_sweep = get_mla_module_sweep_spec("trtllm")

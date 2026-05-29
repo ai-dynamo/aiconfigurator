@@ -83,9 +83,9 @@ _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
 
 
-def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[str, str, str, str]:
+def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[tuple[int, str], str, str, str]:
     model, system, backend, version = combo
-    return system, backend, version, model
+    return common.get_support_matrix_system_sort_key(system), backend, version, model
 
 
 def _combination_group_key(combo: tuple[str, str, str, str]) -> tuple[str, str, str]:
@@ -674,7 +674,7 @@ class SupportMatrix:
         """
         Iterate over all combinations of hardware, and inference backend, version.
         """
-        for hardware in sorted(self.get_systems()):
+        for hardware in common.sort_support_matrix_systems(self.get_systems()):
             hardware_databases = self.databases.get(hardware, {})
             for backend in sorted(self.get_backends()):
                 for version in sorted(hardware_databases.get(backend, [])):
@@ -1321,7 +1321,7 @@ class SupportMatrix:
 
         sorted_results = sorted(
             (_row_values(row) for row in results),
-            key=lambda x: (x[2], x[0], x[1], x[3], x[4], x[5]),
+            key=lambda x: (common.get_support_matrix_system_sort_key(x[2]), x[0], x[1], x[3], x[4], x[5]),
         )
         grouped_results = {
             system: list(system_results) for system, system_results in groupby(sorted_results, key=lambda x: x[2])

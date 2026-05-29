@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import csv
+import json
 from collections import namedtuple
 from dataclasses import dataclass
 from enum import Enum
@@ -19,6 +20,34 @@ def parse_support_matrix_version(version: str | None) -> Version | None:
         return Version(version)
     except InvalidVersion:
         return None
+
+
+SupportMatrixSystemOrder = (
+    "b200",
+    "gb200",
+    "b300",
+    "gb300",
+    "rtx_pro_6000",
+    "h200",
+    "h100",
+    "l40s",
+    "a100",
+    "b60",
+)
+
+
+def get_support_matrix_system_sort_key(system: str) -> tuple[int, str]:
+    """Sort support-matrix systems by product priority, then by name."""
+    normalized_system = system.lower()
+    for index, prefix in enumerate(SupportMatrixSystemOrder):
+        if normalized_system.startswith(prefix):
+            return index, normalized_system
+    return len(SupportMatrixSystemOrder), normalized_system
+
+
+def sort_support_matrix_systems(systems):
+    """Return systems in the preferred support-matrix display order."""
+    return sorted(systems, key=get_support_matrix_system_sort_key)
 
 
 @dataclass(frozen=True)
@@ -60,6 +89,9 @@ class NemotronHConfig:
         n_groups (int): Number of groups for Mamba2
         chunk_size (int): Chunk size for Mamba2 chunked scan
         moe_shared_expert_intermediate_size (int): Intermediate size for shared expert
+        moe_latent_size (int): Latent dim for routed-expert projections (0 disables
+            latent compression and routed experts run on hidden_size directly).
+            Used by latent-MoE variants like Nemotron-3-Super.
     """
 
     hybrid_override_pattern: str
@@ -70,6 +102,7 @@ class NemotronHConfig:
     n_groups: int
     chunk_size: int
     moe_shared_expert_intermediate_size: int = 0  # Optional: 0 for non-MoE NemotronH models
+    moe_latent_size: int = 0  # Optional: 0 means routed experts use hidden_size directly
 
 
 @dataclass(frozen=True)
@@ -102,6 +135,44 @@ class HybridMoEConfig:
     global_v_head_dim: int = 0
     sliding_window_size: int = 0
     dense_inter_size: int = 0
+
+
+@dataclass(frozen=True)
+class VisionEncoderConfig:
+    """
+    Configuration for the vision encoder (ViT) component of multimodal VL models.
+
+    Covers Qwen3-VL and similar vision-language architectures where the visual
+    encoder is a separate ViT that runs before the LLM backbone.
+
+    Attributes:
+        depth (int): Number of ViT transformer layers
+        hidden_size (int): Hidden dimension of the ViT
+        num_heads (int): Number of attention heads in the ViT
+        intermediate_size (int): FFN intermediate size in the ViT
+        patch_size (int): Spatial patch size in pixels (applied to H and W)
+        temporal_patch_size (int): Temporal patch size for video inputs (1 for image-only)
+        spatial_merge_size (int): Pixel-shuffle reduction factor applied after ViT
+            (e.g., 2 means 2x2 patches are merged, dividing token count by 4)
+        out_hidden_size (int): Output projection dimension (must match LLM hidden size)
+        projector_dims (tuple[tuple[int, int], ...]): Per-layer (in_dim, out_dim) pairs
+            for the vision-to-LLM projector MLP. Empty tuple means no projector.
+            Dimensions are absolute (before TP sharding); build_encoder_ops applies TP.
+        projector_n_instances (int): Number of projector instances to model (e.g.,
+            1 + len(deepstack_visual_indexes) for Qwen3VL deepstack variants).
+    """
+
+    depth: int
+    hidden_size: int
+    num_heads: int
+    intermediate_size: int
+    patch_size: int
+    temporal_patch_size: int
+    spatial_merge_size: int
+    out_hidden_size: int
+    deepstack_visual_indexes: tuple[int, ...] = ()
+    projector_dims: tuple[tuple[int, int], ...] = ()
+    projector_n_instances: int = 1
 
 
 @dataclass(frozen=True)
@@ -200,9 +271,25 @@ def _iter_support_matrix_resources():
     split_matrix_resource = systems_resource / "support_matrix"
 
     if split_matrix_resource.is_dir():
+        csv_resources = {
+            resource.name: resource for resource in split_matrix_resource.iterdir() if resource.name.endswith(".csv")
+        }
+        index_resource = split_matrix_resource / "index.json"
+        if index_resource.is_file():
+            try:
+                index_data = json.loads(index_resource.read_text())
+                ordered_files = index_data.get("files", []) if isinstance(index_data, dict) else []
+            except (OSError, json.JSONDecodeError):
+                ordered_files = []
+
+            for file_name in ordered_files:
+                resource = csv_resources.pop(file_name, None)
+                if resource is not None:
+                    yield resource
+
         yield from sorted(
-            (resource for resource in split_matrix_resource.iterdir() if resource.name.endswith(".csv")),
-            key=lambda resource: resource.name,
+            csv_resources.values(),
+            key=lambda resource: get_support_matrix_system_sort_key(resource.name.removesuffix(".csv")),
         )
         return
 
@@ -399,6 +486,13 @@ DefaultHFModels = {
     "Qwen/Qwen3-Coder-480B-A35B-Instruct",
     "nvidia/Qwen3-235B-A22B-NVFP4",
     "Qwen/Qwen3-32B-FP8-Static-PerTensor",
+    "Qwen/Qwen3-VL-2B-Instruct",
+    "Qwen/Qwen3-VL-4B-Instruct",
+    "Qwen/Qwen3-VL-8B-Instruct",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "Qwen/Qwen3-VL-32B-Instruct",
+    "Qwen/Qwen3-VL-32B-Thinking",
+    "Qwen/Qwen3-VL-235B-A22B-Instruct",
     # MiniMax Models
     "MiniMaxAI/MiniMax-M2.5",
     "nvidia/MiniMax-M2.5-NVFP4",
@@ -468,6 +562,8 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
     "Qwen2ForCausalLM": "LLAMA",
     "Qwen3ForCausalLM": "LLAMA",
+    "Qwen3VLForConditionalGeneration": "QWEN3VL",
+    "Qwen3VLMoeForConditionalGeneration": "QWEN3VL_MOE",
     "MiMoForCausalLM": "LLAMA",
     "DeepSeekForCausalLM": "DEEPSEEK",
     "DeepseekV3ForCausalLM": "DEEPSEEK",
@@ -498,6 +594,8 @@ MULTIMODAL_TEXT_CONFIG_KEY = {
     "Qwen3_5ForConditionalGeneration": "text_config",
     "Qwen3_5MoeForConditionalGeneration": "text_config",
     "Gemma4ForConditionalGeneration": "text_config",
+    "Qwen3VLForConditionalGeneration": "text_config",
+    "Qwen3VLMoeForConditionalGeneration": "text_config",
 }
 
 """
@@ -525,6 +623,7 @@ ColumnsStatic = [
     "tokens/s/gpu",
     "tokens/s/user",
     "request_latency",
+    "encoder_latency",
     "context_latency",
     "generation_latency",
     "num_total_gpus",
@@ -648,6 +747,11 @@ ColumnsDisagg = [
     "(d)backend",
     "(d)version",
     "(d)system",
+    "(e)workers",
+    "(e)tp",
+    "(e)pp",
+    "(e)parallel",
+    "(e)memory",
     "power_w",  # NEW: E2E weighted average power in watts
 ]
 
@@ -684,6 +788,7 @@ class PerfDataFilename(Enum):
     oneccl = "oneccl_perf.txt"
     generation_attention = "generation_attention_perf.txt"
     context_attention = "context_attention_perf.txt"
+    encoder_attention = "encoder_attention_perf.txt"
     context_mla = "context_mla_perf.txt"
     generation_mla = "generation_mla_perf.txt"
     mla_bmm = "mla_bmm_perf.txt"
@@ -718,9 +823,8 @@ class PerfDataFilename(Enum):
     dsv4_hca_context_module = "dsv4_hca_context_module_perf.txt"
     dsv4_csa_generation_module = "dsv4_csa_generation_module_perf.txt"
     dsv4_hca_generation_module = "dsv4_hca_generation_module_perf.txt"
-    # DeepSeek-V4 sparse-kernel data (kernel-level past_kv Δ correction).
-    # Indexed by ``arch -> tp -> past_kv -> isl -> bs``.
-    # topk_512 and csa_attn are modeled analytically — no CSV needed.
+    # DeepSeek-V4 sparse-kernel data retained for future prefix-aware
+    # corrections of the full attention module.
     dsv4_paged_mqa_logits_module = "dsv4_paged_mqa_logits_module_perf.txt"
     dsv4_hca_attn_module = "dsv4_hca_attn_module_perf.txt"
 

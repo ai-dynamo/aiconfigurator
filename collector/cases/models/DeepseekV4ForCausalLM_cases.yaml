@@ -94,6 +94,35 @@ model_case_values:
       - 262144
       - 524288
       - 1048575
+    module_past_kv_lengths:
+      - 0
+      - 1
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 1536
+      - 2048
+      - 3072
+      - 4096
+      - 6144
+      - 8192
+      - 10000
+      - 10240
+      - 12288
+      - 16384
+      - 32768
+      - 65536
+      - 131072
+      - 262144
+      - 524288
+      - 1000000
+      - 1048575
     module_tp_sizes:
       - 1
       - 2
@@ -177,6 +206,9 @@ framework_specific_op_cases:
       cases: all
     dsv4_hca_generation_module:
       cases: all
+    # These kernel-level cases are kept as auxiliary data for future
+    # prefix/past_kv correction.  Current DeepSeek-V4 SGLang modeling uses the
+    # full CSA/HCA attention-module rows above as the primary path.
     dsv4_paged_mqa_logits_module:
       cases: all
     dsv4_hca_attn_module:
@@ -194,6 +226,9 @@ framework_specific_op_cases:
       cases: all
     dsv4_hca_generation_module:
       cases: all
+    # These kernel-level cases are kept as auxiliary data for future
+    # prefix/past_kv correction.  Current DeepSeek-V4 SGLang modeling uses the
+    # full CSA/HCA attention-module rows above as the primary path.
     dsv4_paged_mqa_logits_module:
       cases: all
     dsv4_hca_attn_module:

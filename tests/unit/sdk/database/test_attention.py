@@ -5,7 +5,7 @@ import math
 
 import pytest
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, interpolation
 
 pytestmark = pytest.mark.unit
 
@@ -187,7 +187,12 @@ class TestGenerationAttention:
         sample_cnt = 5
         s_samples = [s_min + (s_max - s_min) * i // (sample_cnt - 1) for i in range(sample_cnt)]
         expected = (
-            sum(comprehensive_perf_db._interp_3d(n, b, s_i, attention_dict, "bilinear")["latency"] for s_i in s_samples)
+            sum(
+                interpolation.interp_3d(
+                    n, b, s_i, attention_dict, "bilinear", comprehensive_perf_db._extracted_metrics_cache
+                )["latency"]
+                for s_i in s_samples
+            )
             / sample_cnt
         )
 

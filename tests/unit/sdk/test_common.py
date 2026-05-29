@@ -8,6 +8,7 @@ Tests supported systems, model families, and other common configurations.
 """
 
 import csv
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -70,6 +71,34 @@ class TestSupportedSystems:
         """Cloud/colo PCIe systems should be available for naive and SOL-style estimates."""
         assert {"h100_pcie", "a100_pcie", "l4", "a30"}.issubset(common.SupportedSystems)
 
+    def test_support_matrix_systems_sort_by_display_priority(self):
+        """Support matrix systems should sort by product priority before name."""
+        systems = [
+            "b60",
+            "a100_sxm",
+            "gb300",
+            "h100_sxm",
+            "l40s",
+            "b200_sxm",
+            "rtx_pro_6000_server",
+            "gb200",
+            "h200_sxm",
+            "b300_sxm",
+        ]
+
+        assert common.sort_support_matrix_systems(systems) == [
+            "b200_sxm",
+            "gb200",
+            "b300_sxm",
+            "gb300",
+            "rtx_pro_6000_server",
+            "h200_sxm",
+            "h100_sxm",
+            "l40s",
+            "a100_sxm",
+            "b60",
+        ]
+
 
 class TestSupportMatrix:
     """Test support matrix functionality."""
@@ -101,6 +130,29 @@ class TestSupportMatrix:
             with csv_path.open(newline="") as f:
                 systems = {row["System"] for row in csv.DictReader(f)}
             assert systems == {csv_path.stem}
+
+    def test_support_matrix_index_uses_display_order(self):
+        """The static support-matrix manifest should keep the preferred system order."""
+        repo_root = _find_repo_root(Path(__file__))
+        index_path = repo_root / "src" / "aiconfigurator" / "systems" / "support_matrix" / "index.json"
+
+        with index_path.open() as f:
+            files = json.load(f)["files"]
+
+        systems = [Path(file_name).stem for file_name in files]
+        assert systems == [
+            "b200_sxm",
+            "gb200",
+            "b300_sxm",
+            "gb300",
+            "rtx_pro_6000_server",
+            "h200_sxm",
+            "h100_sxm",
+            "l40s",
+            "a100_sxm",
+            "b60",
+        ]
+        assert systems == common.sort_support_matrix_systems(systems)
 
     @pytest.mark.parametrize(
         "model,system,backend,version,architecture,expected_agg,expected_disagg",
@@ -263,3 +315,18 @@ class TestSupportMatrix:
         assert result.disagg_supported is True
         assert result.agg_pass_count == 1
         assert result.agg_total_count == 1
+
+
+class TestEncoderLatencyColumn:
+    """Test encoder_latency column is in ColumnsStatic in the correct position."""
+
+    def test_encoder_latency_in_columns_static(self):
+        assert "encoder_latency" in common.ColumnsStatic
+
+    def test_encoder_latency_before_context_latency(self):
+        cols = common.ColumnsStatic
+        assert cols.index("encoder_latency") < cols.index("context_latency")
+
+    def test_encoder_latency_before_generation_latency(self):
+        cols = common.ColumnsStatic
+        assert cols.index("encoder_latency") < cols.index("generation_latency")

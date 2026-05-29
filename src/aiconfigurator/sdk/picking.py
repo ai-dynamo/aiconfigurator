@@ -147,6 +147,11 @@ def _build_disagg_summary_dict(
         "(d)backend": decode_summary_dict.get("backend", ""),
         "(d)version": decode_summary_dict.get("version", ""),
         "(d)system": decode_summary_dict.get("system", ""),
+        "(e)workers": 0,
+        "(e)tp": 0,
+        "(e)pp": 0,
+        "(e)parallel": "",
+        "(e)memory": 0.0,
         "power_w": disagg_power_avg,
     }
 

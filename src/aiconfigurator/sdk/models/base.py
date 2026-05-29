@@ -96,6 +96,7 @@ class BaseModel:
         self.config = model_config
         self.extra_params = extra_params
         self._use_qk_norm = bool(extra_params.get("use_qk_norm", False)) if isinstance(extra_params, dict) else False
+        self.encoder_ops = []
         self.context_ops = []
         self.generation_ops = []
 
