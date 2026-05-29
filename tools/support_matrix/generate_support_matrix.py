@@ -109,9 +109,10 @@ def main():
 
     args = parser.parse_args()
 
-    has_filters = any(
-        arg is not None for arg in (args.model, args.system, args.backend, args.backend_version)
-    ) or args.mode != "all"
+    has_filters = (
+        any(arg is not None for arg in (args.model, args.system, args.backend, args.backend_version))
+        or args.mode != "all"
+    )
     if has_filters and not args.no_save and args.output == default_output:
         parser.error("filtered support-matrix runs require --no-save or an explicit --output path")
 

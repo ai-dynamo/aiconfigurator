@@ -653,13 +653,16 @@ def test_sm120_exception_filters_trtllm_gptoss_mxfp4():
         "reason_type": "framework_version_unsupported",
         "reason": "TRT-LLM 1.3.0rc5/rc10 TRTLLMGenFusedMoE rejects GPT-OSS MXFP4 paths on SM120.",
     }
-    assert expected_failure_for_test_case(
-        case,
-        plan=plan.op_cases["moe"],
-        full_module_name="trtllm.moe",
-        run_func_name="run_moe_torch",
-        runtime_version="1.3.0rc4",
-    ) is None
+    assert (
+        expected_failure_for_test_case(
+            case,
+            plan=plan.op_cases["moe"],
+            full_module_name="trtllm.moe",
+            run_func_name="run_moe_torch",
+            runtime_version="1.3.0rc4",
+        )
+        is None
+    )
 
 
 def test_filter_test_cases_supports_computed_rule_conditions():
