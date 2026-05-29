@@ -8,7 +8,13 @@ from tools.support_matrix.compare_support_matrix import (
     find_blocking_status_transitions,
     generate_pr_description,
 )
-from tools.support_matrix.support_matrix import STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_PASS, SUPPORT_MATRIX_HEADER
+from tools.support_matrix.support_matrix import (
+    STATUS_FAIL,
+    STATUS_FRAMEWORK_INCOMPATIBLE,
+    STATUS_HW_INCOMPATIBLE,
+    STATUS_PASS,
+    SUPPORT_MATRIX_HEADER,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -81,10 +87,26 @@ def test_hardware_incompatible_to_fail_is_blocking_transition():
     assert "HW_INCOMPATIBLE -> FAIL" in errors[0]
 
 
+def test_framework_incompatible_to_fail_is_blocking_transition():
+    errors = find_blocking_status_transitions([_changed(STATUS_FRAMEWORK_INCOMPATIBLE, STATUS_FAIL)])
+
+    assert len(errors) == 1
+    assert "FRAMEWORK_INCOMPATIBLE -> FAIL" in errors[0]
+
+
 def test_fail_to_hardware_incompatible_is_reported_but_not_blocking():
     errors = find_blocking_status_transitions([_changed(STATUS_FAIL, STATUS_HW_INCOMPATIBLE)])
     pr_description = generate_pr_description([], [], [_changed(STATUS_FAIL, STATUS_HW_INCOMPATIBLE)])
 
     assert errors == []
     assert "Reclassified as hardware-incompatible" in pr_description
+    assert "| Qwen/Qwen3-32B-FP8 |" in pr_description
+
+
+def test_fail_to_framework_incompatible_is_reported_but_not_blocking():
+    errors = find_blocking_status_transitions([_changed(STATUS_FAIL, STATUS_FRAMEWORK_INCOMPATIBLE)])
+    pr_description = generate_pr_description([], [], [_changed(STATUS_FAIL, STATUS_FRAMEWORK_INCOMPATIBLE)])
+
+    assert errors == []
+    assert "Reclassified as framework-incompatible" in pr_description
     assert "| Qwen/Qwen3-32B-FP8 |" in pr_description

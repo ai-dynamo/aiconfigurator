@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
 STATUS_HW_INCOMPATIBLE = "HW_INCOMPATIBLE"
-VALID_STATUSES = frozenset({STATUS_PASS, STATUS_FAIL, STATUS_HW_INCOMPATIBLE})
+STATUS_FRAMEWORK_INCOMPATIBLE = "FRAMEWORK_INCOMPATIBLE"
+VALID_STATUSES = frozenset({STATUS_PASS, STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE})
 SUPPORT_MATRIX_BASE_HEADER = [
     "HuggingFaceID",
     "Architecture",
@@ -300,6 +301,12 @@ def _is_known_framework_incompatible_gap(
         return True
 
     if system == "rtx_pro_6000_server":
+        if (
+            "rtx_pro_6000_server/nccl/" in normalized
+            or "failed to query context attention data" in normalized
+            or "failed to query moe data" in normalized
+        ):
+            return True
         if backend == common.BackendName.sglang.value and version == "0.5.10":
             return (
                 "unsupported gemm quant mode 'fp8_block'" in normalized
@@ -313,6 +320,7 @@ def _is_known_framework_incompatible_gap(
         if backend == common.BackendName.trtllm.value and version == "1.3.0rc10":
             return (
                 "unsupported moe quant mode 'fp8_block'" in normalized
+                or ("DeepSeek-V4" in model and "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized)
                 or (
                     model in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
                     and "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
@@ -938,7 +946,7 @@ class SupportMatrix:
                         version=version,
                         error_message=raw_error,
                     ):
-                        statuses[mode] = STATUS_HW_INCOMPATIBLE
+                        statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
                     else:
                         statuses[mode] = STATUS_FAIL
                     error_messages[mode] = raw_error
@@ -1191,6 +1199,9 @@ class SupportMatrix:
         passed = sum(1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_PASS)
         failed = sum(1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_FAIL)
         hw_incompatible = sum(1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_HW_INCOMPATIBLE)
+        framework_incompatible = sum(
+            1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_FRAMEWORK_INCOMPATIBLE
+        )
 
         print("\n" + "=" * 80)
         print("Test Results Summary")
@@ -1199,12 +1210,16 @@ class SupportMatrix:
         print(f"✓ Passed: {passed} ({100 * passed / total_tests:.1f}%)")
         print(f"✗ Failed: {failed} ({100 * failed / total_tests:.1f}%)")
         print(f"⚪ Hardware incompatible: {hw_incompatible} ({100 * hw_incompatible / total_tests:.1f}%)")
+        print(
+            f"⚪ Framework incompatible: {framework_incompatible} ({100 * framework_incompatible / total_tests:.1f}%)"
+        )
         print("=" * 80)
 
         # Group results by status
         passed_configs = []
         failed_configs = []
         hw_incompatible_configs = []
+        framework_incompatible_configs = []
 
         for huggingface_id, architecture, system, backend, version, mode, status, _err, _command in results:
             config = (huggingface_id, architecture, system, backend, version, mode)
@@ -1214,6 +1229,8 @@ class SupportMatrix:
                 failed_configs.append(config)
             elif status == STATUS_HW_INCOMPATIBLE:
                 hw_incompatible_configs.append(config)
+            elif status == STATUS_FRAMEWORK_INCOMPATIBLE:
+                framework_incompatible_configs.append(config)
 
         # Print passed configurations
         if passed_configs:
@@ -1230,6 +1247,11 @@ class SupportMatrix:
         if hw_incompatible_configs:
             print(f"\n⚪ Hardware-Incompatible Configurations ({len(hw_incompatible_configs)}):")
             for huggingface_id, architecture, system, backend, version, mode in sorted(hw_incompatible_configs):
+                print(f"  • {huggingface_id} ({architecture}) on {system} with {backend} v{version} ({mode})")
+
+        if framework_incompatible_configs:
+            print(f"\n⚪ Framework-Incompatible Configurations ({len(framework_incompatible_configs)}):")
+            for huggingface_id, architecture, system, backend, version, mode in sorted(framework_incompatible_configs):
                 print(f"  • {huggingface_id} ({architecture}) on {system} with {backend} v{version} ({mode})")
 
     def save_results_to_csv(self, results: list[tuple[str, ...]], output_file: str) -> None:

@@ -4,6 +4,7 @@
 import pytest
 
 from tools.support_matrix.support_matrix import (
+    STATUS_FRAMEWORK_INCOMPATIBLE,
     STATUS_HW_INCOMPATIBLE,
     STATUS_PASS,
     SupportMatrix,
@@ -129,11 +130,35 @@ def test_run_single_test_short_circuits_hardware_incompatible_model(monkeypatch)
             "Unsupported moe quant mode 'int4_wo' for system='rtx_pro_6000_server'",
         ),
         (
+            "deepseek-ai/DeepSeek-V4-Flash",
+            "trtllm",
+            "1.3.0rc10",
+            "Unsupported moe quant mode 'w4a8_mxfp4_mxfp8' for system='rtx_pro_6000_server'",
+        ),
+        (
             "zai-org/GLM-5",
             "vllm",
             "0.19.0",
             "File does not exist at "
             "src/aiconfigurator/systems/data/rtx_pro_6000_server/vllm/0.19.0/dsa_context_module_perf.txt",
+        ),
+        (
+            "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+            "vllm",
+            "0.19.0",
+            "File does not exist at src/aiconfigurator/systems/data/rtx_pro_6000_server/nccl/2.28.9/nccl_perf.txt",
+        ),
+        (
+            "google/gemma-4-26B-A4B",
+            "sglang",
+            "0.5.10",
+            "Failed to query context attention data for b=1, s=128.0, prefix=128.0",
+        ),
+        (
+            "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+            "trtllm",
+            "1.3.0rc10",
+            "Failed to query moe data for num_tokens=128.0, hidden_size=5120",
         ),
     ],
 )
@@ -152,5 +177,5 @@ def test_run_single_test_marks_known_rtx_pro_sm120_framework_gaps(monkeypatch, m
         modes_to_test=("agg",),
     )
 
-    assert status_dict == {"agg": STATUS_HW_INCOMPATIBLE}
+    assert status_dict == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE}
     assert message in error_dict["agg"]
