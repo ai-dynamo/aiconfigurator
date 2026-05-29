@@ -82,7 +82,15 @@ from datetime import datetime
 from inspect import Parameter, signature
 from pathlib import Path
 
-from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, setup_logging, setup_signal_handlers
+from helper import (
+    EXIT_CODE_RESTART,
+    create_test_case_id,
+    finalize_perf_files,
+    find_perf_csv_outputs,
+    save_error_report,
+    setup_logging,
+    setup_signal_handlers,
+)
 
 logger = None
 RESUME_SCHEMA_VERSION = "collector-resume-v1"
@@ -1435,6 +1443,11 @@ def main():
         action="store_true",
         help="Profile the collector run and save output ",
     )
+    parser.add_argument(
+        "--keep-csv",
+        action="store_true",
+        help="Keep collector CSV staging files instead of finalizing *_perf.txt outputs to parquet.",
+    )
     args = parser.parse_args()
     ops = args.ops
     _dsv4_auto_expand = False
@@ -1587,6 +1600,13 @@ def main():
     if not args.profile:
         mp.set_start_method("spawn")
 
+    output_root = Path.cwd()
+    existing_perf_outputs = {path.resolve(): path.stat().st_mtime_ns for path in find_perf_csv_outputs(output_root)}
+
+    def was_touched_by_run(path: Path) -> bool:
+        resolved = path.resolve()
+        return resolved not in existing_perf_outputs or path.stat().st_mtime_ns != existing_perf_outputs[resolved]
+
     # Use profiling context manager
     with ProfilerContext(args.backend, enabled=args.profile):
         if args.backend == "trtllm":
@@ -1619,6 +1639,19 @@ def main():
                 model_path=case_plan.model_path if case_plan is not None else None,
                 case_plan=case_plan,
             )
+
+    if args.keep_csv:
+        logger.info("Keeping collector CSV staging files because --keep-csv was passed")
+    else:
+        touched_perf_outputs = [path for path in find_perf_csv_outputs(output_root) if was_touched_by_run(path)]
+        if touched_perf_outputs:
+            logger.info(
+                "Finalizing collector CSV staging files as parquet:\n  "
+                + "\n  ".join(str(path) for path in touched_perf_outputs)
+            )
+        converted = finalize_perf_files(touched_perf_outputs)
+        if converted:
+            logger.info(f"Finalized {len(converted)} collector perf files as parquet")
 
 
 if __name__ == "__main__":

@@ -5,9 +5,13 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import shutil
+from pathlib import Path
 from types import SimpleNamespace
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from aiconfigurator.sdk import common, rust_engine_step
@@ -212,6 +216,53 @@ def test_engine_config_json_preserves_moe_specific_quant_mode() -> None:
 
     assert config["weight_dtype"] == "bfloat16"
     assert config["moe_dtype"] == "w4a16_mxfp4"
+
+
+def test_configure_data_roots_materializes_parquet_perf_for_rust(tmp_path, monkeypatch) -> None:
+    systems_root = tmp_path / "systems"
+    data_root = systems_root / "data" / "test_sxm" / "vllm" / "1.0.0"
+    data_root.mkdir(parents=True)
+    (systems_root / "test_sxm.yaml").write_text(
+        "data_dir: data/test_sxm\n"
+        "gpu:\n"
+        "  mem_bw: 1\n"
+        "node:\n"
+        "  num_gpus_per_node: 8\n"
+        "  inter_node_bw: 1\n"
+        "  intra_node_bw: 1\n"
+        "misc:\n"
+        "  nccl_version: '2.27.3'\n"
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "gemm_dtype": ["bfloat16"],
+                "m": [1],
+                "n": [2],
+                "k": [3],
+                "latency": [4.0],
+            }
+        ),
+        data_root / "gemm_perf.parquet",
+    )
+
+    monkeypatch.setenv("AICONFIGURATOR_SYSTEMS_PATH", str(systems_root))
+    monkeypatch.delenv("AICONFIGURATOR_RUST_SYSTEMS_SOURCE_PATH", raising=False)
+    rust_engine_step._configure_default_data_roots(
+        {
+            "system_name": "test_sxm",
+            "backend": "vllm",
+            "backend_version": "1.0.0",
+        }
+    )
+
+    rust_systems_root = Path(os.environ["AICONFIGURATOR_SYSTEMS_PATH"])
+    materialized = rust_systems_root / "data" / "test_sxm" / "vllm" / "1.0.0" / "gemm_perf.txt"
+
+    assert rust_systems_root != systems_root
+    assert (rust_systems_root / "test_sxm.yaml").is_file()
+    assert materialized.read_text().splitlines()[0] == '"gemm_dtype","m","n","k","latency"'
+    assert os.environ["AICONFIGURATOR_RUST_SYSTEMS_SOURCE_PATH"] == str(systems_root)
 
 
 def test_engine_step_estimator_can_load_old_core_without_forward_pass_perf_symbols(tmp_path, monkeypatch) -> None:
