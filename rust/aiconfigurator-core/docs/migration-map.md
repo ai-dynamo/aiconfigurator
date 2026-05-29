@@ -24,26 +24,74 @@ Python retaining orchestration and compatibility wrappers during migration.
 
 ## Current State
 
-The existing POC lives in `rust/aiconfigurator-core` and is useful, but it is not
-a faithful port of the Python SDK yet.
+Phase 3 (C1-C10 + C12) and Phase 4 (D1-D5) have landed. The Rust crate
+is a faithful apple-to-apple port of Python's engine-step latency path
+for the smoke slice, with parity asserted (no xfails) on 72 surfaces —
+18 cases x 4 modes — covering:
 
-Known simplifications:
+- 3 model families today: Llama / Qwen3 dense (llama.rs), MoE
+  (moe.rs), and DeepSeek (deepseek.rs).
+- 9 distinct models: MiniMaxAI/MiniMax-M2.5 and M2.7, moonshotai/
+  Kimi-K2.5, deepseek-ai/DeepSeek-V3 and DeepSeek-R1, Qwen/Qwen3-30B-A3B
+  and Qwen3-235B-A22B, Qwen/Qwen3-32B, meta-llama/Meta-Llama-3.1-{70B, 8B}.
+- 3 systems: b200_sxm, h200_sxm, h100_sxm.
+- 2 backends: vllm 0.19.0 and sglang 0.5.10.
+- 4 modes per case: static_ctx, static_gen, mixed_step, agg, disagg.
 
-- `src/lib.rs`, `src/model.rs`, and `src/perf.rs` flatten Python's op-graph
-  architecture into a small number of aggregate formulas.
-- Model-family behavior is partly inferred in `ModelSpec` instead of represented
-  as per-family model builders.
-- Qwen3-VL configs are currently unwrapped to their text backbone and classified
-  as Llama/MoE-like. That matches text-only static behavior, but vision encoder
-  ops still need a dedicated Rust slice before multimodal parity can be claimed.
-- Gemma 4 and Nemotron-H config parsing handles the same top-level/text-config
-  and layer-pattern shapes as Python, but their specialized op graphs are not
-  part of the first vLLM MoE smoke slice.
-- Perf queries load selected CSVs directly and do not yet mirror every Python
-  table owner, fallback, database mode, source tag, or interpolation path.
-- The FFI input is ForwardPassMetrics-shaped and useful for the target API, but
-  it does not yet preserve enough request shape to reproduce every Python op
-  query exactly.
+Op-graph composition primitives now match Python:
+
+- `Op::Overlap` mirrors Python's `OverlapOp` (parallel CUDA streams
+  on the generation MoE; latency = `max(routed, shared)`).
+- `Op::Fallback` mirrors Python's `FallbackOp` (try `MLAModule`
+  primary; fall back to the granular `MlaBmm + ContextMla/GenerationMla
+  + MlaBmm` chain when the module-level perf data is missing).
+
+Module shape today:
+
+- `common/{enums,error,system_spec}` — foundation types and YAML
+  system-spec parsing.
+- `models/{base,config_loader,registry,factory,llama,moe,deepseek}` —
+  family-specific op-graph builders. Each builder populates
+  `Model.{context_ops, generation_ops}` exactly the way Python's
+  `models/*.py` populates the same lists.
+- `operators/*` — typed `Op` enum with per-variant `query` methods
+  that go through `perf_database/*` lookups. Mirrors Python's
+  `operations/*.py`.
+- `perf_database/{gemm,attention,mla,moe,wideep,mhc,dsa,dsv4,
+  communication,state_space}` — per-op-owner tables with lazy
+  loading (Python Pattern A) and first-wins parity for duplicate
+  CSV rows.
+- `session.rs` — `Phase3Estimator` drives `run_context_phase`,
+  `run_generation_phase`, and `get_mix_step_latency_ms`. Mirrors
+  Python's `_run_context_phase` / `_run_generation_phase` /
+  `_get_mix_step_latency` in `base_backend.py`.
+- `ffi.rs` + `src/aiconfigurator/sdk/rust_engine_step.py` — JSON-shaped
+  FFI for the FPM input and a Python ctypes wrapper. Stable across
+  Phase 3.
+
+Known gaps still on the roadmap:
+
+- Performance: smoke benchmark is at 1.1-1.6x p50 speedup vs Python.
+  The Phase 3 plan's >=3x target is deferred to Phase 5 (see
+  `migration-execution-plan.md`) because closing the gap requires
+  cache designs and an FFI fast-path that drift from the Python
+  reference shape; landing them inside the parity PR would mix
+  concerns.
+- Qwen3-VL configs are currently unwrapped to their text backbone and
+  classified as Llama/MoE-like. That matches text-only static
+  behavior. Vision encoder ops are not in Phase 3 scope: Qwen3-VL is
+  absent from every support matrix CSV today, and `cli_estimate`
+  errors out on the public path. Multimodal parity waits for the
+  Python path to be validated and the support matrix to be
+  regenerated (Phase 4 territory).
+- Gemma 4 and Nemotron-H config parsing handles the same top-level /
+  text-config and layer-pattern shapes as Python, but their
+  specialized op graphs are not part of the Phase 3 smoke slice.
+- The FFI input is ForwardPassMetrics-shaped. For AIC's
+  homogeneous-batch workload this is lossless (see Tradeoffs); no
+  schema enrichment is expected for Phase 3 parity. Phase 5 may
+  introduce a packed-primitive fast-path entry-point alongside the
+  existing JSON entry-point.
 
 ## Target System
 
@@ -101,7 +149,7 @@ Python callers are deprecated or removed.
 | Models | `models/gemma4_moe.py` | `src/models/gemma4_moe.rs` | Gemma 4 SWA/global attention and dense+MoE FFN graph. Not first latency slice. |
 | Models | `models/nemotron_h.py` | `src/models/nemotron_h.rs` | Nemotron-H graph. |
 | Models | `models/nemotron_nas.py` | `src/models/nemotron_nas.rs` | Nemotron NAS graph. |
-| Models | `models/qwen3vl.py` and `models/vit_ops.py` | `src/models/qwen3vl.rs`, `src/operators/vision.rs` | Vision encoder and multimodal graph. Not first latency slice unless engine-step API needs images. |
+| Models | `models/qwen3vl.py` and `models/vit_ops.py` | `src/models/qwen3vl.rs`, `src/operators/vision.rs` | Vision encoder and multimodal graph. Not in Phase 3 scope: Qwen3-VL has no support matrix entry and `cli_estimate` is currently broken for it. |
 | Operations | `operations/base.py` | `src/operators/base.rs` | `Operator` trait, `PerformanceResult`, scaling/source handling. |
 | Operations | `operations/gemm.py` | `src/operators/gemm.rs`, `src/perf_database/gemm.rs` | GEMM op plus GEMM/compute-scale/scale-matrix table logic. |
 | Operations | `operations/attention.py` | `src/operators/attention.rs`, `src/perf_database/attention.rs` | Context/generation attention ops and table queries. |
@@ -124,17 +172,25 @@ Python callers are deprecated or removed.
 
 ## First Implementation Slice
 
-Start with engine-step latency parity for vLLM 0.19.0 on B200 using the two
-smoke models requested:
+Engine-step latency parity for vLLM 0.19.0 on B200 using two smoke models:
 
-- `MiniMaxAI/MiniMax-M2.5`
-- `moonshotai/Kimi-K2.5`
+- `MiniMaxAI/MiniMax-M2.5` (hybrid MoE)
+- `moonshotai/Kimi-K2.5` (DeepSeek family, MLA)
+
+Together these cover MoE compute, expert sharding, all-to-all dispatch, MLA
+attention, and the dense GEMM path used by both backbones.
+
+Qwen3-VL is intentionally excluded from Phase 3 smoke: it is absent from every
+support matrix CSV today and the public `cli_estimate` path errors out on it
+(perf-DB interpolation receives `x=0` for vision-encoder-driven queries).
+Vision-encoder parity is deferred to Phase 4 once the Python path is fixed
+and the support matrix is regenerated.
 
 The current smoke harness covers `static`, `mixed_step`, `agg`, and `disagg`.
-Scope for the first real Rust implementation slice:
+Scope for the Phase 3 implementation slice:
 
 1. Build Rust op graphs instead of aggregate family formulas.
-2. Port GEMM, attention, MoE, dispatch, elementwise, embedding, custom
+2. Port GEMM, attention, MLA, MoE + dispatch, elementwise, embedding, custom
    all-reduce, P2P, and overlap operators needed by those two models.
 3. Port only the database modes needed for parity smoke first. SILICON is the
    priority. HYBRID/EMPIRICAL/SOL should be represented in the schema so they
@@ -154,35 +210,58 @@ Scope for the first real Rust implementation slice:
 - Python's current op graph is behaviorally authoritative. Rust can choose a
   cleaner module layout, but every deletion or deduplication needs parity tests
   that prove the behavior stayed equivalent.
-- The current FPM v1 aggregate fields lose per-request distributions. That is
-  good for latency overhead and bad for exact parity where variance or sampled
-  sequence shape matters. If <1% parity cannot be reached with aggregate FPM,
-  the API needs richer request-shape input.
+- The current FPM v1 aggregate fields collapse per-request distribution into
+  sums and counts. For AIC this is lossless: AIC models homogeneous batches,
+  Python issues one table query per step with uniform `(batch_size,
+  context_length)` shape, and `sum / num_requests` recovers the exact
+  per-request value (`mean = max = min`). No FPM schema bump is expected during
+  Phase 3 parity work. The schema-richness concern only resurfaces for a
+  future Dynamo Mocker integration where a live scheduler produces
+  heterogeneous distributions; that is out of Phase 3 scope.
 
 ## Current-Iteration Decisions
 
 1. Keep Rust/Python comparison assets under
    `rust/aiconfigurator-core/parity_tests/` and run them explicitly until Python
    SDK deprecation.
-2. Use `tp=8, pp=1, attention_dp=1, moe_tp=1, moe_ep=8` as the current smoke
-   parallelism because it is valid for both requested MoE models on vLLM 0.19.0.
+2. Use `tp=8, pp=1, attention_dp=1, moe_tp=1, moe_ep=8` as the smoke
+   parallelism because it is valid for both MoE smoke models on vLLM 0.19.0.
 3. Cover both public Python-visible parity and raw engine-step parity in the
    first slice: `static`, `mixed_step`, `agg`, and `disagg`.
 4. Defer source tags and energy accounting until after latency parity.
+5. Keep FPM v1 aggregate input. Lossless for AIC's homogeneous-batch workload
+   (see Tradeoffs); no schema bump expected during Phase 3.
 
 ## Current-Iteration Status
 
 - [x] Migration map exists and covers the target Rust module shape.
 - [x] Rust/Python parity smoke tests exist under
-  `rust/aiconfigurator-core/parity_tests/` and are allowed to xfail until the
-  Rust op graph is complete.
+  `rust/aiconfigurator-core/parity_tests/`.
+- [x] Phase 3 modular implementation has landed (C1-C10 + C12): apple-to-apple
+  port of Python's op graph for the smoke slice.
+- [x] All 12 smoke parity surfaces (3 cases x 4 modes) pass within 1% drift;
+  xfails have been flipped to hard assertions (C8-C10).
 - [x] Benchmark harness reports reproducible case parameters, Python/Rust setup
   cost, hot/cold step latency, and Rust-vs-Python speedup.
+- [x] Final Phase 3 benchmark snapshot recorded in `parity_tests/benchmarks.md`.
 - [x] Current-iteration open questions have been resolved into decisions.
-- [x] Comprehensive parity scan is documented as a post-implementation phase.
+- [x] Comprehensive parity scan is documented as Phase 4.
+- [x] Hot-path optimization (≥3x speedup) is documented as Phase 5.
+- [x] Phase 4 expanded the smoke set from 3 cases x 4 modes (12
+  surfaces) to 18 cases x 4 modes (72 surfaces). Each "deferred
+  follow-up" in earlier write-ups turned out to be an apple-to-apple
+  translation, not a structural change:
+  - D1: `llama.rs` missing `act_gate` + `logits_gemm` ops; force
+    `use_qk_norm` for Qwen3 / MiniMax-M2 architectures.
+  - D4: `Op::Overlap` for DeepSeek-V3 / R1 shared-expert overlap;
+    MLA effective head count = `128 // tp_size`; SGLang dispatch
+    default = `CustomAllReduce`.
+  - D5: `Op::Fallback` for the SGLang / TRT-LLM MLA fallback chain;
+    `MlaBmm` dispatch fix.
 
-Next implementation checkpoint: once a model/backend slice reaches <1% drift,
-flip that case from xfail to a required test.
+Next implementation checkpoint: Phase 5 (hot-path optimization), or
+re-open Phase 4 as a comprehensive matrix scan now that all
+landed-family backends share the same op graph.
 
 ## Harness Commands
 

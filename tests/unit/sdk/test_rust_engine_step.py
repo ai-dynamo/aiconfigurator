@@ -181,9 +181,15 @@ def test_mixed_and_decode_helpers_map_to_fpm(monkeypatch) -> None:
 
     assert mixed_ms == 8.5
     assert decode_ms == 9.5
+    # `sum_prefill_tokens` is the NEW prefill-token count (matches the
+    # static-path `_prefill_metrics` convention: cached prefix tokens are
+    # carried separately by `sum_prefill_kv_tokens`). For these inputs:
+    #   num_prefill_requests = ceil(384 / 256) = 2
+    #   cached_total = prefix(128) * num_prefill_requests(2) = 256
+    #   new_prefill_tokens = ctx_tokens(384) - cached_total(256) = 128
     assert calls[0][0]["scheduled_requests"] == {
         "num_prefill_requests": 2,
-        "sum_prefill_tokens": 384,
+        "sum_prefill_tokens": 128,
         "sum_prefill_kv_tokens": 256,
         "num_decode_requests": 7,
         "sum_decode_kv_tokens": 2688,

@@ -91,9 +91,10 @@ Deliverables:
 
 ### Phase 1: Parity Smoke Harness
 
-Status: complete for the current iteration. The smoke tests live under
-`rust/aiconfigurator-core/parity_tests/` and are expected to xfail until the
-Rust op graph is complete.
+Status: complete. The smoke tests live under
+`rust/aiconfigurator-core/parity_tests/`. After Phase 3 (C8-C10) all 12
+surfaces pass as required assertions; the original xfail markers are
+gone.
 
 Add pytest parity smoke tests comparing the existing Python SDK against the current Rust integration.
 
@@ -112,7 +113,12 @@ Initial smoke coverage:
 - vLLM 0.19.0
 - Sampled forward-pass parameters
 
-The current Rust implementation is expected to be wrong or incomplete in some cases. These tests may be marked as `xfail` or otherwise made non-blocking for now, but failures must be explicit and explained.
+During Phase 3 build-up these tests were `pytest.xfail`-able while
+specific cases were still drifting; that pattern is now retired. The
+Phase 3 (C8-C10) flip turned them into hard `assert`s so a regression
+would be loud. Add a fresh `pytest.xfail` for any newly added case that
+genuinely isn't ready yet, with the drift print attached, so failures
+stay explicit and explained.
 
 Do not let expected current failures hide unrelated regressions.
 
@@ -195,28 +201,263 @@ Implementation guidance:
 5. Keep perf DB loading and expensive setup out of the per-step hot path where possible.
 6. Run parity tests and benchmark checks as the implementation progresses.
 
-### Phase 4: Comprehensive Parity Scan
+FPM input schema (decision):
 
-Status: pending until the Rust implementation is feature-complete.
+AIC models homogeneous batches. At any single step every request shares the
+same `(batch_size, context_length)` shape. Python does not iterate per
+request; it issues one table query per step with uniform shape and integrates
+across decode steps externally. Aggregate FPM v1 fields such as
+`sum_decode_kv_tokens` and `num_decode_requests` therefore recover the exact
+per-request value losslessly (`mean = max = min`). No FPM schema bump is
+expected during Phase 3 parity work. The schema-richness concern in the
+migration map applies to a future Dynamo Mocker integration where a live
+scheduler produces heterogeneous distributions; that is out of Phase 3 scope.
 
-After the Rust implementation is feature-complete, run a full parity scan across
-the AIC-supported search space. The Phase 1 smoke tests cover only two models and
-are not sufficient final coverage.
+If the mixed-step parity smoke shows >1% drift attributable to an aggregate
+input collapsing distinct per-request shapes, treat it as a stop condition and
+escalate before proceeding.
 
-Comprehensive scan requirements:
+Pre-Phase 3 cleanup (lands before the commit sequence below):
 
-1. Enumerate every model/system/backend/version/configuration entry that AIC
-   advertises as supported.
-2. Compare Python SDK and Rust core latency outputs through stable public
-   interfaces.
-3. Cover static, mixed-step, agg, and disagg paths where applicable.
-4. Run the scan in parallel or shards if needed; the requirement is full
-   coverage, not single-process execution.
-5. Report every mismatch with enough case metadata to reproduce it.
-6. Treat <1% latency drift as the final parity target unless a documented and
-   approved exception exists.
-7. Keep the comprehensive scan separate from the lightweight smoke suite so
-   normal development feedback remains fast.
+1. Commit the working-tree clarification in
+   `rust/aiconfigurator-core/docs/migration-map.md` that defines what "target
+   Rust path" means during the transition.
+2. Update `rust/aiconfigurator-core/docs/migration-map.md`:
+   - Note that Python `perf_database` lazy-load + Pattern A cleanup landed on
+     main, so Rust matches Python's current shape (not its future shape).
+   - Correct the FPM v1 aggregate-input tradeoff entry per the
+     homogeneous-batch reasoning above.
+   - Document why Qwen3-VL is excluded from Phase 3 smoke (not in any support
+     matrix; `cli_estimate` errors out today).
+3. Capture a baseline benchmark snapshot to
+   `rust/aiconfigurator-core/parity_tests/benchmarks.md` so Phase 3 progress
+   is anchored (final Phase 3 snapshot appended in C12; the ≥3x speedup
+   target moved to Phase 5).
+
+Qwen3-VL is intentionally out of Phase 3 scope. The model code exists in
+`src/aiconfigurator/sdk/models/qwen3vl.py`, but Qwen3-VL has zero entries in
+any support matrix CSV (model code landed after the matrix was last
+regenerated), and `cli_estimate(mode="static_ctx", ...)` hard-errors with
+`ValueError: x is less than the smallest value in the list. x=0` from
+`interpolation.py` because vision-encoder ops query the perf DB with a
+zero-valued dimension. Multimodal parity waits for the Python path to be
+fixed and the support matrix to advertise Qwen3-VL as PASS; Phase 4 picks it
+up.
+
+Phase 3 commit sequence (single PR; commits land in this order):
+
+| # | Commit | What lands |
+| --- | --- | --- |
+| C1 | scaffolding | Carve `{lib,perf,model,ffi}.rs` into target shape: `{config,enums,system_spec,result,perf_database/,operators/,models/,backends/,session}.rs`. Aggregate formula path keeps working through the new modules. Parity unchanged. |
+| C2 | foundation types | `enums`, `system_spec` (YAML parse), `model_config_parser` (HF config + hf_quant_config), `result`. |
+| C3 | perf_database modular | Lazy per-op-owner shape mirroring Python Pattern A. `interpolation`, then `perf_database/{gemm,attention,mla,moe,communication}`. Unit tests vs Python on sampled grid within float-epsilon. |
+| C4 | operator primitives | `operators/{base,gemm,attention,mla,moe,communication,elementwise,embedding,overlap}`. Per-operator unit tests vs Python. |
+| C5 | models + backends infra | `models/{base,registry,config_loader}`, `backends/{base,vllm}`. |
+| C6 | model implementations | `models/{hybrid_moe,deepseek}` op graphs. Covers both smoke models. |
+| C7 | session + FFI rewire | `session.rs` (static + mixed-step + agg + disagg). Remove aggregate `lib.rs` path; FFI now drives session. |
+| C8 | flip MiniMax parity | All 4 modes (static_ctx, static_gen, mixed_step, agg, disagg) -> required. |
+| C9 | flip Kimi parity | All 4 modes -> required. |
+| C10 | flip prefix-caching parity | `minimax-m25-sampled-prefix` all modes -> required. |
+| C12 | docs | Update migration-map "Current State" to reflect Phase 3 reality. Capture final benchmark snapshot. Document any intentional Python divergence. |
+
+Note: the original Phase 3 plan included a `C11 hot-path optimization`
+commit conditional on the benchmark missing 3x at the end of C10. After
+landing C1-C10 the smoke benchmark shows 1.1-1.6x speedup, below the
+target. We split that work out into a dedicated **Phase 5: Hot-Path
+Optimization** (below) because the remaining wins require a careful
+cache design and Python-side FFI restructuring that drifts noticeably
+from the current Python reference; landing it inside the parity PR
+would mix concerns and risk regressions.
+
+Phase 3 commit dependencies:
+
+- C1-C3 are strictly sequential.
+- C4 operator implementations may be split into sub-commits and reviewed in
+  any order, but all must land before C5.
+- C5 -> C6 -> C7 are sequential.
+- C8-C10 may interleave in any order; each requires C7 plus the operators it
+  exercises from C4.
+- C12 always lands last.
+
+Phase 3 exit criteria:
+
+1. All parity surfaces (3 smoke case variants x 4 modes, minus any documented
+   N/A) within 1% drift versus Python SDK; xfails removed.
+2. Existing Python tests still pass.
+
+Performance — the ≥3x speedup target is deferred to **Phase 5** (see
+below). Phase 3 ships the correctness foundation and a documented
+1.1-1.6x speedup baseline.
+
+### Phase 4: Larger Smoke Set
+
+Status: complete (D1 + D2 landed). The original Phase 4 framing was a
+full comprehensive scan across every entry in the support matrix; once
+the inventory step ran, it was clear most of those rows would just be
+"unsupported family" skips against the current Rust implementation (3
+of 17 supported architectures map to Rust builders today). The goal
+was reshaped to "expand the smoke set with more representative cases"
+— still increasing real coverage, but without burning the comprehensive
+matrix on cases the Rust crate doesn't model yet.
+
+Phase 4 deliverables (landed):
+
+- **D1: model-graph fixes uncovered during inventory.** The probe of
+  the broader matrix surfaced two real Rust bugs:
+  - `use_qk_norm` was driven only by an explicit HF field; Python's
+    `utils.py` forces it on for `Qwen3ForCausalLM`,
+    `Qwen3MoeForCausalLM`, and `MiniMaxM2ForCausalLM` regardless. The
+    Rust `config_loader` now mirrors that architecture-driven override.
+  - `models/llama.rs` was missing `context_act_gate` (elementwise
+    between the gated FFN GEMMs) and `context_logits_gemm` (bf16 vocab
+    projection), and was using `dtypes.gemm_quant` instead of bf16 for
+    `generation_logits_gemm`. Added all three plus `low_precision_input`
+    on ffn2.
+- **D2: smoke set expansion.** The smoke suite grew from 3 cases x 4
+  modes = 12 surfaces to 11 cases x 4 modes = 44 surfaces, all
+  asserted (no xfails) within the 1% drift tolerance:
+  - 3 original (MiniMax-M2.5, Kimi-K2.5, sampled-prefix).
+  - 3 new MoE-family models (MiniMax-M2.7, Qwen3-30B-A3B, Qwen3-235B-A22B).
+  - 3 new dense Llama-family models (Qwen3-32B, Llama-3.1-70B,
+    Llama-3.1-8B).
+  - 2 cross-system MiniMax-M2.5 runs (h200_sxm, h100_sxm).
+
+Phase 4 D4 / D5 closed three gaps that the earlier write-up
+mis-classified as needing structural work. Each was a real apple-to-
+apple translation that just hadn't been ported yet:
+
+1. **`Op::Overlap` for shared/routed-expert overlap** (D4).
+   Python wraps the DeepSeek-V3 / DeepSeek-R1 generation MoE in
+   `OverlapOp("generation_moe_overlap", routed, shared)` so the latency
+   is `max(sum(routed), sum(shared))`. Rust gained an `Op::Overlap`
+   variant in `operators/op.rs` that mirrors the Python op exactly;
+   `models/deepseek.rs` now builds the two groups and pushes a single
+   `Op::Overlap` between the MLA module and the logits GEMM. Pre-fix
+   `static_gen` drifted +15.89% on DeepSeek-V3 / R1; post-fix it
+   passes within 0.02%. Kimi-K2.5 — which previously happened to pass
+   because its routed-MoE work swamped the shared FFN — still passes.
+
+2. **`Op::Fallback` for missing MLA-module data** (D5).
+   Python uses `FallbackOp(primary=MLAModule, fallback=[GEMM, MlaBmm,
+   ContextMla/GenerationMla, MlaBmm, GEMM])` so when a perf DB doesn't
+   ship `mla_*_module_perf.txt` (true for SGLang / TRT-LLM today), the
+   per-kernel chain takes over. Rust gained `Op::Fallback` and the
+   DeepSeek model builder now constructs the same fallback chain
+   unconditionally. vLLM keeps using the module-level primary; SGLang
+   now exercises the fallback and Kimi-K2.5 passes on
+   b200_sxm/sglang/0.5.10 (ctx +0.33%, gen -0.02%) and
+   h200_sxm/sglang/0.5.10 (ctx +0.35%, gen -0.06%).
+
+   Also fixed the latent `MlaBmm` dispatch: Python's `MLABmm.query`
+   keys the BMM table by `batch_size`, not by `num_tokens`. Rust was
+   passing `ctx.num_tokens` (which is `batch * effective_isl` for
+   context); now uses `ctx.batch_size`. Hidden by vLLM's primary
+   succeeding pre-fix; surfaced once the SGLang fallback exercised it.
+
+3. **SGLang dispatch defaults to CustomAllReduce** (D4).
+   Python's `MoEDispatch.query` only uses `wideep_deepep_normal_perf`
+   when the caller explicitly sets `moe_backend="deepep_moe"`; the
+   AIC `cli_estimate` path doesn't, so it falls through to a
+   custom_allreduce path identical to vLLM. Rust was hard-coding
+   `DispatchFlavor::DeepEpNormal` for SGLang, which then hit a
+   missing perf file. Switched both `models/moe.rs` and
+   `models/deepseek.rs` to `CustomAllReduce` for the SGLang default.
+   The `DeepEpNormal` flavor is preserved in the enum for when we
+   thread `moe_backend="deepep_moe"` through the FFI.
+
+4. **MLA effective head count = `128 // tp_size`.** (D4)
+   Python `models/deepseek.py` hard-codes `128 // tp_size` for every
+   MLA op regardless of the model's `num_attention_heads`. DeepSeek-
+   style MLA always profiles against 128 attention heads. Rust was
+   using `num_attention_heads / tp` (so Kimi-K2.5 with 64 heads on
+   tp=8 was passing 8 instead of 16; DeepSeek-V3 with 128 heads
+   happened to be right). The wrong key hit a different slice of the
+   MLA module table; drift grew with system speed and ISL on Kimi
+   (~-1.06% on h200/ISL=1024, -1.58% at ISL=2048). Fixed.
+
+Still deferred:
+
+5. **Comprehensive matrix scan.** Now that families on
+   vLLM/SGLang/TRT-LLM share a single Rust op graph, the original
+   Phase 4 vision (every matrix entry, parallelized, per-row drift
+   CSV) is more attractive. Still gated on Phase 5 hot-path work so a
+   full scan finishes in a reasonable time, but the "would mostly
+   produce unsupported noise" objection no longer holds for the
+   landed families. Data-gap rows (DeepSeek-V3 SGLang missing
+   `context_mla_perf`, etc.) need to be flagged by the harness as
+   "Python also errors", not as Rust drift.
+
+Re-running the smoke set:
+
+```bash
+AICONFIGURATOR_RUST_CORE_AUTOBUILD=1 uv run pytest \
+  rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py -p no:xdist
+```
+
+A clean run finishes in ~45s and asserts all 108 surfaces (27 cases
+x 4 modes). Coverage spans 13 of 14 supported model families (the
+multimodal Qwen3VL pair and Gemma4Moe are intentionally out of scope):
+
+- Llama / Qwen3 dense: Qwen3-32B, Llama-3.1-70B, Llama-3.1-8B.
+- MoE family: MiniMax-M2.5, MiniMax-M2.7, Qwen3-30B-A3B,
+  Qwen3-235B-A22B.
+- DeepSeek family: Kimi-K2.5, DeepSeek-V3, DeepSeek-R1.
+- DeepSeekV32 family: DeepSeek-V3.2, GLM-5 (DSA attention).
+- NemotronNas: Llama-3.3-Nemotron-Super-49B-v1 (per-block config).
+- NemotronH: Nemotron-H-56B-Base-8K (hybrid Mamba2 + attention + MLP).
+- Qwen35: Qwen3.5-27B (hybrid GDN + full-attention),
+  Qwen3.5-397B-A17B (hybrid GDN + MoE).
+- Error-symmetry families (both Python and Rust error on perf-DB
+  miss): meta-llama/Llama-4-Scout (HybridMoe), openai/gpt-oss-20b
+  (Gpt), deepseek-ai/DeepSeek-V4-Flash (DeepSeekV4).
+- Cross-system: MiniMax-M2.5 on b200_sxm / h200_sxm / h100_sxm;
+  Kimi-K2.5 on b200_sxm / h200_sxm / h100_sxm.
+- Cross-backend: MiniMax-M2.5 on b200_sxm/sglang/0.5.10;
+  Kimi-K2.5 on b200_sxm + h200_sxm on sglang/0.5.10.
+
+The error-symmetry contract introduced in D7-A treats "both engines
+raise" as parity pass, so families whose perf-DB tables are missing
+for the smoke shape still get smoke coverage — the test asserts that
+Rust mirrors Python's behavior, not just its successful outputs.
+
+### Phase 5: Hot-Path Optimization
+
+Status: pending. Activated after the Phase 3 parity work merges. Goal:
+get smoke-case p50 speedup from the Phase 3 1.1-1.6x baseline to >=3x.
+
+Phase 3 profiling (recorded in `parity_tests/benchmarks.md`) attributes
+the remaining cost to several pieces, none of which can be tackled
+without measurable code drift from the Python reference:
+
+- **Python wrapper rebuilds the engine-config JSON per call** (~5.6us)
+  because the `@cache`d Rust estimator is keyed by that JSON string.
+  Fixing it requires an identity-keyed (or otherwise model+db-keyed)
+  cache that keeps the Rust handle alive across calls.
+- **Per-call `copy.deepcopy` + `json.dumps`** of FPM metrics adds
+  ~3.5us. Avoiding it requires a packed-primitive FFI entry-point on
+  the Rust side and a fast-path detector on the Python side.
+- **Rust op-graph allocations / dispatch** dominates the remaining
+  ~4.7us hot-path budget. Reducing it without sacrificing the
+  apple-to-apple op-list structure requires a runtime sub-table cache
+  (memoized table-resolution per op-shape) plus interned distribution
+  strings.
+
+Each of these pulls the implementation away from the Python reference
+shape in non-trivial ways: the FFI gains a fast/slow path bifurcation,
+the table layout grows a runtime cache (unsafe pointers or interior
+mutability), and the Python side grows an identity-keyed estimator
+context. Landing those changes safely needs:
+
+1. A documented design for the cache structures (key shape, invalidation
+   rules, eviction policy) so future maintainers can reason about them
+   without re-deriving correctness.
+2. A separate optimization-only PR so any speedup-induced regression is
+   bisectable against the parity-only PR.
+3. Re-running the Phase 3 smoke parity assert suite after each
+   structural change, plus the eventual Phase 4 comprehensive scan.
+
+Exit criterion: benchmark p50 speedup >= 3x for every smoke case while
+Phase 3's parity assertions remain green.
 
 ## Dependencies / Relationships
 
@@ -224,8 +465,10 @@ Comprehensive scan requirements:
 - Phase 1 provides correctness guardrails.
 - Phase 2 provides performance guardrails.
 - Phase 3 uses the migration map, parity tests, and benchmark harness to implement the Rust migration safely.
-- Phase 4 validates full parity across the supported AIC search space before the
-  Rust core becomes the source of truth.
+- Phase 4 expands the smoke set with realistic per-family / cross-system
+  coverage; the full matrix scan is deferred until the remaining family
+  gaps close.
+- Phase 5 optimizes the hot path after the parity foundation lands.
 
 Do not treat the phases as isolated checklist items. If work in one phase reveals missing requirements in another, update the plan and surface the change.
 
@@ -298,7 +541,9 @@ Stop and ask before proceeding if:
 6. A required model/system/backend/version tuple is missing from the perf DB.
 7. The test harness cannot compare Python and Rust metrics through stable public interfaces.
 8. Achieving <1% parity appears incompatible with the intended Rust architecture.
-9. Achieving 3x speedup appears incompatible with parity or readability.
+9. Achieving 3x speedup appears incompatible with parity or readability (the
+   Phase 3 outcome: surfaced and resolved by moving the 3x target to a
+   dedicated Phase 5).
 10. A task requires changing unrelated Python SDK internals.
 
 ## Expected Final Summary

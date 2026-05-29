@@ -67,8 +67,12 @@ class RustEngineStepEstimator:
         _raise_for_error(self._lib, err)
         return float(out_ms.value)
 
-    # TODO(remove-after-rust-migration): parity check/benchmark-only cache reset.
     def clear_runtime_caches(self) -> None:
+        """Reset the Rust estimator's runtime caches.
+
+        Used by parity and benchmarking harnesses that need a cold cache
+        between iterations; production callers normally don't touch this.
+        """
         if not self._lib.__dict__.get("_aic_engine_step_estimator_clear_runtime_caches_available", False):
             raise RustCoreUnavailableError(
                 "Rust core shared library does not expose runtime cache reset. "
@@ -427,12 +431,21 @@ def estimate_mixed_step_latency_with_rust(
 
     scheduled_requests: dict[str, Any] = {}
     if ctx_tokens > 0:
+        # `ctx_tokens` is the chunk size in `isl`-equivalent units. The FPM
+        # convention (see `_prefill_metrics`) is that `sum_prefill_tokens`
+        # is the count of NEW prefill tokens to process, with prior cache
+        # reported separately in `sum_prefill_kv_tokens`. Subtract the
+        # cached portion here so the Rust mix-step interpretation lines up
+        # with Python's pass-1 formula
+        # (`effective_isl = num_tokens_combined - prefix`).
         num_prefill_requests = max(math.ceil(ctx_tokens / isl), 1)
+        cached_total = prefix * num_prefill_requests
+        new_prefill_tokens = max(ctx_tokens - cached_total, 1) if cached_total else ctx_tokens
         scheduled_requests.update(
             {
                 "num_prefill_requests": num_prefill_requests,
-                "sum_prefill_tokens": ctx_tokens,
-                "sum_prefill_kv_tokens": prefix * num_prefill_requests,
+                "sum_prefill_tokens": new_prefill_tokens,
+                "sum_prefill_kv_tokens": cached_total,
             }
         )
     if gen_tokens > 0:
