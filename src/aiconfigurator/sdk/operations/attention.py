@@ -265,9 +265,117 @@ class ContextAttention(Operation):
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             n_kv_lookup = 0 if n == n_kv else n_kv
             attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
-            result = interpolation.interp_3d(n, full_s, b, attention_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+
+            lookup_s = full_s
+            available_s = {observed_s for per_n_data in attention_dict.values() for observed_s in per_n_data.keys()}
+            if lookup_s not in available_s and available_s:
+                nearest_s = min(available_s, key=lambda observed_s: abs(observed_s - lookup_s))
+                if abs(nearest_s - lookup_s) <= max(1, int(lookup_s * 0.01)):
+                    lookup_s = nearest_s
+
+            def sample_metric(sample, metric: str) -> float:
+                return float(interpolation.get_value(sample, metric))
+
+            def get_batch_sample(per_b_data: dict, s_i: int):
+                if b in per_b_data:
+                    return per_b_data[b]
+
+                b_keys = sorted(per_b_data)
+                left_b = None
+                right_b = None
+                for key in b_keys:
+                    if key <= b:
+                        left_b = key
+                    if key >= b:
+                        right_b = key
+                        break
+                if left_b is not None and right_b is not None:
+                    if left_b == right_b:
+                        return per_b_data[left_b]
+                    left = per_b_data[left_b]
+                    right = per_b_data[right_b]
+                    ratio = (b - left_b) / (right_b - left_b)
+                    return {
+                        "latency": sample_metric(left, "latency")
+                        + (sample_metric(right, "latency") - sample_metric(left, "latency")) * ratio,
+                        "power": sample_metric(left, "power")
+                        + (sample_metric(right, "power") - sample_metric(left, "power")) * ratio,
+                        "energy": sample_metric(left, "energy")
+                        + (sample_metric(right, "energy") - sample_metric(left, "energy")) * ratio,
+                    }
+
+                nearest_b = min(b_keys, key=lambda observed_b: abs(observed_b - b))
+                sample = per_b_data[nearest_b]
+                source_sol = get_sol(
+                    nearest_b,
+                    s_i,
+                    0,
+                    n,
+                    n_kv,
+                    head_size,
+                    window_size,
+                    kvcache_quant_mode,
+                    fmha_quant_mode,
+                )[0]
+                target_sol = get_sol(
+                    b,
+                    s_i,
+                    0,
+                    n,
+                    n_kv,
+                    head_size,
+                    window_size,
+                    kvcache_quant_mode,
+                    fmha_quant_mode,
+                )[0]
+                scale = target_sol / source_sol if source_sol else 1.0
+                return {
+                    "latency": sample_metric(sample, "latency") * scale,
+                    "power": sample_metric(sample, "power"),
+                    "energy": sample_metric(sample, "energy") * scale,
+                }
+
+            def get_same_shape_sample(s_i: int):
+                exact_n = attention_dict.get(n)
+                if not exact_n:
+                    return None
+                exact_s = exact_n.get(s_i)
+                if exact_s is not None:
+                    return get_batch_sample(exact_s, s_i)
+
+                s_keys = sorted(s_key for s_key, per_b in exact_n.items() if per_b)
+                left_s = None
+                right_s = None
+                for key in s_keys:
+                    if key <= s_i:
+                        left_s = key
+                    if key >= s_i:
+                        right_s = key
+                        break
+                if left_s is None or right_s is None:
+                    return None
+                if left_s == right_s:
+                    return get_batch_sample(exact_n[left_s], left_s)
+
+                left = get_batch_sample(exact_n[left_s], left_s)
+                right = get_batch_sample(exact_n[right_s], right_s)
+                ratio = (s_i - left_s) / (right_s - left_s)
+                return {
+                    "latency": sample_metric(left, "latency")
+                    + (sample_metric(right, "latency") - sample_metric(left, "latency")) * ratio,
+                    "power": sample_metric(left, "power")
+                    + (sample_metric(right, "power") - sample_metric(left, "power")) * ratio,
+                    "energy": sample_metric(left, "energy")
+                    + (sample_metric(right, "energy") - sample_metric(left, "energy")) * ratio,
+                }
+
+            result = get_same_shape_sample(lookup_s)
+            if result is None:
+                result = interpolation.interp_3d(
+                    n, lookup_s, b, attention_dict, "cubic", database._extracted_metrics_cache
+                )
+            latency = sample_metric(result, "latency") * prefix_correction
+            energy = sample_metric(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -550,6 +658,45 @@ class GenerationAttention(Operation):
             n_kv_lookup = n_kv if n_kv != n else 0
 
             attention_dict = data_wrapper[kvcache_quant_mode][n_kv_lookup][head_size][window_size]
+
+            def sample_metric(sample, metric: str) -> float:
+                return float(interpolation.get_value(sample, metric))
+
+            def get_same_shape_sample(s_i: int):
+                exact_n = attention_dict.get(n)
+                exact_b = exact_n.get(b) if exact_n else None
+                if not exact_b:
+                    return None
+                exact = exact_b.get(s_i)
+                if exact is not None:
+                    return exact
+
+                s_keys = sorted(exact_b)
+                left_s = None
+                right_s = None
+                for key in s_keys:
+                    if key <= s_i:
+                        left_s = key
+                    if key >= s_i:
+                        right_s = key
+                        break
+                if left_s is None or right_s is None:
+                    return None
+                if left_s == right_s:
+                    return exact_b[left_s]
+
+                left = exact_b[left_s]
+                right = exact_b[right_s]
+                ratio = (s_i - left_s) / (right_s - left_s)
+                return {
+                    "latency": sample_metric(left, "latency")
+                    + (sample_metric(right, "latency") - sample_metric(left, "latency")) * ratio,
+                    "power": sample_metric(left, "power")
+                    + (sample_metric(right, "power") - sample_metric(left, "power")) * ratio,
+                    "energy": sample_metric(left, "energy")
+                    + (sample_metric(right, "energy") - sample_metric(left, "energy")) * ratio,
+                }
+
             s_min = max(1, int(s * 0.9))
             s_max = max(s_min, int(s * 1.1))
             sample_cnt = 5
@@ -558,9 +705,13 @@ class GenerationAttention(Operation):
             latency_sum = 0.0
             energy_sum = 0.0
             for s_i in s_samples:
-                r = interpolation.interp_3d(n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache)
-                latency_sum += float(r["latency"])
-                energy_sum += float(r.get("energy", 0.0))
+                r = get_same_shape_sample(s_i)
+                if r is None:
+                    r = interpolation.interp_3d(
+                        n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache
+                    )
+                latency_sum += sample_metric(r, "latency")
+                energy_sum += sample_metric(r, "energy")
 
             latency = latency_sum / sample_cnt
             energy = energy_sum / sample_cnt

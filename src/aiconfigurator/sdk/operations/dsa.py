@@ -438,6 +438,11 @@ class ContextDSAModule(Operation):
             return PerformanceResult(emp_latency, energy=0.0, source="empirical")
 
         cls.load_data(database)
+        allow_reduced_head_dsa_fallback = (
+            database.system == "b300_sxm"
+            and database.backend == common.BackendName.sglang.value
+            and database.version == "0.5.10"
+        )
 
         def missing_context_dsa_error() -> PerfDataNotAvailableError:
             return PerfDataNotAvailableError(
@@ -458,7 +463,12 @@ class ContextDSAModule(Operation):
             try:
                 dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
             except (KeyError, TypeError) as exc:
-                raise missing_context_dsa_error() from exc
+                try:
+                    dsa_dict = dsa_module_data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][
+                        common.GEMMQuantMode.bfloat16
+                    ][architecture]
+                except (KeyError, TypeError):
+                    raise missing_context_dsa_error() from exc
             raw_dsa_dict = None
             raw_dsa_module_data = database._raw_context_dsa_module_data
             if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
@@ -467,7 +477,12 @@ class ContextDSAModule(Operation):
                         architecture
                     ]
                 except (KeyError, TypeError):
-                    raw_dsa_dict = None
+                    try:
+                        raw_dsa_dict = raw_dsa_module_data[common.FMHAQuantMode.bfloat16][
+                            common.KVCacheQuantMode.bfloat16
+                        ][common.GEMMQuantMode.bfloat16][architecture]
+                    except (KeyError, TypeError):
+                        raw_dsa_dict = None
 
             def _finite_result(result):
                 if not isinstance(result, dict):
@@ -513,7 +528,7 @@ class ContextDSAModule(Operation):
             prefix_data, has_prefix_axis = _context_prefix_data(dsa_dict, require_prefix_axis)
             raw_prefix_data, _ = _context_prefix_data(raw_dsa_dict, require_prefix_axis)
 
-            def _lookup_prefix_module_at(prefix_value: int):
+            def _lookup_prefix_module_at_heads(prefix_value: int, query_heads: int):
                 if not isinstance(prefix_data, dict):
                     return None
                 prefix_slice = prefix_data.get(prefix_value)
@@ -529,7 +544,7 @@ class ContextDSAModule(Operation):
                 if index_topk is not None:
                     boundary = index_topk - prefix_value
                     result = interpolation.interp_dsa_context_topk_piecewise_from_raw(
-                        num_heads, s, b, raw_slice, boundary
+                        query_heads, s, b, raw_slice, boundary
                     )
                     if not _finite_result(result):
                         result = None
@@ -537,10 +552,36 @@ class ContextDSAModule(Operation):
                     try:
                         from aiconfigurator.sdk.operations.dsv4 import _dsv4_robust_3d_lookup
 
-                        result = _dsv4_robust_3d_lookup(database, prefix_slice, num_heads, s, b)
+                        result = _dsv4_robust_3d_lookup(database, prefix_slice, query_heads, s, b)
                     except Exception:
                         return None
                 return result if _finite_result(result) else None
+
+            def _lookup_prefix_module_at(prefix_value: int):
+                result = _lookup_prefix_module_at_heads(prefix_value, num_heads)
+                if result is not None or not allow_reduced_head_dsa_fallback:
+                    return result
+
+                prefix_slice = prefix_data.get(prefix_value) if isinstance(prefix_data, dict) else None
+                if not isinstance(prefix_slice, dict):
+                    return None
+                available_heads = sorted(h for h, curves in prefix_slice.items() if isinstance(curves, dict))
+                if not available_heads or num_heads >= available_heads[0]:
+                    return None
+
+                anchor_heads = available_heads[0]
+                anchor_result = _lookup_prefix_module_at_heads(prefix_value, anchor_heads)
+                if not _finite_result(anchor_result):
+                    return None
+
+                anchor_sol = get_sol(b, s, prefix_value, anchor_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+                target_sol = get_sol(b, s, prefix_value, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+                head_scale = 1.0 if anchor_sol <= 0 else target_sol / anchor_sol
+                return {
+                    "latency": interpolation.get_value(anchor_result, "latency") * head_scale,
+                    "power": interpolation.get_value(anchor_result, "power") * head_scale,
+                    "energy": interpolation.get_value(anchor_result, "energy") * head_scale,
+                }
 
             def _interp_results_1d(x0, x1, r0, r1, x):
                 return {
@@ -845,6 +886,11 @@ class GenerationDSAModule(Operation):
             return PerformanceResult(emp_latency, energy=0.0, source="empirical")
 
         cls.load_data(database)
+        allow_reduced_head_dsa_fallback = (
+            database.system == "b300_sxm"
+            and database.backend == common.BackendName.sglang.value
+            and database.version == "0.5.10"
+        )
 
         def missing_generation_dsa_error() -> PerfDataNotAvailableError:
             return PerfDataNotAvailableError(
@@ -864,6 +910,14 @@ class GenerationDSAModule(Operation):
                 )
             try:
                 dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
+            except (KeyError, TypeError) as exc:
+                try:
+                    dsa_dict = dsa_module_data[common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][
+                        architecture
+                    ]
+                except (KeyError, TypeError):
+                    raise missing_generation_dsa_error() from exc
+            try:
                 # Generation callers pass ``s`` as total decode length, while
                 # some collectors persist the same point as past-KV length.
                 # Try both exact keys before falling back to interpolation.
@@ -871,20 +925,22 @@ class GenerationDSAModule(Operation):
                 if s > 0:
                     sequence_candidates.append(s - 1)
 
-                sequence_dicts = list(dsa_dict.get(num_heads, {}).values())
-                normalized_s = s
-                for seq_key in sequence_candidates:
-                    if any(seq_key in seq_dict for seq_dict in sequence_dicts):
-                        normalized_s = seq_key
-                        break
+                def normalized_sequence_length(heads: int) -> int:
+                    sequence_dicts = list(dsa_dict.get(heads, {}).values())
+                    for seq_key in sequence_candidates:
+                        if any(seq_key in seq_dict for seq_dict in sequence_dicts):
+                            return seq_key
+                    return s
 
-                def sequence_value(seq_dict):
-                    if normalized_s in seq_dict:
-                        return seq_dict[normalized_s]
+                normalized_s = normalized_sequence_length(num_heads)
+
+                def sequence_value(seq_dict, sequence_length: int):
+                    if sequence_length in seq_dict:
+                        return seq_dict[sequence_length]
                     seq_keys = sorted(seq_dict)
                     if len(seq_keys) < 2:
                         return None
-                    left, right = interpolation.nearest_1d_point_helper(normalized_s, seq_keys, inner_only=False)
+                    left, right = interpolation.nearest_1d_point_helper(sequence_length, seq_keys, inner_only=False)
 
                     def interp_sequence_metric(metric: str) -> float:
                         return interpolation.interp_1d(
@@ -893,7 +949,7 @@ class GenerationDSAModule(Operation):
                                 interpolation.get_value(seq_dict[left], metric),
                                 interpolation.get_value(seq_dict[right], metric),
                             ],
-                            normalized_s,
+                            sequence_length,
                         )
 
                     return {
@@ -904,11 +960,11 @@ class GenerationDSAModule(Operation):
 
                 result = None
                 if num_heads in dsa_dict and b in dsa_dict[num_heads]:
-                    result = sequence_value(dsa_dict[num_heads][b])
+                    result = sequence_value(dsa_dict[num_heads][b], normalized_s)
                 if result is None and num_heads in dsa_dict:
                     batch_dict = {}
                     for batch_key, seq_dict in dsa_dict[num_heads].items():
-                        value = sequence_value(seq_dict)
+                        value = sequence_value(seq_dict, normalized_s)
                         if value is not None:
                             batch_dict[batch_key] = value
                     batch_keys = sorted(batch_dict)
@@ -930,6 +986,52 @@ class GenerationDSAModule(Operation):
                             "power": interp_batch_metric("power"),
                             "energy": interp_batch_metric("energy"),
                         }
+                if result is None and allow_reduced_head_dsa_fallback:
+                    available_heads = sorted(h for h, curves in dsa_dict.items() if isinstance(curves, dict))
+                    if available_heads and num_heads < available_heads[0]:
+                        anchor_heads = available_heads[0]
+                        anchor_s = normalized_sequence_length(anchor_heads)
+                        anchor_result = None
+                        if anchor_heads in dsa_dict and b in dsa_dict[anchor_heads]:
+                            anchor_result = sequence_value(dsa_dict[anchor_heads][b], anchor_s)
+                        if anchor_result is None:
+                            batch_dict = {}
+                            for batch_key, seq_dict in dsa_dict.get(anchor_heads, {}).items():
+                                value = sequence_value(seq_dict, anchor_s)
+                                if value is not None:
+                                    batch_dict[batch_key] = value
+                            batch_keys = sorted(batch_dict)
+                            if len(batch_keys) >= 2:
+                                left, right = interpolation.nearest_1d_point_helper(b, batch_keys, inner_only=False)
+
+                                def interp_anchor_batch_metric(metric: str) -> float:
+                                    return interpolation.interp_1d(
+                                        [left, right],
+                                        [
+                                            interpolation.get_value(batch_dict[left], metric),
+                                            interpolation.get_value(batch_dict[right], metric),
+                                        ],
+                                        b,
+                                    )
+
+                                anchor_result = {
+                                    "latency": interp_anchor_batch_metric("latency"),
+                                    "power": interp_anchor_batch_metric("power"),
+                                    "energy": interp_anchor_batch_metric("energy"),
+                                }
+                        if anchor_result is None:
+                            anchor_result = interpolation.interp_3d(
+                                anchor_heads, b, anchor_s, dsa_dict, "cubic", database._extracted_metrics_cache
+                            )
+                        if anchor_result is not None:
+                            anchor_sol = get_sol(b, s, anchor_heads, kv_cache_dtype)[0]
+                            target_sol = get_sol(b, s, num_heads, kv_cache_dtype)[0]
+                            head_scale = 1.0 if anchor_sol <= 0 else target_sol / anchor_sol
+                            result = {
+                                "latency": interpolation.get_value(anchor_result, "latency") * head_scale,
+                                "power": interpolation.get_value(anchor_result, "power") * head_scale,
+                                "energy": interpolation.get_value(anchor_result, "energy") * head_scale,
+                            }
                 if result is None:
                     result = interpolation.interp_3d(
                         num_heads, b, normalized_s, dsa_dict, "cubic", database._extracted_metrics_cache
@@ -983,12 +1085,16 @@ class GenerationDSAModule(Operation):
             raise ValueError(f"{self.__class__.__name__} only supports beam_width=1, got {beam_width}")
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
+        kv_cache_dtype = self._kv_cache_dtype
+        supported_modes = (getattr(database, "supported_quant_mode", {}) or {}).get("dsa_generation_module", []) or []
+        if kv_cache_dtype.name not in supported_modes and common.KVCacheQuantMode.bfloat16.name in supported_modes:
+            kv_cache_dtype = common.KVCacheQuantMode.bfloat16
 
         result = database.query_generation_dsa_module(
             b=batch_size,
             s=s,
             num_heads=self._num_heads,
-            kv_cache_dtype=self._kv_cache_dtype,
+            kv_cache_dtype=kv_cache_dtype,
             gemm_quant_mode=self._gemm_quant_mode,
             architecture=self._architecture,
         )
