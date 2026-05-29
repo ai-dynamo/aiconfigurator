@@ -104,6 +104,20 @@ class TestContextDSAModule:
         ][32][0][256][1]
         assert value["latency"] == pytest.approx(10.0)
 
+    def test_default_context_loader_treats_whitespace_step_as_missing(self, tmp_path):
+        data_path = tmp_path / "dsa_context_module_perf.txt"
+        data_path.write_text(
+            "architecture,gemm_type,mla_dtype,kv_cache_dtype,num_heads,batch_size,isl,step,latency\n"
+            f"{DEFAULT_DSA_ARCHITECTURE},bfloat16,bfloat16,bfloat16,32,1,256,  ,10.0\n"
+        )
+
+        data = load_context_dsa_module_data(str(data_path))
+
+        value = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][
+            DEFAULT_DSA_ARCHITECTURE
+        ][32][0][256][1]
+        assert value["latency"] == pytest.approx(10.0)
+
     def test_glm5_context_rejects_legacy_shape_without_prefix_axis(self, stub_perf_db):
         legacy_dsa_dict = {32: {256: {1: _dsa_value(10.0)}}}
         stub_perf_db._context_dsa_module_data = LoadedOpData(

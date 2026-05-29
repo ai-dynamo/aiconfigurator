@@ -56,7 +56,7 @@ def _read_perf_rows(perf_file: str) -> list[dict[str, object]]:
         ]
 
     with open(perf_file, encoding="utf-8", newline="") as f:
-        return list(csv.DictReader(f))
+        return [{key: "" if value is None else value for key, value in row.items()} for row in csv.DictReader(f)]
 
 
 def _resolve_perf_data_path(perf_file: str) -> str:
