@@ -91,6 +91,38 @@ def _chart_op_name(create_chart_func) -> str:
     return chart_op_name.replace("visualize_", "")
 
 
+def _load_chart_op_data(database, op: str) -> None:
+    """Load the lazy op data expected by the legacy notebook visualizers."""
+    from aiconfigurator.sdk.operations import (
+        GEMM,
+        NCCL,
+        ContextAttention,
+        ContextDSAModule,
+        ContextMLA,
+        CustomAllReduce,
+        GenerationAttention,
+        GenerationDSAModule,
+        GenerationMLA,
+        MLAModule,
+        MoE,
+    )
+
+    op_loaders = {
+        "gemm": (GEMM,),
+        "context_attention": (ContextAttention,),
+        "generation_attention": (GenerationAttention,),
+        "context_mla": (ContextMLA, MLAModule),
+        "generation_mla": (GenerationMLA, MLAModule),
+        "moe": (MoE,),
+        "custom_allreduce": (CustomAllReduce,),
+        "nccl": (NCCL,),
+        "dsa_module": (ContextDSAModule, GenerationDSAModule),
+    }
+
+    for loader in op_loaders.get(op, ()):
+        loader.load_data(database)
+
+
 class SkippedSiliconPoints:
     """Temporarily skip unavailable SILICON query points while drawing charts."""
 
@@ -215,6 +247,50 @@ def get_changed_files(base_ref: str, head_ref: str) -> list[str]:
         return []
 
 
+def get_csv_to_parquet_conversion_files(base_ref: str, head_ref: str) -> set[str]:
+    """Return added parquet files that replace same-stem legacy text files."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-status", f"{base_ref}...{head_ref}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Error getting changed file statuses: {e}", file=sys.stderr)
+        return set()
+
+    added_parquet: set[str] = set()
+    deleted_legacy_as_parquet: set[str] = set()
+    renamed_legacy_as_parquet: set[str] = set()
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        status = parts[0]
+        paths = parts[1:]
+        if status.startswith("A") and paths:
+            path = paths[-1]
+            if path.startswith("src/aiconfigurator/systems/") and path.endswith("_perf.parquet"):
+                added_parquet.add(path)
+        elif status.startswith("D") and paths:
+            path = paths[0]
+            if path.startswith("src/aiconfigurator/systems/") and path.endswith("_perf.txt"):
+                deleted_legacy_as_parquet.add(f"{os.path.splitext(path)[0]}.parquet")
+        elif status.startswith("R") and len(paths) == 2:
+            old_path, new_path = paths
+            if (
+                old_path.startswith("src/aiconfigurator/systems/")
+                and new_path.startswith("src/aiconfigurator/systems/")
+                and old_path.endswith("_perf.txt")
+                and new_path.endswith("_perf.parquet")
+                and os.path.splitext(old_path)[0] == os.path.splitext(new_path)[0]
+            ):
+                renamed_legacy_as_parquet.add(new_path)
+
+    return (added_parquet & deleted_legacy_as_parquet) | renamed_legacy_as_parquet
+
+
 def create_charts(
     backend: str,
     backend_version: str,
@@ -305,6 +381,7 @@ def create_charts(
 
             try:
                 plt.close("all")
+                _load_chart_op_data(database, op)
                 with SkippedSiliconPoints(database) as skipped_points:
                     create_chart_func(database)
                 if skipped_points.calls and not skipped_points.successes:
@@ -384,6 +461,12 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     changed_files = get_changed_files(args.base_ref, args.head_ref)
+    csv_to_parquet_conversion_files = get_csv_to_parquet_conversion_files(args.base_ref, args.head_ref)
+    if csv_to_parquet_conversion_files:
+        print(
+            "Skipping "
+            f"{len(csv_to_parquet_conversion_files)} CSV-to-parquet conversion files already covered by parquet diff."
+        )
 
     # Organize changed files by (system, backend, backend_version) so that
     # they are grouped together in the output text.
@@ -391,6 +474,9 @@ def main():
     system_backend_version_to_changed_files = defaultdict(list)
 
     for changed_file in changed_files:
+        if changed_file in csv_to_parquet_conversion_files:
+            continue
+
         # remove prefix
         changed_file = changed_file.replace("src/aiconfigurator/systems/", "")
         # split by /
