@@ -122,6 +122,17 @@ class BaseBackend:
         """
         return num_mix_steps
 
+    def _ttft_queuing_factor(self, b: int, steps_to_finish_ctx: float) -> float:
+        """Return the queuing factor applied to the per-request prefill time to get TTFT.
+
+        In a batch of b requests that all arrive simultaneously, each request waits
+        for the preceding ones to complete their context phase before its own first
+        token is produced. Default: the legacy heuristic formula (preserves existing
+        behaviour for non-vLLM backends). Subclasses should override with a model
+        appropriate to their engine's scheduling policy.
+        """
+        return min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)
+
     def _throughput_cap(self, step_throughput: float, ttft: float, tpot: float, b: int, osl: int) -> float:
         """Return the effective output throughput after any engine-specific cap.
 
@@ -1203,13 +1214,15 @@ class BaseBackend:
             per_ops_data["genonly_step"] = genonly_per_ops
             per_ops_source["genonly_step"] = genonly_per_ops_src
 
-        # TTFT: assume a 10x request queue, capped correction factor at 4.
-        llm_ttft = mix_step_latency_ms * np.ceil(isl / ctx_tokens)
-        correction_factor = min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)
-        ttft = encoder_latency_ms + llm_ttft * correction_factor
+        # TTFT: per-request prefill time * queuing factor, plus encoder latency.
+        # _mix_step_efficiency reduces mix_step_latency_ms based on the fraction of
+        # decode tokens in the step. For TTFT we need the pure prefill cost (no decode
+        # tokens alongside), so we undo that efficiency reduction first.
+        _prefill_step_ms = mix_step_latency_ms / mix_efficiency if mix_efficiency > 0 else mix_step_latency_ms
+        _ttft_per_request = _prefill_step_ms * np.ceil(isl / ctx_tokens)
+        ttft = encoder_latency_ms + _ttft_per_request * self._ttft_queuing_factor(b, steps_to_finish_ctx)
         logger.debug(
-            f"ttft correction factor: {2 + (steps_to_finish_ctx - 3) / 2 / 10} capped to "
-            f"{correction_factor} when b: {b}, ctx_tokens: {ctx_tokens} isl {isl}"
+            f"ttft: prefill_step={_prefill_step_ms:.2f}ms qf={self._ttft_queuing_factor(b, steps_to_finish_ctx):.2f}"
         )
 
         # Guard against osl == 1 (no-decode), which makes both denominators zero.
