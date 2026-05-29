@@ -122,6 +122,16 @@ class BaseBackend:
         """
         return num_mix_steps
 
+    def _throughput_cap(self, step_throughput: float, ttft: float, tpot: float, b: int, osl: int) -> float:
+        """Return the effective output throughput after any engine-specific cap.
+
+        Default: returns step_throughput unchanged. Subclasses may override to
+        apply a tighter constraint — e.g. a Little's Law cap that prevents the
+        model from recommending operating points that cannot be sustained in
+        steady state given the predicted request latency.
+        """
+        return step_throughput
+
     def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int) -> dict:
         """Resolve backend-specific run_agg kwargs to defaults.
 
@@ -1213,9 +1223,10 @@ class BaseBackend:
         _total_step_latency_ms = (
             encoder_latency_ms + num_mix_steps * mix_step_latency_ms + num_genonly_steps * genonly_step_latency_ms
         )
-        output_throughput = (
+        _step_throughput = (
             (1000 / _total_step_latency_ms * b * (osl - 1)) if (osl > 1 and _total_step_latency_ms > 0) else 0.0
         )
+        output_throughput = self._throughput_cap(_step_throughput, ttft, tpot, b, osl)
         logger.debug(
             f"ctx_tokens: {ctx_tokens}, b: {b}, osl: {osl}, isl: {isl}, "
             f"num_mix_steps: {num_mix_steps}, num_genonly_steps: {num_genonly_steps}, "

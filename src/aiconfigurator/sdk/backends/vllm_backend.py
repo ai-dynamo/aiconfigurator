@@ -57,3 +57,13 @@ class VLLMBackend(BaseBackend):
         # giving a consistent formula across both scheduling regimes.
         # Source: vllm/v1/core/sched/scheduler.py, SchedulerConfig.max_num_partial_prefills
         return max(1, b - int(np.ceil(ctx_tokens / isl)))
+
+    def _throughput_cap(self, step_throughput: float, ttft: float, tpot: float, b: int, osl: int) -> float:
+        # Cap throughput at the Little's Law limit: b concurrent requests each
+        # taking (ttft + tpot*(osl-1)) ms cannot sustain more than
+        # b*(osl-1)*1000 / request_latency_ms output tokens/s in steady state.
+        request_latency_ms = ttft + tpot * max(osl - 1, 0)
+        if request_latency_ms <= 0:
+            return step_throughput
+        ll_throughput = b * max(osl - 1, 0) * 1000.0 / request_latency_ms
+        return min(step_throughput, ll_throughput)
