@@ -30,6 +30,8 @@ def mock_stdout_isatty(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _reset_logging_after_test(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    setup_logging(no_color=False)
     yield
     setup_logging(no_color=False)
     monkeypatch.delenv("NO_COLOR", raising=False)
