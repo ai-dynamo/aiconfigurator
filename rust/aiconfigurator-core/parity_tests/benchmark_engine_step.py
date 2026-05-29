@@ -51,8 +51,39 @@ class BenchmarkCase:
 
 
 CASES = {
+    # Existing Phase 3 baseline cases (MoE family + DeepSeek family via Kimi).
     "minimax-m25": BenchmarkCase(model_path="MiniMaxAI/MiniMax-M2.5"),
     "kimi-k25": BenchmarkCase(model_path="moonshotai/Kimi-K2.5"),
+    # Phase 4 full family coverage. One representative model per Rust-supported
+    # ModelFamily not already covered above. Parallelism mirrors the smoke
+    # suite (`test_engine_step_parity.py::SMOKE_CASES`) where one exists so
+    # the perf-DB tables are known to resolve.
+    # Llama/Qwen3 dense family. User asked for tp=4 (smaller dense sweep).
+    "qwen3-32b": BenchmarkCase(
+        model_path="Qwen/Qwen3-32B",
+        tp_size=4,
+        moe_ep_size=1,
+    ),
+    # MoE family (non-DeepSeek). Smoke uses tp=4, moe_ep=4 for this model;
+    # tp=8/moe_ep=8 misses perf data.
+    "qwen3-30b-a3b": BenchmarkCase(
+        model_path="Qwen/Qwen3-30B-A3B",
+        tp_size=4,
+        moe_ep_size=4,
+    ),
+    # DeepSeek family diversity vs Kimi (DSv3 != Kimi-K2.5 architecturally).
+    "deepseek-v3": BenchmarkCase(model_path="deepseek-ai/DeepSeek-V3"),
+    # DeepSeekV32 family (DSA attention + MoE).
+    "deepseek-v32": BenchmarkCase(model_path="deepseek-ai/DeepSeek-V3.2"),
+    # NemotronNas (Puzzle / DeciLM per-block architecture). Smoke runs at
+    # tp=8 default.
+    "nemotron-nas-49b": BenchmarkCase(model_path="nvidia/Llama-3_3-Nemotron-Super-49B-v1"),
+    # NemotronH hybrid Mamba2 + attention + MLP. Smoke runs at tp=8 default.
+    "nemotron-h-56b": BenchmarkCase(model_path="nvidia/Nemotron-H-56B-Base-8K"),
+    # Qwen3.5 hybrid GDN + MoE. User asked for Qwen3-Next-80B-A3B-Instruct
+    # (not in support matrix); using the smoke-verified Qwen3.5-397B-A17B
+    # representative (Qwen3_5MoeForConditionalGeneration) instead.
+    "qwen35-397b-a17b": BenchmarkCase(model_path="Qwen/Qwen3.5-397B-A17B"),
 }
 
 
@@ -358,24 +389,53 @@ def main() -> None:
         if getattr(args, key) is not None
     }
     case_names = [args.case] if args.case is not None else list(CASES)
-    results = [
-        _run_case(
-            replace(CASES[case_name], **overrides),
-            warmup=args.warmup,
-            iterations=args.iterations,
-            suppress_output=not args.show_loader_output,
-            cache_mode=args.cache_mode,
-        )
-        for case_name in case_names
-    ]
+    results: list[dict] = []
+    for case_name in case_names:
+        case = replace(CASES[case_name], **overrides)
+        try:
+            result = _run_case(
+                case,
+                warmup=args.warmup,
+                iterations=args.iterations,
+                suppress_output=not args.show_loader_output,
+                cache_mode=args.cache_mode,
+            )
+            result["case_name"] = case_name
+            results.append(result)
+        except Exception as exc:
+            import traceback
+
+            results.append(
+                {
+                    "case_name": case_name,
+                    "case": asdict(case),
+                    "cache_mode": args.cache_mode,
+                    "error": {
+                        "type": type(exc).__name__,
+                        "message": str(exc).splitlines()[0][:500] if str(exc) else "",
+                        "traceback": traceback.format_exc(),
+                    },
+                }
+            )
     if args.json:
-        output = results[0] if args.case is not None else {"results": results}
+        if args.case is not None and len(results) == 1:
+            output = results[0]
+        else:
+            output = {"results": results}
         print(json.dumps(output, indent=2, sort_keys=True))
     else:
         for index, result in enumerate(results):
             if index:
                 print()
-            _print_table(result)
+            if "error" in result:
+                case = result["case"]
+                print(
+                    f"Case: {case['model_path']} on {case['system_name']}/{case['backend_name']} "
+                    f"{case['backend_version']} - FAILED ({result['error']['type']}): "
+                    f"{result['error']['message']}"
+                )
+            else:
+                _print_table(result)
 
 
 if __name__ == "__main__":
