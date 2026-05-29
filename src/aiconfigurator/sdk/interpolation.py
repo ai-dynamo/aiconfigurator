@@ -297,33 +297,72 @@ def interp_3d_linear(x: int, y: int, z: int, data: dict) -> float:
 
 def interp_2d_1d(x: int, y: int, z: int, data: dict, method: str = "bilinear") -> float:
     """3-D interpolation done as 2-D (over y, z) followed by 1-D (over x)."""
-    x_values = []
-    x_left, x_right = nearest_1d_point_helper(x, list(data.keys()))
 
-    for i in [x_left, x_right]:
+    def interp_yz_plane(yz_data: dict):
+        if y in yz_data and z in yz_data[y]:
+            return yz_data[y][z]
+        if y in yz_data:
+            z_left, z_right = nearest_1d_point_helper(z, list(yz_data[y].keys()))
+            return validate_interpolation_result(
+                interp_1d([z_left, z_right], [yz_data[y][z_left], yz_data[y][z_right]], z)
+            )
+
+        y_left, y_right = nearest_1d_point_helper(y, list(yz_data.keys()))
+        if z in yz_data[y_left] and z in yz_data[y_right]:
+            return validate_interpolation_result(
+                interp_1d([y_left, y_right], [yz_data[y_left][z], yz_data[y_right][z]], y)
+            )
+
+        z_left_by_y = {}
+        z_right_by_y = {}
+        for j in [y_left, y_right]:
+            z_left_by_y[j], z_right_by_y[j] = nearest_1d_point_helper(z, list(yz_data[j].keys()))
+
+        z_left_values = set(z_left_by_y.values())
+        z_right_values = set(z_right_by_y.values())
+        z_values = z_left_values | z_right_values
+        if y_left == y_right and len(z_values) == 1:
+            [z_value] = z_values
+            return yz_data[y_left][z_value]
+        if len(z_values) == 1:
+            [z_value] = z_values
+            return validate_interpolation_result(
+                interp_1d([y_left, y_right], [yz_data[y_left][z_value], yz_data[y_right][z_value]], y)
+            )
+        if y_left == y_right:
+            z_left = z_left_by_y[y_left]
+            z_right = z_right_by_y[y_left]
+            return validate_interpolation_result(
+                interp_1d([z_left, z_right], [yz_data[y_left][z_left], yz_data[y_left][z_right]], z)
+            )
+
         points_list = []
         values_list = []
-        y_left, y_right = nearest_1d_point_helper(y, list(data[i].keys()))
         for j in [y_left, y_right]:
-            z_left, z_right = nearest_1d_point_helper(z, list(data[i][j].keys()))
+            z_left = z_left_by_y[j]
+            z_right = z_right_by_y[j]
             points_list.append([j, z_left])
             points_list.append([j, z_right])
-            values_list.append(data[i][j][z_left])
-            values_list.append(data[i][j][z_right])
+            values_list.append(yz_data[j][z_left])
+            values_list.append(yz_data[j][z_right])
         if method == "cubic":
-            x_values.append(
-                validate_interpolation_result(
-                    interpolate.griddata(np.array(points_list), np.array(values_list), (y, z), method="cubic")
-                )
+            return validate_interpolation_result(
+                interpolate.griddata(np.array(points_list), np.array(values_list), (y, z), method="cubic")
             )
-        elif method == "bilinear":
-            x_values.append(
-                validate_interpolation_result(
-                    bilinear_interpolation([y_left, y_right], [z_left, z_right], y, z, data[i])
-                )
+        if method == "bilinear":
+            return validate_interpolation_result(
+                bilinear_interpolation([y_left, y_right], [z_left, z_right], y, z, yz_data)
             )
-        else:
-            raise NotImplementedError
+        raise NotImplementedError
+
+    if x in data:
+        return validate_interpolation_result(interp_yz_plane(data[x]))
+
+    x_left, x_right = nearest_1d_point_helper(x, list(data.keys()))
+
+    x_values = []
+    for i in [x_left, x_right]:
+        x_values.append(interp_yz_plane(data[i]))
 
     return validate_interpolation_result(interp_1d([x_left, x_right], x_values, x))
 

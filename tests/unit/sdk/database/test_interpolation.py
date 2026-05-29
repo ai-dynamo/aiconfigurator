@@ -172,6 +172,25 @@ class TestInterpolationMethods:
         with pytest.raises(NotImplementedError):
             comprehensive_perf_db._interp_2d_1d(15, 35, 55, data, method="invalid")
 
+    def test_interp_2d_1d_cubic_collapses_single_z_axis(self, comprehensive_perf_db):
+        data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        for x in [8, 16]:
+            for y in [128, 256]:
+                data[x][y][1] = x + y
+
+        result = comprehensive_perf_db._interp_2d_1d(8, 192, 1, data, method="cubic")
+
+        assert result == pytest.approx(200.0)
+
+    def test_interp_2d_1d_exact_outer_axis_uses_exact_plane(self, comprehensive_perf_db):
+        data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        data[8][256][1] = 10.0
+        data[16][256][2] = 99.0
+
+        result = comprehensive_perf_db._interp_2d_1d(8, 256, 1, data, method="cubic")
+
+        assert result == pytest.approx(10.0)
+
     def test_interp_3d(self, comprehensive_perf_db):
         """Test general 3D interpolation dispatcher."""
         data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
