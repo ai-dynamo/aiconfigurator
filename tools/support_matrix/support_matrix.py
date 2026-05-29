@@ -233,13 +233,14 @@ def _large_pipeline_parallel_attempt(
         return None
 
     # Some very large checkpoints are too large for the default one-node search.
-    # Keep attention TP at 8 and add PP=2 so a single serving worker can span 16
-    # GPUs. This also constrains MoE splits away from uncollected smaller shapes
-    # when the viable data was collected for larger model-parallel workers.
+    # Keep attention TP at 8 and add larger PP splits so a single serving worker
+    # can span enough GPUs to fit checkpoints with large active/resident weights.
+    # This also constrains MoE splits away from uncollected smaller shapes when
+    # the viable data was collected for larger model-parallel workers.
     worker_config = {
-        "num_gpu_per_worker": [16],
+        "num_gpu_per_worker": [16, 32, 64],
         "tp_list": [8],
-        "pp_list": [2],
+        "pp_list": [2, 4, 8],
         "dp_list": [1],
         "moe_tp_list": [1, 2, 4, 8],
         "moe_ep_list": [1, 2, 4, 8],
