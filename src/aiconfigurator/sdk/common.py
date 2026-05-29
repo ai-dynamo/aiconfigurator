@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import csv
+import json
 from collections import namedtuple
 from dataclasses import dataclass
 from enum import Enum
@@ -19,6 +20,34 @@ def parse_support_matrix_version(version: str | None) -> Version | None:
         return Version(version)
     except InvalidVersion:
         return None
+
+
+SupportMatrixSystemOrder = (
+    "b200",
+    "gb200",
+    "b300",
+    "gb300",
+    "rtx_pro_6000",
+    "h200",
+    "h100",
+    "l40s",
+    "a100",
+    "b60",
+)
+
+
+def get_support_matrix_system_sort_key(system: str) -> tuple[int, str]:
+    """Sort support-matrix systems by product priority, then by name."""
+    normalized_system = system.lower()
+    for index, prefix in enumerate(SupportMatrixSystemOrder):
+        if normalized_system.startswith(prefix):
+            return index, normalized_system
+    return len(SupportMatrixSystemOrder), normalized_system
+
+
+def sort_support_matrix_systems(systems):
+    """Return systems in the preferred support-matrix display order."""
+    return sorted(systems, key=get_support_matrix_system_sort_key)
 
 
 @dataclass(frozen=True)
@@ -242,9 +271,25 @@ def _iter_support_matrix_resources():
     split_matrix_resource = systems_resource / "support_matrix"
 
     if split_matrix_resource.is_dir():
+        csv_resources = {
+            resource.name: resource for resource in split_matrix_resource.iterdir() if resource.name.endswith(".csv")
+        }
+        index_resource = split_matrix_resource / "index.json"
+        if index_resource.is_file():
+            try:
+                index_data = json.loads(index_resource.read_text())
+                ordered_files = index_data.get("files", []) if isinstance(index_data, dict) else []
+            except (OSError, json.JSONDecodeError):
+                ordered_files = []
+
+            for file_name in ordered_files:
+                resource = csv_resources.pop(file_name, None)
+                if resource is not None:
+                    yield resource
+
         yield from sorted(
-            (resource for resource in split_matrix_resource.iterdir() if resource.name.endswith(".csv")),
-            key=lambda resource: resource.name,
+            csv_resources.values(),
+            key=lambda resource: get_support_matrix_system_sort_key(resource.name.removesuffix(".csv")),
         )
         return
 

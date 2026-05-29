@@ -312,7 +312,7 @@ def create_support_matrix_tab(app_config):
 
         # Load data
         initial_df = load_support_matrix_data()
-        unique_systems = sorted(initial_df["System"].unique())
+        unique_systems = common.sort_support_matrix_systems(initial_df["System"].unique())
 
         # Mode filter
         mode_filter = gr.Dropdown(
