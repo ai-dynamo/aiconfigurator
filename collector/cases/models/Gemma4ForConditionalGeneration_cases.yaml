@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: Gemma4ForConditionalGeneration
+model_path: google/gemma-4-26B-A4B
+model_paths:
+  - google/gemma-4-26B-A4B
+include_base: true
+description: >
+  Gemma 4 hybrid SWA/global attention plus routed-MoE collection plan.
+
+model_case_values:
+  moe:
+    - model_path: google/gemma-4-26B-A4B
+      hidden_size: 2816
+      inter_size: 704
+      topk: 8
+      num_experts: 128
+
+all_frameworks_op_cases:
+  moe:
+    cases: all

@@ -55,6 +55,7 @@ const SUPPORT_MATRIX_PATH = 'src/aiconfigurator/systems/support_matrix';
 const SUPPORT_MATRIX_INDEX_PATH = `${SUPPORT_MATRIX_PATH}/index.json`;
 const LEGACY_CSV_PATH = 'src/aiconfigurator/systems/support_matrix.csv';
 const STATUS_HW_INCOMPATIBLE = 'HW_INCOMPATIBLE';
+const STATUS_FRAMEWORK_INCOMPATIBLE = 'FRAMEWORK_INCOMPATIBLE';
 const PREFERRED_DEFAULT_SYSTEM = 'b200_sxm';
 const SYSTEM_ORDER = ['b200', 'gb200', 'gb300', 'h100', 'h200', '__other__', 'a100', 'l40s'];
 
@@ -79,7 +80,7 @@ function unsupportedStatusFromError(error) {
 
 function statusDisplayLabel(status) {
   if (status === 'hw_incompatible') return STATUS_HW_INCOMPATIBLE;
-  if (status === 'framework_unsupported') return 'FRAMEWORK_UNSUPPORTED';
+  if (status === 'framework_unsupported') return STATUS_FRAMEWORK_INCOMPATIBLE;
   return 'FAIL';
 }
 
@@ -263,6 +264,7 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
   const versionHasFail = {};
   const versionHasPass = {};
   const versionHasHwIncompatible = {};
+  const versionHasFrameworkIncompatible = {};
   const versionErrorMsgs = {};
   const versionDetails = {};
 
@@ -306,10 +308,22 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
           versionErrorMsgs[version] = errorMsg;
         }
       }
+    } else if (status === STATUS_FRAMEWORK_INCOMPATIBLE) {
+      versionHasFrameworkIncompatible[version] = true;
+      if (errorMsg) {
+        if (version in versionErrorMsgs) {
+          const existing = versionErrorMsgs[version];
+          if (existing && existing !== errorMsg) {
+            versionErrorMsgs[version] = `${existing} | ${errorMsg}`;
+          }
+        } else {
+          versionErrorMsgs[version] = errorMsg;
+        }
+      }
     }
   }
 
-  if (!Object.keys(versionHasFail).length && !Object.keys(versionHasPass).length && !Object.keys(versionHasHwIncompatible).length) {
+  if (!Object.keys(versionHasFail).length && !Object.keys(versionHasPass).length && !Object.keys(versionHasHwIncompatible).length && !Object.keys(versionHasFrameworkIncompatible).length) {
     return { version: null, isLatest: false, error: null };
   }
 
@@ -326,6 +340,14 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
       version: STATUS_HW_INCOMPATIBLE,
       isLatest: false,
       error: versionErrorMsgs[latestVersion] || 'Hardware is incompatible with model datatype',
+      detail: versionDetails[latestVersion] || null,
+    };
+  }
+  if (latestVersion && versionHasFrameworkIncompatible[latestVersion] && !versionHasFail[latestVersion]) {
+    return {
+      version: STATUS_FRAMEWORK_INCOMPATIBLE,
+      isLatest: false,
+      error: versionErrorMsgs[latestVersion] || 'Framework version does not support required model feature',
       detail: versionDetails[latestVersion] || null,
     };
   }
@@ -363,6 +385,23 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
 
   const hwVersions = Object.keys(versionHasHwIncompatible)
     .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
+  const frameworkVersions = Object.keys(versionHasFrameworkIncompatible)
+    .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
+  const frameworkMsgs = [];
+  const frameworkDetails = [];
+  for (const ver of frameworkVersions) {
+    if (versionErrorMsgs[ver]) frameworkMsgs.push(`${ver}: ${versionErrorMsgs[ver]}`);
+    if (versionDetails[ver]) frameworkDetails.push(versionDetails[ver]);
+  }
+  if (frameworkMsgs.length || frameworkVersions.length) {
+    return {
+      version: STATUS_FRAMEWORK_INCOMPATIBLE,
+      isLatest: false,
+      error: frameworkMsgs.length ? frameworkMsgs.join(' | ') : 'Framework version does not support required model feature',
+      detail: frameworkDetails.length ? frameworkDetails.join('\n\n---\n\n') : null,
+    };
+  }
+
   const hwMsgs = [];
   const hwDetails = [];
   for (const ver of hwVersions) {
@@ -403,6 +442,7 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
     if (result.version === 'FAIL') {
       return isFrameworkUnsupported(result.error) ? 'framework_unsupported' : 'fail';
     }
+    if (result.version === STATUS_FRAMEWORK_INCOMPATIBLE) return 'framework_unsupported';
     if (result.version === STATUS_HW_INCOMPATIBLE) return unsupportedStatusFromError(result.error);
     return 'pass';
   };
@@ -1508,7 +1548,7 @@ function ErrorModal({ model, system, backend, error, onClose }) {
   const [copied, setCopied] = useState(false);
   if (!error) return null;
   const formatted = error.replace(/\\\\n/g, '\n').replace(/\\n/g, '\n');
-  const showFixLink = /Status: (FAIL|HW_INCOMPATIBLE)/.test(formatted) || formatted.includes('No support-matrix row exists');
+  const showFixLink = /Status: (FAIL|HW_INCOMPATIBLE|FRAMEWORK_INCOMPATIBLE)/.test(formatted) || formatted.includes('No support-matrix row exists');
   const issueUrl = buildCallForFixUrl(model, system, backend, formatted);
   const copyError = () => {
     const done = () => {

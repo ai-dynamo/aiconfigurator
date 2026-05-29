@@ -61,6 +61,21 @@ def test_csv_sanity_accepts_hardware_incompatible_status_with_reason():
     assert errors == []
 
 
+def test_csv_sanity_accepts_framework_incompatible_status_with_reason():
+    errors = check_csv_sanity(
+        HEADER,
+        [_row(STATUS_FRAMEWORK_INCOMPATIBLE, "Framework runtime rejects the required attention shape")],
+    )
+
+    assert errors == []
+
+
+def test_csv_sanity_requires_framework_incompatible_reason():
+    errors = check_csv_sanity(HEADER, [_row(STATUS_FRAMEWORK_INCOMPATIBLE)])
+
+    assert any("framework incompatibility reason" in err for err in errors)
+
+
 def test_csv_sanity_requires_hardware_incompatible_reason():
     errors = check_csv_sanity(HEADER, [_row(STATUS_HW_INCOMPATIBLE)])
 
