@@ -666,6 +666,54 @@ def test_sm120_exception_filters_trtllm_gptoss_mxfp4():
     )
 
 
+def test_sm100_exception_filters_trtllm_int4_wo():
+    plan = build_collection_case_plan(
+        backend="trtllm",
+        model_path="moonshotai/Kimi-K2.5",
+        gpu_type="b200_sxm",
+    )
+    case = [
+        "int4_wo",
+        [1],
+        7168,
+        2048,
+        8,
+        384,
+        8,
+        1,
+        False,
+        "moonshotai/Kimi-K2.5",
+        "power_law",
+        1.2,
+    ]
+
+    expected = expected_failure_for_test_case(
+        case,
+        plan=plan.op_cases["moe"],
+        full_module_name="trtllm.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert expected == {
+        "case_id": create_test_case_id(case, "run_moe_torch", "trtllm.moe"),
+        "source": "sm_exception",
+        "selector": "rule",
+        "reason_type": "framework_version_unsupported",
+        "reason": (
+            "TRT-LLM 1.3.0rc10 SM100 CutlassFusedMoE rejects plain W4A16/int4_wo "
+            "in create_moe with ValueError Unsupported quantization mode [1]."
+        ),
+    }
+    assert expected_failure_for_test_case(
+        case,
+        plan=plan.op_cases["moe"],
+        full_module_name="trtllm.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="1.3.0rc9",
+    ) is None
+
+
 def test_filter_test_cases_supports_computed_rule_conditions():
     cases = [
         [1, 4096, 64, 4, 128, False, False, False],
