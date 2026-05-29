@@ -10,7 +10,7 @@ pipeline when describing the SAME task.
 
 Each side is constructed via its native interface:
 - Old: V1 TaskConfig + yaml_config nested dict, executed by TaskRunner.run
-- New: TaskConfig + flat fields, executed by sweep_agg / sweep_disagg
+- New: Task (flat fields), executed by task.run() which dispatches internally
 
 The two sides MUST produce byte-equal Pareto DataFrames (after dropping
 object columns, sorting on a stable key, and rounding to 3 decimals).
@@ -177,32 +177,30 @@ def _old_path_disagg(params: dict) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# New path adapters — flat YAML directly into the new TaskConfig
+# New path adapters — flat YAML into Task, then task.run()
 # ---------------------------------------------------------------------------
 
 
+_LEGACY_TPOT_SWEEP = list(range(1, 20, 1)) + list(range(20, 300, 5))
+
+
 def _new_path_agg(params: dict) -> pd.DataFrame:
-    from aiconfigurator.sdk.perf_database import get_database
-    from aiconfigurator.sdk.sweep import sweep_agg
-    from aiconfigurator.sdk.task_config import TaskConfig
+    from aiconfigurator.sdk.task_config import Task
 
     yaml_data = {"serving_mode": "agg", **params}
-    task = TaskConfig.from_yaml(yaml_data)
-    db = get_database(task.system_name, task.backend_name, task.backend_version)
-    kwargs = task.sweep_agg_kwargs(database=db)
+    task = Task.from_yaml(yaml_data)
     # Match legacy TaskRunner.run_agg's hardcoded tpot sweep list so the
-    # Pareto frontier covers the same domain.
-    kwargs["runtime_config"].tpot = list(range(1, 20, 1)) + list(range(20, 300, 5))
-    return sweep_agg(**kwargs)
+    # candidate set covers the same SLA domain.  task.tpot accepts either
+    # a single float or a list -- sweep_agg's tpot expansion handles both.
+    task.tpot = _LEGACY_TPOT_SWEEP
+    return task.run()
 
 
 def _new_path_disagg(params: dict) -> pd.DataFrame:
-    from aiconfigurator.sdk.perf_database import get_database
-    from aiconfigurator.sdk.sweep import sweep_disagg
-    from aiconfigurator.sdk.task_config import TaskConfig
+    from aiconfigurator.sdk.task_config import Task
 
     # Legacy disagg uses a single shared model_path + system_name; the new
-    # TaskConfig requires explicit prefill_/decode_ fields.
+    # Task requires explicit prefill_/decode_ fields.
     yaml_data: dict = {
         "serving_mode": "disagg",
         "isl": params["isl"],
@@ -223,12 +221,9 @@ def _new_path_disagg(params: dict) -> pd.DataFrame:
         for dim in ("num_gpu", "tp", "pp", "dp", "moe_tp", "moe_ep"):
             yaml_data[f"{role}_{dim}_candidates"] = params[f"{role}_{dim}_candidates"]
 
-    task = TaskConfig.from_yaml(yaml_data)
-    p_db = get_database(task.prefill_system_name, task.prefill_backend_name, task.prefill_backend_version)
-    d_db = get_database(task.decode_system_name, task.decode_backend_name, task.decode_backend_version)
-    kwargs = task.sweep_disagg_kwargs(prefill_database=p_db, decode_database=d_db)
-    kwargs["runtime_config"].tpot = list(range(1, 20, 1)) + list(range(20, 300, 5))
-    return sweep_disagg(**kwargs)
+    task = Task.from_yaml(yaml_data)
+    task.tpot = _LEGACY_TPOT_SWEEP
+    return task.run()
 
 
 # ---------------------------------------------------------------------------
@@ -313,17 +308,13 @@ def _old_path_agg_request_latency(params: dict, request_latency: float) -> pd.Da
 
 
 def _new_path_agg_request_latency(params: dict, request_latency: float) -> pd.DataFrame:
-    from aiconfigurator.sdk.perf_database import get_database
-    from aiconfigurator.sdk.sweep import sweep_agg
-    from aiconfigurator.sdk.task_config import TaskConfig
+    from aiconfigurator.sdk.task_config import Task
 
     yaml_data = {"serving_mode": "agg", **params, "request_latency": request_latency}
-    task = TaskConfig.from_yaml(yaml_data)
-    db = get_database(task.system_name, task.backend_name, task.backend_version)
-    kwargs = task.sweep_agg_kwargs(database=db)
+    task = Task.from_yaml(yaml_data)
     # In request_latency mode the SDK derives (ttft, tpot) pairs internally;
-    # do NOT override runtime_config.tpot here.
-    return sweep_agg(**kwargs)
+    # do NOT override task.tpot here.
+    return task.run()
 
 
 def test_old_vs_new_pareto_parity_agg_request_latency():
@@ -389,9 +380,7 @@ def _old_path_disagg_autoscale(params: dict) -> pd.DataFrame:
 
 
 def _new_path_disagg_autoscale(params: dict) -> pd.DataFrame:
-    from aiconfigurator.sdk.perf_database import get_database
-    from aiconfigurator.sdk.sweep import sweep_disagg
-    from aiconfigurator.sdk.task_config import TaskConfig
+    from aiconfigurator.sdk.task_config import Task
 
     yaml_data: dict = {
         "serving_mode": "disagg",
@@ -413,13 +402,9 @@ def _new_path_disagg_autoscale(params: dict) -> pd.DataFrame:
         for dim in ("num_gpu", "tp", "pp", "dp", "moe_tp", "moe_ep"):
             yaml_data[f"{role}_{dim}_candidates"] = params[f"{role}_{dim}_candidates"]
 
-    task = TaskConfig.from_yaml(yaml_data)
-    p_db = get_database(task.prefill_system_name, task.prefill_backend_name, task.prefill_backend_version)
-    d_db = get_database(task.decode_system_name, task.decode_backend_name, task.decode_backend_version)
-    kwargs = task.sweep_disagg_kwargs(prefill_database=p_db, decode_database=d_db)
-    kwargs["runtime_config"].tpot = list(range(1, 20, 1)) + list(range(20, 300, 5))
-    kwargs["autoscale"] = True
-    return sweep_disagg(**kwargs)
+    task = Task.from_yaml(yaml_data)
+    task.tpot = _LEGACY_TPOT_SWEEP
+    return task.run(autoscale=True)
 
 
 def test_old_vs_new_pareto_parity_disagg_autoscale():
@@ -491,9 +476,7 @@ def _old_path_hetero_disagg(params: dict) -> pd.DataFrame:
 
 
 def _new_path_hetero_disagg(params: dict) -> pd.DataFrame:
-    from aiconfigurator.sdk.perf_database import get_database
-    from aiconfigurator.sdk.sweep import sweep_disagg
-    from aiconfigurator.sdk.task_config import TaskConfig
+    from aiconfigurator.sdk.task_config import Task
 
     yaml_data: dict = {
         "serving_mode": "disagg",
@@ -519,12 +502,9 @@ def _new_path_hetero_disagg(params: dict) -> pd.DataFrame:
         for dim in ("num_gpu", "tp", "pp", "dp", "moe_tp", "moe_ep"):
             yaml_data[f"{role}_{dim}_candidates"] = params[f"{role}_{dim}_candidates"]
 
-    task = TaskConfig.from_yaml(yaml_data)
-    p_db = get_database(task.prefill_system_name, task.prefill_backend_name, task.prefill_backend_version)
-    d_db = get_database(task.decode_system_name, task.decode_backend_name, task.decode_backend_version)
-    kwargs = task.sweep_disagg_kwargs(prefill_database=p_db, decode_database=d_db)
-    kwargs["runtime_config"].tpot = list(range(1, 20, 1)) + list(range(20, 300, 5))
-    return sweep_disagg(**kwargs)
+    task = Task.from_yaml(yaml_data)
+    task.tpot = _LEGACY_TPOT_SWEEP
+    return task.run()
 
 
 def test_old_vs_new_pareto_parity_hetero_disagg():
