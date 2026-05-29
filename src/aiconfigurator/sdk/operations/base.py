@@ -41,8 +41,37 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _read_perf_rows(perf_file: str) -> list[dict[str, object]]:
+    if perf_file.lower().endswith(".parquet"):
+        try:
+            import pyarrow.parquet as pq
+        except ImportError as exc:
+            raise RuntimeError(
+                "Loading parquet perf data requires the 'pyarrow' package. "
+                "Install aiconfigurator with its declared runtime dependencies."
+            ) from exc
+        return [
+            {key: "" if value is None else value for key, value in row.items()}
+            for row in pq.read_table(perf_file).to_pylist()
+        ]
+
+    with open(perf_file, encoding="utf-8", newline="") as f:
+        return [{key: "" if value is None else value for key, value in row.items()} for row in csv.DictReader(f)]
+
+
+def _resolve_perf_data_path(perf_file: str) -> str:
+    if os.path.exists(perf_file):
+        return perf_file
+    stem, suffix = os.path.splitext(perf_file)
+    if suffix.lower() == ".parquet":
+        legacy_file = f"{stem}.txt"
+        if os.path.exists(legacy_file):
+            return legacy_file
+    return perf_file
+
+
 def _read_filtered_rows(file_or_sources):
-    """Read CSV rows from one or more sources. Used by every ``load_*_data``
+    """Read perf rows from one or more sources. Used by every ``load_*_data``
     in this package.
 
     Accepts:
@@ -64,21 +93,21 @@ def _read_filtered_rows(file_or_sources):
     load time.
     """
     if isinstance(file_or_sources, str):
-        if not os.path.exists(file_or_sources):
+        path = _resolve_perf_data_path(file_or_sources)
+        if not os.path.exists(path):
             return None
-        with open(file_or_sources, encoding="utf-8") as f:
-            return list(csv.DictReader(f))
+        return _read_perf_rows(path)
 
     rows: list[dict] = []
     any_exists = False
     for path, ks_filter in file_or_sources:
+        path = _resolve_perf_data_path(path)
         if not os.path.exists(path):
             continue
         any_exists = True
-        with open(path, encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                if ks_filter is None or row.get("kernel_source") in ks_filter:
-                    rows.append(row)
+        for row in _read_perf_rows(path):
+            if ks_filter is None or row.get("kernel_source") in ks_filter:
+                rows.append(row)
     return rows if any_exists else None
 
 

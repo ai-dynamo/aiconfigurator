@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Audit cross-framework shareability of perf-database CSVs.
+Audit cross-framework shareability of perf-database perf tables.
 
 For every (system, op_file, kernel_source) triple, compute:
   - which (framework, version) pairs contributed rows
@@ -34,7 +34,7 @@ Usage:
 The manifest lives under src/aiconfigurator/systems/ so the SDK loader
 (src/aiconfigurator/sdk/perf_database.py) reads it as package data and decides,
 per (op_file, kernel_source), which sibling backend/version directories the
-active backend may inherit from. No CSV is moved or rewritten on disk.
+active backend may inherit from. No perf data is moved or rewritten on disk.
 """
 
 from __future__ import annotations
@@ -191,7 +191,7 @@ def _build_shape_key(row: dict[str, str], header: list[str], latency_col: str) -
 
 
 def _iter_data_files(data_root: Path) -> Iterable[tuple[str, str, str, Path]]:
-    """Yield (system, backend, version, path) for every data CSV."""
+    """Yield (system, backend, version, path) for every perf data table."""
     for system_dir in sorted(data_root.iterdir()):
         if not system_dir.is_dir():
             continue
@@ -201,7 +201,8 @@ def _iter_data_files(data_root: Path) -> Iterable[tuple[str, str, str, Path]]:
             for version_dir in sorted(backend_dir.iterdir()):
                 if not version_dir.is_dir():
                     continue
-                for path in sorted(version_dir.glob("*.txt")):
+                paths = sorted([*version_dir.glob("*.parquet"), *version_dir.glob("*.txt")])
+                for path in paths:
                     if path.name in _SKIP_FILE_BASENAMES:
                         continue
                     yield system_dir.name, backend_dir.name, version_dir.name, path
@@ -220,40 +221,52 @@ class _FileAuditResult:
     unnamed_examples: list[tuple[str, str]] = field(default_factory=list)
 
 
-def _audit_one_file(system: str, backend: str, version: str, path: Path) -> _FileAuditResult:
-    """Parse one CSV and emit the records it contributes. Pure-ish: only the
-    `logger.warning` for missing latency columns escapes."""
-    out = _FileAuditResult()
+def _read_perf_rows(path: Path) -> tuple[list[str], list[dict]]:
+    if path.suffix.lower() == ".parquet":
+        import pyarrow.parquet as pq
+
+        table = pq.read_table(path)
+        header = table.schema.names
+        rows = [{key: "" if value is None else value for key, value in row.items()} for row in table.to_pylist()]
+        return header, rows
+
     with path.open(newline="") as f:
         reader = csv.DictReader(f)
-        header = reader.fieldnames or []
-        latency_col = _pick_latency_column(header)
-        if latency_col is None:
-            logger.warning("No latency column found in %s; skipping", path)
-            return out
+        return reader.fieldnames or [], list(reader)
 
-        for row in reader:
-            out.rows_scanned += 1
-            framework = (row.get("framework") or backend).lower()
-            row_version = row.get("version") or version
-            raw_ks = row.get("kernel_source")
-            kernel_source = (raw_ks or "").strip()
-            if not kernel_source:
-                out.rows_unnamed_kernel_source += 1
-                if len(out.unnamed_examples) < 5:
-                    out.unnamed_examples.append((str(path), repr(raw_ks)))
-                continue
-            latency_raw = row.get(latency_col)
-            try:
-                latency = float(latency_raw) if latency_raw not in (None, "") else None
-            except ValueError:
-                latency = None
-            if latency is None or latency <= 0:
-                out.rows_skipped += 1
-                continue
 
-            shape_key = _build_shape_key(row, header, latency_col)
-            out.records.append((system, path.name, kernel_source, framework, row_version, shape_key, latency))
+def _audit_one_file(system: str, backend: str, version: str, path: Path) -> _FileAuditResult:
+    """Parse one perf data file and emit the records it contributes. Pure-ish: only the
+    `logger.warning` for missing latency columns escapes."""
+    out = _FileAuditResult()
+    header, rows = _read_perf_rows(path)
+    latency_col = _pick_latency_column(header)
+    if latency_col is None:
+        logger.warning("No latency column found in %s; skipping", path)
+        return out
+
+    for row in rows:
+        out.rows_scanned += 1
+        framework = (row.get("framework") or backend).lower()
+        row_version = row.get("version") or version
+        raw_ks = row.get("kernel_source")
+        kernel_source = (raw_ks or "").strip()
+        if not kernel_source:
+            out.rows_unnamed_kernel_source += 1
+            if len(out.unnamed_examples) < 5:
+                out.unnamed_examples.append((str(path), repr(raw_ks)))
+            continue
+        latency_raw = row.get(latency_col)
+        try:
+            latency = float(latency_raw) if latency_raw not in (None, "") else None
+        except ValueError:
+            latency = None
+        if latency is None or latency <= 0:
+            out.rows_skipped += 1
+            continue
+
+        shape_key = _build_shape_key(row, header, latency_col)
+        out.records.append((system, path.name, kernel_source, framework, row_version, shape_key, latency))
     return out
 
 
@@ -263,9 +276,9 @@ _AUDIT_THREADS = 4
 def audit(data_root: Path) -> dict[tuple[str, str, str], GroupStats]:
     """Walk the data tree and accumulate per-group stats.
 
-    Files are parsed in a `_AUDIT_THREADS`-wide thread pool (CSV reads release
-    the GIL during I/O); the merge into `groups` runs serially on the main
-    thread, which is cheap enough not to need locks.
+    Files are parsed in a `_AUDIT_THREADS`-wide thread pool; the merge into
+    `groups` runs serially on the main thread, which is cheap enough not to
+    need locks.
     """
     groups: dict[tuple[str, str, str], GroupStats] = {}
     rows_scanned = 0
@@ -484,7 +497,7 @@ def render_manifest(summaries: list[dict]) -> str:
         "#",
         "# How to regenerate:",
         "#   Generated by tools/perf_database/audit_kernel_source.py from the data tree —",
-        "#   do not hand-edit. Re-run whenever a CSV under src/aiconfigurator/systems/data/",
+        "#   do not hand-edit. Re-run whenever a perf table under src/aiconfigurator/systems/data/",
         "#   is added, removed, or has its kernel_source values changed:",
         "#",
         "#     python3 tools/perf_database/audit_kernel_source.py \\",
@@ -492,8 +505,8 @@ def render_manifest(summaries: list[dict]) -> str:
         "#         --out-manifest src/aiconfigurator/systems/op_kernel_source_manifest.yaml",
         "#",
         "# Schema (per group):",
-        "#   op_file:                     CSV basename, e.g. gemm_perf.txt",
-        "#   kernel_source:               kernel name as it appears in the CSV's kernel_source column",
+        "#   op_file:                     perf table basename, e.g. gemm_perf.parquet",
+        "#   kernel_source:               kernel name as it appears in the perf table's kernel_source column",
         "#   tier:                        'shared' (named, high-fidelity) or",
         "#                                'shared_fallback' (default, framework-implicit)",
         "#   systems:                     systems where rows for this (op_file, kernel_source) exist",
