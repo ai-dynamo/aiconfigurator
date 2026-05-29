@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-TaskConfig — flat user-facing config for sweep_agg / sweep_disagg.
+Task — flat user-facing config for sweep_agg / sweep_disagg.
 
 Replaces the legacy ``sdk.task.TaskConfig`` (V1) and the orphaned
 ``sdk.task_v2.TaskConfig`` (V2).  The legacy YAML format is NOT supported;
@@ -269,13 +269,26 @@ def _default_disagg_search(
 
 
 # ---------------------------------------------------------------------------
-# TaskConfig
+# Task
 # ---------------------------------------------------------------------------
 
 
 @dataclass
-class TaskConfig:
-    """Flat user-facing task config.  See module docstring."""
+class Task:
+    """Flat user-facing optimization task.
+
+    Holds every knob the user controls (workload, model spec, search space,
+    SLA targets) as a flat dataclass.  Construction (or ``__post_init__``)
+    resolves model identity, backend version, quant modes, and search
+    candidates so the resulting object is fully concrete.
+
+    Entry point: ``.run()`` loads the perf database(s) internally and
+    dispatches to :mod:`aiconfigurator.sdk.sweep` -- callers don't need to
+    know about databases or which sweep function applies to their serving
+    mode.
+
+    See module docstring for design notes.
+    """
 
     # ====== 1. Mode + workload ======
     serving_mode: Literal["agg", "disagg"] = "agg"
@@ -383,10 +396,10 @@ class TaskConfig:
     # =====================================================================
 
     @classmethod
-    def from_yaml(cls, yaml_data: dict, **overrides: Any) -> TaskConfig:
+    def from_yaml(cls, yaml_data: dict, **overrides: Any) -> Task:
         """Construct from a flat YAML dict.
 
-        YAML keys must match TaskConfig field names directly.  String values
+        YAML keys must match Task field names directly.  String values
         for quant_mode fields are converted to the matching enum.  Unknown
         keys are warned about but ignored.  ``overrides`` (kwargs) win over
         YAML values.
@@ -402,7 +415,7 @@ class TaskConfig:
         return cls(**kwargs)
 
     @classmethod
-    def from_cli(cls, **kwargs: Any) -> TaskConfig:
+    def from_cli(cls, **kwargs: Any) -> Task:
         """Construct from CLI kwargs.  Filters None to let __post_init__ defaults run."""
         return cls(**{k: v for k, v in kwargs.items() if v is not None})
 
@@ -920,7 +933,7 @@ class TaskConfig:
         """Return the exact kwargs needed for sweep.sweep_agg.
 
         Caller is responsible for loading the perf database (so it can be
-        shared across multiple TaskConfigs).
+        shared across multiple Tasks).
         """
         if self.serving_mode != "agg":
             raise ValueError(f"sweep_agg_kwargs requires serving_mode='agg', got {self.serving_mode!r}")
@@ -967,5 +980,50 @@ class TaskConfig:
             "num_gpu_list": num_gpu_list,
         }
 
+    # =====================================================================
+    # Optimization entry point
+    # =====================================================================
 
-__all__ = ["QUANT_PRESETS", "ParallelChoice", "TaskConfig"]
+    def run(self, *, autoscale: bool = False):
+        """Run the sweep and return a feasible-candidate DataFrame.
+
+        Loads the perf database(s) for the active role(s) internally and
+        dispatches to ``sweep_agg`` or ``sweep_disagg`` based on
+        ``serving_mode``.  Callers do not need to know about databases or
+        which sweep function applies.
+
+        Args:
+            autoscale: disagg-only.  When True, prefill and decode workers
+                are picked independently via ``picking.pick_autoscale`` --
+                no rate matching is performed and the result has
+                ``(p)workers=1`` and ``(d)workers=1``.  Ignored in agg mode.
+
+        Returns:
+            pandas.DataFrame -- ``common.ColumnsAgg`` schema for agg,
+            ``common.ColumnsDisagg`` for disagg.  This is the SLA-feasible
+            candidate set; Pareto frontier computation is downstream in
+            ``aiconfigurator.sdk.picking``.
+        """
+        from aiconfigurator.sdk.perf_database import get_database
+        from aiconfigurator.sdk.sweep import sweep_agg, sweep_disagg
+
+        if self.serving_mode == "agg":
+            if autoscale:
+                raise ValueError("autoscale is only supported in disagg mode")
+            database = get_database(self.system_name, self.backend_name, self.backend_version)
+            return sweep_agg(**self.sweep_agg_kwargs(database=database))
+        if self.serving_mode == "disagg":
+            prefill_database = get_database(
+                self.prefill_system_name, self.prefill_backend_name, self.prefill_backend_version
+            )
+            decode_database = get_database(
+                self.decode_system_name, self.decode_backend_name, self.decode_backend_version
+            )
+            return sweep_disagg(
+                **self.sweep_disagg_kwargs(prefill_database=prefill_database, decode_database=decode_database),
+                autoscale=autoscale,
+            )
+        raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
+
+
+__all__ = ["QUANT_PRESETS", "ParallelChoice", "Task"]

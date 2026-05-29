@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the new flat TaskConfig in sdk/task_config.py.
+"""Unit tests for the new flat Task in sdk/task_config.py.
 
 End-to-end sweep correctness is covered by the integration parity test
 against the legacy CLI; these tests focus on construction, defaulting,
@@ -11,7 +11,7 @@ prefix discipline, and the build_* helpers.
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.task_config import TaskConfig
+from aiconfigurator.sdk.task_config import Task
 
 pytestmark = pytest.mark.unit
 
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 
 
 def test_default_task_config_is_agg_with_default_workload():
-    t = TaskConfig()
+    t = Task()
     assert t.serving_mode == "agg"
     assert t.isl == 4000
     assert t.osl == 1000
@@ -31,7 +31,7 @@ def test_default_task_config_is_agg_with_default_workload():
 
 
 def test_agg_with_model_resolves_identity_and_backend():
-    t = TaskConfig(
+    t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
@@ -47,13 +47,13 @@ def test_agg_with_model_resolves_identity_and_backend():
 
 
 def test_agg_resolves_quant_from_hf():
-    t = TaskConfig(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
+    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
     # DeepSeek-V3 is fp8_block from HF config
     assert t.gemm_quant_mode == common.GEMMQuantMode.fp8_block
 
 
 def test_agg_quant_preset_overrides_hf():
-    t = TaskConfig(
+    t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
@@ -64,7 +64,7 @@ def test_agg_quant_preset_overrides_hf():
 
 
 def test_agg_explicit_quant_overrides_preset():
-    t = TaskConfig(
+    t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
@@ -82,7 +82,7 @@ def test_agg_explicit_quant_overrides_preset():
 
 
 def test_disagg_with_separate_role_specs():
-    t = TaskConfig(
+    t = Task(
         serving_mode="disagg",
         prefill_model_path="deepseek-ai/DeepSeek-V3",
         prefill_system_name="h200_sxm",
@@ -99,7 +99,7 @@ def test_disagg_with_separate_role_specs():
 
 
 def test_disagg_wideep_sets_larger_replica_budget():
-    t = TaskConfig(
+    t = Task(
         serving_mode="disagg",
         prefill_model_path="deepseek-ai/DeepSeek-V3",
         prefill_system_name="gb200",
@@ -130,7 +130,7 @@ def test_disagg_wideep_sets_larger_replica_budget():
 def test_disagg_rejects_top_level_worker_field_leakage(field, value):
     """Setting top-level worker fields in disagg mode must raise (no silent override)."""
     with pytest.raises(ValueError, match="top-level worker fields"):
-        TaskConfig(
+        Task(
             serving_mode="disagg",
             prefill_model_path="x",
             prefill_system_name="h200_sxm",
@@ -164,7 +164,7 @@ def test_from_yaml_flat_agg():
         "agg_tp_candidates": [1, 2, 4, 8],
         "agg_pp_candidates": [1],
     }
-    t = TaskConfig.from_yaml(yaml_data)
+    t = Task.from_yaml(yaml_data)
     assert t.serving_mode == "agg"
     assert t.model_path == "deepseek-ai/DeepSeek-V3"
     assert t.backend_version == "1.2.0rc5"
@@ -177,7 +177,7 @@ def test_from_yaml_flat_agg():
 
 def test_from_yaml_flat_agg_minimal():
     """Just model_path + system_name; everything else defaults."""
-    t = TaskConfig.from_yaml(
+    t = Task.from_yaml(
         {
             "serving_mode": "agg",
             "model_path": "deepseek-ai/DeepSeek-V3",
@@ -218,7 +218,7 @@ def test_from_yaml_flat_disagg():
         "prefill_max_batch_size": 1,
         "decode_max_batch_size": 512,
     }
-    t = TaskConfig.from_yaml(yaml_data)
+    t = Task.from_yaml(yaml_data)
     assert t.serving_mode == "disagg"
     assert t.prefill_model_path == "deepseek-ai/DeepSeek-V3"
     assert t.decode_model_path == "deepseek-ai/DeepSeek-V3"
@@ -229,7 +229,7 @@ def test_from_yaml_flat_disagg():
 
 
 def test_from_yaml_with_cli_overrides():
-    t = TaskConfig.from_yaml(
+    t = Task.from_yaml(
         {
             "serving_mode": "agg",
             "model_path": "deepseek-ai/DeepSeek-V3",
@@ -249,7 +249,7 @@ def test_from_yaml_warns_on_unknown_keys(caplog):
     import logging
 
     with caplog.at_level(logging.WARNING):
-        TaskConfig.from_yaml(
+        Task.from_yaml(
             {
                 "serving_mode": "agg",
                 "model_path": "deepseek-ai/DeepSeek-V3",
@@ -265,7 +265,7 @@ def test_from_yaml_warns_on_unknown_keys(caplog):
 def test_from_yaml_disagg_rejects_legacy_shared_model_path():
     """Legacy YAML shape with top-level model_path is not silently mirrored to roles."""
     with pytest.raises(ValueError, match="top-level worker fields"):
-        TaskConfig.from_yaml(
+        Task.from_yaml(
             {
                 "serving_mode": "disagg",
                 "model_path": "deepseek-ai/DeepSeek-V3",  # legacy shared form
@@ -281,7 +281,7 @@ def test_from_yaml_disagg_rejects_legacy_shared_model_path():
 
 
 def test_build_runtime_config_carries_workload():
-    t = TaskConfig(isl=2048, osl=512, ttft=300.0, tpot=20.0)
+    t = Task(isl=2048, osl=512, ttft=300.0, tpot=20.0)
     rt = t.build_runtime_config(batch_size=64)
     assert rt.isl == 2048
     assert rt.osl == 512
@@ -291,7 +291,7 @@ def test_build_runtime_config_carries_workload():
 
 
 def test_build_model_config_agg_uses_resolved_quant():
-    t = TaskConfig(
+    t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
@@ -303,7 +303,7 @@ def test_build_model_config_agg_uses_resolved_quant():
 
 
 def test_sweep_agg_kwargs_shape():
-    t = TaskConfig(
+    t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
@@ -317,7 +317,7 @@ def test_sweep_agg_kwargs_shape():
 
 
 def test_sweep_disagg_kwargs_shape():
-    t = TaskConfig(
+    t = Task(
         serving_mode="disagg",
         prefill_model_path="deepseek-ai/DeepSeek-V3",
         prefill_system_name="h200_sxm",
@@ -336,9 +336,109 @@ def test_sweep_disagg_kwargs_shape():
 
 
 def test_sweep_kwargs_mode_mismatch_raises():
-    t_agg = TaskConfig(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
+    t_agg = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
     with pytest.raises(ValueError, match="got 'agg'"):
         t_agg.sweep_disagg_kwargs(prefill_database=None, decode_database=None)
+
+
+# ---------------------------------------------------------------------------
+# Task.run() entry point
+# ---------------------------------------------------------------------------
+
+
+def test_run_dispatches_to_sweep_agg(monkeypatch):
+    """run() loads DB internally and dispatches to sweep_agg for agg mode."""
+    from aiconfigurator.sdk import sweep
+
+    captured: dict = {}
+
+    def fake_get_database(system, backend, version):
+        captured.setdefault("dbs", []).append((system, backend, version))
+        return f"db-{system}-{backend}-{version}"
+
+    def fake_sweep_agg(**kwargs):
+        captured["agg_kwargs"] = kwargs
+        return "agg-result"
+
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr(sweep, "sweep_agg", fake_sweep_agg)
+
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+    )
+    result = t.run()
+    assert result == "agg-result"
+    # DB loaded for the (system, backend, version) triple
+    assert captured["dbs"] == [("h200_sxm", t.backend_name, t.backend_version)]
+    assert captured["agg_kwargs"]["model_path"] == "deepseek-ai/DeepSeek-V3"
+    assert captured["agg_kwargs"]["database"] == f"db-h200_sxm-{t.backend_name}-{t.backend_version}"
+
+
+def test_run_dispatches_to_sweep_disagg_with_two_dbs(monkeypatch):
+    """run() loads two databases (prefill + decode) for disagg and dispatches."""
+    from aiconfigurator.sdk import sweep
+
+    captured: dict = {}
+
+    def fake_get_database(system, backend, version):
+        captured.setdefault("dbs", []).append((system, backend, version))
+        return f"db-{system}"
+
+    def fake_sweep_disagg(**kwargs):
+        captured["disagg_kwargs"] = kwargs
+        return "disagg-result"
+
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr(sweep, "sweep_disagg", fake_sweep_disagg)
+
+    t = Task(
+        serving_mode="disagg",
+        prefill_model_path="deepseek-ai/DeepSeek-V3",
+        prefill_system_name="h200_sxm",
+        decode_model_path="deepseek-ai/DeepSeek-V3",
+        decode_system_name="h100_sxm",
+    )
+    result = t.run()
+    assert result == "disagg-result"
+    # Both DBs loaded
+    systems = [d[0] for d in captured["dbs"]]
+    assert "h200_sxm" in systems and "h100_sxm" in systems
+    # autoscale defaults to False
+    assert captured["disagg_kwargs"]["autoscale"] is False
+
+
+def test_run_passes_autoscale_flag(monkeypatch):
+    from aiconfigurator.sdk import sweep
+
+    captured: dict = {}
+
+    def fake_get_database(*a, **kw):
+        return "db"
+
+    def fake_sweep_disagg(**kwargs):
+        captured["autoscale"] = kwargs.get("autoscale")
+        return "result"
+
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr(sweep, "sweep_disagg", fake_sweep_disagg)
+
+    t = Task(
+        serving_mode="disagg",
+        prefill_model_path="deepseek-ai/DeepSeek-V3",
+        prefill_system_name="h200_sxm",
+        decode_model_path="deepseek-ai/DeepSeek-V3",
+        decode_system_name="h200_sxm",
+    )
+    t.run(autoscale=True)
+    assert captured["autoscale"] is True
+
+
+def test_run_rejects_autoscale_in_agg_mode():
+    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
+    with pytest.raises(ValueError, match="autoscale is only supported in disagg mode"):
+        t.run(autoscale=True)
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +447,7 @@ def test_sweep_kwargs_mode_mismatch_raises():
 
 
 def test_validate_agg_happy_path():
-    t = TaskConfig(
+    t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
@@ -356,19 +456,19 @@ def test_validate_agg_happy_path():
 
 
 def test_validate_agg_requires_model_path():
-    t = TaskConfig(serving_mode="agg")
+    t = Task(serving_mode="agg")
     with pytest.raises(ValueError, match="agg mode requires model_path"):
         t.validate()
 
 
 def test_validate_agg_requires_system_name():
-    t = TaskConfig(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3")
+    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3")
     with pytest.raises(ValueError, match="agg mode requires system_name"):
         t.validate()
 
 
 def test_validate_agg_rejects_deepseek_on_vllm():
-    t = TaskConfig(
+    t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
@@ -379,7 +479,7 @@ def test_validate_agg_rejects_deepseek_on_vllm():
 
 
 def test_validate_agg_rejects_fp8_static_on_non_trtllm():
-    t = TaskConfig(
+    t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
@@ -391,7 +491,7 @@ def test_validate_agg_rejects_fp8_static_on_non_trtllm():
 
 
 def test_validate_disagg_happy_path():
-    t = TaskConfig(
+    t = Task(
         serving_mode="disagg",
         prefill_model_path="deepseek-ai/DeepSeek-V3",
         prefill_system_name="h200_sxm",
@@ -402,7 +502,7 @@ def test_validate_disagg_happy_path():
 
 
 def test_validate_disagg_requires_both_role_model_paths():
-    t = TaskConfig(
+    t = Task(
         serving_mode="disagg",
         prefill_model_path="deepseek-ai/DeepSeek-V3",
         prefill_system_name="h200_sxm",
@@ -414,7 +514,7 @@ def test_validate_disagg_requires_both_role_model_paths():
 
 
 def test_validate_disagg_rejects_fp8_static_on_non_trtllm_per_role():
-    t = TaskConfig(
+    t = Task(
         serving_mode="disagg",
         prefill_model_path="deepseek-ai/DeepSeek-V3",
         prefill_system_name="h200_sxm",
@@ -428,7 +528,7 @@ def test_validate_disagg_rejects_fp8_static_on_non_trtllm_per_role():
 
 
 def test_validate_invalid_serving_mode_raises():
-    t = TaskConfig(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
+    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
     t.serving_mode = "weird"  # type: ignore[assignment]
     with pytest.raises(ValueError, match="Invalid serving_mode"):
         t.validate()
@@ -441,7 +541,7 @@ def test_validate_invalid_serving_mode_raises():
 
 def test_validate_database_check_passes_for_supported_quant():
     """Valid quant modes against a real perf DB should pass full validate()."""
-    t = TaskConfig(
+    t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
@@ -453,7 +553,7 @@ def test_validate_database_check_passes_for_supported_quant():
 
 def test_validate_database_check_rejects_unsupported_quant():
     """Setting a quant mode the DB doesn't list should raise from the DB layer."""
-    t = TaskConfig(
+    t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
@@ -473,7 +573,7 @@ def test_validate_database_check_rejects_unsupported_quant():
 
 def test_validate_skips_db_check_when_database_unavailable():
     """If DB can't be loaded, DB validation silently skips (caller sees other errors)."""
-    t = TaskConfig(
+    t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
@@ -486,7 +586,7 @@ def test_validate_skips_db_check_when_database_unavailable():
 
 def test_validate_skips_db_check_for_deepseekv4_synthetic_mode():
     """DeepSeek-V4 in synthetic database modes skips DB validation entirely."""
-    t = TaskConfig(
+    t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",  # use V3 since we just need is_moe + family
         system_name="h200_sxm",
@@ -506,7 +606,7 @@ def test_validate_skips_db_check_for_deepseekv4_synthetic_mode():
 
 
 def test_to_dict_emits_resolved_state_with_enum_names():
-    t = TaskConfig(
+    t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
@@ -525,7 +625,7 @@ def test_to_dict_emits_resolved_state_with_enum_names():
 
 
 def test_to_dict_excludes_internal_fields():
-    t = TaskConfig(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
+    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
     d = t.to_dict()
     # Internal underscore-prefixed fields not exposed
     assert not any(k.startswith("_") for k in d)
@@ -535,7 +635,7 @@ def test_to_yaml_round_trips_through_from_yaml():
     """Ensure to_yaml output is parseable by from_yaml (modulo HF re-resolution)."""
     import yaml
 
-    t1 = TaskConfig(
+    t1 = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
@@ -543,7 +643,7 @@ def test_to_yaml_round_trips_through_from_yaml():
     )
     yaml_text = t1.to_yaml()
     yaml_data = yaml.safe_load(yaml_text)
-    t2 = TaskConfig.from_yaml(yaml_data)
+    t2 = Task.from_yaml(yaml_data)
 
     # Core fields preserved
     assert t2.serving_mode == t1.serving_mode

@@ -6,7 +6,7 @@
 Standalone runner that drives the new sweep path end-to-end.
 
 Reads a YAML experiment file (same format as cli/example.yaml or
-cli/exps/*.yaml), builds a new TaskConfig from it, loads the perf
+cli/exps/*.yaml), builds a new Task from it, loads the perf
 database, calls sweep_agg or sweep_disagg, and writes the resulting
 Pareto DataFrame to <output_dir>/pareto.csv.
 
@@ -31,9 +31,7 @@ from pathlib import Path
 
 import yaml
 
-from aiconfigurator.sdk.perf_database import get_database
-from aiconfigurator.sdk.sweep import sweep_agg, sweep_disagg
-from aiconfigurator.sdk.task_config import TaskConfig
+from aiconfigurator.sdk.task_config import Task
 
 logger = logging.getLogger("sweep_new")
 
@@ -67,39 +65,16 @@ def _load_yaml(yaml_path: Path, exp_key: str | None) -> dict:
 def run(yaml_path: Path, exp_key: str | None, output_dir: Path) -> Path:
     """Run the new sweep path; return the path to the written CSV."""
     yaml_data = _load_yaml(yaml_path, exp_key)
-    task = TaskConfig.from_yaml(yaml_data)
+    task = Task.from_yaml(yaml_data)
     logger.info(
-        "Loaded TaskConfig: mode=%s model=%s is_moe=%s family=%s",
+        "Loaded Task: mode=%s model=%s is_moe=%s family=%s",
         task.serving_mode,
         task.model_path or task.prefill_model_path,
         task.is_moe,
         task.model_family,
     )
 
-    if task.serving_mode == "agg":
-        database = get_database(
-            system=task.system_name,
-            backend=task.backend_name,
-            version=task.backend_version,
-        )
-        df = sweep_agg(**task.sweep_agg_kwargs(database=database))
-    else:
-        prefill_database = get_database(
-            system=task.prefill_system_name,
-            backend=task.prefill_backend_name,
-            version=task.prefill_backend_version,
-        )
-        decode_database = get_database(
-            system=task.decode_system_name,
-            backend=task.decode_backend_name,
-            version=task.decode_backend_version,
-        )
-        df = sweep_disagg(
-            **task.sweep_disagg_kwargs(
-                prefill_database=prefill_database,
-                decode_database=decode_database,
-            )
-        )
+    df = task.run()
 
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "pareto.csv"
