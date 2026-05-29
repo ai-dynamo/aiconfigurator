@@ -206,6 +206,64 @@ def _get_test_constraints(model_path: str) -> TestConstraints:
     return _DEFAULT_TIER
 
 
+def _large_pipeline_parallel_attempt(
+    *,
+    mode: str,
+    backend: str,
+    constraints: TestConstraints,
+) -> TaskAttempt | None:
+    """Return a support-matrix retry that shards one large-model worker across nodes."""
+    if backend not in {
+        common.BackendName.sglang.value,
+        common.BackendName.trtllm.value,
+        common.BackendName.vllm.value,
+    }:
+        return None
+    if constraints.total_gpus < 16:
+        return None
+
+    # Some very large checkpoints are too large for the default one-node search.
+    # Keep attention TP at 8 and add larger PP splits so a single serving worker
+    # can span enough GPUs to fit checkpoints with large active/resident weights.
+    # This also constrains MoE splits away from uncollected smaller shapes when
+    # the viable data was collected for larger model-parallel workers.
+    worker_config = {
+        "num_gpu_per_worker": [16, 32, 64],
+        "tp_list": [8],
+        "pp_list": [2, 4, 8],
+        "dp_list": [1],
+        "moe_tp_list": [1, 2, 4, 8],
+        "moe_ep_list": [1, 2, 4, 8],
+    }
+    config = {"worker_config": worker_config}
+    if mode == "disagg":
+        config = {
+            "prefill_worker_config": worker_config,
+            "decode_worker_config": worker_config,
+            "replica_config": {
+                "max_gpu_per_replica": 128,
+                "num_gpu_per_replica": [32, 64, 128],
+            },
+        }
+    return TaskAttempt(
+        name="large-pipeline-parallel-worker",
+        yaml_config={"mode": "patch", "config": config},
+    )
+
+
+def _should_retry_with_large_worker(error_message: str | None) -> bool:
+    if not error_message:
+        return False
+    normalized = error_message.lower()
+    return (
+        "does not fit in gpu memory" in normalized
+        or "try increasing --total-gpus" in normalized
+        or "try increasing total gpus" in normalized
+        or "failed to query moe data" in normalized
+        or "missing silicon data for the requested lookup" in normalized
+    )
+
+
 def _is_known_framework_incompatible_gap(
     *,
     model: str,
