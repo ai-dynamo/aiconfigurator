@@ -142,6 +142,9 @@ framework_specific_op_cases:
         - 128
         - 192
         - 256
+        window_sizes:
+        - 0
+        - 1024
   vllm:
     attention_generation:
       cases:
@@ -174,9 +177,12 @@ framework_specific_op_cases:
         - 64
         - 128
         - 192
+        - 256
+        - 512
         window_sizes:
         - 0
         - 128
+        - 1024
         - 8192
   vllm_xpu:
     attention_generation:
