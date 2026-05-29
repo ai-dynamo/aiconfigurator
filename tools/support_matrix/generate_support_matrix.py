@@ -143,6 +143,8 @@ def main():
         combinations = [combo for combo in combinations if combo[2] == args.backend]
     if args.backend_version is not None:
         combinations = [combo for combo in combinations if combo[3] == args.backend_version]
+    if not combinations:
+        parser.error("No support-matrix combinations matched the provided filters.")
 
     modes_to_test = None if args.mode == "all" else (args.mode,)
     results = support_matrix.test_support_matrix(

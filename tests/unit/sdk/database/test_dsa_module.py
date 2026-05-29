@@ -362,6 +362,33 @@ class TestGenerationDSAModule:
         assert any("Generation DSA module data not available" in record.getMessage() for record in caplog.records)
         assert all(record.exc_info is None for record in caplog.records)
 
+    def test_past_kv_sequence_normalization_applies_to_interpolation(self, stub_perf_db):
+        dsa_dict = {
+            32: {
+                1: {
+                    99: _dsa_value(10.0),
+                    199: _dsa_value(30.0),
+                },
+                2: {
+                    149: _dsa_value(20.0),
+                },
+            }
+        }
+        stub_perf_db._generation_dsa_module_data = LoadedOpData(
+            _generation_dsa_data(dsa_dict), common.PerfDataFilename.dsa_generation_module, "past-kv"
+        )
+
+        result = stub_perf_db.query_generation_dsa_module(
+            b=1,
+            s=150,
+            num_heads=32,
+            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        assert float(result) == pytest.approx(20.0)
+
     def test_sol_returns_positive(self, comprehensive_perf_db):
         result = comprehensive_perf_db.query_generation_dsa_module(
             b=4,

@@ -7456,40 +7456,49 @@ class PerfDatabase:
                     if s > 0:
                         sequence_candidates.append(s - 1)
 
-                    def exact_sequence_value(seq_dict):
-                        for seq_key in sequence_candidates:
-                            if seq_key in seq_dict:
-                                return seq_dict[seq_key]
-                        return None
+                    sequence_dicts = list(dsa_dict.get(num_heads, {}).values())
+                    normalized_s = s
+                    for seq_key in sequence_candidates:
+                        if any(seq_key in seq_dict for seq_dict in sequence_dicts):
+                            normalized_s = seq_key
+                            break
+
+                    def sequence_value(seq_dict):
+                        if normalized_s in seq_dict:
+                            return seq_dict[normalized_s]
+                        seq_keys = sorted(seq_dict)
+                        if len(seq_keys) < 2:
+                            return None
+                        left, right = self._nearest_1d_point_helper(normalized_s, seq_keys, inner_only=False)
+                        return {
+                            "latency": self._interp_1d(
+                                [left, right],
+                                [
+                                    self._get_value(seq_dict[left], "latency"),
+                                    self._get_value(seq_dict[right], "latency"),
+                                ],
+                                normalized_s,
+                            ),
+                            "power": self._interp_1d(
+                                [left, right],
+                                [self._get_value(seq_dict[left], "power"), self._get_value(seq_dict[right], "power")],
+                                normalized_s,
+                            ),
+                            "energy": self._interp_1d(
+                                [left, right],
+                                [self._get_value(seq_dict[left], "energy"), self._get_value(seq_dict[right], "energy")],
+                                normalized_s,
+                            ),
+                        }
 
                     result = None
                     if num_heads in dsa_dict and b in dsa_dict[num_heads]:
                         seq_dict = dsa_dict[num_heads][b]
-                        result = exact_sequence_value(seq_dict)
-                        if result is None:
-                            seq_keys = sorted(seq_dict)
-                            if len(seq_keys) >= 2:
-                                left, right = self._nearest_1d_point_helper(s, seq_keys, inner_only=False)
-
-                                def interp_seq_metric(metric: str) -> float:
-                                    return self._interp_1d(
-                                        [left, right],
-                                        [
-                                            self._get_value(seq_dict[left], metric),
-                                            self._get_value(seq_dict[right], metric),
-                                        ],
-                                        s,
-                                    )
-
-                                result = {
-                                    "latency": interp_seq_metric("latency"),
-                                    "power": interp_seq_metric("power"),
-                                    "energy": interp_seq_metric("energy"),
-                                }
+                        result = sequence_value(seq_dict)
                     if result is None and num_heads in dsa_dict:
                         batch_dict = {}
                         for batch_key, seq_dict in dsa_dict[num_heads].items():
-                            value = exact_sequence_value(seq_dict)
+                            value = sequence_value(seq_dict)
                             if value is not None:
                                 batch_dict[batch_key] = value
                         batch_keys = sorted(batch_dict)
@@ -7512,9 +7521,7 @@ class PerfDatabase:
                                 "energy": interp_batch_metric("energy"),
                             }
                     if result is None:
-                        result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
-                    if result is None:
-                        result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
+                        result = self._interp_3d(num_heads, b, normalized_s, dsa_dict, "cubic")
                     latency = result["latency"]
                     energy = result.get("energy", 0.0)
                 except (KeyError, TypeError, ValueError, AssertionError) as exc:

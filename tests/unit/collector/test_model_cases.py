@@ -5,6 +5,7 @@ import csv
 from itertools import pairwise
 from pathlib import Path
 
+from collector.case_generator import moe_model_allows_quantization
 from collector.helper import create_test_case_id
 from collector.model_cases import (
     CaseSelector,
@@ -58,6 +59,20 @@ def test_base_gemm_cases_are_readable_shape_specs():
     )
 
     assert filtered == ["case0", "case1"]
+
+
+def test_moe_model_quantization_policy_is_yaml_backed():
+    assert moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "w4a8_mxfp4_mxfp8")
+    assert moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "bfloat16")
+    assert not moe_model_allows_quantization("sglang", "Qwen/Qwen3-235B-A22B", "w4a8_mxfp4_mxfp8")
+
+    assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a16_mxfp4")
+    assert not moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "bfloat16")
+
+    assert moe_model_allows_quantization("trtllm", "moonshotai/Kimi-K2.5", "w4a16_mxfp4")
+    assert moe_model_allows_quantization("trtllm", "moonshotai/Kimi-K2.5", "bfloat16")
+    assert not moe_model_allows_quantization("trtllm", "Qwen/Qwen3-235B-A22B", "w4a16_mxfp4")
+    assert not moe_model_allows_quantization("trtllm", "openai/gpt-oss-20b", "fp8")
 
 
 def test_attention_shape_specs_are_yaml_backed_with_backend_overrides():
@@ -705,13 +720,16 @@ def test_sm100_exception_filters_trtllm_int4_wo():
             "in create_moe with ValueError Unsupported quantization mode [1]."
         ),
     }
-    assert expected_failure_for_test_case(
-        case,
-        plan=plan.op_cases["moe"],
-        full_module_name="trtllm.moe",
-        run_func_name="run_moe_torch",
-        runtime_version="1.3.0rc9",
-    ) is None
+    assert (
+        expected_failure_for_test_case(
+            case,
+            plan=plan.op_cases["moe"],
+            full_module_name="trtllm.moe",
+            run_func_name="run_moe_torch",
+            runtime_version="1.3.0rc9",
+        )
+        is None
+    )
 
 
 def test_filter_test_cases_supports_computed_rule_conditions():

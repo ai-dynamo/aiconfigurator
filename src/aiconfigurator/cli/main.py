@@ -1395,6 +1395,7 @@ def build_experiment_task_configs(
             # backend, default to trtllm
             backend_name = expanded_config.get("backend_name") or common.BackendName.trtllm.value
             backend_version = expanded_config.get("backend_version")
+            database_mode = expanded_config.get("database_mode", common.DatabaseMode.SILICON.name)
 
             total_gpus = expanded_config.get("total_gpus")
             if total_gpus is None:
@@ -1410,10 +1411,11 @@ def build_experiment_task_configs(
                 "profiles": expanded_config.get("profiles", []),
             }
 
-            if backend_version is not None:
+            if database_mode == common.DatabaseMode.SILICON.name or backend_version is not None:
                 _ensure_backend_version_available(system_name, backend_name, backend_version)
                 if serving_mode == "disagg" and inferred_decode_system and inferred_decode_system != system_name:
                     _ensure_backend_version_available(inferred_decode_system, backend_name, backend_version)
+            if backend_version is not None:
                 task_kwargs["backend_version"] = backend_version
 
             if serving_mode == "disagg":
@@ -1440,7 +1442,7 @@ def build_experiment_task_configs(
             if "enable_chunked_prefill" in expanded_config:
                 task_kwargs["enable_chunked_prefill"] = expanded_config["enable_chunked_prefill"]
             if "database_mode" in expanded_config:
-                task_kwargs["database_mode"] = expanded_config["database_mode"]
+                task_kwargs["database_mode"] = database_mode
             effective_engine_step_backend = expanded_config.get("engine_step_backend", engine_step_backend)
             if effective_engine_step_backend is not None:
                 task_kwargs["engine_step_backend"] = effective_engine_step_backend

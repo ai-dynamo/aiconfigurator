@@ -74,6 +74,30 @@ def test_build_experiment_task_configs_keeps_no_config_prefix_out_of_yaml_patch(
     assert "prefix" not in exported.get("config", {})
 
 
+def test_build_experiment_task_configs_validates_silicon_backend_without_explicit_version(monkeypatch):
+    calls = []
+
+    def record_backend_check(system_name, backend_name, backend_version=None):
+        calls.append((system_name, backend_name, backend_version))
+
+    monkeypatch.setattr("aiconfigurator.cli.main._ensure_backend_version_available", record_backend_check)
+
+    build_experiment_task_configs(
+        config={
+            "exps": ["exp_agg"],
+            "exp_agg": {
+                "serving_mode": "agg",
+                "model_path": "Qwen/Qwen3-32B",
+                "total_gpus": 8,
+                "system_name": "h200_sxm",
+                "backend_name": "trtllm",
+            },
+        }
+    )
+
+    assert calls == [("h200_sxm", "trtllm", None)]
+
+
 def test_build_experiment_task_configs_expands_list_valued_top_level_fields():
     task_configs = build_experiment_task_configs(
         config={

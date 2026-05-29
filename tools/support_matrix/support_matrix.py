@@ -139,7 +139,7 @@ def _support_matrix_row_command(
         "aiconfigurator",
         "cli",
         "default",
-        "--model",
+        "--model-path",
         model,
         "--total-gpus",
         str(constraints.total_gpus),

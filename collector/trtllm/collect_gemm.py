@@ -54,7 +54,7 @@ def _skip_trtllm_sm120_fp8_gemm(gemm_type: str, m: int, n: int, k: int) -> bool:
     return (
         tensorrt_llm.__version__.startswith(("1.3.0rc5", "1.3.0rc10"))
         and get_sm_version() >= 120
-        and gemm_type == "fp8"
+        and gemm_type in {"fp8", "fp8_static"}
         # The SM120 FP8 small-M kernel hits an illegal memory access for
         # Qwen3-235B-style large projection shapes and poisons the CUDA context.
         # On 1.3.0rc10 this reproduces for m=1..8 when both projection dims are

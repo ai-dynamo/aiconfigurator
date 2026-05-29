@@ -99,7 +99,7 @@ except ImportError:
     pass
 
 try:
-    from case_generator import get_common_moe_test_cases
+    from case_generator import get_common_moe_test_cases, moe_model_allows_quantization
 
     from helper import (
         balanced_logits,
@@ -114,7 +114,7 @@ except ModuleNotFoundError:
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from case_generator import get_common_moe_test_cases
+    from case_generator import get_common_moe_test_cases, moe_model_allows_quantization
 
     from helper import (
         balanced_logits,
@@ -169,11 +169,7 @@ def get_moe_test_cases():
         num_tokens_list = [num_tokens for num_tokens in common_moe_testcase.num_tokens_list if num_tokens <= 20480]
 
         for moe_type, num_tokens in itertools.product(moe_list, num_tokens_list):
-            if moe_type == "w4a8_mxfp4_mxfp8" and "DeepSeek-V4" not in model_name:
-                continue
-            if moe_type == "w4a16_mxfp4" and model_name not in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
-                continue
-            if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"] and moe_type != "w4a16_mxfp4":
+            if not moe_model_allows_quantization("sglang", model_name, moe_type):
                 continue
             # fp8_block requires hidden_size divisible by block group_size (128)
             if moe_type == "fp8_block" and (

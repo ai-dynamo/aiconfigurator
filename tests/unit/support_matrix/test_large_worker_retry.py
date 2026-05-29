@@ -4,6 +4,7 @@
 import pandas as pd
 import pytest
 
+from tools.support_matrix import generate_support_matrix
 from tools.support_matrix import support_matrix as support_matrix_module
 from tools.support_matrix.support_matrix import STATUS_PASS, SupportMatrix, TestConstraints
 
@@ -130,9 +131,33 @@ def test_run_single_test_can_return_row_replay_commands(monkeypatch):
     assert errors == {"agg": None}
     assert commands == {
         "agg": (
-            "uv run aiconfigurator cli default --model zai-org/GLM-5 --total-gpus 32 "
+            "uv run aiconfigurator cli default --model-path zai-org/GLM-5 --total-gpus 32 "
             "--system b200_sxm --backend sglang --backend-version 0.5.10 "
             "--database-mode SILICON --isl 256 --osl 256 --prefix 128 --ttft 2000.0 "
             "--tpot 50.0 --top-n 1 --no-color"
         )
     }
+
+
+def test_generate_support_matrix_reports_empty_filter(monkeypatch, capsys):
+    class EmptySupportMatrix:
+        def __init__(self, **_kwargs):
+            pass
+
+        def generate_combinations(self):
+            return [("Qwen/Qwen3-32B", "h200_sxm", "trtllm", "1.3.0rc10")]
+
+        def test_support_matrix(self, **_kwargs):
+            raise AssertionError("empty filters should stop before matrix execution")
+
+    monkeypatch.setattr(generate_support_matrix, "SupportMatrix", EmptySupportMatrix)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["generate_support_matrix.py", "--model", "missing/model", "--no-save"],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        generate_support_matrix.main()
+
+    assert exc.value.code == 2
+    assert "No support-matrix combinations matched the provided filters." in capsys.readouterr().err

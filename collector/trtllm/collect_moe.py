@@ -36,16 +36,8 @@ from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 # supported in trtllm 1.3.0rc1, please expect failures for these models if using trtllm < 1.3.0rc1
 NON_GATED_MOE_MODELS = ["Nemotron-3"]
 _MXFP4_MOE_TYPES = {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
-_TRTLLM_MXFP4_MOE_MODELS = {
-    "moonshotai/Kimi-K2-Instruct",
-    "moonshotai/Kimi-K2.5",
-    "nvidia/Kimi-K2.5-NVFP4",
-    "openai/gpt-oss-20b",
-    "openai/gpt-oss-120b",
-}
-_GPTOSS_MOE_MODELS = {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
 
-from collector.case_generator import get_common_moe_test_cases
+from collector.case_generator import get_common_moe_test_cases, moe_model_allows_quantization
 from collector.helper import (
     EXIT_CODE_RESTART,
     balanced_logits,
@@ -193,10 +185,7 @@ def get_moe_test_cases():
         moe_tp = common_moe_testcase.tp
 
         for moe_type in moe_list:
-            if moe_type in _MXFP4_MOE_TYPES:
-                if model_name not in _TRTLLM_MXFP4_MOE_MODELS:
-                    continue
-            elif model_name in _GPTOSS_MOE_MODELS:
+            if not moe_model_allows_quantization("trtllm", model_name, moe_type):
                 continue
 
             # w4afp8 requires k shape to be multiple of 128
