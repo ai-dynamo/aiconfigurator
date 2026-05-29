@@ -32,6 +32,7 @@ sys.path.insert(0, _REPO_ROOT)
 
 from tools.support_matrix.support_matrix import (
     STATUS_FAIL,
+    STATUS_FRAMEWORK_INCOMPATIBLE,
     STATUS_HW_INCOMPATIBLE,
     STATUS_PASS,
     SUPPORT_MATRIX_BASE_HEADER,
@@ -142,6 +143,8 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
         err_msg = row[7].strip() if len(row) > 7 else ""
         if status == STATUS_HW_INCOMPATIBLE and not err_msg:
             errors.append(f"Row {i}: {STATUS_HW_INCOMPATIBLE} rows must include a hardware incompatibility reason")
+        if status == STATUS_FRAMEWORK_INCOMPATIBLE and not err_msg:
+            errors.append(f"Row {i}: {STATUS_FRAMEWORK_INCOMPATIBLE} rows must include a framework incompatibility reason")
         if header == SUPPORT_MATRIX_HEADER and not row[8].strip():
             errors.append(f"Row {i}: Command column must include the support-matrix rerun command")
 
