@@ -119,6 +119,24 @@ class TestContextAttention:
                 common.FMHAQuantMode.bfloat16,
             )
 
+    def test_query_context_attention_sglang_head_size_limit(self, mutable_comprehensive_perf_db):
+        """SGLang 0.5.10 cannot run context attention above head_size 256."""
+        mutable_comprehensive_perf_db.backend = common.BackendName.sglang.value
+        mutable_comprehensive_perf_db.version = "0.5.10"
+
+        with pytest.raises(RuntimeError, match="head_size=512"):
+            mutable_comprehensive_perf_db.query_context_attention(
+                1,
+                32,
+                0,
+                8,
+                8,
+                common.KVCacheQuantMode.bfloat16,
+                common.FMHAQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.SOL,
+                head_size=512,
+            )
+
 
 class TestGenerationAttention:
     """Test cases for query_generation_attention method."""
