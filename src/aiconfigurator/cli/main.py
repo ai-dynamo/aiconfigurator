@@ -1617,7 +1617,7 @@ def _run_support_matrix_mode(args):
         architecture = None
 
     matrix = common.get_support_matrix()
-    systems = sorted(common.SupportedSystems) if args.system == "all" else [args.system]
+    systems = common.sort_support_matrix_systems(common.SupportedSystems) if args.system == "all" else [args.system]
     backends = [b.value for b in common.BackendName] if args.backend == "all" else [args.backend]
     existing_combos = {(row["System"].lower(), row["Backend"].lower()) for row in matrix}
 
