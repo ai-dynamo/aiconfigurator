@@ -4,7 +4,12 @@
 import pytest
 
 from tools.support_matrix import support_matrix as support_matrix_module
-from tools.support_matrix.support_matrix import STATUS_FAIL, STATUS_HW_INCOMPATIBLE, SupportMatrix, TestConstraints
+from tools.support_matrix.support_matrix import (
+    STATUS_FAIL,
+    STATUS_FRAMEWORK_INCOMPATIBLE,
+    SupportMatrix,
+    TestConstraints,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -38,7 +43,7 @@ def test_dsv4_vllm_019_unsupported_mxfp8_quant_is_framework_incompatible(monkeyp
         system_spec=_b200_system_spec(),
     )
 
-    assert statuses == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
     assert "Unsupported moe quant mode" in errors["agg"]
 
 
@@ -61,7 +66,7 @@ def test_dsv4_vllm_019_missing_mhc_data_is_framework_incompatible(monkeypatch):
         system_spec=_b200_system_spec(),
     )
 
-    assert statuses == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
     assert "DeepSeek-V4 mHC module data not loaded" in errors["disagg"]
 
 
@@ -100,7 +105,7 @@ def test_kimi_moonshot_trtllm_b200_int4_wo_is_framework_incompatible(monkeypatch
         system_spec=_b200_system_spec(),
     )
 
-    assert statuses == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
     assert "Unsupported moe quant mode 'int4_wo'" in errors["agg"]
 
 

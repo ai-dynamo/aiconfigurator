@@ -1279,11 +1279,20 @@ class SupportMatrix:
                     backend=backend,
                     version=version,
                     mode=mode,
-                    compare_engine_step_backends=self.compare_engine_step_backends,
-                    engine_step_comparison_rtol=self.engine_step_comparison_rtol,
-                    engine_step_comparison_atol=self.engine_step_comparison_atol,
-                    engine_step_frontier_rtol=self.engine_step_frontier_rtol,
-                    engine_step_frontier_atol=self.engine_step_frontier_atol,
+                    constraints=_DEFAULT_TIER,
+                    compare_engine_step_backends=getattr(self, "compare_engine_step_backends", False),
+                    engine_step_comparison_rtol=getattr(
+                        self, "engine_step_comparison_rtol", DEFAULT_ENGINE_STEP_COMPARISON_RTOL
+                    ),
+                    engine_step_comparison_atol=getattr(
+                        self, "engine_step_comparison_atol", DEFAULT_ENGINE_STEP_COMPARISON_ATOL
+                    ),
+                    engine_step_frontier_rtol=getattr(
+                        self, "engine_step_frontier_rtol", DEFAULT_ENGINE_STEP_FRONTIER_RTOL
+                    ),
+                    engine_step_frontier_atol=getattr(
+                        self, "engine_step_frontier_atol", DEFAULT_ENGINE_STEP_FRONTIER_ATOL
+                    ),
                 )
             else:
                 raise ValueError(f"Invalid support-matrix result row length: {len(row)}")

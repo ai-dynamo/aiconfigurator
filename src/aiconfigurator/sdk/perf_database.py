@@ -925,15 +925,7 @@ class _LazySupportMatrix:
             from aiconfigurator.sdk.operations.gemm import GEMM
 
             GEMM.load_data(db)
-            modes = _enum_key_names(getattr(db, "_gemm_data", None))
-            # ``fp8_static`` is a behavioral mode that reuses ``fp8`` GEMM perf tables.
-            if (
-                db.backend == "trtllm"
-                and common.GEMMQuantMode.fp8.name in modes
-                and common.GEMMQuantMode.fp8_static.name not in modes
-            ):
-                modes.append(common.GEMMQuantMode.fp8_static.name)
-            return modes
+            return _enum_key_names(getattr(db, "_gemm_data", None))
 
         if key == "context_attention":
             from aiconfigurator.sdk.operations.attention import ContextAttention
