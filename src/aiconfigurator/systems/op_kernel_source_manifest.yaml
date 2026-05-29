@@ -209,7 +209,7 @@ groups:
     frameworks: [sglang, trtllm]
     total_raw_rows: 16478
     within_framework_dedup_rows: 17
-    median_pct_divergence: 8.55
+    median_pct_divergence: 8.99
   - op_file: gdn_perf.txt
     kernel_source: 'causal_conv1d_update'
     tier: shared
