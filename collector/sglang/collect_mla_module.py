@@ -397,8 +397,8 @@ def get_generation_test_cases(attn_type: str):
     cases = []
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation"):
         for num_heads in sweep.inner_sweep_head_counts:
-            for batch_size in sweep.batch_sizes:
-                for seq_len in sweep.sequence_lengths:
+            for batch_size in sweep.generation_batch_sizes:
+                for seq_len in sweep.generation_sequence_lengths:
                     if batch_size * seq_len > sweep.generation_max_tokens:
                         continue
                     if (
@@ -1826,10 +1826,12 @@ def run_mla_module(
         base_cases = [(bs, seq_len, ip) for bs, seq_len, ip in base_cases if bs == batch_size_filter]
     if is_prefill and attn_type == "dsa":
         prefix_lens = get_mla_module_sweep_spec("sglang").context_prefix_lengths
+        # Run prefix as the outer loop so a late long-prefix illegal access does
+        # not discard all larger-ISL rows for the current batch-size subprocess.
         cases = [
             (bs, seq_len, ip, prefix_len)
-            for bs, seq_len, ip in base_cases
             for prefix_len in prefix_lens
+            for bs, seq_len, ip in base_cases
             if _dsa_context_prefix_shape_is_valid(bs, seq_len, prefix_len)
         ]
     else:
