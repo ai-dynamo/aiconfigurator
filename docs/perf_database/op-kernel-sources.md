@@ -16,7 +16,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
   - `shared_fallback`: 47 groups · 318,015 rows
 
 
-## `computescale_perf.txt`
+## `computescale_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -28,7 +28,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h200_sxm | `torch_ops` | shared | trtllm | trtllm:2069 | 0 / 1649 | 0 | — | — | — |
 | l40s | `torch_ops` | shared | trtllm | trtllm:439 | 0 / 439 | 0 | — | — | — |
 
-## `context_attention_perf.txt`
+## `context_attention_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -60,7 +60,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | l40s | `vllm_flashinfer` | shared | vllm | vllm:5457 | 0 / 5049 | 0 | — | — | — |
 | rtx_pro_6000_server | `triton` | shared | sglang | sglang:33522 | 0 / 33522 | 0 | — | — | — |
 
-## `context_mla_perf.txt`
+## `context_mla_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -86,7 +86,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | l40s | `vllm_triton_mla` | shared | vllm | vllm:880 | 0 / 880 | 0 | — | — | — |
 | rtx_pro_6000_server | `triton` | shared | sglang | sglang:1540 | 0 / 1540 | 0 | — | — | — |
 
-## `custom_allreduce_perf.txt`
+## `custom_allreduce_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -134,7 +134,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | rtx_pro_6000_server | `SGLang_CustomAllReduce_eager` | shared | sglang | sglang:23 | 0 / 23 | 0 | — | — | — |
 | rtx_pro_6000_server | `SGLang_CustomAllReduce_graph` | shared | sglang | sglang:23 | 0 / 23 | 0 | — | — | — |
 
-## `dsa_context_module_perf.txt`
+## `dsa_context_module_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -149,7 +149,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h100_sxm | `dsa_nsa` | shared | sglang | sglang:1287 | 0 / 1068 | 0 | — | — | — |
 | h200_sxm | `dsa_nsa` | shared | sglang | sglang:3917 | 0 / 3917 | 0 | — | — | — |
 
-## `dsa_generation_module_perf.txt`
+## `dsa_generation_module_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -166,7 +166,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h200_sxm | `default` | shared_fallback | trtllm | trtllm:2944 | 0 / 2944 | 0 | — | — | — |
 | h200_sxm | `dsa_nsa` | shared | sglang | sglang:4752 | 0 / 4752 | 0 | — | — | — |
 
-## `gdn_perf.txt`
+## `gdn_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -204,7 +204,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | rtx_pro_6000_server | `causal_conv1d_update` | shared | sglang | sglang:88 | 0 / 88 | 0 | — | — | — |
 | rtx_pro_6000_server | `fused_recurrent_gated_delta_rule` | shared | sglang | sglang:86 | 0 / 86 | 0 | — | — | — |
 
-## `gemm_perf.txt`
+## `gemm_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -245,7 +245,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | l40s | `vllm_default` | shared | vllm | vllm:18480 | 0 / 18480 | 0 | — | — | — |
 | rtx_pro_6000_server | `sglang` | shared | sglang | sglang:101010 | 0 / 101010 | 0 | — | — | — |
 
-## `generation_attention_perf.txt`
+## `generation_attention_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -277,7 +277,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | l40s | `vllm_flashinfer` | shared | vllm | vllm:5435 | 0 / 5435 | 0 | — | — | — |
 | rtx_pro_6000_server | `triton` | shared | sglang | sglang:19484 | 0 / 19484 | 0 | — | — | — |
 
-## `generation_mla_perf.txt`
+## `generation_mla_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -303,7 +303,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | l40s | `vllm_triton_mla` | shared | vllm | vllm:1401 | 0 / 1401 | 0 | — | — | — |
 | rtx_pro_6000_server | `triton` | shared | sglang | sglang:2324 | 0 / 2324 | 0 | — | — | — |
 
-## `mamba2_perf.txt`
+## `mamba2_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -320,13 +320,13 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h200_sxm | `causal_conv1d_fn` | shared | trtllm | trtllm:425 | 0 / 425 | 0 | — | — | — |
 | h200_sxm | `causal_conv1d_update` | shared | trtllm | trtllm:44 | 0 / 44 | 0 | — | — | — |
 
-## `mhc_module_perf.txt`
+## `mhc_module_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
 | rtx_pro_6000_server | `sglang_mhc` | shared | sglang | sglang:139 | 0 / 70 | 0 | — | — | — |
 
-## `mla_bmm_perf.txt`
+## `mla_bmm_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -340,7 +340,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | l40s | `default` | shared_fallback | sglang, trtllm | sglang:1696, trtllm:848 | 448 / 448 | 4 | 10.6 | 52.7 | 81.9 |
 | rtx_pro_6000_server | `default` | shared_fallback | sglang | sglang:848 | 0 / 448 | 0 | — | — | — |
 
-## `mla_context_module_perf.txt`
+## `mla_context_module_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -351,7 +351,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h100_sxm | `default` | shared_fallback | trtllm | trtllm:3878 | 0 / 3878 | 0 | — | — | — |
 | h200_sxm | `default` | shared_fallback | trtllm | trtllm:3873 | 0 / 3873 | 0 | — | — | — |
 
-## `mla_generation_module_perf.txt`
+## `mla_generation_module_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -362,7 +362,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h100_sxm | `default` | shared_fallback | trtllm | trtllm:5888 | 0 / 5888 | 0 | — | — | — |
 | h200_sxm | `default` | shared_fallback | trtllm | trtllm:5888 | 0 / 5888 | 0 | — | — | — |
 
-## `moe_perf.txt`
+## `moe_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -437,13 +437,13 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | rtx_pro_6000_server | `sglang_marlin_moe` | shared | sglang | sglang:14661 | 0 / 12717 | 0 | — | — | — |
 | rtx_pro_6000_server | `vllm_fused_moe` | shared | vllm | vllm:17766 | 0 / 17766 | 0 | — | — | — |
 
-## `nccl_perf.txt`
+## `nccl_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
 | b300_sxm | `NCCL` | shared | trtllm | trtllm:1512 | 0 / 126 | 0 | — | — | — |
 
-## `scale_matrix_perf.txt`
+## `scale_matrix_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -455,14 +455,14 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h200_sxm | `torch_ops` | shared | trtllm | trtllm:2069 | 0 / 1649 | 0 | — | — | — |
 | l40s | `torch_ops` | shared | trtllm | trtllm:441 | 0 / 441 | 0 | — | — | — |
 
-## `trtllm_alltoall_perf.txt`
+## `trtllm_alltoall_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
 | gb200 | `NVLinkOneSided` | shared | trtllm | trtllm:296 | 0 / 148 | 0 | — | — | — |
 | gb200 | `NVLinkTwoSided` | shared | trtllm | trtllm:1800 | 0 / 540 | 0 | — | — | — |
 
-## `wideep_context_mla_perf.txt`
+## `wideep_context_mla_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -475,14 +475,14 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h200_sxm | `fa3` | shared | sglang | sglang:960 | 0 / 960 | 0 | — | — | — |
 | h200_sxm | `flashinfer` | shared | sglang | sglang:960 | 0 / 960 | 0 | — | — | — |
 
-## `wideep_context_mlp_perf.txt`
+## `wideep_context_mlp_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
 | h100_sxm | `deepseek_v3` | shared | sglang | sglang:18 | 0 / 18 | 0 | — | — | — |
 | h200_sxm | `deepseek_v3` | shared | sglang | sglang:18 | 0 / 18 | 0 | — | — | — |
 
-## `wideep_context_moe_perf.txt`
+## `wideep_context_moe_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -493,14 +493,14 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h100_sxm | `deepepmoe` | shared | sglang | sglang:892 | 0 / 461 | 0 | — | — | — |
 | h200_sxm | `deepepmoe` | shared | sglang | sglang:954 | 0 / 492 | 0 | — | — | — |
 
-## `wideep_deepep_ll_perf.txt`
+## `wideep_deepep_ll_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
 | h100_sxm | `deepep` | shared | sglang | sglang:95 | 0 / 95 | 0 | — | — | — |
 | h200_sxm | `deepep` | shared | sglang | sglang:95 | 0 / 95 | 0 | — | — | — |
 
-## `wideep_generation_mla_perf.txt`
+## `wideep_generation_mla_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -513,14 +513,14 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h200_sxm | `fa3` | shared | sglang | sglang:1056 | 0 / 1056 | 0 | — | — | — |
 | h200_sxm | `flashinfer` | shared | sglang | sglang:1056 | 0 / 1056 | 0 | — | — | — |
 
-## `wideep_generation_mlp_perf.txt`
+## `wideep_generation_mlp_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
 | h100_sxm | `deepseek_v3` | shared | sglang | sglang:18 | 0 / 18 | 0 | — | — | — |
 | h200_sxm | `deepseek_v3` | shared | sglang | sglang:18 | 0 / 18 | 0 | — | — | — |
 
-## `wideep_generation_moe_perf.txt`
+## `wideep_generation_moe_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -531,7 +531,7 @@ Rows with a blank/`<unknown>` kernel_source are skipped during audit (the curren
 | h100_sxm | `deepepmoe` | shared | sglang | sglang:719 | 0 / 384 | 0 | — | — | — |
 | h200_sxm | `deepepmoe` | shared | sglang | sglang:720 | 0 / 384 | 0 | — | — | — |
 
-## `wideep_moe_perf.txt`
+## `wideep_moe_perf.parquet`
 
 | system | kernel_source | tier | frameworks | rows_per_fw | overlap_keys | dedup rows | median % | p95 % | max % |
 |---|---|---|---|---|---|---|---|---|---|
@@ -551,57 +551,57 @@ Each row is one distinct `kernel_source` value seen in the corpus, with the unio
 
 | kernel_source | frameworks | op files | systems | rows |
 |---|---|---|---|---|
-| `causal_conv1d_fn` | sglang, trtllm | gdn_perf.txt, mamba2_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 18,211 |
-| `causal_conv1d_update` | sglang, trtllm, vllm | gdn_perf.txt, mamba2_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 2,332 |
-| `chunk_gated_delta_rule` | trtllm | gdn_perf.txt | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 4,849 |
-| `deepep` | sglang | wideep_deepep_ll_perf.txt | h100_sxm, h200_sxm | 190 |
-| `deepepmoe` | sglang | wideep_context_moe_perf.txt, wideep_generation_moe_perf.txt | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 6,333 |
-| `deepgemm` | trtllm | gemm_perf.txt, moe_perf.txt | b200_sxm, b300_sxm, gb200, gb300 | 161,103 |
-| `deepseek_v3` | sglang | wideep_context_mlp_perf.txt, wideep_generation_mlp_perf.txt | h100_sxm, h200_sxm | 72 |
-| `dsa_nsa` | sglang | dsa_context_module_perf.txt, dsa_generation_module_perf.txt | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 23,772 |
-| `fa3` | sglang | wideep_context_mla_perf.txt, wideep_generation_mla_perf.txt | h100_sxm, h200_sxm | 5,248 |
-| `flash_attention` | sglang | context_attention_perf.txt, context_mla_perf.txt, generation_attention_perf.txt, generation_mla_perf.txt | a100_sxm, h100_sxm, h200_sxm, l40s | 249,719 |
-| `flashinfer` | sglang | wideep_context_mla_perf.txt, wideep_generation_mla_perf.txt | h100_sxm, h200_sxm | 5,325 |
-| `fused_recurrent_gated_delta_rule` | sglang, trtllm | gdn_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 1,507 |
-| `moe_torch_flow` | trtllm | moe_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 91,612 |
-| `moe_torch_flow_cutlass` | trtllm | moe_perf.txt | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 596,454 |
-| `moe_torch_flow_min_latency` | trtllm | moe_perf.txt | b200_sxm, gb200 | 50,157 |
-| `moe_torch_flow_nongated` | trtllm | moe_perf.txt | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 70,227 |
-| `NCCL` | trtllm | nccl_perf.txt | b300_sxm | 1,512 |
-| `NVLinkOneSided` | trtllm | trtllm_alltoall_perf.txt | gb200 | 296 |
-| `NVLinkTwoSided` | trtllm | trtllm_alltoall_perf.txt | gb200 | 1,800 |
-| `sglang` | sglang | gemm_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 1,745,481 |
-| `SGLang_CustomAllReduce_eager` | sglang | custom_allreduce_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 1,058 |
-| `SGLang_CustomAllReduce_graph` | sglang | custom_allreduce_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 1,058 |
-| `sglang_flashinfer_cutedsl_moe` | sglang | moe_perf.txt | b200_sxm, b300_sxm, gb200, gb300 | 236,422 |
-| `sglang_fused_moe_triton` | sglang | moe_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 936,086 |
-| `sglang_marlin_moe` | sglang | moe_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 228,443 |
-| `sglang_mhc` | sglang | mhc_module_perf.txt | rtx_pro_6000_server | 139 |
-| `torch_flow` | trtllm | context_attention_perf.txt, gemm_perf.txt, generation_attention_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 1,719,114 |
-| `torch_ops` | trtllm | computescale_perf.txt, scale_matrix_perf.txt | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 23,061 |
-| `triton` | sglang | context_attention_perf.txt, context_mla_perf.txt, generation_attention_perf.txt, generation_mla_perf.txt | rtx_pro_6000_server | 56,870 |
-| `trt_flow_/smooth_quant_gemm_L96/PLUGIN_V2_SmoothQuantGemm_0` | trtllm | gemm_perf.txt | a100_sxm, h200_sxm, l40s | 21,336 |
-| `trt_flow_/weight_only_quant_matmul_L257/PLUGIN_V2_WeightOnlyQuantMatmul_0` | trtllm | gemm_perf.txt | a100_sxm, h200_sxm, l40s | 42,672 |
-| `TRTLLM` | trtllm | custom_allreduce_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 1,656 |
-| `trtllm_mha` | sglang | context_attention_perf.txt, generation_attention_perf.txt | b200_sxm, b300_sxm, gb200, gb300 | 347,191 |
-| `trtllm_mla` | sglang | context_mla_perf.txt, generation_mla_perf.txt, wideep_context_mla_perf.txt, wideep_generation_mla_perf.txt | b200_sxm, b300_sxm, gb200, gb300 | 67,735 |
-| `vLLM_custom_eager` | vllm | custom_allreduce_perf.txt | a100_sxm, b200_sxm, b300_sxm, b60, gb200, gb300, h100_sxm, h200_sxm, l40s | 805 |
-| `vLLM_custom_graph` | vllm | custom_allreduce_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 736 |
-| `vllm_default` | vllm | gemm_perf.txt | a100_sxm, b200_sxm, b300_sxm, b60, gb200, gb300, h100_sxm, h200_sxm, l40s | 948,633 |
-| `vllm_flash_attn` | vllm | context_attention_perf.txt, generation_attention_perf.txt | a100_sxm, b60, h100_sxm, h200_sxm, l40s | 187,414 |
-| `vllm_flash_attn_mla` | vllm | context_mla_perf.txt, generation_mla_perf.txt | h100_sxm, h200_sxm | 8,730 |
-| `vllm_flashinfer` | vllm | context_attention_perf.txt, generation_attention_perf.txt | b200_sxm, b300_sxm, gb200, gb300, l40s | 194,796 |
-| `vllm_flashinfer_trtllm_moe_fp4` | vllm | moe_perf.txt | b200_sxm, b300_sxm, gb200, gb300 | 59,616 |
-| `vllm_flashmla` | vllm | context_mla_perf.txt, generation_mla_perf.txt | h100_sxm, h200_sxm | 8,460 |
-| `vllm_fused_moe` | vllm | moe_perf.txt | a100_sxm, b200_sxm, b300_sxm, b60, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 367,818 |
-| `vllm_marlin_int4_moe` | vllm | moe_perf.txt | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 61,236 |
-| `vllm_marlin_moe` | vllm | moe_perf.txt | gb200, gb300, h100_sxm, h200_sxm | 18,863 |
-| `vllm_mxfp4_moe` | vllm | moe_perf.txt | h200_sxm | 1,701 |
-| `vllm_triton_mla` | vllm | context_mla_perf.txt, generation_mla_perf.txt | a100_sxm, l40s | 4,526 |
-| `wideep_compute_cutlass` | trtllm | wideep_moe_perf.txt | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 24,948 |
+| `causal_conv1d_fn` | sglang, trtllm | gdn_perf.parquet, mamba2_perf.parquet | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 18,211 |
+| `causal_conv1d_update` | sglang, trtllm, vllm | gdn_perf.parquet, mamba2_perf.parquet | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 2,332 |
+| `chunk_gated_delta_rule` | trtllm | gdn_perf.parquet | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 4,849 |
+| `deepep` | sglang | wideep_deepep_ll_perf.parquet | h100_sxm, h200_sxm | 190 |
+| `deepepmoe` | sglang | wideep_context_moe_perf.parquet, wideep_generation_moe_perf.parquet | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 6,333 |
+| `deepgemm` | trtllm | gemm_perf.parquet, moe_perf.parquet | b200_sxm, b300_sxm, gb200, gb300 | 161,103 |
+| `deepseek_v3` | sglang | wideep_context_mlp_perf.parquet, wideep_generation_mlp_perf.parquet | h100_sxm, h200_sxm | 72 |
+| `dsa_nsa` | sglang | dsa_context_module_perf.parquet, dsa_generation_module_perf.parquet | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 23,772 |
+| `fa3` | sglang | wideep_context_mla_perf.parquet, wideep_generation_mla_perf.parquet | h100_sxm, h200_sxm | 5,248 |
+| `flash_attention` | sglang | context_attention_perf.parquet, context_mla_perf.parquet, generation_attention_perf.parquet, generation_mla_perf.parquet | a100_sxm, h100_sxm, h200_sxm, l40s | 249,719 |
+| `flashinfer` | sglang | wideep_context_mla_perf.parquet, wideep_generation_mla_perf.parquet | h100_sxm, h200_sxm | 5,325 |
+| `fused_recurrent_gated_delta_rule` | sglang, trtllm | gdn_perf.parquet | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 1,507 |
+| `moe_torch_flow` | trtllm | moe_perf.parquet | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 91,612 |
+| `moe_torch_flow_cutlass` | trtllm | moe_perf.parquet | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 596,454 |
+| `moe_torch_flow_min_latency` | trtllm | moe_perf.parquet | b200_sxm, gb200 | 50,157 |
+| `moe_torch_flow_nongated` | trtllm | moe_perf.parquet | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 70,227 |
+| `NCCL` | trtllm | nccl_perf.parquet | b300_sxm | 1,512 |
+| `NVLinkOneSided` | trtllm | trtllm_alltoall_perf.parquet | gb200 | 296 |
+| `NVLinkTwoSided` | trtllm | trtllm_alltoall_perf.parquet | gb200 | 1,800 |
+| `sglang` | sglang | gemm_perf.parquet | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 1,745,481 |
+| `SGLang_CustomAllReduce_eager` | sglang | custom_allreduce_perf.parquet | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 1,058 |
+| `SGLang_CustomAllReduce_graph` | sglang | custom_allreduce_perf.parquet | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 1,058 |
+| `sglang_flashinfer_cutedsl_moe` | sglang | moe_perf.parquet | b200_sxm, b300_sxm, gb200, gb300 | 236,422 |
+| `sglang_fused_moe_triton` | sglang | moe_perf.parquet | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 936,086 |
+| `sglang_marlin_moe` | sglang | moe_perf.parquet | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 228,443 |
+| `sglang_mhc` | sglang | mhc_module_perf.parquet | rtx_pro_6000_server | 139 |
+| `torch_flow` | trtllm | context_attention_perf.parquet, gemm_perf.parquet, generation_attention_perf.parquet | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 1,719,114 |
+| `torch_ops` | trtllm | computescale_perf.parquet, scale_matrix_perf.parquet | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 23,061 |
+| `triton` | sglang | context_attention_perf.parquet, context_mla_perf.parquet, generation_attention_perf.parquet, generation_mla_perf.parquet | rtx_pro_6000_server | 56,870 |
+| `trt_flow_/smooth_quant_gemm_L96/PLUGIN_V2_SmoothQuantGemm_0` | trtllm | gemm_perf.parquet | a100_sxm, h200_sxm, l40s | 21,336 |
+| `trt_flow_/weight_only_quant_matmul_L257/PLUGIN_V2_WeightOnlyQuantMatmul_0` | trtllm | gemm_perf.parquet | a100_sxm, h200_sxm, l40s | 42,672 |
+| `TRTLLM` | trtllm | custom_allreduce_perf.parquet | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 1,656 |
+| `trtllm_mha` | sglang | context_attention_perf.parquet, generation_attention_perf.parquet | b200_sxm, b300_sxm, gb200, gb300 | 347,191 |
+| `trtllm_mla` | sglang | context_mla_perf.parquet, generation_mla_perf.parquet, wideep_context_mla_perf.parquet, wideep_generation_mla_perf.parquet | b200_sxm, b300_sxm, gb200, gb300 | 67,735 |
+| `vLLM_custom_eager` | vllm | custom_allreduce_perf.parquet | a100_sxm, b200_sxm, b300_sxm, b60, gb200, gb300, h100_sxm, h200_sxm, l40s | 805 |
+| `vLLM_custom_graph` | vllm | custom_allreduce_perf.parquet | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s | 736 |
+| `vllm_default` | vllm | gemm_perf.parquet | a100_sxm, b200_sxm, b300_sxm, b60, gb200, gb300, h100_sxm, h200_sxm, l40s | 948,633 |
+| `vllm_flash_attn` | vllm | context_attention_perf.parquet, generation_attention_perf.parquet | a100_sxm, b60, h100_sxm, h200_sxm, l40s | 187,414 |
+| `vllm_flash_attn_mla` | vllm | context_mla_perf.parquet, generation_mla_perf.parquet | h100_sxm, h200_sxm | 8,730 |
+| `vllm_flashinfer` | vllm | context_attention_perf.parquet, generation_attention_perf.parquet | b200_sxm, b300_sxm, gb200, gb300, l40s | 194,796 |
+| `vllm_flashinfer_trtllm_moe_fp4` | vllm | moe_perf.parquet | b200_sxm, b300_sxm, gb200, gb300 | 59,616 |
+| `vllm_flashmla` | vllm | context_mla_perf.parquet, generation_mla_perf.parquet | h100_sxm, h200_sxm | 8,460 |
+| `vllm_fused_moe` | vllm | moe_perf.parquet | a100_sxm, b200_sxm, b300_sxm, b60, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 367,818 |
+| `vllm_marlin_int4_moe` | vllm | moe_perf.parquet | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 61,236 |
+| `vllm_marlin_moe` | vllm | moe_perf.parquet | gb200, gb300, h100_sxm, h200_sxm | 18,863 |
+| `vllm_mxfp4_moe` | vllm | moe_perf.parquet | h200_sxm | 1,701 |
+| `vllm_triton_mla` | vllm | context_mla_perf.parquet, generation_mla_perf.parquet | a100_sxm, l40s | 4,526 |
+| `wideep_compute_cutlass` | trtllm | wideep_moe_perf.parquet | b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm | 24,948 |
 
 ### `shared_fallback` (1 kernel sources)
 
 | kernel_source | frameworks | op files | systems | rows |
 |---|---|---|---|---|
-| `default` | sglang, trtllm, vllm | context_mla_perf.txt, dsa_context_module_perf.txt, dsa_generation_module_perf.txt, generation_mla_perf.txt, mla_bmm_perf.txt, mla_context_module_perf.txt, mla_generation_module_perf.txt | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 318,015 |
+| `default` | sglang, trtllm, vllm | context_mla_perf.parquet, dsa_context_module_perf.parquet, dsa_generation_module_perf.parquet, generation_mla_perf.parquet, mla_bmm_perf.parquet, mla_context_module_perf.parquet, mla_generation_module_perf.parquet | a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server | 318,015 |

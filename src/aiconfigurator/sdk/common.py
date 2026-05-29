@@ -783,50 +783,51 @@ class PerfDataFilename(Enum):
     Perf data filename for database to load.
     """
 
-    gemm = "gemm_perf.txt"
-    nccl = "nccl_perf.txt"
-    oneccl = "oneccl_perf.txt"
-    generation_attention = "generation_attention_perf.txt"
-    context_attention = "context_attention_perf.txt"
-    encoder_attention = "encoder_attention_perf.txt"
-    context_mla = "context_mla_perf.txt"
-    generation_mla = "generation_mla_perf.txt"
-    mla_bmm = "mla_bmm_perf.txt"
-    moe = "moe_perf.txt"
-    custom_allreduce = "custom_allreduce_perf.txt"
-    wideep_context_mla = "wideep_context_mla_perf.txt"
-    wideep_generation_mla = "wideep_generation_mla_perf.txt"
-    wideep_context_moe = "wideep_context_moe_perf.txt"
-    wideep_generation_moe = "wideep_generation_moe_perf.txt"
-    wideep_deepep_normal = "wideep_deepep_normal_perf.txt"
-    wideep_deepep_ll = "wideep_deepep_ll_perf.txt"
+    gemm = "gemm_perf.parquet"
+    nccl = "nccl_perf.parquet"
+    oneccl = "oneccl_perf.parquet"
+    generation_attention = "generation_attention_perf.parquet"
+    context_attention = "context_attention_perf.parquet"
+    encoder_attention = "encoder_attention_perf.parquet"
+    context_mla = "context_mla_perf.parquet"
+    generation_mla = "generation_mla_perf.parquet"
+    mla_bmm = "mla_bmm_perf.parquet"
+    moe = "moe_perf.parquet"
+    custom_allreduce = "custom_allreduce_perf.parquet"
+    wideep_context_mla = "wideep_context_mla_perf.parquet"
+    wideep_generation_mla = "wideep_generation_mla_perf.parquet"
+    wideep_context_moe = "wideep_context_moe_perf.parquet"
+    wideep_generation_moe = "wideep_generation_moe_perf.parquet"
+    wideep_deepep_normal = "wideep_deepep_normal_perf.parquet"
+    wideep_deepep_ll = "wideep_deepep_ll_perf.parquet"
     # TensorRT-LLM WideEP specific
-    wideep_moe_compute = "wideep_moe_perf.txt"
+    wideep_moe_compute = "wideep_moe_perf.parquet"
     # TensorRT-LLM AlltoAll (covers WideEP NVLinkTwoSided + CutlassFusedMoE NVLinkOneSided)
-    trtllm_alltoall = "trtllm_alltoall_perf.txt"
-    compute_scale = "computescale_perf.txt"
-    scale_matrix = "scale_matrix_perf.txt"
-    mamba2 = "mamba2_perf.txt"
-    gdn = "gdn_perf.txt"
+    trtllm_alltoall = "trtllm_alltoall_perf.parquet"
+    compute_scale = "computescale_perf.parquet"
+    scale_matrix = "scale_matrix_perf.parquet"
+    mamba2 = "mamba2_perf.parquet"
+    gdn = "gdn_perf.parquet"
     # Module-level attention profiling (complete self_attn forward)
-    mla_context_module = "mla_context_module_perf.txt"
-    mla_generation_module = "mla_generation_module_perf.txt"
-    dsa_context_module = "dsa_context_module_perf.txt"
-    dsa_generation_module = "dsa_generation_module_perf.txt"
-    mhc_module = "mhc_module_perf.txt"
-    # DeepSeek-V4 module-level data — one CSV per (attn_kind ∈ {csa, hca},
-    # mode ∈ {context, generation}) = 4 files.  Each file contains all
+    mla_context_module = "mla_context_module_perf.parquet"
+    mla_generation_module = "mla_generation_module_perf.parquet"
+    dsa_context_module = "dsa_context_module_perf.parquet"
+    dsa_generation_module = "dsa_generation_module_perf.parquet"
+    mhc_module = "mhc_module_perf.parquet"
+    # DeepSeek-V4 module-level data — one file per (attn_kind ∈ {csa, hca},
+    # mode ∈ {context, generation}) = 4 files. Each file contains all
     # (tp_size, gemm_type, b, s) rows for that kind+mode.  SWA layers are
     # folded into HCA at the model layer (see models.py:_attention_ops),
     # so no separate SWA collector / data is needed.
-    dsv4_csa_context_module = "dsv4_csa_context_module_perf.txt"
-    dsv4_hca_context_module = "dsv4_hca_context_module_perf.txt"
-    dsv4_csa_generation_module = "dsv4_csa_generation_module_perf.txt"
-    dsv4_hca_generation_module = "dsv4_hca_generation_module_perf.txt"
-    # DeepSeek-V4 sparse-kernel data retained for future prefix-aware
-    # corrections of the full attention module.
-    dsv4_paged_mqa_logits_module = "dsv4_paged_mqa_logits_module_perf.txt"
-    dsv4_hca_attn_module = "dsv4_hca_attn_module_perf.txt"
+    dsv4_csa_context_module = "dsv4_csa_context_module_perf.parquet"
+    dsv4_hca_context_module = "dsv4_hca_context_module_perf.parquet"
+    dsv4_csa_generation_module = "dsv4_csa_generation_module_perf.parquet"
+    dsv4_hca_generation_module = "dsv4_hca_generation_module_perf.parquet"
+    # DeepSeek-V4 sparse-kernel data (kernel-level past_kv Δ correction).
+    # Indexed by ``arch -> tp -> past_kv -> isl -> bs``.
+    # topk_512 and csa_attn are modeled analytically — no CSV needed.
+    dsv4_paged_mqa_logits_module = "dsv4_paged_mqa_logits_module_perf.parquet"
+    dsv4_hca_attn_module = "dsv4_hca_attn_module_perf.parquet"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])

@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -722,6 +723,83 @@ def log_perf(
         # Delete the lock file, even if writing crashed
         if got_lock and os.path.exists(lock_file):
             os.unlink(lock_file)
+
+
+def convert_perf_csv_to_parquet(
+    csv_file: str | os.PathLike,
+    *,
+    delete_source: bool = True,
+    compression: str = "zstd",
+) -> Path:
+    """Convert a collector CSV staging file to parquet atomically."""
+    csv_path = Path(csv_file)
+    if csv_path.name == "INCOMPLETE.txt" or not csv_path.name.endswith("_perf.txt"):
+        raise ValueError(f"Expected a collector perf CSV ending in _perf.txt, got {csv_path}")
+    if not csv_path.exists():
+        raise FileNotFoundError(csv_path)
+
+    lock_path = Path(f"{csv_path}.lock")
+    if lock_path.exists():
+        raise RuntimeError(f"Cannot convert {csv_path} while lock file exists: {lock_path}")
+
+    try:
+        import pyarrow.csv as pc
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise RuntimeError(
+            "Finalizing collector perf data as parquet requires pyarrow. "
+            "Install the project runtime dependencies before collecting perf data."
+        ) from exc
+
+    parquet_path = csv_path.with_suffix(".parquet")
+    tmp_path = parquet_path.with_name(f".{parquet_path.name}.tmp")
+    try:
+        table = pc.read_csv(csv_path)
+        pq.write_table(table, tmp_path, compression=compression)
+        os.replace(tmp_path, parquet_path)
+        if delete_source:
+            csv_path.unlink()
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+    return parquet_path
+
+
+def find_perf_csv_outputs(output_root: str | os.PathLike = ".", *, recursive: bool = False) -> list[Path]:
+    """Find collector CSV staging files directly under `output_root` by default."""
+    root = Path(output_root)
+    paths = root.rglob("*_perf.txt") if recursive else root.glob("*_perf.txt")
+    return sorted(path for path in paths if path.name != "INCOMPLETE.txt")
+
+
+def finalize_perf_files(
+    csv_files: Iterable[str | os.PathLike],
+    *,
+    delete_source: bool = True,
+    compression: str = "zstd",
+) -> list[Path]:
+    """Finalize explicit collector CSV staging files as parquet."""
+    converted: list[Path] = []
+    for csv_file in sorted({Path(path) for path in csv_files}):
+        if csv_file.name == "INCOMPLETE.txt" or not csv_file.name.endswith("_perf.txt") or not csv_file.exists():
+            continue
+        converted.append(convert_perf_csv_to_parquet(csv_file, delete_source=delete_source, compression=compression))
+    return converted
+
+
+def finalize_perf_outputs(
+    output_root: str | os.PathLike = ".",
+    *,
+    recursive: bool = False,
+    delete_source: bool = True,
+    compression: str = "zstd",
+) -> list[Path]:
+    """Finalize collector CSV staging files directly under `output_root` as parquet."""
+    return finalize_perf_files(
+        find_perf_csv_outputs(output_root, recursive=recursive),
+        delete_source=delete_source,
+        compression=compression,
+    )
 
 
 # Helper functions for MoE

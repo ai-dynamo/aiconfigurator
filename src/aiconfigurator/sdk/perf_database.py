@@ -137,6 +137,8 @@ def _load_op_kernel_source_manifest_entries(systems_root: str) -> dict[str, tupl
         op_file = entry.get("op_file")
         if not op_file:
             continue
+        if op_file.endswith(".txt"):
+            op_file = f"{os.path.splitext(op_file)[0]}.parquet"
         accum[op_file].append(entry)
     return {key: tuple(value) for key, value in accum.items()}
 
@@ -145,7 +147,11 @@ def _load_op_kernel_source_manifest_entries(systems_root: str) -> dict[str, tupl
 # loaders can import it without a circular dependency on ``perf_database``
 # at module load time. Re-exported here for any external callers that may
 # still import it via ``aiconfigurator.sdk.perf_database._read_filtered_rows``.
-from aiconfigurator.sdk.operations.base import _read_filtered_rows  # noqa: F401
+from aiconfigurator.sdk.operations.base import (  # noqa: F401
+    _read_filtered_rows,
+    _read_perf_rows,
+    _resolve_perf_data_path,
+)
 
 
 def get_supported_databases(
@@ -1390,7 +1396,7 @@ class PerfDatabase:
             for sibling_version in fw_versions:
                 if framework == backend_lower and sibling_version == self.version:
                     continue  # Active source already added as the primary.
-                sibling_path = os.path.join(fw_dir, sibling_version, op_file_basename)
+                sibling_path = _resolve_perf_data_path(os.path.join(fw_dir, sibling_version, op_file_basename))
                 if not os.path.isfile(sibling_path):
                     continue
                 sources.append((sibling_path, ks_filter))

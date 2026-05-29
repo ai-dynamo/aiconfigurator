@@ -16,7 +16,7 @@ import sys
 import textwrap
 from collections import defaultdict
 
-from aiconfigurator.sdk.perf_database import get_database
+from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError, get_database
 
 # Disable interactive backend
 os.environ["MPLBACKEND"] = "agg"
@@ -34,10 +34,93 @@ os.chdir(old_cwd)
 
 
 CLI_SMOKE_REQUIRED_PERF_FILES = (
-    "gemm_perf.txt",
-    "context_attention_perf.txt",
-    "generation_attention_perf.txt",
+    "gemm_perf.parquet",
+    "context_attention_perf.parquet",
+    "generation_attention_perf.parquet",
 )
+
+OPTIONAL_CHART_ERROR_SNIPPETS = (
+    "values is None or empty",
+    "QH6013 qhull input error",
+    "input is less than",
+    "File does not exist at",
+    "list index out of range",
+)
+
+
+def _data_dir(system: str, backend: str, backend_version: str) -> str:
+    return os.path.join(
+        REPO_ROOT,
+        "src",
+        "aiconfigurator",
+        "systems",
+        "data",
+        system,
+        backend,
+        backend_version,
+    )
+
+
+def _perf_files_present(data_dir: str) -> set[str]:
+    if not os.path.isdir(data_dir):
+        return set()
+    return {entry for entry in os.listdir(data_dir) if entry.endswith("_perf.parquet")}
+
+
+def _short_error(exc: Exception) -> str:
+    short_error_str = str(exc).split("\n")[0].strip()
+    if len(short_error_str) > 100:
+        short_error_str = short_error_str[:97] + "..."
+    return short_error_str
+
+
+def _is_optional_chart_error(exc: Exception) -> bool:
+    if isinstance(exc, PerfDataNotAvailableError):
+        return True
+    error = str(exc)
+    return any(snippet in error for snippet in OPTIONAL_CHART_ERROR_SNIPPETS)
+
+
+def _chart_op_name(create_chart_func) -> str:
+    if isinstance(create_chart_func, functools.partial):
+        chart_op_name = create_chart_func.func.__name__
+        for val in create_chart_func.keywords.values():
+            chart_op_name += f"_{val}"
+    else:
+        chart_op_name = create_chart_func.__name__
+    return chart_op_name.replace("visualize_", "")
+
+
+def _load_chart_op_data(database, op: str) -> None:
+    """Load the lazy op data expected by the legacy notebook visualizers."""
+    from aiconfigurator.sdk.operations import (
+        GEMM,
+        NCCL,
+        ContextAttention,
+        ContextDSAModule,
+        ContextMLA,
+        CustomAllReduce,
+        GenerationAttention,
+        GenerationDSAModule,
+        GenerationMLA,
+        MLAModule,
+        MoE,
+    )
+
+    op_loaders = {
+        "gemm": (GEMM,),
+        "context_attention": (ContextAttention,),
+        "generation_attention": (GenerationAttention,),
+        "context_mla": (ContextMLA, MLAModule),
+        "generation_mla": (GenerationMLA, MLAModule),
+        "moe": (MoE,),
+        "custom_allreduce": (CustomAllReduce,),
+        "nccl": (NCCL,),
+        "dsa_module": (ContextDSAModule, GenerationDSAModule),
+    }
+
+    for loader in op_loaders.get(op, ()):
+        loader.load_data(database)
 
 
 class SkippedSiliconPoints:
@@ -134,16 +217,7 @@ def run_cli_smoke_test(system: str, backend: str, backend_version: str) -> tuple
 
 def should_run_cli_smoke_test(system: str, backend: str, backend_version: str) -> tuple[bool, str]:
     """Return whether the default Qwen CLI smoke test has enough data to be meaningful."""
-    data_dir = os.path.join(
-        REPO_ROOT,
-        "src",
-        "aiconfigurator",
-        "systems",
-        "data",
-        system,
-        backend,
-        backend_version,
-    )
+    data_dir = _data_dir(system, backend, backend_version)
     missing_files = [
         perf_file
         for perf_file in CLI_SMOKE_REQUIRED_PERF_FILES
@@ -173,6 +247,50 @@ def get_changed_files(base_ref: str, head_ref: str) -> list[str]:
         return []
 
 
+def get_csv_to_parquet_conversion_files(base_ref: str, head_ref: str) -> set[str]:
+    """Return added parquet files that replace same-stem legacy text files."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-status", f"{base_ref}...{head_ref}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Error getting changed file statuses: {e}", file=sys.stderr)
+        return set()
+
+    added_parquet: set[str] = set()
+    deleted_legacy_as_parquet: set[str] = set()
+    renamed_legacy_as_parquet: set[str] = set()
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        status = parts[0]
+        paths = parts[1:]
+        if status.startswith("A") and paths:
+            path = paths[-1]
+            if path.startswith("src/aiconfigurator/systems/") and path.endswith("_perf.parquet"):
+                added_parquet.add(path)
+        elif status.startswith("D") and paths:
+            path = paths[0]
+            if path.startswith("src/aiconfigurator/systems/") and path.endswith("_perf.txt"):
+                deleted_legacy_as_parquet.add(f"{os.path.splitext(path)[0]}.parquet")
+        elif status.startswith("R") and len(paths) == 2:
+            old_path, new_path = paths
+            if (
+                old_path.startswith("src/aiconfigurator/systems/")
+                and new_path.startswith("src/aiconfigurator/systems/")
+                and old_path.endswith("_perf.txt")
+                and new_path.endswith("_perf.parquet")
+                and os.path.splitext(old_path)[0] == os.path.splitext(new_path)[0]
+            ):
+                renamed_legacy_as_parquet.add(new_path)
+
+    return (added_parquet & deleted_legacy_as_parquet) | renamed_legacy_as_parquet
+
+
 def create_charts(
     backend: str,
     backend_version: str,
@@ -182,7 +300,8 @@ def create_charts(
     output_md_file: str,
 ):
     new_nccl_perf_collected = False  # FIXME
-    database = get_database(system=system, backend=backend, version=backend_version)
+    data_dir = _data_dir(system, backend, backend_version)
+    all_perf_files = _perf_files_present(data_dir)
 
     # TODO: for simplicity & maintainability, maybe better to ignore perf_files and
     # just call all chart functions in validate_database?
@@ -212,8 +331,10 @@ def create_charts(
             functools.partial(validate_database.visualize_nccl, operation="alltoall"),
             functools.partial(validate_database.visualize_nccl, operation="reduce_scatter"),
         ],
-        "dsa_context_module": [validate_database.visualize_dsa_module],
-        "dsa_generation_module": [validate_database.visualize_dsa_module],
+        "dsa_module": [validate_database.visualize_dsa_module],
+    }
+    op_to_required_perf_files = {
+        "dsa_module": ("dsa_context_module_perf.parquet", "dsa_generation_module_perf.parquet"),
     }
 
     xpu_systems = ["b60"]
@@ -230,24 +351,37 @@ def create_charts(
             f"system: {system}, backend: {backend}, backend_version: {backend_version}\n"
         )
 
+    database = get_database(system=system, backend=backend, version=backend_version)
+    if database is None:
+        with open(output_md_file, "a") as f:
+            f.write("- Skipped ⚠️: no complete perf database is available for this system/backend/version\n")
+        return
+
     # Create sanity check plots for each op and save them to the output directory.
     # Append the plot image URLs to the output md file.
+    perf_files = set(perf_files)
     for op, funcs_to_create_charts in op_to_chart_function.items():
-        op_perf_file = f"{op}_perf.txt"
-        if op_perf_file not in perf_files and not (op == "nccl" and new_nccl_perf_collected):
+        required_perf_files = op_to_required_perf_files.get(op, (f"{op}_perf.parquet",))
+        if not any(perf_file in perf_files for perf_file in required_perf_files) and not (
+            op == "nccl" and new_nccl_perf_collected
+        ):
+            continue
+
+        missing_required = [perf_file for perf_file in required_perf_files if perf_file not in all_perf_files]
+        if missing_required:
+            with open(output_md_file, "a") as f:
+                f.write(
+                    f"- `{op}` Skipped ⚠️: required paired perf files are not present: {', '.join(missing_required)}\n"
+                )
             continue
 
         for create_chart_func in funcs_to_create_charts:
-            if isinstance(create_chart_func, functools.partial):
-                chart_op_name = create_chart_func.func.__name__
-                for val in create_chart_func.keywords.values():
-                    chart_op_name += f"_{val}"
-            else:
-                chart_op_name = create_chart_func.__name__
-            chart_op_name = chart_op_name.replace("visualize_", "")
+            chart_op_name = _chart_op_name(create_chart_func)
             img_path = f"{chart_op_name}_{system}_{backend}_{backend_version}.png"
 
             try:
+                plt.close("all")
+                _load_chart_op_data(database, op)
                 with SkippedSiliconPoints(database) as skipped_points:
                     create_chart_func(database)
                 if skipped_points.calls and not skipped_points.successes:
@@ -257,18 +391,22 @@ def create_charts(
                             f"for the sanity chart grid ({skipped_points.skipped} unavailable points)\n"
                         )
                     continue
+                if not plt.get_fignums():
+                    with open(output_md_file, "a") as f:
+                        f.write(f"- `{chart_op_name}` Skipped ⚠️: no chart was generated for this data shape\n")
+                    continue
             except Exception as e:
-                # Extract 1-line error summary
-                short_error_str = str(e).split("\n")[0].strip()
-                if len(short_error_str) > 100:
-                    short_error_str = short_error_str[:97] + "..."
+                short_error_str = _short_error(e)
+                status = "Skipped ⚠️" if _is_optional_chart_error(e) else "Error ❌"
                 with open(output_md_file, "a") as f:
-                    f.write(f"- `{chart_op_name}` Error ❌: {short_error_str}\n")
+                    f.write(f"- `{chart_op_name}` {status}: {short_error_str}\n")
 
                 print(f"Error creating chart for {chart_op_name}: {e}")
+                plt.close("all")
                 continue
 
             plt.savefig(os.path.join(output_dir, img_path))
+            plt.close("all")
 
             with open(output_md_file, "a") as f:
                 if skipped_points.skipped:
@@ -323,6 +461,12 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     changed_files = get_changed_files(args.base_ref, args.head_ref)
+    csv_to_parquet_conversion_files = get_csv_to_parquet_conversion_files(args.base_ref, args.head_ref)
+    if csv_to_parquet_conversion_files:
+        print(
+            "Skipping "
+            f"{len(csv_to_parquet_conversion_files)} CSV-to-parquet conversion files already covered by parquet diff."
+        )
 
     # Organize changed files by (system, backend, backend_version) so that
     # they are grouped together in the output text.
@@ -330,6 +474,9 @@ def main():
     system_backend_version_to_changed_files = defaultdict(list)
 
     for changed_file in changed_files:
+        if changed_file in csv_to_parquet_conversion_files:
+            continue
+
         # remove prefix
         changed_file = changed_file.replace("src/aiconfigurator/systems/", "")
         # split by /
@@ -340,20 +487,24 @@ def main():
             # Ignore for now
             continue
 
-        # data/<system>/<backend>/<backend_version>/*.txt
+        # data/<system>/<backend>/<backend_version>/*.parquet
         elif len(parts) == 5 and parts[0] == "data":
             system = parts[1]
             backend = parts[2]
             backend_version = parts[3]
 
-            # data/<system>/nccl/<nccl_version>/nccl_perf.txt
-            # data/<system>/oneccl/<oneccl_version>/oneccl_perf.txt
+            # data/<system>/nccl/<nccl_version>/nccl_perf.parquet
+            # data/<system>/oneccl/<oneccl_version>/oneccl_perf.parquet
             if backend in ("nccl", "oneccl"):
                 # Ignore for now
                 continue
 
             perf_file = parts[4]
-            if perf_file == "INCOMPLETE.txt":
+            if perf_file == "INCOMPLETE.txt" or not perf_file.endswith("_perf.parquet"):
+                continue
+
+            data_dir = _data_dir(system, backend, backend_version)
+            if os.path.isfile(os.path.join(data_dir, "INCOMPLETE.txt")):
                 continue
             system_backend_version_to_changed_files[(system, backend, backend_version)].append(perf_file)
 

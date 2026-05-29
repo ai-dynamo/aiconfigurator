@@ -979,9 +979,11 @@ def load_context_dsa_module_data(dsa_file: str):
         energy = power * latency
 
         arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
-        if arch == "GlmMoeDsaForCausalLM" and not row.get("step"):
+        step = row.get("step")
+        step_missing = step is None or (isinstance(step, str) and step.strip() == "")
+        if arch == "GlmMoeDsaForCausalLM" and step_missing:
             raise ValueError("GLM-5 context DSA module data requires a non-empty step column for prefix/past_kv length")
-        prefix = int(row.get("step", 0) or 0)
+        prefix = 0 if step_missing else int(step)
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
         kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
