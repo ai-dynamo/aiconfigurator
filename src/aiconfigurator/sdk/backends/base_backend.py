@@ -133,6 +133,18 @@ class BaseBackend:
         """
         return min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)
 
+    def _prefill_dispatch_overhead_ms(self, model: "BaseModel") -> float:
+        """Return a constant per-request overhead added to T_prefill (ms).
+
+        Silicon benchmarks measure isolated kernel time. Production inference
+        engines carry a fixed per-request cost from CPU-side Python dispatch
+        across all layers (tensor creation, CUDA kernel launches) that does not
+        appear in per-kernel measurements and does not scale with batch size.
+        The model is provided so subclasses can factor in architecture properties
+        beyond layer count. Default: 0.0 (no correction).
+        """
+        return 0.0
+
     def _throughput_cap(self, step_throughput: float, ttft: float, tpot: float, b: int, osl: int) -> float:
         """Return the effective output throughput after any engine-specific cap.
 
@@ -1219,7 +1231,7 @@ class BaseBackend:
         # decode tokens in the step. For TTFT we need the pure prefill cost (no decode
         # tokens alongside), so we undo that efficiency reduction first.
         _prefill_step_ms = mix_step_latency_ms / mix_efficiency if mix_efficiency > 0 else mix_step_latency_ms
-        _ttft_per_request = _prefill_step_ms * np.ceil(isl / ctx_tokens)
+        _ttft_per_request = _prefill_step_ms * np.ceil(isl / ctx_tokens) + self._prefill_dispatch_overhead_ms(model)
         ttft = encoder_latency_ms + _ttft_per_request * self._ttft_queuing_factor(b, steps_to_finish_ctx)
         logger.debug(
             f"ttft: prefill_step={_prefill_step_ms:.2f}ms qf={self._ttft_queuing_factor(b, steps_to_finish_ctx):.2f}"

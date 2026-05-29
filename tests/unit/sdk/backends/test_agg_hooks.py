@@ -3,6 +3,8 @@
 
 """Cross-backend tests for overridable agg-pipeline hooks on BaseBackend."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from aiconfigurator.sdk.backends.sglang_backend import SGLANGBackend
@@ -131,3 +133,25 @@ def test_throughput_cap_non_vllm_identity() -> None:
     for backend_cls in [SGLANGBackend, TRTLLMBackend]:
         backend = backend_cls()
         assert backend._throughput_cap(step_throughput=999.0, ttft=100.0, tpot=5.0, b=8, osl=30) == 999.0
+
+
+# ---------------------------------------------------------------------------
+# _prefill_dispatch_overhead_ms
+# ---------------------------------------------------------------------------
+
+
+def test_prefill_dispatch_overhead_vllm_scales_with_layers() -> None:
+    backend = VLLMBackend()
+    model = MagicMock()
+    model._num_layers = 32
+    assert backend._prefill_dispatch_overhead_ms(model) == pytest.approx(32 * 0.8)
+    model._num_layers = 80
+    assert backend._prefill_dispatch_overhead_ms(model) == pytest.approx(80 * 0.8)
+
+
+@pytest.mark.parametrize("backend_cls", [SGLANGBackend, TRTLLMBackend])
+def test_prefill_dispatch_overhead_non_vllm_zero(backend_cls) -> None:
+    backend = backend_cls()
+    model = MagicMock()
+    model._num_layers = 32
+    assert backend._prefill_dispatch_overhead_ms(model) == 0.0

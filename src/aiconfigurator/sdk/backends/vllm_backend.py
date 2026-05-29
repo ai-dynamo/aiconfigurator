@@ -8,6 +8,7 @@ import numpy as np
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+from aiconfigurator.sdk.models import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,12 @@ class VLLMBackend(BaseBackend):
         # giving a consistent formula across both scheduling regimes.
         # Source: vllm/v1/core/sched/scheduler.py, SchedulerConfig.max_num_partial_prefills
         return max(1, b - int(np.ceil(ctx_tokens / isl)))
+
+    def _prefill_dispatch_overhead_ms(self, model: BaseModel) -> float:
+        # CPU-side dispatch overhead scales with layer count and is not captured
+        # in silicon benchmarks. Recalibrated at ~0.8ms/layer against the full
+        # silicon corpus across hardware platforms and model families.
+        return model._num_layers * 0.8
 
     def _ttft_queuing_factor(self, b: int, steps_to_finish_ctx: float) -> float:
         # vLLM v1 serialises prefill (max_num_partial_prefills=1): requests queue
