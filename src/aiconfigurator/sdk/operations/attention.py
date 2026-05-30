@@ -34,6 +34,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _raise_for_sglang_context_attention_head_size_limit(backend: str, version: str, head_size: int) -> None:
+    if backend != common.BackendName.sglang.value or head_size <= 256:
+        return
+    parsed_version = common.parse_support_matrix_version(version)
+    max_limited_version = common.parse_support_matrix_version("0.5.10")
+    if parsed_version is None or max_limited_version is None or parsed_version > max_limited_version:
+        return
+    raise RuntimeError(
+        "SGLang context attention does not support head_size="
+        f"{head_size} for backend version {version}; "
+        "flash_attn_with_kvcache reports: "
+        "FlashAttention forward only supports head dimension at most 256."
+    )
+
+
 # Extrapolation target grids — lifted verbatim from the legacy blocks in
 # ``PerfDatabase.__init__`` so behavior stays bit-identical.
 
@@ -245,16 +260,7 @@ class ContextAttention(Operation):
 
         if database_mode is None:
             database_mode = database._default_database_mode
-        if database.backend == common.BackendName.sglang.value and head_size > 256:
-            version = common.parse_support_matrix_version(database.version)
-            max_limited_version = common.parse_support_matrix_version("0.5.10")
-            if version is not None and max_limited_version is not None and version <= max_limited_version:
-                raise RuntimeError(
-                    "SGLang context attention does not support head_size="
-                    f"{head_size} for backend version {database.version}; "
-                    "flash_attn_with_kvcache reports: "
-                    "FlashAttention forward only supports head dimension at most 256."
-                )
+        _raise_for_sglang_context_attention_head_size_limit(database.backend, database.version, head_size)
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
