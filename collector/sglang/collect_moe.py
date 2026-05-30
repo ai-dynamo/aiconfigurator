@@ -765,9 +765,17 @@ def benchmark_config(
         from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe
         from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
             _pack_topk_for_flashinfer_routed,
-            get_activation_type,
             quantize_hidden_states_fp4,
         )
+
+        try:
+            from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import get_activation_type
+        except ImportError:
+
+            def get_activation_type(activation: str) -> int:
+                if activation == "silu":
+                    return 3
+                raise ValueError(f"Unsupported FlashInfer TRTLLM activation: {activation}")
 
         if hidden_size % 32 != 0 or (shard_intermediate_size // 2) % 32 != 0:
             raise ValueError(
