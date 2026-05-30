@@ -13,7 +13,15 @@ from unittest.mock import patch
 import pytest
 
 from aiconfigurator.sdk import common, config, models
-from aiconfigurator.sdk.models import LLAMAModel, Qwen3VLModel, check_is_moe, get_model, get_model_family
+from aiconfigurator.sdk.models import (
+    LLAMAModel,
+    MOEModel,
+    Qwen3VLModel,
+    Qwen3VLMoEModel,
+    check_is_moe,
+    get_model,
+    get_model_family,
+)
 from aiconfigurator.sdk.task import TaskConfig
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
@@ -939,9 +947,14 @@ class TestDeepSeekTPAllReduce:
 # ── Qwen3VL constants ──────────────────────────────────────────────────────────
 
 _QWEN3VL_ARCH = "Qwen3VLForConditionalGeneration"
+_QWEN3VL_MOE_ARCH = "Qwen3VLMoeForConditionalGeneration"
 _VL_MODELS = [
     "Qwen/Qwen3-VL-32B-Instruct",
     "Qwen/Qwen3-VL-32B-Thinking",
+]
+_VL_MOE_MODELS = [
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "Qwen/Qwen3-VL-235B-A22B-Instruct",
 ]
 
 
@@ -954,14 +967,27 @@ class TestQwen3VLRegistration:
     def test_architecture_maps_to_qwen3vl_family(self):
         assert common.ARCHITECTURE_TO_MODEL_FAMILY[_QWEN3VL_ARCH] == "QWEN3VL"
 
+    def test_moe_architecture_maps_to_qwen3vl_moe_family(self):
+        assert common.ARCHITECTURE_TO_MODEL_FAMILY[_QWEN3VL_MOE_ARCH] == "QWEN3VL_MOE"
+
     def test_architecture_in_multimodal_text_config_key(self):
         assert _QWEN3VL_ARCH in common.MULTIMODAL_TEXT_CONFIG_KEY
+
+    def test_moe_architecture_in_multimodal_text_config_key(self):
+        assert _QWEN3VL_MOE_ARCH in common.MULTIMODAL_TEXT_CONFIG_KEY
 
     def test_multimodal_text_config_key_is_text_config(self):
         assert common.MULTIMODAL_TEXT_CONFIG_KEY[_QWEN3VL_ARCH] == "text_config"
 
+    def test_moe_multimodal_text_config_key_is_text_config(self):
+        assert common.MULTIMODAL_TEXT_CONFIG_KEY[_QWEN3VL_MOE_ARCH] == "text_config"
+
     @pytest.mark.parametrize("model_id", _VL_MODELS)
     def test_model_ids_in_default_hf_models(self, model_id):
+        assert model_id in common.DefaultHFModels
+
+    @pytest.mark.parametrize("model_id", _VL_MOE_MODELS)
+    def test_moe_model_ids_in_default_hf_models(self, model_id):
         assert model_id in common.DefaultHFModels
 
 
@@ -977,6 +1003,11 @@ class TestQwen3VLPredownloadedConfig:
     def test_config_has_correct_architecture(self, model_id):
         result = get_model_config_from_model_path(model_id)
         assert result["architecture"] == _QWEN3VL_ARCH
+
+    @pytest.mark.parametrize("model_id", _VL_MOE_MODELS)
+    def test_moe_config_has_correct_architecture(self, model_id):
+        result = get_model_config_from_model_path(model_id)
+        assert result["architecture"] == _QWEN3VL_MOE_ARCH
 
     @pytest.mark.parametrize("model_id", _VL_MODELS)
     def test_config_has_correct_llm_params(self, model_id):
@@ -1091,3 +1122,21 @@ class TestQwen3VLModel:
     def test_both_vl_variants_return_qwen3vl_model(self, model_id, model_config):
         model = get_model(model_id, model_config, "trtllm")
         assert isinstance(model, Qwen3VLModel)
+
+    @pytest.mark.parametrize("model_id", _VL_MOE_MODELS)
+    def test_vl_moe_variants_are_moe_models(self, model_id):
+        assert check_is_moe(model_id)
+
+    @pytest.mark.parametrize("model_id", _VL_MODELS)
+    def test_dense_vl_variants_are_not_moe_models(self, model_id):
+        assert not check_is_moe(model_id)
+
+    @pytest.mark.parametrize("model_id", _VL_MOE_MODELS)
+    def test_vl_moe_variants_resolve_moe_parallelism(self, model_id):
+        model_config = config.ModelConfig(tp_size=8, attention_dp_size=1, moe_tp_size=1, moe_ep_size=None)
+        model = get_model(model_id, model_config, "trtllm")
+
+        assert isinstance(model, Qwen3VLMoEModel)
+        assert isinstance(model, MOEModel)
+        assert model.config.moe_tp_size == 1
+        assert model.config.moe_ep_size == 8

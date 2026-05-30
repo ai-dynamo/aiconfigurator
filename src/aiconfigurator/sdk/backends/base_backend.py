@@ -363,9 +363,9 @@ class BaseBackend:
             the LLM context and generation phases.
 
             token count resolution order:
-                1. image_height + image_width (computed from VisionEncoderConfig patch/merge sizes)
+                1. image_height + image_width when both are set
                 2. num_image_tokens (explicit override, per image)
-                3. isl (fallback for text-only or unconfigured VL requests)
+                3. skip encoder modeling for text-only or unconfigured VL requests
 
             Returns:
                 tuple: (encoder_latency_dict, encoder_energy_wms_dict, img_ctx_tokens)
@@ -380,7 +380,10 @@ class BaseBackend:
             enc_cfg = getattr(model, "encoder_config", None)
             num_images = runtime_config.num_images_per_request
 
-            if runtime_config.num_images_per_request > 0 and enc_cfg is not None:
+            if num_images <= 0 or enc_cfg is None:
+                return encoder_latency_dict, encoder_energy_wms_dict, 0
+
+            if runtime_config.image_height > 0 and runtime_config.image_width > 0:
                 img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
                 tokens_per_image = (runtime_config.image_height // img_stride) * (
                     runtime_config.image_width // img_stride
@@ -388,8 +391,14 @@ class BaseBackend:
                 pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
                     runtime_config.image_width // enc_cfg.patch_size
                 )
+            elif runtime_config.num_image_tokens > 0:
+                tokens_per_image = runtime_config.num_image_tokens
+                pre_merge_per_image = runtime_config.num_image_tokens
             else:
-                # No image dimensions specified. skip encoder modeling
+                # Image inputs are disabled. Keep VL models in text-only mode.
+                return encoder_latency_dict, encoder_energy_wms_dict, 0
+
+            if tokens_per_image <= 0 or pre_merge_per_image <= 0:
                 return encoder_latency_dict, encoder_energy_wms_dict, 0
 
             n_img_post = tokens_per_image * num_images  # post-merge: injected into LLM context
