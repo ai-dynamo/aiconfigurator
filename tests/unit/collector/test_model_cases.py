@@ -84,7 +84,7 @@ def test_attention_shape_specs_are_yaml_backed_with_backend_overrides():
     vllm_xpu_context = get_attention_context_shape_sweeps("vllm_xpu")[0]
     vllm_generation = get_attention_generation_shape_sweeps("vllm")[0]
 
-    assert sglang_context["head_dims"] == [128, 192, 256]
+    assert sglang_context["head_dims"] == [128, 192, 256, 512]
     assert trtllm_context["head_dims"] == [64, 128, 192, 256]
     assert trtllm_context["query_head_counts"][:6] == [1, 2, 3, 4, 5, 6]
     assert vllm_context["head_dims"] == [64, 128, 192, 256, 512]

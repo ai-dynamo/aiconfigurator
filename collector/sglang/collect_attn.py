@@ -123,7 +123,7 @@ class MockModelRunner:
         self.attn_cp_size = 1  # Context parallelism size; required by FlashAttentionBackend in sglang >=0.5.10
         self.is_draft_worker = False
         self.model_is_mrope = False
-        self.sliding_window_size = 0
+        self.sliding_window_size = None
         self.attention_chunk_size = None
         # FlashInferIndicesUpdaterPrefill expects an allocator; keep None for mock.
         self.token_to_kv_pool_allocator = None
@@ -164,6 +164,11 @@ def _int_list(values):
 
 def _kv_head_options(values, num_heads):
     return [num_heads if value == "self" else int(value) for value in values]
+
+
+def _sglang_sliding_window_size(window_size: int) -> int | None:
+    """Convert AIC's 0 sentinel to SGLang's non-sliding-window sentinel."""
+    return int(window_size) if int(window_size) > 0 else None
 
 
 def get_context_attention_test_cases():
@@ -351,7 +356,8 @@ def run_attention_torch(
         head_dim=head_dim,
     )
     model_runner.kv_cache_dtype = kvtype
-    model_runner.sliding_window_size = window_size
+    sglang_window_size = _sglang_sliding_window_size(window_size)
+    model_runner.sliding_window_size = sglang_window_size
 
     total_len = input_len if is_context_phase else input_len + 1
     req_to_token_pool, token_matrix = create_req_to_token_pool(
@@ -414,7 +420,7 @@ def run_attention_torch(
         num_kv_heads=num_key_value_heads,
         layer_id=0,
     ).to(torch_device)
-    layer.sliding_window_size = window_size
+    layer.sliding_window_size = sglang_window_size
 
     seqlen_q = input_len if is_context_phase else 1
     q = torch.randn(
