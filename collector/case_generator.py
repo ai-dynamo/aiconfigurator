@@ -328,9 +328,9 @@ def _merged_mla_module_values(backend: str | None = None) -> dict[str, object]:
         if override:
             merged = copy.deepcopy(values)
             merged.update(override)
-            if "context_batch_sizes" in override or "generation_batch_sizes" in override:
+            if "context_batch_sizes" in override and "generation_batch_sizes" in override:
                 merged.pop("batch_sizes", None)
-            if "context_sequence_lengths" in override or "generation_sequence_lengths" in override:
+            if "context_sequence_lengths" in override and "generation_sequence_lengths" in override:
                 merged.pop("sequence_lengths", None)
             if "head_counts" in override:
                 merged.pop("inner_sweep_head_counts", None)
