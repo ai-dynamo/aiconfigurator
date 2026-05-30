@@ -3,6 +3,7 @@
 
 import sys
 import types
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -48,6 +49,38 @@ def _import_module():
     sys.modules[mod_name] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def test_sglang_forward_context_is_optional_on_0510(monkeypatch):
+    mod = _import_module()
+    monkeypatch.delitem(sys.modules, "sglang.srt.model_executor.forward_context", raising=False)
+
+    with mod._sglang_forward_context("backend"):
+        pass
+
+
+def test_sglang_forward_context_uses_legacy_module_when_available(monkeypatch):
+    mod = _import_module()
+    calls = []
+    fake_forward_context_mod = types.ModuleType("sglang.srt.model_executor.forward_context")
+
+    class ForwardContext:
+        def __init__(self, *, attn_backend):
+            self.attn_backend = attn_backend
+
+    @contextmanager
+    def forward_context(ctx):
+        calls.append(ctx.attn_backend)
+        yield
+
+    fake_forward_context_mod.ForwardContext = ForwardContext
+    fake_forward_context_mod.forward_context = forward_context
+    monkeypatch.setitem(sys.modules, "sglang.srt.model_executor.forward_context", fake_forward_context_mod)
+
+    with mod._sglang_forward_context("backend"):
+        pass
+
+    assert calls == ["backend"]
 
 
 class TestGetPrecisionCombos:
