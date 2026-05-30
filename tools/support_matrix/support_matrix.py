@@ -259,7 +259,7 @@ def _is_known_framework_incompatible_gap(
                     and "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
                 )
                 or (model == "moonshotai/Kimi-K2.5" and "unsupported moe quant mode 'int4_wo'" in normalized)
-                or "dsa_context_module_perf.txt" in normalized
+                or "dsa_context_module_perf" in normalized
             )
         if backend == common.BackendName.vllm.value and version == "0.19.0":
             return "unsupported moe quant mode 'nvfp4'" in normalized or "dsa_context_module_perf.txt" in normalized
@@ -319,6 +319,95 @@ def _framework_incompatible_gap_evidence(
             "import name 'get_activation_type'. This is a SGLang 0.5.10 runtime "
             "incompatibility for the NVFP4 MoE path on this GPU, not an untested AIC "
             "support-matrix parallelism shape."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and "unsupported moe quant mode 'fp8_block'" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: TensorRT-LLM 1.3.0rc10 block-FP8 MoE on RTX Pro "
+            "6000 Server (SM120) fails in the TRT-LLM DeepGEMM MoE path before a "
+            "collectable perf row is produced. Forced validation on an 8-GPU RTX Pro "
+            "6000 Server Brev node with nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10 "
+            "ran collector/trtllm/collect_moe.py for this model's fp8_block expert "
+            "shape and failed in tensorrt_llm/_torch/modules/fused_moe/"
+            "fused_moe_deepgemm.py with RuntimeError: Assertion error "
+            "(_deps/deepgemm-src/csrc/apis/../jit_kernels/impls/../heuristics/"
+            "../../utils/layout.hpp:57): Unknown recipe."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and (
+            "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
+            or "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
+        )
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: TensorRT-LLM 1.3.0rc10 MXFP4 MoE on RTX Pro "
+            "6000 Server (SM120) fails in the TRTLLMGenFusedMoE backend before a "
+            "collectable perf row is produced. Forced validation on an 8-GPU RTX Pro "
+            "6000 Server Brev node with nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10 "
+            "ran collector/trtllm/collect_moe.py for GPT-OSS w4a16_mxfp4 and "
+            "DeepSeek-V4 w4a8_mxfp4_mxfp8 shapes; both failed while creating "
+            "tensorrt_llm/_torch/modules/fused_moe/fused_moe_trtllm_gen.py with "
+            "NotImplementedError: TRTLLMGenFusedMoE does not support SM120 and above."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and "unsupported moe quant mode 'int4_wo'" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: TensorRT-LLM 1.3.0rc10 INT4/W4A16 MoE on RTX Pro "
+            "6000 Server (SM120) fails in the TRT-LLM CUTLASS MoE path before a "
+            "collectable perf row is produced. Forced validation on an 8-GPU RTX Pro "
+            "6000 Server Brev node with nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10 "
+            "ran collector/trtllm/collect_moe.py for the Kimi-K2.5 int4_wo expert "
+            "shape and failed in tensorrt_llm/_torch/modules/fused_moe/"
+            "fused_moe_cutlass.py with ValueError: Unsupported quantization mode: [1]."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and "dsa_context_module_perf" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: TensorRT-LLM 1.3.0rc10 DSA context module on RTX "
+            "Pro 6000 Server (SM120) fails inside the TRT-LLM attention backend before "
+            "a collectable perf row is produced. Forced validation on an 8-GPU RTX Pro "
+            "6000 Server Brev node with nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10 "
+            "ran collector/trtllm/collect_mla_module.py for zai-org/GLM-5 DSA context "
+            "and failed in tensorrt_llm/_torch/attention_backend/trtllm.py with "
+            "RuntimeError: Assertion failed: SEPARATE_Q_K_V requires valid K and V "
+            "pointers, followed by a CUDA illegal memory access during cleanup."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and "failed to query context attention data" in normalized
+        and "head_size=512" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: TensorRT-LLM 1.3.0rc10 context attention with "
+            "head_dim=512 on RTX Pro 6000 Server (SM120) fails inside the TRT-LLM "
+            "MMHA attention path before a collectable perf row is produced. Forced "
+            "validation on an 8-GPU RTX Pro 6000 Server Brev node with "
+            "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10 ran "
+            "collector/trtllm/collect_attn.py for the Gemma head_size=512 context "
+            "shape and aborted in tensorrt_llm/common/attentionOp.cpp with "
+            "TllmException: Assertion failed: Head size 512 is not supported by MMHA."
         )
 
     return None
