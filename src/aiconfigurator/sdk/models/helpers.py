@@ -23,7 +23,16 @@ from aiconfigurator.sdk.utils import (
 
 logger = logging.getLogger(__name__)
 
-_MOE_MODEL_FAMILIES = {"MOE", "DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25", "HYBRIDMOE", "GEMMA4MOE"}
+_MOE_MODEL_FAMILIES = {
+    "MOE",
+    "DEEPSEEK",
+    "DEEPSEEKV32",
+    "DEEPSEEKV4",
+    "KIMIK25",
+    "HYBRIDMOE",
+    "GEMMA4MOE",
+    "QWEN3VL_MOE",
+}
 
 
 @cache

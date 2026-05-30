@@ -80,6 +80,7 @@ class TestSupportedModels:
             ("zai-org/GLM-5-FP8", True),
             ("nvidia/GLM-5-NVFP4", True),
             ("Qwen/Qwen3-30B-A3B", True),
+            ("Qwen/Qwen3-VL-235B-A22B-Instruct", True),
             # NemotronH: check hybrid_override_pattern for 'E' (MoE layers)
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' in pattern
             ("nvidia/nemotron-ultra-rl-050826", True),  # Has 'E' in derived pattern
@@ -232,6 +233,7 @@ class TestHFModelSupport:
             ("zai-org/GLM-5-FP8", True),
             ("nvidia/GLM-5-NVFP4", True),
             ("Qwen/Qwen3-30B-A3B", True),
+            ("Qwen/Qwen3-VL-235B-A22B-Instruct", True),
             # NemotronH: is_moe depends on 'E' in hybrid_override_pattern
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' (MoE layers)
             ("nvidia/nemotron-ultra-rl-050826", True),  # Has 'E' in derived pattern
