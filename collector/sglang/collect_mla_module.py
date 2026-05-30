@@ -32,6 +32,7 @@ import sys
 import tempfile
 import traceback
 import types
+from contextlib import nullcontext
 from importlib.metadata import version as get_version
 
 import numpy as np
@@ -1075,10 +1076,19 @@ def _run_prefill(
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
     from sglang.srt.mem_cache.chunk_cache import ChunkCache
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-    from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
     from sglang.srt.sampling.sampling_params import SamplingParams
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
     from sglang.srt.utils import BumpAllocator
+    try:
+        from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+
+        def _forward_context(attn_backend):
+            return forward_context(ForwardContext(attn_backend=attn_backend))
+
+    except ModuleNotFoundError:
+
+        def _forward_context(_attn_backend):
+            return nullcontext()
 
     print(f"\nPrefill: batch_size={batch_size}, seq_length={seq_length}, prefix_len={prefix_len}")
 
@@ -1317,7 +1327,7 @@ def _run_prefill(
                     )
                     set_is_extend_in_batch(False)
                     with (
-                        forward_context(ForwardContext(attn_backend=runner.model_runner.attn_backend)),
+                        _forward_context(runner.model_runner.attn_backend),
                         set_piecewise_forward_context(
                             static_forward_batch,
                             runner.attention_layers,
@@ -1388,7 +1398,7 @@ def _run_prefill(
                 print(f"  Module piecewise runner={model_runner.piecewise_cuda_graph_runner is not None}")
 
         def call_attention_module():
-            with forward_context(ForwardContext(attn_backend=model_runner.attn_backend)):
+            with _forward_context(model_runner.attn_backend):
                 if use_module_piecewise_context:
                     with (
                         enable_piecewise_cuda_graph(),
@@ -1577,10 +1587,19 @@ def _run_decode(
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
     from sglang.srt.mem_cache.chunk_cache import ChunkCache
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-    from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
     from sglang.srt.sampling.sampling_params import SamplingParams
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
     from sglang.srt.utils import BumpAllocator
+    try:
+        from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+
+        def _forward_context(attn_backend):
+            return forward_context(ForwardContext(attn_backend=attn_backend))
+
+    except ModuleNotFoundError:
+
+        def _forward_context(_attn_backend):
+            return nullcontext()
 
     print(f"\nDecode: batch_size={batch_size}, kv_cache_length={seq_length}")
 
@@ -1647,7 +1666,7 @@ def _run_decode(
             _patch_nsa_indexer_compile_for_module_cuda_graph(attention_module)
 
         def kernel_func():
-            with forward_context(ForwardContext(attn_backend=model_runner.attn_backend)):
+            with _forward_context(model_runner.attn_backend):
                 attention_module(
                     positions=decode_positions,
                     hidden_states=decode_hidden,
