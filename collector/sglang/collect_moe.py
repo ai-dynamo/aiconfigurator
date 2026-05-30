@@ -51,7 +51,14 @@ except ImportError:
         get_moe_configs,
     )
 from sglang.srt.layers.moe.moe_runner.base import MoeRunnerConfig
-from sglang.srt.layers.moe.topk import BypassedTopKOutput, StandardTopKOutput, TopKConfig, select_experts
+from sglang.srt.layers.moe.topk import (
+    BypassedTopKOutput,
+    StandardTopKOutput,
+    TopK,
+    TopKConfig,
+    TopKOutputFormat,
+    select_experts,
+)
 from sglang.srt.layers.moe.utils import MoeRunnerBackend
 from sglang.srt.utils import is_hip
 
@@ -160,6 +167,10 @@ def _uses_relu2_moe_activation(model_name: str) -> bool:
     return any(pattern in model_name for pattern in _NON_GATED_MOE_MODEL_PATTERNS)
 
 
+def _use_triton_kernels_mxfp4_w4a16() -> bool:
+    return get_sm_version() >= 120
+
+
 def get_moe_test_cases():
     # fp8_block MOE requires SM90+ due to shared memory requirements
     # L40S (SM89) has 100KB shared memory, fp8_block kernel needs ~144KB
@@ -179,9 +190,10 @@ def get_moe_test_cases():
         ]
     else:
         # SGLang 0.5.10 routes many nvfp4 MoE cases through FlashInfer paths
-        # that were not validated on SM120. Add back only live-smoked Nemotron
-        # NVFP4 model cases below instead of enabling the mode globally.
-        moe_list = ["bfloat16", "fp8_block", "int4_wo"]
+        # that were not validated on SM120.
+        # GPT-OSS W4A16 MXFP4 uses SGLang's MXFP4 MoE path instead, so keep it
+        # enabled for SM120 and let model quantization policy filter it to GPT-OSS.
+        moe_list = ["bfloat16", "fp8_block", "int4_wo", "w4a16_mxfp4"]
 
     test_cases = []
 
@@ -972,8 +984,11 @@ def benchmark_config(
         if workloads is not None:
             raise ValueError("MXFP4 benchmarking uses full-router logits, not rank-local workloads")
 
+        use_triton_mxfp4 = use_mxfp4_w4a16 and _use_triton_kernels_mxfp4_w4a16()
         previous_backend = _moe_utils.MOE_RUNNER_BACKEND
-        _moe_utils.MOE_RUNNER_BACKEND = MoeRunnerBackend.FLASHINFER_MXFP4
+        _moe_utils.MOE_RUNNER_BACKEND = (
+            MoeRunnerBackend.TRITON_KERNELS if use_triton_mxfp4 else MoeRunnerBackend.FLASHINFER_MXFP4
+        )
         _patch_mxfp4_single_process_parallel(moe_tp_size=moe_tp_size, moe_ep_size=moe_ep_size)
 
         intermediate_size = shard_intermediate_size // 2 * moe_tp_size
@@ -981,6 +996,9 @@ def benchmark_config(
         if "is_checkpoint_mxfp4_serialized" in inspect.signature(Mxfp4Config).parameters:
             mxfp4_config_kwargs["is_checkpoint_mxfp4_serialized"] = True
         quant_config = Mxfp4Config(**mxfp4_config_kwargs)
+        fused_moe_kwargs = {}
+        if use_triton_mxfp4:
+            fused_moe_kwargs.update({"gemm1_alpha": 1.702, "gemm1_clamp_limit": 7.0})
         moe_layer = FusedMoE(
             num_experts=num_experts,
             hidden_size=hidden_size,
@@ -991,6 +1009,7 @@ def benchmark_config(
             reduce_results=False,
             quant_config=quant_config,
             prefix="aic_sglang_mxfp4_moe",
+            **fused_moe_kwargs,
         ).to(device)
         _moe_utils.MOE_RUNNER_BACKEND = previous_backend
 
@@ -1022,12 +1041,20 @@ def benchmark_config(
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
 
+        topk_layer = None
+        if use_triton_mxfp4:
+            topk_layer = TopK(topk, layer_id=0, output_format=TopKOutputFormat.TRITON_KERNEL).to(device)
+
         def run_op(i):
+            router_logits = router_logits_list[i % num_iters]
+            if topk_layer is not None:
+                moe_layer(x, topk_layer(x, router_logits))
+                return
             moe_layer(
                 x,
                 BypassedTopKOutput(
                     hidden_states=x,
-                    router_logits=router_logits_list[i % num_iters],
+                    router_logits=router_logits,
                     topk_config=TopKConfig(top_k=topk),
                 ),
             )
@@ -1505,6 +1532,8 @@ def run_moe_torch(
             if use_nvfp4_kernel
             else "sglang_marlin_moe"
             if moe_type == "int4_wo" and _HAS_MARLIN_MOE
+            else "sglang_triton_kernels_mxfp4_moe"
+            if moe_type == "w4a16_mxfp4" and _use_triton_kernels_mxfp4_w4a16()
             else "sglang_flashinfer_mxfp4_moe"
             if moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
             else "sglang_fused_moe_triton"

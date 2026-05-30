@@ -751,6 +751,81 @@ def test_sm120_exception_filters_trtllm_gptoss_mxfp4():
     )
 
 
+def test_sm120_sglang_gptoss_mxfp4_is_collectable():
+    plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="openai/gpt-oss-120b",
+        gpu_type="rtx_pro_6000_server",
+    )
+    case = [
+        "w4a16_mxfp4",
+        1,
+        2880,
+        2880,
+        4,
+        128,
+        1,
+        1,
+        "openai/gpt-oss-120b",
+        "power_law",
+        1.01,
+        None,
+    ]
+
+    assert (
+        expected_failure_for_test_case(
+            case,
+            plan=plan.op_cases["moe"],
+            full_module_name="sglang.moe",
+            run_func_name="run_moe_torch",
+            runtime_version="0.5.10",
+        )
+        is None
+    )
+
+
+def test_sm120_sglang_gptoss_mxfp4_ep_is_framework_incompatible():
+    plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="openai/gpt-oss-120b",
+        gpu_type="rtx_pro_6000_server",
+    )
+    case = [
+        "w4a16_mxfp4",
+        1,
+        2880,
+        2880,
+        4,
+        128,
+        1,
+        2,
+        "openai/gpt-oss-120b",
+        "power_law",
+        1.01,
+        None,
+    ]
+
+    expected = expected_failure_for_test_case(
+        case,
+        plan=plan.op_cases["moe"],
+        full_module_name="sglang.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="0.5.10",
+    )
+    reason = (
+        "SGLang 0.5.10 Triton MXFP4 MoE supports GPT-OSS W4A16 MXFP4 on SM120 only without "
+        'expert parallelism; EP>1 asserts "Expert parallel is not supported when using triton kernels."'
+    )
+
+    assert expected == {
+        "case_id": create_test_case_id(case, "run_moe_torch", "sglang.moe"),
+        "source": "sm_exception",
+        "selector": "rule",
+        "reason_type": "framework_version_unsupported",
+        "reason": reason,
+    }
+
+
 def test_sm100_exception_filters_trtllm_int4_wo():
     plan = build_collection_case_plan(
         backend="trtllm",
