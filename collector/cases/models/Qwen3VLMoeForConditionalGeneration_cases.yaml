@@ -3,14 +3,14 @@
 
 schema_version: 1
 architecture: Qwen3VLMoeForConditionalGeneration
-model_path: Qwen/Qwen3-VL-235B-A22B-Instruct
+model_path: Qwen/Qwen3-VL-30B-A3B-Instruct
 model_paths:
   - Qwen/Qwen3-VL-30B-A3B-Instruct
   - Qwen/Qwen3-VL-235B-A22B-Instruct
 include_base: true
 description: >
-  Qwen3-VL MoE model-centric collection plan. Starts with shared base op cases
-  and includes the Qwen3-VL MoE shapes used by the support matrix.
+  Qwen3-VL MoE model-centric collection plan. The LLM backbone shares Qwen3 MoE
+  dimensions; the vision encoder is covered by the Qwen3-VL model implementation.
 
 model_case_values:
   moe:
