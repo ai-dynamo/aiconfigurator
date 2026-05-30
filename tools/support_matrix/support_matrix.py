@@ -262,7 +262,13 @@ def _is_known_framework_incompatible_gap(
                 or "dsa_context_module_perf" in normalized
             )
         if backend == common.BackendName.vllm.value and version == "0.19.0":
-            return "unsupported moe quant mode 'nvfp4'" in normalized or "dsa_context_module_perf.txt" in normalized
+            return (
+                "unsupported moe quant mode 'nvfp4'" in normalized
+                or "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
+                or "dsa_context_module_perf" in normalized
+                or "dsa_generation_module_perf" in normalized
+                or "deepseek-v4 mhc module data not loaded" in normalized
+            )
 
     return (
         model == "moonshotai/Kimi-K2.5"
@@ -285,6 +291,90 @@ def _framework_incompatible_gap_evidence(
         return None
 
     normalized = error_message.lower()
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "unsupported moe quant mode 'nvfp4'" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: vLLM 0.19.0 NVFP4 MoE on RTX Pro 6000 "
+            "Server (SM120) fails inside the vLLM FlashInfer TRT-LLM FP4 MoE "
+            "path before a collectable perf row is produced. Forced validation "
+            "on an 8-GPU RTX Pro 6000 Server Brev node with "
+            "vllm/vllm-openai:v0.19.0-cu130 ran collector/vllm/collect_moe.py "
+            "for a representative NVFP4 expert shape and failed in "
+            "flashinfer/fused_moe/core.py while building the FP4 routed-MoE "
+            "module with RuntimeError: No supported CUDA architectures found "
+            "for major versions [10]."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: vLLM 0.19.0 does not expose a W4A8 "
+            "MXFP4/MXFP8 MoE runtime path for DeepSeek-V4 on RTX Pro 6000 "
+            "Server (SM120). Validation on an 8-GPU RTX Pro 6000 Server Brev "
+            "node with vllm/vllm-openai:v0.19.0-cu130 found vLLM's "
+            "Mxfp4Config only supports bfloat16 activations for FusedMoE "
+            "(W4A16), while AIC's DeepSeek-V4 models request "
+            "w4a8_mxfp4_mxfp8. Treating that row as W4A16 would collect the "
+            "wrong kernel, so the row is marked framework-incompatible."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "dsa_context_module_perf" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: vLLM 0.19.0 DSA context module on RTX Pro "
+            "6000 Server (SM120) fails in vLLM's sparse MLA backend selector "
+            "before a collectable perf row is produced. Forced validation on "
+            "an 8-GPU RTX Pro 6000 Server Brev node with "
+            "vllm/vllm-openai:v0.19.0-cu130 ran "
+            "collector/vllm/collect_mla_module.py for zai-org/GLM-5 DSA "
+            "context and failed with ValueError: No valid attention backend "
+            "found; FLASHMLA_SPARSE reports compute capability not supported."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "dsa_generation_module_perf" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: vLLM 0.19.0 DSA generation module on RTX "
+            "Pro 6000 Server (SM120) uses the same sparse MLA backend selector "
+            "that rejects this GPU for DSA context. The representative DSA "
+            "context validation on an 8-GPU RTX Pro 6000 Server Brev node with "
+            "vllm/vllm-openai:v0.19.0-cu130 failed with ValueError: No valid "
+            "attention backend found; FLASHMLA_SPARSE reports compute "
+            "capability not supported."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "deepseek-v4 mhc module data not loaded" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: vLLM 0.19.0 does not include the "
+            "DeepSeek-V4 mHC module needed for these rows. Forced validation "
+            "on an 8-GPU RTX Pro 6000 Server Brev node with "
+            "vllm/vllm-openai:v0.19.0-cu130 ran "
+            "collector/vllm/collect_mhc_module.py for the DeepSeek-V4 Flash "
+            "and Pro mHC shapes and both failed immediately with "
+            "ModuleNotFoundError: No module named 'vllm.model_executor.layers.mhc'."
+        )
+
     if (
         system == "rtx_pro_6000_server"
         and backend == common.BackendName.sglang.value
