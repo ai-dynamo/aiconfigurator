@@ -281,7 +281,9 @@ class ContextAttention(Operation):
             if sparse_by_s:
                 result = database._interp_metric_fields_1d(sparse_by_s, full_s, inner_only=False)
             else:
-                result = interpolation.interp_3d(n, full_s, b, attention_dict, "cubic", database._extracted_metrics_cache)
+                result = interpolation.interp_3d(
+                    n, full_s, b, attention_dict, "cubic", database._extracted_metrics_cache
+                )
             latency = result["latency"] * prefix_correction
             energy = result.get("energy", 0.0) * prefix_correction
             return database._interp_pr(latency, energy=energy)
@@ -587,7 +589,9 @@ class GenerationAttention(Operation):
                 if sparse_by_b:
                     r = database._interp_metric_fields_1d(sparse_by_b, b, inner_only=False)
                 else:
-                    r = interpolation.interp_3d(n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache)
+                    r = interpolation.interp_3d(
+                        n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache
+                    )
                 latency_sum += float(r["latency"])
                 energy_sum += float(r.get("energy", 0.0))
 
