@@ -366,6 +366,46 @@ def _is_known_framework_incompatible_gap(
     )
 
 
+def _strip_exception_prefix(line: str) -> str:
+    for prefix in ("ValueError: ", "RuntimeError: ", "AssertionError: ", "ImportError: ", "ModuleNotFoundError: "):
+        if line.startswith(prefix):
+            return line[len(prefix) :]
+    return line
+
+
+def _concise_framework_incompatibility_reason(error_message: str) -> str:
+    """Return the framework-facing failure reason without the Python traceback."""
+    lines = [line.strip() for line in error_message.splitlines() if line.strip()]
+    if not lines:
+        return error_message
+
+    marker_phrases = (
+        "Unsupported moe quant mode",
+        "Unsupported gemm quant mode",
+        "DeepSeek-V4 mHC module data not loaded",
+        "No mHC silicon data",
+        "DeepSeek-V4 mHC module",
+        "tp_size (8) * attention_dp_size",
+        "division by zero failed to query context attention data",
+        "x is less than the smallest value in the list",
+        "x is not equal to the only value in the list",
+        "dsa_context_module_perf.txt",
+        "dsa_generation_module_perf.txt",
+    )
+    for line in reversed(lines):
+        clean_line = _strip_exception_prefix(line)
+        for marker in marker_phrases:
+            marker_index = clean_line.find(marker)
+            if marker_index >= 0:
+                return clean_line[marker_index:]
+
+    for line in reversed(lines):
+        clean_line = _strip_exception_prefix(line)
+        if clean_line != line:
+            return clean_line
+    return lines[-1]
+
+
 def _enum_name(value: object | None) -> str | None:
     if value is None:
         return None
@@ -1072,6 +1112,7 @@ class SupportMatrix:
                         error_message=raw_error,
                     ):
                         statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
+                        raw_error = _concise_framework_incompatibility_reason(raw_error)
                     else:
                         statuses[mode] = STATUS_FAIL
                     error_messages[mode] = raw_error

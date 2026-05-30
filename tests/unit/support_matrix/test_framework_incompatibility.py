@@ -149,7 +149,7 @@ def test_b300_trtllm_unsupported_moe_quant_is_framework_incompatible(monkeypatch
     monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
     _patch_large_constraints(monkeypatch)
 
-    statuses, _errors = SupportMatrix.run_single_test(
+    statuses, errors = SupportMatrix.run_single_test(
         model="moonshotai/Kimi-K2.5",
         system="b300_sxm",
         backend="trtllm",
@@ -158,6 +158,33 @@ def test_b300_trtllm_unsupported_moe_quant_is_framework_incompatible(monkeypatch
     )
 
     assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert errors["agg"] == "Unsupported moe quant mode 'int4_wo'"
+
+
+def test_b300_trtllm_mhc_data_gap_has_concise_reason(monkeypatch):
+    def fake_run_mode(**_kwargs):
+        raise RuntimeError(
+            "No results found for any parallel configuration. Showing last exception: "
+            "DeepSeek-V4 mHC module data not loaded for system='b300_sxm', "
+            "backend='trtllm', version='1.3.0rc10'. Failed to query DeepSeek-V4 mHC module "
+            "for num_tokens=128, hidden_size=7168, hc_mult=4, sinkhorn_iters=20, op='pre'. "
+            "Consider using HYBRID mode."
+        )
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="deepseek-ai/DeepSeek-V4-Pro",
+        system="b300_sxm",
+        backend="trtllm",
+        version="1.3.0rc10",
+        system_spec=_b300_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert errors["agg"].startswith("DeepSeek-V4 mHC module data not loaded")
+    assert "Traceback" not in errors["agg"]
 
 
 def test_b300_vllm_nemotron_ultra_topk_gap_short_circuits(monkeypatch):
