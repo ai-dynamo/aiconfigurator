@@ -136,12 +136,13 @@ def _parse_int_list(value: str | None) -> list[int] | None:
 
 
 def _filter_cases_from_env(test_cases, *, is_prefill: bool, attn_type: str):
-    if not (is_prefill and attn_type == "dsa"):
+    if attn_type != "dsa":
         return test_cases
 
-    seq_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_SEQ_LENS"))
-    prefix_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_PREFIX_LENS"))
-    batch_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_BATCH_SIZES"))
+    phase = "CONTEXT" if is_prefill else "GENERATION"
+    seq_filter = _parse_int_list(os.environ.get(f"AIC_DSA_{phase}_SEQ_LENS"))
+    batch_filter = _parse_int_list(os.environ.get(f"AIC_DSA_{phase}_BATCH_SIZES"))
+    prefix_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_PREFIX_LENS")) if is_prefill else None
 
     if seq_filter is None and prefix_filter is None and batch_filter is None:
         return test_cases
@@ -159,7 +160,7 @@ def _filter_cases_from_env(test_cases, *, is_prefill: bool, attn_type: str):
         if prefix_set is not None and prefix_len not in prefix_set:
             continue
         filtered.append((bs, seq_len, ip, prefix_len))
-    print(f"[DSA] Env-filtered context cases: {len(filtered)}/{len(test_cases)}")
+    print(f"[DSA] Env-filtered {phase.lower()} cases: {len(filtered)}/{len(test_cases)}")
     return filtered
 
 
@@ -1882,6 +1883,7 @@ def run_mla_module(
         and model_path == "deepseek-ai/DeepSeek-V3.2"
         and head_num <= 32
         and get_sm_version() == 100
+        and not _env_flag("AIC_FORCE_DSA_REDUCED_HEAD_GENERATION")
     ):
         before = len(cases)
         cases = [(bs, seq_len, ip, prefix_len) for (bs, seq_len, ip, prefix_len) in cases if seq_len < 256]

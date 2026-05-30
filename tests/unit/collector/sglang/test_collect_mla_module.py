@@ -175,6 +175,23 @@ class TestGetGenerationTestCases:
             for case in mod.get_generation_test_cases("dsa"):
                 assert case[0] * case[1] <= 256 * 1024
 
+    def test_dsa_generation_env_filter(self, monkeypatch):
+        mod = _import_module()
+        monkeypatch.setenv("AIC_DSA_GENERATION_SEQ_LENS", "257,385")
+        monkeypatch.setenv("AIC_DSA_GENERATION_BATCH_SIZES", "2")
+
+        cases = [
+            (2, 257, False, 0),
+            (2, 385, False, 0),
+            (4, 257, False, 0),
+            (2, 128, False, 0),
+        ]
+
+        assert mod._filter_cases_from_env(cases, is_prefill=False, attn_type="dsa") == [
+            (2, 257, False, 0),
+            (2, 385, False, 0),
+        ]
+
 
 class TestDsaContextPrefixShape:
     def test_rejects_single_token_prefill(self):
