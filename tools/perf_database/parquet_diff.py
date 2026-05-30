@@ -7,12 +7,13 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import math
 import subprocess
 import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pyarrow as pa
@@ -23,6 +24,8 @@ PERF_DATA_PREFIX = "src/aiconfigurator/systems/data"
 COMMENT_MARKER = "<!-- perf-parquet-diff-comment -->"
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
 DEFAULT_DETAIL_DIR = "parquet-diff-details"
+INLINE_PREVIEW_ROWS = 3
+MAX_INLINE_PREVIEW_CHARS = 45_000
 MEASUREMENT_COLUMNS = frozenset(
     {
         "latency",
@@ -80,6 +83,7 @@ class RowDiff:
     modified_rows: int
     detail_files: dict[str, str]
     note: str | None = None
+    detail_previews: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -210,6 +214,15 @@ def _csv_value(value: object) -> object:
     return value
 
 
+def _rows_to_csv_text(rows: list[dict[str, object]], columns: list[str], *, limit: int | None = None) -> str:
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=columns, lineterminator="\n")
+    writer.writeheader()
+    for row in rows[:limit]:
+        writer.writerow({column: _csv_value(row.get(column)) for column in columns})
+    return output.getvalue().rstrip()
+
+
 def _write_rows_csv(path: Path, rows: list[dict[str, object]], columns: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as f:
@@ -219,6 +232,43 @@ def _write_rows_csv(path: Path, rows: list[dict[str, object]], columns: list[str
             writer.writerow({column: _csv_value(row.get(column)) for column in columns})
 
 
+def _modified_csv_rows(
+    modified_rows: list[tuple[dict[str, object], dict[str, object]]],
+    *,
+    key_columns: list[str],
+    compare_columns: list[str],
+) -> tuple[list[str], list[dict[str, object]]]:
+    changed_columns = [
+        column
+        for column in compare_columns
+        if any(_freeze_value(base.get(column)) != _freeze_value(head.get(column)) for base, head in modified_rows)
+    ]
+    fieldnames = key_columns + [field for column in changed_columns for field in (f"{column}__base", f"{column}__head")]
+    rows: list[dict[str, object]] = []
+    for base, head in modified_rows:
+        row: dict[str, object] = {column: _csv_value(head.get(column)) for column in key_columns}
+        for column in changed_columns:
+            row[f"{column}__base"] = _csv_value(base.get(column))
+            row[f"{column}__head"] = _csv_value(head.get(column))
+        rows.append(row)
+    return fieldnames, rows
+
+
+def _modified_rows_to_csv_text(
+    modified_rows: list[tuple[dict[str, object], dict[str, object]]],
+    *,
+    key_columns: list[str],
+    compare_columns: list[str],
+    limit: int | None = None,
+) -> str:
+    fieldnames, rows = _modified_csv_rows(
+        modified_rows,
+        key_columns=key_columns,
+        compare_columns=compare_columns,
+    )
+    return _rows_to_csv_text(rows, fieldnames, limit=limit)
+
+
 def _write_modified_csv(
     path: Path,
     modified_rows: list[tuple[dict[str, object], dict[str, object]]],
@@ -226,23 +276,17 @@ def _write_modified_csv(
     key_columns: list[str],
     compare_columns: list[str],
 ) -> None:
-    changed_columns = [
-        column
-        for column in compare_columns
-        if any(_freeze_value(base.get(column)) != _freeze_value(head.get(column)) for base, head in modified_rows)
-    ]
-    fieldnames = key_columns + [field for column in changed_columns for field in (f"{column}__base", f"{column}__head")]
+    fieldnames, rows = _modified_csv_rows(
+        modified_rows,
+        key_columns=key_columns,
+        compare_columns=compare_columns,
+    )
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
-        for base, head in modified_rows:
-            row: dict[str, object] = {column: _csv_value(head.get(column)) for column in key_columns}
-            for column in changed_columns:
-                row[f"{column}__base"] = _csv_value(base.get(column))
-                row[f"{column}__head"] = _csv_value(head.get(column))
-            writer.writerow(row)
+        writer.writerows(rows)
 
 
 def _detail_output_path(detail_dir: Path, parquet_path: str, kind: str) -> tuple[Path, str]:
@@ -379,9 +423,11 @@ def _diff_snapshots(
     columns = _merge_columns(base_columns, head_columns)
     key_columns = _select_key_columns(base_columns or head_columns, head_columns or base_columns)
     detail_files: dict[str, str] = {}
+    detail_previews: dict[str, str] = {}
 
     if base_snapshot is None:
         head_rows = sorted(_row_dicts(head_snapshot.table), key=lambda row: _sort_key(row, columns))
+        detail_previews["added"] = _rows_to_csv_text(head_rows, columns, limit=INLINE_PREVIEW_ROWS)
         detail_file = _write_detail_rows(
             detail_dir=detail_dir,
             parquet_path=parquet_path,
@@ -391,10 +437,11 @@ def _diff_snapshots(
         )
         if detail_file:
             detail_files["added"] = detail_file
-        return RowDiff(key_columns, len(head_rows), 0, 0, detail_files)
+        return RowDiff(key_columns, len(head_rows), 0, 0, detail_files, detail_previews=detail_previews)
 
     if head_snapshot is None:
         base_rows = sorted(_row_dicts(base_snapshot.table), key=lambda row: _sort_key(row, columns))
+        detail_previews["removed"] = _rows_to_csv_text(base_rows, columns, limit=INLINE_PREVIEW_ROWS)
         detail_file = _write_detail_rows(
             detail_dir=detail_dir,
             parquet_path=parquet_path,
@@ -404,7 +451,7 @@ def _diff_snapshots(
         )
         if detail_file:
             detail_files["removed"] = detail_file
-        return RowDiff(key_columns, 0, len(base_rows), 0, detail_files)
+        return RowDiff(key_columns, 0, len(base_rows), 0, detail_files, detail_previews=detail_previews)
 
     base_rows = _row_dicts(base_snapshot.table)
     head_rows = _row_dicts(head_snapshot.table)
@@ -413,6 +460,8 @@ def _diff_snapshots(
         added_rows = sorted(added_rows, key=lambda row: _sort_key(row, columns))
         removed_rows = sorted(removed_rows, key=lambda row: _sort_key(row, columns))
         for kind, rows in (("added", added_rows), ("removed", removed_rows)):
+            if rows:
+                detail_previews[kind] = _rows_to_csv_text(rows, columns, limit=INLINE_PREVIEW_ROWS)
             detail_file = _write_detail_rows(
                 detail_dir=detail_dir,
                 parquet_path=parquet_path,
@@ -429,6 +478,7 @@ def _diff_snapshots(
             0,
             detail_files,
             note="unavailable keys; exact full-row add/remove diff used",
+            detail_previews=detail_previews,
         )
 
     duplicate_keys = _has_duplicate_keys(base_rows, key_columns) or _has_duplicate_keys(head_rows, key_columns)
@@ -440,6 +490,8 @@ def _diff_snapshots(
             columns=columns,
         )
         for kind, rows in (("added", added_rows), ("removed", removed_rows)):
+            if rows:
+                detail_previews[kind] = _rows_to_csv_text(rows, columns, limit=INLINE_PREVIEW_ROWS)
             detail_file = _write_detail_rows(
                 detail_dir=detail_dir,
                 parquet_path=parquet_path,
@@ -458,6 +510,13 @@ def _diff_snapshots(
             key_columns=key_columns,
             compare_columns=compare_columns,
         )
+        if modified_rows:
+            detail_previews["modified"] = _modified_rows_to_csv_text(
+                modified_rows,
+                key_columns=key_columns,
+                compare_columns=compare_columns,
+                limit=INLINE_PREVIEW_ROWS,
+            )
         if detail_file:
             detail_files["modified"] = detail_file
 
@@ -468,6 +527,7 @@ def _diff_snapshots(
             len(modified_rows),
             detail_files,
             note="duplicate keys; unmatched rows paired within key",
+            detail_previews=detail_previews,
         )
 
     base_by_key = {_row_key(row, key_columns): row for row in base_rows}
@@ -484,6 +544,8 @@ def _diff_snapshots(
     ]
 
     for kind, rows in (("added", added_rows), ("removed", removed_rows)):
+        if rows:
+            detail_previews[kind] = _rows_to_csv_text(rows, columns, limit=INLINE_PREVIEW_ROWS)
         detail_file = _write_detail_rows(
             detail_dir=detail_dir,
             parquet_path=parquet_path,
@@ -502,10 +564,24 @@ def _diff_snapshots(
         key_columns=key_columns,
         compare_columns=compare_columns,
     )
+    if modified_rows:
+        detail_previews["modified"] = _modified_rows_to_csv_text(
+            modified_rows,
+            key_columns=key_columns,
+            compare_columns=compare_columns,
+            limit=INLINE_PREVIEW_ROWS,
+        )
     if detail_file:
         detail_files["modified"] = detail_file
 
-    return RowDiff(key_columns, len(added_rows), len(removed_rows), len(modified_rows), detail_files)
+    return RowDiff(
+        key_columns,
+        len(added_rows),
+        len(removed_rows),
+        len(modified_rows),
+        detail_files,
+        detail_previews=detail_previews,
+    )
 
 
 def _write_detail_summary(detail_dir: Path, comparisons: list[Comparison]) -> None:
@@ -595,6 +671,57 @@ def _render_table(rows: list[list[object]]) -> list[str]:
     for row in rows[1:]:
         out.append("| " + " | ".join(str(value) for value in row) + " |")
     return out
+
+
+def _render_inline_diff_previews(comparisons: list[Comparison]) -> list[str]:
+    preview_lines = [
+        "### Per-File Row Diff Preview",
+        "",
+        f"Showing the first {INLINE_PREVIEW_ROWS} rows per diff kind for each changed parquet file. "
+        f"Full exact CSVs are in `{DEFAULT_DETAIL_DIR}/`.",
+        "",
+    ]
+    budget_used = 0
+    rendered = 0
+    for comparison in comparisons:
+        row_diff = comparison.row_diff
+        if not row_diff or not row_diff.detail_previews:
+            continue
+
+        section = [
+            f"<details><summary>{comparison.path}</summary>",
+            "",
+            f"- Rows: +{row_diff.added_rows} / -{row_diff.removed_rows} / ~{row_diff.modified_rows}",
+            f"- Key columns: `{', '.join(row_diff.key_columns)}`" if row_diff.key_columns else "- Key columns: n/a",
+        ]
+        if row_diff.note:
+            section.append(f"- Note: {row_diff.note}")
+        section.append("")
+
+        for kind, preview in row_diff.detail_previews.items():
+            detail_file = row_diff.detail_files.get(kind)
+            if detail_file:
+                section.append(f"**{kind} rows** - full CSV: `{DEFAULT_DETAIL_DIR}/{detail_file}`")
+            else:
+                section.append(f"**{kind} rows**")
+            section.extend(["", "```csv", preview, "```", ""])
+        section.extend(["</details>", ""])
+
+        section_text = "\n".join(section)
+        if budget_used + len(section_text) > MAX_INLINE_PREVIEW_CHARS:
+            remaining = len([c for c in comparisons if c.row_diff and c.row_diff.detail_previews]) - rendered
+            preview_lines.append(
+                f"...inline previews truncated after {rendered} files to keep the PR comment readable; "
+                f"{remaining} more files are available in `{DEFAULT_DETAIL_DIR}/`."
+            )
+            preview_lines.append("")
+            break
+
+        preview_lines.append(section_text)
+        budget_used += len(section_text)
+        rendered += 1
+
+    return preview_lines if rendered else []
 
 
 def render_report(
@@ -701,6 +828,7 @@ def render_report(
                 "with filenames matching `<source>.{added,removed,modified}.csv`."
             )
             lines.append("")
+            lines.extend(_render_inline_diff_previews(interesting))
 
     if converted and not converted_bad and not legacy_perf_changes:
         lines.append("All detected CSV-to-parquet conversions preserve column names and Arrow table content.")

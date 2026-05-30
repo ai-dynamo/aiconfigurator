@@ -159,6 +159,9 @@ def test_report_includes_row_level_counts(parquet_diff_module):
             removed_rows=1,
             modified_rows=1,
             detail_files={"added": "gemm.added.csv", "removed": "gemm.removed.csv", "modified": "gemm.modified.csv"},
+            detail_previews={
+                "modified": "framework,gemm_dtype,m,n,k,latency__base,latency__head\nvllm,fp8,1,16,16,1.0,1.5"
+            },
         ),
     )
 
@@ -173,3 +176,5 @@ def test_report_includes_row_level_counts(parquet_diff_module):
     assert "- Row-level changes: +1 / -1 / ~1" in report
     assert "| M | src/aiconfigurator/systems/data/h100/vllm/0.19.0/gemm_perf.parquet | 3 | 3 | 1 | 1 | 1 |" in report
     assert "Exact row-level CSVs are attached" in report
+    assert "### Per-File Row Diff Preview" in report
+    assert "latency__base,latency__head" in report
