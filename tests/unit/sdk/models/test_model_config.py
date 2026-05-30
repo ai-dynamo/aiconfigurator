@@ -1102,6 +1102,10 @@ _VL_MODELS = [
     "Qwen/Qwen3-VL-32B-Instruct",
     "Qwen/Qwen3-VL-32B-Thinking",
 ]
+_VL_MOE_MODELS = [
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "Qwen/Qwen3-VL-235B-A22B-Instruct",
+]
 
 
 class TestQwen3VLRegistration:
@@ -1262,3 +1266,19 @@ class TestQwen3VLModel:
     def test_both_vl_variants_return_qwen3vl_model(self, model_id, model_config):
         model = get_model(model_id, model_config, "trtllm")
         assert isinstance(model, Qwen3VLModel)
+
+
+class TestQwen3VLMoEModel:
+    """Test Qwen3-VL MoE classification and model construction."""
+
+    @pytest.mark.parametrize("model_id", _VL_MOE_MODELS)
+    def test_qwen3vl_moe_models_are_moe(self, model_id):
+        assert get_model_family(model_id) == "QWEN3VL_MOE"
+        assert check_is_moe(model_id)
+
+    @pytest.mark.parametrize("model_id", _VL_MOE_MODELS)
+    def test_qwen3vl_moe_models_construct_with_valid_moe_parallelism(self, model_id):
+        model_config = config.ModelConfig(tp_size=8, pp_size=2, moe_tp_size=1, moe_ep_size=8)
+        model = get_model(model_id, model_config, "trtllm")
+        assert isinstance(model, Qwen3VLMoEModel)
+        assert len(model.encoder_ops) > 0
