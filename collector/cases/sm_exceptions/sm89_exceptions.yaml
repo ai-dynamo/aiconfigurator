@@ -42,6 +42,12 @@ framework_specific_op_exceptions:
           fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
           match:
             use_fp8_kv_cache: true
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.10"]
+          reason: SGLang 0.5.10 FlashAttention context attention with head_dim=256 fails on SM89 with CUDA invalid argument.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase, window_size]
+          match:
+            head_dim: 256
     attention_generation:
       rules:
         - reason_type: hardware_unsupported
