@@ -265,8 +265,6 @@ def _is_known_framework_incompatible_gap(
             return "unsupported moe quant mode 'nvfp4'" in normalized or "dsa_context_module_perf.txt" in normalized
 
     if system == "gb200" and backend == common.BackendName.sglang.value and version == "0.5.10":
-        if model == "deepseek-ai/DeepSeek-V3.2" and "context dsa module data not available" in normalized:
-            return True
         if "DeepSeek-V4" in model and (
             "deepseek-v4 mhc module data not loaded" in normalized
             or "no mhc silicon data" in normalized
