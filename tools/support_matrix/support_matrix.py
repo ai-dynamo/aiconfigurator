@@ -81,6 +81,7 @@ _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
 _SPARSE_DSA_ARCHITECTURES = frozenset({"GlmMoeDsaForCausalLM"})
+_GPT_OSS_MXFP4_MODELS = frozenset({"openai/gpt-oss-20b", "openai/gpt-oss-120b"})
 
 
 def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[tuple[int, str], str, str, str]:
@@ -344,6 +345,11 @@ def _gpu_supports_sparse_dsa(system_spec: dict) -> bool:
     return sm_version is not None and sm_version >= 90
 
 
+def _gpu_supports_gpt_oss_mxfp4(system_spec: dict) -> bool:
+    sm_version = (system_spec.get("gpu") or {}).get("sm_version")
+    return sm_version is not None and sm_version >= 89
+
+
 def _required_datatypes_for_model(model: str, backend: str) -> tuple[str, ...]:
     """Infer hardware datatypes required by a model's quantization metadata."""
     model_info = dict(_get_model_info(model))
@@ -387,6 +393,12 @@ def get_hardware_incompatibility(
     """Return a deterministic hardware/model datatype incompatibility, if any."""
     model_info = dict(_get_model_info(model))
     architecture = model_info["architecture"]
+    if model in _GPT_OSS_MXFP4_MODELS and not _gpu_supports_gpt_oss_mxfp4(system_spec):
+        return HardwareIncompatibility(
+            missing_datatypes=("MXFP4",),
+            reason=f"{_gpu_label(system, system_spec)} does not support MXFP4/FP4 required by {model}",
+        )
+
     if (
         backend in {common.BackendName.sglang.value, common.BackendName.vllm.value}
         and architecture in _SPARSE_DSA_ARCHITECTURES
