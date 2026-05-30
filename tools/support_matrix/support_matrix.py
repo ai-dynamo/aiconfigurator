@@ -244,6 +244,16 @@ def _is_known_framework_incompatible_gap(
             or (model == "moonshotai/Kimi-K2.5" and "unsupported moe quant mode 'int4_wo'" in normalized)
             or ("DeepSeek-V4" in model and "deepseek-v4 mhc module data not loaded" in normalized)
         )
+    if (
+        backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and system == "h200_sxm"
+        and "DeepSeek-V4" in model
+        and "deepseekv4forcausallm" in normalized
+        and "not a registered model" in normalized
+        and "'automodel' is not present" in normalized
+    ):
+        return True
 
     if system == "rtx_pro_6000_server":
         if (
