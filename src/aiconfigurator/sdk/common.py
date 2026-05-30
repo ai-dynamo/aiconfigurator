@@ -556,6 +556,8 @@ ModelFamily = {
     "NEMOTRONH",
     "HYBRIDMOE",
     "QWEN35",
+    "QWEN3VL",
+    "QWEN3VL_MOE",
     "GEMMA4MOE",
 }
 ARCHITECTURE_TO_MODEL_FAMILY = {
