@@ -449,7 +449,8 @@ def get_framework_incompatibility(
     ):
         return FrameworkIncompatibility(
             reason=(
-                f"SGLang {version} cannot collect FlashAttention data for {model} on {_gpu_label(system, system_spec)}: "
+                f"SGLang {version} cannot collect FlashAttention data for {model} "
+                f"on {_gpu_label(system, system_spec)}: "
                 f"Gemma4 global attention uses head_dim={global_head_dim}, but SGLang raises "
                 "RuntimeError('FlashAttention forward only supports head dimension at most 256')"
             )
