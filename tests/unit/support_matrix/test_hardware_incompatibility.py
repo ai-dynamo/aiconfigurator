@@ -142,6 +142,32 @@ def test_mxfp4_model_is_not_native_fp4_hardware_incompatible_on_hopper(model):
     assert incompatibility is None
 
 
+def test_vllm_sparse_dsa_model_is_hardware_incompatible_on_a100():
+    incompatibility = get_hardware_incompatibility(
+        model="zai-org/GLM-5",
+        system="a100_sxm",
+        backend="vllm",
+        system_spec=_system_spec(sm_version=80),
+    )
+
+    assert incompatibility is not None
+    assert incompatibility.missing_datatypes == ("DSA",)
+    assert incompatibility.reason == (
+        "a100_sxm (SM80) does not support sparse DSA attention required by zai-org/GLM-5 on vLLM"
+    )
+
+
+def test_vllm_sparse_dsa_model_is_allowed_on_hopper():
+    incompatibility = get_hardware_incompatibility(
+        model="zai-org/GLM-5",
+        system="h100_sxm",
+        backend="vllm",
+        system_spec=_system_spec(sm_version=90, fp8=True),
+    )
+
+    assert incompatibility is None
+
+
 def test_run_single_test_short_circuits_hardware_incompatible_model(monkeypatch):
     def fail_run_mode(**_kwargs):
         raise AssertionError("TaskRunner should not run for hardware-incompatible combinations")

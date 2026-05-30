@@ -80,8 +80,7 @@ _FRONTIER_ENVELOPE_COLUMNS = {
 _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
-_SGLANG_DSA_ARCHITECTURES = frozenset({"DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"})
-_GPT_OSS_MXFP4_MODELS = frozenset({"openai/gpt-oss-20b", "openai/gpt-oss-120b"})
+_SPARSE_DSA_ARCHITECTURES = frozenset({"GlmMoeDsaForCausalLM"})
 
 
 def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[tuple[int, str], str, str, str]:
@@ -340,14 +339,9 @@ def _gpu_supports_datatype(system: str, system_spec: dict, datatype: str) -> boo
     return True
 
 
-def _gpu_supports_sglang_dsa(system_spec: dict) -> bool:
+def _gpu_supports_sparse_dsa(system_spec: dict) -> bool:
     sm_version = (system_spec.get("gpu") or {}).get("sm_version")
     return sm_version is not None and sm_version >= 90
-
-
-def _gpu_supports_gpt_oss_mxfp4(system_spec: dict) -> bool:
-    sm_version = (system_spec.get("gpu") or {}).get("sm_version")
-    return sm_version is not None and sm_version >= 89
 
 
 def _required_datatypes_for_model(model: str, backend: str) -> tuple[str, ...]:
@@ -392,32 +386,30 @@ def get_hardware_incompatibility(
 ) -> HardwareIncompatibility | None:
     """Return a deterministic hardware/model datatype incompatibility, if any."""
     model_info = dict(_get_model_info(model))
-    required_datatypes = _required_datatypes_for_model(model, backend)
-    missing = tuple(dt for dt in required_datatypes if not _gpu_supports_datatype(system, system_spec, dt))
-    if missing:
-        datatype_text = _format_datatype_list(missing)
-        return HardwareIncompatibility(
-            missing_datatypes=missing,
-            reason=f"{_gpu_label(system, system_spec)} does not support {datatype_text} required by {model}",
-        )
-
-    if model in _GPT_OSS_MXFP4_MODELS and not _gpu_supports_gpt_oss_mxfp4(system_spec):
-        return HardwareIncompatibility(
-            missing_datatypes=("MXFP4",),
-            reason=f"{_gpu_label(system, system_spec)} does not support MXFP4/FP4 required by {model}",
-        )
-
+    architecture = model_info["architecture"]
     if (
-        backend == common.BackendName.sglang.value
-        and model_info["architecture"] in _SGLANG_DSA_ARCHITECTURES
-        and not _gpu_supports_sglang_dsa(system_spec)
+        backend in {common.BackendName.sglang.value, common.BackendName.vllm.value}
+        and architecture in _SPARSE_DSA_ARCHITECTURES
+        and not _gpu_supports_sparse_dsa(system_spec)
     ):
         return HardwareIncompatibility(
-            missing_datatypes=("SGLang DSA",),
-            reason=f"{_gpu_label(system, system_spec)} does not support SGLang DSA attention required by {model}",
+            missing_datatypes=("DSA",),
+            reason=(
+                f"{_gpu_label(system, system_spec)} does not support sparse DSA attention required by "
+                f"{model} on {backend}"
+            ),
         )
 
-    return None
+    required_datatypes = _required_datatypes_for_model(model, backend)
+    missing = tuple(dt for dt in required_datatypes if not _gpu_supports_datatype(system, system_spec, dt))
+    if not missing:
+        return None
+
+    datatype_text = _format_datatype_list(missing)
+    return HardwareIncompatibility(
+        missing_datatypes=missing,
+        reason=f"{_gpu_label(system, system_spec)} does not support {datatype_text} required by {model}",
+    )
 
 
 def get_framework_incompatibility(
@@ -426,17 +418,17 @@ def get_framework_incompatibility(
     system: str,
     backend: str,
     version: str,
-    system_spec: dict,
+    system_spec: dict | None = None,
 ) -> FrameworkIncompatibility | None:
-    """Return deterministic framework/runtime incompatibilities discovered during collection."""
+    """Return deterministic framework/runtime incompatibility evidence, if any."""
     model_info = dict(_get_model_info(model))
     extra_params = model_info.get("extra_params")
     global_head_dim = getattr(extra_params, "global_head_dim", None)
-    sm_version = (system_spec.get("gpu") or {}).get("sm_version")
+    sm_version = (system_spec.get("gpu") or {}).get("sm_version") if system_spec is not None else None
 
     if (
         backend == common.BackendName.sglang.value
-        and version == "0.5.10"
+        and version in {"0.5.9", "0.5.10"}
         and model_info["architecture"] == "Gemma4ForConditionalGeneration"
         and global_head_dim is not None
         and global_head_dim > 256
@@ -448,6 +440,28 @@ def get_framework_incompatibility(
                 f"SGLang {version} cannot collect FlashAttention data for {model} on {_gpu_label(system, system_spec)}: "
                 f"Gemma4 global attention uses head_dim={global_head_dim}, but SGLang raises "
                 "RuntimeError('FlashAttention forward only supports head dimension at most 256')"
+            )
+        )
+
+    if (
+        model == "google/gemma-4-26B-A4B"
+        and system == "a100_sxm"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.0.0"
+        and global_head_dim is not None
+        and global_head_dim > 256
+    ):
+        return FrameworkIncompatibility(
+            reason=(
+                "FRAMEWORK_INCOMPATIBLE after live TRT-LLM 1.0.0 A100 Gemma-4 head_dim=512 repair attempt: "
+                "recorded replay requires BF16 global context attention head_size=512/window_size=0. "
+                "The a100_sxm/trtllm/1.0.0 collector database has no head_dim=512 attention rows because "
+                "the TRT-LLM 1.0.0 torch-flow runtime cannot execute the missing shape. Runtime evidence: "
+                "debug node gpu-debug-4e7dcf0117 with image nvcr.io/nvidia/tensorrt-llm/release:1.0.0 ran "
+                "run_attention_torch(1, 128, 2, 1, 512, 0, False, False, True, "
+                "perf_filename='/tmp/a100_trtllm_gemma_hd512_context_smoke.txt') on NVIDIA A100-SXM4-80GB "
+                "(SM80), and TensorRT-LLM AttentionOp::initialize() aborted with: "
+                "Head size 512 is not supported by MMHA."
             )
         )
 
