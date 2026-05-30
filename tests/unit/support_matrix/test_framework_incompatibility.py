@@ -99,6 +99,7 @@ def test_non_dsv4_vllm_019_error_remains_fail(monkeypatch):
         ("XiaomiMiMo/MiMo-V2-Flash", "MiMo h=192 FP8 GQA"),
         ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4", "local intermediate size 336"),
         ("sgl-project/DeepSeek-V4-Pro-FP8", "newer SGLang kernel and TileLang support"),
+        ("deepseek-ai/DeepSeek-V4-Pro", "Cannot find model module"),
     ],
 )
 def test_b300_sglang_0510_verified_runtime_gaps_short_circuit(monkeypatch, model, reason_fragment):

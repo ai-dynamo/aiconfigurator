@@ -926,14 +926,7 @@ class _LazySupportMatrix:
 
             GEMM.load_data(db)
             modes = _enum_key_names(getattr(db, "_gemm_data", None))
-            # ``fp8_static`` is a behavioral mode that reuses ``fp8`` GEMM perf tables.
-            if (
-                db.backend == "trtllm"
-                and common.GEMMQuantMode.fp8.name in modes
-                and common.GEMMQuantMode.fp8_static.name not in modes
-            ):
-                modes.append(common.GEMMQuantMode.fp8_static.name)
-            return modes
+            return _with_behavioral_gemm_modes(db.backend, modes)
 
         if key == "context_attention":
             from aiconfigurator.sdk.operations.attention import ContextAttention
@@ -1020,7 +1013,8 @@ class _LazySupportMatrix:
             from aiconfigurator.sdk.operations.moe import MoE
 
             MoE.load_data(db)
-            return _enum_key_names(getattr(db, "_moe_data", None))
+            modes = _enum_key_names(getattr(db, "_moe_data", None))
+            return _with_sglang_blackwell_moe_modes(db.backend, db.system_spec, modes)
 
         if key == "wideep_context_moe":
             from aiconfigurator.sdk.operations.moe import MoE
@@ -1071,6 +1065,34 @@ def _enum_key_names(data) -> list[str]:
     for key in data:
         names.append(key.name if hasattr(key, "name") else str(key))
     return names
+
+
+def _with_behavioral_gemm_modes(backend: str, modes: list[str]) -> list[str]:
+    """Add supported behavioral GEMM modes that reuse existing perf tables."""
+    if (
+        backend
+        in {
+            common.BackendName.sglang.value,
+            common.BackendName.trtllm.value,
+        }
+        and common.GEMMQuantMode.fp8.name in modes
+        and common.GEMMQuantMode.fp8_static.name not in modes
+    ):
+        modes.append(common.GEMMQuantMode.fp8_static.name)
+    return modes
+
+
+def _with_sglang_blackwell_moe_modes(backend: str, system_spec: dict, modes: list[str]) -> list[str]:
+    """Add SGLang Blackwell MXFP4 MoE modes validated by the collector path."""
+    sm_version = system_spec.get("gpu", {}).get("sm_version")
+    if backend == common.BackendName.sglang.value and sm_version in (100, 103):
+        for mode in (
+            common.MoEQuantMode.w4a16_mxfp4.name,
+            common.MoEQuantMode.w4a8_mxfp4_mxfp8.name,
+        ):
+            if mode not in modes:
+                modes.append(mode)
+    return modes
 
 
 def _merge_key_names(*sources) -> list[str]:
@@ -1235,7 +1257,10 @@ class PerfDatabase:
                     wideep_generation_mla_modes.add(kv_cache_dtype.name)
 
             self.supported_quant_mode = {
-                "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
+                "gemm": _with_behavioral_gemm_modes(
+                    self.backend,
+                    _enum_key_names(getattr(self, "_gemm_data", None)),
+                ),
                 "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
                 "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
                 "context_mla": _merge_key_names(
@@ -1253,7 +1278,11 @@ class PerfDatabase:
                 ),
                 "mla_bmm": _enum_key_names(getattr(self, "_mla_bmm_data", None)),
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
-                "moe": _enum_key_names(getattr(self, "_moe_data", None)),
+                "moe": _with_sglang_blackwell_moe_modes(
+                    self.backend,
+                    self.system_spec,
+                    _enum_key_names(getattr(self, "_moe_data", None)),
+                ),
                 "wideep_context_moe": _enum_key_names(getattr(self, "_wideep_context_moe_data", None)),
                 "wideep_generation_moe": _enum_key_names(getattr(self, "_wideep_generation_moe_data", None)),
                 "wideep_context_mla": list(wideep_context_mla_modes),
@@ -1261,7 +1290,10 @@ class PerfDatabase:
             }
         elif self.backend == "trtllm":
             self.supported_quant_mode = {
-                "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
+                "gemm": _with_behavioral_gemm_modes(
+                    self.backend,
+                    _enum_key_names(getattr(self, "_gemm_data", None)),
+                ),
                 "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
                 "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
                 "context_mla": _merge_key_names(

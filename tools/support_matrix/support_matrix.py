@@ -516,6 +516,15 @@ def get_framework_incompatibility(
                 )
             )
 
+        if model == "deepseek-ai/DeepSeek-V4-Pro":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 cannot load the native "
+                    "DeepSeek-V4 Pro mHC collector/runtime path for hidden_size=7168, hc_mult=4: "
+                    "SGLang raises `Cannot find model module` for `DeepseekV4ForCausalLM`."
+                )
+            )
+
         if model == "XiaomiMiMo/MiMo-V2-Flash":
             return FrameworkIncompatibility(
                 reason=(
