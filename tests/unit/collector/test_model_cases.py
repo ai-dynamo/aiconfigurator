@@ -84,7 +84,7 @@ def test_attention_shape_specs_are_yaml_backed_with_backend_overrides():
     vllm_xpu_context = get_attention_context_shape_sweeps("vllm_xpu")[0]
     vllm_generation = get_attention_generation_shape_sweeps("vllm")[0]
 
-    assert sglang_context["head_dims"] == [128, 192, 256]
+    assert sglang_context["head_dims"] == [64, 128, 192, 256]
     assert trtllm_context["head_dims"] == [64, 128, 192, 256]
     assert trtllm_context["query_head_counts"][:6] == [1, 2, 3, 4, 5, 6]
     assert vllm_context["head_dims"] == [64, 128, 192, 256, 512]
@@ -699,6 +699,39 @@ def test_filter_test_cases_reports_expected_sm_exception_reasons():
             "reason": "tiny-M FP8 large GEMM crashes on this framework build",
         }
     ]
+
+
+def test_sm89_exception_marks_sglang_head_dim_256_context_attention_expected_failure():
+    plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="google/gemma-4-26B-A4B",
+        gpu_type="l40s",
+    )
+    case = [1, 256, 2, 1, 256, False, False, True, 1024]
+
+    for version in ("0.5.9", "0.5.10"):
+        expected = expected_failure_for_test_case(
+            case,
+            plan=plan.op_cases["attention_context"],
+            full_module_name="sglang.attention_context",
+            run_func_name="run_attention_torch",
+            runtime_version=version,
+        )
+
+        assert expected is not None
+        assert expected["reason_type"] == "framework_version_unsupported"
+        assert "head_dim=256" in expected["reason"]
+
+    assert (
+        expected_failure_for_test_case(
+            case,
+            plan=plan.op_cases["attention_context"],
+            full_module_name="sglang.attention_context",
+            run_func_name="run_attention_torch",
+            runtime_version="0.5.8",
+        )
+        is None
+    )
 
 
 def test_sm120_exception_filters_trtllm_gptoss_mxfp4():
