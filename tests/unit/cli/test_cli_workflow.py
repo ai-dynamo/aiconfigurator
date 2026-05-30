@@ -192,21 +192,18 @@ class TestCLIIntegration:
         )
         assert args.database_mode == database_mode
 
-    @patch("aiconfigurator.cli.main.TaskRunner")
     def test_execute_task_configs_no_feasible_config_logs_without_traceback(
         self,
-        mock_task_runner_class,
         caplog,
     ):
         """Strict-SLA no-match should produce a controlled report, not a traceback."""
-        mock_runner = mock_task_runner_class.return_value
-        mock_runner.run.side_effect = NoFeasibleConfigError("No configuration satisfied the TTFT/TPOT constraints.")
-        mock_task_config = MagicMock(name="TaskConfig")
-        mock_task_config.to_yaml.return_value = "serving_mode: agg"
-        mock_task_config.database_mode = None
+        mock_task = MagicMock(name="Task")
+        mock_task.to_yaml.return_value = "serving_mode: agg"
+        mock_task.database_mode = None
+        mock_task.run.side_effect = NoFeasibleConfigError("No configuration satisfied the TTFT/TPOT constraints.")
 
         with caplog.at_level(logging.WARNING), pytest.raises(SystemExit) as exc_info:
-            _execute_task_configs({"agg": mock_task_config}, mode="default", strict_sla=True)
+            _execute_task_configs({"agg": mock_task}, mode="default", strict_sla=True)
 
         assert exc_info.value.code == 1
         assert "Experiment agg found no SLA-feasible configuration" in caplog.text
@@ -277,10 +274,10 @@ exp_with_db_mode:
 class TestBuildDefaultTaskConfigs:
     """Tests for build_default_task_configs function."""
 
-    @patch("aiconfigurator.cli.main.TaskConfig")
-    def test_skips_disagg_when_total_gpus_less_than_2(self, mock_task_config):
+    @patch("aiconfigurator.cli.main.Task")
+    def test_skips_disagg_when_total_gpus_less_than_2(self, mock_task):
         """Disagg config should be skipped when total_gpus < 2."""
-        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+        mock_task.return_value = MagicMock(name="MockTask")
 
         result = build_default_task_configs(
             model_path="Qwen/Qwen3-32B",
@@ -291,13 +288,13 @@ class TestBuildDefaultTaskConfigs:
         # Should only have agg config, no disagg
         assert "agg" in result
         assert "disagg" not in result
-        # TaskConfig should only be called once (for agg)
-        assert mock_task_config.call_count == 1
+        # Task should only be called once (for agg)
+        assert mock_task.call_count == 1
 
-    @patch("aiconfigurator.cli.main.TaskConfig")
-    def test_includes_disagg_when_total_gpus_at_least_2(self, mock_task_config):
+    @patch("aiconfigurator.cli.main.Task")
+    def test_includes_disagg_when_total_gpus_at_least_2(self, mock_task):
         """Disagg config should be included when total_gpus >= 2."""
-        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+        mock_task.return_value = MagicMock(name="MockTask")
 
         result = build_default_task_configs(
             model_path="Qwen/Qwen3-32B",
@@ -308,20 +305,20 @@ class TestBuildDefaultTaskConfigs:
         # Should have both agg and disagg configs
         assert "agg" in result
         assert "disagg" in result
-        # TaskConfig should be called twice (agg + disagg)
-        assert mock_task_config.call_count == 2
+        # Task should be called twice (agg + disagg)
+        assert mock_task.call_count == 2
 
     @patch("aiconfigurator.cli.main.check_is_moe", return_value=True)
-    @patch("aiconfigurator.cli.main.TaskConfig")
+    @patch("aiconfigurator.cli.main.Task")
     def test_skips_optional_sglang_deepep_when_perf_data_missing(
         self,
-        mock_task_config,
+        mock_task,
         _mock_check_is_moe,
         tmp_path,
         caplog,
     ):
         """Optional SGLang DeepEP sweeps should not be scheduled without DeepEP op data."""
-        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+        mock_task.return_value = MagicMock(name="MockTask")
         caplog.set_level(logging.INFO, logger="aiconfigurator.cli.main")
 
         with patch("aiconfigurator.cli.main._get_backend_data_path", return_value=str(tmp_path)):
@@ -335,21 +332,21 @@ class TestBuildDefaultTaskConfigs:
             )
 
         assert set(result) == {"agg", "disagg"}
-        assert mock_task_config.call_count == 2
+        assert mock_task.call_count == 2
         assert "Skipping SGLang DeepEP agg sweep" in caplog.text
         assert "Skipping SGLang DeepEP disagg sweep" in caplog.text
         assert "wideep_deepep_normal_perf.parquet" in caplog.text
 
     @patch("aiconfigurator.cli.main.check_is_moe", return_value=True)
-    @patch("aiconfigurator.cli.main.TaskConfig")
+    @patch("aiconfigurator.cli.main.Task")
     def test_includes_optional_sglang_deepep_when_perf_data_exists(
         self,
-        mock_task_config,
+        mock_task,
         _mock_check_is_moe,
         tmp_path,
     ):
         """SGLang DeepEP sweeps remain available when required DeepEP op data exists."""
-        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+        mock_task.return_value = MagicMock(name="MockTask")
         for filename in ("wideep_deepep_normal_perf.parquet", "wideep_deepep_ll_perf.parquet"):
             (tmp_path / filename).write_text("header\n", encoding="utf-8")
 
@@ -363,15 +360,15 @@ class TestBuildDefaultTaskConfigs:
             )
 
         assert set(result) == {"agg", "agg_deepep", "disagg", "disagg_deepep"}
-        assert mock_task_config.call_count == 4
+        assert mock_task.call_count == 4
 
 
 class TestBuildExperimentTaskConfigs:
     """Tests for experiment config construction."""
 
-    @patch("aiconfigurator.cli.main.TaskConfig")
-    def test_global_engine_step_backend_applies_unless_exp_overrides(self, mock_task_config):
-        mock_task_config.side_effect = lambda **kwargs: MagicMock(**kwargs)
+    @patch("aiconfigurator.cli.main.Task")
+    def test_global_engine_step_backend_applies_unless_exp_overrides(self, mock_task):
+        mock_task.from_yaml.side_effect = lambda data, **overrides: MagicMock(**data)
         config = {
             "global_backend": {
                 "serving_mode": "agg",
@@ -390,12 +387,12 @@ class TestBuildExperimentTaskConfigs:
 
         build_experiment_task_configs(config=config, engine_step_backend="rust")
 
-        kwargs_by_backend = {
-            call.kwargs["engine_step_backend"]: call.kwargs for call in mock_task_config.call_args_list
-        }
-        assert set(kwargs_by_backend) == {"rust", "python"}
-        assert kwargs_by_backend["rust"]["model_path"] == "Qwen/Qwen3-32B"
-        assert kwargs_by_backend["python"]["model_path"] == "Qwen/Qwen3-32B"
+        # Inspect the YAML payloads passed to Task.from_yaml.
+        payloads = [call.args[0] for call in mock_task.from_yaml.call_args_list]
+        backends = {p["engine_step_backend"]: p for p in payloads}
+        assert set(backends) == {"rust", "python"}
+        assert backends["rust"]["model_path"] == "Qwen/Qwen3-32B"
+        assert backends["python"]["model_path"] == "Qwen/Qwen3-32B"
 
 
 class TestInclusiveTpot:

@@ -9,13 +9,13 @@ from aiconfigurator.sdk.pareto_analysis import (
     get_pareto_front,
 )
 from aiconfigurator.sdk.picking import pick_default, pick_load_match
-from aiconfigurator.sdk.task_v1 import TaskConfig
+from aiconfigurator.sdk.task import Task
 
 logger = logging.getLogger(__name__)
 
 
 def process_experiment_result(
-    task_config: TaskConfig,
+    task_config: Task,
     result: dict[str, pd.DataFrame],
     top_n: int = 5,
     target_request_rate: float | None = None,
@@ -28,10 +28,10 @@ def process_experiment_result(
 
     This is a thin wrapper around :func:`picking.pick_default` and
     :func:`picking.pick_load_match` that extracts parameters from the
-    ``TaskConfig``.
+    ``Task``.
 
     Args:
-        task_config: TaskConfig object for the experiment.
+        task_config: Task object for the experiment.
         result: Dictionary containing the pareto_df result of the experiment.
         top_n: Number of top configurations to return.
         target_request_rate: If set, activates load-match picking (minimize
@@ -58,11 +58,10 @@ def process_experiment_result(
     load_match = target_request_rate is not None or target_concurrency is not None
 
     pareto_df = result["pareto_df"]
-    runtime_cfg = task_config.config.runtime_config
-    target_tpot = runtime_cfg.tpot
-    target_request_latency = runtime_cfg.request_latency
+    target_tpot = task_config.tpot
+    target_request_latency = task_config.request_latency
     use_request_latency = target_request_latency is not None and target_request_latency > 0
-    total_gpus = getattr(task_config, "total_gpus", None) or 0
+    total_gpus = task_config.total_gpus or 0
     serving_mode = task_config.serving_mode
 
     x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"
@@ -99,7 +98,7 @@ def process_experiment_result(
 
 def _merge_into_top_n(
     exps: list[str],
-    task_configs: dict[str, TaskConfig],
+    task_configs: dict[str, Task],
     best_configs: dict[str, pd.DataFrame],
     pareto_fronts: dict[str, pd.DataFrame],
     pareto_x_axis: dict[str, str],
@@ -113,7 +112,10 @@ def _merge_into_top_n(
         if exp_name not in best_configs:
             continue
         retained_exps.append(exp_name)
-        backend_name = task_configs[exp_name].backend_name
+        task = task_configs[exp_name]
+        # For disagg, backend_name is per-role; agg's flat backend_name field is
+        # populated.  Prefer the agg name; fall back to prefill role for disagg.
+        backend_name = task.backend_name if task.serving_mode == "agg" else task.prefill_backend_name
         df = best_configs[exp_name].copy()
         if not df.empty:
             df["backend"] = backend_name
@@ -151,7 +153,7 @@ def _merge_into_top_n(
 
 
 def merge_experiment_results_by_mode(
-    task_configs: dict[str, TaskConfig],
+    task_configs: dict[str, Task],
     best_configs: dict[str, pd.DataFrame],
     pareto_fronts: dict[str, pd.DataFrame],
     pareto_x_axis: dict[str, str],

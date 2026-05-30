@@ -918,6 +918,26 @@ class Task:
     def model_family(self) -> str:
         return self._model_family
 
+    # The "primary" accessors return the headline value for reporting / labels.
+    # For agg they are the flat field; for disagg they fall back to the prefill
+    # role (prefill and decode systems / backends may differ in disagg; reports
+    # need a single representative name and prefill is the chosen convention).
+    @property
+    def primary_model_path(self) -> str:
+        return self.prefill_model_path if self.serving_mode == "disagg" else self.model_path
+
+    @property
+    def primary_system_name(self) -> str:
+        return self.prefill_system_name if self.serving_mode == "disagg" else self.system_name
+
+    @property
+    def primary_backend_name(self) -> str:
+        return self.prefill_backend_name if self.serving_mode == "disagg" else self.backend_name
+
+    @property
+    def primary_backend_version(self) -> str | None:
+        return self.prefill_backend_version if self.serving_mode == "disagg" else self.backend_version
+
     # =====================================================================
     # Serialization
     # =====================================================================

@@ -25,10 +25,10 @@ from aiconfigurator.cli.main import (
 from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.models import check_is_moe
+from aiconfigurator.sdk.task import Task
 from aiconfigurator.sdk.task_v1 import (
     DEFAULT_DECODE_LATENCY_CORRECTION_SCALE,
     DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE,
-    TaskConfig,
 )
 
 
@@ -88,8 +88,8 @@ class CLIResult:
     best_throughputs: dict[str, float]
     """Best throughput (tokens/s/gpu_cluster) per experiment."""
 
-    task_configs: dict[str, TaskConfig]
-    """TaskConfig objects used for each experiment."""
+    task_configs: dict[str, Task]
+    """Task objects used for each experiment."""
 
     best_latencies: dict[str, dict[str, float]] = field(default_factory=dict)
     """Estimated latencies (ttft, tpot, request_latency) from the rank-1 config per experiment."""
@@ -106,7 +106,7 @@ class CLIResult:
 
 
 def _execute_and_wrap_result(
-    task_configs: dict[str, TaskConfig],
+    task_configs: dict[str, Task],
     mode: str,
     top_n: int = 5,
     strict_sla: bool = False,
