@@ -81,8 +81,10 @@ def test_sglang_dsa_model_is_hardware_incompatible_on_sm80():
     )
 
     assert incompatibility is not None
-    assert incompatibility.missing_datatypes == ("SGLang DSA",)
-    assert incompatibility.reason == "a100_sxm (SM80) does not support SGLang DSA attention required by zai-org/GLM-5"
+    assert incompatibility.missing_datatypes == ("DSA",)
+    assert incompatibility.reason == (
+        "a100_sxm (SM80) does not support sparse DSA attention required by zai-org/GLM-5 on sglang"
+    )
 
 
 @pytest.mark.parametrize("model", ["openai/gpt-oss-20b", "openai/gpt-oss-120b"])
@@ -154,6 +156,19 @@ def test_sparse_dsa_model_is_allowed_on_hopper(backend):
     assert incompatibility is None
 
 
+def test_gemma4_trtllm_head_dim_512_is_framework_incompatible_on_a100():
+    incompatibility = get_framework_incompatibility(
+        model="google/gemma-4-26B-A4B",
+        system="a100_sxm",
+        backend="trtllm",
+        version="1.0.0",
+    )
+
+    assert incompatibility is not None
+    assert "Head size 512 is not supported by MMHA" in incompatibility.reason
+    assert "run_attention_torch(1, 128, 2, 1, 512, 0" in incompatibility.reason
+
+
 def test_run_single_test_short_circuits_hardware_incompatible_model(monkeypatch):
     def fail_run_mode(**_kwargs):
         raise AssertionError("TaskRunner should not run for hardware-incompatible combinations")
@@ -173,7 +188,7 @@ def test_run_single_test_short_circuits_hardware_incompatible_model(monkeypatch)
     assert STATUS_PASS not in status_dict.values()
 
 
-def test_run_single_test_short_circuits_framework_incompatible_model(monkeypatch):
+def test_run_single_test_short_circuits_sglang_framework_incompatible_model(monkeypatch):
     def fail_run_mode(**_kwargs):
         raise AssertionError("TaskRunner should not run for framework-incompatible combinations")
 
@@ -190,6 +205,25 @@ def test_run_single_test_short_circuits_framework_incompatible_model(monkeypatch
     assert status_dict == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
     assert "cannot collect FlashAttention data" in error_dict["agg"]
     assert STATUS_PASS not in status_dict.values()
+
+
+def test_run_single_test_short_circuits_trtllm_framework_incompatible_model(monkeypatch):
+    def fail_run_mode(**_kwargs):
+        raise AssertionError("TaskRunner should not run for framework-incompatible combinations")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
+
+    status_dict, error_dict = SupportMatrix.run_single_test(
+        model="google/gemma-4-26B-A4B",
+        system="a100_sxm",
+        backend="trtllm",
+        version="1.0.0",
+        system_spec=_system_spec(sm_version=80),
+        modes_to_test=("agg",),
+    )
+
+    assert status_dict == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert "Head size 512 is not supported by MMHA" in error_dict["agg"]
 
 
 @pytest.mark.parametrize(
