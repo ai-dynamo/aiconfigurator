@@ -765,9 +765,16 @@ def benchmark_config(
         from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe
         from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
             _pack_topk_for_flashinfer_routed,
-            get_activation_type,
             quantize_hidden_states_fp4,
         )
+
+        try:
+            from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import get_activation_type
+        except ImportError:
+            from flashinfer.fused_moe.core import ActivationType
+
+            def get_activation_type(_activation: str):
+                return ActivationType.Swiglu
 
         if hidden_size % 32 != 0 or (shard_intermediate_size // 2) % 32 != 0:
             raise ValueError(

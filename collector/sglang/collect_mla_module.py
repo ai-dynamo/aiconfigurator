@@ -130,6 +130,27 @@ def _parse_int_list(value: str | None) -> list[int] | None:
     return [int(item) for item in value.split(",") if item]
 
 
+def _parse_dsa_context_extra_cases() -> list[list[int | str]]:
+    value = os.environ.get("AIC_DSA_CONTEXT_EXTRA_CASES")
+    if not value:
+        return []
+
+    cases: list[list[int | str]] = []
+    for item in value.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        parts = [part.strip() for part in item.split(",")]
+        if len(parts) != 6:
+            raise ValueError(
+                "AIC_DSA_CONTEXT_EXTRA_CASES entries must use "
+                "seq_len,batch_size,num_heads,kv_cache_dtype,compute_dtype,gemm_type"
+            )
+        seq_len, batch_size, num_heads = (int(part) for part in parts[:3])
+        cases.append([seq_len, batch_size, num_heads, parts[3], parts[4], parts[5]])
+    return cases
+
+
 def _filter_cases_from_env(test_cases, *, is_prefill: bool, attn_type: str):
     if not (is_prefill and attn_type == "dsa"):
         return test_cases
@@ -385,6 +406,11 @@ def get_context_test_cases(attn_type: str):
                     ):
                         continue
                     cases.append([seq_len, batch_size, num_heads, kv_dtype, compute_dtype, gemm_type])
+    if attn_type == "dsa":
+        extra_cases = _parse_dsa_context_extra_cases()
+        if extra_cases:
+            cases.extend(extra_cases)
+            print(f"[DSA] Added {len(extra_cases)} env-specified context case(s)")
     return cases
 
 
