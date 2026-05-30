@@ -153,6 +153,51 @@ def test_l40s_fp8_block_other_backend_error_is_hardware_incompatible(monkeypatch
     assert "Unsupported gemm quant mode 'fp8_block'" in errors["agg"]
 
 
+@pytest.mark.parametrize("model", ["openai/gpt-oss-20b", "openai/gpt-oss-120b"])
+def test_l40s_gpt_oss_mxfp4_moe_gap_is_hardware_incompatible(monkeypatch, model):
+    def fake_run_mode(**_kwargs):
+        raise ValueError(
+            "Unsupported moe quant mode 'w4a16_mxfp4' for system='l40s', "
+            "backend='sglang', version='0.5.10'."
+        )
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model=model,
+        system="l40s",
+        backend="sglang",
+        version="0.5.10",
+        system_spec=_l40s_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
+    assert "Unsupported moe quant mode 'w4a16_mxfp4'" in errors["agg"]
+
+
+def test_l40s_sglang_fp8_attention_gap_is_hardware_incompatible(monkeypatch):
+    def fake_run_mode(**_kwargs):
+        raise ValueError(
+            "Unsupported context_attention quant mode 'fp8' for system='l40s', "
+            "backend='sglang', version='0.5.10'."
+        )
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+        system="l40s",
+        backend="sglang",
+        version="0.5.10",
+        system_spec=_l40s_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
+    assert "Unsupported context_attention quant mode 'fp8'" in errors["agg"]
+
+
 def test_kimi_moonshot_trtllm_b200_int4_wo_is_framework_incompatible(monkeypatch):
     def fake_run_mode(**_kwargs):
         raise ValueError(
