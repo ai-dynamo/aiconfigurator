@@ -241,6 +241,7 @@ class TestBuildModuleTestCases:
             combos = mod._get_module_precision_combos()
         assert ("bfloat16", "bfloat16", "bfloat16") in combos
         assert ("bfloat16", "fp8", "bfloat16") in combos
+        assert ("bfloat16", "bfloat16", "fp8_block") in combos
 
     def test_dsa_includes_both_models(self):
         mod = _import_module()

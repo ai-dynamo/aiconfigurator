@@ -77,7 +77,7 @@ common_case_values:
       - compute_dtype: bfloat16
         kv_cache_dtype: bfloat16
         gemm_type: fp8_block
-        min_sm: 89
+        min_sm: 90
       - compute_dtype: bfloat16
         kv_cache_dtype: fp8
         gemm_type: fp8_block
