@@ -241,6 +241,17 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
         if all(c in out.columns for c in key_set):
             out = out.sort_values(key_set).reset_index(drop=True)
             break
+    # V1's disagg path seeded the accumulator with an all-object empty frame
+    # (pd.DataFrame(columns=ColumnsDisagg)) and concat'd against it, which
+    # demoted integer columns (isl, osl, workers, etc.) to object dtype.
+    # The new sweep path concats only real frames so those columns stay int64.
+    # That's a cleanup, not a numerical change — coerce object-int columns
+    # in either side to int64 before comparing values.
+    for col in out.columns:
+        if out[col].dtype == object:
+            coerced = pd.to_numeric(out[col], errors="ignore")
+            if coerced.dtype != object:
+                out[col] = coerced
     return out.round(3)
 
 

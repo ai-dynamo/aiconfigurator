@@ -398,7 +398,10 @@ def sweep_agg(
         RuntimeError: When all configs OOM or no point meets SLA.
         NoFeasibleConfigError: When SLA cannot be satisfied at any point.
     """
-    results_df = pd.DataFrame(columns=common.ColumnsAgg)
+    # Accumulate per-point frames in a list and concat once at the end.
+    # In-loop pd.concat is O(N^2) in accumulated rows; the V1 hardcoded tpot
+    # sweep makes the inner loop fire ~75 x parallel_configs times.
+    result_frames: list[pd.DataFrame] = []
     exceptions: list[Exception] = []
     all_configs_oom = True
     all_kv_cache_oom = True
@@ -480,10 +483,7 @@ def sweep_agg(
                     all_kv_cache_oom = False
                 if len(point_df) == 0:
                     continue
-                if len(results_df) == 0:
-                    results_df = point_df
-                else:
-                    results_df = pd.concat([results_df, point_df], axis=0, ignore_index=True)
+                result_frames.append(point_df)
         except Exception as exc:
             logger.info(
                 "sweep_agg: error at tp=%s pp=%s dp=%s moe_tp=%s moe_ep=%s, skipping",
@@ -496,7 +496,8 @@ def sweep_agg(
             exceptions.append(exc)
             continue
 
-    if not results_df.empty:
+    if result_frames:
+        results_df = pd.concat(result_frames, axis=0, ignore_index=True)
         dedupe_cols = [c for c in results_df.columns if c != "_per_ops_source"]
         results_df = results_df.drop_duplicates(subset=dedupe_cols, ignore_index=True)
         results_df = results_df.sort_values(by="tokens/s/gpu", ascending=False).reset_index(drop=True)
@@ -547,7 +548,9 @@ def _get_disagg_worker_candidates(
     ``DisaggInferenceSession.get_worker_candidates``.
     """
     backend = get_backend(backend_name)
-    summary_df = pd.DataFrame(columns=common.ColumnsStatic)
+    # Accumulate per-(parallel, batch) summaries; concat once at the end to
+    # avoid O(N^2) growth in the inner loop.
+    summary_frames: list[pd.DataFrame] = []
     exceptions: list[Exception] = []
     all_configs_oom = True
 
@@ -586,11 +589,7 @@ def _get_disagg_worker_candidates(
                 )
                 if not summary.check_oom():
                     all_configs_oom = False
-                    summary_df = pd.concat(
-                        [summary_df, summary.get_summary_df()],
-                        axis=0,
-                        ignore_index=True,
-                    )
+                    summary_frames.append(summary.get_summary_df())
                 else:
                     break
         except Exception as e:
@@ -607,7 +606,7 @@ def _get_disagg_worker_candidates(
             exceptions.append(e)
             continue
 
-    if summary_df.empty:
+    if not summary_frames:
         if exceptions:
             raise RuntimeError(
                 f"sweep_disagg/{role}: no results for any parallel config. Last exception: {exceptions[-1]}"
@@ -620,7 +619,7 @@ def _get_disagg_worker_candidates(
         raise NoFeasibleConfigError(
             f"sweep_disagg/{role}: no parallel configuration met TTFT/TPOT or request-latency constraints."
         )
-    return summary_df
+    return pd.concat(summary_frames, axis=0, ignore_index=True)
 
 
 def _find_best_disagg_under_constraint(
@@ -890,7 +889,8 @@ def sweep_disagg(
         tpot_values = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
         constraint_pairs = [(runtime_config.ttft, tpot) for tpot in tpot_values]
 
-    disagg_df = pd.DataFrame(columns=common.ColumnsDisagg)
+    # Accumulate per-constraint partials; concat once at the end.
+    partial_frames: list[pd.DataFrame] = []
     for ttft_c, tpot_c in constraint_pairs:
         logger.debug("sweep_disagg: finding best for ttft=%sms tpot=%sms", ttft_c, tpot_c)
         partial = _find_best_disagg_under_constraint(
@@ -909,11 +909,12 @@ def sweep_disagg(
             decode_degradation=d_deg,
         )
         if partial is not None:
-            disagg_df = pd.concat([disagg_df, partial], axis=0, ignore_index=True)
+            partial_frames.append(partial)
 
-    if len(disagg_df) == 0:
+    if not partial_frames:
         logger.debug("sweep_disagg: no disagg result satisfies any constraint")
         return pd.DataFrame(columns=common.ColumnsDisagg)
 
+    disagg_df = pd.concat(partial_frames, axis=0, ignore_index=True)
     disagg_df = disagg_df.drop_duplicates(ignore_index=True)
     return disagg_df
