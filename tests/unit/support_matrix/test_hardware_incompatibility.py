@@ -71,6 +71,30 @@ def test_fp4_model_is_hardware_incompatible_without_fp4_support():
     assert "does not support FP4" in incompatibility.reason
 
 
+def test_sglang_dsa_model_is_hardware_incompatible_below_sm90():
+    incompatibility = get_hardware_incompatibility(
+        model="zai-org/GLM-5",
+        system="l40s",
+        backend="sglang",
+        system_spec=_system_spec(sm_version=89, fp8=True),
+    )
+
+    assert incompatibility is not None
+    assert incompatibility.missing_datatypes == ()
+    assert "SGLang DSA/NSA module collectors require SM90+" in incompatibility.reason
+
+
+def test_sglang_dsa_model_is_allowed_on_sm90_plus():
+    incompatibility = get_hardware_incompatibility(
+        model="zai-org/GLM-5",
+        system="h100_sxm",
+        backend="sglang",
+        system_spec=_system_spec(sm_version=90, fp8=True),
+    )
+
+    assert incompatibility is None
+
+
 @pytest.mark.parametrize("model", ["openai/gpt-oss-20b", "openai/gpt-oss-120b"])
 def test_mxfp4_model_is_not_native_fp4_hardware_incompatible_on_hopper(model):
     incompatibility = get_hardware_incompatibility(

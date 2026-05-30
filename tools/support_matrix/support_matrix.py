@@ -349,6 +349,8 @@ def _is_known_hw_incompatible_gap(
         or "unsupported context_attention quant mode 'fp8'" in normalized
         or "unsupported generation_attention quant mode 'fp8'" in normalized
         or "ampere/ada cards only supports fp16 and bf16 data type" in normalized
+        or "dsa_context_module_perf.parquet" in normalized
+        or "dsa_generation_module_perf.parquet" in normalized
         or "quant_mode=<gemmquantmode.fp8_block" in normalized
         or "quant_mode=<moequantmode.fp8_block" in normalized
         or "quant_mode=<moequantmode.w4a16_mxfp4" in normalized
@@ -430,6 +432,23 @@ def get_hardware_incompatibility(
     system_spec: dict,
 ) -> HardwareIncompatibility | None:
     """Return a deterministic hardware/model datatype incompatibility, if any."""
+    model_info = dict(_get_model_info(model))
+    gpu_spec = system_spec.get("gpu") or {}
+    sm_version = gpu_spec.get("sm_version")
+    if (
+        backend == common.BackendName.sglang.value
+        and model_info["architecture"] in {"DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"}
+        and sm_version is not None
+        and sm_version < 90
+    ):
+        return HardwareIncompatibility(
+            missing_datatypes=(),
+            reason=(
+                f"{_gpu_label(system, system_spec)} does not support SGLang DSA/NSA module collectors "
+                f"required by {model}; SGLang DSA/NSA module collectors require SM90+."
+            ),
+        )
+
     required_datatypes = _required_datatypes_for_model(model, backend)
     missing = tuple(dt for dt in required_datatypes if not _gpu_supports_datatype(system, system_spec, dt))
     if not missing:
