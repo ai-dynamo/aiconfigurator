@@ -105,6 +105,7 @@ framework_specific_op_cases:
         window_sizes:
         - 0
         - 1024
+        - 8192
   trtllm:
     attention_context:
       cases:
