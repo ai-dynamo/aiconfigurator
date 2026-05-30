@@ -273,6 +273,57 @@ def _is_known_framework_incompatible_gap(
     )
 
 
+def _framework_incompatible_gap_evidence(
+    *,
+    system: str,
+    backend: str,
+    version: str,
+    error_message: str | None,
+) -> str | None:
+    """Return a concise, evidence-backed explanation for known framework gaps."""
+    if not error_message:
+        return None
+
+    normalized = error_message.lower()
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and "unsupported gemm quant mode 'fp8_block'" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: RTX Pro 6000 Server uses SM120, and SGLang 0.5.10 "
+            "does not have a working DeepGEMM fp8_block GEMM recipe for this GPU. "
+            "This was verified on an 8-GPU RTX Pro 6000 Server Brev node with "
+            "lmsysorg/sglang:v0.5.10-cu130: the SGLang collector reported compute capability "
+            "12.0 and excluded fp8_block from get_gemm_test_cases(), and direct "
+            "run_gemm('fp8_block') probes for 128/256/512 square GEMMs all failed before "
+            "producing perf data with RuntimeError: Assertion error "
+            "(_deps/repo-deepgemm-src/csrc/apis/../jit_kernels/impls/../heuristics/"
+            "../../utils/layout.hpp:56): Unknown recipe."
+        )
+
+    return None
+
+
+def _add_framework_incompatible_gap_evidence(
+    *,
+    system: str,
+    backend: str,
+    version: str,
+    error_message: str,
+) -> str:
+    evidence = _framework_incompatible_gap_evidence(
+        system=system,
+        backend=backend,
+        version=version,
+        error_message=error_message,
+    )
+    if evidence is None:
+        return error_message
+    return f"{evidence}\n\nOriginal traceback:\n{error_message}"
+
+
 def _enum_name(value: object | None) -> str | None:
     if value is None:
         return None
@@ -831,6 +882,12 @@ class SupportMatrix:
                     error_message=raw_error,
                 ):
                     statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
+                    raw_error = _add_framework_incompatible_gap_evidence(
+                        system=system,
+                        backend=backend,
+                        version=version,
+                        error_message=raw_error,
+                    )
                 else:
                     statuses[mode] = STATUS_FAIL
                 error_messages[mode] = raw_error
