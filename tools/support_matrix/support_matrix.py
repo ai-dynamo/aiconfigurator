@@ -305,6 +305,27 @@ def _is_known_framework_incompatible_gap(
     if "unsupported gemm quant mode 'fp8_static'" in normalized:
         return True
 
+    if system == "b300_sxm":
+        is_qwen3_vl = model.startswith("Qwen/Qwen3-VL-")
+        qwen3_vl_runtime_gap = is_qwen3_vl and (
+            "tp_size (8) * attention_dp_size (1) should be equal" in normalized
+            or "division by zero failed to query context attention data" in normalized
+            or "x is less than the smallest value in the list. x=0" in normalized
+        )
+        if backend == common.BackendName.trtllm.value and version == "1.3.0rc10":
+            return (
+                "unsupported moe quant mode 'fp8_block'" in normalized
+                or "unsupported moe quant mode 'int4_wo'" in normalized
+                or "deepseek-v4 mhc module data not loaded" in normalized
+                or qwen3_vl_runtime_gap
+            )
+        if backend == common.BackendName.vllm.value and version == "0.19.0":
+            return (
+                "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
+                or "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
+                or qwen3_vl_runtime_gap
+            )
+
     if system == "rtx_pro_6000_server":
         if (
             "rtx_pro_6000_server/nccl/" in normalized
@@ -441,42 +462,67 @@ def get_framework_incompatibility(
 ) -> FrameworkIncompatibility | None:
     """Return deterministic framework/runtime gaps verified by collector runs."""
     sm_version = (system_spec.get("gpu") or {}).get("sm_version")
-    if sm_version != 103 or backend != common.BackendName.sglang.value or version != "0.5.10":
+    if sm_version != 103:
         return None
 
-    if model == "google/gemma-4-26B-A4B":
+    if backend == common.BackendName.vllm.value and version == "0.19.0":
+        if model == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} vLLM 0.19.0 NVFP4 MoE rejects Nemotron-3 Super "
+                    "because the FlashInfer FP4 scale-factor shuffle requires M % 128 == 0."
+                )
+            )
+        if model == "nvidia/nemotron-ultra-rl-050826":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} vLLM 0.19.0 NVFP4 MoE rejects Nemotron Ultra "
+                    "because its routing kernel requires topK <= 10, but this model uses topK=22."
+                )
+            )
+
+    if backend == common.BackendName.trtllm.value and version == "1.3.0rc10" and model == "google/gemma-4-26B-A4B":
         return FrameworkIncompatibility(
             reason=(
-                f"{_gpu_label(system, system_spec)} SGLang 0.5.10 context attention is missing the "
-                "TRTLLM-GEN kernel for Gemma4 head_dim=512."
+                f"{_gpu_label(system, system_spec)} TRT-LLM 1.3.0rc10 MMHA rejects Gemma4 "
+                "context attention head_dim=512."
             )
         )
 
-    if model == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4":
-        return FrameworkIncompatibility(
-            reason=(
-                f"{_gpu_label(system, system_spec)} SGLang 0.5.10 NVFP4 MoE rejects Nemotron-3 Super "
-                "latent-MoE shape hidden_size=1024, inter_size=2688, moe_tp_size=8 because the local "
-                "intermediate size 336 is not divisible by 32."
+    if backend == common.BackendName.sglang.value and version == "0.5.10":
+        if model == "google/gemma-4-26B-A4B":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 context attention is missing the "
+                    "TRTLLM-GEN kernel for Gemma4 head_dim=512."
+                )
             )
-        )
 
-    if model == "sgl-project/DeepSeek-V4-Pro-FP8":
-        return FrameworkIncompatibility(
-            reason=(
-                f"{_gpu_label(system, system_spec)} SGLang 0.5.10 cannot run the DeepSeek-V4 Pro-FP8 "
-                "mHC collector/runtime path for hidden_size=7168, hc_mult=4 without newer SGLang "
-                "kernel and TileLang support."
+        if model == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 NVFP4 MoE rejects Nemotron-3 Super "
+                    "latent-MoE shape hidden_size=1024, inter_size=2688, moe_tp_size=8 because the local "
+                    "intermediate size 336 is not divisible by 32."
+                )
             )
-        )
 
-    if model == "XiaomiMiMo/MiMo-V2-Flash":
-        return FrameworkIncompatibility(
-            reason=(
-                f"{_gpu_label(system, system_spec)} SGLang 0.5.10 Triton context attention fails to compile "
-                "the MiMo h=192 FP8 GQA shape used by this matrix row."
+        if model == "sgl-project/DeepSeek-V4-Pro-FP8":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 cannot run the DeepSeek-V4 Pro-FP8 "
+                    "mHC collector/runtime path for hidden_size=7168, hc_mult=4 without newer SGLang "
+                    "kernel and TileLang support."
+                )
             )
-        )
+
+        if model == "XiaomiMiMo/MiMo-V2-Flash":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 Triton context attention fails to compile "
+                    "the MiMo h=192 FP8 GQA shape used by this matrix row."
+                )
+            )
 
     return None
 

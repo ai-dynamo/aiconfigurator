@@ -476,6 +476,7 @@ def create_kv_cache_and_metadata(
     seq_len: int,
     is_context: bool,
     use_fp8_kv_cache: bool = False,
+    prefix_len: int = 0,
     device: str = "cuda:0",
 ):
     """
@@ -494,10 +495,10 @@ def create_kv_cache_and_metadata(
     head_dim = kv_lora_rank + qk_rope_head_dim
 
     if is_context:
-        max_seq = seq_len + 1
+        max_seq = seq_len + prefix_len + 1
         total_tokens = seq_len * batch_size
         seq_len_q = seq_len
-        kv_cache_len = 0
+        kv_cache_len = prefix_len
     else:
         max_seq = seq_len + 1
         total_tokens = batch_size
@@ -604,6 +605,7 @@ def run_mla_module(
     device: str = "cuda:0",
     warming_up: int = 10,
     test_ite: int = 6,
+    prefix_len: int = 0,
 ):
     """Run a single MLA / DSA module-level benchmark point."""
     torch.cuda.set_device(device)
@@ -616,7 +618,8 @@ def run_mla_module(
     variant = attn_type.upper()
     print(
         f"\n[{variant} module] {phase} b={batch_size}, s={seq_len}, "
-        f"heads={num_heads}, gemm={gemm_type}, compute={compute_dtype}, kv={kv_cache_dtype}, model={model_path}"
+        f"prefix={prefix_len if is_context else 0}, heads={num_heads}, "
+        f"gemm={gemm_type}, compute={compute_dtype}, kv={kv_cache_dtype}, model={model_path}"
     )
 
     # 1. Create attention layer (from_pretrained reads config.json)
@@ -636,6 +639,7 @@ def run_mla_module(
         seq_len=seq_len,
         is_context=is_context,
         use_fp8_kv_cache=use_fp8_kv_cache,
+        prefix_len=prefix_len if is_context else 0,
         device=device,
     )
 
@@ -644,7 +648,7 @@ def run_mla_module(
     if is_context:
         num_tokens = seq_len * batch_size
         position_ids = (
-            torch.arange(seq_len, device=torch_device, dtype=torch.long)
+            torch.arange(prefix_len, prefix_len + seq_len, device=torch_device, dtype=torch.long)
             .unsqueeze(0)
             .expand(batch_size, -1)
             .reshape(-1)
@@ -702,7 +706,7 @@ def run_mla_module(
     # 6. Log results
     if is_context:
         isl = seq_len
-        step = 0
+        step = prefix_len
     else:
         isl = 1
         step = seq_len
@@ -757,6 +761,7 @@ def run_mla_module_worker(
     *,
     perf_filename: str,
     device: str = "cuda:0",
+    prefix_len: int = 0,
 ):
     """Worker-compatible positional wrapper used by collector/collect.py."""
     return run_mla_module(
@@ -770,6 +775,7 @@ def run_mla_module_worker(
         model_path=model_path,
         attn_type=attn_type,
         device=device,
+        prefix_len=prefix_len,
     )
 
 
@@ -836,6 +842,7 @@ def main():
         help="GEMM quantisation type for linear layers (default: run all supported by GPU)",
     )
     parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--prefix-len", type=int, default=0, help="Prefix length for context-phase quick runs")
     parser.add_argument("--quick", action="store_true", help="Quick single-point test")
     args = parser.parse_args()
 
@@ -872,6 +879,7 @@ def main():
                 model_path=model_path,
                 attn_type=attn_type,
                 device=args.device,
+                prefix_len=args.prefix_len if args.mode == "context" else 0,
             )
             continue
 

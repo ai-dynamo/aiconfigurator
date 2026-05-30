@@ -472,6 +472,8 @@ def run_moe_torch(
                 topk_weights = F.softmax(weights, dim=-1)
                 if use_int4_wo:
                     topk_weights = topk_weights.float()
+                else:
+                    topk_weights = topk_weights.to(torch.bfloat16)
                 topk_weights_list.append(topk_weights)
                 topk_ids_list.append(ids)
 
@@ -483,6 +485,8 @@ def run_moe_torch(
             topk_weights = F.softmax(topk_weights, dim=-1)
             if use_int4_wo:
                 topk_weights = topk_weights.float()
+            else:
+                topk_weights = topk_weights.to(torch.bfloat16)
 
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")

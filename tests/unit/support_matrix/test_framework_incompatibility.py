@@ -141,7 +141,7 @@ def test_kimi_moonshot_trtllm_b200_int4_wo_is_framework_incompatible(monkeypatch
     assert "Unsupported moe quant mode 'int4_wo'" in errors["agg"]
 
 
-def test_kimi_moonshot_trtllm_int4_wo_other_system_remains_fail(monkeypatch):
+def test_b300_trtllm_unsupported_moe_quant_is_framework_incompatible(monkeypatch):
     def fake_run_mode(**_kwargs):
         raise ValueError("Unsupported moe quant mode 'int4_wo'")
 
@@ -153,7 +153,67 @@ def test_kimi_moonshot_trtllm_int4_wo_other_system_remains_fail(monkeypatch):
         system="b300_sxm",
         backend="trtllm",
         version="1.3.0rc10",
-        system_spec=_b200_system_spec(),
+        system_spec=_b300_system_spec(),
     )
 
-    assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+
+
+def test_b300_vllm_nemotron_ultra_topk_gap_short_circuits(monkeypatch):
+    def fail_run_mode(**_kwargs):
+        raise AssertionError("framework incompatibility preflight should run before TaskRunner")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="nvidia/nemotron-ultra-rl-050826",
+        system="b300_sxm",
+        backend="vllm",
+        version="0.19.0",
+        system_spec=_b300_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert "topK <= 10" in errors["agg"]
+
+
+def test_b300_trtllm_gemma4_h512_gap_short_circuits(monkeypatch):
+    def fail_run_mode(**_kwargs):
+        raise AssertionError("framework incompatibility preflight should run before TaskRunner")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="google/gemma-4-26B-A4B",
+        system="b300_sxm",
+        backend="trtllm",
+        version="1.3.0rc10",
+        system_spec=_b300_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert "head_dim=512" in errors["agg"]
+
+
+def test_b300_qwen3_vl_runtime_gap_is_framework_incompatible(monkeypatch):
+    def fake_run_mode(**_kwargs):
+        raise RuntimeError(
+            "No results found for any parallel configuration. Showing last exception: "
+            "tp_size (8) * attention_dp_size (1) should be equal to moe_tp_size (1) * moe_ep_size (1)"
+        )
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="Qwen/Qwen3-VL-235B-A22B-Instruct",
+        system="b300_sxm",
+        backend="trtllm",
+        version="1.3.0rc10",
+        system_spec=_b300_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert "attention_dp_size" in errors["agg"]
