@@ -233,6 +233,15 @@ def _is_known_framework_incompatible_gap(
     if "unsupported gemm quant mode 'fp8_static'" in normalized:
         return True
 
+    if (
+        model == "google/gemma-4-26B-A4B"
+        and system == "gb300"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and "head_size=512" in normalized
+    ):
+        return True
+
     if system == "rtx_pro_6000_server":
         if (
             "rtx_pro_6000_server/nccl/" in normalized
