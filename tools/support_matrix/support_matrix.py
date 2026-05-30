@@ -478,6 +478,75 @@ def get_framework_incompatibility(
             )
         )
 
+    if (
+        model == "moonshotai/Kimi-K2.5"
+        and system == "a100_sxm"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.0.0"
+    ):
+        return FrameworkIncompatibility(
+            reason=(
+                "FRAMEWORK_INCOMPATIBLE after live TRT-LLM 1.0.0 A100 quant repair attempt: recorded replay "
+                "requests moe_quant_mode=int4_wo, which AIC maps to W4A16. The a100_sxm/trtllm/1.0.0 "
+                "PerfDatabase MoE surface remains bfloat16-only because the TRT-LLM MoE collector on SM80 "
+                "enumerates only bfloat16. Runtime evidence from debug session gpu-debug-ba17f5809f "
+                "(Slurm job 1124068, node luna-prod-1316-au, image "
+                "nvcr.io/nvidia/tensorrt-llm/release:1.0.0, A100-SXM4-80GB SM80) tried actual Kimi shape "
+                "hidden_size=7168, inter_size=2048, topk=8, num_experts=384, moe_ep_size=8. TensorRT-LLM "
+                "1.0.0 QuantAlgo exposes W4A16/W4A16_AWQ/W4A16_GPTQ, but create_moe+forward failed W4A16 "
+                "with ValueError: Unsupported quantization mode: [1], and failed W4A16_AWQ/W4A16_GPTQ with "
+                "NotImplementedError: W4AFP8 MoE is unsupported on SM80. No int4_wo MoE perf rows can be "
+                "collected for this backend/version on A100; exact replay command remains in Command."
+            )
+        )
+
+    if (
+        model == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+        and system == "a100_sxm"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.0.0"
+    ):
+        return FrameworkIncompatibility(
+            reason=(
+                "FRAMEWORK_INCOMPATIBLE after live TRT-LLM 1.0.0 A100 non-gated MoE repair attempt: the PR "
+                "branch includes collector/trtllm/collect_moe.py compatibility fixes for TRT-LLM 1.0.0 "
+                "create_moe/ActivationType imports, but the tight BF16 smoke still fails before data "
+                "collection. Runtime evidence from debug session gpu-debug-ba17f5809f (Slurm job 1124068, "
+                "node luna-prod-1316-au, image nvcr.io/nvidia/tensorrt-llm/release:1.0.0, "
+                'A100-SXM4-80GB SM80) ran run_moe_torch("bfloat16", [128], 2688, 1856, 6, 128, 1, 1, '
+                'False, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "power_law", 1.01, '
+                'perf_filename="/tmp/a100_trtllm_nemotron_moe_smoke.txt") and failed with RuntimeError: '
+                "TRT-LLM 1.0.0 create_moe API does not expose ActivationType; cannot collect non-gated MoE "
+                "model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16. This model needs Relu2/non-gated MoE, "
+                "and the selected backend/version cannot express activation_type; exact replay command "
+                "remains in Command."
+            )
+        )
+
+    if (
+        model == "zai-org/GLM-5"
+        and system == "a100_sxm"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.0.0"
+    ):
+        return FrameworkIncompatibility(
+            reason=(
+                "FRAMEWORK_INCOMPATIBLE after live TRT-LLM 1.0.0 A100 DSA repair attempt: GLM-5 needs "
+                "BF16 DSA module rows keyed by mla_dtype=bfloat16, kv_cache_dtype=bfloat16, and "
+                "gemm_type=bfloat16 for GlmMoeDsaForCausalLM, but a100_sxm/trtllm/1.0.0 has no "
+                "dsa_context_module_perf.txt or dsa_generation_module_perf.txt. Runtime evidence from debug "
+                "session gpu-debug-ba17f5809f (Slurm job 1124068, node luna-prod-1316-au, image "
+                "nvcr.io/nvidia/tensorrt-llm/release:1.0.0, A100-SXM4-80GB SM80) ran tight context and "
+                "generation smokes: PYTHONPATH=. python3 collector/trtllm/collect_mla_module.py --mode "
+                "context|generation --model zai-org/GLM-5 --quick --batch-size 1 --seq-len 128 --num-heads "
+                "64 --kv-cache-dtype bfloat16 --compute-dtype bfloat16 --gemm-type bfloat16. Both failed "
+                "before collection because TRT-LLM 1.0.0 lacks get_kv_cache_manager_cls; a dynamic "
+                "compatibility probe adding that shim then failed on missing _CONFIG_REGISTRY, confirming "
+                "the DSA module collector/runtime APIs required by this path are absent in this backend "
+                "version. Exact replay command remains in Command."
+            )
+        )
+
     return None
 
 

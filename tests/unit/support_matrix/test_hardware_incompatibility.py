@@ -155,6 +155,27 @@ def test_gemma4_trtllm_head_dim_512_is_framework_incompatible_on_a100():
     assert "run_attention_torch(1, 128, 2, 1, 512, 0" in incompatibility.reason
 
 
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("moonshotai/Kimi-K2.5", "moe_quant_mode=int4_wo"),
+        ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "Relu2/non-gated MoE"),
+        ("zai-org/GLM-5", "DSA module rows"),
+    ],
+)
+def test_trtllm_a100_framework_incompatible_rows_are_durable(model, expected):
+    incompatibility = get_framework_incompatibility(
+        model=model,
+        system="a100_sxm",
+        backend="trtllm",
+        version="1.0.0",
+        system_spec=_system_spec(sm_version=80),
+    )
+
+    assert incompatibility is not None
+    assert expected in incompatibility.reason
+
+
 def test_run_single_test_short_circuits_hardware_incompatible_model(monkeypatch):
     def fail_run_mode(**_kwargs):
         raise AssertionError("TaskRunner should not run for hardware-incompatible combinations")
@@ -219,17 +240,23 @@ def test_run_single_test_short_circuits_trtllm_framework_incompatible_model(monk
 
     monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
 
-    status_dict, error_dict = SupportMatrix.run_single_test(
-        model="google/gemma-4-26B-A4B",
-        system="a100_sxm",
-        backend="trtllm",
-        version="1.0.0",
-        system_spec=_system_spec(sm_version=80),
-        modes_to_test=("agg",),
-    )
+    for model in (
+        "google/gemma-4-26B-A4B",
+        "moonshotai/Kimi-K2.5",
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "zai-org/GLM-5",
+    ):
+        status_dict, error_dict = SupportMatrix.run_single_test(
+            model=model,
+            system="a100_sxm",
+            backend="trtllm",
+            version="1.0.0",
+            system_spec=_system_spec(sm_version=80),
+            modes_to_test=("agg",),
+        )
 
-    assert status_dict == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE}
-    assert "Head size 512 is not supported by MMHA" in error_dict["agg"]
+        assert status_dict == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE}
+        assert error_dict["agg"]
 
 
 @pytest.mark.parametrize(
