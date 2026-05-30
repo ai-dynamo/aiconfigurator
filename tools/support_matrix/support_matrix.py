@@ -254,6 +254,14 @@ def _is_known_framework_incompatible_gap(
         and "'automodel' is not present" in normalized
     ):
         return True
+    if (
+        backend == common.BackendName.sglang.value
+        and system == "h200_sxm"
+        and "DeepSeek-V4" in model
+        and "deep_gemm.fp8_einsum" in normalized
+        and "sf.size(-2) == ceil_div(mn, gran_mn)" in normalized
+    ):
+        return True
 
     if system == "rtx_pro_6000_server":
         if (

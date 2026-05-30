@@ -197,3 +197,25 @@ def test_dsv4_h200_sglang_missing_model_module_is_framework_incompatible(monkeyp
 
     assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
     assert "DeepseekV4ForCausalLM" in errors["agg"]
+
+
+def test_dsv4_h200_sglang_deepgemm_layout_assertion_is_framework_incompatible(monkeypatch):
+    def fake_run_mode(**_kwargs):
+        raise RuntimeError(
+            "RuntimeError at sglang/srt/models/deepseek_v4.py deep_gemm.fp8_einsum: "
+            "Assertion error layout.hpp:97: sf.size(-2) == ceil_div(mn, gran_mn)"
+        )
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="sgl-project/DeepSeek-V4-Flash-FP8",
+        system="h200_sxm",
+        backend="sglang",
+        version="0.5.10",
+        system_spec=_h200_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert "deep_gemm.fp8_einsum" in errors["disagg"]
