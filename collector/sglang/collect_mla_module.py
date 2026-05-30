@@ -32,6 +32,7 @@ import sys
 import tempfile
 import traceback
 import types
+from contextlib import contextmanager
 from importlib.metadata import version as get_version
 
 import numpy as np
@@ -116,6 +117,25 @@ _MODEL_CONFIG_DIR = os.path.join(
 _GLM5_DSA_ARCHITECTURE = "GlmMoeDsaForCausalLM"
 
 
+def _get_forward_context_api():
+    """Return SGLang forward_context helpers, with a v0.5.10 fallback."""
+    try:
+        from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+
+        return ForwardContext, forward_context
+    except ModuleNotFoundError:
+
+        class ForwardContext:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        @contextmanager
+        def forward_context(_context):
+            yield
+
+        return ForwardContext, forward_context
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -130,12 +150,19 @@ def _parse_int_list(value: str | None) -> list[int] | None:
 
 
 def _filter_cases_from_env(test_cases, *, is_prefill: bool, attn_type: str):
-    if not (is_prefill and attn_type == "dsa"):
+    if attn_type != "dsa":
         return test_cases
 
-    seq_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_SEQ_LENS"))
-    prefix_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_PREFIX_LENS"))
-    batch_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_BATCH_SIZES"))
+    prefix_filter = None
+    if is_prefill:
+        seq_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_SEQ_LENS"))
+        prefix_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_PREFIX_LENS"))
+        batch_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_BATCH_SIZES"))
+        label = "context"
+    else:
+        seq_filter = _parse_int_list(os.environ.get("AIC_DSA_GENERATION_SEQ_LENS"))
+        batch_filter = _parse_int_list(os.environ.get("AIC_DSA_GENERATION_BATCH_SIZES"))
+        label = "generation"
 
     if seq_filter is None and prefix_filter is None and batch_filter is None:
         return test_cases
@@ -153,7 +180,7 @@ def _filter_cases_from_env(test_cases, *, is_prefill: bool, attn_type: str):
         if prefix_set is not None and prefix_len not in prefix_set:
             continue
         filtered.append((bs, seq_len, ip, prefix_len))
-    print(f"[DSA] Env-filtered context cases: {len(filtered)}/{len(test_cases)}")
+    print(f"[DSA] Env-filtered {label} cases: {len(filtered)}/{len(test_cases)}")
     return filtered
 
 
@@ -1075,10 +1102,11 @@ def _run_prefill(
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
     from sglang.srt.mem_cache.chunk_cache import ChunkCache
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-    from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
     from sglang.srt.sampling.sampling_params import SamplingParams
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
     from sglang.srt.utils import BumpAllocator
+
+    forward_context_cls, forward_context = _get_forward_context_api()
 
     print(f"\nPrefill: batch_size={batch_size}, seq_length={seq_length}, prefix_len={prefix_len}")
 
@@ -1317,7 +1345,7 @@ def _run_prefill(
                     )
                     set_is_extend_in_batch(False)
                     with (
-                        forward_context(ForwardContext(attn_backend=runner.model_runner.attn_backend)),
+                        forward_context(forward_context_cls(attn_backend=runner.model_runner.attn_backend)),
                         set_piecewise_forward_context(
                             static_forward_batch,
                             runner.attention_layers,
@@ -1388,7 +1416,7 @@ def _run_prefill(
                 print(f"  Module piecewise runner={model_runner.piecewise_cuda_graph_runner is not None}")
 
         def call_attention_module():
-            with forward_context(ForwardContext(attn_backend=model_runner.attn_backend)):
+            with forward_context(forward_context_cls(attn_backend=model_runner.attn_backend)):
                 if use_module_piecewise_context:
                     with (
                         enable_piecewise_cuda_graph(),
@@ -1577,10 +1605,11 @@ def _run_decode(
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
     from sglang.srt.mem_cache.chunk_cache import ChunkCache
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-    from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
     from sglang.srt.sampling.sampling_params import SamplingParams
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
     from sglang.srt.utils import BumpAllocator
+
+    forward_context_cls, forward_context = _get_forward_context_api()
 
     print(f"\nDecode: batch_size={batch_size}, kv_cache_length={seq_length}")
 
@@ -1647,7 +1676,7 @@ def _run_decode(
             _patch_nsa_indexer_compile_for_module_cuda_graph(attention_module)
 
         def kernel_func():
-            with forward_context(ForwardContext(attn_backend=model_runner.attn_backend)):
+            with forward_context(forward_context_cls(attn_backend=model_runner.attn_backend)):
                 attention_module(
                     positions=decode_positions,
                     hidden_states=decode_hidden,
