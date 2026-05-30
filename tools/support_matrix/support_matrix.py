@@ -264,6 +264,42 @@ def _is_known_framework_incompatible_gap(
         if backend == common.BackendName.vllm.value and version == "0.19.0":
             return "unsupported moe quant mode 'nvfp4'" in normalized or "dsa_context_module_perf.txt" in normalized
 
+    if system == "gb200" and backend == common.BackendName.sglang.value and version == "0.5.10":
+        if "DeepSeek-V4" in model and (
+            "deepseek-v4 mhc module data not loaded" in normalized
+            or "no mhc silicon data" in normalized
+            or "failed to query deepseek-v4 mhc module" in normalized
+        ):
+            return True
+        if "DeepSeek-V4" in model and (
+            (
+                "failed to query deepseek-v4 context attention module" in normalized
+                and "native_heads=128" in normalized
+            )
+            or "no deepseek-v4 context attention silicon data for native_heads=128" in normalized
+            or "deepseek-v4 hca_attn sparse-kernel correction data not available" in normalized
+        ):
+            return True
+        if (
+            model == "XiaomiMiMo/MiMo-V2-Flash"
+            and "failed to query context attention data" in normalized
+            and "head_size=192" in normalized
+        ):
+            return True
+        if (
+            model == "google/gemma-4-26B-A4B"
+            and "failed to query context attention data" in normalized
+            and "head_size=512" in normalized
+        ):
+            return True
+        if (
+            model in {"openai/gpt-oss-120b", "openai/gpt-oss-20b"}
+            and "failed to query moe data" in normalized
+            and "quant_mode=<moequantmode.int4_wo" in normalized
+            and "hidden_size=2880" in normalized
+        ):
+            return True
+
     return (
         model == "moonshotai/Kimi-K2.5"
         and system == "b200_sxm"

@@ -88,6 +88,56 @@ def test_non_dsv4_vllm_019_error_remains_fail(monkeypatch):
     assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
 
 
+@pytest.mark.parametrize(
+    ("model", "error"),
+    [
+        (
+            "deepseek-ai/DeepSeek-V4-Flash",
+            "DeepSeek-V4 mHC module data not loaded for system='gb200', backend='sglang', version='0.5.10'.",
+        ),
+        (
+            "deepseek-ai/DeepSeek-V4-Pro",
+            "No DeepSeek-V4 context attention silicon data for native_heads=128, loaded keys=[64]. "
+            "Failed to query DeepSeek-V4 context attention module for b=1, s=128, prefix=128, "
+            "num_heads=16, native_heads=128, tp_size=8, compress_ratio=128.",
+        ),
+        (
+            "XiaomiMiMo/MiMo-V2-Flash",
+            "Failed to query context attention data for b=1, s=128, prefix=128, n=8, n_kv=1, "
+            "head_size=192, window_size=0.",
+        ),
+        (
+            "google/gemma-4-26B-A4B",
+            "Failed to query context attention data for b=1, s=128, prefix=128, n=2, n_kv=1, "
+            "head_size=512, window_size=0.",
+        ),
+        (
+            "openai/gpt-oss-120b",
+            "Failed to query moe data for num_tokens=128, hidden_size=2880, inter_size=2880, topk=4, "
+            "num_experts=128, moe_tp_size=8, moe_ep_size=1, "
+            "quant_mode=<MoEQuantMode.int4_wo: QuantMapping(memory=0.5, compute=1, name='int4_wo')>.",
+        ),
+    ],
+)
+def test_gb200_sglang_0510_known_runtime_gaps_are_framework_incompatible(monkeypatch, model, error):
+    def fake_run_mode(**_kwargs):
+        raise RuntimeError(f"No results found for any parallel configuration. Showing last exception: {error}")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model=model,
+        system="gb200",
+        backend="sglang",
+        version="0.5.10",
+        system_spec=_b200_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert error.split(" for ")[0] in errors["agg"]
+
+
 def test_kimi_moonshot_trtllm_b200_int4_wo_is_framework_incompatible(monkeypatch):
     def fake_run_mode(**_kwargs):
         raise ValueError(
