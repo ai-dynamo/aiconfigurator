@@ -288,6 +288,24 @@ def test_build_runtime_config_carries_workload():
     assert rt.ttft == 300.0
     assert rt.tpot == 20.0
     assert rt.batch_size == 64
+    # Multimodal defaults: text-only workload.
+    assert rt.image_height == 0
+    assert rt.image_width == 0
+    assert rt.num_images_per_request == 1
+
+
+def test_build_runtime_config_propagates_multimodal_fields():
+    t = Task(
+        isl=1024,
+        osl=128,
+        image_height=448,
+        image_width=448,
+        num_images_per_request=4,
+    )
+    rt = t.build_runtime_config()
+    assert rt.image_height == 448
+    assert rt.image_width == 448
+    assert rt.num_images_per_request == 4
 
 
 def test_build_model_config_agg_uses_resolved_quant():

@@ -304,6 +304,11 @@ class Task:
     free_gpu_memory_fraction: float | None = None
     max_seq_len: int | None = None
     engine_step_backend: str | None = None
+    # Multimodal workload hints (propagated to RuntimeConfig; consumed by
+    # ViT prefill cost calculations).  Default 0/1 = text-only.
+    image_height: int = 0
+    image_width: int = 0
+    num_images_per_request: int = 1
 
     # ====== 2. Agg worker spec (serving_mode='agg') ======
     model_path: str = ""
@@ -679,6 +684,9 @@ class Task:
             tpot=self.tpot,
             request_latency=self.request_latency,
             engine_step_backend=self.engine_step_backend,
+            image_height=self.image_height,
+            image_width=self.image_width,
+            num_images_per_request=self.num_images_per_request,
         )
         if batch_size is not None:
             rt.batch_size = batch_size
