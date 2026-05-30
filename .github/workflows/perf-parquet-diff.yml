@@ -52,11 +52,14 @@ jobs:
           python tools/perf_database/parquet_diff.py \
             --base-ref "origin/${BASE_REF}" \
             --head-ref HEAD \
-            --output comment.md
+            --output comment.md \
+            --detail-dir parquet-diff-details
 
       - name: Upload parquet diff artifact bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: perf-parquet-diff
-          path: comment.md
+          path: |
+            comment.md
+            parquet-diff-details
           retention-days: 30

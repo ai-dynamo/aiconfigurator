@@ -5,9 +5,13 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import json
+import math
 import subprocess
 import sys
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +22,25 @@ import pyarrow.parquet as pq
 PERF_DATA_PREFIX = "src/aiconfigurator/systems/data"
 COMMENT_MARKER = "<!-- perf-parquet-diff-comment -->"
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
+DEFAULT_DETAIL_DIR = "parquet-diff-details"
+MEASUREMENT_COLUMNS = frozenset(
+    {
+        "latency",
+        "power",
+        "energy",
+        "avg_ms",
+        "dispatch_avg_t_us",
+        "dispatch_bandwidth_gbps",
+        "dispatch_notify_us",
+        "dispatch_sms",
+        "dispatch_transmit_us",
+        "combine_avg_t_us",
+        "combine_bandwidth_gbps",
+        "combine_notify_us",
+        "combine_sms",
+        "combine_transmit_us",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -50,6 +73,16 @@ class Snapshot:
 
 
 @dataclass
+class RowDiff:
+    key_columns: list[str]
+    added_rows: int
+    removed_rows: int
+    modified_rows: int
+    detail_files: dict[str, str]
+    note: str | None = None
+
+
+@dataclass
 class Comparison:
     path: str
     base_path: str | None
@@ -60,6 +93,7 @@ class Comparison:
     content_match: bool | None
     base_hash: str | None
     head_hash: str | None
+    row_diff: RowDiff | None
 
 
 def _git(args: list[str], *, input_data: bytes | None = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -125,11 +159,399 @@ def _hash_table(table: pa.Table) -> str:
     return hashlib.sha256(sink.getvalue().to_pybytes()).hexdigest()[:16]
 
 
+def _row_dicts(table: pa.Table) -> list[dict[str, object]]:
+    return table.combine_chunks().to_pylist()
+
+
+def _merge_columns(*column_lists: list[str]) -> list[str]:
+    columns: list[str] = []
+    seen: set[str] = set()
+    for column_list in column_lists:
+        for column in column_list:
+            if column not in seen:
+                columns.append(column)
+                seen.add(column)
+    return columns
+
+
+def _select_key_columns(base_columns: list[str], head_columns: list[str]) -> list[str]:
+    common_columns = [column for column in base_columns if column in head_columns]
+    key_columns = [column for column in common_columns if column not in MEASUREMENT_COLUMNS]
+    return key_columns or common_columns
+
+
+def _freeze_value(value: object) -> object:
+    if isinstance(value, float) and math.isnan(value):
+        return ("__nan__",)
+    if isinstance(value, dict):
+        return tuple(sorted((key, _freeze_value(item)) for key, item in value.items()))
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_value(item) for item in value)
+    return value
+
+
+def _row_key(row: dict[str, object], columns: list[str]) -> tuple[object, ...]:
+    return tuple(_freeze_value(row.get(column)) for column in columns)
+
+
+def _sort_key(row: dict[str, object], columns: list[str]) -> tuple[str, ...]:
+    return tuple(repr(_freeze_value(row.get(column))) for column in columns)
+
+
+def _rows_equal(base_row: dict[str, object], head_row: dict[str, object], columns: list[str]) -> bool:
+    return all(_freeze_value(base_row.get(column)) == _freeze_value(head_row.get(column)) for column in columns)
+
+
+def _csv_value(value: object) -> object:
+    if value is None:
+        return ""
+    if isinstance(value, dict | list | tuple):
+        return json.dumps(value, sort_keys=True)
+    return value
+
+
+def _write_rows_csv(path: Path, rows: list[dict[str, object]], columns: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=columns, lineterminator="\n")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: _csv_value(row.get(column)) for column in columns})
+
+
+def _write_modified_csv(
+    path: Path,
+    modified_rows: list[tuple[dict[str, object], dict[str, object]]],
+    *,
+    key_columns: list[str],
+    compare_columns: list[str],
+) -> None:
+    changed_columns = [
+        column
+        for column in compare_columns
+        if any(_freeze_value(base.get(column)) != _freeze_value(head.get(column)) for base, head in modified_rows)
+    ]
+    fieldnames = key_columns + [field for column in changed_columns for field in (f"{column}__base", f"{column}__head")]
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        for base, head in modified_rows:
+            row: dict[str, object] = {column: _csv_value(head.get(column)) for column in key_columns}
+            for column in changed_columns:
+                row[f"{column}__base"] = _csv_value(base.get(column))
+                row[f"{column}__head"] = _csv_value(head.get(column))
+            writer.writerow(row)
+
+
+def _detail_output_path(detail_dir: Path, parquet_path: str, kind: str) -> tuple[Path, str]:
+    relative_path = Path(f"{parquet_path}.{kind}.csv")
+    return detail_dir / relative_path, relative_path.as_posix()
+
+
+def _write_detail_rows(
+    *,
+    detail_dir: Path | None,
+    parquet_path: str,
+    kind: str,
+    rows: list[dict[str, object]],
+    columns: list[str],
+) -> str | None:
+    if not detail_dir or not rows:
+        return None
+    output_path, relative_path = _detail_output_path(detail_dir, parquet_path, kind)
+    _write_rows_csv(output_path, rows, columns)
+    return relative_path
+
+
+def _write_detail_modified_rows(
+    *,
+    detail_dir: Path | None,
+    parquet_path: str,
+    modified_rows: list[tuple[dict[str, object], dict[str, object]]],
+    key_columns: list[str],
+    compare_columns: list[str],
+) -> str | None:
+    if not detail_dir or not modified_rows:
+        return None
+    output_path, relative_path = _detail_output_path(detail_dir, parquet_path, "modified")
+    _write_modified_csv(output_path, modified_rows, key_columns=key_columns, compare_columns=compare_columns)
+    return relative_path
+
+
+def _has_duplicate_keys(rows: list[dict[str, object]], key_columns: list[str]) -> bool:
+    counts = Counter(_row_key(row, key_columns) for row in rows)
+    return any(count > 1 for count in counts.values())
+
+
+def _counter_rows_delta(
+    *,
+    base_rows: list[dict[str, object]],
+    head_rows: list[dict[str, object]],
+    columns: list[str],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    base_counter = Counter(_row_key(row, columns) for row in base_rows)
+    head_counter = Counter(_row_key(row, columns) for row in head_rows)
+    added_rows: list[dict[str, object]] = []
+    removed_rows: list[dict[str, object]] = []
+    for key, count in (head_counter - base_counter).items():
+        added_rows.extend(dict(zip(columns, key, strict=True)) for _ in range(count))
+    for key, count in (base_counter - head_counter).items():
+        removed_rows.extend(dict(zip(columns, key, strict=True)) for _ in range(count))
+    return added_rows, removed_rows
+
+
+def _dict_from_key(columns: list[str], key: tuple[object, ...]) -> dict[str, object]:
+    return dict(zip(columns, key, strict=True))
+
+
+def _unmatched_full_rows(
+    rows: list[dict[str, object]],
+    *,
+    matched_rows: Counter[tuple[object, ...]],
+    columns: list[str],
+) -> list[dict[str, object]]:
+    counter = Counter(_row_key(row, columns) for row in rows)
+    unmatched = counter - matched_rows
+    result: list[dict[str, object]] = []
+    for key, count in unmatched.items():
+        result.extend(_dict_from_key(columns, key) for _ in range(count))
+    return sorted(result, key=lambda row: _sort_key(row, columns))
+
+
+def _diff_rows_with_duplicate_keys(
+    *,
+    base_rows: list[dict[str, object]],
+    head_rows: list[dict[str, object]],
+    key_columns: list[str],
+    columns: list[str],
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[tuple[dict[str, object], dict[str, object]]]]:
+    base_groups: dict[tuple[object, ...], list[dict[str, object]]] = defaultdict(list)
+    head_groups: dict[tuple[object, ...], list[dict[str, object]]] = defaultdict(list)
+    for row in base_rows:
+        base_groups[_row_key(row, key_columns)].append(row)
+    for row in head_rows:
+        head_groups[_row_key(row, key_columns)].append(row)
+
+    added_rows: list[dict[str, object]] = []
+    removed_rows: list[dict[str, object]] = []
+    modified_rows: list[tuple[dict[str, object], dict[str, object]]] = []
+
+    for key in sorted(set(base_groups) | set(head_groups), key=repr):
+        base_group = base_groups.get(key, [])
+        head_group = head_groups.get(key, [])
+        if not base_group:
+            added_rows.extend(head_group)
+            continue
+        if not head_group:
+            removed_rows.extend(base_group)
+            continue
+
+        matched_rows = Counter(_row_key(row, columns) for row in base_group) & Counter(
+            _row_key(row, columns) for row in head_group
+        )
+        unmatched_base = _unmatched_full_rows(base_group, matched_rows=matched_rows, columns=columns)
+        unmatched_head = _unmatched_full_rows(head_group, matched_rows=matched_rows, columns=columns)
+        pair_count = min(len(unmatched_base), len(unmatched_head))
+        modified_rows.extend(zip(unmatched_base[:pair_count], unmatched_head[:pair_count], strict=True))
+        removed_rows.extend(unmatched_base[pair_count:])
+        added_rows.extend(unmatched_head[pair_count:])
+
+    added_rows = sorted(added_rows, key=lambda row: _sort_key(row, columns))
+    removed_rows = sorted(removed_rows, key=lambda row: _sort_key(row, columns))
+    modified_rows = sorted(modified_rows, key=lambda pair: _sort_key(pair[1], columns))
+    return added_rows, removed_rows, modified_rows
+
+
+def _diff_snapshots(
+    parquet_path: str,
+    base_snapshot: Snapshot | None,
+    head_snapshot: Snapshot | None,
+    *,
+    detail_dir: Path | None,
+) -> RowDiff | None:
+    if base_snapshot is None and head_snapshot is None:
+        return None
+
+    base_columns = base_snapshot.columns if base_snapshot else []
+    head_columns = head_snapshot.columns if head_snapshot else []
+    columns = _merge_columns(base_columns, head_columns)
+    key_columns = _select_key_columns(base_columns or head_columns, head_columns or base_columns)
+    detail_files: dict[str, str] = {}
+
+    if base_snapshot is None:
+        head_rows = sorted(_row_dicts(head_snapshot.table), key=lambda row: _sort_key(row, columns))
+        detail_file = _write_detail_rows(
+            detail_dir=detail_dir,
+            parquet_path=parquet_path,
+            kind="added",
+            rows=head_rows,
+            columns=columns,
+        )
+        if detail_file:
+            detail_files["added"] = detail_file
+        return RowDiff(key_columns, len(head_rows), 0, 0, detail_files)
+
+    if head_snapshot is None:
+        base_rows = sorted(_row_dicts(base_snapshot.table), key=lambda row: _sort_key(row, columns))
+        detail_file = _write_detail_rows(
+            detail_dir=detail_dir,
+            parquet_path=parquet_path,
+            kind="removed",
+            rows=base_rows,
+            columns=columns,
+        )
+        if detail_file:
+            detail_files["removed"] = detail_file
+        return RowDiff(key_columns, 0, len(base_rows), 0, detail_files)
+
+    base_rows = _row_dicts(base_snapshot.table)
+    head_rows = _row_dicts(head_snapshot.table)
+    if not key_columns:
+        added_rows, removed_rows = _counter_rows_delta(base_rows=base_rows, head_rows=head_rows, columns=columns)
+        added_rows = sorted(added_rows, key=lambda row: _sort_key(row, columns))
+        removed_rows = sorted(removed_rows, key=lambda row: _sort_key(row, columns))
+        for kind, rows in (("added", added_rows), ("removed", removed_rows)):
+            detail_file = _write_detail_rows(
+                detail_dir=detail_dir,
+                parquet_path=parquet_path,
+                kind=kind,
+                rows=rows,
+                columns=columns,
+            )
+            if detail_file:
+                detail_files[kind] = detail_file
+        return RowDiff(
+            key_columns,
+            len(added_rows),
+            len(removed_rows),
+            0,
+            detail_files,
+            note="unavailable keys; exact full-row add/remove diff used",
+        )
+
+    duplicate_keys = _has_duplicate_keys(base_rows, key_columns) or _has_duplicate_keys(head_rows, key_columns)
+    if duplicate_keys:
+        added_rows, removed_rows, modified_rows = _diff_rows_with_duplicate_keys(
+            base_rows=base_rows,
+            head_rows=head_rows,
+            key_columns=key_columns,
+            columns=columns,
+        )
+        for kind, rows in (("added", added_rows), ("removed", removed_rows)):
+            detail_file = _write_detail_rows(
+                detail_dir=detail_dir,
+                parquet_path=parquet_path,
+                kind=kind,
+                rows=rows,
+                columns=columns,
+            )
+            if detail_file:
+                detail_files[kind] = detail_file
+
+        compare_columns = [column for column in columns if column not in key_columns]
+        detail_file = _write_detail_modified_rows(
+            detail_dir=detail_dir,
+            parquet_path=parquet_path,
+            modified_rows=modified_rows,
+            key_columns=key_columns,
+            compare_columns=compare_columns,
+        )
+        if detail_file:
+            detail_files["modified"] = detail_file
+
+        return RowDiff(
+            key_columns,
+            len(added_rows),
+            len(removed_rows),
+            len(modified_rows),
+            detail_files,
+            note="duplicate keys; unmatched rows paired within key",
+        )
+
+    base_by_key = {_row_key(row, key_columns): row for row in base_rows}
+    head_by_key = {_row_key(row, key_columns): row for row in head_rows}
+    added_keys = sorted(set(head_by_key) - set(base_by_key), key=repr)
+    removed_keys = sorted(set(base_by_key) - set(head_by_key), key=repr)
+    common_keys = sorted(set(base_by_key) & set(head_by_key), key=repr)
+    added_rows = [head_by_key[key] for key in added_keys]
+    removed_rows = [base_by_key[key] for key in removed_keys]
+    modified_rows = [
+        (base_by_key[key], head_by_key[key])
+        for key in common_keys
+        if not _rows_equal(base_by_key[key], head_by_key[key], columns)
+    ]
+
+    for kind, rows in (("added", added_rows), ("removed", removed_rows)):
+        detail_file = _write_detail_rows(
+            detail_dir=detail_dir,
+            parquet_path=parquet_path,
+            kind=kind,
+            rows=rows,
+            columns=columns,
+        )
+        if detail_file:
+            detail_files[kind] = detail_file
+
+    compare_columns = [column for column in columns if column not in key_columns]
+    detail_file = _write_detail_modified_rows(
+        detail_dir=detail_dir,
+        parquet_path=parquet_path,
+        modified_rows=modified_rows,
+        key_columns=key_columns,
+        compare_columns=compare_columns,
+    )
+    if detail_file:
+        detail_files["modified"] = detail_file
+
+    return RowDiff(key_columns, len(added_rows), len(removed_rows), len(modified_rows), detail_files)
+
+
+def _write_detail_summary(detail_dir: Path, comparisons: list[Comparison]) -> None:
+    rows: list[dict[str, object]] = []
+    for comparison in comparisons:
+        row_diff = comparison.row_diff
+        if row_diff is None:
+            continue
+        rows.append(
+            {
+                "file": comparison.path,
+                "status": comparison.status,
+                "base_rows": comparison.base_rows,
+                "head_rows": comparison.head_rows,
+                "added_rows": row_diff.added_rows,
+                "removed_rows": row_diff.removed_rows,
+                "modified_rows": row_diff.modified_rows,
+                "key_columns": ",".join(row_diff.key_columns),
+                "detail_files": ",".join(row_diff.detail_files.values()),
+                "note": row_diff.note or "",
+            }
+        )
+    if rows:
+        _write_rows_csv(
+            detail_dir / "summary.csv",
+            rows,
+            [
+                "file",
+                "status",
+                "base_rows",
+                "head_rows",
+                "added_rows",
+                "removed_rows",
+                "modified_rows",
+                "key_columns",
+                "detail_files",
+                "note",
+            ],
+        )
+
+
 def _legacy_txt_path(path: str) -> str:
     return f"{path[: -len('.parquet')]}.txt"
 
 
-def _compare(base_ref: str, head_ref: str, entry: DiffEntry) -> Comparison:
+def _compare(base_ref: str, head_ref: str, entry: DiffEntry, detail_dir: Path | None = None) -> Comparison:
     head_snapshot = None if entry.status.startswith("D") else _read_snapshot(head_ref, entry.path)
 
     base_path: str | None = entry.old_path or entry.path
@@ -144,6 +566,8 @@ def _compare(base_ref: str, head_ref: str, entry: DiffEntry) -> Comparison:
     if base_path is not None and _git_file_exists(base_ref, base_path):
         base_snapshot = _read_snapshot(base_ref, base_path)
 
+    row_diff = _diff_snapshots(entry.path, base_snapshot, head_snapshot, detail_dir=detail_dir)
+
     return Comparison(
         path=entry.path,
         base_path=base_path,
@@ -156,6 +580,7 @@ def _compare(base_ref: str, head_ref: str, entry: DiffEntry) -> Comparison:
         else None,
         base_hash=base_snapshot.content_hash if base_snapshot else None,
         head_hash=head_snapshot.content_hash if head_snapshot else None,
+        row_diff=row_diff,
     )
 
 
@@ -188,6 +613,10 @@ def render_report(
         c for c in comparisons if c.base_path and c.base_path.endswith(".parquet") and not c.status.startswith("D")
     ]
     deleted = [c for c in comparisons if c.status.startswith("D")]
+    row_diffs = [c.row_diff for c in comparisons if c.row_diff]
+    added_rows = sum(row_diff.added_rows for row_diff in row_diffs)
+    removed_rows = sum(row_diff.removed_rows for row_diff in row_diffs)
+    modified_rows = sum(row_diff.modified_rows for row_diff in row_diffs)
 
     lines = [
         COMMENT_MARKER,
@@ -202,6 +631,7 @@ def render_report(
         f"- Modified or renamed parquet files: {len(modified)}",
         f"- Deleted parquet files: {len(deleted)}",
         f"- Legacy `*_perf.txt` files added or modified: {len(legacy_perf_changes)}",
+        f"- Row-level changes: +{added_rows} / -{removed_rows} / ~{modified_rows}",
         "",
     ]
 
@@ -240,17 +670,37 @@ def render_report(
     interesting = [c for c in added + modified + deleted if c not in converted_bad]
     if interesting:
         lines.extend(["### Other Parquet Changes", ""])
-        rows = [["Status", "File", "Base rows", "Head rows", "Content"]]
+        rows = [["Status", "File", "Base rows", "Head rows", "Rows +", "Rows -", "Rows ~", "Details"]]
         for item in interesting[:75]:
-            if item.content_match is None:
-                content = "n/a"
-            else:
-                content = "match" if item.content_match else f"{item.base_hash} -> {item.head_hash}"
-            rows.append([item.status, item.path, item.base_rows, item.head_rows, content])
+            row_diff = item.row_diff
+            if row_diff is None:
+                rows.append([item.status, item.path, item.base_rows, item.head_rows, "n/a", "n/a", "n/a", "n/a"])
+                continue
+            detail_kinds = ", ".join(row_diff.detail_files.keys()) or "none"
+            if row_diff.note:
+                detail_kinds = f"{detail_kinds}; {row_diff.note}"
+            rows.append(
+                [
+                    item.status,
+                    item.path,
+                    item.base_rows,
+                    item.head_rows,
+                    row_diff.added_rows,
+                    row_diff.removed_rows,
+                    row_diff.modified_rows,
+                    detail_kinds,
+                ]
+            )
         lines.extend(_render_table(rows))
         if len(interesting) > 75:
             lines.append(f"\n...and {len(interesting) - 75} more parquet changes.")
         lines.append("")
+        if any(item.row_diff and item.row_diff.detail_files for item in interesting):
+            lines.append(
+                f"Exact row-level CSVs are attached to the workflow artifact under `{DEFAULT_DETAIL_DIR}/` "
+                "with filenames matching `<source>.{added,removed,modified}.csv`."
+            )
+            lines.append("")
 
     if converted and not converted_bad and not legacy_perf_changes:
         lines.append("All detected CSV-to-parquet conversions preserve column names and Arrow table content.")
@@ -278,13 +728,23 @@ def main() -> int:
     parser.add_argument("--head-ref", default="HEAD")
     parser.add_argument("--path-prefix", default=PERF_DATA_PREFIX)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--detail-dir",
+        type=Path,
+        default=None,
+        help="Directory for exact row-level CSV artifacts.",
+    )
     parser.add_argument("--no-strict", action="store_true", help="Do not fail on conversion mismatches.")
     args = parser.parse_args()
 
     entries = _parse_diff(args.base_ref, args.head_ref, args.path_prefix)
     parquet_entries = [entry for entry in entries if entry.path.endswith(".parquet")]
     legacy_perf_changes = find_legacy_perf_changes(entries)
-    comparisons = [_compare(args.base_ref, args.head_ref, entry) for entry in parquet_entries]
+    comparisons = [
+        _compare(args.base_ref, args.head_ref, entry, detail_dir=args.detail_dir) for entry in parquet_entries
+    ]
+    if args.detail_dir:
+        _write_detail_summary(args.detail_dir, comparisons)
     report = render_report(
         base_ref=args.base_ref,
         head_ref=args.head_ref,
