@@ -89,6 +89,7 @@ framework_specific_op_cases:
         - 256
         window_sizes:
         - 0
+        - 128
         - 1024
   trtllm:
     attention_context:
@@ -120,6 +121,183 @@ framework_specific_op_cases:
         window_sizes:
         - 0
         - 1024
+      - id: mimo_v2_flash_fp8_h192_prefix_context
+        description: Exact MiMo-V2-Flash prefix-context shapes used by support-matrix replay.
+        batch_sizes:
+        - 1
+        - 2
+        sequence_lengths:
+        - 256
+        - 257
+        query_head_counts:
+        - 8
+        - 16
+        - 32
+        - 64
+        kv_head_options:
+        - 1
+        - 2
+        - 4
+        - 8
+        head_dims:
+        - 192
+        max_tokens_self_attention: 65536
+        max_tokens_grouped_query_attention: 131072
+        max_batch_size_self_attention: 128
+        max_kv_elements: 2147483647
+        precision_cases:
+        - id: fp8_kv_cache_and_context_fmha
+          fp8_kv_cache: true
+          fp8_context_fmha: true
+        window_sizes:
+        - 0
+        - 128
+      - id: llama4_bf16_h128_swa_context_tp8
+        description: Exact Llama-4 SWA context shape used by support-matrix replay at TP=8.
+        batch_sizes:
+        - 1
+        - 2
+        sequence_lengths:
+        - 128
+        - 256
+        query_head_counts:
+        - 5
+        kv_head_options:
+        - 1
+        head_dims:
+        - 128
+        max_tokens_self_attention: 65536
+        max_tokens_grouped_query_attention: 131072
+        max_batch_size_self_attention: 128
+        max_kv_elements: 2147483647
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
+          fp8_context_fmha: false
+        window_sizes:
+        - 8192
+      - id: llama4_bf16_h128_swa_context_tp4
+        description: Exact Llama-4 SWA context shape used by support-matrix replay at TP=4.
+        batch_sizes:
+        - 1
+        - 2
+        sequence_lengths:
+        - 128
+        - 256
+        query_head_counts:
+        - 10
+        kv_head_options:
+        - 2
+        head_dims:
+        - 128
+        max_tokens_self_attention: 65536
+        max_tokens_grouped_query_attention: 131072
+        max_batch_size_self_attention: 128
+        max_kv_elements: 2147483647
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
+          fp8_context_fmha: false
+        window_sizes:
+        - 8192
+      - id: llama4_bf16_h128_swa_context_tp2
+        description: Exact Llama-4 SWA context shape used by support-matrix replay at TP=2.
+        batch_sizes:
+        - 1
+        - 2
+        sequence_lengths:
+        - 128
+        - 256
+        query_head_counts:
+        - 20
+        kv_head_options:
+        - 4
+        head_dims:
+        - 128
+        max_tokens_self_attention: 65536
+        max_tokens_grouped_query_attention: 131072
+        max_batch_size_self_attention: 128
+        max_kv_elements: 2147483647
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
+          fp8_context_fmha: false
+        window_sizes:
+        - 8192
+      - id: llama4_bf16_h128_swa_context_tp1
+        description: Exact Llama-4 SWA context shape used by support-matrix replay at TP=1.
+        batch_sizes:
+        - 1
+        - 2
+        sequence_lengths:
+        - 128
+        - 256
+        query_head_counts:
+        - 40
+        kv_head_options:
+        - 8
+        head_dims:
+        - 128
+        max_tokens_self_attention: 65536
+        max_tokens_grouped_query_attention: 131072
+        max_batch_size_self_attention: 128
+        max_kv_elements: 2147483647
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
+          fp8_context_fmha: false
+        window_sizes:
+        - 8192
+      - id: gemma4_bf16_h512_global_context_gqa
+        description: Exact Gemma-4 global-context GQA shape used by support-matrix replay.
+        batch_sizes:
+        - 1
+        - 2
+        sequence_lengths:
+        - 128
+        - 256
+        query_head_counts:
+        - 2
+        - 4
+        - 8
+        kv_head_options:
+        - 1
+        head_dims:
+        - 512
+        max_tokens_self_attention: 65536
+        max_tokens_grouped_query_attention: 131072
+        max_batch_size_self_attention: 128
+        max_kv_elements: 2147483647
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
+          fp8_context_fmha: false
+        window_sizes:
+        - 0
+      - id: gemma4_bf16_h512_global_context_tp1
+        description: Exact Gemma-4 global-context GQA shape used by support-matrix replay at TP=1.
+        batch_sizes:
+        - 1
+        - 2
+        sequence_lengths:
+        - 128
+        - 256
+        query_head_counts:
+        - 16
+        kv_head_options:
+        - 2
+        head_dims:
+        - 512
+        max_tokens_self_attention: 65536
+        max_tokens_grouped_query_attention: 131072
+        max_batch_size_self_attention: 128
+        max_kv_elements: 2147483647
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
+          fp8_context_fmha: false
+        window_sizes:
+        - 0
   vllm:
     attention_context:
       cases:

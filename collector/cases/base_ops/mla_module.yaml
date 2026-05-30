@@ -213,6 +213,10 @@ common_case_values:
       - 1
     context:
       max_tokens: 131072
+      prefix_lengths:
+        - 0
+        - 128
+        - 256
     generation:
       max_tokens: 33554432
   mla_module_vllm:

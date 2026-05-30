@@ -8,6 +8,7 @@ benchmark context and generation attention. This file owns TRT-LLM cache manager
 setup, quantization flags, SM/version-specific skips, and perf-row formatting.
 """
 
+import argparse
 import os
 
 import tensorrt_llm
@@ -504,10 +505,49 @@ def get_generation_attention_test_cases():
 
 
 if __name__ == "__main__":
-    test_cases = get_context_attention_test_cases()
-    for test_case in test_cases:
-        run_attention_torch(*test_case, perf_filename=PerfFile.CONTEXT_ATTENTION)
+    parser = argparse.ArgumentParser(description="Collect TRT-LLM dense attention perf data.")
+    parser.add_argument("--mode", choices=["context", "generation"], help="Run one attention phase.")
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--seq-len", type=int, help="Input/context sequence length.")
+    parser.add_argument("--num-heads", type=int)
+    parser.add_argument("--num-kv-heads", type=int)
+    parser.add_argument("--head-dim", type=int)
+    parser.add_argument("--window-size", type=int, default=0)
+    parser.add_argument("--fp8-kv-cache", action="store_true")
+    parser.add_argument("--fp8-context-fmha", action="store_true")
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--perf-filename", help="Output perf file for one explicit case.")
+    args = parser.parse_args()
 
-    test_cases = get_generation_attention_test_cases()
-    for test_case in test_cases:
-        run_attention_torch(*test_case, perf_filename=PerfFile.GENERATION_ATTENTION)
+    single_case_values = [args.batch_size, args.seq_len, args.num_heads, args.num_kv_heads, args.head_dim]
+    if any(value is not None for value in single_case_values):
+        if args.mode is None or any(value is None for value in single_case_values):
+            parser.error(
+                "--mode, --batch-size, --seq-len, --num-heads, --num-kv-heads, and --head-dim "
+                "must be provided together for a single attention case."
+            )
+        is_context = args.mode == "context"
+        perf_filename = args.perf_filename or (
+            PerfFile.CONTEXT_ATTENTION if is_context else PerfFile.GENERATION_ATTENTION
+        )
+        run_attention_torch(
+            args.batch_size,
+            args.seq_len,
+            args.num_heads,
+            args.num_kv_heads,
+            args.head_dim,
+            args.window_size,
+            args.fp8_kv_cache,
+            args.fp8_context_fmha,
+            is_context,
+            perf_filename=perf_filename,
+            device=args.device,
+        )
+    else:
+        test_cases = get_context_attention_test_cases()
+        for test_case in test_cases:
+            run_attention_torch(*test_case, perf_filename=PerfFile.CONTEXT_ATTENTION)
+
+        test_cases = get_generation_attention_test_cases()
+        for test_case in test_cases:
+            run_attention_torch(*test_case, perf_filename=PerfFile.GENERATION_ATTENTION)

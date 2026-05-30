@@ -9,6 +9,7 @@ FP8, FP8 block, and related quantization modes. Shape policy comes from
 quantized-weight setup, and perf logging.
 """
 
+import argparse
 import ctypes
 import math
 import os
@@ -271,5 +272,19 @@ def run_gemm(gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
 if __name__ == "__main__":
     from collector.registry_types import PerfFile
 
-    for test_case in get_gemm_test_cases():
-        run_gemm(*test_case, perf_filename=PerfFile.GEMM)
+    parser = argparse.ArgumentParser(description="Collect TRT-LLM GEMM perf data.")
+    parser.add_argument("--gemm-type", choices=["bfloat16", "fp8", "fp8_static", "fp8_block", "nvfp4"])
+    parser.add_argument("--m", type=int, help="Token count / GEMM M dimension for a single case.")
+    parser.add_argument("--n", type=int, help="Output features / GEMM N dimension for a single case.")
+    parser.add_argument("--k", type=int, help="Input features / GEMM K dimension for a single case.")
+    parser.add_argument("--perf-filename", default=PerfFile.GEMM, help="Output perf file.")
+    args = parser.parse_args()
+
+    single_case_values = [args.gemm_type, args.m, args.n, args.k]
+    if any(value is not None for value in single_case_values):
+        if any(value is None for value in single_case_values):
+            parser.error("--gemm-type, --m, --n, and --k must be provided together for a single GEMM case.")
+        run_gemm(args.gemm_type, args.m, args.n, args.k, perf_filename=args.perf_filename)
+    else:
+        for test_case in get_gemm_test_cases():
+            run_gemm(*test_case, perf_filename=args.perf_filename)

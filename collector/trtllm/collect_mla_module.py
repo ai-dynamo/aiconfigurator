@@ -186,7 +186,7 @@ def get_context_test_cases(attn_type: str):
     """Context-phase test cases.
 
     Returns list of [seq_len, batch_size, num_heads, kv_cache_dtype,
-                     compute_dtype, gemm_type].
+                     compute_dtype, gemm_type, prefix_len].
     """
     cases = []
     sweep = get_mla_module_sweep_spec("trtllm")
@@ -202,7 +202,8 @@ def get_context_test_cases(attn_type: str):
                         and b > sweep.context_large_sequence_max_batch_size
                     ):
                         continue
-                    cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
+                    for prefix_len in sweep.context_prefix_lengths:
+                        cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type, prefix_len])
     return cases
 
 
@@ -241,8 +242,14 @@ def _build_module_test_cases(attn_type: str, mode: str):
     model_specs = get_mla_module_model_specs(attention_type=attn_type)
     cases = []
     for model_spec in model_specs:
-        for s, b, h, kv_dtype, compute_dtype, gemm_type in base_cases:
-            cases.append([s, b, h, kv_dtype, compute_dtype, gemm_type, model_spec.model_path, attn_type])
+        if mode == "context":
+            for s, b, h, kv_dtype, compute_dtype, gemm_type, prefix_len in base_cases:
+                cases.append(
+                    [s, b, h, kv_dtype, compute_dtype, gemm_type, model_spec.model_path, attn_type, prefix_len]
+                )
+        else:
+            for s, b, h, kv_dtype, compute_dtype, gemm_type in base_cases:
+                cases.append([s, b, h, kv_dtype, compute_dtype, gemm_type, model_spec.model_path, attn_type])
     return cases
 
 
@@ -476,6 +483,7 @@ def create_kv_cache_and_metadata(
     seq_len: int,
     is_context: bool,
     use_fp8_kv_cache: bool = False,
+    prefix_len: int = 0,
     device: str = "cuda:0",
 ):
     """
@@ -494,10 +502,11 @@ def create_kv_cache_and_metadata(
     head_dim = kv_lora_rank + qk_rope_head_dim
 
     if is_context:
-        max_seq = seq_len + 1
+        prefix_len = max(0, int(prefix_len))
+        max_seq = prefix_len + seq_len + 1
         total_tokens = seq_len * batch_size
         seq_len_q = seq_len
-        kv_cache_len = 0
+        kv_cache_len = prefix_len
     else:
         max_seq = seq_len + 1
         total_tokens = batch_size
@@ -601,6 +610,7 @@ def run_mla_module(
     *,
     model_path: str,
     attn_type: str,
+    prefix_len: int = 0,
     device: str = "cuda:0",
     warming_up: int = 10,
     test_ite: int = 6,
@@ -614,9 +624,11 @@ def run_mla_module(
     is_context = "context" in perf_filename
     phase = "context" if is_context else "generation"
     variant = attn_type.upper()
+    prefix_len = max(0, int(prefix_len)) if is_context else 0
     print(
         f"\n[{variant} module] {phase} b={batch_size}, s={seq_len}, "
-        f"heads={num_heads}, gemm={gemm_type}, compute={compute_dtype}, kv={kv_cache_dtype}, model={model_path}"
+        f"prefix={prefix_len}, heads={num_heads}, gemm={gemm_type}, "
+        f"compute={compute_dtype}, kv={kv_cache_dtype}, model={model_path}"
     )
 
     # 1. Create attention layer (from_pretrained reads config.json)
@@ -636,6 +648,7 @@ def run_mla_module(
         seq_len=seq_len,
         is_context=is_context,
         use_fp8_kv_cache=use_fp8_kv_cache,
+        prefix_len=prefix_len,
         device=device,
     )
 
@@ -644,7 +657,7 @@ def run_mla_module(
     if is_context:
         num_tokens = seq_len * batch_size
         position_ids = (
-            torch.arange(seq_len, device=torch_device, dtype=torch.long)
+            torch.arange(prefix_len, prefix_len + seq_len, device=torch_device, dtype=torch.long)
             .unsqueeze(0)
             .expand(batch_size, -1)
             .reshape(-1)
@@ -702,7 +715,7 @@ def run_mla_module(
     # 6. Log results
     if is_context:
         isl = seq_len
-        step = 0
+        step = prefix_len
     else:
         isl = 1
         step = seq_len
@@ -738,7 +751,8 @@ def run_mla_module(
 
     print(
         f"  [{phase}] b={batch_size}, s={seq_len}, heads={num_heads}, "
-        f"gemm={gemm_type}, compute={compute_dtype}, kv={kv_cache_dtype}: {latency:.4f} ms"
+        f"prefix={prefix_len}, gemm={gemm_type}, compute={compute_dtype}, "
+        f"kv={kv_cache_dtype}: {latency:.4f} ms"
     )
 
     _cleanup(kv_cache_manager)
@@ -754,6 +768,7 @@ def run_mla_module_worker(
     gemm_type: str,
     model_path: str,
     attn_type: str,
+    prefix_len: int = 0,
     *,
     perf_filename: str,
     device: str = "cuda:0",
@@ -769,6 +784,7 @@ def run_mla_module_worker(
         perf_filename=perf_filename,
         model_path=model_path,
         attn_type=attn_type,
+        prefix_len=prefix_len,
         device=device,
     )
 
@@ -814,6 +830,7 @@ def main():
     parser.add_argument("--num-heads", type=int, default=None, help="Filter by number of heads")
     parser.add_argument("--batch-size", type=int, default=None, help="Single batch size (for --quick)")
     parser.add_argument("--seq-len", type=int, default=None, help="Single seq len (for --quick)")
+    parser.add_argument("--prefix-len", type=int, default=0, help="Context cached-prefix length (for --quick)")
     parser.add_argument(
         "--kv-cache-dtype",
         type=str,
@@ -871,6 +888,7 @@ def main():
                 perf_filename=perf_filename,
                 model_path=model_path,
                 attn_type=attn_type,
+                prefix_len=args.prefix_len if args.mode == "context" else 0,
                 device=args.device,
             )
             continue
@@ -894,8 +912,13 @@ def main():
 
         print(f"Running {len(test_cases)} {args.mode} {attn_type.upper()} module test cases...")
 
-        for i, (s, b, h, kv_dtype, compute, gemm) in enumerate(test_cases):
+        for i, test_case in enumerate(test_cases):
             print(f"[{i + 1}/{len(test_cases)}]", end="")
+            if args.mode == "context":
+                s, b, h, kv_dtype, compute, gemm, prefix_len = test_case
+            else:
+                s, b, h, kv_dtype, compute, gemm = test_case
+                prefix_len = 0
             try:
                 run_mla_module(
                     seq_len=s,
@@ -907,14 +930,21 @@ def main():
                     perf_filename=perf_filename,
                     model_path=model_path,
                     attn_type=attn_type,
+                    prefix_len=prefix_len,
                     device=args.device,
                 )
             except torch.cuda.OutOfMemoryError:
-                print(f"  OOM: b={b}, s={s}, heads={h}, gemm={gemm}, compute={compute}, kv={kv_dtype}")
+                print(
+                    f"  OOM: b={b}, s={s}, prefix={prefix_len}, heads={h}, "
+                    f"gemm={gemm}, compute={compute}, kv={kv_dtype}"
+                )
                 torch.cuda.empty_cache()
                 gc.collect()
             except Exception as e:
-                print(f"  FAILED: b={b}, s={s}, heads={h}, gemm={gemm}, compute={compute}, kv={kv_dtype}: {e}")
+                print(
+                    f"  FAILED: b={b}, s={s}, prefix={prefix_len}, heads={h}, "
+                    f"gemm={gemm}, compute={compute}, kv={kv_dtype}: {e}"
+                )
                 traceback.print_exc()
                 torch.cuda.empty_cache()
                 gc.collect()

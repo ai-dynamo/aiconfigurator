@@ -95,6 +95,7 @@ framework_specific_op_cases:
         - 256
         window_sizes:
         - 0
+        - 128
         - 1024
   trtllm:
     attention_generation:
@@ -145,6 +146,186 @@ framework_specific_op_cases:
         window_sizes:
         - 0
         - 1024
+      - id: mimo_v2_flash_fp8_h192_genonly_decode
+        description: Exact MiMo-V2-Flash gen-only decode shapes used by support-matrix replay.
+        batch_sizes:
+        - 2
+        sequence_lengths:
+        - 257
+        - 385
+        mha_query_head_counts: []
+        xqa_query_head_counts:
+        - 8
+        - 16
+        - 32
+        - 64
+        kv_head_counts:
+        - 1
+        - 2
+        - 4
+        - 8
+        head_dims:
+        - 192
+        max_mha_tokens_per_step: 8388608
+        max_xqa_tokens_per_step: 16777216
+        min_batch_options_per_sequence: 1
+        drop_largest_sequence_for_batch_at_least: 256
+        precision_cases:
+        - id: fp8_kv_cache
+          fp8_kv_cache: true
+        window_sizes:
+        - 0
+        - 128
+      - id: llama4_bf16_h128_swa_decode_tp8
+        description: Exact Llama-4 SWA decode shape used by support-matrix replay at TP=8.
+        batch_sizes:
+        - 1
+        - 2
+        sequence_lengths:
+        - 129
+        - 257
+        mha_query_head_counts: []
+        xqa_query_head_counts:
+        - 5
+        kv_head_counts:
+        - 1
+        head_dims:
+        - 128
+        max_mha_tokens_per_step: 8388608
+        max_xqa_tokens_per_step: 16777216
+        min_batch_options_per_sequence: 1
+        drop_largest_sequence_for_batch_at_least: 256
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
+        window_sizes:
+        - 8192
+      - id: llama4_bf16_h128_swa_decode_tp4
+        description: Exact Llama-4 SWA decode shape used by support-matrix replay at TP=4.
+        batch_sizes:
+        - 1
+        - 2
+        sequence_lengths:
+        - 129
+        - 257
+        - 258
+        mha_query_head_counts: []
+        xqa_query_head_counts:
+        - 10
+        kv_head_counts:
+        - 2
+        head_dims:
+        - 128
+        max_mha_tokens_per_step: 8388608
+        max_xqa_tokens_per_step: 16777216
+        min_batch_options_per_sequence: 1
+        drop_largest_sequence_for_batch_at_least: 256
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
+        window_sizes:
+        - 8192
+      - id: llama4_bf16_h128_swa_decode_tp2
+        description: Exact Llama-4 SWA decode shape used by support-matrix replay at TP=2.
+        batch_sizes:
+        - 1
+        - 2
+        sequence_lengths:
+        - 129
+        - 257
+        - 258
+        mha_query_head_counts: []
+        xqa_query_head_counts:
+        - 20
+        kv_head_counts:
+        - 4
+        head_dims:
+        - 128
+        max_mha_tokens_per_step: 8388608
+        max_xqa_tokens_per_step: 16777216
+        min_batch_options_per_sequence: 1
+        drop_largest_sequence_for_batch_at_least: 256
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
+        window_sizes:
+        - 8192
+      - id: llama4_bf16_h128_swa_decode_tp1
+        description: Exact Llama-4 SWA decode shape used by support-matrix replay at TP=1.
+        batch_sizes:
+        - 1
+        - 2
+        sequence_lengths:
+        - 129
+        - 257
+        mha_query_head_counts: []
+        xqa_query_head_counts:
+        - 40
+        kv_head_counts:
+        - 8
+        head_dims:
+        - 128
+        max_mha_tokens_per_step: 8388608
+        max_xqa_tokens_per_step: 16777216
+        min_batch_options_per_sequence: 1
+        drop_largest_sequence_for_batch_at_least: 256
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
+        window_sizes:
+        - 8192
+      - id: gemma4_bf16_h512_global_decode_gqa
+        description: Exact Gemma-4 global-decode GQA shape used by support-matrix replay.
+        batch_sizes:
+        - 1
+        - 2
+        sequence_lengths:
+        - 129
+        - 257
+        - 258
+        mha_query_head_counts: []
+        xqa_query_head_counts:
+        - 2
+        - 4
+        - 8
+        kv_head_counts:
+        - 1
+        head_dims:
+        - 512
+        max_mha_tokens_per_step: 8388608
+        max_xqa_tokens_per_step: 16777216
+        min_batch_options_per_sequence: 1
+        drop_largest_sequence_for_batch_at_least: 256
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
+        window_sizes:
+        - 0
+      - id: gemma4_bf16_h512_global_decode_tp1
+        description: Exact Gemma-4 global-decode GQA shape used by support-matrix replay at TP=1.
+        batch_sizes:
+        - 1
+        - 2
+        sequence_lengths:
+        - 129
+        - 257
+        - 258
+        mha_query_head_counts: []
+        xqa_query_head_counts:
+        - 16
+        kv_head_counts:
+        - 2
+        head_dims:
+        - 512
+        max_mha_tokens_per_step: 8388608
+        max_xqa_tokens_per_step: 16777216
+        min_batch_options_per_sequence: 1
+        drop_largest_sequence_for_batch_at_least: 256
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
+        window_sizes:
+        - 0
   vllm:
     attention_generation:
       cases:
