@@ -165,16 +165,17 @@ def _apply_model_quant_defaults(
         if model_config.gemm_quant_mode == common.GEMMQuantMode.fp8_static:
             model_config.gemm_quant_mode = common.GEMMQuantMode.fp8
 
-    # DSA module (DeepSeek-V3.2 / GLM-5): current SGLang/TRT-LLM DSA
-    # module perf tables are keyed only by bfloat16 attention, KV cache,
-    # and DSA GEMM type.
+    # DSA module (DeepSeek-V3.2 / GLM-5): current module perf tables are
+    # keyed by bfloat16 attention and DSA GEMM type.  SGLang's DeepSeek-V3.2
+    # path maps through DeepseekV4ForCausalLM and rejects bfloat16 KV cache,
+    # so keep the model-inferred fp8 KV cache for that runtime.
     if (
         architecture in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM")
         and backend_name in ("trtllm", "sglang")
     ):
         if model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
             model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
-        if model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8:
+        if backend_name != "sglang" and model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8:
             model_config.kvcache_quant_mode = common.KVCacheQuantMode.bfloat16
         if model_config.gemm_quant_mode != common.GEMMQuantMode.bfloat16:
             model_config.gemm_quant_mode = common.GEMMQuantMode.bfloat16
