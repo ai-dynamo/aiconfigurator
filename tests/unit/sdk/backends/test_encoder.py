@@ -542,3 +542,32 @@ class TestEncoderMemoryInSummary:
         assert enc_mem["kvcache"] == 0.0
         assert enc_mem["weights"] > 0.0
         assert enc_mem["activations"] > 0.0
+
+    def test_vl_model_without_image_dimensions_skips_encoder_ops(self, model_config):
+        """VL model with no image shape behaves like a text-only request."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+
+        model = get_model("Qwen/Qwen3-VL-32B-Instruct", model_config, "trtllm")
+        database = SimpleNamespace(
+            backend="trtllm",
+            version="10.0",
+            system="h200_sxm",
+            system_spec={
+                "gpu": {"mem_capacity": 80 * (1 << 30)},
+                "misc": {"nccl_mem": {1: 500 * 1024 * 1024, 8: 1024 * 1024 * 1024}, "other_mem": 200 * 1024 * 1024},
+            },
+        )
+
+        for op in model.context_ops + model.generation_ops:
+            op.query = MagicMock(return_value=MagicMock(__float__=lambda s: 1.0, energy=0.0, source="silicon"))
+        for op in model.encoder_ops:
+            op.query = MagicMock(side_effect=AssertionError("encoder op should not run without image dimensions"))
+
+        rc = RuntimeConfig(batch_size=1, isl=512, osl=64, num_images_per_request=1)
+        backend = TRTLLMBackend()
+        summary = backend.run_static(model, database, rc, mode="static")
+
+        assert summary.get_encoder_memory() == {}

@@ -30,8 +30,8 @@ _MOE_MODEL_FAMILIES = {
     "DEEPSEEKV4",
     "KIMIK25",
     "HYBRIDMOE",
-    "QWEN3VL_MOE",
     "GEMMA4MOE",
+    "QWEN3VL_MOE",
 }
 
 
