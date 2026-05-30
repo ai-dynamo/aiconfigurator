@@ -142,26 +142,28 @@ def test_mxfp4_model_is_not_native_fp4_hardware_incompatible_on_hopper(model):
     assert incompatibility is None
 
 
-def test_vllm_sparse_dsa_model_is_hardware_incompatible_on_a100():
+@pytest.mark.parametrize("backend", ["sglang", "vllm"])
+def test_sparse_dsa_model_is_hardware_incompatible_on_a100(backend):
     incompatibility = get_hardware_incompatibility(
         model="zai-org/GLM-5",
         system="a100_sxm",
-        backend="vllm",
+        backend=backend,
         system_spec=_system_spec(sm_version=80),
     )
 
     assert incompatibility is not None
     assert incompatibility.missing_datatypes == ("DSA",)
     assert incompatibility.reason == (
-        "a100_sxm (SM80) does not support sparse DSA attention required by zai-org/GLM-5 on vLLM"
+        f"a100_sxm (SM80) does not support sparse DSA attention required by zai-org/GLM-5 on {backend}"
     )
 
 
-def test_vllm_sparse_dsa_model_is_allowed_on_hopper():
+@pytest.mark.parametrize("backend", ["sglang", "vllm"])
+def test_sparse_dsa_model_is_allowed_on_hopper(backend):
     incompatibility = get_hardware_incompatibility(
         model="zai-org/GLM-5",
         system="h100_sxm",
-        backend="vllm",
+        backend=backend,
         system_spec=_system_spec(sm_version=90, fp8=True),
     )
 
