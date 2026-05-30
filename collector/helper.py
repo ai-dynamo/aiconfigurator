@@ -1170,6 +1170,7 @@ def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
 
     # Find EP rank with max load and swap to rank 0
     with torch.no_grad():
+        conv_dtype = torch.float32
         conv1d = torch.nn.Conv1d(
             in_channels=1,
             out_channels=1,
@@ -1177,11 +1178,12 @@ def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
             stride=num_experts // ep,
             padding=0,
             bias=False,
+            dtype=conv_dtype,
         )
-        conv1d_weights = torch.tensor([1 for _ in range(num_experts // ep)])
+        conv1d_weights = torch.ones(num_experts // ep, dtype=conv_dtype)
         conv1d.weight.copy_(conv1d_weights)
 
-    res = conv1d(num_tokens_per_expert.unsqueeze(0).unsqueeze(0).float())
+    res = conv1d(num_tokens_per_expert.unsqueeze(0).unsqueeze(0).to(dtype=conv_dtype))
     max_ep_idx = torch.argmax(res).item()
 
     if max_ep_idx != 0:
