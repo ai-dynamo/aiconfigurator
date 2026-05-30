@@ -380,7 +380,8 @@ class BaseBackend:
             enc_cfg = getattr(model, "encoder_config", None)
             num_images = runtime_config.num_images_per_request
 
-            if runtime_config.num_images_per_request > 0 and enc_cfg is not None:
+            has_image_dims = runtime_config.image_height > 0 and runtime_config.image_width > 0
+            if runtime_config.num_images_per_request > 0 and enc_cfg is not None and has_image_dims:
                 img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
                 tokens_per_image = (runtime_config.image_height // img_stride) * (
                     runtime_config.image_width // img_stride
