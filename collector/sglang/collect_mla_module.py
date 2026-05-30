@@ -37,6 +37,12 @@ from importlib.metadata import version as get_version
 import numpy as np
 import torch
 
+# The collector writes an AIC-local config.json for DeepSeek-V3.2/GLM-5 so
+# SGLang can load them through its DeepSeek-V3 NSA path.  Letting SGLang's
+# layer-count backup auto-rewrite run here can remap DeepSeek-V3.2 to the
+# DeepSeek-V4 compressed-attention path before the DSA module is benchmarked.
+os.environ.setdefault("SGLANG_APPLY_CONFIG_BACKUP", "none")
+
 try:
     from helper import benchmark_with_power, get_sm_version, log_perf
 except ModuleNotFoundError:
@@ -889,15 +895,10 @@ def load_model_runner(
     )
 
     if num_layers > 0 and load_format == "dummy":
-        # SGLang 0.5.10 maps DeepSeek-V3.2 through its DeepseekV4ForCausalLM
-        # config backup on the Grace-Blackwell image.  That runtime path is
-        # MQA-shaped and asserts num_key_value_heads == 1, while the DSA sweep
-        # still uses num_attention_heads to emulate local TP head counts.
-        kv_head_num = 1 if model_path == "deepseek-ai/DeepSeek-V3.2" else head_num
         override_args = {
             "num_hidden_layers": num_layers,
             "num_attention_heads": head_num,
-            "num_key_value_heads": kv_head_num,
+            "num_key_value_heads": head_num,
         }
         server_args.json_model_override_args = json.dumps(override_args)
 
