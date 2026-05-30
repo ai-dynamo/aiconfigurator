@@ -344,8 +344,15 @@ def _is_known_hw_incompatible_gap(
     return system == "l40s" and (
         "unsupported gemm quant mode 'fp8_block'" in normalized
         or "unsupported moe quant mode 'fp8_block'" in normalized
+        or "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
+        or "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
+        or "unsupported context_attention quant mode 'fp8'" in normalized
+        or "unsupported generation_attention quant mode 'fp8'" in normalized
+        or "ampere/ada cards only supports fp16 and bf16 data type" in normalized
         or "quant_mode=<gemmquantmode.fp8_block" in normalized
         or "quant_mode=<moequantmode.fp8_block" in normalized
+        or "quant_mode=<moequantmode.w4a16_mxfp4" in normalized
+        or "quant_mode=<moequantmode.w4a8_mxfp4_mxfp8" in normalized
     )
 
 
