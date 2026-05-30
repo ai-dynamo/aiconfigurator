@@ -557,6 +557,8 @@ ModelFamily = {
     "NEMOTRONNAS",
     "NEMOTRONH",
     "HYBRIDMOE",
+    "QWEN3VL",
+    "QWEN3VL_MOE",
     "QWEN35",
     "QWEN3VL",
     "QWEN3VL_MOE",
