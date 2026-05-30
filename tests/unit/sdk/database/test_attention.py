@@ -6,6 +6,7 @@ import math
 import pytest
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.operations.attention import _raise_for_sglang_context_attention_head_size_limit
 
 pytestmark = pytest.mark.unit
 
@@ -119,22 +120,13 @@ class TestContextAttention:
                 common.FMHAQuantMode.bfloat16,
             )
 
-    def test_query_context_attention_sglang_head_size_limit(self, mutable_comprehensive_perf_db):
+    def test_query_context_attention_sglang_head_size_limit(self):
         """SGLang 0.5.10 cannot run context attention above head_size 256."""
-        mutable_comprehensive_perf_db.backend = common.BackendName.sglang.value
-        mutable_comprehensive_perf_db.version = "0.5.10"
-
         with pytest.raises(RuntimeError, match="head_size=512"):
-            mutable_comprehensive_perf_db.query_context_attention(
-                1,
-                32,
-                0,
-                8,
-                8,
-                common.KVCacheQuantMode.bfloat16,
-                common.FMHAQuantMode.bfloat16,
-                database_mode=common.DatabaseMode.SOL,
-                head_size=512,
+            _raise_for_sglang_context_attention_head_size_limit(
+                common.BackendName.sglang.value,
+                "0.5.10",
+                512,
             )
 
 
