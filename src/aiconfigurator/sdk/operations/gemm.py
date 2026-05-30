@@ -453,7 +453,16 @@ class GEMM(Operation):
                 )
                 return _to_performance_result(result)
 
-            result = interpolation.interp_3d(m, n, k, gemm_data, "cubic", database._extracted_metrics_cache)
+            try:
+                result = interpolation.interp_3d(m, n, k, gemm_data, "cubic", database._extracted_metrics_cache)
+            except ValueError as exc:
+                from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+                raise PerfDataNotAvailableError(
+                    "GEMM perf data not available for requested shape. "
+                    f"system='{database.system}', backend='{database.backend}', version='{database.version}', "
+                    f"quant_mode='{quant_mode.name}', m={m}, n={n}, k={k}."
+                ) from exc
             return _to_performance_result(result)
 
         return database._query_silicon_or_hybrid(

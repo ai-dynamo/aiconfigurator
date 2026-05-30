@@ -171,6 +171,34 @@ def test_query_gemm_fp8_static_requires_static_table(mutable_comprehensive_perf_
         )
 
 
+def test_query_gemm_fp8_static_sparse_shape_miss_is_structured(mutable_comprehensive_perf_db):
+    db = mutable_comprehensive_perf_db
+    db.backend = common.BackendName.sglang.value
+    db._gemm_data = LoadedOpData(
+        {
+            common.GEMMQuantMode.fp8_static: {
+                1: {
+                    4096: {
+                        5120: {"latency": 1.0, "energy": 10.0},
+                    }
+                }
+            },
+        },
+        common.PerfDataFilename.gemm,
+        "dummy_path",
+    )
+    db.query_gemm.cache_clear()
+
+    with pytest.raises(PerfDataNotAvailableError, match=r"GEMM perf data not available.*fp8_static"):
+        db.query_gemm(
+            1,
+            4096,
+            4096,
+            common.GEMMQuantMode.fp8_static,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+
 def test_query_compute_scale_fp8_static_reuses_fp8_table(mutable_comprehensive_perf_db):
     db = mutable_comprehensive_perf_db
     # Provide enough points for 2D interpolation (>=2 keys in each axis).
