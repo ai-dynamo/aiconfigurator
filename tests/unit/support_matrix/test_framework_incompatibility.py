@@ -88,6 +88,52 @@ def test_non_dsv4_vllm_019_error_remains_fail(monkeypatch):
     assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
 
 
+def test_gemma4_sglang_gb300_head512_uses_runtime_kernel_error(monkeypatch):
+    def fake_run_mode(**_kwargs):
+        raise RuntimeError(
+            "Failed to query context attention data for n=2, n_kv=1, head_size=512, window_size=0. "
+            "Missing silicon data for the requested lookup."
+        )
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="google/gemma-4-26B-A4B",
+        system="gb300",
+        backend="sglang",
+        version="0.5.10",
+        system_spec=_b200_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert "Missing TRTLLM-GEN kernel" in errors["agg"]
+    assert "Missing silicon data" not in errors["agg"]
+
+
+def test_dsv4_pro_sglang_gb300_mhc_gap_uses_runtime_model_error(monkeypatch):
+    def fake_run_mode(**_kwargs):
+        raise RuntimeError(
+            "No mHC silicon data for op='pre', hc_mult=4, hidden_size=7168. "
+            "Missing silicon data for the requested lookup."
+        )
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="deepseek-ai/DeepSeek-V4-Pro",
+        system="gb300",
+        backend="sglang",
+        version="0.5.10",
+        system_spec=_b200_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert "Cannot find model module 'DeepseekV4ForCausalLM'" in errors["agg"]
+    assert "Missing silicon data" not in errors["agg"]
+
+
 def test_kimi_moonshot_trtllm_b200_int4_wo_is_framework_incompatible(monkeypatch):
     def fake_run_mode(**_kwargs):
         raise ValueError(

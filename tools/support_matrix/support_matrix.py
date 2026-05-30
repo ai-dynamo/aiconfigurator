@@ -273,17 +273,17 @@ def _should_retry_with_large_worker(error_message: str | None) -> bool:
     )
 
 
-def _is_known_framework_incompatible_gap(
+def _known_framework_incompatibility_message(
     *,
     model: str,
     system: str,
     backend: str,
     version: str,
     error_message: str | None,
-) -> bool:
-    """Return True for deterministic framework/data gaps that should not stay plain FAIL."""
+) -> str | None:
+    """Return a message for deterministic framework/runtime gaps that should not stay plain FAIL."""
     if not error_message:
-        return False
+        return None
 
     normalized = error_message.lower()
     if (
@@ -295,10 +295,10 @@ def _is_known_framework_incompatible_gap(
             or "deepseek-v4 mhc module data not loaded" in normalized
         )
     ):
-        return True
+        return error_message
 
     if "unsupported gemm quant mode 'fp8_static'" in normalized:
-        return True
+        return error_message
 
     if (
         model == "google/gemma-4-26B-A4B"
@@ -307,7 +307,27 @@ def _is_known_framework_incompatible_gap(
         and version == "0.5.10"
         and "head_size=512" in normalized
     ):
-        return True
+        return (
+            "SGLang 0.5.10 on GB300 does not provide TRTLLM-GEN attention kernels for "
+            "google/gemma-4-26B-A4B head_size=512. Collector verification hit "
+            "Missing TRTLLM-GEN kernel (context/decode) with headDimQk=512 and headDimV=512."
+        )
+
+    if (
+        model == "deepseek-ai/DeepSeek-V4-Pro"
+        and system == "gb300"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and (
+            "deepseek-v4 mhc module data" in normalized
+            or "mhc silicon data" in normalized
+            or "no mhc silicon data" in normalized
+        )
+    ):
+        return (
+            "SGLang 0.5.10 on GB300 cannot initialize deepseek-ai/DeepSeek-V4-Pro for mHC collection: "
+            "Cannot find model module 'DeepseekV4ForCausalLM'."
+        )
 
     if system == "rtx_pro_6000_server":
         if (
@@ -315,9 +335,9 @@ def _is_known_framework_incompatible_gap(
             or "failed to query context attention data" in normalized
             or "failed to query moe data" in normalized
         ):
-            return True
+            return error_message
         if backend == common.BackendName.sglang.value and version == "0.5.10":
-            return (
+            if (
                 "unsupported gemm quant mode 'fp8_block'" in normalized
                 or "unsupported moe quant mode 'nvfp4'" in normalized
                 or (
@@ -325,9 +345,10 @@ def _is_known_framework_incompatible_gap(
                     and "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
                 )
                 or "dsa_context_module_perf.txt" in normalized
-            )
+            ):
+                return error_message
         if backend == common.BackendName.trtllm.value and version == "1.3.0rc10":
-            return (
+            if (
                 "unsupported moe quant mode 'fp8_block'" in normalized
                 or ("DeepSeek-V4" in model and "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized)
                 or (
@@ -336,16 +357,42 @@ def _is_known_framework_incompatible_gap(
                 )
                 or (model == "moonshotai/Kimi-K2.5" and "unsupported moe quant mode 'int4_wo'" in normalized)
                 or "dsa_context_module_perf.txt" in normalized
-            )
+            ):
+                return error_message
         if backend == common.BackendName.vllm.value and version == "0.19.0":
-            return "unsupported moe quant mode 'nvfp4'" in normalized or "dsa_context_module_perf.txt" in normalized
+            if "unsupported moe quant mode 'nvfp4'" in normalized or "dsa_context_module_perf.txt" in normalized:
+                return error_message
 
-    return (
+    if (
         model == "moonshotai/Kimi-K2.5"
         and system == "b200_sxm"
         and backend == common.BackendName.trtllm.value
         and version == "1.3.0rc10"
         and "unsupported moe quant mode 'int4_wo'" in normalized
+    ):
+        return error_message
+
+    return None
+
+
+def _is_known_framework_incompatible_gap(
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    version: str,
+    error_message: str | None,
+) -> bool:
+    """Return True for deterministic framework/data gaps that should not stay plain FAIL."""
+    return (
+        _known_framework_incompatibility_message(
+            model=model,
+            system=system,
+            backend=backend,
+            version=version,
+            error_message=error_message,
+        )
+        is not None
     )
 
 
@@ -948,14 +995,16 @@ class SupportMatrix:
                         attempt_queue.append(retry_attempt)
                         continue
 
-                    if _is_known_framework_incompatible_gap(
+                    known_framework_message = _known_framework_incompatibility_message(
                         model=model,
                         system=system,
                         backend=backend,
                         version=version,
                         error_message=raw_error,
-                    ):
+                    )
+                    if known_framework_message is not None:
                         statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
+                        raw_error = known_framework_message
                     else:
                         statuses[mode] = STATUS_FAIL
                     error_messages[mode] = raw_error
