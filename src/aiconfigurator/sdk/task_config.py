@@ -385,6 +385,16 @@ class Task:
     prefill_latency_correction: float = 1.1
     decode_latency_correction: float = 1.08
 
+    # ====== 8.5 Scheduler strategy ======
+    # Optional Scheduler that decides how each single config point is
+    # predicted.  None (default) uses sdk.scheduler.StaticScheduler --
+    # bit-identical to the pre-Scheduler behavior.  Future implementations
+    # (e.g. MockerScheduler wrapping Dynamo Mocker, DynamicScheduler) can
+    # be injected here without touching sweep / predict / Task internals.
+    # Excluded from to_dict / YAML serialization (it is a strategy object,
+    # not a primitive value).
+    scheduler: Any = field(default=None, repr=False)
+
     # ====== 9. Internal — resolved in __post_init__ ======
     _is_moe: bool = field(default=False, repr=False, init=False)
     _model_family: str = field(default="", repr=False, init=False)
@@ -403,12 +413,22 @@ class Task:
         for quant_mode fields are converted to the matching enum.  Unknown
         keys are warned about but ignored.  ``overrides`` (kwargs) win over
         YAML values.
+
+        Strategy fields like ``scheduler`` cannot be expressed in YAML
+        (they're Python objects); pass them via ``overrides`` or assign
+        after construction.
         """
         valid_keys = {f.name for f in dataclasses.fields(cls) if f.init and not f.name.startswith("_")}
+        # YAML cannot construct strategy objects; ignore them here even if
+        # they're valid fields.
+        _yaml_skip: frozenset[str] = frozenset({"scheduler"})
         kwargs: dict[str, Any] = {}
         for k, v in yaml_data.items():
             if k not in valid_keys:
                 logger.warning("from_yaml: ignoring unknown key %r", k)
+                continue
+            if k in _yaml_skip:
+                logger.warning("from_yaml: %r is a strategy object, not YAML-expressible; pass via overrides", k)
                 continue
             kwargs[k] = _resolve_quant_str(k, v) if k.endswith("quant_mode") else v
         kwargs.update({k: v for k, v in overrides.items() if v is not None})
@@ -904,9 +924,14 @@ class Task:
         Useful for debugging ("what did the user actually get after
         __post_init__?") and for writing an "effective config" report.
         """
+        # Strategy fields hold non-serializable objects; skip them.
+        non_serializable: frozenset[str] = frozenset({"scheduler"})
+
         out: dict[str, Any] = {}
         for f in dataclasses.fields(self):
             if f.name.startswith("_") or not f.init:
+                continue
+            if f.name in non_serializable:
                 continue
             value = getattr(self, f.name)
             if hasattr(value, "name") and hasattr(value, "value"):
@@ -1011,7 +1036,10 @@ class Task:
             if autoscale:
                 raise ValueError("autoscale is only supported in disagg mode")
             database = get_database(self.system_name, self.backend_name, self.backend_version)
-            return sweep_agg(**self.sweep_agg_kwargs(database=database))
+            return sweep_agg(
+                **self.sweep_agg_kwargs(database=database),
+                scheduler=self.scheduler,
+            )
         if self.serving_mode == "disagg":
             prefill_database = get_database(
                 self.prefill_system_name, self.prefill_backend_name, self.prefill_backend_version
@@ -1022,6 +1050,7 @@ class Task:
             return sweep_disagg(
                 **self.sweep_disagg_kwargs(prefill_database=prefill_database, decode_database=decode_database),
                 autoscale=autoscale,
+                scheduler=self.scheduler,
             )
         raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
 
