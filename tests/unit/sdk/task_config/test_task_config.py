@@ -533,6 +533,205 @@ def test_from_yaml_warns_and_skips_scheduler_key(caplog):
 
 
 # ---------------------------------------------------------------------------
+# Task.run_single_* (single-point evaluation, subsumes cli_estimate)
+# ---------------------------------------------------------------------------
+
+
+def _build_fake_summary(result_dict: dict | None = None, oom: bool = False):
+    """Return a MagicMock InferenceSummary."""
+    from unittest.mock import MagicMock
+
+    s = MagicMock(name="InferenceSummary")
+    s.check_oom.return_value = oom
+    s.check_kv_cache_oom.return_value = False
+    s.get_result_dict.return_value = (
+        result_dict if result_dict is not None else {"tokens/s/gpu": 100.0, "ttft": 50.0, "tpot": 20.0}
+    )
+    # For disagg: get_summary_df().iloc[0].to_dict()
+    import pandas as pd
+
+    s.get_summary_df.return_value = pd.DataFrame([result_dict or {"tokens/s/gpu": 100.0, "ttft": 50.0, "tpot": 20.0}])
+    return s
+
+
+def test_run_single_agg_calls_predict_agg_worker_with_fixed_point(monkeypatch):
+    """run_single_agg builds ModelConfig with given dims and calls predict_agg_worker once."""
+    from aiconfigurator.sdk import predict
+
+    captured: dict = {}
+
+    def fake_get_database(*a, **kw):
+        return "db"
+
+    def fake_get_backend(name):
+        from unittest.mock import MagicMock
+
+        return MagicMock(name=f"backend-{name}")
+
+    def fake_get_model(model_path, model_config, backend_name):
+        captured["model_config"] = model_config
+        from unittest.mock import MagicMock
+
+        return MagicMock(name="model")
+
+    def fake_predict_agg_worker(**kwargs):
+        captured["predict_kwargs"] = kwargs
+        return _build_fake_summary(result_dict={"tokens/s/gpu": 999.0, "ttft": 42.0, "tpot": 7.0})
+
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr("aiconfigurator.sdk.backends.factory.get_backend", fake_get_backend)
+    monkeypatch.setattr("aiconfigurator.sdk.models.get_model", fake_get_model)
+    monkeypatch.setattr(predict, "predict_agg_worker", fake_predict_agg_worker)
+
+    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
+    result = t.run_single_agg(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=1, batch_size=64)
+
+    # Result is the fake_predict_agg_worker's result_dict
+    assert result["tokens/s/gpu"] == 999.0
+    assert result["ttft"] == 42.0
+    # ModelConfig built with the requested parallelism
+    mc = captured["model_config"]
+    assert mc.tp_size == 4 and mc.pp_size == 1 and mc.moe_tp_size == 1 and mc.moe_ep_size == 1
+    # ctx_tokens defaults to isl
+    assert captured["predict_kwargs"]["ctx_tokens"] == t.isl
+
+
+def test_run_single_agg_rejects_disagg_task():
+    t = Task(
+        serving_mode="disagg",
+        prefill_model_path="deepseek-ai/DeepSeek-V3",
+        prefill_system_name="h200_sxm",
+        decode_model_path="deepseek-ai/DeepSeek-V3",
+        decode_system_name="h200_sxm",
+    )
+    with pytest.raises(ValueError, match="requires serving_mode='agg'"):
+        t.run_single_agg(tp=4, batch_size=64)
+
+
+def test_run_single_agg_raises_on_oom(monkeypatch):
+    """OOM in single-point eval should surface as a clear RuntimeError."""
+    from aiconfigurator.sdk import predict
+
+    def fake_get_database(*a, **kw):
+        return "db"
+
+    def fake_get_backend(name):
+        from unittest.mock import MagicMock
+
+        return MagicMock()
+
+    def fake_get_model(model_path, model_config, backend_name):
+        from unittest.mock import MagicMock
+
+        return MagicMock()
+
+    def fake_predict_agg_worker(**kwargs):
+        return _build_fake_summary(oom=True)
+
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr("aiconfigurator.sdk.backends.factory.get_backend", fake_get_backend)
+    monkeypatch.setattr("aiconfigurator.sdk.models.get_model", fake_get_model)
+    monkeypatch.setattr(predict, "predict_agg_worker", fake_predict_agg_worker)
+
+    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
+    with pytest.raises(RuntimeError, match="OOM"):
+        t.run_single_agg(tp=1, batch_size=999)
+
+
+def test_run_single_disagg_invokes_both_phases_and_rate_matches(monkeypatch):
+    """run_single_disagg calls predict_disagg_phase twice (prefill + decode)
+    then rate-matches the pair into one ColumnsDisagg row."""
+    from aiconfigurator.sdk import predict
+
+    call_roles: list[str] = []
+
+    def fake_get_database(*a, **kw):
+        return "db"
+
+    def fake_get_backend(name):
+        from unittest.mock import MagicMock
+
+        return MagicMock()
+
+    def fake_get_model(model_path, model_config, backend_name):
+        from unittest.mock import MagicMock
+
+        return MagicMock()
+
+    # Build per-role summary dicts that satisfy _rate_match_dict's schema.
+    def _phase_summary(role: str):
+        base = {
+            "model": "m",
+            "isl": 4000,
+            "osl": 500,
+            "prefix": 0,
+            "concurrency": 1,
+            "bs": 1,
+            "global_bs": 1,
+            "tp": 4,
+            "pp": 1,
+            "dp": 1,
+            "moe_tp": 1,
+            "moe_ep": 1,
+            "parallel": "tp4pp1dp1",
+            "ttft": 80.0 if role == "prefill" else 0.0,
+            "tpot": 0.0 if role == "prefill" else 25.0,
+            "seq/s": 10.0 if role == "prefill" else 5.0,
+            "tokens/s/user": 0.0 if role == "prefill" else 40.0,
+            "gemm": "fp8",
+            "kvcache": "fp8",
+            "fmha": "fp8",
+            "moe": "fp8",
+            "comm": "half",
+            "memory": 12.3,
+            "backend": "trtllm",
+            "version": "1.3.0",
+            "system": "h200_sxm",
+            "power_w": 500.0,
+        }
+        return _build_fake_summary(result_dict=base)
+
+    def fake_predict_disagg_phase(**kwargs):
+        call_roles.append(kwargs["role"])
+        return _phase_summary(kwargs["role"])
+
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr("aiconfigurator.sdk.backends.factory.get_backend", fake_get_backend)
+    monkeypatch.setattr("aiconfigurator.sdk.models.get_model", fake_get_model)
+    monkeypatch.setattr(predict, "predict_disagg_phase", fake_predict_disagg_phase)
+
+    t = Task(
+        serving_mode="disagg",
+        prefill_model_path="deepseek-ai/DeepSeek-V3",
+        prefill_system_name="h200_sxm",
+        decode_model_path="deepseek-ai/DeepSeek-V3",
+        decode_system_name="h200_sxm",
+    )
+    row = t.run_single_disagg(
+        prefill_tp=4,
+        prefill_batch_size=1,
+        prefill_num_workers=2,
+        decode_tp=2,
+        decode_batch_size=64,
+        decode_num_workers=4,
+    )
+
+    # Both phases invoked
+    assert call_roles == ["prefill", "decode"]
+    # Rate-matched row has (p)/(d) prefixed columns plus encoder placeholders
+    assert "(p)workers" in row and "(d)workers" in row
+    assert row["(p)workers"] == 2
+    assert row["(d)workers"] == 4
+    assert "(e)workers" in row  # encoder placeholders preserved
+
+
+def test_run_single_disagg_rejects_agg_task():
+    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
+    with pytest.raises(ValueError, match="requires serving_mode='disagg'"):
+        t.run_single_disagg(prefill_tp=4, decode_tp=2, decode_batch_size=64)
+
+
+# ---------------------------------------------------------------------------
 # validate()
 # ---------------------------------------------------------------------------
 

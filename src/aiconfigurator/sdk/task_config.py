@@ -1054,5 +1054,195 @@ class Task:
             )
         raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
 
+    # =====================================================================
+    # Single-point evaluation (subsumes cli_estimate)
+    # =====================================================================
+
+    def run_single_agg(
+        self,
+        *,
+        tp: int,
+        pp: int = 1,
+        dp: int = 1,
+        moe_tp: int = 1,
+        moe_ep: int = 1,
+        batch_size: int,
+        ctx_tokens: int | None = None,
+    ) -> dict:
+        """Evaluate one fixed agg config point and return its row dict.
+
+        Subsumes the per-point use case that ``cli/api.cli_estimate``
+        handles today (40 separate kwargs, custom model/backend wiring).
+        Reads model_path / system_name / backend / quant / nextn / isl /
+        osl from the Task itself; only the per-point dimensions are
+        passed as method args.
+
+        Args:
+            tp / pp / dp / moe_tp / moe_ep: parallelism for this single point.
+            batch_size: concurrency (max in-flight requests).
+            ctx_tokens: per-step context-token budget for the IFB
+                scheduler.  Defaults to ``self.isl`` (full prefill in
+                one step) -- matching ``cli_estimate`` semantics.
+
+        Returns:
+            Row dict in ``common.ColumnsAgg`` schema, equivalent to one
+            row of what ``run()`` would produce for the same point.
+
+        Raises:
+            ValueError: if called on a disagg Task.  Use
+                :meth:`run_single_disagg` instead.
+            RuntimeError: on OOM at this config point.
+        """
+        if self.serving_mode != "agg":
+            raise ValueError(
+                f"run_single_agg requires serving_mode='agg', got {self.serving_mode!r}; "
+                "use run_single_disagg for disagg."
+            )
+        from aiconfigurator.sdk.backends.factory import get_backend
+        from aiconfigurator.sdk.models import get_model
+        from aiconfigurator.sdk.perf_database import get_database
+        from aiconfigurator.sdk.predict import predict_agg_worker
+
+        model_config = self.build_model_config(role="agg")
+        model_config.tp_size = tp
+        model_config.pp_size = pp
+        model_config.attention_dp_size = dp if self._is_moe else 1
+        model_config.moe_tp_size = moe_tp
+        model_config.moe_ep_size = moe_ep
+
+        runtime_config = self.build_runtime_config(batch_size=batch_size)
+        database = get_database(self.system_name, self.backend_name, self.backend_version)
+        backend = get_backend(self.backend_name)
+        model = get_model(self.model_path, model_config, self.backend_name)
+
+        backend_kwargs: dict[str, Any] = {}
+        if self.max_seq_len is not None:
+            backend_kwargs["max_seq_len"] = self.max_seq_len
+        if self.free_gpu_memory_fraction is not None:
+            backend_kwargs["free_gpu_memory_fraction"] = self.free_gpu_memory_fraction
+
+        summary = predict_agg_worker(
+            model=model,
+            backend=backend,
+            database=database,
+            runtime_config=runtime_config,
+            ctx_tokens=ctx_tokens if ctx_tokens is not None else self.isl,
+            scheduler=self.scheduler,
+            **backend_kwargs,
+        )
+        if summary.check_oom():
+            raise RuntimeError(
+                f"OOM at tp={tp} pp={pp} dp={dp} moe_tp={moe_tp} moe_ep={moe_ep} "
+                f"batch_size={batch_size}.  Reduce batch_size, increase parallelism, "
+                "or use a quantized model."
+            )
+        result = summary.get_result_dict()
+        if result is None:
+            raise RuntimeError("run_single_agg produced no result; configuration may be invalid.")
+        return result
+
+    def run_single_disagg(
+        self,
+        *,
+        prefill_tp: int,
+        prefill_pp: int = 1,
+        prefill_dp: int = 1,
+        prefill_moe_tp: int = 1,
+        prefill_moe_ep: int = 1,
+        prefill_batch_size: int = 1,
+        prefill_num_workers: int = 1,
+        decode_tp: int,
+        decode_pp: int = 1,
+        decode_dp: int = 1,
+        decode_moe_tp: int = 1,
+        decode_moe_ep: int = 1,
+        decode_batch_size: int,
+        decode_num_workers: int = 1,
+    ) -> dict:
+        """Evaluate one fixed disagg config point and return its row dict.
+
+        Subsumes the disagg per-point use case from ``cli_estimate``.
+        Reads workload + model_path + quant from the Task; per-role
+        parallelism, batch_size, and num_workers come from args.
+
+        Returns:
+            Row dict in ``common.ColumnsDisagg`` schema (one rate-matched
+            P/D pair).
+
+        Raises:
+            ValueError: if called on an agg Task.
+            RuntimeError: on OOM in either phase.
+        """
+        if self.serving_mode != "disagg":
+            raise ValueError(
+                f"run_single_disagg requires serving_mode='disagg', got {self.serving_mode!r}; "
+                "use run_single_agg for agg."
+            )
+        from aiconfigurator.sdk.backends.factory import get_backend
+        from aiconfigurator.sdk.models import get_model
+        from aiconfigurator.sdk.perf_database import get_database
+        from aiconfigurator.sdk.predict import predict_disagg_phase
+        from aiconfigurator.sdk.sweep import _rate_match_dict
+
+        # --- Prefill phase ---
+        p_mc = self.build_model_config(role="prefill")
+        p_mc.tp_size = prefill_tp
+        p_mc.pp_size = prefill_pp
+        p_mc.attention_dp_size = prefill_dp if self._is_moe else 1
+        p_mc.moe_tp_size = prefill_moe_tp
+        p_mc.moe_ep_size = prefill_moe_ep
+
+        p_rt = self.build_runtime_config(batch_size=prefill_batch_size)
+        p_db = get_database(self.prefill_system_name, self.prefill_backend_name, self.prefill_backend_version)
+        p_backend = get_backend(self.prefill_backend_name)
+        p_model = get_model(self.prefill_model_path, p_mc, self.prefill_backend_name)
+
+        p_summary = predict_disagg_phase(
+            model=p_model,
+            backend=p_backend,
+            database=p_db,
+            runtime_config=p_rt,
+            role="prefill",
+            latency_correction=self.prefill_latency_correction,
+            scheduler=self.scheduler,
+        )
+        if p_summary.check_oom():
+            raise RuntimeError(
+                f"OOM in prefill phase at tp={prefill_tp} pp={prefill_pp} dp={prefill_dp} "
+                f"batch_size={prefill_batch_size}."
+            )
+
+        # --- Decode phase ---
+        d_mc = self.build_model_config(role="decode")
+        d_mc.tp_size = decode_tp
+        d_mc.pp_size = decode_pp
+        d_mc.attention_dp_size = decode_dp if self._is_moe else 1
+        d_mc.moe_tp_size = decode_moe_tp
+        d_mc.moe_ep_size = decode_moe_ep
+
+        d_rt = self.build_runtime_config(batch_size=decode_batch_size)
+        d_db = get_database(self.decode_system_name, self.decode_backend_name, self.decode_backend_version)
+        d_backend = get_backend(self.decode_backend_name)
+        d_model = get_model(self.decode_model_path, d_mc, self.decode_backend_name)
+
+        d_summary = predict_disagg_phase(
+            model=d_model,
+            backend=d_backend,
+            database=d_db,
+            runtime_config=d_rt,
+            role="decode",
+            latency_correction=self.decode_latency_correction,
+            scheduler=self.scheduler,
+        )
+        if d_summary.check_oom():
+            raise RuntimeError(
+                f"OOM in decode phase at tp={decode_tp} pp={decode_pp} dp={decode_dp} batch_size={decode_batch_size}."
+            )
+
+        # --- Rate-match the pair ---
+        p_dict = p_summary.get_summary_df().iloc[0].to_dict()
+        d_dict = d_summary.get_summary_df().iloc[0].to_dict()
+        return _rate_match_dict(p_dict, prefill_num_workers, d_dict, decode_num_workers)
+
 
 __all__ = ["QUANT_PRESETS", "ParallelChoice", "Task"]
