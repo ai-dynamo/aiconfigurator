@@ -49,6 +49,20 @@ def _raise_for_sglang_context_attention_head_size_limit(backend: str, version: s
     )
 
 
+def _raise_for_trtllm_attention_head_size_limit(backend: str, version: str, head_size: int) -> None:
+    if backend != common.BackendName.trtllm.value or head_size <= 256:
+        return
+    parsed_version = common.parse_support_matrix_version(version)
+    max_limited_version = common.parse_support_matrix_version("1.3.0rc10")
+    if parsed_version is None or max_limited_version is None or parsed_version > max_limited_version:
+        return
+    raise RuntimeError(
+        "TRT-LLM attention does not support head_size="
+        f"{head_size} for backend version {version}; "
+        "TRT-LLM MMHA reports: Head size 512 is not supported by MMHA."
+    )
+
+
 # Extrapolation target grids — lifted verbatim from the legacy blocks in
 # ``PerfDatabase.__init__`` so behavior stays bit-identical.
 
@@ -261,6 +275,7 @@ class ContextAttention(Operation):
         if database_mode is None:
             database_mode = database._default_database_mode
         _raise_for_sglang_context_attention_head_size_limit(database.backend, database.version, head_size)
+        _raise_for_trtllm_attention_head_size_limit(database.backend, database.version, head_size)
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
@@ -281,17 +296,71 @@ class ContextAttention(Operation):
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             n_kv_lookup = 0 if n == n_kv else n_kv
             attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
-            result = interpolation.interp_3d(
-                n,
-                full_s,
-                b,
-                attention_dict,
-                "cubic",
-                database._extracted_metrics_cache,
-                allow_singleton_axes=True,
-            )
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            if n in attention_dict and full_s in attention_dict[n] and b in attention_dict[n][full_s]:
+                result = attention_dict[n][full_s][b]
+            elif n in attention_dict:
+                batch_samples = {}
+                batch_keys = sorted({batch_key for seq_dict in attention_dict[n].values() for batch_key in seq_dict})
+                for batch_key in batch_keys:
+                    seq_samples = {
+                        seq_key: seq_dict[batch_key]
+                        for seq_key, seq_dict in attention_dict[n].items()
+                        if batch_key in seq_dict
+                    }
+                    if full_s in seq_samples:
+                        batch_samples[batch_key] = seq_samples[full_s]
+                        continue
+                    seq_keys = sorted(seq_samples)
+                    if len(seq_keys) < 2:
+                        continue
+                    left, right = interpolation.nearest_1d_point_helper(full_s, seq_keys, inner_only=False)
+                    batch_samples[batch_key] = {
+                        metric: interpolation.interp_1d(
+                            [left, right],
+                            [
+                                interpolation.get_value(seq_samples[left], metric),
+                                interpolation.get_value(seq_samples[right], metric),
+                            ],
+                            full_s,
+                        )
+                        for metric in ("latency", "power", "energy")
+                    }
+
+                if b in batch_samples:
+                    result = batch_samples[b]
+                elif len(batch_samples) >= 2:
+                    left, right = interpolation.nearest_1d_point_helper(b, sorted(batch_samples), inner_only=False)
+                    result = {
+                        metric: interpolation.interp_1d(
+                            [left, right],
+                            [
+                                interpolation.get_value(batch_samples[left], metric),
+                                interpolation.get_value(batch_samples[right], metric),
+                            ],
+                            b,
+                        )
+                        for metric in ("latency", "power", "energy")
+                    }
+                else:
+                    result = interpolation.interp_3d(
+                        n,
+                        full_s,
+                        b,
+                        attention_dict,
+                        "cubic",
+                        database._extracted_metrics_cache,
+                    )
+            else:
+                result = interpolation.interp_3d(
+                    n,
+                    full_s,
+                    b,
+                    attention_dict,
+                    "cubic",
+                    database._extracted_metrics_cache,
+                )
+            latency = interpolation.get_value(result, "latency") * prefix_correction
+            energy = interpolation.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -420,12 +489,6 @@ class GenerationAttention(Operation):
 
             cls._correct_sol(database, cls._data_cache[key])
             cls._extrapolate(cls._data_cache[key])
-            # Re-clamp after extrapolation: interpolated/extrapolated grid
-            # points can land below the SOL bound. The legacy init path ran
-            # ``_correct_data()`` a second time which caught these; replicate
-            # that here so standalone ``load_data`` callers get the same
-            # physically-consistent floor.
-            cls._correct_sol(database, cls._data_cache[key])
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -563,6 +626,7 @@ class GenerationAttention(Operation):
 
         if database_mode is None:
             database_mode = database._default_database_mode
+        _raise_for_trtllm_attention_head_size_limit(database.backend, database.version, head_size)
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
@@ -588,9 +652,69 @@ class GenerationAttention(Operation):
             latency_sum = 0.0
             energy_sum = 0.0
             for s_i in s_samples:
-                r = interpolation.interp_3d(n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache)
-                latency_sum += float(r["latency"])
-                energy_sum += float(r.get("energy", 0.0))
+                r = None
+                if n in attention_dict and b in attention_dict[n]:
+                    seq_dict = attention_dict[n][b]
+                    if s_i in seq_dict:
+                        r = seq_dict[s_i]
+                    else:
+                        seq_keys = sorted(seq_dict)
+                        if len(seq_keys) >= 2:
+                            left, right = interpolation.nearest_1d_point_helper(s_i, seq_keys, inner_only=False)
+                            r = {
+                                metric: interpolation.interp_1d(
+                                    [left, right],
+                                    [
+                                        interpolation.get_value(seq_dict[left], metric),
+                                        interpolation.get_value(seq_dict[right], metric),
+                                    ],
+                                    s_i,
+                                )
+                                for metric in ("latency", "power", "energy")
+                            }
+
+                if r is None and n in attention_dict:
+                    batch_dict = {}
+                    for batch_key, seq_dict in attention_dict[n].items():
+                        if s_i in seq_dict:
+                            batch_dict[batch_key] = seq_dict[s_i]
+                            continue
+                        seq_keys = sorted(seq_dict)
+                        if len(seq_keys) < 2:
+                            continue
+                        left, right = interpolation.nearest_1d_point_helper(s_i, seq_keys, inner_only=False)
+                        batch_dict[batch_key] = {
+                            metric: interpolation.interp_1d(
+                                [left, right],
+                                [
+                                    interpolation.get_value(seq_dict[left], metric),
+                                    interpolation.get_value(seq_dict[right], metric),
+                                ],
+                                s_i,
+                            )
+                            for metric in ("latency", "power", "energy")
+                        }
+                    batch_keys = sorted(batch_dict)
+                    if len(batch_keys) >= 2:
+                        left, right = interpolation.nearest_1d_point_helper(b, batch_keys, inner_only=False)
+                        r = {
+                            metric: interpolation.interp_1d(
+                                [left, right],
+                                [
+                                    interpolation.get_value(batch_dict[left], metric),
+                                    interpolation.get_value(batch_dict[right], metric),
+                                ],
+                                b,
+                            )
+                            for metric in ("latency", "power", "energy")
+                        }
+
+                if r is None:
+                    r = interpolation.interp_3d(
+                        n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache
+                    )
+                latency_sum += float(interpolation.get_value(r, "latency"))
+                energy_sum += float(interpolation.get_value(r, "energy"))
 
             latency = latency_sum / sample_cnt
             energy = energy_sum / sample_cnt

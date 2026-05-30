@@ -224,6 +224,7 @@ common_case_values:
       prefix_lengths:
         - 0
         - 128
+        - 256
     generation:
       max_tokens: 33554432
   mla_module_vllm:

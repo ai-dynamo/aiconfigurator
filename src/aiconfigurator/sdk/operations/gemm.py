@@ -215,10 +215,10 @@ class GEMM(Operation):
     def _normalize_gemm_quant_mode_for_table(
         quant_mode: common.GEMMQuantMode,
     ) -> common.GEMMQuantMode:
-        """Normalize modeled GEMM quant modes for perf table lookup.
+        """Normalize GEMM overhead quant modes for perf table lookup.
 
-        ``fp8_static`` is modeled from the dynamic ``fp8`` GEMM row plus
-        separately collected activation-quantization overhead tables.
+        TRT-LLM ``fp8_static`` reuses the dynamic ``fp8`` GEMM table and
+        subtracts compute/scale overheads at query time.
         """
         if quant_mode == common.GEMMQuantMode.fp8_static:
             return common.GEMMQuantMode.fp8
@@ -397,7 +397,11 @@ class GEMM(Operation):
         if database_mode is None:
             database_mode = database._default_database_mode
 
-        table_quant_mode = cls._normalize_gemm_quant_mode_for_table(quant_mode)
+        table_quant_mode = (
+            cls._normalize_gemm_quant_mode_for_table(quant_mode)
+            if database.backend == common.BackendName.trtllm.value
+            else quant_mode
+        )
 
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0, source="sol")
