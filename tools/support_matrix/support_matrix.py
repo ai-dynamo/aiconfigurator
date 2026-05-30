@@ -322,21 +322,30 @@ def _is_known_framework_incompatible_gap(
         if backend == common.BackendName.vllm.value and version == "0.19.0":
             return "unsupported moe quant mode 'nvfp4'" in normalized or "dsa_context_module_perf.txt" in normalized
 
-    if system == "l40s":
-        if backend in {common.BackendName.sglang.value, common.BackendName.vllm.value} and (
-            "unsupported gemm quant mode 'fp8_block'" in normalized
-        ):
-            return True
-
-        if backend == common.BackendName.trtllm.value and ("unsupported moe quant mode 'fp8_block'" in normalized):
-            return True
-
     return (
         model == "moonshotai/Kimi-K2.5"
         and system == "b200_sxm"
         and backend == common.BackendName.trtllm.value
         and version == "1.3.0rc10"
         and "unsupported moe quant mode 'int4_wo'" in normalized
+    )
+
+
+def _is_known_hw_incompatible_gap(
+    *,
+    system: str,
+    error_message: str | None,
+) -> bool:
+    """Return True for deterministic runtime errors caused by GPU capability gaps."""
+    if not error_message:
+        return False
+
+    normalized = error_message.lower()
+    return system == "l40s" and (
+        "unsupported gemm quant mode 'fp8_block'" in normalized
+        or "unsupported moe quant mode 'fp8_block'" in normalized
+        or "quant_mode=<gemmquantmode.fp8_block" in normalized
+        or "quant_mode=<moequantmode.fp8_block" in normalized
     )
 
 
@@ -890,7 +899,12 @@ class SupportMatrix:
                     str(e),
                 )
 
-                if _is_known_framework_incompatible_gap(
+                if _is_known_hw_incompatible_gap(
+                    system=system,
+                    error_message=raw_error,
+                ):
+                    statuses[mode] = STATUS_HW_INCOMPATIBLE
+                elif _is_known_framework_incompatible_gap(
                     model=model,
                     system=system,
                     backend=backend,
