@@ -374,6 +374,12 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("bfloat16", "fp8", "fp8_block"),
     ]
 
+    sglang_sweep = get_mla_module_sweep_spec("sglang")
+    assert 128 in sglang_sweep.context_sequence_lengths
+    assert 129 in sglang_sweep.context_sequence_lengths
+    assert sglang_sweep.context_sequence_lengths[-1] == 16384
+    assert sglang_sweep.generation_sequence_lengths[-1] == 131072
+
     assert {spec.model_path for spec in dsa_specs} == {
         "deepseek-ai/DeepSeek-V3.2",
         "zai-org/GLM-5",
