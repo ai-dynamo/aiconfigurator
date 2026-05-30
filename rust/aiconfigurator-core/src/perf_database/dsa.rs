@@ -30,6 +30,22 @@ pub struct DsaTable {
     data_root: PathBuf,
     context: OnceLock<Result<DsaGrids, AicError>>,
     generation: OnceLock<Result<DsaGrids, AicError>>,
+    /// Lazy per-`(DsaKey, prefix)` Grid3 caches with the exact shape
+    /// `pick_prefix_slice` builds, so warm queries skip the per-call walk
+    /// over the full `num_heads × step × isl × batch` nested map.
+    context_prefix_grids: OnceLock<Result<ContextPrefixCache, AicError>>,
+    /// Lazy per-`DsaKey` Grid3 caches with the exact shape the inline
+    /// generation collapse builds (axes: num_heads, seq=isl+step, batch),
+    /// so warm queries skip the per-call rebuild.
+    generation_grids: OnceLock<Result<GenerationGridCache, AicError>>,
+}
+
+struct ContextPrefixCache {
+    by_keys: BTreeMap<DsaKey, BTreeMap<u32, Grid3<f64>>>,
+}
+
+struct GenerationGridCache {
+    by_keys: BTreeMap<DsaKey, Grid3<f64>>,
 }
 
 /// (arch, fmha, kv, gemm) → num_heads → step → isl → batch → latency.
@@ -64,6 +80,8 @@ impl DsaTable {
             data_root,
             context: OnceLock::new(),
             generation: OnceLock::new(),
+            context_prefix_grids: OnceLock::new(),
+            generation_grids: OnceLock::new(),
         }
     }
 
@@ -81,9 +99,22 @@ impl DsaTable {
         architecture: &str,
         prefix: u32,
     ) -> Result<f64, AicError> {
-        let grids = self.load_context()?;
-        let slice = pick_prefix_slice(grids, architecture, fmha_quant, kv_quant, gemm_quant, prefix)?;
-        interp_2d_1d_grid_extrapolate_inner(&slice, num_heads, full_seq_tokens, b)
+        let cache = self.load_context_prefix_grids()?;
+        let key = DsaKey {
+            architecture: architecture.to_string(),
+            fmha_quant: fmha_quant.name().to_string(),
+            kv_quant: kv_quant.name().to_string(),
+            gemm_quant: gemm_quant.name().to_string(),
+        };
+        let by_prefix = cache.by_keys.get(&key).ok_or_else(|| {
+            AicError::PerfDatabase(format!("context DSA module data missing for {key:?}"))
+        })?;
+        let slice = by_prefix.get(&prefix).ok_or_else(|| {
+            AicError::PerfDatabase(format!(
+                "context DSA module data missing for prefix={prefix}, {key:?}"
+            ))
+        })?;
+        interp_2d_1d_grid_extrapolate_inner(slice, num_heads, full_seq_tokens, b)
     }
 
     /// Raw generation-DSA module latency. `sequence_tokens = isl + step`
@@ -98,40 +129,24 @@ impl DsaTable {
         gemm_quant: GemmQuantMode,
         architecture: &str,
     ) -> Result<f64, AicError> {
-        let grids = self.load_generation()?;
+        let cache = self.load_generation_grids()?;
         let key = DsaKey {
             architecture: architecture.to_string(),
             fmha_quant: fmha_quant.name().to_string(),
             kv_quant: kv_quant.name().to_string(),
             gemm_quant: gemm_quant.name().to_string(),
         };
-        let by_heads = grids
+        let grid = cache
             .by_keys
             .get(&key)
             .ok_or_else(|| missing("generation DSA module", &self.data_root, format!("{key:?}")))?;
-        // Generation: collapse `step` into `seq_tokens = isl + step` then 3D-interp.
-        let mut grid: Grid3<f64> = BTreeMap::new();
-        for (&n, by_step) in by_heads {
-            for (&step, by_isl) in by_step {
-                for (&isl, by_batch) in by_isl {
-                    let seq = isl + step;
-                    for (&bb, &lat) in by_batch {
-                        grid.entry(n)
-                            .or_default()
-                            .entry(seq)
-                            .or_default()
-                            .insert(bb, lat);
-                    }
-                }
-            }
-        }
         // Grid axis order: outer = num_heads, middle = seq_tokens, inner = batch.
         // Uses the extrapolating variant because Python pre-extends both
         // axes via `_extrapolate` before interpolation; linear extrapolation
         // here from the boundary pair gives the same numeric result for the
         // out-of-envelope queries that show up on sparser backend tables
         // (e.g. SGLang DSv32 at low num_heads).
-        interp_2d_1d_grid_extrapolate_inner(&grid, num_heads, sequence_tokens, b)
+        interp_2d_1d_grid_extrapolate_inner(grid, num_heads, sequence_tokens, b)
     }
 
     /// Return the raw nested context grids for a given key, exposed so the
@@ -154,43 +169,66 @@ impl DsaTable {
             .get_or_init(|| load_dsa_csv(&self.data_root.join("dsa_generation_module_perf.txt")));
         cell.as_ref().map_err(clone_err)
     }
+
+    fn load_context_prefix_grids(&self) -> Result<&ContextPrefixCache, AicError> {
+        let cell = self.context_prefix_grids.get_or_init(|| {
+            let grids = self.load_context()?;
+            Ok(build_context_prefix_cache(grids))
+        });
+        cell.as_ref().map_err(clone_err)
+    }
+
+    fn load_generation_grids(&self) -> Result<&GenerationGridCache, AicError> {
+        let cell = self.generation_grids.get_or_init(|| {
+            let grids = self.load_generation()?;
+            Ok(build_generation_grid_cache(grids))
+        });
+        cell.as_ref().map_err(clone_err)
+    }
 }
 
-fn pick_prefix_slice(
-    grids: &DsaGrids,
-    architecture: &str,
-    fmha: FmhaQuantMode,
-    kv: KvCacheQuantMode,
-    gemm: GemmQuantMode,
-    prefix: u32,
-) -> Result<Grid3<f64>, AicError> {
-    let key = DsaKey {
-        architecture: architecture.to_string(),
-        fmha_quant: fmha.name().to_string(),
-        kv_quant: kv.name().to_string(),
-        gemm_quant: gemm.name().to_string(),
-    };
-    let by_heads = grids
-        .by_keys
-        .get(&key)
-        .ok_or_else(|| AicError::PerfDatabase(format!("context DSA module data missing for {key:?}")))?;
-
-    let mut slice: Grid3<f64> = BTreeMap::new();
-    for (&n, by_step) in by_heads {
-        if let Some(by_isl) = by_step.get(&prefix) {
-            for (&isl, by_batch) in by_isl {
-                for (&bb, &lat) in by_batch {
-                    slice.entry(n).or_default().entry(isl).or_default().insert(bb, lat);
+/// Materialise the per-`(DsaKey, prefix)` `Grid3` shape that `query_context`
+/// needs (axes: num_heads, isl, batch). Exact reproduction of the historical
+/// `pick_prefix_slice` loop so numerics are identical.
+fn build_context_prefix_cache(grids: &DsaGrids) -> ContextPrefixCache {
+    let mut by_keys: BTreeMap<DsaKey, BTreeMap<u32, Grid3<f64>>> = BTreeMap::new();
+    for (key, by_heads) in &grids.by_keys {
+        let entry = by_keys.entry(key.clone()).or_default();
+        for (&n, by_step) in by_heads {
+            for (&prefix, by_isl) in by_step {
+                let slice = entry.entry(prefix).or_default();
+                for (&isl, by_batch) in by_isl {
+                    for (&bb, &lat) in by_batch {
+                        slice.entry(n).or_default().entry(isl).or_default().insert(bb, lat);
+                    }
                 }
             }
         }
     }
-    if slice.is_empty() {
-        return Err(AicError::PerfDatabase(format!(
-            "context DSA module data missing for prefix={prefix}, {key:?}"
-        )));
+    ContextPrefixCache { by_keys }
+}
+
+/// Materialise the per-`DsaKey` `Grid3` shape that `query_generation` needs
+/// (axes: num_heads, seq=isl+step, batch). Iterates the same already-loaded
+/// nested map in the same BTreeMap-sorted order, so the last-write-wins
+/// semantics on `seq` ties (largest step wins) are identical to the pre-fix
+/// per-call rebuild.
+fn build_generation_grid_cache(grids: &DsaGrids) -> GenerationGridCache {
+    let mut by_keys: BTreeMap<DsaKey, Grid3<f64>> = BTreeMap::new();
+    for (key, by_heads) in &grids.by_keys {
+        let grid = by_keys.entry(key.clone()).or_default();
+        for (&n, by_step) in by_heads {
+            for (&step, by_isl) in by_step {
+                for (&isl, by_batch) in by_isl {
+                    let seq = isl + step;
+                    for (&bb, &lat) in by_batch {
+                        grid.entry(n).or_default().entry(seq).or_default().insert(bb, lat);
+                    }
+                }
+            }
+        }
     }
-    Ok(slice)
+    GenerationGridCache { by_keys }
 }
 
 fn load_dsa_csv(path: &Path) -> Result<DsaGrids, AicError> {
