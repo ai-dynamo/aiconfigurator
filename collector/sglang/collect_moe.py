@@ -189,8 +189,9 @@ def get_moe_test_cases():
             "w4a8_mxfp4_mxfp8",
         ]
     else:
-        # SGLang 0.5.10 routes many nvfp4 MoE cases through FlashInfer paths
-        # that were not validated on SM120.
+        # SGLang 0.5.10 routes nvfp4 MoE through a FlashInfer TRT-LLM path that
+        # fails on SM120 before perf data is produced, so do not collect it by
+        # default for RTX PRO 6000 Server.
         # GPT-OSS W4A16 MXFP4 uses SGLang's MXFP4 MoE path instead, so keep it
         # enabled for SM120 and let model quantization policy filter it to GPT-OSS.
         moe_list = ["bfloat16", "fp8_block", "int4_wo", "w4a16_mxfp4"]

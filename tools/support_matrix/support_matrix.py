@@ -303,6 +303,24 @@ def _framework_incompatible_gap_evidence(
             "../../utils/layout.hpp:56): Unknown recipe."
         )
 
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and "unsupported moe quant mode 'nvfp4'" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: SGLang 0.5.10 NVFP4 MoE on RTX Pro 6000 Server "
+            "(SM120) fails inside the SGLang runtime before a collectable perf row is "
+            "produced. Forced validation on an 8-GPU RTX Pro 6000 Server Brev node with "
+            "lmsysorg/sglang:v0.5.10-cu130 ran the SGLang MoE collector path for this "
+            "model's nvfp4 expert shape and failed in collector/sglang/collect_moe.py -> "
+            "sglang.srt.layers.moe.moe_runner.flashinfer_trtllm with ImportError: cannot "
+            "import name 'get_activation_type'. This is a SGLang 0.5.10 runtime "
+            "incompatibility for the NVFP4 MoE path on this GPU, not an untested AIC "
+            "support-matrix parallelism shape."
+        )
+
     return None
 
 
