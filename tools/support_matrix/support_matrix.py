@@ -110,6 +110,11 @@ class HardwareIncompatibility:
 
 
 @dataclass(frozen=True)
+class FrameworkIncompatibility:
+    reason: str
+
+
+@dataclass(frozen=True)
 class TaskAttempt:
     name: str
     yaml_config: dict | None = None
@@ -424,6 +429,56 @@ def get_hardware_incompatibility(
         missing_datatypes=missing,
         reason=f"{_gpu_label(system, system_spec)} does not support {datatype_text} required by {model}",
     )
+
+
+def get_framework_incompatibility(
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    version: str,
+    system_spec: dict,
+) -> FrameworkIncompatibility | None:
+    """Return deterministic framework/runtime gaps verified by collector runs."""
+    sm_version = (system_spec.get("gpu") or {}).get("sm_version")
+    if sm_version != 103 or backend != common.BackendName.sglang.value or version != "0.5.10":
+        return None
+
+    if model == "google/gemma-4-26B-A4B":
+        return FrameworkIncompatibility(
+            reason=(
+                f"{_gpu_label(system, system_spec)} SGLang 0.5.10 context attention is missing the "
+                "TRTLLM-GEN kernel for Gemma4 head_dim=512."
+            )
+        )
+
+    if model == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4":
+        return FrameworkIncompatibility(
+            reason=(
+                f"{_gpu_label(system, system_spec)} SGLang 0.5.10 NVFP4 MoE rejects Nemotron-3 Super "
+                "latent-MoE shape hidden_size=1024, inter_size=2688, moe_tp_size=8 because the local "
+                "intermediate size 336 is not divisible by 32."
+            )
+        )
+
+    if model == "sgl-project/DeepSeek-V4-Pro-FP8":
+        return FrameworkIncompatibility(
+            reason=(
+                f"{_gpu_label(system, system_spec)} SGLang 0.5.10 cannot run the DeepSeek-V4 Pro-FP8 "
+                "mHC collector/runtime path for hidden_size=7168, hc_mult=4 without newer SGLang "
+                "kernel and TileLang support."
+            )
+        )
+
+    if model == "XiaomiMiMo/MiMo-V2-Flash":
+        return FrameworkIncompatibility(
+            reason=(
+                f"{_gpu_label(system, system_spec)} SGLang 0.5.10 Triton context attention fails to compile "
+                "the MiMo h=192 FP8 GQA shape used by this matrix row."
+            )
+        )
+
+    return None
 
 
 @contextmanager
@@ -833,6 +888,21 @@ class SupportMatrix:
             if incompatibility is not None:
                 reason = _format_exception_for_csv(incompatibility.reason)
                 statuses = dict.fromkeys(modes_to_test, STATUS_HW_INCOMPATIBLE)
+                error_messages = dict.fromkeys(modes_to_test, reason)
+                if include_commands:
+                    return statuses, error_messages, commands
+                return statuses, error_messages
+
+            framework_incompatibility = get_framework_incompatibility(
+                model=model,
+                system=system,
+                backend=backend,
+                version=version,
+                system_spec=system_spec,
+            )
+            if framework_incompatibility is not None:
+                reason = _format_exception_for_csv(framework_incompatibility.reason)
+                statuses = dict.fromkeys(modes_to_test, STATUS_FRAMEWORK_INCOMPATIBLE)
                 error_messages = dict.fromkeys(modes_to_test, reason)
                 if include_commands:
                     return statuses, error_messages, commands

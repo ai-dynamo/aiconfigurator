@@ -133,6 +133,37 @@ framework_specific_op_cases:
         window_sizes:
         - 0
         - 1024
+      - id: sglang_gemma4_head_dim_512_generation
+        batch_sizes:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 16
+        sequence_lengths:
+        - 128
+        - 256
+        - 512
+        - 1024
+        - 2048
+        mha_query_head_counts:
+        - 2
+        xqa_query_head_counts:
+        - 2
+        kv_head_counts:
+        - 1
+        head_dims:
+        - 512
+        window_sizes:
+        - 0
+        - 1024
+        max_mha_tokens_per_step: 8388608
+        max_xqa_tokens_per_step: 16777216
+        min_batch_options_per_sequence: 1
+        drop_largest_sequence_for_batch_at_least: 256
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
   trtllm:
     attention_generation:
       cases:

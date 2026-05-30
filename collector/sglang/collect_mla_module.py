@@ -1105,6 +1105,7 @@ def _run_prefill(
     from sglang.srt.sampling.sampling_params import SamplingParams
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
     from sglang.srt.utils import BumpAllocator
+
     try:
         from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
 
@@ -1616,6 +1617,7 @@ def _run_decode(
     from sglang.srt.sampling.sampling_params import SamplingParams
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
     from sglang.srt.utils import BumpAllocator
+
     try:
         from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
 

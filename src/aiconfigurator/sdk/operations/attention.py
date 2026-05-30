@@ -267,7 +267,7 @@ class ContextAttention(Operation):
             attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
 
             lookup_s = full_s
-            available_s = {observed_s for per_n_data in attention_dict.values() for observed_s in per_n_data.keys()}
+            available_s = {observed_s for per_n_data in attention_dict.values() for observed_s in per_n_data}
             if lookup_s not in available_s and available_s:
                 nearest_s = min(available_s, key=lambda observed_s: abs(observed_s - lookup_s))
                 if abs(nearest_s - lookup_s) <= max(1, int(lookup_s * 0.01)):
