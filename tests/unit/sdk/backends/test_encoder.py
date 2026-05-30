@@ -569,7 +569,7 @@ class TestEncoderMemoryInSummary:
         assert enc_mem["weights"] > 0.0
         assert enc_mem["activations"] > 0.0
 
-    def test_vl_model_without_image_dimensions_skips_encoder_ops(self, model_config):
+    def test_vl_model_with_image_count_without_shape_skips_encoder_ops(self, model_config):
         """VL model with no image shape behaves like a text-only request."""
         from types import SimpleNamespace
         from unittest.mock import MagicMock
