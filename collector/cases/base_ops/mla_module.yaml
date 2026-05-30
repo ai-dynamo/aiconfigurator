@@ -74,6 +74,10 @@ common_case_values:
         kv_cache_dtype: fp8
         gemm_type: bfloat16
         min_sm: 90
+      - compute_dtype: bfloat16
+        kv_cache_dtype: bfloat16
+        gemm_type: fp8_block
+        min_sm: 90
     generation_sequence_lengths:
       - 1
       - 4
