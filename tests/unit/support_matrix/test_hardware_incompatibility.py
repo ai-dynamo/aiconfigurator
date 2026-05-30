@@ -9,6 +9,7 @@ from tools.support_matrix.support_matrix import (
     STATUS_HW_INCOMPATIBLE,
     STATUS_PASS,
     SupportMatrix,
+    get_framework_incompatibility,
     get_hardware_incompatibility,
 )
 
@@ -72,17 +73,21 @@ def test_fp4_model_is_hardware_incompatible_without_fp4_support():
     assert "does not support FP4" in incompatibility.reason
 
 
-def test_sglang_dsa_model_is_hardware_incompatible_below_sm90():
+@pytest.mark.parametrize(("system", "sm_version"), [("a100_sxm", 80), ("l40s", 89)])
+def test_sglang_dsa_model_is_hardware_incompatible_below_sm90(system, sm_version):
     incompatibility = get_hardware_incompatibility(
         model="zai-org/GLM-5",
-        system="l40s",
+        system=system,
         backend="sglang",
-        system_spec=_system_spec(sm_version=89, fp8=True),
+        system_spec=_system_spec(sm_version=sm_version, fp8=True),
     )
 
     assert incompatibility is not None
-    assert incompatibility.missing_datatypes == ()
-    assert "SGLang DSA/NSA module collectors require SM90+" in incompatibility.reason
+    assert incompatibility.missing_datatypes == ("SGLang DSA",)
+    assert (
+        incompatibility.reason
+        == f"{system} (SM{sm_version}) does not support SGLang DSA attention required by zai-org/GLM-5"
+    )
 
 
 def test_sglang_dsa_model_is_allowed_on_sm90_plus():
@@ -94,6 +99,35 @@ def test_sglang_dsa_model_is_allowed_on_sm90_plus():
     )
 
     assert incompatibility is None
+
+
+@pytest.mark.parametrize("model", ["openai/gpt-oss-20b", "openai/gpt-oss-120b"])
+def test_gpt_oss_mxfp4_model_is_hardware_incompatible_on_sm80(model):
+    incompatibility = get_hardware_incompatibility(
+        model=model,
+        system="a100_sxm",
+        backend="sglang",
+        system_spec=_system_spec(sm_version=80),
+    )
+
+    assert incompatibility is not None
+    assert incompatibility.missing_datatypes == ("MXFP4",)
+    assert f"does not support MXFP4/FP4 required by {model}" in incompatibility.reason
+
+
+def test_gemma4_sglang_flashattention_limit_is_framework_incompatible_on_sm80():
+    incompatibility = get_framework_incompatibility(
+        model="google/gemma-4-26B-A4B",
+        system="a100_sxm",
+        backend="sglang",
+        version="0.5.10",
+        system_spec=_system_spec(sm_version=80),
+    )
+
+    assert incompatibility is not None
+    assert "cannot collect FlashAttention data" in incompatibility.reason
+    assert "head_dim=512" in incompatibility.reason
+    assert "FlashAttention forward only supports head dimension at most 256" in incompatibility.reason
 
 
 @pytest.mark.parametrize("model", ["openai/gpt-oss-20b", "openai/gpt-oss-120b"])
@@ -145,6 +179,25 @@ def test_run_single_test_propagates_hardware_preflight_failures(monkeypatch):
             version="0.5.12",
             system_spec=_system_spec(sm_version=89, fp8=True),
         )
+
+
+def test_run_single_test_short_circuits_framework_incompatible_model(monkeypatch):
+    def fail_run_mode(**_kwargs):
+        raise AssertionError("TaskRunner should not run for framework-incompatible combinations")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
+
+    status_dict, error_dict = SupportMatrix.run_single_test(
+        model="google/gemma-4-26B-A4B",
+        system="a100_sxm",
+        backend="sglang",
+        version="0.5.10",
+        system_spec=_system_spec(sm_version=80),
+    )
+
+    assert status_dict == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert "cannot collect FlashAttention data" in error_dict["agg"]
+    assert STATUS_PASS not in status_dict.values()
 
 
 @pytest.mark.parametrize(

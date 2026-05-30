@@ -80,6 +80,8 @@ _FRONTIER_ENVELOPE_COLUMNS = {
 _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
+_SGLANG_DSA_ARCHITECTURES = frozenset({"DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"})
+_GPT_OSS_MXFP4_MODELS = frozenset({"openai/gpt-oss-20b", "openai/gpt-oss-120b"})
 
 
 def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[tuple[int, str], str, str, str]:
@@ -105,6 +107,11 @@ class TestConstraints:
 @dataclass(frozen=True)
 class HardwareIncompatibility:
     missing_datatypes: tuple[str, ...]
+    reason: str
+
+
+@dataclass(frozen=True)
+class FrameworkIncompatibility:
     reason: str
 
 
@@ -333,6 +340,16 @@ def _gpu_supports_datatype(system: str, system_spec: dict, datatype: str) -> boo
     return True
 
 
+def _gpu_supports_sglang_dsa(system_spec: dict) -> bool:
+    sm_version = (system_spec.get("gpu") or {}).get("sm_version")
+    return sm_version is not None and sm_version >= 90
+
+
+def _gpu_supports_gpt_oss_mxfp4(system_spec: dict) -> bool:
+    sm_version = (system_spec.get("gpu") or {}).get("sm_version")
+    return sm_version is not None and sm_version >= 89
+
+
 def _required_datatypes_for_model(model: str, backend: str) -> tuple[str, ...]:
     """Infer hardware datatypes required by a model's quantization metadata."""
     model_info = dict(_get_model_info(model))
@@ -375,32 +392,66 @@ def get_hardware_incompatibility(
 ) -> HardwareIncompatibility | None:
     """Return a deterministic hardware/model datatype incompatibility, if any."""
     model_info = dict(_get_model_info(model))
-    gpu_spec = system_spec.get("gpu") or {}
-    sm_version = gpu_spec.get("sm_version")
-    if (
-        backend == common.BackendName.sglang.value
-        and model_info["architecture"] in {"DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"}
-        and sm_version is not None
-        and sm_version < 90
-    ):
-        return HardwareIncompatibility(
-            missing_datatypes=(),
-            reason=(
-                f"{_gpu_label(system, system_spec)} does not support SGLang DSA/NSA module collectors "
-                f"required by {model}; SGLang DSA/NSA module collectors require SM90+."
-            ),
-        )
-
     required_datatypes = _required_datatypes_for_model(model, backend)
     missing = tuple(dt for dt in required_datatypes if not _gpu_supports_datatype(system, system_spec, dt))
-    if not missing:
-        return None
+    if missing:
+        datatype_text = _format_datatype_list(missing)
+        return HardwareIncompatibility(
+            missing_datatypes=missing,
+            reason=f"{_gpu_label(system, system_spec)} does not support {datatype_text} required by {model}",
+        )
 
-    datatype_text = _format_datatype_list(missing)
-    return HardwareIncompatibility(
-        missing_datatypes=missing,
-        reason=f"{_gpu_label(system, system_spec)} does not support {datatype_text} required by {model}",
-    )
+    if model in _GPT_OSS_MXFP4_MODELS and not _gpu_supports_gpt_oss_mxfp4(system_spec):
+        return HardwareIncompatibility(
+            missing_datatypes=("MXFP4",),
+            reason=f"{_gpu_label(system, system_spec)} does not support MXFP4/FP4 required by {model}",
+        )
+
+    if (
+        backend == common.BackendName.sglang.value
+        and model_info["architecture"] in _SGLANG_DSA_ARCHITECTURES
+        and not _gpu_supports_sglang_dsa(system_spec)
+    ):
+        return HardwareIncompatibility(
+            missing_datatypes=("SGLang DSA",),
+            reason=f"{_gpu_label(system, system_spec)} does not support SGLang DSA attention required by {model}",
+        )
+
+    return None
+
+
+def get_framework_incompatibility(
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    version: str,
+    system_spec: dict,
+) -> FrameworkIncompatibility | None:
+    """Return deterministic framework/runtime incompatibilities discovered during collection."""
+    model_info = dict(_get_model_info(model))
+    extra_params = model_info.get("extra_params")
+    global_head_dim = getattr(extra_params, "global_head_dim", None)
+    sm_version = (system_spec.get("gpu") or {}).get("sm_version")
+
+    if (
+        backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and model_info["architecture"] == "Gemma4ForConditionalGeneration"
+        and global_head_dim is not None
+        and global_head_dim > 256
+        and sm_version is not None
+        and sm_version < 100
+    ):
+        return FrameworkIncompatibility(
+            reason=(
+                f"SGLang {version} cannot collect FlashAttention data for {model} on {_gpu_label(system, system_spec)}: "
+                f"Gemma4 global attention uses head_dim={global_head_dim}, but SGLang raises "
+                "RuntimeError('FlashAttention forward only supports head dimension at most 256')"
+            )
+        )
+
+    return None
 
 
 @contextmanager
@@ -805,6 +856,25 @@ class SupportMatrix:
             if incompatibility is not None:
                 reason = _format_exception_for_csv(incompatibility.reason)
                 statuses = dict.fromkeys(modes_to_test, STATUS_HW_INCOMPATIBLE)
+                error_messages = dict.fromkeys(modes_to_test, reason)
+                if include_commands:
+                    return statuses, error_messages, commands
+                return statuses, error_messages
+
+            try:
+                framework_incompatibility = get_framework_incompatibility(
+                    model=model,
+                    system=system,
+                    backend=backend,
+                    version=version,
+                    system_spec=system_spec,
+                )
+            except Exception:
+                logger.exception("Framework compatibility preflight failed for %s on %s/%s", model, system, backend)
+                framework_incompatibility = None
+            if framework_incompatibility is not None:
+                reason = _format_exception_for_csv(framework_incompatibility.reason)
+                statuses = dict.fromkeys(modes_to_test, STATUS_FRAMEWORK_INCOMPATIBLE)
                 error_messages = dict.fromkeys(modes_to_test, reason)
                 if include_commands:
                     return statuses, error_messages, commands
