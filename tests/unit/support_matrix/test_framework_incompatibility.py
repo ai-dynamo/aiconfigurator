@@ -110,7 +110,7 @@ def test_l40s_sm89_fp8_block_gemm_gap_is_framework_incompatible(monkeypatch, bac
         system_spec=_l40s_system_spec(),
     )
 
-    assert statuses == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
     assert "Unsupported gemm quant mode 'fp8_block'" in errors["agg"]
 
 
@@ -129,7 +129,7 @@ def test_l40s_trtllm_fp8_block_moe_gap_is_framework_incompatible(monkeypatch):
         system_spec=_l40s_system_spec(),
     )
 
-    assert statuses == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
     assert "Unsupported moe quant mode 'fp8_block'" in errors["disagg"]
 
 
