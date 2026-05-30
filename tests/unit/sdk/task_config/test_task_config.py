@@ -441,6 +441,97 @@ def test_run_rejects_autoscale_in_agg_mode():
         t.run(autoscale=True)
 
 
+def test_run_forwards_scheduler_field_to_sweep_agg(monkeypatch):
+    """Task.scheduler is plumbed into sweep_agg's scheduler kwarg."""
+    from aiconfigurator.sdk import sweep
+
+    captured: dict = {}
+
+    def fake_get_database(*a, **kw):
+        return "db"
+
+    def fake_sweep_agg(**kwargs):
+        captured["scheduler"] = kwargs.get("scheduler")
+        return "agg-result"
+
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr(sweep, "sweep_agg", fake_sweep_agg)
+
+    from aiconfigurator.sdk.scheduler import StaticScheduler
+
+    custom = StaticScheduler()  # any Scheduler-compatible object
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        scheduler=custom,
+    )
+    t.run()
+    assert captured["scheduler"] is custom
+
+
+def test_run_forwards_scheduler_field_to_sweep_disagg(monkeypatch):
+    """Task.scheduler is plumbed into sweep_disagg's scheduler kwarg."""
+    from aiconfigurator.sdk import sweep
+
+    captured: dict = {}
+
+    def fake_get_database(*a, **kw):
+        return "db"
+
+    def fake_sweep_disagg(**kwargs):
+        captured["scheduler"] = kwargs.get("scheduler")
+        return "disagg-result"
+
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr(sweep, "sweep_disagg", fake_sweep_disagg)
+
+    from aiconfigurator.sdk.scheduler import StaticScheduler
+
+    custom = StaticScheduler()
+    t = Task(
+        serving_mode="disagg",
+        prefill_model_path="deepseek-ai/DeepSeek-V3",
+        prefill_system_name="h200_sxm",
+        decode_model_path="deepseek-ai/DeepSeek-V3",
+        decode_system_name="h200_sxm",
+        scheduler=custom,
+    )
+    t.run()
+    assert captured["scheduler"] is custom
+
+
+def test_to_dict_skips_scheduler_strategy_field():
+    """Strategy fields (Python objects) shouldn't appear in to_dict / YAML output."""
+    from aiconfigurator.sdk.scheduler import StaticScheduler
+
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        scheduler=StaticScheduler(),
+    )
+    d = t.to_dict()
+    assert "scheduler" not in d
+
+
+def test_from_yaml_warns_and_skips_scheduler_key(caplog):
+    """YAML can't construct a Scheduler; from_yaml warns and ignores the key."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        t = Task.from_yaml(
+            {
+                "serving_mode": "agg",
+                "model_path": "deepseek-ai/DeepSeek-V3",
+                "system_name": "h200_sxm",
+                "scheduler": "MockerScheduler",  # not a real object
+            }
+        )
+    assert "scheduler" in caplog.text
+    assert t.scheduler is None  # default kept; YAML value ignored
+
+
 # ---------------------------------------------------------------------------
 # validate()
 # ---------------------------------------------------------------------------
