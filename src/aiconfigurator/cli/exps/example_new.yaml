@@ -177,5 +177,18 @@ disagg_full:
   max_decode_workers: 32
   prefill_max_batch_size: 1
   decode_max_batch_size: 512
+
+  # Per-phase latency-correction multipliers, applied inside the static
+  # disagg scheduler.  Defaults are silicon-calibrated.
   prefill_latency_correction: 1.1
   decode_latency_correction: 1.08
+
+  # Rate-matching degradation factors model the practical P/D throughput
+  # loss under (P_workers, D_workers) pairing.  Defaults are silicon-calibrated.
+  rate_match_prefill_degradation: 0.9
+  rate_match_decode_degradation: 0.92
+
+  # TTFT pre-correction applied to prefill candidates before the SLA filter,
+  # modeling queueing-under-concurrency in the deployed system.
+  # Used by both the constraint-mode search and ``pick_autoscale``.
+  autoscale_ttft_correction_factor: 1.8
