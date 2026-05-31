@@ -23,7 +23,7 @@ Design:
   kwargs needed by :mod:`aiconfigurator.sdk.sweep` — no caller
   marshalling required.
 
-See ``cli/exps/example_new.yaml`` for the canonical YAML format.
+See ``src/aiconfigurator/cli/exps/example_new.yaml`` for the canonical YAML format.
 """
 
 from __future__ import annotations
