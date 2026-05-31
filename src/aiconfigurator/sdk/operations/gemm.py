@@ -141,6 +141,12 @@ class GEMM(Operation):
             # of ``GEMM.load_data`` get the legacy single-pass semantics.
             cls._correct_sol(database, gemm_loaded)
             cls._extrapolate_gemm_data(gemm_loaded)
+            # Re-clamp after extrapolation: interpolated/extrapolated grid
+            # points can land below the SOL bound. The legacy init path ran
+            # ``_correct_data()`` a second time which caught these; replicate
+            # that here so standalone ``load_data`` callers get the same
+            # physically-consistent floor.
+            cls._correct_sol(database, gemm_loaded)
 
             # All three loads + correction + extrapolation succeeded — commit
             # atomically so partially-populated cache state can never be observed.
