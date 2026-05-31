@@ -38,12 +38,6 @@ pub enum AicError {
         #[source]
         source: std::io::Error,
     },
-    #[error("CSV error at {path}: {source}")]
-    Csv {
-        path: PathBuf,
-        #[source]
-        source: csv::Error,
-    },
     #[error("JSON error at {path}: {source}")]
     Json {
         path: PathBuf,
@@ -55,6 +49,12 @@ pub enum AicError {
         path: PathBuf,
         #[source]
         source: serde_yaml::Error,
+    },
+    #[error("Parquet error at {path}: {source}")]
+    Parquet {
+        path: PathBuf,
+        #[source]
+        source: parquet::errors::ParquetError,
     },
 }
 

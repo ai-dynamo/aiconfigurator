@@ -20,15 +20,13 @@
 //! back transparently.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-
-use serde::Deserialize;
 
 use crate::common::enums::CommQuantMode;
 use crate::common::error::AicError;
 use crate::interpolation::{interp_1d, nearest_neighbors};
+use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct CommunicationTable {
     data_root: PathBuf,
@@ -45,26 +43,6 @@ struct CustomAllReduceGrids {
 struct NcclGrids {
     /// (dtype_name, operation, num_gpus) -> {message_size -> latency_ms}
     by_keys: BTreeMap<(String, String, u32), BTreeMap<u64, f64>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CustomAllReduceRow {
-    kernel_source: Option<String>,
-    allreduce_dtype: String,
-    num_gpus: u32,
-    message_size: u64,
-    latency: f64,
-    #[serde(default)]
-    backend: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NcclRow {
-    op_name: String,
-    nccl_dtype: String,
-    num_gpus: u32,
-    message_size: u64,
-    latency: f64,
 }
 
 impl CommunicationTable {
@@ -164,7 +142,7 @@ impl CommunicationTable {
 
     fn load_custom_allreduce(&self) -> Result<&CustomAllReduceGrids, AicError> {
         let cell = self.custom_allreduce.get_or_init(|| {
-            load_custom_allreduce_csv(&self.data_root.join("custom_allreduce_perf.txt"))
+            load_custom_allreduce_parquet(&self.data_root.join("custom_allreduce_perf.parquet"))
         });
         cell.as_ref().map_err(clone_err)
     }
@@ -172,14 +150,14 @@ impl CommunicationTable {
     fn load_nccl(&self) -> Result<&NcclGrids, AicError> {
         let cell = self
             .nccl
-            .get_or_init(|| load_nccl_csv(&self.data_root.join("nccl_perf.txt")));
+            .get_or_init(|| load_nccl_parquet(&self.data_root.join("nccl_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_oneccl(&self) -> Result<&NcclGrids, AicError> {
         let cell = self
             .oneccl
-            .get_or_init(|| load_nccl_csv(&self.data_root.join("oneccl_perf.txt")));
+            .get_or_init(|| load_nccl_parquet(&self.data_root.join("oneccl_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
 }
@@ -201,11 +179,13 @@ fn interp_message_size(by_size: &BTreeMap<u64, f64>, message_size: u64) -> Resul
     Ok(interp_1d(lo as f64, hi as f64, y_lo, y_hi, query as f64))
 }
 
-fn load_custom_allreduce_csv(path: &Path) -> Result<CustomAllReduceGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_custom_allreduce_parquet(path: &Path) -> Result<CustomAllReduceGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let num_gpus_col = reader.col("num_gpus")?;
+    let message_size_col = reader.col("message_size")?;
+    let latency_col = reader.col("latency")?;
+    let kernel_source_col = reader.col_optional("kernel_source");
+    let backend_col = reader.col_optional("backend");
 
     // Mirror Python/legacy: skip "_eager" kernel sources on systems other
     // than b60. We can't see the system name from here, so apply the filter
@@ -214,14 +194,11 @@ fn load_custom_allreduce_csv(path: &Path) -> Result<CustomAllReduceGrids, AicErr
     let is_b60 = path_str.contains("/b60/");
 
     let mut by_keys: BTreeMap<(String, u32), BTreeMap<u64, f64>> = BTreeMap::new();
-    for record in reader.deserialize::<CustomAllReduceRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         if !is_b60 {
-            let kernel = row.kernel_source.as_deref().unwrap_or("");
-            let backend = row.backend.as_deref().unwrap_or("");
+            let kernel = row.str_optional(kernel_source_col)?.unwrap_or("");
+            let backend = row.str_optional(backend_col)?.unwrap_or("");
             if kernel.ends_with("_eager") || backend.ends_with("_eager") {
                 continue;
             }
@@ -230,13 +207,12 @@ fn load_custom_allreduce_csv(path: &Path) -> Result<CustomAllReduceGrids, AicErr
         // under `CommQuantMode.half` regardless of the CSV's
         // `allreduce_dtype` column (Python has a `TODO` here but the
         // behavior is stable in production).
-        let _ = row.allreduce_dtype;
         // First-wins parity with Python `load_custom_allreduce_data`.
         by_keys
-            .entry(("half".to_string(), row.num_gpus))
+            .entry(("half".to_string(), row.u32(num_gpus_col)?))
             .or_default()
-            .entry(row.message_size)
-            .or_insert(row.latency);
+            .entry(row.u64(message_size_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -247,24 +223,27 @@ fn load_custom_allreduce_csv(path: &Path) -> Result<CustomAllReduceGrids, AicErr
     Ok(CustomAllReduceGrids { by_keys })
 }
 
-fn load_nccl_csv(path: &Path) -> Result<NcclGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_nccl_parquet(path: &Path) -> Result<NcclGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let op_name_col = reader.col("op_name")?;
+    let nccl_dtype_col = reader.col("nccl_dtype")?;
+    let num_gpus_col = reader.col("num_gpus")?;
+    let message_size_col = reader.col("message_size")?;
+    let latency_col = reader.col("latency")?;
 
     let mut by_keys: BTreeMap<(String, String, u32), BTreeMap<u64, f64>> = BTreeMap::new();
-    for record in reader.deserialize::<NcclRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         // First-wins parity with Python `load_nccl_data`.
         by_keys
-            .entry((row.nccl_dtype, row.op_name, row.num_gpus))
+            .entry((
+                row.str_owned(nccl_dtype_col)?,
+                row.str_owned(op_name_col)?,
+                row.u32(num_gpus_col)?,
+            ))
             .or_default()
-            .entry(row.message_size)
-            .or_insert(row.latency);
+            .entry(row.u64(message_size_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -273,20 +252,6 @@ fn load_nccl_csv(path: &Path) -> Result<NcclGrids, AicError> {
         )));
     }
     Ok(NcclGrids { by_keys })
-}
-
-fn read_perf_file(path: &Path) -> Result<String, AicError> {
-    let text = fs::read_to_string(path).map_err(|source| AicError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if text.starts_with("version https://git-lfs") {
-        return Err(AicError::PerfDatabase(format!(
-            "perf file is an unresolved git-lfs pointer: {}; run `git lfs pull`",
-            path.display()
-        )));
-    }
-    Ok(text)
 }
 
 fn clone_err(err: &AicError) -> AicError {

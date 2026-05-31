@@ -15,15 +15,13 @@
 //! mode is absent, matching Python's `quant_mode_lookup` behavior.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-
-use serde::Deserialize;
 
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::interpolation::{interp_1d, interp_2d_1d_grid, nearest_neighbors, Grid3};
+use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct MlaTable {
     data_root: PathBuf,
@@ -75,38 +73,6 @@ struct ModuleKey {
 struct BmmKey {
     bmm_quant: String,
     pre_or_post: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpRow {
-    mla_dtype: String,
-    kv_cache_dtype: String,
-    num_heads: u32,
-    batch_size: u32,
-    isl: u32,
-    step: u32,
-    latency: f64,
-}
-
-#[derive(Debug, Deserialize)]
-struct ModuleRow {
-    mla_dtype: String,
-    kv_cache_dtype: String,
-    gemm_type: String,
-    num_heads: u32,
-    batch_size: u32,
-    isl: u32,
-    step: u32,
-    latency: f64,
-}
-
-#[derive(Debug, Deserialize)]
-struct BmmRow {
-    op_name: String,
-    bmm_dtype: String,
-    num_tokens: u32,
-    num_heads: u32,
-    latency: f64,
 }
 
 impl MlaTable {
@@ -259,13 +225,13 @@ impl MlaTable {
     fn load_context(&self) -> Result<&ContextMlaGrids, AicError> {
         let cell = self
             .context
-            .get_or_init(|| load_op_csv(&self.data_root.join("context_mla_perf.txt"), true));
+            .get_or_init(|| load_op_parquet(&self.data_root.join("context_mla_perf.parquet"), true));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_generation(&self) -> Result<&GenerationMlaGrids, AicError> {
         let cell = self.generation.get_or_init(|| {
-            load_op_gen_csv(&self.data_root.join("generation_mla_perf.txt"))
+            load_op_gen_parquet(&self.data_root.join("generation_mla_perf.parquet"))
         });
         cell.as_ref().map_err(clone_err)
     }
@@ -273,52 +239,54 @@ impl MlaTable {
     fn load_bmm(&self) -> Result<&BmmGrids, AicError> {
         let cell = self
             .bmm
-            .get_or_init(|| load_bmm_csv(&self.data_root.join("mla_bmm_perf.txt")));
+            .get_or_init(|| load_bmm_parquet(&self.data_root.join("mla_bmm_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_context_module(&self) -> Result<&ModuleGrids, AicError> {
         let cell = self.context_module.get_or_init(|| {
-            load_module_csv(&self.data_root.join("mla_context_module_perf.txt"), true)
+            load_module_parquet(&self.data_root.join("mla_context_module_perf.parquet"), true)
         });
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_generation_module(&self) -> Result<&ModuleGrids, AicError> {
         let cell = self.generation_module.get_or_init(|| {
-            load_module_csv(&self.data_root.join("mla_generation_module_perf.txt"), false)
+            load_module_parquet(&self.data_root.join("mla_generation_module_perf.parquet"), false)
         });
         cell.as_ref().map_err(clone_err)
     }
 }
 
-fn load_op_csv(path: &Path, is_context: bool) -> Result<ContextMlaGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_op_parquet(path: &Path, is_context: bool) -> Result<ContextMlaGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let mla_dtype_col = reader.col("mla_dtype")?;
+    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+    let num_heads_col = reader.col("num_heads")?;
+    let batch_size_col = reader.col("batch_size")?;
+    let isl_col = reader.col("isl")?;
+    let step_col = reader.col("step")?;
+    let latency_col = reader.col("latency")?;
 
     let mut by_keys: BTreeMap<ContextKey, Grid3<f64>> = BTreeMap::new();
-    for record in reader.deserialize::<OpRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = ContextKey {
-            fmha_quant: row.mla_dtype.clone(),
-            kv_quant: row.kv_cache_dtype.clone(),
+            fmha_quant: row.str_owned(mla_dtype_col)?,
+            kv_quant: row.str_owned(kv_cache_dtype_col)?,
         };
-        let y_axis = if is_context { row.isl } else { row.isl + row.step };
+        let isl = row.u32(isl_col)?;
+        let y_axis = if is_context { isl } else { isl + row.u32(step_col)? };
         // First-wins parity with Python `load_mla_data` (context branch).
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.num_heads)
+            .entry(row.u32(num_heads_col)?)
             .or_default()
             .entry(y_axis)
             .or_default()
-            .entry(row.batch_size)
-            .or_insert(row.latency);
+            .entry(row.u32(batch_size_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -329,33 +297,33 @@ fn load_op_csv(path: &Path, is_context: bool) -> Result<ContextMlaGrids, AicErro
     Ok(ContextMlaGrids { by_keys })
 }
 
-fn load_op_gen_csv(path: &Path) -> Result<GenerationMlaGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_op_gen_parquet(path: &Path) -> Result<GenerationMlaGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+    let num_heads_col = reader.col("num_heads")?;
+    let batch_size_col = reader.col("batch_size")?;
+    let isl_col = reader.col("isl")?;
+    let step_col = reader.col("step")?;
+    let latency_col = reader.col("latency")?;
 
     let mut by_keys: BTreeMap<KvOnlyKey, Grid3<f64>> = BTreeMap::new();
-    for record in reader.deserialize::<OpRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = KvOnlyKey {
-            kv_quant: row.kv_cache_dtype.clone(),
+            kv_quant: row.str_owned(kv_cache_dtype_col)?,
         };
-        let sequence_tokens = row.isl + row.step;
+        let sequence_tokens = row.u32(isl_col)? + row.u32(step_col)?;
         // Python uses (num_heads, b, s) axis order for generation MLA.
         // First-wins parity with Python `load_mla_data` (generation branch).
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.num_heads)
+            .entry(row.u32(num_heads_col)?)
             .or_default()
-            .entry(row.batch_size)
+            .entry(row.u32(batch_size_col)?)
             .or_default()
             .entry(sequence_tokens)
-            .or_insert(row.latency);
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -366,46 +334,52 @@ fn load_op_gen_csv(path: &Path) -> Result<GenerationMlaGrids, AicError> {
     Ok(GenerationMlaGrids { by_keys })
 }
 
-fn load_module_csv(path: &Path, is_context: bool) -> Result<ModuleGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_module_parquet(path: &Path, is_context: bool) -> Result<ModuleGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let mla_dtype_col = reader.col("mla_dtype")?;
+    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+    let gemm_type_col = reader.col("gemm_type")?;
+    let num_heads_col = reader.col("num_heads")?;
+    let batch_size_col = reader.col("batch_size")?;
+    let isl_col = reader.col("isl")?;
+    let step_col = reader.col("step")?;
+    let latency_col = reader.col("latency")?;
 
     let mut by_keys: BTreeMap<ModuleKey, Grid3<f64>> = BTreeMap::new();
-    for record in reader.deserialize::<ModuleRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = ModuleKey {
-            fmha_quant: row.mla_dtype.clone(),
-            kv_quant: row.kv_cache_dtype.clone(),
-            gemm_quant: row.gemm_type.clone(),
+            fmha_quant: row.str_owned(mla_dtype_col)?,
+            kv_quant: row.str_owned(kv_cache_dtype_col)?,
+            gemm_quant: row.str_owned(gemm_type_col)?,
         };
+        let num_heads = row.u32(num_heads_col)?;
+        let batch_size = row.u32(batch_size_col)?;
+        let isl = row.u32(isl_col)?;
+        let latency = row.f64(latency_col)?;
         // First-wins parity with Python `load_mla_module_data`.
         if is_context {
             by_keys
                 .entry(key)
                 .or_default()
-                .entry(row.num_heads)
+                .entry(num_heads)
                 .or_default()
-                .entry(row.isl)
+                .entry(isl)
                 .or_default()
-                .entry(row.batch_size)
-                .or_insert(row.latency);
+                .entry(batch_size)
+                .or_insert(latency);
         } else {
             // Generation module: (num_heads, b, s) axis order.
-            let sequence_tokens = row.isl + row.step;
+            let sequence_tokens = isl + row.u32(step_col)?;
             by_keys
                 .entry(key)
                 .or_default()
-                .entry(row.num_heads)
+                .entry(num_heads)
                 .or_default()
-                .entry(row.batch_size)
+                .entry(batch_size)
                 .or_default()
                 .entry(sequence_tokens)
-                .or_insert(row.latency);
+                .or_insert(latency);
         }
     }
     if by_keys.is_empty() {
@@ -417,30 +391,29 @@ fn load_module_csv(path: &Path, is_context: bool) -> Result<ModuleGrids, AicErro
     Ok(ModuleGrids { by_keys })
 }
 
-fn load_bmm_csv(path: &Path) -> Result<BmmGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_bmm_parquet(path: &Path) -> Result<BmmGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let op_name_col = reader.col("op_name")?;
+    let bmm_dtype_col = reader.col("bmm_dtype")?;
+    let num_tokens_col = reader.col("num_tokens")?;
+    let num_heads_col = reader.col("num_heads")?;
+    let latency_col = reader.col("latency")?;
 
     let mut by_keys: BTreeMap<BmmKey, BTreeMap<u32, BTreeMap<u32, f64>>> = BTreeMap::new();
-    for record in reader.deserialize::<BmmRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = BmmKey {
-            bmm_quant: row.bmm_dtype.clone(),
-            pre_or_post: row.op_name.clone(),
+            bmm_quant: row.str_owned(bmm_dtype_col)?,
+            pre_or_post: row.str_owned(op_name_col)?,
         };
         // First-wins parity with Python `load_mla_bmm_data`.
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.num_heads)
+            .entry(row.u32(num_heads_col)?)
             .or_default()
-            .entry(row.num_tokens)
-            .or_insert(row.latency);
+            .entry(row.u32(num_tokens_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -449,20 +422,6 @@ fn load_bmm_csv(path: &Path) -> Result<BmmGrids, AicError> {
         )));
     }
     Ok(BmmGrids { by_keys })
-}
-
-fn read_perf_file(path: &Path) -> Result<String, AicError> {
-    let text = fs::read_to_string(path).map_err(|source| AicError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if text.starts_with("version https://git-lfs") {
-        return Err(AicError::PerfDatabase(format!(
-            "perf file is an unresolved git-lfs pointer: {}; run `git lfs pull`",
-            path.display()
-        )));
-    }
-    Ok(text)
 }
 
 fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {

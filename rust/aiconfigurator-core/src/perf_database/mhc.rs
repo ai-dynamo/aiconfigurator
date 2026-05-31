@@ -8,14 +8,12 @@
 //! → latency. Query is 1-D interpolation along num_tokens.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use serde::Deserialize;
-
 use crate::common::error::AicError;
 use crate::interpolation::{interp_1d, nearest_neighbors};
+use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct MhcTable {
     data_root: PathBuf,
@@ -31,15 +29,6 @@ struct MhcKey {
     architecture: String,
     hc_mult: u32,
     hidden_size: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct MhcRow {
-    architecture: String,
-    num_tokens: u32,
-    hc_mult: u32,
-    hidden_size: u32,
-    latency: f64,
 }
 
 impl MhcTable {
@@ -86,33 +75,33 @@ impl MhcTable {
     fn load(&self) -> Result<&MhcGrids, AicError> {
         let cell = self
             .module
-            .get_or_init(|| load_mhc_csv(&self.data_root.join("mhc_module_perf.txt")));
+            .get_or_init(|| load_mhc_parquet(&self.data_root.join("mhc_module_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
 }
 
-fn load_mhc_csv(path: &Path) -> Result<MhcGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_mhc_parquet(path: &Path) -> Result<MhcGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let arch_col = reader.col("architecture")?;
+    let num_tokens_col = reader.col("num_tokens")?;
+    let hc_mult_col = reader.col("hc_mult")?;
+    let hidden_size_col = reader.col("hidden_size")?;
+    let latency_col = reader.col("latency")?;
+
     let mut by_keys: BTreeMap<MhcKey, BTreeMap<u32, f64>> = BTreeMap::new();
-    for record in reader.deserialize::<MhcRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = MhcKey {
-            architecture: row.architecture,
-            hc_mult: row.hc_mult,
-            hidden_size: row.hidden_size,
+            architecture: row.str_owned(arch_col)?,
+            hc_mult: row.u32(hc_mult_col)?,
+            hidden_size: row.u32(hidden_size_col)?,
         };
         // First-wins parity with Python `load_mhc_data`.
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.num_tokens)
-            .or_insert(row.latency);
+            .entry(row.u32(num_tokens_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -121,20 +110,6 @@ fn load_mhc_csv(path: &Path) -> Result<MhcGrids, AicError> {
         )));
     }
     Ok(MhcGrids { by_keys })
-}
-
-fn read_perf_file(path: &Path) -> Result<String, AicError> {
-    let text = fs::read_to_string(path).map_err(|source| AicError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if text.starts_with("version https://git-lfs") {
-        return Err(AicError::PerfDatabase(format!(
-            "perf file is an unresolved git-lfs pointer: {}; run `git lfs pull`",
-            path.display()
-        )));
-    }
-    Ok(text)
 }
 
 fn clone_err(err: &AicError) -> AicError {

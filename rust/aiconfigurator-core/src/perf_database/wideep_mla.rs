@@ -34,15 +34,13 @@
 //! shipped table at the time of writing.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-
-use serde::Deserialize;
 
 use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::interpolation::{interp_2d_1d_grid_extrapolate_inner, Grid3};
+use crate::perf_database::parquet_loader::PerfReader;
 
 /// Owner for both WideEP MLA tables. Each side is lazily loaded on first
 /// query.
@@ -76,18 +74,6 @@ pub struct ContextKey {
 pub struct GenerationKey {
     pub kernel_source: String,
     pub kv_quant: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct WideEpMlaRow {
-    kernel_source: String,
-    mla_dtype: String,
-    kv_cache_dtype: String,
-    num_heads: u32,
-    batch_size: u32,
-    isl: u32,
-    step: u32,
-    latency: f64,
 }
 
 impl WideEpMlaTable {
@@ -159,45 +145,47 @@ impl WideEpMlaTable {
 
     fn load_context(&self) -> Result<&WideEpContextMlaGrids, AicError> {
         let cell = self.context.get_or_init(|| {
-            load_context_csv(&self.data_root.join("wideep_context_mla_perf.txt"))
+            load_context_parquet(&self.data_root.join("wideep_context_mla_perf.parquet"))
         });
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_generation(&self) -> Result<&WideEpGenerationMlaGrids, AicError> {
         let cell = self.generation.get_or_init(|| {
-            load_generation_csv(&self.data_root.join("wideep_generation_mla_perf.txt"))
+            load_generation_parquet(&self.data_root.join("wideep_generation_mla_perf.parquet"))
         });
         cell.as_ref().map_err(clone_err)
     }
 }
 
-fn load_context_csv(path: &Path) -> Result<WideEpContextMlaGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_context_parquet(path: &Path) -> Result<WideEpContextMlaGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let kernel_source_col = reader.col("kernel_source")?;
+    let mla_dtype_col = reader.col("mla_dtype")?;
+    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+    let num_heads_col = reader.col("num_heads")?;
+    let batch_size_col = reader.col("batch_size")?;
+    let isl_col = reader.col("isl")?;
+    let latency_col = reader.col("latency")?;
+
     let mut by_keys: BTreeMap<ContextKey, Grid3<f64>> = BTreeMap::new();
-    for record in reader.deserialize::<WideEpMlaRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = ContextKey {
-            kernel_source: row.kernel_source,
-            fmha_quant: row.mla_dtype,
-            kv_quant: row.kv_cache_dtype,
+            kernel_source: row.str_owned(kernel_source_col)?,
+            fmha_quant: row.str_owned(mla_dtype_col)?,
+            kv_quant: row.str_owned(kv_cache_dtype_col)?,
         };
         // First-wins parity with Python `load_wideep_context_mla_data`.
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.num_heads)
+            .entry(row.u32(num_heads_col)?)
             .or_default()
-            .entry(row.isl)
+            .entry(row.u32(isl_col)?)
             .or_default()
-            .entry(row.batch_size)
-            .or_insert(row.latency);
+            .entry(row.u32(batch_size_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -208,32 +196,34 @@ fn load_context_csv(path: &Path) -> Result<WideEpContextMlaGrids, AicError> {
     Ok(WideEpContextMlaGrids { by_keys })
 }
 
-fn load_generation_csv(path: &Path) -> Result<WideEpGenerationMlaGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_generation_parquet(path: &Path) -> Result<WideEpGenerationMlaGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let kernel_source_col = reader.col("kernel_source")?;
+    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+    let num_heads_col = reader.col("num_heads")?;
+    let batch_size_col = reader.col("batch_size")?;
+    let isl_col = reader.col("isl")?;
+    let step_col = reader.col("step")?;
+    let latency_col = reader.col("latency")?;
+
     let mut by_keys: BTreeMap<GenerationKey, Grid3<f64>> = BTreeMap::new();
-    for record in reader.deserialize::<WideEpMlaRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = GenerationKey {
-            kernel_source: row.kernel_source,
-            kv_quant: row.kv_cache_dtype,
+            kernel_source: row.str_owned(kernel_source_col)?,
+            kv_quant: row.str_owned(kv_cache_dtype_col)?,
         };
         // Python collapses `s = isl + step` into the seq axis.
-        let seq = row.isl + row.step;
+        let seq = row.u32(isl_col)? + row.u32(step_col)?;
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.num_heads)
+            .entry(row.u32(num_heads_col)?)
             .or_default()
-            .entry(row.batch_size)
+            .entry(row.u32(batch_size_col)?)
             .or_default()
             .entry(seq)
-            .or_insert(row.latency);
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -242,20 +232,6 @@ fn load_generation_csv(path: &Path) -> Result<WideEpGenerationMlaGrids, AicError
         )));
     }
     Ok(WideEpGenerationMlaGrids { by_keys })
-}
-
-fn read_perf_file(path: &Path) -> Result<String, AicError> {
-    let text = fs::read_to_string(path).map_err(|source| AicError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if text.starts_with("version https://git-lfs") {
-        return Err(AicError::PerfDatabase(format!(
-            "perf file is an unresolved git-lfs pointer: {}; run `git lfs pull`",
-            path.display()
-        )));
-    }
-    Ok(text)
 }
 
 fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {

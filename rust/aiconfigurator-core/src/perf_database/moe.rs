@@ -21,15 +21,13 @@
 //! `perf_database::wideep`, `wideep_mla`, and `wideep_moe`.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-
-use serde::Deserialize;
 
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::interpolation::{interp_1d, nearest_neighbors};
+use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct MoeTable {
     data_root: PathBuf,
@@ -50,20 +48,6 @@ struct MoeKey {
     inter_size: u32,
     moe_tp_size: u32,
     moe_ep_size: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct MoeRow {
-    moe_dtype: String,
-    num_tokens: u32,
-    hidden_size: u32,
-    inter_size: u32,
-    topk: u32,
-    num_experts: u32,
-    moe_tp_size: u32,
-    moe_ep_size: u32,
-    distribution: String,
-    latency: f64,
 }
 
 impl MoeTable {
@@ -192,32 +176,36 @@ impl MoeTable {
     fn load(&self) -> Result<&MoeGrids, AicError> {
         let cell = self
             .moe
-            .get_or_init(|| load_moe_csv(&self.data_root.join("moe_perf.txt")));
+            .get_or_init(|| load_moe_parquet(&self.data_root.join("moe_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
 }
 
-fn load_moe_csv(path: &Path) -> Result<MoeGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_moe_parquet(path: &Path) -> Result<MoeGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let moe_dtype_col = reader.col("moe_dtype")?;
+    let num_tokens_col = reader.col("num_tokens")?;
+    let hidden_size_col = reader.col("hidden_size")?;
+    let inter_size_col = reader.col("inter_size")?;
+    let topk_col = reader.col("topk")?;
+    let num_experts_col = reader.col("num_experts")?;
+    let moe_tp_size_col = reader.col("moe_tp_size")?;
+    let moe_ep_size_col = reader.col("moe_ep_size")?;
+    let distribution_col = reader.col("distribution")?;
+    let latency_col = reader.col("latency")?;
 
     let mut by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
-    for record in reader.deserialize::<MoeRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = MoeKey {
-            quant: row.moe_dtype.clone(),
-            distribution: row.distribution.clone(),
-            topk: row.topk,
-            num_experts: row.num_experts,
-            hidden_size: row.hidden_size,
-            inter_size: row.inter_size,
-            moe_tp_size: row.moe_tp_size,
-            moe_ep_size: row.moe_ep_size,
+            quant: row.str_owned(moe_dtype_col)?,
+            distribution: row.str_owned(distribution_col)?,
+            topk: row.u32(topk_col)?,
+            num_experts: row.u32(num_experts_col)?,
+            hidden_size: row.u32(hidden_size_col)?,
+            inter_size: row.u32(inter_size_col)?,
+            moe_tp_size: row.u32(moe_tp_size_col)?,
+            moe_ep_size: row.u32(moe_ep_size_col)?,
         };
         // Python's `load_moe_data` wraps the leaf insert in a try/except KeyError
         // and skips on conflict, i.e. it keeps the FIRST occurrence of each
@@ -226,8 +214,8 @@ fn load_moe_csv(path: &Path) -> Result<MoeGrids, AicError> {
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.num_tokens)
-            .or_insert(row.latency);
+            .entry(row.u32(num_tokens_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -236,20 +224,6 @@ fn load_moe_csv(path: &Path) -> Result<MoeGrids, AicError> {
         )));
     }
     Ok(MoeGrids { by_keys })
-}
-
-fn read_perf_file(path: &Path) -> Result<String, AicError> {
-    let text = fs::read_to_string(path).map_err(|source| AicError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if text.starts_with("version https://git-lfs") {
-        return Err(AicError::PerfDatabase(format!(
-            "perf file is an unresolved git-lfs pointer: {}; run `git lfs pull`",
-            path.display()
-        )));
-    }
-    Ok(text)
 }
 
 fn clone_err(err: &AicError) -> AicError {
@@ -271,7 +245,7 @@ mod tests {
     #[test]
     fn moe_table_loads_b200_vllm() {
         let table = MoeTable::new(b200_vllm_data_root());
-        let _ = table.load().expect("moe_perf.txt must load");
+        let _ = table.load().expect("moe_perf.parquet must load");
     }
 
     #[test]

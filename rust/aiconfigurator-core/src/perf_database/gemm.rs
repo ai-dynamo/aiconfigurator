@@ -15,15 +15,13 @@
 //! them (vLLM, SGLang); the loaders surface a clear error in that case.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-
-use serde::Deserialize;
 
 use crate::common::enums::GemmQuantMode;
 use crate::common::error::AicError;
 use crate::interpolation::{interp_1d, interp_2d_1d_grid, nearest_neighbors, Grid3};
+use crate::perf_database::parquet_loader::PerfReader;
 
 /// GEMM-family perf-data owner for one `<system>/<backend>/<version>` slice.
 ///
@@ -44,25 +42,6 @@ struct GemmGrids {
 /// 2-D scale tables keyed by quant name -> m -> k -> latency_ms.
 struct TwoDGrids {
     by_quant: BTreeMap<String, BTreeMap<u32, BTreeMap<u32, f64>>>,
-}
-
-/// One row of `gemm_perf.txt`.
-#[derive(Debug, Deserialize)]
-struct GemmRow {
-    gemm_dtype: String,
-    m: u32,
-    n: u32,
-    k: u32,
-    latency: f64,
-}
-
-/// One row of `computescale_perf.txt` or `scale_matrix_perf.txt`.
-#[derive(Debug, Deserialize)]
-struct TwoDRow {
-    quant_dtype: String,
-    m: u32,
-    k: u32,
-    latency: f64,
 }
 
 impl GemmTable {
@@ -155,21 +134,21 @@ impl GemmTable {
     fn load_gemm(&self) -> Result<&GemmGrids, AicError> {
         let cell = self
             .gemm
-            .get_or_init(|| load_gemm_csv(&self.data_root.join("gemm_perf.txt")));
+            .get_or_init(|| load_gemm_parquet(&self.data_root.join("gemm_perf.parquet")));
         cell.as_ref().map_err(|err| clone_err(err))
     }
 
     fn load_compute_scale(&self) -> Result<&TwoDGrids, AicError> {
-        let cell = self
-            .compute_scale
-            .get_or_init(|| load_two_d_csv(&self.data_root.join("computescale_perf.txt")));
+        let cell = self.compute_scale.get_or_init(|| {
+            load_two_d_parquet(&self.data_root.join("computescale_perf.parquet"))
+        });
         cell.as_ref().map_err(|err| clone_err(err))
     }
 
     fn load_scale_matrix(&self) -> Result<&TwoDGrids, AicError> {
-        let cell = self
-            .scale_matrix
-            .get_or_init(|| load_two_d_csv(&self.data_root.join("scale_matrix_perf.txt")));
+        let cell = self.scale_matrix.get_or_init(|| {
+            load_two_d_parquet(&self.data_root.join("scale_matrix_perf.parquet"))
+        });
         cell.as_ref().map_err(|err| clone_err(err))
     }
 }
@@ -246,42 +225,34 @@ fn query_two_d(
     ))
 }
 
-fn load_gemm_csv(path: &Path) -> Result<GemmGrids, AicError> {
-    let text = fs::read_to_string(path).map_err(|source| AicError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if text.starts_with("version https://git-lfs") {
-        return Err(AicError::PerfDatabase(format!(
-            "perf file is an unresolved git-lfs pointer: {}; run `git lfs pull`",
-            path.display()
-        )));
-    }
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_gemm_parquet(path: &Path) -> Result<GemmGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let gemm_dtype_col = reader.col("gemm_dtype")?;
+    let m_col = reader.col("m")?;
+    let n_col = reader.col("n")?;
+    let k_col = reader.col("k")?;
+    let latency_col = reader.col("latency")?;
 
     let mut by_quant: BTreeMap<String, Grid3<f64>> = BTreeMap::new();
-    for record in reader.deserialize::<GemmRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
+        let dtype = row.str(gemm_dtype_col)?;
         // Skip quant modes AIC does not model in the perf path (matches the
         // legacy perf.rs behavior).
-        if row.gemm_dtype == "awq" || row.gemm_dtype == "gptq" {
+        if dtype == "awq" || dtype == "gptq" {
             continue;
         }
+        let dtype = dtype.to_string();
         // First-wins parity with Python's `load_gemm_data` try/except KeyError.
         by_quant
-            .entry(row.gemm_dtype)
+            .entry(dtype)
             .or_default()
-            .entry(row.m)
+            .entry(row.u32(m_col)?)
             .or_default()
-            .entry(row.n)
+            .entry(row.u32(n_col)?)
             .or_default()
-            .entry(row.k)
-            .or_insert(row.latency);
+            .entry(row.u32(k_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_quant.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -292,35 +263,24 @@ fn load_gemm_csv(path: &Path) -> Result<GemmGrids, AicError> {
     Ok(GemmGrids { by_quant })
 }
 
-fn load_two_d_csv(path: &Path) -> Result<TwoDGrids, AicError> {
-    let text = fs::read_to_string(path).map_err(|source| AicError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if text.starts_with("version https://git-lfs") {
-        return Err(AicError::PerfDatabase(format!(
-            "perf file is an unresolved git-lfs pointer: {}; run `git lfs pull`",
-            path.display()
-        )));
-    }
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_two_d_parquet(path: &Path) -> Result<TwoDGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let quant_dtype_col = reader.col("quant_dtype")?;
+    let m_col = reader.col("m")?;
+    let k_col = reader.col("k")?;
+    let latency_col = reader.col("latency")?;
 
     let mut by_quant: BTreeMap<String, BTreeMap<u32, BTreeMap<u32, f64>>> = BTreeMap::new();
-    for record in reader.deserialize::<TwoDRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         // First-wins parity (compute_scale / scale_matrix tables in Python).
         by_quant
-            .entry(row.quant_dtype)
+            .entry(row.str_owned(quant_dtype_col)?)
             .or_default()
-            .entry(row.m)
+            .entry(row.u32(m_col)?)
             .or_default()
-            .entry(row.k)
-            .or_insert(row.latency);
+            .entry(row.u32(k_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_quant.is_empty() {
         return Err(AicError::PerfDatabase(format!(

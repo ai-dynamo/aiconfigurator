@@ -16,15 +16,13 @@
 //! the topk-piecewise dispatch.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-
-use serde::Deserialize;
 
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::interpolation::{interp_2d_1d_grid_extrapolate_inner, Grid3};
+use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct DsaTable {
     data_root: PathBuf,
@@ -59,19 +57,6 @@ pub struct DsaKey {
     pub fmha_quant: String,
     pub kv_quant: String,
     pub gemm_quant: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct DsaRow {
-    architecture: String,
-    mla_dtype: String,
-    kv_cache_dtype: String,
-    gemm_type: String,
-    num_heads: u32,
-    batch_size: u32,
-    isl: u32,
-    step: u32,
-    latency: f64,
 }
 
 impl DsaTable {
@@ -159,14 +144,14 @@ impl DsaTable {
     fn load_context(&self) -> Result<&DsaGrids, AicError> {
         let cell = self
             .context
-            .get_or_init(|| load_dsa_csv(&self.data_root.join("dsa_context_module_perf.txt")));
+            .get_or_init(|| load_dsa_parquet(&self.data_root.join("dsa_context_module_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_generation(&self) -> Result<&DsaGrids, AicError> {
         let cell = self
             .generation
-            .get_or_init(|| load_dsa_csv(&self.data_root.join("dsa_generation_module_perf.txt")));
+            .get_or_init(|| load_dsa_parquet(&self.data_root.join("dsa_generation_module_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
 
@@ -231,36 +216,40 @@ fn build_generation_grid_cache(grids: &DsaGrids) -> GenerationGridCache {
     GenerationGridCache { by_keys }
 }
 
-fn load_dsa_csv(path: &Path) -> Result<DsaGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_dsa_parquet(path: &Path) -> Result<DsaGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let arch_col = reader.col("architecture")?;
+    let mla_dtype_col = reader.col("mla_dtype")?;
+    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+    let gemm_type_col = reader.col("gemm_type")?;
+    let num_heads_col = reader.col("num_heads")?;
+    let batch_size_col = reader.col("batch_size")?;
+    let isl_col = reader.col("isl")?;
+    let step_col = reader.col("step")?;
+    let latency_col = reader.col("latency")?;
+
     let mut by_keys: BTreeMap<DsaKey, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, f64>>>>> =
         BTreeMap::new();
-    for record in reader.deserialize::<DsaRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = DsaKey {
-            architecture: row.architecture,
-            fmha_quant: row.mla_dtype,
-            kv_quant: row.kv_cache_dtype,
-            gemm_quant: row.gemm_type,
+            architecture: row.str_owned(arch_col)?,
+            fmha_quant: row.str_owned(mla_dtype_col)?,
+            kv_quant: row.str_owned(kv_cache_dtype_col)?,
+            gemm_quant: row.str_owned(gemm_type_col)?,
         };
         // First-wins parity with Python `load_dsa_module_data`.
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.num_heads)
+            .entry(row.u32(num_heads_col)?)
             .or_default()
-            .entry(row.step)
+            .entry(row.u32(step_col)?)
             .or_default()
-            .entry(row.isl)
+            .entry(row.u32(isl_col)?)
             .or_default()
-            .entry(row.batch_size)
-            .or_insert(row.latency);
+            .entry(row.u32(batch_size_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -269,20 +258,6 @@ fn load_dsa_csv(path: &Path) -> Result<DsaGrids, AicError> {
         )));
     }
     Ok(DsaGrids { by_keys })
-}
-
-fn read_perf_file(path: &Path) -> Result<String, AicError> {
-    let text = fs::read_to_string(path).map_err(|source| AicError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if text.starts_with("version https://git-lfs") {
-        return Err(AicError::PerfDatabase(format!(
-            "perf file is an unresolved git-lfs pointer: {}; run `git lfs pull`",
-            path.display()
-        )));
-    }
-    Ok(text)
 }
 
 fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {

@@ -5,15 +5,12 @@ from __future__ import annotations
 
 import copy
 import ctypes
-import hashlib
 import json
 import math
 import os
 import platform
 import shutil
 import subprocess
-import tempfile
-import uuid
 from functools import cache
 from importlib import resources as pkg_resources
 from pathlib import Path
@@ -24,17 +21,6 @@ from aiconfigurator.sdk.config import RuntimeConfig
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
 RUST_CORE_LIB_ENV = "AICONFIGURATOR_RUST_CORE_LIB"
 RUST_CORE_AUTOBUILD_ENV = "AICONFIGURATOR_RUST_CORE_AUTOBUILD"
-RUST_SYSTEMS_SOURCE_ENV = "AICONFIGURATOR_RUST_SYSTEMS_SOURCE_PATH"
-
-_RUST_VERSION_PERF_FILES = (
-    "gemm_perf.txt",
-    "context_attention_perf.txt",
-    "generation_attention_perf.txt",
-    "custom_allreduce_perf.txt",
-    "moe_perf.txt",
-    "context_mla_perf.txt",
-    "generation_mla_perf.txt",
-)
 
 
 class RustCoreUnavailableError(RuntimeError):
@@ -49,7 +35,7 @@ class RustEngineStepEstimator:
     """ctypes wrapper over the Rust `aiconfigurator-core` FPM estimator."""
 
     def __init__(self, config: dict[str, Any], *, autobuild: bool | None = None) -> None:
-        _configure_default_data_roots(config)
+        _configure_default_data_roots()
         self._lib = _load_library(bool(autobuild) or _truthy(os.environ.get(RUST_CORE_AUTOBUILD_ENV)))
         self._handle = ctypes.c_void_p()
         config_json = _json_bytes(config)
@@ -810,157 +796,15 @@ def _moe_quant_to_dtype(value: Any) -> str | None:
     return _quant_to_dtype(value)
 
 
-def _configure_default_data_roots(config: dict[str, Any] | None = None) -> None:
-    systems_root = _configured_systems_source_root()
-    if systems_root and systems_root.exists():
-        rust_systems_root = _ensure_rust_csv_systems_root(systems_root, config)
-        os.environ["AICONFIGURATOR_SYSTEMS_PATH"] = str(rust_systems_root)
-        if rust_systems_root != systems_root:
-            os.environ[RUST_SYSTEMS_SOURCE_ENV] = str(systems_root)
+def _configure_default_data_roots() -> None:
+    if "AICONFIGURATOR_SYSTEMS_PATH" not in os.environ:
+        systems_root = _python_sdk_systems_root() or Path(str(pkg_resources.files("aiconfigurator") / "systems"))
+        if systems_root.exists():
+            os.environ["AICONFIGURATOR_SYSTEMS_PATH"] = str(systems_root)
     if "AICONFIGURATOR_MODEL_CONFIGS_PATH" not in os.environ:
         model_configs_root = Path(str(pkg_resources.files("aiconfigurator") / "model_configs"))
         if model_configs_root.exists():
             os.environ["AICONFIGURATOR_MODEL_CONFIGS_PATH"] = str(model_configs_root)
-
-
-def _configured_systems_source_root() -> Path | None:
-    explicit = os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
-    if explicit:
-        explicit_path = Path(explicit)
-        source_override = os.environ.get(RUST_SYSTEMS_SOURCE_ENV)
-        if source_override and _is_rust_overlay_root(explicit_path):
-            return Path(source_override)
-        return explicit_path
-    source_override = os.environ.get(RUST_SYSTEMS_SOURCE_ENV)
-    if source_override:
-        return Path(source_override)
-    return _python_sdk_systems_root() or Path(str(pkg_resources.files("aiconfigurator") / "systems"))
-
-
-def _ensure_rust_csv_systems_root(systems_root: Path, config: dict[str, Any] | None) -> Path:
-    required_paths = _rust_perf_paths_for_config(systems_root, config)
-    if not required_paths:
-        return systems_root
-
-    needs_overlay = any(
-        not (systems_root / path).is_file() and (systems_root / path).with_suffix(".parquet").is_file()
-        for path in required_paths
-    )
-    if not needs_overlay:
-        return systems_root
-
-    source_key = hashlib.sha256(str(systems_root.resolve()).encode("utf-8")).hexdigest()[:16]
-    overlay_root = _rust_overlay_base() / source_key
-    _copy_system_file_for_rust_overlay(systems_root, overlay_root, config)
-    for path in required_paths:
-        _materialize_rust_perf_csv(systems_root, overlay_root, path)
-    return overlay_root
-
-
-def _rust_overlay_base() -> Path:
-    return Path(tempfile.gettempdir()) / "aiconfigurator-rust-perf-csv"
-
-
-def _is_rust_overlay_root(path: Path) -> bool:
-    try:
-        path.resolve().relative_to(_rust_overlay_base().resolve())
-        return True
-    except ValueError:
-        return False
-
-
-def _rust_perf_paths_for_config(systems_root: Path, config: dict[str, Any] | None) -> list[Path]:
-    if not config:
-        return []
-    system_name = str(config.get("system_name") or "").strip()
-    backend = str(config.get("backend") or "").strip()
-    if not system_name or not backend:
-        return []
-
-    system_file = systems_root / f"{system_name}.yaml"
-    if not system_file.is_file():
-        return []
-
-    try:
-        import yaml
-
-        system_spec = yaml.safe_load(system_file.read_text()) or {}
-    except Exception:
-        return []
-
-    data_dir = system_spec.get("data_dir")
-    if not data_dir:
-        return []
-
-    backend_root = systems_root / data_dir / backend
-    backend_version = config.get("backend_version")
-    if backend_version:
-        version_dirs = [backend_root / str(backend_version)]
-    elif backend_root.is_dir():
-        version_dirs = sorted(path for path in backend_root.iterdir() if path.is_dir())
-    else:
-        version_dirs = []
-
-    paths: list[Path] = []
-    for version_dir in version_dirs:
-        version_rel = version_dir.relative_to(systems_root)
-        paths.extend(version_rel / name for name in _RUST_VERSION_PERF_FILES)
-
-    nccl_version = (system_spec.get("misc") or {}).get("nccl_version")
-    if nccl_version:
-        paths.append(Path(data_dir) / "nccl" / str(nccl_version) / "nccl_perf.txt")
-    return paths
-
-
-def _copy_system_file_for_rust_overlay(systems_root: Path, overlay_root: Path, config: dict[str, Any] | None) -> None:
-    if not config:
-        return
-    system_name = str(config.get("system_name") or "").strip()
-    if not system_name:
-        return
-    source = systems_root / f"{system_name}.yaml"
-    target = overlay_root / f"{system_name}.yaml"
-    if source.is_file():
-        _copy_if_stale(source, target)
-
-
-def _materialize_rust_perf_csv(systems_root: Path, overlay_root: Path, relative_path: Path) -> None:
-    source_txt = systems_root / relative_path
-    source_parquet = source_txt.with_suffix(".parquet")
-    target_txt = overlay_root / relative_path
-    if source_txt.is_file():
-        _copy_if_stale(source_txt, target_txt)
-        return
-    if not source_parquet.is_file():
-        target_txt.parent.mkdir(parents=True, exist_ok=True)
-        return
-    if target_txt.is_file() and target_txt.stat().st_mtime_ns >= source_parquet.stat().st_mtime_ns:
-        return
-
-    try:
-        import pyarrow.csv as pc
-        import pyarrow.parquet as pq
-    except ImportError as exc:
-        raise RustCoreUnavailableError(
-            "Rust engine-step estimator currently consumes CSV perf files. "
-            "Materializing parquet perf data for Rust requires pyarrow."
-        ) from exc
-
-    target_txt.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = target_txt.with_name(f".{target_txt.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    try:
-        pc.write_csv(pq.read_table(source_parquet), tmp_path)
-        os.replace(tmp_path, target_txt)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
-
-
-def _copy_if_stale(source: Path, target: Path) -> None:
-    if target.is_file() and target.stat().st_mtime_ns >= source.stat().st_mtime_ns:
-        return
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target)
 
 
 def _python_sdk_systems_root() -> Path | None:

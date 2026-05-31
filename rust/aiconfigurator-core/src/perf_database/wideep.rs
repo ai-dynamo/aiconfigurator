@@ -21,15 +21,13 @@
 //! `num_tokens`; SOL/EMPIRICAL wrappers live in `operators/moe.rs`.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-
-use serde::Deserialize;
 
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::interpolation::{interp_1d, nearest_neighbors};
+use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct WideEpTable {
     data_root: PathBuf,
@@ -82,52 +80,6 @@ pub struct DispatchPoint {
     pub combine_avg_t_us: f64,
     /// LL-only: dispatch average latency (us).
     pub dispatch_avg_t_us: f64,
-}
-
-#[derive(Debug, Deserialize)]
-struct MoeRow {
-    moe_dtype: String,
-    num_tokens: u32,
-    hidden_size: u32,
-    #[serde(default)]
-    inter_size: Option<u32>,
-    topk: u32,
-    num_experts: u32,
-    #[serde(default)]
-    moe_tp_size: Option<u32>,
-    moe_ep_size: u32,
-    distribution: String,
-    latency: f64,
-}
-
-#[derive(Debug, Deserialize)]
-struct DeepEpNormalRow {
-    node_num: u32,
-    hidden_size: u32,
-    num_token: u32,
-    num_topk: u32,
-    num_experts: u32,
-    #[serde(default)]
-    dispatch_transmit_us: Option<f64>,
-    #[serde(default)]
-    dispatch_notify_us: Option<f64>,
-    #[serde(default)]
-    combine_transmit_us: Option<f64>,
-    #[serde(default)]
-    combine_notify_us: Option<f64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DeepEpLlRow {
-    node_num: u32,
-    hidden_size: u32,
-    num_token: u32,
-    num_topk: u32,
-    num_experts: u32,
-    #[serde(default)]
-    combine_avg_t_us: Option<f64>,
-    #[serde(default)]
-    dispatch_avg_t_us: Option<f64>,
 }
 
 impl WideEpTable {
@@ -286,37 +238,37 @@ impl WideEpTable {
     fn load_context_moe(&self) -> Result<&MoeGrids, AicError> {
         let cell = self
             .context_moe
-            .get_or_init(|| load_moe_csv(&self.data_root.join("wideep_context_moe_perf.txt")));
+            .get_or_init(|| load_moe_parquet(&self.data_root.join("wideep_context_moe_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
     fn load_generation_moe(&self) -> Result<&MoeGrids, AicError> {
         let cell = self
             .generation_moe
-            .get_or_init(|| load_moe_csv(&self.data_root.join("wideep_generation_moe_perf.txt")));
+            .get_or_init(|| load_moe_parquet(&self.data_root.join("wideep_generation_moe_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
     fn load_trtllm_wideep_moe(&self) -> Result<&MoeGrids, AicError> {
         let cell = self
             .trtllm_wideep_moe
-            .get_or_init(|| load_moe_csv(&self.data_root.join("wideep_moe_perf.txt")));
+            .get_or_init(|| load_moe_parquet(&self.data_root.join("wideep_moe_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
     fn load_trtllm_alltoall(&self) -> Result<&MoeGrids, AicError> {
         let cell = self
             .trtllm_alltoall
-            .get_or_init(|| load_moe_csv(&self.data_root.join("trtllm_alltoall_perf.txt")));
+            .get_or_init(|| load_moe_parquet(&self.data_root.join("trtllm_alltoall_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
     fn load_deepep_normal(&self) -> Result<&DispatchGrids, AicError> {
         let cell = self.deepep_normal.get_or_init(|| {
-            load_deepep_normal_csv(&self.data_root.join("wideep_deepep_normal_perf.txt"))
+            load_deepep_normal_parquet(&self.data_root.join("wideep_deepep_normal_perf.parquet"))
         });
         cell.as_ref().map_err(clone_err)
     }
     fn load_deepep_ll(&self) -> Result<&DispatchGrids, AicError> {
         let cell = self
             .deepep_ll
-            .get_or_init(|| load_deepep_ll_csv(&self.data_root.join("wideep_deepep_ll_perf.txt")));
+            .get_or_init(|| load_deepep_ll_parquet(&self.data_root.join("wideep_deepep_ll_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
 }
@@ -410,33 +362,41 @@ fn dispatch_lookup(
     })
 }
 
-fn load_moe_csv(path: &Path) -> Result<MoeGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_moe_parquet(path: &Path) -> Result<MoeGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let moe_dtype_col = reader.col("moe_dtype")?;
+    let num_tokens_col = reader.col("num_tokens")?;
+    let hidden_size_col = reader.col("hidden_size")?;
+    // `inter_size` / `moe_tp_size` are absent in `trtllm_alltoall_perf.parquet`;
+    // shared with the wideep_*_moe parquets which carry them. Optional lookup
+    // mirrors the prior `Option<u32>` deserialization plus `unwrap_or` default.
+    let inter_size_col = reader.col_optional("inter_size");
+    let topk_col = reader.col("topk")?;
+    let num_experts_col = reader.col("num_experts")?;
+    let moe_tp_size_col = reader.col_optional("moe_tp_size");
+    let moe_ep_size_col = reader.col("moe_ep_size")?;
+    let distribution_col = reader.col("distribution")?;
+    let latency_col = reader.col("latency")?;
+
     let mut by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
-    for record in reader.deserialize::<MoeRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = MoeKey {
-            quant: row.moe_dtype,
-            distribution: row.distribution,
-            topk: row.topk,
-            num_experts: row.num_experts,
-            hidden_size: row.hidden_size,
-            inter_size: row.inter_size.unwrap_or(0),
-            moe_tp_size: row.moe_tp_size.unwrap_or(1),
-            moe_ep_size: row.moe_ep_size,
+            quant: row.str_owned(moe_dtype_col)?,
+            distribution: row.str_owned(distribution_col)?,
+            topk: row.u32(topk_col)?,
+            num_experts: row.u32(num_experts_col)?,
+            hidden_size: row.u32(hidden_size_col)?,
+            inter_size: row.u32_optional(inter_size_col)?.unwrap_or(0),
+            moe_tp_size: row.u32_optional(moe_tp_size_col)?.unwrap_or(1),
+            moe_ep_size: row.u32(moe_ep_size_col)?,
         };
         // First-wins parity with Python `load_wideep_*_moe_data`.
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.num_tokens)
-            .or_insert(row.latency);
+            .entry(row.u32(num_tokens_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -447,30 +407,34 @@ fn load_moe_csv(path: &Path) -> Result<MoeGrids, AicError> {
     Ok(MoeGrids { by_keys })
 }
 
-fn load_deepep_normal_csv(path: &Path) -> Result<DispatchGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_deepep_normal_parquet(path: &Path) -> Result<DispatchGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let node_num_col = reader.col("node_num")?;
+    let hidden_size_col = reader.col("hidden_size")?;
+    let num_token_col = reader.col("num_token")?;
+    let num_topk_col = reader.col("num_topk")?;
+    let num_experts_col = reader.col("num_experts")?;
+    let dispatch_transmit_us_col = reader.col_optional("dispatch_transmit_us");
+    let dispatch_notify_us_col = reader.col_optional("dispatch_notify_us");
+    let combine_transmit_us_col = reader.col_optional("combine_transmit_us");
+    let combine_notify_us_col = reader.col_optional("combine_notify_us");
+
     let mut by_keys: BTreeMap<DispatchKey, BTreeMap<u32, DispatchPoint>> = BTreeMap::new();
-    for record in reader.deserialize::<DeepEpNormalRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = DispatchKey {
-            node_num: row.node_num,
-            hidden_size: row.hidden_size,
-            num_topk: row.num_topk,
-            num_experts: row.num_experts,
+            node_num: row.u32(node_num_col)?,
+            hidden_size: row.u32(hidden_size_col)?,
+            num_topk: row.u32(num_topk_col)?,
+            num_experts: row.u32(num_experts_col)?,
         };
         by_keys.entry(key).or_default().insert(
-            row.num_token,
+            row.u32(num_token_col)?,
             DispatchPoint {
-                dispatch_transmit_us: row.dispatch_transmit_us.unwrap_or(0.0),
-                dispatch_notify_us: row.dispatch_notify_us.unwrap_or(0.0),
-                combine_transmit_us: row.combine_transmit_us.unwrap_or(0.0),
-                combine_notify_us: row.combine_notify_us.unwrap_or(0.0),
+                dispatch_transmit_us: row.f64_optional(dispatch_transmit_us_col)?.unwrap_or(0.0),
+                dispatch_notify_us: row.f64_optional(dispatch_notify_us_col)?.unwrap_or(0.0),
+                combine_transmit_us: row.f64_optional(combine_transmit_us_col)?.unwrap_or(0.0),
+                combine_notify_us: row.f64_optional(combine_notify_us_col)?.unwrap_or(0.0),
                 combine_avg_t_us: 0.0,
                 dispatch_avg_t_us: 0.0,
             },
@@ -485,32 +449,34 @@ fn load_deepep_normal_csv(path: &Path) -> Result<DispatchGrids, AicError> {
     Ok(DispatchGrids { by_keys })
 }
 
-fn load_deepep_ll_csv(path: &Path) -> Result<DispatchGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_deepep_ll_parquet(path: &Path) -> Result<DispatchGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let node_num_col = reader.col("node_num")?;
+    let hidden_size_col = reader.col("hidden_size")?;
+    let num_token_col = reader.col("num_token")?;
+    let num_topk_col = reader.col("num_topk")?;
+    let num_experts_col = reader.col("num_experts")?;
+    let combine_avg_t_us_col = reader.col_optional("combine_avg_t_us");
+    let dispatch_avg_t_us_col = reader.col_optional("dispatch_avg_t_us");
+
     let mut by_keys: BTreeMap<DispatchKey, BTreeMap<u32, DispatchPoint>> = BTreeMap::new();
-    for record in reader.deserialize::<DeepEpLlRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = DispatchKey {
-            node_num: row.node_num,
-            hidden_size: row.hidden_size,
-            num_topk: row.num_topk,
-            num_experts: row.num_experts,
+            node_num: row.u32(node_num_col)?,
+            hidden_size: row.u32(hidden_size_col)?,
+            num_topk: row.u32(num_topk_col)?,
+            num_experts: row.u32(num_experts_col)?,
         };
         by_keys.entry(key).or_default().insert(
-            row.num_token,
+            row.u32(num_token_col)?,
             DispatchPoint {
                 dispatch_transmit_us: 0.0,
                 dispatch_notify_us: 0.0,
                 combine_transmit_us: 0.0,
                 combine_notify_us: 0.0,
-                combine_avg_t_us: row.combine_avg_t_us.unwrap_or(0.0),
-                dispatch_avg_t_us: row.dispatch_avg_t_us.unwrap_or(0.0),
+                combine_avg_t_us: row.f64_optional(combine_avg_t_us_col)?.unwrap_or(0.0),
+                dispatch_avg_t_us: row.f64_optional(dispatch_avg_t_us_col)?.unwrap_or(0.0),
             },
         );
     }
@@ -521,20 +487,6 @@ fn load_deepep_ll_csv(path: &Path) -> Result<DispatchGrids, AicError> {
         )));
     }
     Ok(DispatchGrids { by_keys })
-}
-
-fn read_perf_file(path: &Path) -> Result<String, AicError> {
-    let text = fs::read_to_string(path).map_err(|source| AicError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if text.starts_with("version https://git-lfs") {
-        return Err(AicError::PerfDatabase(format!(
-            "perf file is an unresolved git-lfs pointer: {}; run `git lfs pull`",
-            path.display()
-        )));
-    }
-    Ok(text)
 }
 
 fn clone_err(err: &AicError) -> AicError {

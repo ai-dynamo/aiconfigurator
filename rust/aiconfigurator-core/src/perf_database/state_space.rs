@@ -12,14 +12,12 @@
 //! stores the raw nested grid and provides 1-D-by-2-D lookup.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use serde::Deserialize;
-
 use crate::common::error::AicError;
 use crate::interpolation::{interp_1d, nearest_neighbors};
+use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct StateSpaceTable {
     data_root: PathBuf,
@@ -66,39 +64,6 @@ struct GdnKey {
     num_v_heads: u32,
     head_v_dim: u32,
     // See `Mamba2Key`: shape is the key, `model_name` is metadata.
-}
-
-#[derive(Debug, Deserialize)]
-struct Mamba2Row {
-    kernel_source: String,
-    phase: String,
-    batch_size: u32,
-    seq_len: u32,
-    d_model: u32,
-    d_state: u32,
-    d_conv: u32,
-    nheads: u32,
-    head_dim: u32,
-    n_groups: u32,
-    chunk_size: u32,
-    model_name: String,
-    latency: f64,
-}
-
-#[derive(Debug, Deserialize)]
-struct GdnRow {
-    kernel_source: String,
-    phase: String,
-    batch_size: u32,
-    seq_len: u32,
-    d_model: u32,
-    d_conv: u32,
-    num_k_heads: u32,
-    head_k_dim: u32,
-    num_v_heads: u32,
-    head_v_dim: u32,
-    model_name: String,
-    latency: f64,
 }
 
 impl StateSpaceTable {
@@ -230,14 +195,14 @@ impl StateSpaceTable {
     fn load_mamba2(&self) -> Result<&Mamba2Grids, AicError> {
         let cell = self
             .mamba2
-            .get_or_init(|| load_mamba2_csv(&self.data_root.join("mamba2_perf.txt")));
+            .get_or_init(|| load_mamba2_parquet(&self.data_root.join("mamba2_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_gdn(&self) -> Result<&GdnGrids, AicError> {
         let cell = self
             .gdn
-            .get_or_init(|| load_gdn_csv(&self.data_root.join("gdn_perf.txt")));
+            .get_or_init(|| load_gdn_parquet(&self.data_root.join("gdn_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
 }
@@ -314,35 +279,41 @@ fn bs_seq_interp(
     )))
 }
 
-fn load_mamba2_csv(path: &Path) -> Result<Mamba2Grids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_mamba2_parquet(path: &Path) -> Result<Mamba2Grids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let kernel_source_col = reader.col("kernel_source")?;
+    let phase_col = reader.col("phase")?;
+    let batch_size_col = reader.col("batch_size")?;
+    let seq_len_col = reader.col("seq_len")?;
+    let d_model_col = reader.col("d_model")?;
+    let d_state_col = reader.col("d_state")?;
+    let d_conv_col = reader.col("d_conv")?;
+    let nheads_col = reader.col("nheads")?;
+    let head_dim_col = reader.col("head_dim")?;
+    let n_groups_col = reader.col("n_groups")?;
+    let chunk_size_col = reader.col("chunk_size")?;
+    let latency_col = reader.col("latency")?;
+
     let mut by_keys: BTreeMap<Mamba2Key, BTreeMap<(u32, u32), f64>> = BTreeMap::new();
-    for record in reader.deserialize::<Mamba2Row>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = Mamba2Key {
-            kernel_source: row.kernel_source,
-            phase: row.phase,
-            d_model: row.d_model,
-            d_state: row.d_state,
-            d_conv: row.d_conv,
-            nheads: row.nheads,
-            head_dim: row.head_dim,
-            n_groups: row.n_groups,
-            chunk_size: row.chunk_size,
+            kernel_source: row.str_owned(kernel_source_col)?,
+            phase: row.str_owned(phase_col)?,
+            d_model: row.u32(d_model_col)?,
+            d_state: row.u32(d_state_col)?,
+            d_conv: row.u32(d_conv_col)?,
+            nheads: row.u32(nheads_col)?,
+            head_dim: row.u32(head_dim_col)?,
+            n_groups: row.u32(n_groups_col)?,
+            chunk_size: row.u32(chunk_size_col)?,
         };
-        let _ = row.model_name; // metadata only, not part of the key
         // First-wins parity with Python `load_mamba2_data`.
         by_keys
             .entry(key)
             .or_default()
-            .entry((row.batch_size, row.seq_len))
-            .or_insert(row.latency);
+            .entry((row.u32(batch_size_col)?, row.u32(seq_len_col)?))
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -353,34 +324,39 @@ fn load_mamba2_csv(path: &Path) -> Result<Mamba2Grids, AicError> {
     Ok(Mamba2Grids { by_keys })
 }
 
-fn load_gdn_csv(path: &Path) -> Result<GdnGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_gdn_parquet(path: &Path) -> Result<GdnGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let kernel_source_col = reader.col("kernel_source")?;
+    let phase_col = reader.col("phase")?;
+    let batch_size_col = reader.col("batch_size")?;
+    let seq_len_col = reader.col("seq_len")?;
+    let d_model_col = reader.col("d_model")?;
+    let d_conv_col = reader.col("d_conv")?;
+    let num_k_heads_col = reader.col("num_k_heads")?;
+    let head_k_dim_col = reader.col("head_k_dim")?;
+    let num_v_heads_col = reader.col("num_v_heads")?;
+    let head_v_dim_col = reader.col("head_v_dim")?;
+    let latency_col = reader.col("latency")?;
+
     let mut by_keys: BTreeMap<GdnKey, BTreeMap<(u32, u32), f64>> = BTreeMap::new();
-    for record in reader.deserialize::<GdnRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = GdnKey {
-            kernel_source: row.kernel_source,
-            phase: row.phase,
-            d_model: row.d_model,
-            d_conv: row.d_conv,
-            num_k_heads: row.num_k_heads,
-            head_k_dim: row.head_k_dim,
-            num_v_heads: row.num_v_heads,
-            head_v_dim: row.head_v_dim,
+            kernel_source: row.str_owned(kernel_source_col)?,
+            phase: row.str_owned(phase_col)?,
+            d_model: row.u32(d_model_col)?,
+            d_conv: row.u32(d_conv_col)?,
+            num_k_heads: row.u32(num_k_heads_col)?,
+            head_k_dim: row.u32(head_k_dim_col)?,
+            num_v_heads: row.u32(num_v_heads_col)?,
+            head_v_dim: row.u32(head_v_dim_col)?,
         };
-        let _ = row.model_name;
         // First-wins parity with Python `load_gdn_data`.
         by_keys
             .entry(key)
             .or_default()
-            .entry((row.batch_size, row.seq_len))
-            .or_insert(row.latency);
+            .entry((row.u32(batch_size_col)?, row.u32(seq_len_col)?))
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -389,20 +365,6 @@ fn load_gdn_csv(path: &Path) -> Result<GdnGrids, AicError> {
         )));
     }
     Ok(GdnGrids { by_keys })
-}
-
-fn read_perf_file(path: &Path) -> Result<String, AicError> {
-    let text = fs::read_to_string(path).map_err(|source| AicError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if text.starts_with("version https://git-lfs") {
-        return Err(AicError::PerfDatabase(format!(
-            "perf file is an unresolved git-lfs pointer: {}; run `git lfs pull`",
-            path.display()
-        )));
-    }
-    Ok(text)
 }
 
 fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {

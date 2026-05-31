@@ -27,15 +27,13 @@
 //! variants used by the TRT-LLM WideEP path).
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-
-use serde::Deserialize;
 
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::interpolation::{interp_1d, nearest_neighbors};
+use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct WideEpMoeTable {
     data_root: PathBuf,
@@ -62,29 +60,9 @@ pub struct WideEpMoeKey {
     pub moe_ep_size: u32,
 }
 
-#[derive(Debug, Deserialize)]
-struct WideEpMoeRow {
-    // `kernel_source` is optional in the CSV (defaults to "moe_torch_flow"
-    // when absent, per Python's `load_wideep_moe_compute_data`). serde's
-    // `default` handles that branch.
-    #[serde(default = "default_kernel_source")]
-    kernel_source: String,
-    moe_dtype: String,
-    num_tokens: u32,
-    hidden_size: u32,
-    inter_size: u32,
-    topk: u32,
-    num_experts: u32,
-    num_slots: u32,
-    moe_tp_size: u32,
-    moe_ep_size: u32,
-    distribution: String,
-    latency: f64,
-}
-
-fn default_kernel_source() -> String {
-    "moe_torch_flow".to_string()
-}
+/// `kernel_source` defaults to `"moe_torch_flow"` when null, matching Python's
+/// `load_wideep_moe_compute_data` behavior.
+const DEFAULT_KERNEL_SOURCE: &str = "moe_torch_flow";
 
 impl WideEpMoeTable {
     pub fn new(data_root: PathBuf) -> Self {
@@ -178,40 +156,53 @@ impl WideEpMoeTable {
     fn load_compute(&self) -> Result<&WideEpMoeGrids, AicError> {
         let cell = self
             .compute
-            .get_or_init(|| load_compute_csv(&self.data_root.join("wideep_moe_perf.txt")));
+            .get_or_init(|| load_compute_parquet(&self.data_root.join("wideep_moe_perf.parquet")));
         cell.as_ref().map_err(clone_err)
     }
 }
 
-fn load_compute_csv(path: &Path) -> Result<WideEpMoeGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_compute_parquet(path: &Path) -> Result<WideEpMoeGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let kernel_source_col = reader.col_optional("kernel_source");
+    let moe_dtype_col = reader.col("moe_dtype")?;
+    let num_tokens_col = reader.col("num_tokens")?;
+    let hidden_size_col = reader.col("hidden_size")?;
+    let inter_size_col = reader.col("inter_size")?;
+    let topk_col = reader.col("topk")?;
+    let num_experts_col = reader.col("num_experts")?;
+    let num_slots_col = reader.col("num_slots")?;
+    let moe_tp_size_col = reader.col("moe_tp_size")?;
+    let moe_ep_size_col = reader.col("moe_ep_size")?;
+    let distribution_col = reader.col("distribution")?;
+    let latency_col = reader.col("latency")?;
+
     let mut by_keys: BTreeMap<WideEpMoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
-    for record in reader.deserialize::<WideEpMoeRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
+        // `kernel_source` is optional/nullable in the perf file; default to
+        // "moe_torch_flow" when absent, matching Python's loader.
+        let kernel_source = row
+            .str_optional(kernel_source_col)?
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| DEFAULT_KERNEL_SOURCE.to_string());
         let key = WideEpMoeKey {
-            kernel_source: row.kernel_source,
-            quant: row.moe_dtype,
-            distribution: row.distribution,
-            topk: row.topk,
-            num_experts: row.num_experts,
-            hidden_size: row.hidden_size,
-            inter_size: row.inter_size,
-            num_slots: row.num_slots,
-            moe_tp_size: row.moe_tp_size,
-            moe_ep_size: row.moe_ep_size,
+            kernel_source,
+            quant: row.str_owned(moe_dtype_col)?,
+            distribution: row.str_owned(distribution_col)?,
+            topk: row.u32(topk_col)?,
+            num_experts: row.u32(num_experts_col)?,
+            hidden_size: row.u32(hidden_size_col)?,
+            inter_size: row.u32(inter_size_col)?,
+            num_slots: row.u32(num_slots_col)?,
+            moe_tp_size: row.u32(moe_tp_size_col)?,
+            moe_ep_size: row.u32(moe_ep_size_col)?,
         };
         // First-wins parity with Python loader.
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.num_tokens)
-            .or_insert(row.latency);
+            .entry(row.u32(num_tokens_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -220,20 +211,6 @@ fn load_compute_csv(path: &Path) -> Result<WideEpMoeGrids, AicError> {
         )));
     }
     Ok(WideEpMoeGrids { by_keys })
-}
-
-fn read_perf_file(path: &Path) -> Result<String, AicError> {
-    let text = fs::read_to_string(path).map_err(|source| AicError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if text.starts_with("version https://git-lfs") {
-        return Err(AicError::PerfDatabase(format!(
-            "perf file is an unresolved git-lfs pointer: {}; run `git lfs pull`",
-            path.display()
-        )));
-    }
-    Ok(text)
 }
 
 fn clone_err(err: &AicError) -> AicError {

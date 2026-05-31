@@ -23,15 +23,13 @@
 //! fallbacks, and extra fused-op accounting (qk_norm, rope, kv writes).
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-
-use serde::Deserialize;
 
 use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::interpolation::{interp_2d_1d_grid, Grid3};
+use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct AttentionTable {
     data_root: PathBuf,
@@ -73,44 +71,6 @@ struct GenerationKey {
 struct EncoderKey {
     fmha_quant: String,
     head_size: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContextRow {
-    batch_size: u32,
-    isl: u32,
-    num_heads: u32,
-    num_key_value_heads: u32,
-    head_dim: u32,
-    attn_dtype: String,
-    kv_cache_dtype: String,
-    latency: f64,
-    #[serde(default)]
-    window_size: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GenerationRow {
-    batch_size: u32,
-    isl: u32,
-    num_heads: u32,
-    num_key_value_heads: u32,
-    head_dim: u32,
-    kv_cache_dtype: String,
-    step: u32,
-    latency: f64,
-    #[serde(default)]
-    window_size: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EncoderRow {
-    batch_size: u32,
-    isl: u32,
-    num_heads: u32,
-    head_dim: u32,
-    attn_dtype: String,
-    latency: f64,
 }
 
 impl AttentionTable {
@@ -202,23 +162,23 @@ impl AttentionTable {
     }
 
     fn load_context(&self) -> Result<&ContextGrids, AicError> {
-        let cell = self
-            .context
-            .get_or_init(|| load_context_csv(&self.data_root.join("context_attention_perf.txt")));
+        let cell = self.context.get_or_init(|| {
+            load_context_parquet(&self.data_root.join("context_attention_perf.parquet"))
+        });
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_generation(&self) -> Result<&GenerationGrids, AicError> {
         let cell = self.generation.get_or_init(|| {
-            load_generation_csv(&self.data_root.join("generation_attention_perf.txt"))
+            load_generation_parquet(&self.data_root.join("generation_attention_perf.parquet"))
         });
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_encoder(&self) -> Result<&EncoderGrids, AicError> {
-        let cell = self
-            .encoder
-            .get_or_init(|| load_encoder_csv(&self.data_root.join("encoder_attention_perf.txt")));
+        let cell = self.encoder.get_or_init(|| {
+            load_encoder_parquet(&self.data_root.join("encoder_attention_perf.parquet"))
+        });
         cell.as_ref().map_err(clone_err)
     }
 }
@@ -232,35 +192,40 @@ fn normalize_kv(n: u32, n_kv: u32) -> u32 {
     }
 }
 
-fn load_context_csv(path: &Path) -> Result<ContextGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_context_parquet(path: &Path) -> Result<ContextGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let batch_size_col = reader.col("batch_size")?;
+    let isl_col = reader.col("isl")?;
+    let num_heads_col = reader.col("num_heads")?;
+    let num_kv_col = reader.col("num_key_value_heads")?;
+    let head_dim_col = reader.col("head_dim")?;
+    let attn_dtype_col = reader.col("attn_dtype")?;
+    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+    let latency_col = reader.col("latency")?;
+    let window_size_col = reader.col_optional("window_size");
 
     let mut by_keys: BTreeMap<ContextKey, Grid3<f64>> = BTreeMap::new();
-    for record in reader.deserialize::<ContextRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
+        let num_heads = row.u32(num_heads_col)?;
+        let num_kv = row.u32(num_kv_col)?;
         let key = ContextKey {
-            fmha_quant: row.attn_dtype,
-            kv_quant: row.kv_cache_dtype,
-            n_kv_lookup: normalize_kv(row.num_heads, row.num_key_value_heads),
-            head_size: row.head_dim,
-            window_size: row.window_size.unwrap_or(0),
+            fmha_quant: row.str_owned(attn_dtype_col)?,
+            kv_quant: row.str_owned(kv_cache_dtype_col)?,
+            n_kv_lookup: normalize_kv(num_heads, num_kv),
+            head_size: row.u32(head_dim_col)?,
+            window_size: row.u32_optional(window_size_col)?.unwrap_or(0),
         };
         // First-wins parity with Python `load_context_attention_data`.
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.num_heads)
+            .entry(num_heads)
             .or_default()
-            .entry(row.isl)
+            .entry(row.u32(isl_col)?)
             .or_default()
-            .entry(row.batch_size)
-            .or_insert(row.latency);
+            .entry(row.u32(batch_size_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -271,35 +236,40 @@ fn load_context_csv(path: &Path) -> Result<ContextGrids, AicError> {
     Ok(ContextGrids { by_keys })
 }
 
-fn load_generation_csv(path: &Path) -> Result<GenerationGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_generation_parquet(path: &Path) -> Result<GenerationGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let batch_size_col = reader.col("batch_size")?;
+    let isl_col = reader.col("isl")?;
+    let num_heads_col = reader.col("num_heads")?;
+    let num_kv_col = reader.col("num_key_value_heads")?;
+    let head_dim_col = reader.col("head_dim")?;
+    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+    let step_col = reader.col("step")?;
+    let latency_col = reader.col("latency")?;
+    let window_size_col = reader.col_optional("window_size");
 
     let mut by_keys: BTreeMap<GenerationKey, Grid3<f64>> = BTreeMap::new();
-    for record in reader.deserialize::<GenerationRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
+        let num_heads = row.u32(num_heads_col)?;
+        let num_kv = row.u32(num_kv_col)?;
         let key = GenerationKey {
-            kv_quant: row.kv_cache_dtype,
-            n_kv_lookup: normalize_kv(row.num_heads, row.num_key_value_heads),
-            head_size: row.head_dim,
-            window_size: row.window_size.unwrap_or(0),
+            kv_quant: row.str_owned(kv_cache_dtype_col)?,
+            n_kv_lookup: normalize_kv(num_heads, num_kv),
+            head_size: row.u32(head_dim_col)?,
+            window_size: row.u32_optional(window_size_col)?.unwrap_or(0),
         };
-        let sequence_tokens = row.isl + row.step;
+        let sequence_tokens = row.u32(isl_col)? + row.u32(step_col)?;
         // First-wins parity with Python `load_generation_attention_data`.
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.num_heads)
+            .entry(num_heads)
             .or_default()
             .entry(sequence_tokens)
             .or_default()
-            .entry(row.batch_size)
-            .or_insert(row.latency);
+            .entry(row.u32(batch_size_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -310,32 +280,32 @@ fn load_generation_csv(path: &Path) -> Result<GenerationGrids, AicError> {
     Ok(GenerationGrids { by_keys })
 }
 
-fn load_encoder_csv(path: &Path) -> Result<EncoderGrids, AicError> {
-    let text = read_perf_file(path)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+fn load_encoder_parquet(path: &Path) -> Result<EncoderGrids, AicError> {
+    let reader = PerfReader::open(path)?;
+    let batch_size_col = reader.col("batch_size")?;
+    let isl_col = reader.col("isl")?;
+    let num_heads_col = reader.col("num_heads")?;
+    let head_dim_col = reader.col("head_dim")?;
+    let attn_dtype_col = reader.col("attn_dtype")?;
+    let latency_col = reader.col("latency")?;
 
     let mut by_keys: BTreeMap<EncoderKey, Grid3<f64>> = BTreeMap::new();
-    for record in reader.deserialize::<EncoderRow>() {
-        let row = record.map_err(|source| AicError::Csv {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    for row in reader.rows()? {
+        let row = row?;
         let key = EncoderKey {
-            fmha_quant: row.attn_dtype,
-            head_size: row.head_dim,
+            fmha_quant: row.str_owned(attn_dtype_col)?,
+            head_size: row.u32(head_dim_col)?,
         };
         // First-wins parity with Python `load_encoder_attention_data`.
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.num_heads)
+            .entry(row.u32(num_heads_col)?)
             .or_default()
-            .entry(row.isl)
+            .entry(row.u32(isl_col)?)
             .or_default()
-            .entry(row.batch_size)
-            .or_insert(row.latency);
+            .entry(row.u32(batch_size_col)?)
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -344,20 +314,6 @@ fn load_encoder_csv(path: &Path) -> Result<EncoderGrids, AicError> {
         )));
     }
     Ok(EncoderGrids { by_keys })
-}
-
-fn read_perf_file(path: &Path) -> Result<String, AicError> {
-    let text = fs::read_to_string(path).map_err(|source| AicError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if text.starts_with("version https://git-lfs") {
-        return Err(AicError::PerfDatabase(format!(
-            "perf file is an unresolved git-lfs pointer: {}; run `git lfs pull`",
-            path.display()
-        )));
-    }
-    Ok(text)
 }
 
 fn missing_key(data_root: &Path, key: &ContextKey) -> AicError {

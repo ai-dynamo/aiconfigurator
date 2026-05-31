@@ -23,6 +23,7 @@ pub mod gemm;
 pub mod mhc;
 pub mod mla;
 pub mod moe;
+pub mod parquet_loader;
 pub mod state_space;
 pub mod wideep;
 pub mod wideep_mla;
@@ -131,7 +132,7 @@ mod tests {
         assert_eq!(db.backend, "vllm");
         assert_eq!(db.version, "0.19.0");
         assert!(db.data_root.is_dir(), "data_root must exist");
-        assert!(db.data_root.join("gemm_perf.txt").is_file());
+        assert!(db.data_root.join("gemm_perf.parquet").is_file());
     }
 
     #[test]
