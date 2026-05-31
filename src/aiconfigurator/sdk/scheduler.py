@@ -42,6 +42,11 @@ from aiconfigurator.sdk.perf_database import PerfDatabase
 
 DisaggRole = Literal["prefill", "decode"]
 
+# Per-phase latency-correction multipliers used by static disagg scheduling
+# (calibrated against silicon measurements; preserved verbatim from V1).
+DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE: float = 1.1
+DEFAULT_DECODE_LATENCY_CORRECTION_SCALE: float = 1.08
+
 
 @runtime_checkable
 class Scheduler(Protocol):
@@ -141,4 +146,11 @@ class StaticScheduler:
 DEFAULT_SCHEDULER: Scheduler = StaticScheduler()
 
 
-__all__ = ["DEFAULT_SCHEDULER", "DisaggRole", "Scheduler", "StaticScheduler"]
+__all__ = [
+    "DEFAULT_DECODE_LATENCY_CORRECTION_SCALE",
+    "DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE",
+    "DEFAULT_SCHEDULER",
+    "DisaggRole",
+    "Scheduler",
+    "StaticScheduler",
+]

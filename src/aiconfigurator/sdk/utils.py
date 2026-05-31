@@ -217,6 +217,154 @@ def enumerate_parallel_config(
     return parallel_config_list
 
 
+def build_disagg_parallel_lists(
+    backend_name: str,
+    prefill_system: str,
+    decode_system: str,
+    is_moe: bool,
+    enable_wideep: bool = False,
+    should_enable_pp: bool = False,
+    *,
+    prefill_enable_wideep: bool | None = None,
+    decode_enable_wideep: bool | None = None,
+    moe_backend: str | None = None,
+) -> tuple[dict, dict]:
+    """Build the TP/PP/DP/MoE-TP/MoE-EP search-space lists for disagg enumeration.
+
+    Shared by :class:`aiconfigurator.sdk.task.Task` (default sweep candidates)
+    and :mod:`aiconfigurator.generator.enumerate` (profiling enumeration).
+
+    Args:
+        backend_name: Backend identifier (``"trtllm"``, ``"sglang"``, ``"vllm"``).
+        prefill_system: System name for the prefill worker (e.g. ``"h200_sxm"``).
+        decode_system: System name for the decode worker.
+        is_moe: Whether the model is a Mixture-of-Experts model.
+        enable_wideep: Enable wide expert-parallelism search space (global fallback).
+        should_enable_pp: Enable pipeline-parallelism candidates (default ``False``).
+        prefill_enable_wideep: Override WideEP for prefill (None = use *enable_wideep*).
+        decode_enable_wideep: Override WideEP for decode (None = use *enable_wideep*).
+        moe_backend: MoE communication backend (``"deepep_moe"`` or ``None``).
+
+    Returns:
+        ``(prefill_worker_config, decode_worker_config)`` — two dicts each containing
+        the keys ``num_gpu_per_worker``, ``tp_list``, ``pp_list``, ``dp_list``,
+        ``moe_tp_list``, ``moe_ep_list``.
+    """
+    _prefill_wideep = prefill_enable_wideep if prefill_enable_wideep is not None else enable_wideep
+    _decode_wideep = decode_enable_wideep if decode_enable_wideep is not None else enable_wideep
+
+    prefill_worker_config: dict = {
+        "num_gpu_per_worker": [1, 2, 4, 8],
+        "tp_list": [1, 2, 4, 8],
+        "pp_list": [1, 2, 4, 8] if should_enable_pp else [1],
+        "dp_list": [1],
+        "moe_tp_list": [1],
+        "moe_ep_list": [1, 2, 4, 8] if is_moe else [1],
+    }
+
+    decode_worker_config: dict = {
+        "num_gpu_per_worker": [1, 2, 4, 8],
+        "tp_list": [1, 2, 4, 8],
+        "pp_list": [1, 2, 4, 8] if should_enable_pp else [1],
+        "dp_list": [1, 2, 4, 8] if is_moe else [1],
+        "moe_tp_list": [1],
+        "moe_ep_list": [1, 2, 4, 8] if is_moe else [1],
+    }
+
+    if not is_moe:
+        if prefill_system in ["gb200", "gb300"]:
+            prefill_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
+            prefill_worker_config["tp_list"] = [1, 2, 4, 8, 16]
+            prefill_worker_config["pp_list"] = [1]
+        if decode_system in ["gb200", "gb300"]:
+            decode_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
+            decode_worker_config["tp_list"] = [1, 2, 4, 8, 16]
+            decode_worker_config["pp_list"] = [1]
+        return prefill_worker_config, decode_worker_config
+
+    if backend_name == "trtllm":
+        if _prefill_wideep:
+            prefill_worker_config["num_gpu_per_worker"] = [4, 8, 16, 32]
+            prefill_worker_config["tp_list"] = [1, 2, 4, 8]
+            prefill_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
+            prefill_worker_config["dp_list"] = [4, 8, 16, 32]
+            prefill_worker_config["moe_tp_list"] = [1]
+            prefill_worker_config["moe_ep_list"] = [4, 8, 16, 32]
+        else:
+            x = [1, 2, 4, 8]
+            prefill_worker_config["num_gpu_per_worker"] = x
+            prefill_worker_config["tp_list"] = x
+            prefill_worker_config["pp_list"] = x if should_enable_pp else [1]
+            prefill_worker_config["dp_list"] = x
+            prefill_worker_config["moe_tp_list"] = x
+            prefill_worker_config["moe_ep_list"] = x
+
+        if _decode_wideep:
+            decode_worker_config["num_gpu_per_worker"] = [4, 8, 16, 32, 64]
+            decode_worker_config["tp_list"] = [1, 2, 4, 8]
+            decode_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
+            decode_worker_config["dp_list"] = [4, 8, 16, 32, 64]
+            decode_worker_config["moe_tp_list"] = [1]
+            decode_worker_config["moe_ep_list"] = [4, 8, 16, 32, 64]
+        else:
+            x = [1, 2, 4, 8]
+            decode_worker_config["num_gpu_per_worker"] = x
+            decode_worker_config["tp_list"] = x
+            decode_worker_config["pp_list"] = x if should_enable_pp else [1]
+            decode_worker_config["dp_list"] = x
+            decode_worker_config["moe_tp_list"] = x
+            decode_worker_config["moe_ep_list"] = x
+    elif backend_name == "sglang":
+        if enable_wideep:
+            # Inter-node DeepEP (ep >= 8, cross-node)
+            prefill_worker_config["num_gpu_per_worker"] = [8, 16, 32]
+            prefill_worker_config["tp_list"] = [1, 2, 4, 8]
+            prefill_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
+            prefill_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32]
+            prefill_worker_config["moe_tp_list"] = [1]
+            prefill_worker_config["moe_ep_list"] = [8, 16, 32]
+
+            decode_worker_config["num_gpu_per_worker"] = [8, 16, 32, 64]
+            decode_worker_config["tp_list"] = [1, 2, 4, 8]
+            decode_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
+            decode_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
+            decode_worker_config["moe_tp_list"] = [1]
+            decode_worker_config["moe_ep_list"] = [8, 16, 32, 64]
+        elif moe_backend == "deepep_moe":
+            # Intra-node DeepEP (ep 1-8, NVLink)
+            x = [1, 2, 4, 8]
+            for cfg in (prefill_worker_config, decode_worker_config):
+                cfg["num_gpu_per_worker"] = x
+                cfg["tp_list"] = x
+                cfg["pp_list"] = x if should_enable_pp else [1]
+                cfg["dp_list"] = x
+                cfg["moe_tp_list"] = [1]
+                cfg["moe_ep_list"] = [1, 2, 4, 8]
+        else:
+            # Standard comm (fused_moe + allgather/RS)
+            x = [1, 2, 4, 8]
+            for cfg in (prefill_worker_config, decode_worker_config):
+                cfg["num_gpu_per_worker"] = x
+                cfg["tp_list"] = x
+                cfg["pp_list"] = x if should_enable_pp else [1]
+                cfg["dp_list"] = x
+                cfg["moe_tp_list"] = x
+                cfg["moe_ep_list"] = [1, 2, 4, 8]
+    elif backend_name == "vllm":
+        x = [1, 2, 4, 8]
+        for cfg in (prefill_worker_config, decode_worker_config):
+            cfg["num_gpu_per_worker"] = x
+            cfg["tp_list"] = x
+            cfg["pp_list"] = x if should_enable_pp else [1]
+            cfg["dp_list"] = x
+            cfg["moe_tp_list"] = x
+            cfg["moe_ep_list"] = x
+    else:
+        raise ValueError(f"Invalid backend: {backend_name}")
+
+    return prefill_worker_config, decode_worker_config
+
+
 def enumerate_ttft_tpot_constraints(
     osl: int,
     request_latency: float,

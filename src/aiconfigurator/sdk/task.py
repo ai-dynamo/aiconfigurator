@@ -4,10 +4,8 @@
 """
 Task — flat user-facing config for sweep_agg / sweep_disagg.
 
-Replaces the legacy ``sdk.task_v1.TaskConfig`` (still present alongside
-this module until V1 callers — chiefly ``cli/api.py:cli_estimate`` — are
-migrated).  The legacy YAML format is NOT supported; new YAML uses field
-names that map 1:1 to this dataclass.
+Replaces the legacy nested ``TaskConfig`` design.  The legacy YAML format
+is NOT supported; new YAML uses field names that map 1:1 to this dataclass.
 
 Design:
 - Flat dataclass, SGLang-style.  No nested DefaultMunch, no deep_merge.
@@ -28,12 +26,11 @@ See ``cli/exps/example_new.yaml`` for the canonical YAML format.
 
 from __future__ import annotations
 
-import copy
 import dataclasses
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.models import (
@@ -42,7 +39,11 @@ from aiconfigurator.sdk.models import (
     get_model_family,
 )
 from aiconfigurator.sdk.perf_database import get_latest_database_version
-from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config_from_model_path
+from aiconfigurator.sdk.utils import (
+    build_disagg_parallel_lists,
+    enumerate_parallel_config,
+    get_model_config_from_model_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,155 +119,6 @@ def _resolve_quant_str(key: str, value: Any) -> Any:
     if enum_cls is not None and isinstance(value, str):
         return enum_cls[value]
     return value
-
-
-# ---------------------------------------------------------------------------
-# Default disagg search space (mirror of legacy build_disagg_parallel_lists)
-# ---------------------------------------------------------------------------
-
-
-def _default_disagg_search(
-    *,
-    backend_name: str,
-    is_moe: bool,
-    prefill_system: str,
-    decode_system: str,
-    prefill_enable_wideep: bool,
-    decode_enable_wideep: bool,
-    moe_backend: str | None,
-    should_enable_pp: bool = False,
-) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
-    """Inlined version of legacy sdk.task.build_disagg_parallel_lists.
-
-    Kept here so task_config.py does not depend on V1 task.py.  Algorithm
-    identical; locked by integration parity test.
-    """
-    prefill_cfg: dict[str, list[int]] = {
-        "num_gpu_per_worker": [1, 2, 4, 8],
-        "tp_list": [1, 2, 4, 8],
-        "pp_list": [1, 2, 4, 8] if should_enable_pp else [1],
-        "dp_list": [1],
-        "moe_tp_list": [1],
-        "moe_ep_list": [1, 2, 4, 8] if is_moe else [1],
-    }
-    decode_cfg: dict[str, list[int]] = {
-        "num_gpu_per_worker": [1, 2, 4, 8],
-        "tp_list": [1, 2, 4, 8],
-        "pp_list": [1, 2, 4, 8] if should_enable_pp else [1],
-        "dp_list": [1, 2, 4, 8] if is_moe else [1],
-        "moe_tp_list": [1],
-        "moe_ep_list": [1, 2, 4, 8] if is_moe else [1],
-    }
-    if not is_moe:
-        if prefill_system in ("gb200", "gb300"):
-            prefill_cfg["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
-            prefill_cfg["tp_list"] = [1, 2, 4, 8, 16]
-            prefill_cfg["pp_list"] = [1]
-        if decode_system in ("gb200", "gb300"):
-            decode_cfg["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
-            decode_cfg["tp_list"] = [1, 2, 4, 8, 16]
-            decode_cfg["pp_list"] = [1]
-        return prefill_cfg, decode_cfg
-
-    if backend_name == "trtllm":
-        if prefill_enable_wideep:
-            prefill_cfg = {
-                "num_gpu_per_worker": [4, 8, 16, 32],
-                "tp_list": [1, 2, 4, 8],
-                "pp_list": [1, 2, 4, 8, 16, 32] if should_enable_pp else [1],
-                "dp_list": [4, 8, 16, 32],
-                "moe_tp_list": [1],
-                "moe_ep_list": [4, 8, 16, 32],
-            }
-        else:
-            x = [1, 2, 4, 8]
-            prefill_cfg = {
-                "num_gpu_per_worker": x,
-                "tp_list": x,
-                "pp_list": x if should_enable_pp else [1],
-                "dp_list": x,
-                "moe_tp_list": x,
-                "moe_ep_list": x,
-            }
-        if decode_enable_wideep:
-            decode_cfg = {
-                "num_gpu_per_worker": [4, 8, 16, 32, 64],
-                "tp_list": [1, 2, 4, 8],
-                "pp_list": [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1],
-                "dp_list": [4, 8, 16, 32, 64],
-                "moe_tp_list": [1],
-                "moe_ep_list": [4, 8, 16, 32, 64],
-            }
-        else:
-            x = [1, 2, 4, 8]
-            decode_cfg = {
-                "num_gpu_per_worker": x,
-                "tp_list": x,
-                "pp_list": x if should_enable_pp else [1],
-                "dp_list": x,
-                "moe_tp_list": x,
-                "moe_ep_list": x,
-            }
-    elif backend_name == "sglang":
-        if prefill_enable_wideep or decode_enable_wideep:
-            prefill_cfg = {
-                "num_gpu_per_worker": [8, 16, 32],
-                "tp_list": [1, 2, 4, 8],
-                "pp_list": [1, 2, 4, 8, 16, 32] if should_enable_pp else [1],
-                "dp_list": [1, 2, 4, 8, 16, 32],
-                "moe_tp_list": [1],
-                "moe_ep_list": [8, 16, 32],
-            }
-            decode_cfg = {
-                "num_gpu_per_worker": [8, 16, 32, 64],
-                "tp_list": [1, 2, 4, 8],
-                "pp_list": [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1],
-                "dp_list": [1, 2, 4, 8, 16, 32, 64],
-                "moe_tp_list": [1],
-                "moe_ep_list": [8, 16, 32, 64],
-            }
-        elif moe_backend == "deepep_moe":
-            x = [1, 2, 4, 8]
-            for cfg in (prefill_cfg, decode_cfg):
-                cfg["num_gpu_per_worker"] = x
-                cfg["tp_list"] = x
-                cfg["pp_list"] = x if should_enable_pp else [1]
-                cfg["dp_list"] = x
-                cfg["moe_tp_list"] = [1]
-                cfg["moe_ep_list"] = [1, 2, 4, 8]
-        else:
-            x = [1, 2, 4, 8]
-            prefill_cfg = {
-                "num_gpu_per_worker": x,
-                "tp_list": x,
-                "pp_list": x if should_enable_pp else [1],
-                "dp_list": x,
-                "moe_tp_list": x,
-                "moe_ep_list": [1, 2, 4, 8],
-            }
-            decode_cfg = {
-                "num_gpu_per_worker": x,
-                "tp_list": x,
-                "pp_list": x if should_enable_pp else [1],
-                "dp_list": x,
-                "moe_tp_list": x,
-                "moe_ep_list": [1, 2, 4, 8],
-            }
-    elif backend_name == "vllm":
-        x = [1, 2, 4, 8]
-        prefill_cfg = {
-            "num_gpu_per_worker": x,
-            "tp_list": x,
-            "pp_list": x if should_enable_pp else [1],
-            "dp_list": x,
-            "moe_tp_list": x,
-            "moe_ep_list": x,
-        }
-        decode_cfg = copy.deepcopy(prefill_cfg)
-    else:
-        raise ValueError(f"Invalid backend: {backend_name}")
-
-    return prefill_cfg, decode_cfg
 
 
 # ---------------------------------------------------------------------------
@@ -452,9 +304,41 @@ class Task:
     def __post_init__(self) -> None:
         self._check_prefix_discipline()
         self._resolve_model_identity()
+        self._check_deepseek_v4_fp4_on_hopper()
         self._resolve_backend_version()
         self._resolve_quant_modes()
         self._resolve_search_space()
+
+    # Native FP4-expert DeepSeek-V4 checkpoints can't run on Hopper -- redirect
+    # the user to the FP8 fork.  Kept as a hardcoded list because the routing
+    # is checkpoint-specific, not derivable from HF config.
+    _DEEPSEEK_V4_NATIVE_FP4_TO_FP8: ClassVar[dict[str, str]] = {
+        "deepseek-ai/DeepSeek-V4-Flash": "sgl-project/DeepSeek-V4-Flash-FP8",
+        "deepseek-ai/DeepSeek-V4-Pro": "sgl-project/DeepSeek-V4-Pro-FP8",
+    }
+
+    @staticmethod
+    def _is_hopper_system(system_name: str | None) -> bool:
+        if not system_name:
+            return False
+        return system_name.startswith(("h100", "h200", "gh200"))
+
+    def _check_deepseek_v4_fp4_on_hopper(self) -> None:
+        if self.serving_mode == "agg":
+            pairs = [(self.model_path, self.system_name)]
+        else:
+            pairs = [
+                (self.prefill_model_path, self.prefill_system_name),
+                (self.decode_model_path, self.decode_system_name),
+            ]
+        for model_path, system_name in pairs:
+            replacement = self._DEEPSEEK_V4_NATIVE_FP4_TO_FP8.get(model_path)
+            if replacement is None or not self._is_hopper_system(system_name):
+                continue
+            raise ValueError(
+                f"{model_path} uses native FP4 routed-expert weights and is not supported "
+                f"on Hopper system {system_name!r}.  Use {replacement} instead."
+            )
 
     def _check_prefix_discipline(self) -> None:
         """In disagg mode, top-level worker-spec fields must be at their defaults.
@@ -622,11 +506,11 @@ class Task:
             raise ValueError(f"Unsupported backend: {self.backend_name}")
 
     def _resolve_disagg_search(self) -> None:
-        prefill_cfg, decode_cfg = _default_disagg_search(
+        prefill_cfg, decode_cfg = build_disagg_parallel_lists(
             backend_name=self.prefill_backend_name,
-            is_moe=self._is_moe,
             prefill_system=self.prefill_system_name,
             decode_system=self.decode_system_name,
+            is_moe=self._is_moe,
             prefill_enable_wideep=self.prefill_enable_wideep,
             decode_enable_wideep=self.decode_enable_wideep,
             moe_backend=self.moe_backend,
