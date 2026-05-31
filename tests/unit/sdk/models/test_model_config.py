@@ -14,7 +14,7 @@ import pytest
 
 from aiconfigurator.sdk import common, config, models
 from aiconfigurator.sdk.models import LLAMAModel, Qwen3VLModel, check_is_moe, get_model, get_model_family
-from aiconfigurator.sdk.task import TaskConfig
+from aiconfigurator.sdk.task_v1 import TaskConfig
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
 pytestmark = pytest.mark.unit
