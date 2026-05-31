@@ -114,12 +114,14 @@ framework_specific_op_cases:
         - 96
         head_dims:
         - 64
+        - 72
         - 128
         - 192
         - 256
         window_sizes:
         - 0
         - 1024
+        - 8192
   vllm:
     attention_context:
       cases:
@@ -138,6 +140,7 @@ framework_specific_op_cases:
         - 64
         head_dims:
         - 64
+        - 72
         - 128
         - 192
         - 256

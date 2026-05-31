@@ -1190,6 +1190,16 @@ class PerfDatabase:
                 merged.update(_enum_key_names(data))
             return sorted(merged)
 
+        def _gemm_key_names() -> list[str]:
+            modes = _enum_key_names(getattr(self, "_gemm_data", None))
+            if (
+                self.backend == "trtllm"
+                and common.GEMMQuantMode.fp8.name in modes
+                and common.GEMMQuantMode.fp8_static.name not in modes
+            ):
+                modes.append(common.GEMMQuantMode.fp8_static.name)
+            return modes
+
         def _generation_mla_kv_modes() -> list[str]:
             """Collect kv_cache_dtype names for generation MLA from both sources.
 
@@ -1253,7 +1263,7 @@ class PerfDatabase:
             }
         elif self.backend == "trtllm":
             self.supported_quant_mode = {
-                "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
+                "gemm": _gemm_key_names(),
                 "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
                 "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
                 "context_mla": _merge_key_names(

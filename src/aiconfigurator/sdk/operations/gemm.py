@@ -211,10 +211,10 @@ class GEMM(Operation):
     ) -> common.GEMMQuantMode:
         """Normalize GEMM overhead quant modes for perf table lookup.
 
-        GEMM itself treats ``fp8_static`` as a distinct runtime path with its
-        own perf rows. The compute_scale and scale_matrix overhead tables are
-        stored in the dynamic ``fp8`` table family because they model the delta
-        between dynamic and static FP8.
+        TRT-LLM treats ``fp8_static`` as a behavioral mode over its dynamic
+        ``fp8`` GEMM timing rows. The compute_scale and scale_matrix overhead
+        tables are also stored in the dynamic ``fp8`` table family because they
+        model the delta between dynamic and static FP8.
         """
         if quant_mode == common.GEMMQuantMode.fp8_static:
             return common.GEMMQuantMode.fp8
@@ -393,7 +393,11 @@ class GEMM(Operation):
         if database_mode is None:
             database_mode = database._default_database_mode
 
-        table_quant_mode = quant_mode
+        table_quant_mode = (
+            cls._normalize_gemm_quant_mode_for_table(quant_mode)
+            if database.backend == common.BackendName.trtllm.value
+            else quant_mode
+        )
 
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0, source="sol")

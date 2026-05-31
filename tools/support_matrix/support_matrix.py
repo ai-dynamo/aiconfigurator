@@ -79,8 +79,32 @@ _FRONTIER_ENVELOPE_COLUMNS = {
     "request_latency": "min",
 }
 _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
-_NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
+_NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
+_DEFAULT_IMAGE_SIZE = 448
+_H100_TRTLLM_130RC10_CONTEXT_ATTENTION_MODELS = frozenset(
+    {
+        "Qwen/Qwen3.5-27B",
+        "Qwen/Qwen3.5-397B-A17B",
+        "XiaomiMiMo/MiMo-V2-Flash",
+        "google/gemma-4-26B-A4B",
+    }
+)
+_H100_TRTLLM_130RC10_MOE_MODELS = frozenset(
+    {
+        "Qwen/Qwen3-VL-235B-A22B-Instruct",
+        "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        "Qwen/Qwen3.5-35B-A3B",
+        "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
+        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    }
+)
+_H100_TRTLLM_130RC10_MHC_MODELS = frozenset(
+    {
+        "sgl-project/DeepSeek-V4-Flash-FP8",
+        "sgl-project/DeepSeek-V4-Pro-FP8",
+    }
+)
 
 
 def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[tuple[int, str], str, str, str]:
@@ -113,6 +137,20 @@ class HardwareIncompatibility:
 class TaskAttempt:
     name: str
     yaml_config: dict | None = None
+
+
+def _default_image_kwargs_for_model(model: str) -> dict[str, int]:
+    try:
+        model_info = _get_model_info(model)
+    except Exception:
+        return {}
+    if isinstance(model_info.get("extra_params"), common.VisionEncoderConfig):
+        return {
+            "image_height": _DEFAULT_IMAGE_SIZE,
+            "image_width": _DEFAULT_IMAGE_SIZE,
+            "num_images_per_request": 1,
+        }
+    return {}
 
 
 def _support_matrix_row_command(
@@ -165,6 +203,18 @@ def _support_matrix_row_command(
         "1",
         "--no-color",
     ]
+    image_kwargs = _default_image_kwargs_for_model(model)
+    if image_kwargs:
+        parts.extend(
+            [
+                "--image-height",
+                str(image_kwargs["image_height"]),
+                "--image-width",
+                str(image_kwargs["image_width"]),
+                "--num-images",
+                str(image_kwargs["num_images_per_request"]),
+            ]
+        )
     if yaml_config_path is not None:
         parts.extend(["--config-yaml", yaml_config_path])
     if compare_engine_step_backends:
@@ -273,6 +323,78 @@ def _should_retry_with_large_worker(error_message: str | None) -> bool:
     )
 
 
+def _is_h100_trtllm_130rc10(system: str, backend: str, version: str) -> bool:
+    return system == "h100_sxm" and backend == common.BackendName.trtllm.value and version == "1.3.0rc10"
+
+
+def _h100_trtllm_130rc10_framework_reason(model: str, error_message: str | None) -> str | None:
+    if not error_message:
+        return None
+
+    normalized = error_message.lower()
+    if model in {"deepseek-ai/DeepSeek-V3.2", "zai-org/GLM-5-FP8"} and (
+        "unsupported dsa_generation_module quant mode 'fp8'" in normalized
+    ):
+        return (
+            "TRT-LLM 1.3.0rc10 H100 sparse DSA generation rejects fp8 KV cache at runtime: "
+            "flash_mla_sparse_fwd requires BF16 KV tensors. The collector intentionally keeps "
+            "H100 DSA module rows to BF16 KV for this TRT-LLM version."
+        )
+
+    if model == "zai-org/GLM-5" and "dsa_context_module_perf" in normalized:
+        return (
+            "TRT-LLM 1.3.0rc10 H100 has no DSA context-module data collected for GLM-5/DSA; "
+            "this is a framework collector coverage gap."
+        )
+
+    if model in _H100_TRTLLM_130RC10_MHC_MODELS and "deepseek-v4 mhc module data not loaded" in normalized:
+        return (
+            "TRT-LLM 1.3.0rc10 H100 DeepSeek-V4 mHC module data is not available; "
+            "mHC is required by the sgl-project DeepSeek-V4 FP8 checkpoints."
+        )
+
+    if model == "moonshotai/Kimi-K2.5" and "unsupported moe quant mode 'int4_wo'" in normalized:
+        return (
+            "TRT-LLM 1.3.0rc10 H100 does not expose the int4_wo MoE path required by "
+            "moonshotai/Kimi-K2.5; supported MoE modes are bfloat16, fp8, fp8_block, and w4a16_mxfp4."
+        )
+
+    if "failed to query context attention data" in normalized:
+        if model.startswith("Qwen/Qwen3-VL-") and ("head_size=72" in normalized or "keyerror: 72" in normalized):
+            return (
+                "TRT-LLM 1.3.0rc10 H100 context-attention data is missing for the Qwen3-VL vision "
+                "encoder shape head_dim=72, s=784, n_kv=2/4. Recollect TRT-LLM attention_context "
+                "cases with head_dim=72 before this cell can be supported."
+            )
+        if model == "XiaomiMiMo/MiMo-V2-Flash" and ("head_size=192" in normalized or "keyerror: 192" in normalized):
+            return (
+                "TRT-LLM 1.3.0rc10 H100 context-attention data is missing for MiMo head_dim=192 "
+                "with FP8 KV/context FMHA; the current H100 TRT-LLM parquet does not include that shape."
+            )
+        if model in {"Qwen/Qwen3.5-27B", "Qwen/Qwen3.5-397B-A17B"} and (
+            "head_size=256" in normalized or "keyerror: 256" in normalized
+        ):
+            return (
+                "TRT-LLM 1.3.0rc10 H100 context-attention data is missing for Qwen3.5 head_dim=256 "
+                "full-attention shapes; the current H100 TRT-LLM parquet does not include that shape."
+            )
+        if model == "google/gemma-4-26B-A4B" and (
+            ("head_size=256" in normalized or "keyerror: 256" in normalized) and "window_size=1024" in normalized
+        ):
+            return (
+                "TRT-LLM 1.3.0rc10 H100 context-attention data is missing for Gemma 4 sliding-window "
+                "head_dim=256/window_size=1024; the current H100 TRT-LLM parquet does not include that shape."
+            )
+
+    if "failed to query moe data" in normalized and model in _H100_TRTLLM_130RC10_MOE_MODELS:
+        return (
+            f"TRT-LLM 1.3.0rc10 H100 MoE data is missing for {model}'s required shape; "
+            "this is a framework collector coverage gap in the current H100 TRT-LLM parquet."
+        )
+
+    return None
+
+
 def _is_known_framework_incompatible_gap(
     *,
     model: str,
@@ -286,6 +408,11 @@ def _is_known_framework_incompatible_gap(
         return False
 
     normalized = error_message.lower()
+    if _is_h100_trtllm_130rc10(system, backend, version) and (
+        _h100_trtllm_130rc10_framework_reason(model, error_message) is not None
+    ):
+        return True
+
     if (
         backend == common.BackendName.vllm.value
         and version == "0.19.0"
@@ -297,7 +424,65 @@ def _is_known_framework_incompatible_gap(
     ):
         return True
 
+    if (
+        model == "deepseek-ai/DeepSeek-V3.2"
+        and system == "h100_sxm"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "dsa module data not available" in normalized
+        and "deepseekv32forcausallm" in normalized
+        and "kvcachequantmode.fp8" in normalized
+        and "gemmquantmode.fp8_block" in normalized
+    ):
+        return True
+
+    if (
+        model == "XiaomiMiMo/MiMo-V2-Flash"
+        and system == "h100_sxm"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "failed to query context attention data" in normalized
+        and ("head_size=192" in normalized or "keyerror: 192" in normalized)
+        and "kvcachequantmode.fp8" in normalized
+    ):
+        return True
+
     if "unsupported gemm quant mode 'fp8_static'" in normalized:
+        return True
+
+    if (
+        model == "deepseek-ai/DeepSeek-V3.2"
+        and system == "h100_sxm"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and "generation dsa module data not available" in normalized
+        and "kvcachequantmode.fp8" in normalized
+        and "gemmquantmode.fp8_block" in normalized
+        and ("num_heads=16" in normalized or "num_heads=32" in normalized)
+    ):
+        return True
+
+    if (
+        model == "zai-org/GLM-5-FP8"
+        and system == "h100_sxm"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and "dsa module data not available" in normalized
+        and "kvcachequantmode.fp8" in normalized
+        and "gemmquantmode.fp8_block" in normalized
+    ):
+        return True
+
+    if (
+        model == "google/gemma-4-26B-A4B"
+        and system == "h100_sxm"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and (
+            ("failed to query context attention data" in normalized and "head_size=512" in normalized)
+            or "keyerror: 512" in normalized
+        )
+    ):
         return True
 
     if system == "rtx_pro_6000_server":
@@ -338,6 +523,106 @@ def _is_known_framework_incompatible_gap(
         and version == "1.3.0rc10"
         and "unsupported moe quant mode 'int4_wo'" in normalized
     )
+
+
+def _known_framework_incompatible_reason(
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    version: str,
+    error_message: str | None,
+) -> str | None:
+    if not error_message:
+        return None
+
+    normalized = error_message.lower()
+    if _is_h100_trtllm_130rc10(system, backend, version):
+        reason = _h100_trtllm_130rc10_framework_reason(model, error_message)
+        if reason is not None:
+            return reason
+
+    if (
+        model == "deepseek-ai/DeepSeek-V3.2"
+        and system == "h100_sxm"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and "generation dsa module data not available" in normalized
+        and "kvcachequantmode.fp8" in normalized
+        and "gemmquantmode.fp8_block" in normalized
+        and ("num_heads=16" in normalized or "num_heads=32" in normalized)
+    ):
+        return (
+            "SGLang 0.5.10 DeepSeek-V3.2 DSA fp8 decode is framework-incompatible on H100: "
+            "flash MLA KV decode rejects reduced local heads with Unsupported h_q for h_q=16/32. "
+            "The missing DSA generation data is intentional because the collector cannot produce "
+            "valid rows for that SGLang kernel path."
+        )
+
+    if (
+        model == "deepseek-ai/DeepSeek-V3.2"
+        and system == "h100_sxm"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "dsa module data not available" in normalized
+        and "deepseekv32forcausallm" in normalized
+        and "kvcachequantmode.fp8" in normalized
+        and "gemmquantmode.fp8_block" in normalized
+    ):
+        return (
+            "vLLM 0.19.0 DeepSeek-V3.2 DSA fp8 path is framework-incompatible on H100: "
+            "the vLLM collector/runtime set does not provide context/generation DSA module "
+            "silicon rows for DeepseekV32ForCausalLM with FP8 KV cache and FP8-block GEMMs."
+        )
+
+    if (
+        model == "XiaomiMiMo/MiMo-V2-Flash"
+        and system == "h100_sxm"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "failed to query context attention data" in normalized
+        and ("head_size=192" in normalized or "keyerror: 192" in normalized)
+        and "kvcachequantmode.fp8" in normalized
+    ):
+        return (
+            "vLLM 0.19.0 MiMo-V2-Flash FP8-KV attention is framework-incompatible on H100: "
+            "the collector reaches vllm_flash_attn for head_dim=192 with BF16 query and FP8 "
+            "KV cache, where vLLM raises RuntimeError: query and key must have the same dtype."
+        )
+
+    if (
+        model == "zai-org/GLM-5-FP8"
+        and system == "h100_sxm"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and "dsa module data not available" in normalized
+        and "kvcachequantmode.fp8" in normalized
+        and "gemmquantmode.fp8_block" in normalized
+    ):
+        return (
+            "SGLang 0.5.10 GLM-5-FP8 DSA fp8 path is framework-incompatible on H100: "
+            "piecewise CUDA graph/flash MLA rejects reduced local heads with Unsupported h_q and "
+            "the h_q=64 path fails MHA_ONE_SHOT dense multi-head validation. "
+            "dsa_generation_module exposes fp8; the blocker is the current SGLang GLM DSA graph path."
+        )
+
+    if (
+        model == "google/gemma-4-26B-A4B"
+        and system == "h100_sxm"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and (
+            ("failed to query context attention data" in normalized and "head_size=512" in normalized)
+            or "keyerror: 512" in normalized
+        )
+    ):
+        return (
+            "SGLang 0.5.10 FlashAttention on H100 supports head_dim <= 256; "
+            "google/gemma-4-26B-A4B global attention needs head_dim=512, "
+            "so the row is framework-incompatible rather than missing collector data."
+        )
+
+    return None
 
 
 def _enum_name(value: object | None) -> str | None:
@@ -394,7 +679,7 @@ def _required_datatypes_for_model(model: str, backend: str) -> tuple[str, ...]:
     expert_dtype = str(raw_config.get("expert_dtype") or "").lower()
 
     required: set[str] = set()
-    if quant_mode_names & _NATIVE_FP4_QUANT_MODE_NAMES or raw_quant_algo == "nvfp4" or expert_dtype == "fp4":
+    if quant_mode_names & _NATIVE_FP4_QUANT_MODE_NAMES or raw_quant_algo in {"nvfp4", "mxfp4"} or expert_dtype == "fp4":
         required.add("FP4")
     if quant_mode_names & _FP8_QUANT_MODE_NAMES or raw_quant_algo in {"fp8", "fp8_block"}:
         required.add("FP8")
@@ -721,6 +1006,7 @@ class SupportMatrix:
             "tpot": constraints.tpot,
             "engine_step_backend": engine_step_backend,
         }
+        task_config_kwargs.update(_default_image_kwargs_for_model(model))
         if mode == "disagg":
             task_config_kwargs["decode_system_name"] = system
         if yaml_config is not None:
@@ -922,6 +1208,18 @@ class SupportMatrix:
                         attempt.name,
                         str(e),
                     )
+                    framework_reason = _known_framework_incompatible_reason(
+                        model=model,
+                        system=system,
+                        backend=backend,
+                        version=version,
+                        error_message=raw_error,
+                    )
+                    if framework_reason is not None:
+                        statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
+                        error_messages[mode] = framework_reason
+                        break
+
                     if (
                         attempt.name == "default"
                         and retry_attempt is not None
