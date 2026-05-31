@@ -3,9 +3,9 @@
 
 """Integration parity test: legacy CLI path vs new sweep path.
 
-Verifies that the new sdk/sweep.py + sdk/task_config.py pipeline produces
+Verifies that the new sdk/sweep.py + sdk/task.py pipeline produces
 the same Pareto DataFrame as the legacy
-sdk.task.TaskRunner -> sdk.pareto_analysis.agg_pareto/disagg_pareto
+sdk.task_v1.TaskRunner -> sdk.pareto_analysis.agg_pareto/disagg_pareto
 pipeline when describing the SAME task.
 
 Each side is constructed via its native interface:

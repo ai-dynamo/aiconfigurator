@@ -136,10 +136,10 @@ def _default_disagg_search(
     moe_backend: str | None,
     should_enable_pp: bool = False,
 ) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
-    """Inlined version of legacy sdk.task.build_disagg_parallel_lists.
+    """Inlined version of legacy sdk.task_v1.build_disagg_parallel_lists.
 
-    Kept here so task_config.py does not depend on V1 task.py.  Algorithm
-    identical; locked by integration parity test.
+    Kept here so the new sdk.task module does not depend on V1 (sdk.task_v1).
+    Algorithm identical; locked by integration parity test.
     """
     prefill_cfg: dict[str, list[int]] = {
         "num_gpu_per_worker": [1, 2, 4, 8],

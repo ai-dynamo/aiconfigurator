@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the new flat Task in sdk/task_config.py.
+"""Unit tests for the new flat Task in sdk/task.py.
 
 End-to-end sweep correctness is covered by the integration parity test
 against the legacy CLI; these tests focus on construction, defaulting,

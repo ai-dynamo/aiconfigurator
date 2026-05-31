@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # ----------------------------------------------------------------------------
-# Canonical YAML format for the new sdk.task_config.TaskConfig.
+# Canonical YAML format for the new sdk.task.Task.
 #
-# Every key here maps 1:1 to a field on TaskConfig.  No nesting, no
+# Every key here maps 1:1 to a field on Task.  No nesting, no
 # `config:` block, no `worker_config:` subsections.  Pass a dict like this
-# to tools/run_sweep_new.py or TaskConfig.from_yaml() and it constructs
+# to tools/run_sweep_new.py or Task.from_yaml() and it constructs
 # directly.
 #
 # The legacy YAML format (top-level model_path shared across roles,
