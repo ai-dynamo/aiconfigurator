@@ -112,7 +112,7 @@ disagg_full:
   tpot: 40.0
   total_gpus: 32
 
-  # Speculative decoding (shared)
+  # Speculative decoding (shared; auto-inferred from HF config if omitted)
   nextn: 1
   nextn_accept_rates: [0.85, 0, 0, 0, 0]
 
@@ -162,7 +162,7 @@ disagg_full:
   decode_fmha_quant_mode: bfloat16
   decode_comm_quant_mode: half
 
-  # Decode search space
+  # Decode search space (auto-defaulted if omitted)
   decode_num_gpu_candidates: [4, 8]
   decode_tp_candidates: [1, 2, 4, 8]
   decode_pp_candidates: [1]
