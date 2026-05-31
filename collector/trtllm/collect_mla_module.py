@@ -568,7 +568,7 @@ def create_kv_cache_and_metadata(
         kv_cache_manager=kv_cache_manager,
         mapping=mapping,
         enable_flash_mla=_enable_flash_mla,
-        seq_lens=torch.tensor([seq_len_q] * batch_size, dtype=torch.int32),
+        seq_lens=torch.tensor([seq_len_q] * batch_size, dtype=torch.int32, device="cpu"),
         position_ids=None,
         num_contexts=batch_size if is_context else 0,
         kv_cache_params=KVCacheParams(
@@ -833,6 +833,12 @@ def main():
     parser.add_argument("--batch-size", type=int, default=None, help="Single batch size (for --quick)")
     parser.add_argument("--seq-len", type=int, default=None, help="Single seq len (for --quick)")
     parser.add_argument(
+        "--prefix-len",
+        type=int,
+        default=None,
+        help="Cached prefix length for context module collection",
+    )
+    parser.add_argument(
         "--kv-cache-dtype",
         type=str,
         choices=["bfloat16", "fp8"],
@@ -889,6 +895,7 @@ def main():
                 perf_filename=perf_filename,
                 model_path=model_path,
                 attn_type=attn_type,
+                prefix_len=args.prefix_len,
                 device=args.device,
             )
             continue

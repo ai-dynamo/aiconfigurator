@@ -120,6 +120,28 @@ framework_specific_op_cases:
         window_sizes:
         - 0
         - 1024
+      - id: gemma4_head512_prefix128_context
+        description: Gemma 4 TRT-LLM context-attention point needed for support-matrix isl=256,prefix=128 checks.
+        batch_sizes:
+        - 1
+        sequence_lengths:
+        - 256
+        query_head_counts:
+        - 2
+        kv_head_options:
+        - 1
+        head_dims:
+        - 512
+        window_sizes:
+        - 0
+        max_tokens_self_attention: 65536
+        max_tokens_grouped_query_attention: 131072
+        max_batch_size_self_attention: 128
+        max_kv_elements: 2147483647
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
+          fp8_context_fmha: false
   vllm:
     attention_context:
       cases:

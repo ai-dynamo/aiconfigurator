@@ -73,8 +73,12 @@ class DeepSeekV32Model(BaseModel):
             model_config,
         )
         extra_params = dict(model_info["extra_params"])
-        if model_info["architecture"] == "GlmMoeDsaForCausalLM" and _dsa_attention_modules_excluded_from_quant(
-            model_info.get("raw_config", {})
+        if (
+            model_info["architecture"] in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM")
+            and backend_name in ("sglang", "trtllm")
+        ) or (
+            model_info["architecture"] == "GlmMoeDsaForCausalLM"
+            and _dsa_attention_modules_excluded_from_quant(model_info.get("raw_config", {}))
         ):
             extra_params.setdefault("dsa_gemm_quant_mode", common.GEMMQuantMode.bfloat16)
 

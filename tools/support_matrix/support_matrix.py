@@ -264,6 +264,52 @@ def _is_known_framework_incompatible_gap(
         if backend == common.BackendName.vllm.value and version == "0.19.0":
             return "unsupported moe quant mode 'nvfp4'" in normalized or "dsa_context_module_perf.txt" in normalized
 
+    if system == "gb200" and backend == common.BackendName.trtllm.value and version == "1.3.0rc10":
+        return (
+            "unsupported moe quant mode 'fp8_block'" in normalized
+            or ("DeepSeek-V4" in model and "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized)
+            or (
+                "DeepSeek-V4" in model
+                and (
+                    "deepseek-v4 mhc module data not loaded" in normalized
+                    or "no mhc silicon data" in normalized
+                    or "failed to query deepseek-v4 mhc module" in normalized
+                )
+            )
+            or (
+                model in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
+                and "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
+            )
+            or (model == "moonshotai/Kimi-K2.5" and "unsupported moe quant mode 'int4_wo'" in normalized)
+            or (
+                model == "google/gemma-4-26B-A4B"
+                and "failed to query context attention data" in normalized
+                and "head_size=512" in normalized
+            )
+            or (
+                model == "XiaomiMiMo/MiMo-V2-Flash"
+                and "failed to query context attention data" in normalized
+                and "head_size=192" in normalized
+            )
+        )
+
+    if system == "gb200" and backend == common.BackendName.vllm.value and version == "0.19.0":
+        if (
+            model in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
+            and "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
+        ):
+            return True
+        if (
+            model
+            in {
+                "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+                "nvidia/nemotron-ultra-rl-050826",
+            }
+            and "failed to query moe data" in normalized
+            and "quant_mode=<moequantmode.nvfp4" in normalized
+        ):
+            return True
+
     if system == "gb200" and backend == common.BackendName.sglang.value and version == "0.5.10":
         if "DeepSeek-V4" in model and (
             "deepseek-v4 mhc module data not loaded" in normalized
@@ -272,10 +318,7 @@ def _is_known_framework_incompatible_gap(
         ):
             return True
         if "DeepSeek-V4" in model and (
-            (
-                "failed to query deepseek-v4 context attention module" in normalized
-                and "native_heads=128" in normalized
-            )
+            ("failed to query deepseek-v4 context attention module" in normalized and "native_heads=128" in normalized)
             or "no deepseek-v4 context attention silicon data for native_heads=128" in normalized
             or "deepseek-v4 hca_attn sparse-kernel correction data not available" in normalized
         ):
@@ -307,6 +350,102 @@ def _is_known_framework_incompatible_gap(
         and version == "1.3.0rc10"
         and "unsupported moe quant mode 'int4_wo'" in normalized
     )
+
+
+def _known_framework_incompatibility_reason(
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    version: str,
+    error_message: str | None,
+) -> str | None:
+    """Return a clearer framework-side reason for known perf lookup sentinels."""
+    if not error_message:
+        return None
+
+    normalized = error_message.lower()
+    if (
+        model == "google/gemma-4-26B-A4B"
+        and system == "gb200"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and "failed to query context attention data" in normalized
+        and "head_size=512" in normalized
+    ):
+        return (
+            "SGLang 0.5.10 on GB200 rejects Gemma 4 context attention with head_size=512. "
+            "GB200 debug-node probe of b=1, s=256, n=2, n_kv=1, head_dim=512, window_size=0 "
+            "failed in SGLang's TRTLLM MHA path: RuntimeError: Error in function "
+            "'trtllm_paged_attention_launcher' at /workspace/csrc/trtllm_fmha_kernel_launcher.cu:211: "
+            "Missing TRTLLM-GEN kernel (context): headDimQk=512, headDimV=512, headDimPerCtaV=512."
+        )
+
+    if (
+        model == "XiaomiMiMo/MiMo-V2-Flash"
+        and system == "gb200"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and "failed to query context attention data" in normalized
+        and "head_size=192" in normalized
+    ):
+        return (
+            "TRT-LLM 1.3.0rc10 on GB200 fails required MiMo context attention with head_size=192. "
+            "GB200 debug-node collection reached b=1, s=128, n=32, n_kv=2, head_dim=192, "
+            "window_size=0 and TensorRT-LLM raised CUDA error: an illegal memory access was encountered."
+        )
+
+    if (
+        model == "google/gemma-4-26B-A4B"
+        and system == "gb200"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and "failed to query context attention data" in normalized
+        and "head_size=512" in normalized
+    ):
+        return (
+            "TRT-LLM 1.3.0rc10 on GB200 rejects Gemma 4 context attention with head_size=512. "
+            "GB200 debug-node collection of b=1, full_s=256, n=2, n_kv=1, head_dim=512, "
+            "window_size=0 failed in TensorRT-LLM AttentionOp: Assertion failed: "
+            "Head size 512 is not supported by MMHA."
+        )
+
+    if system == "gb200" and backend == common.BackendName.vllm.value and version == "0.19.0":
+        if (
+            model == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
+            and "failed to query moe data" in normalized
+            and "quant_mode=<moequantmode.nvfp4" in normalized
+            and "topk=22" in normalized
+        ):
+            return (
+                "vLLM 0.19.0 on GB200 rejects the Nemotron-3 Super NVFP4 MoE lookup used by AIC. "
+                "GB200 debug-node collection of num_tokens=128, hidden_size=1024, inter_size=2688, "
+                "topk=22, num_experts=512, moe_tp_size=8, moe_ep_size=1, distribution=power_law_1.01 "
+                "failed in FlashInfer FP4 static weight preparation: AssertionError: assert M % 128 == 0."
+            )
+        if (
+            model == "nvidia/nemotron-ultra-rl-050826"
+            and "failed to query moe data" in normalized
+            and "quant_mode=<moequantmode.nvfp4" in normalized
+            and "topk=22" in normalized
+        ):
+            return (
+                "vLLM 0.19.0 on GB200 rejects the nemotron-ultra NVFP4 MoE lookup used by AIC. "
+                "GB200 debug-node collection of num_tokens=128, hidden_size=2048, inter_size=5120, "
+                "topk=22, num_experts=512, moe_tp_size=8, moe_ep_size=1, distribution=power_law_1.01 "
+                "failed in FlashInfer TRT-LLM FP4 routed MoE: Routing kernel expects topK experts <= 10, got 22."
+            )
+        if "DeepSeek-V4" in model and "deepseek-v4 mhc module data not loaded" in normalized:
+            hidden_size = 7168 if "Pro" in model else 4096
+            return (
+                "vLLM 0.19.0 on GB200 cannot run the DeepSeek-V4 mHC pre module required by AIC. "
+                f"GB200 debug-node collection of op=pre, num_tokens=128, hidden_size={hidden_size}, "
+                "hc_mult=4, sinkhorn_iters=20 failed before benchmarking: ModuleNotFoundError: "
+                "No module named 'vllm.model_executor.layers.mhc'. The vLLM mHC collector is compatible "
+                "with vLLM >= 0.20.1."
+            )
+
+    return None
 
 
 def _enum_name(value: object | None) -> str | None:
@@ -859,7 +998,17 @@ class SupportMatrix:
                     str(e),
                 )
 
-                if _is_known_framework_incompatible_gap(
+                framework_reason = _known_framework_incompatibility_reason(
+                    model=model,
+                    system=system,
+                    backend=backend,
+                    version=version,
+                    error_message=raw_error,
+                )
+                if framework_reason is not None:
+                    statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
+                    error_messages[mode] = framework_reason
+                elif _is_known_framework_incompatible_gap(
                     model=model,
                     system=system,
                     backend=backend,
@@ -867,9 +1016,10 @@ class SupportMatrix:
                     error_message=raw_error,
                 ):
                     statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
+                    error_messages[mode] = raw_error
                 else:
                     statuses[mode] = STATUS_FAIL
-                error_messages[mode] = raw_error
+                    error_messages[mode] = raw_error
 
             finally:
                 perf_database.clear_database_runtime_caches(system, backend, version)

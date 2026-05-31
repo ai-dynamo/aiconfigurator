@@ -395,10 +395,12 @@ class BaseBackend:
             enc_cfg = getattr(model, "encoder_config", None)
             num_images = runtime_config.num_images_per_request
 
-            if runtime_config.num_images_per_request <= 0 or enc_cfg is None:
-                return encoder_latency_dict, encoder_energy_wms_dict, 0
-
-            if runtime_config.image_height > 0 and runtime_config.image_width > 0:
+            if (
+                runtime_config.num_images_per_request > 0
+                and runtime_config.image_height > 0
+                and runtime_config.image_width > 0
+                and enc_cfg is not None
+            ):
                 img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
                 tokens_per_image = (runtime_config.image_height // img_stride) * (
                     runtime_config.image_width // img_stride
@@ -406,9 +408,13 @@ class BaseBackend:
                 pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
                     runtime_config.image_width // enc_cfg.patch_size
                 )
-            elif runtime_config.num_image_tokens > 0:
+            elif (
+                runtime_config.num_images_per_request > 0
+                and runtime_config.num_image_tokens > 0
+                and enc_cfg is not None
+            ):
                 tokens_per_image = runtime_config.num_image_tokens
-                pre_merge_per_image = tokens_per_image * (enc_cfg.spatial_merge_size**2)
+                pre_merge_per_image = tokens_per_image * enc_cfg.spatial_merge_size**2
             else:
                 # No image dimensions or token override specified; model this as a text-only request.
                 return encoder_latency_dict, encoder_energy_wms_dict, 0
@@ -630,9 +636,12 @@ class BaseBackend:
         if img_ctx_tokens > 0:
             enc_cfg = getattr(model, "encoder_config", None)
             if enc_cfg is not None:
-                pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
-                    runtime_config.image_width // enc_cfg.patch_size
-                )
+                if runtime_config.image_height > 0 and runtime_config.image_width > 0:
+                    pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
+                        runtime_config.image_width // enc_cfg.patch_size
+                    )
+                else:
+                    pre_merge_per_image = runtime_config.num_image_tokens * enc_cfg.spatial_merge_size**2
                 enc_num_tokens = batch_size * runtime_config.num_images_per_request * pre_merge_per_image
                 summary.set_encoder_memory(self._get_encoder_node_memory(model, database, enc_num_tokens))
 

@@ -43,6 +43,36 @@ import torch
 # DeepSeek-V4 compressed-attention path before the DSA module is benchmarked.
 os.environ.setdefault("SGLANG_APPLY_CONFIG_BACKUP", "none")
 
+
+def _piecewise_forward_context(
+    set_forward_context,
+    forward_batch,
+    attention_layers,
+    quant_config,
+    moe_layers,
+    moe_fusions,
+    *,
+    dsa_indexers=None,
+):
+    kwargs = {}
+    try:
+        import inspect
+
+        if "dsa_indexers" in inspect.signature(set_forward_context).parameters:
+            kwargs["dsa_indexers"] = dsa_indexers
+    except (TypeError, ValueError):
+        pass
+
+    return set_forward_context(
+        forward_batch,
+        attention_layers,
+        quant_config,
+        moe_layers,
+        moe_fusions,
+        **kwargs,
+    )
+
+
 try:
     from helper import benchmark_with_power, get_sm_version, log_perf
 except ModuleNotFoundError:
@@ -783,6 +813,11 @@ def _import_sglang_forward_context():
     return ForwardContext, forward_context
 
 
+def _sglang_forward_context(attn_backend):
+    forward_context_type, forward_context = _import_sglang_forward_context()
+    return forward_context(forward_context_type(attn_backend=attn_backend))
+
+
 def load_model_runner(
     model_path: str,
     head_num: int,
@@ -1345,13 +1380,14 @@ def _run_prefill(
                     set_is_extend_in_batch(False)
                     with (
                         forward_context(forward_context_type(attn_backend=runner.model_runner.attn_backend)),
-                        set_piecewise_forward_context(
+                        _piecewise_forward_context(
+                            set_piecewise_forward_context,
                             static_forward_batch,
                             runner.attention_layers,
                             runner.quant_config,
                             runner.moe_layers,
                             runner.moe_fusions,
-                            dsa_indexers=runner.dsa_indexers,
+                            dsa_indexers=getattr(runner, "dsa_indexers", None),
                         ),
                     ):
                         return runner.model_runner.model.forward(
@@ -1419,7 +1455,8 @@ def _run_prefill(
                 if use_module_piecewise_context:
                     with (
                         enable_piecewise_cuda_graph(),
-                        set_piecewise_forward_context(
+                        _piecewise_forward_context(
+                            set_piecewise_forward_context,
                             forward_batch,
                             getattr(model_runner, "attention_layers", []),
                             getattr(model_runner.model, "quant_config", None),

@@ -17,6 +17,7 @@ import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config, models
 from aiconfigurator.sdk.models import (
     LLAMAModel,
+    MOEModel,
     Qwen3VLModel,
     Qwen3VLMoEModel,
     check_is_moe,
@@ -224,6 +225,8 @@ class TestHFModelSupport:
             ("zai-org/GLM-5-FP8", "DEEPSEEKV32"),
             ("nvidia/GLM-5-NVFP4", "DEEPSEEKV32"),
             ("Qwen/Qwen3-30B-A3B", "MOE"),
+            ("Qwen/Qwen3-VL-30B-A3B-Instruct", "QWEN3VL_MOE"),
+            ("Qwen/Qwen3-VL-235B-A22B-Instruct", "QWEN3VL_MOE"),
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "NEMOTRONH"),
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "NEMOTRONH"),
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", "NEMOTRONH"),
@@ -642,15 +645,28 @@ class TestHFModelSupport:
         assert model_config.moe_quant_mode == expected_moe_quant
         assert model_config.fmha_quant_mode == common.FMHAQuantMode.bfloat16
 
-    def test_glm5_nvfp4_dsa_attention_uses_unquantized_projection_tables(self):
+    @pytest.mark.parametrize(
+        "model_path,expected_gemm_quant",
+        [
+            ("deepseek-ai/DeepSeek-V3.2", common.GEMMQuantMode.fp8_block),
+            ("zai-org/GLM-5-FP8", common.GEMMQuantMode.fp8_block),
+            ("nvidia/GLM-5-NVFP4", common.GEMMQuantMode.nvfp4),
+        ],
+    )
+    @pytest.mark.parametrize("backend_name", ["sglang", "trtllm"])
+    def test_sglang_trtllm_dsa_attention_uses_unquantized_projection_tables(
+        self,
+        model_path,
+        expected_gemm_quant,
+        backend_name,
+    ):
         model_config = config.ModelConfig(tp_size=1, moe_tp_size=1, moe_ep_size=1)
-        model = get_model("nvidia/GLM-5-NVFP4", model_config, backend_name="sglang")
+        model = get_model(model_path, model_config, backend_name=backend_name)
 
         context_dsa = next(op for op in model.context_ops if op._name == "context_attention")
         generation_dsa = next(op for op in model.generation_ops if op._name == "generation_attention")
 
-        assert model_config.gemm_quant_mode == common.GEMMQuantMode.nvfp4
-        assert model_config.moe_quant_mode == common.MoEQuantMode.nvfp4
+        assert model_config.gemm_quant_mode == expected_gemm_quant
         assert context_dsa._gemm_quant_mode == common.GEMMQuantMode.bfloat16
         assert generation_dsa._gemm_quant_mode == common.GEMMQuantMode.bfloat16
 
@@ -1102,6 +1118,10 @@ _VL_MODELS = [
     "Qwen/Qwen3-VL-32B-Instruct",
     "Qwen/Qwen3-VL-32B-Thinking",
 ]
+_VL_MOE_MODELS = [
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "Qwen/Qwen3-VL-235B-A22B-Instruct",
+]
 
 
 class TestQwen3VLRegistration:
@@ -1123,11 +1143,21 @@ class TestQwen3VLRegistration:
     def test_architecture_in_multimodal_text_config_key(self):
         assert _QWEN3VL_ARCH in common.MULTIMODAL_TEXT_CONFIG_KEY
 
+    def test_moe_architecture_in_multimodal_text_config_key(self):
+        assert _QWEN3VL_MOE_ARCH in common.MULTIMODAL_TEXT_CONFIG_KEY
+
     def test_multimodal_text_config_key_is_text_config(self):
         assert common.MULTIMODAL_TEXT_CONFIG_KEY[_QWEN3VL_ARCH] == "text_config"
 
+    def test_moe_multimodal_text_config_key_is_text_config(self):
+        assert common.MULTIMODAL_TEXT_CONFIG_KEY[_QWEN3VL_MOE_ARCH] == "text_config"
+
     @pytest.mark.parametrize("model_id", _VL_MODELS)
     def test_model_ids_in_default_hf_models(self, model_id):
+        assert model_id in common.DefaultHFModels
+
+    @pytest.mark.parametrize("model_id", _VL_MOE_MODELS)
+    def test_moe_model_ids_in_default_hf_models(self, model_id):
         assert model_id in common.DefaultHFModels
 
 
@@ -1144,6 +1174,11 @@ class TestQwen3VLPredownloadedConfig:
         result = get_model_config_from_model_path(model_id)
         assert result["architecture"] == _QWEN3VL_ARCH
 
+    @pytest.mark.parametrize("model_id", _VL_MOE_MODELS)
+    def test_moe_config_has_correct_architecture(self, model_id):
+        result = get_model_config_from_model_path(model_id)
+        assert result["architecture"] == _QWEN3VL_MOE_ARCH
+
     @pytest.mark.parametrize("model_id", _VL_MODELS)
     def test_config_has_correct_llm_params(self, model_id):
         result = get_model_config_from_model_path(model_id)
@@ -1155,6 +1190,11 @@ class TestQwen3VLPredownloadedConfig:
 
     @pytest.mark.parametrize("model_id", _VL_MODELS)
     def test_extra_params_is_vision_encoder_config(self, model_id):
+        result = get_model_config_from_model_path(model_id)
+        assert isinstance(result["extra_params"], common.VisionEncoderConfig)
+
+    @pytest.mark.parametrize("model_id", _VL_MOE_MODELS)
+    def test_moe_extra_params_is_vision_encoder_config(self, model_id):
         result = get_model_config_from_model_path(model_id)
         assert isinstance(result["extra_params"], common.VisionEncoderConfig)
 
@@ -1262,3 +1302,31 @@ class TestQwen3VLModel:
     def test_both_vl_variants_return_qwen3vl_model(self, model_id, model_config):
         model = get_model(model_id, model_config, "trtllm")
         assert isinstance(model, Qwen3VLModel)
+
+    @pytest.mark.parametrize("model_id", _VL_MODELS)
+    def test_dense_vl_variants_are_not_moe(self, model_id):
+        assert check_is_moe(model_id) is False
+
+
+class TestQwen3VLMoEModel:
+    """Test Qwen3-VL MoE variants are routed through the MoE model path."""
+
+    @pytest.fixture
+    def model_config(self):
+        return config.ModelConfig(moe_tp_size=1, moe_ep_size=1)
+
+    @pytest.mark.parametrize("model_id", _VL_MOE_MODELS)
+    def test_moe_vl_variants_are_moe(self, model_id):
+        assert check_is_moe(model_id) is True
+
+    @pytest.mark.parametrize("model_id", _VL_MOE_MODELS)
+    def test_moe_vl_variants_return_qwen3vl_moe_model(self, model_id, model_config):
+        model = get_model(model_id, model_config, "trtllm")
+        assert isinstance(model, Qwen3VLMoEModel)
+        assert isinstance(model, MOEModel)
+
+    @pytest.mark.parametrize("model_id", _VL_MOE_MODELS)
+    def test_moe_vl_model_has_encoder_ops_populated(self, model_id, model_config):
+        model = get_model(model_id, model_config, "trtllm")
+        assert len(model.encoder_ops) > 0
+        assert isinstance(model.encoder_config, common.VisionEncoderConfig)

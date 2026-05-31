@@ -688,9 +688,41 @@ def _create_kv_cache_and_metadata(
     indexer_kv_cache = None
     indexer_metadata = None
     if is_dsa:
+        from vllm.v1.attention.backends.mla import indexer as indexer_mod
         from vllm.v1.attention.backends.mla.indexer import (
             DeepseekV32IndexerBackend,
         )
+
+        if not getattr(indexer_mod.kv_spans_from_batches, "_aic_device_safe", False):
+
+            def _device_safe_kv_spans_from_batches(start_seq_loc, seq_len_per_batch, device):
+                q = start_seq_loc.to(dtype=torch.long)
+                seq_lens = seq_len_per_batch.to(dtype=torch.long)
+                counts = q[1:] - q[:-1]
+                total_tokens = int(q[-1].item())
+                batch_size = seq_lens.numel()
+                if total_tokens == 0:
+                    return (
+                        torch.empty(0, dtype=torch.long, device=device),
+                        torch.empty(0, dtype=torch.long, device=device),
+                    )
+
+                work_device = q.device
+                kv_starts_per_batch = torch.cumsum(seq_lens, dim=0) - seq_lens
+                batch_id = torch.repeat_interleave(torch.arange(batch_size, device=work_device), counts)
+                start_tensor = kv_starts_per_batch[batch_id]
+                seq_lens_expanded = torch.repeat_interleave(seq_lens, counts)
+                m_expand = torch.repeat_interleave(counts, counts)
+                pos_within = (
+                    torch.arange(total_tokens, dtype=torch.long, device=work_device)
+                    - torch.repeat_interleave(q[:-1], counts)
+                    + 1
+                )
+                end_location = start_tensor + seq_lens_expanded - m_expand + pos_within
+                return start_tensor.int().to(device), end_location.int().to(device)
+
+            _device_safe_kv_spans_from_batches._aic_device_safe = True
+            indexer_mod.kv_spans_from_batches = _device_safe_kv_spans_from_batches
 
         index_head_dim = hf_config.index_head_dim
         quant_block_size = 128

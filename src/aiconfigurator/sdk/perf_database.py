@@ -1218,6 +1218,19 @@ class PerfDatabase:
         self.supported_quant_mode = _LazySupportMatrix(self)
         self._finalize_loaded_data()
 
+    @staticmethod
+    def _bilinear_interpolation(x_list: list[int], y_list: list[int], x: int, y: int, data: dict) -> float:
+        """Compatibility wrapper for interpolation helpers now owned by interpolation.py."""
+        from aiconfigurator.sdk import interpolation
+
+        return interpolation.bilinear_interpolation(x_list, y_list, x, y, data)
+
+    def _interp_3d(self, x: int, y: int, z: int, data: dict, method: str) -> dict:
+        """Compatibility wrapper for callers that still dispatch 3-D interpolation through PerfDatabase."""
+        from aiconfigurator.sdk import interpolation
+
+        return interpolation.interp_3d(x, y, z, data, method, self._extracted_metrics_cache)
+
     def _finalize_loaded_data(self) -> None:
         """Stop loader-time defaultdicts from mutating database state after construction."""
         for attr, value in list(vars(self).items()):
