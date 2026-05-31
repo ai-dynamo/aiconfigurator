@@ -126,7 +126,10 @@ CREATE TABLE run_meta (
 - On startup, the runner reads `entries` (populating it from the
   baseline CSVs on first run).
 - For each entry, it skips `probe_results` rows that already exist
-  with a non-`PENDING` status. Same for `pareto_results`.
+  with a non-`PENDING` status, EXCEPT rows whose status is `TIMEOUT`
+  — those are treated as "not yet successfully run" and re-attempted
+  on the next invocation (with the new run's timeout budget). Same
+  rule for `pareto_results`.
 - A SIGINT or crash mid-entry leaves the entry without a result row —
   the next run re-attempts it. (Worker processes write their result
   row atomically at the end of the entry; partial state is not
@@ -167,9 +170,10 @@ uv run python tools/support_matrix/scan_rust_parity.py \
 ```
 
 `--scan-mode {probe_only,pareto_only,both}` so a fast probe-only scan
-can run first (filters obvious regressions in ~3–5 hours), and a
-`--scan-mode pareto_only` follow-up can run unattended on entries
-the probe accepted.
+can run first (filters obvious regressions; ~17 min on a 16-worker
+host per the wall-clock estimate below), and a `--scan-mode
+pareto_only` follow-up can run unattended on entries the probe
+accepted.
 
 Status output: a periodic stderr line (every 30 s) of
 `done / pending / errored / drifted` counts; full results in

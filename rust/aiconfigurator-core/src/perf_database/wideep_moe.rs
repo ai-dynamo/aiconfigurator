@@ -96,11 +96,31 @@ impl WideEpMoeTable {
     ) -> Result<f64, AicError> {
         let grids = self.load_compute()?;
 
+        // Mirror Python's `TrtllmWideEPMoE._select_kernel` fallback: if
+        // the requested kernel_source isn't in the loaded table (e.g. the
+        // caller asks for "moe_torch_flow" but the collected data is
+        // tagged "wideep_compute_cutlass"), fall back to any kernel
+        // present in the grid (Python takes `available_kernels[0]`).
+        let resolved_kernel = if grids
+            .by_keys
+            .keys()
+            .any(|k| k.kernel_source == kernel_source)
+        {
+            kernel_source.to_string()
+        } else {
+            grids
+                .by_keys
+                .keys()
+                .next()
+                .map(|k| k.kernel_source.clone())
+                .unwrap_or_else(|| kernel_source.to_string())
+        };
+
         // Find a matching key. Python falls back to "first distribution
         // under the same (kernel, quant)" when the exact distribution
         // string isn't in the loaded data.
         let exact_key = WideEpMoeKey {
-            kernel_source: kernel_source.to_string(),
+            kernel_source: resolved_kernel,
             quant: quant.name().to_string(),
             distribution: distribution.to_string(),
             topk,

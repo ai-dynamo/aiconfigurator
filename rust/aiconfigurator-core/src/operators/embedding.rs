@@ -4,8 +4,10 @@
 //! Token embedding operator.
 //!
 //! Mirrors `aiconfigurator.sdk.operations.embedding`. Embedding latency is
-//! a memory-bound table lookup: latency = `vocab * hidden * dtype_memory /
-//! mem_bw`. The weights are `vocab * hidden * memory_factor`.
+//! a memory-bound per-token lookup: latency = `num_tokens * hidden *
+//! dtype_memory / mem_bw` (only the rows that get touched are read, not
+//! the whole table). The weight footprint is `vocab * hidden *
+//! memory_factor`.
 
 use crate::common::enums::GemmQuantMode;
 use crate::common::error::AicError;

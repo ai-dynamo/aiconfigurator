@@ -68,9 +68,13 @@ pub fn build_trtllm_wideep_deepseek_model(config: ModelConfig) -> Result<Model, 
     let moe_ep = cfg.parallel.moe_ep_size.max(1);
     let attn_dp = cfg.parallel.attention_dp_size.max(1);
 
-    // Validation that mirrors Python's:
+    // Validation that mirrors Python's `TrtllmWideEPDeepSeekModel.__init__`:
     //   1. attention_dp_size > 1 required.
     //   2. moe_ep_size > 1 required.
+    //   3. tp_size * attention_dp_size == moe_tp_size * moe_ep_size
+    //      (the parallel-layout invariant — without this the per-rank
+    //      MLA / MoE shapes can disagree across attention and MoE
+    //      stages and produce nonsense latencies).
     if attn_dp <= 1 {
         return Err(AicError::UnsupportedModel(format!(
             "TRT-LLM WideEP requires attention_dp_size > 1, got {attn_dp}"
@@ -79,6 +83,13 @@ pub fn build_trtllm_wideep_deepseek_model(config: ModelConfig) -> Result<Model, 
     if moe_ep <= 1 {
         return Err(AicError::UnsupportedModel(format!(
             "TRT-LLM WideEP requires moe_ep_size > 1, got {moe_ep}"
+        )));
+    }
+    if tp * attn_dp != moe_tp * moe_ep {
+        return Err(AicError::UnsupportedModel(format!(
+            "TRT-LLM WideEP requires tp_size * attention_dp_size == \
+             moe_tp_size * moe_ep_size; got tp={tp}, attn_dp={attn_dp}, \
+             moe_tp={moe_tp}, moe_ep={moe_ep}"
         )));
     }
 

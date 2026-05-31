@@ -255,9 +255,9 @@ Phase 3 commit sequence (single PR; commits land in this order):
 | C5 | models + backends infra | `models/{base,registry,config_loader}`, `backends/{base,vllm}`. |
 | C6 | model implementations | `models/{hybrid_moe,deepseek}` op graphs. Covers both smoke models. |
 | C7 | session + FFI rewire | `session.rs` (static + mixed-step + agg + disagg). Remove aggregate `lib.rs` path; FFI now drives session. |
-| C8 | flip MiniMax parity | All 4 modes (static_ctx, static_gen, mixed_step, agg, disagg) -> required. |
-| C9 | flip Kimi parity | All 4 modes -> required. |
-| C10 | flip prefix-caching parity | `minimax-m25-sampled-prefix` all modes -> required. |
+| C8 | flip MiniMax parity | All 5 surfaces (static_ctx, static_gen, mixed_step, agg, disagg) -> required. |
+| C9 | flip Kimi parity | All 5 surfaces -> required. |
+| C10 | flip prefix-caching parity | `minimax-m25-sampled-prefix` all surfaces -> required. |
 | C12 | docs | Update migration-map "Current State" to reflect Phase 3 reality. Capture final benchmark snapshot. Document any intentional Python divergence. |
 
 Note: the original Phase 3 plan included a `C11 hot-path optimization`

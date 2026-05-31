@@ -121,7 +121,9 @@ impl Dsv4Table {
                 }
             }
         }
-        interp_2d_1d_grid(&grid, num_heads, b, sequence_tokens)
+        // Axis order must match the grid: outer = num_heads, middle =
+        // seq_tokens, inner = batch_size. Mirrors `dsa.rs` query_generation.
+        interp_2d_1d_grid(&grid, num_heads, sequence_tokens, b)
     }
 
     fn load_csa_context(&self) -> Result<&ModuleGrids, AicError> {

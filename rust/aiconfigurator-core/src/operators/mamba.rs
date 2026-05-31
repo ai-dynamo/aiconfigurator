@@ -18,7 +18,7 @@ pub struct Mamba2Op {
     /// (`causal_conv1d_fn` for context, `causal_conv1d_update` for
     /// generation, etc.).
     pub kernel_source: String,
-    pub phase: String, // "prefill" | "generation"
+    pub phase: String, // "context" | "generation" (matches Python; SOL branch keys on phase == "context")
     pub d_model: u32,
     pub d_state: u32,
     pub d_conv: u32,
@@ -99,7 +99,7 @@ pub struct GdnOp {
     /// `chunk_gated_delta_rule`; generation uses `causal_conv1d_update`
     /// and `fused_sigmoid_gating_delta_rule_update`.
     pub kernel_source: String,
-    pub phase: String,
+    pub phase: String, // "context" | "generation" (matches Python; SOL branch keys on phase == "context")
     pub d_model: u32,
     pub d_conv: u32,
     pub num_k_heads: u32,

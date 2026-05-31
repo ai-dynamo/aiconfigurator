@@ -52,7 +52,8 @@ Smoke coverage spans:
 
 - 3 systems: b200_sxm, h200_sxm, h100_sxm.
 - 3 backends: vllm 0.19.0, sglang 0.5.10, trtllm 1.3.0rc10.
-- 4 modes per case: static_ctx, static_gen, mixed_step, agg, disagg.
+- 4 modes per case: static (covers both static_ctx and static_gen
+  shapes in one test), mixed_step, agg, disagg.
 - Shape variations: decode-heavy, prefill-heavy, prefix-heavy,
   large-batch (in addition to the baseline isl=1024/osl=2 shape).
 - Error-symmetry families (Python and Rust both raise on perf-DB

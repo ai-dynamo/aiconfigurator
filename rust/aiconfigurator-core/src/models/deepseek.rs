@@ -37,7 +37,6 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
     let moe_tp = cfg.parallel.moe_tp_size.max(1);
     let moe_ep = cfg.parallel.moe_ep_size.max(1);
     let attn_dp = cfg.parallel.attention_dp_size.max(1);
-    let n_per_tp = cfg.spec.num_attention_heads / tp;
     let backend = cfg.backend;
     let flavor = dispatch_flavor(backend);
     // Python: ElementWise(num_layers, dim_in=2h, dim_out=2h) → (2h + 2h) * 2 bytes/token.

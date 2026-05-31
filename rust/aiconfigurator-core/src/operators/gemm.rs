@@ -83,7 +83,10 @@ impl GemmOp {
     }
 
     /// Per-tensor weight count in bytes, matching Python's
-    /// `_weights = n * k * quant_mode.value.memory`.
+    /// `GEMM.get_weights()`: `n * k * quant_mode.value.memory *
+    /// scale_factor`. The `scale_factor` multiplier mirrors the way model
+    /// builders count weights once at construction and let the op replicate
+    /// per layer (e.g. `scale_factor = num_hidden_layers` for body GEMMs).
     pub fn weights_bytes(&self) -> f64 {
         (self.n as f64) * (self.k as f64) * self.quant_mode.mapping().memory * self.scale_factor
     }
