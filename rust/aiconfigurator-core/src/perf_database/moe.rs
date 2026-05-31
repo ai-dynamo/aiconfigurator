@@ -31,7 +31,17 @@ use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct MoeTable {
     data_root: PathBuf,
-    moe: OnceLock<Result<MoeGrids, AicError>>,
+    moe: OnceLock<Result<LoadedMoeGrids, AicError>>,
+}
+
+/// Two parallel grids split by `kernel_source`. Mirrors Python's split in
+/// `aiconfigurator.sdk.operations.moe.MoE.load_data`, where rows tagged
+/// `kernel_source == "moe_torch_flow_min_latency"` route to a separate
+/// accumulator that the TRT-LLM SILICON path probes first for small-token
+/// nvfp4 gated MoE queries.
+struct LoadedMoeGrids {
+    default: MoeGrids,
+    low_latency: MoeGrids,
 }
 
 struct MoeGrids {
@@ -77,7 +87,8 @@ impl MoeTable {
         quant: MoeQuantMode,
         workload_distribution: &str,
     ) -> Result<f64, AicError> {
-        let grids = self.load()?;
+        let loaded = self.load()?;
+        let grids = &loaded.default;
         let quant_name = quant.name();
 
         let dist = self.resolve_distribution(grids, quant_name, workload_distribution);
@@ -134,7 +145,8 @@ impl MoeTable {
         quant: MoeQuantMode,
         workload_distribution: &str,
     ) -> Result<Option<u32>, AicError> {
-        let grids = self.load()?;
+        let loaded = self.load()?;
+        let grids = &loaded.default;
         let quant_name = quant.name();
         let dist = self.resolve_distribution(grids, quant_name, workload_distribution);
         let key = MoeKey {
@@ -151,6 +163,76 @@ impl MoeTable {
             .by_keys
             .get(&key)
             .and_then(|m| m.keys().next_back().copied()))
+    }
+
+    /// Probe the TRT-LLM low-latency NVFP4 MoE kernel table.
+    ///
+    /// Returns `Ok(Some(latency_ms))` when the loaded `low_latency` grid
+    /// contains a matching `(quant, distribution-after-uniform-fallback,
+    /// topk, num_experts, hidden, inter, moe_tp, moe_ep)` entry, and
+    /// `Ok(None)` when the shape is absent — the caller should then fall
+    /// through to `query()` (the default grid).
+    ///
+    /// Mirrors Python's small-token nvfp4 gated-MoE branch in
+    /// `MoE._query_moe_table`: the low-latency table is consulted with a
+    /// try/except KeyError that falls back to `_moe_data` on miss.
+    pub fn query_low_latency(
+        &self,
+        num_tokens: u32,
+        hidden_size: u32,
+        inter_size: u32,
+        topk: u32,
+        num_experts: u32,
+        moe_tp_size: u32,
+        moe_ep_size: u32,
+        quant: MoeQuantMode,
+        workload_distribution: &str,
+    ) -> Result<Option<f64>, AicError> {
+        let loaded = self.load()?;
+        let grids = &loaded.low_latency;
+        if grids.by_keys.is_empty() {
+            return Ok(None);
+        }
+        let quant_name = quant.name();
+        let dist = self.resolve_distribution(grids, quant_name, workload_distribution);
+        let key = MoeKey {
+            quant: quant_name.to_string(),
+            distribution: dist,
+            topk,
+            num_experts,
+            hidden_size,
+            inter_size,
+            moe_tp_size,
+            moe_ep_size,
+        };
+        let Some(by_tokens) = grids.by_keys.get(&key) else {
+            return Ok(None);
+        };
+        if by_tokens.is_empty() {
+            return Ok(None);
+        }
+        if let Some(&latency) = by_tokens.get(&num_tokens) {
+            return Ok(Some(latency));
+        }
+        let token_keys: Vec<u32> = by_tokens.keys().copied().collect();
+        let (lo, hi) = nearest_neighbors(num_tokens, &token_keys, false)?;
+        Ok(Some(interp_1d(
+            lo as f64,
+            hi as f64,
+            by_tokens[&lo],
+            by_tokens[&hi],
+            num_tokens as f64,
+        )))
+    }
+
+    /// `true` iff the loaded low-latency grid has any rows.
+    ///
+    /// Older perf-DB versions predate the `kernel_source` column, so the
+    /// low-latency accumulator stays empty and the small-token nvfp4 gate
+    /// is short-circuited at the operator layer.
+    pub fn low_latency_available(&self) -> Result<bool, AicError> {
+        let loaded = self.load()?;
+        Ok(!loaded.low_latency.by_keys.is_empty())
     }
 
     /// Mirrors Python's:
@@ -173,7 +255,7 @@ impl MoeTable {
         }
     }
 
-    fn load(&self) -> Result<&MoeGrids, AicError> {
+    fn load(&self) -> Result<&LoadedMoeGrids, AicError> {
         let cell = self
             .moe
             .get_or_init(|| load_moe_parquet(&self.data_root.join("moe_perf.parquet")));
@@ -181,7 +263,7 @@ impl MoeTable {
     }
 }
 
-fn load_moe_parquet(path: &Path) -> Result<MoeGrids, AicError> {
+fn load_moe_parquet(path: &Path) -> Result<LoadedMoeGrids, AicError> {
     let reader = PerfReader::open(path)?;
     let moe_dtype_col = reader.col("moe_dtype")?;
     let num_tokens_col = reader.col("num_tokens")?;
@@ -193,8 +275,12 @@ fn load_moe_parquet(path: &Path) -> Result<MoeGrids, AicError> {
     let moe_ep_size_col = reader.col("moe_ep_size")?;
     let distribution_col = reader.col("distribution")?;
     let latency_col = reader.col("latency")?;
+    // Optional in older perf-DB versions; when absent every row falls into
+    // the `default` grid (matching the pre-split behavior).
+    let kernel_source_col = reader.col_optional("kernel_source");
 
-    let mut by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
+    let mut default_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
+    let mut low_latency_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
     for row in reader.rows()? {
         let row = row?;
         let key = MoeKey {
@@ -207,23 +293,32 @@ fn load_moe_parquet(path: &Path) -> Result<MoeGrids, AicError> {
             moe_tp_size: row.u32(moe_tp_size_col)?,
             moe_ep_size: row.u32(moe_ep_size_col)?,
         };
+        let kernel_source = row.str_optional(kernel_source_col)?.unwrap_or("");
+        let target = if kernel_source == "moe_torch_flow_min_latency" {
+            &mut low_latency_keys
+        } else {
+            &mut default_keys
+        };
         // Python's `load_moe_data` wraps the leaf insert in a try/except KeyError
         // and skips on conflict, i.e. it keeps the FIRST occurrence of each
         // (shape, num_tokens) tuple. Some perf files contain duplicate rows
         // (same kernel_source, same shape) — preserving first-wins parity here.
-        by_keys
+        target
             .entry(key)
             .or_default()
             .entry(row.u32(num_tokens_col)?)
             .or_insert(row.f64(latency_col)?);
     }
-    if by_keys.is_empty() {
+    if default_keys.is_empty() && low_latency_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no MoE rows loaded from {}",
             path.display()
         )));
     }
-    Ok(MoeGrids { by_keys })
+    Ok(LoadedMoeGrids {
+        default: MoeGrids { by_keys: default_keys },
+        low_latency: MoeGrids { by_keys: low_latency_keys },
+    })
 }
 
 fn clone_err(err: &AicError) -> AicError {
@@ -289,5 +384,36 @@ mod tests {
         let r1 = table.load();
         let r2 = table.load();
         assert_eq!(r1.is_ok(), r2.is_ok());
+    }
+
+    fn b200_trtllm_data_root() -> PathBuf {
+        PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator/systems/data/b200_sxm/trtllm/1.2.0rc5")
+    }
+
+    #[test]
+    fn moe_low_latency_grid_split_on_b200_trtllm() {
+        // b200 trtllm 1.2.0rc5 perf-DB carries `moe_torch_flow_min_latency`
+        // rows; they must land in the low_latency grid, not the default
+        // one. vLLM/SGLang DBs lack the column entirely → low_latency
+        // empty → `low_latency_available()` returns false.
+        let table = MoeTable::new(b200_trtllm_data_root());
+        let available = table
+            .low_latency_available()
+            .expect("moe_perf.parquet must load");
+        assert!(
+            available,
+            "expected b200/trtllm/1.2.0rc5 to carry moe_torch_flow_min_latency rows"
+        );
+
+        let vllm = MoeTable::new(b200_vllm_data_root());
+        let vllm_available = vllm
+            .low_latency_available()
+            .expect("vllm moe_perf.parquet must load");
+        assert!(
+            !vllm_available,
+            "vLLM perf DB lacks kernel_source column → low_latency should be empty"
+        );
     }
 }

@@ -357,29 +357,37 @@ fn load_module_parquet(path: &Path, is_context: bool) -> Result<ModuleGrids, Aic
         let batch_size = row.u32(batch_size_col)?;
         let isl = row.u32(isl_col)?;
         let latency = row.f64(latency_col)?;
-        // First-wins parity with Python `load_mla_module_data`.
+        // Last-wins parity with Python `load_context_mla_module_data`
+        // (`operations/mla.py:1804`) and `load_generation_mla_module_data`
+        // (`operations/mla.py:1847`). Unlike the legacy CSV loaders and every
+        // other Python perf-DB loader (GEMM, attention, MoE, MHC, DSA, wideep)
+        // which guard with `try/except KeyError` for first-wins semantics,
+        // these two MLA-module parquet loaders use direct assignment and
+        // therefore last-wins. Some perf-DB parquet shards (notably
+        // b300_sxm/vllm/0.19.0 `mla_generation_module_perf.parquet`) contain
+        // duplicate (num_heads, batch_size, sequence_tokens) rows; first-wins
+        // here caused a constant +0.247ms/step decode drift on b300 because
+        // Rust picked the slightly-higher latency for ~184 affected keys.
         if is_context {
-            by_keys
+            let inner = by_keys
                 .entry(key)
                 .or_default()
                 .entry(num_heads)
                 .or_default()
                 .entry(isl)
-                .or_default()
-                .entry(batch_size)
-                .or_insert(latency);
+                .or_default();
+            inner.insert(batch_size, latency);
         } else {
             // Generation module: (num_heads, b, s) axis order.
             let sequence_tokens = isl + row.u32(step_col)?;
-            by_keys
+            let inner = by_keys
                 .entry(key)
                 .or_default()
                 .entry(num_heads)
                 .or_default()
                 .entry(batch_size)
-                .or_default()
-                .entry(sequence_tokens)
-                .or_insert(latency);
+                .or_default();
+            inner.insert(sequence_tokens, latency);
         }
     }
     if by_keys.is_empty() {

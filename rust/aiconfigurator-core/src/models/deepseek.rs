@@ -10,8 +10,9 @@
 use crate::common::enums::{BackendKind, GemmQuantMode};
 use crate::models::base::{Model, ModelConfig};
 use crate::operators::{
-    ContextMlaOp, CustomAllReduceOp, DispatchFlavor, ElementwiseOp, EmbeddingOp, FallbackOp,
-    GemmOp, GenerationMlaOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp, Op, OverlapOp,
+    ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DispatchFlavor, ElementwiseOp,
+    EmbeddingOp, FallbackOp, GemmOp, GenerationAttentionOp, GenerationMlaOp, MlaBmmOp,
+    MlaModuleOp, MoEDispatchOp, MoeOp, Op, OverlapOp,
 };
 
 fn dispatch_flavor(backend: BackendKind) -> DispatchFlavor {
@@ -72,11 +73,14 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
     };
 
     // Build the per-layer fallback chain Python's `FallbackOp` would
-    // unfold when `MLAModule` perf data is missing (e.g. SGLang / TRT-LLM
-    // perf DBs that ship only the granular per-kernel CSVs). For vLLM the
-    // MLAModule data exists so the primary always succeeds and the
-    // fallback is unreached; we build the SGLang / TRT-LLM shape because
-    // that's the only path that actually exercises the fallback today.
+    // unfold when `MLAModule` perf data is missing. The middle attention
+    // op differs by backend: vLLM absorbs the KV projection into a single
+    // `ContextAttention` (matches Python `models/deepseek.py` line 168 —
+    // "vLLM absorbs the KV projection and runs standard ContextAttention
+    // with v_head_dim=128"); TRT-LLM / SGLang use the granular `ContextMLA`.
+    // Neither path wraps the attention in MlaBmm on the context side —
+    // Python's context fallback has exactly one attention op.
+    let vllm_head_size: u32 = 128; // DeepSeek/Kimi MLA architectural v_head_dim
     let mut context_mla_fallback: Vec<Op> = Vec::new();
     context_mla_fallback.push(Op::Gemm({
         let mut g = GemmOp::new("context_downscale_gemm", 2112, h, dtypes.gemm_quant);
@@ -93,26 +97,31 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
         g.scale_factor = layers;
         g
     }));
-    context_mla_fallback.push(Op::MlaBmm({
-        let mut b = MlaBmmOp::new("context_bmm_pre", n_per_tp, mla_bmm_quant, true);
-        b.scale_factor = layers;
-        b
-    }));
-    context_mla_fallback.push(Op::ContextMla({
-        let mut a = ContextMlaOp::new(
-            "context_attention",
-            mla_num_heads,
-            dtypes.kv_cache_quant,
-            dtypes.fmha_quant,
-        );
-        a.scale_factor = layers;
-        a
-    }));
-    context_mla_fallback.push(Op::MlaBmm({
-        let mut b = MlaBmmOp::new("context_bmm_post", n_per_tp, mla_bmm_quant, false);
-        b.scale_factor = layers;
-        b
-    }));
+    if backend == BackendKind::Vllm {
+        context_mla_fallback.push(Op::ContextAttention({
+            let mut a = ContextAttentionOp::new(
+                "context_attention",
+                cfg.spec.num_attention_heads / tp,
+                cfg.spec.num_key_value_heads / tp,
+                vllm_head_size,
+                dtypes.kv_cache_quant,
+                dtypes.fmha_quant,
+            );
+            a.scale_factor = layers;
+            a
+        }));
+    } else {
+        context_mla_fallback.push(Op::ContextMla({
+            let mut a = ContextMlaOp::new(
+                "context_attention",
+                mla_num_heads,
+                dtypes.kv_cache_quant,
+                dtypes.fmha_quant,
+            );
+            a.scale_factor = layers;
+            a
+        }));
+    }
     context_mla_fallback.push(Op::Gemm({
         let mut g = GemmOp::new("context_proj_gemm", h, 128 * 128 / tp, dtypes.gemm_quant);
         g.scale_factor = layers;
@@ -286,21 +295,41 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
         g.scale_factor = layers;
         g
     }));
-    generation_mla_fallback.push(Op::MlaBmm({
-        let mut b = MlaBmmOp::new("generation_bmm_pre", n_per_tp, mla_bmm_quant, true);
-        b.scale_factor = layers;
-        b
-    }));
-    generation_mla_fallback.push(Op::GenerationMla({
-        let mut a = GenerationMlaOp::new("generation_attention", mla_num_heads, dtypes.kv_cache_quant);
-        a.scale_factor = layers;
-        a
-    }));
-    generation_mla_fallback.push(Op::MlaBmm({
-        let mut b = MlaBmmOp::new("generation_bmm_post", n_per_tp, mla_bmm_quant, false);
-        b.scale_factor = layers;
-        b
-    }));
+    // Generation attention: vLLM absorbs the KV projection into one
+    // GenerationAttention (matches Python `deepseek.py` line 357 — "vLLM
+    // absorbs the KV projection and runs standard GenerationAttention with
+    // v_head_dim=128"); TRT-LLM / SGLang use the full MlaBmm(pre) +
+    // GenerationMLA + MlaBmm(post) chain.
+    if backend == BackendKind::Vllm {
+        generation_mla_fallback.push(Op::GenerationAttention({
+            let mut a = GenerationAttentionOp::new(
+                "generation_attention",
+                cfg.spec.num_attention_heads / tp,
+                cfg.spec.num_key_value_heads / tp,
+                vllm_head_size,
+                dtypes.kv_cache_quant,
+            );
+            a.scale_factor = layers;
+            a
+        }));
+    } else {
+        generation_mla_fallback.push(Op::MlaBmm({
+            let mut b = MlaBmmOp::new("generation_bmm_pre", n_per_tp, mla_bmm_quant, true);
+            b.scale_factor = layers;
+            b
+        }));
+        generation_mla_fallback.push(Op::GenerationMla({
+            let mut a =
+                GenerationMlaOp::new("generation_attention", mla_num_heads, dtypes.kv_cache_quant);
+            a.scale_factor = layers;
+            a
+        }));
+        generation_mla_fallback.push(Op::MlaBmm({
+            let mut b = MlaBmmOp::new("generation_bmm_post", n_per_tp, mla_bmm_quant, false);
+            b.scale_factor = layers;
+            b
+        }));
+    }
     generation_mla_fallback.push(Op::Gemm({
         let mut g = GemmOp::new("generation_proj_gemm", h, h / tp, dtypes.gemm_quant);
         g.scale_factor = layers;

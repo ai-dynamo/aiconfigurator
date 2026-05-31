@@ -381,6 +381,31 @@ impl EngineStepEstimator {
         self.session.clear_runtime_caches();
     }
 
+    /// Per-op context-phase latency breakdown (ms) for parity drilldown.
+    /// Returns `Vec<(op_name, latency_ms)>` for the model's context graph at
+    /// the given batch/ISL/prefix point. Used by integration tests and the
+    /// parity scan runner; production callers normally use `forward_pass_*`.
+    pub fn debug_context_breakdown(
+        &self,
+        batch_size: u32,
+        effective_isl: u32,
+        prefix: u32,
+    ) -> Result<Vec<(String, f64)>, AicError> {
+        self.session
+            .debug_context_breakdown(batch_size, effective_isl, prefix)
+    }
+
+    /// Per-op generation-phase latency breakdown (ms) for parity drilldown.
+    /// Returns `Vec<(op_name, latency_ms)>` for the model's generation graph
+    /// at the given batch / KV-seq-tokens point.
+    pub fn debug_generation_breakdown(
+        &self,
+        batch_size: u32,
+        kv_seq_tokens: u32,
+    ) -> Result<Vec<(String, f64)>, AicError> {
+        self.session
+            .debug_generation_breakdown(batch_size, kv_seq_tokens)
+    }
 }
 
 struct DataRoots {

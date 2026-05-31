@@ -93,6 +93,27 @@ impl StateSpaceTable {
         n_groups: u32,
         chunk_size: u32,
     ) -> Result<f64, AicError> {
+        // Mirror Python `load_mamba2_data`'s defaultdict-without-KeyError
+        // bug: for `phase == "generation"`, the row-population pattern
+        // `try { data[ks][ph][mk][bs] } except KeyError: data[ks][ph][mk][bs]
+        // = entry` never reaches the `except` branch because every level
+        // is a `defaultdict` that lazily materialises an empty dict on
+        // access (no KeyError raised). Python's generation Mamba2 leaves
+        // therefore end up empty and every generation query silently falls
+        // through to SOL. The Rust parquet loader populates the rows
+        // correctly, so returning silicon here would give a numerically
+        // different (and arguably "more correct") answer — but for
+        // apple-to-apple parity we mirror Python by returning a
+        // PerfDatabase error so the operator-layer SOL branch fires.
+        // GDN's loader is fine (uses explicit `in` checks), so this
+        // workaround is Mamba2-generation-only.
+        if phase == "generation" {
+            return Err(AicError::PerfDatabase(format!(
+                "Mamba2 generation data intentionally not used (matches Python `load_mamba2_data` \
+                 defaultdict bug at operations/mamba.py:719); operator must fall to SOL. \
+                 ks={kernel_source}, d_model={d_model}"
+            )));
+        }
         let grids = self.load_mamba2()?;
         let key = Mamba2Key {
             kernel_source: kernel_source.to_string(),
@@ -112,19 +133,11 @@ impl StateSpaceTable {
         // shares d_model, surface as `PerfDatabase` so the operator layer's
         // SOL fallback applies.
         //
-        // Restricted to `phase == "context"`: in `load_mamba2_data`, the
-        // row-population pattern `try { data[ks][ph][mk][bs] } except
-        // KeyError: data[ks][ph][mk][bs] = entry` never reaches the `except`
-        // branch for the generation phase because the 4th-level
-        // `data[ks][ph][mk]` is a `defaultdict` that lazily materialises an
-        // empty dict on access (no KeyError raised). Generation Mamba2 rows
-        // are therefore loaded with empty leaves, and Python silently falls
-        // through to SOL for every generation query. We mirror that
-        // behaviour so context tightens (silicon vs silicon) without
-        // regressing generation (SOL vs SOL).
+        // Only the context phase reaches this point — generation queries are
+        // short-circuited above to match Python's degenerate behaviour.
         let by_bs_seq = match grids.by_keys.get(&key) {
             Some(table) => table,
-            None if key.phase == "context" => grids
+            None => grids
                 .by_keys
                 .iter()
                 .find(|(k, _)| {
@@ -134,9 +147,6 @@ impl StateSpaceTable {
                 })
                 .map(|(_, table)| table)
                 .ok_or_else(|| missing("Mamba2", &self.data_root, format!("{key:?}")))?,
-            None => {
-                return Err(missing("Mamba2", &self.data_root, format!("{key:?}")));
-            }
         };
         bs_seq_interp(by_bs_seq, batch_size, seq_len)
     }

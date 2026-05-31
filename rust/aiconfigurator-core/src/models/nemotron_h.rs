@@ -371,6 +371,8 @@ pub fn build_nemotron_h_model(config: ModelConfig) -> Model {
                 "power_law_1.01",
             );
             m.scale_factor = count_e;
+            // Relu² is non-gated, so the small-token nvfp4 low-latency kernel doesn't apply.
+            m.is_gated = false;
             m
         }));
         ctx.push(Op::MoeDispatch({
@@ -492,6 +494,8 @@ pub fn build_nemotron_h_model(config: ModelConfig) -> Model {
                 "power_law_1.01",
             );
             m.scale_factor = count_e;
+            // Relu² is non-gated, so the small-token nvfp4 low-latency kernel doesn't apply.
+            m.is_gated = false;
             m
         }));
         gen.push(Op::MoeDispatch({

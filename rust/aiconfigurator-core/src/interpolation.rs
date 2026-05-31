@@ -128,14 +128,22 @@ pub type Grid3<T> = BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, T>>>;
 /// may differ between adjacent `x` slices (sparse grids are supported).
 pub fn interp_2d_1d_grid(grid: &Grid3<f64>, x: u32, y: u32, z: u32) -> Result<f64, AicError> {
     let x_keys: Vec<u32> = grid.keys().copied().collect();
-    let (x_left, x_right) = nearest_neighbors(x, &x_keys, true)?;
+    // `inner_only=false`: when a query lands above the axis maximum or below
+    // the minimum, return the boundary pair so `interp_1d` extrapolates
+    // linearly. This mirrors Python's behavior, which pre-extends the table
+    // grid at load time via `interpolation.extrapolate_data_grid` so every
+    // query lands within the (extended) grid. We do the equivalent
+    // extrapolation at query time instead of pre-expanding the table.
+    // For in-grid queries this is identical to the old `inner_only=true`
+    // path — only out-of-grid behavior changes.
+    let (x_left, x_right) = nearest_neighbors(x, &x_keys, false)?;
 
     let interpolate_yz_at = |slice_key: u32| -> Result<f64, AicError> {
         let slice = grid
             .get(&slice_key)
             .ok_or_else(|| AicError::PerfDatabase(format!("missing slice at x={slice_key}")))?;
         let y_keys: Vec<u32> = slice.keys().copied().collect();
-        let (y_left, y_right) = nearest_neighbors(y, &y_keys, true)?;
+        let (y_left, y_right) = nearest_neighbors(y, &y_keys, false)?;
 
         let left_row = slice.get(&y_left).ok_or_else(|| {
             AicError::PerfDatabase(format!("missing row at x={slice_key},y={y_left}"))
@@ -145,7 +153,7 @@ pub fn interp_2d_1d_grid(grid: &Grid3<f64>, x: u32, y: u32, z: u32) -> Result<f6
         })?;
 
         let z_keys_left: Vec<u32> = left_row.keys().copied().collect();
-        let (z_left, z_right) = nearest_neighbors(z, &z_keys_left, true)?;
+        let (z_left, z_right) = nearest_neighbors(z, &z_keys_left, false)?;
 
         let q00 = *left_row.get(&z_left).ok_or_else(|| missing(slice_key, y_left, z_left))?;
         let q01 = *left_row.get(&z_right).ok_or_else(|| missing(slice_key, y_left, z_right))?;
@@ -213,7 +221,10 @@ pub fn interp_2d_1d_grid_extrapolate_inner(
     z: u32,
 ) -> Result<f64, AicError> {
     let x_keys: Vec<u32> = grid.keys().copied().collect();
-    let (x_left, x_right) = nearest_neighbors(x, &x_keys, true)?;
+    // Allow x-axis extrapolation too — see `interp_2d_1d_grid` for the
+    // rationale. The original name `extrapolate_inner` referred to y/z only;
+    // both functions now extrapolate on all three axes.
+    let (x_left, x_right) = nearest_neighbors(x, &x_keys, false)?;
 
     let interpolate_yz_at = |slice_key: u32| -> Result<f64, AicError> {
         let slice = grid
@@ -431,9 +442,25 @@ mod tests {
     }
 
     #[test]
-    fn interp_2d_1d_grid_out_of_range_errors() {
-        let grid = make_grid(&[(1, 1, 1, 10.0), (2, 2, 2, 20.0)]);
-        // Query x=3 is above the x-axis maximum (2).
-        assert!(interp_2d_1d_grid(&grid, 3, 1, 1).is_err());
+    fn interp_2d_1d_grid_out_of_range_extrapolates() {
+        // `interp_2d_1d_grid` now mirrors Python's `extrapolate_data_grid`
+        // semantics — every axis allows extrapolation when the query falls
+        // outside the loaded grid. A query at x=3 (above the max of 2)
+        // takes the boundary pair (1, 2) and linearly extrapolates the
+        // 2-D slice latencies.
+        let grid = make_grid(&[
+            (1, 1, 1, 10.0),
+            (1, 1, 2, 11.0),
+            (1, 2, 1, 12.0),
+            (1, 2, 2, 13.0),
+            (2, 1, 1, 20.0),
+            (2, 1, 2, 21.0),
+            (2, 2, 1, 22.0),
+            (2, 2, 2, 23.0),
+        ]);
+        // The extrapolated value at x=3,y=1,z=1 should be ~30 (linear
+        // continuation of 10, 20).
+        let v = interp_2d_1d_grid(&grid, 3, 1, 1).expect("extrapolation must not error");
+        assert!((v - 30.0).abs() < 1e-9, "expected ~30.0, got {v}");
     }
 }

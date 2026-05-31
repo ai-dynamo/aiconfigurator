@@ -20,6 +20,7 @@ use std::sync::OnceLock;
 
 use crate::common::enums::GemmQuantMode;
 use crate::common::error::AicError;
+use crate::common::system_spec::SystemSpec;
 use crate::interpolation::{interp_1d, interp_2d_1d_grid, nearest_neighbors, Grid3};
 use crate::perf_database::parquet_loader::PerfReader;
 
@@ -27,8 +28,14 @@ use crate::perf_database::parquet_loader::PerfReader;
 ///
 /// Holds the data directory and three lazy CSV-loaded tables. Construct via
 /// `GemmTable::new`; queries trigger the relevant table's load on first use.
+///
+/// `system_spec` is kept for SOL clamping at load time, mirroring Python's
+/// `GEMM._correct_sol`. The supporting `compute_scale` / `scale_matrix`
+/// tables are NOT SOL-clamped — Python's `_correct_data` only touches the
+/// main GEMM table.
 pub struct GemmTable {
     data_root: PathBuf,
+    system_spec: SystemSpec,
     gemm: OnceLock<Result<GemmGrids, AicError>>,
     compute_scale: OnceLock<Result<TwoDGrids, AicError>>,
     scale_matrix: OnceLock<Result<TwoDGrids, AicError>>,
@@ -46,9 +53,10 @@ struct TwoDGrids {
 
 impl GemmTable {
     /// Construct an empty table for the given data directory. No I/O.
-    pub fn new(data_root: PathBuf) -> Self {
+    pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
         Self {
             data_root,
+            system_spec,
             gemm: OnceLock::new(),
             compute_scale: OnceLock::new(),
             scale_matrix: OnceLock::new(),
@@ -65,7 +73,12 @@ impl GemmTable {
     ///    linear over `m`).
     pub fn query(&self, quant: GemmQuantMode, m: u32, n: u32, k: u32) -> Result<f64, AicError> {
         let grids = self.load_gemm()?;
-        let quant_name = quant.name();
+        // `fp8_static` is a behavioral mode that reuses `fp8` perf tables,
+        // mirroring Python `GEMM._normalize_for_lookup`. The
+        // compute_scale / scale_matrix tables apply the same
+        // normalization in their respective query methods.
+        let lookup_quant = normalize_fp8_static_quant(quant);
+        let quant_name = lookup_quant.name();
         let grid = grids.by_quant.get(quant_name).ok_or_else(|| {
             AicError::PerfDatabase(format!(
                 "GEMM perf data missing for quant '{quant_name}' at {}; available: {:?}",
@@ -110,6 +123,10 @@ impl GemmTable {
     }
 
     /// Query compute-scale latency (ms) — used by `fp8_static` GEMM only.
+    ///
+    /// Like the main GEMM table, the compute_scale data is keyed by `fp8`
+    /// (not `fp8_static`) in the perf-DB; normalize before lookup to mirror
+    /// Python's `GEMM._normalize_for_lookup`.
     pub fn query_compute_scale(
         &self,
         quant: GemmQuantMode,
@@ -117,10 +134,13 @@ impl GemmTable {
         k: u32,
     ) -> Result<f64, AicError> {
         let grids = self.load_compute_scale()?;
-        query_two_d(&grids.by_quant, quant.name(), m, k, &self.data_root)
+        let lookup = normalize_fp8_static_quant(quant);
+        query_two_d(&grids.by_quant, lookup.name(), m, k, &self.data_root)
     }
 
     /// Query scale-matrix latency (ms) — used by `fp8_static` GEMM only.
+    /// Same `fp8_static -> fp8` normalization as the GEMM and
+    /// compute_scale lookups.
     pub fn query_scale_matrix(
         &self,
         quant: GemmQuantMode,
@@ -128,13 +148,27 @@ impl GemmTable {
         k: u32,
     ) -> Result<f64, AicError> {
         let grids = self.load_scale_matrix()?;
-        query_two_d(&grids.by_quant, quant.name(), m, k, &self.data_root)
+        let lookup = normalize_fp8_static_quant(quant);
+        query_two_d(&grids.by_quant, lookup.name(), m, k, &self.data_root)
     }
 
     fn load_gemm(&self) -> Result<&GemmGrids, AicError> {
-        let cell = self
-            .gemm
-            .get_or_init(|| load_gemm_parquet(&self.data_root.join("gemm_perf.parquet")));
+        let cell = self.gemm.get_or_init(|| {
+            let mut grids = load_gemm_parquet(&self.data_root.join("gemm_perf.parquet"))?;
+            // Mirror Python `GEMM._correct_sol`: clamp every stored grid
+            // entry to `>= SOL`. SOL is deterministic from the system spec
+            // and (m, n, k, quant); on currently-aligned surfaces this is
+            // a no-op (raw >= SOL already), so the clamp only affects
+            // systems whose collected data drops below SOL (the prime
+            // example is l40s at small bf16 shapes).
+            //
+            // Python interpolates over already-clamped grid points; we
+            // mirror that ordering by mutating the grid before any
+            // queries run. Off-grid interpolation/extrapolation therefore
+            // sees the same monotone-bounded inputs as Python.
+            clamp_gemm_grids_to_sol(&self.system_spec, &mut grids);
+            Ok(grids)
+        });
         cell.as_ref().map_err(|err| clone_err(err))
     }
 
@@ -150,6 +184,104 @@ impl GemmTable {
             load_two_d_parquet(&self.data_root.join("scale_matrix_perf.parquet"))
         });
         cell.as_ref().map_err(|err| clone_err(err))
+    }
+}
+
+/// Speed-of-light GEMM latency in ms.
+///
+/// Mirrors Python's `GEMM._query_gemm_table::get_sol`:
+/// - `sol_math = 2 * m * n * k / tc_flops(quant) * 1000`
+/// - `sol_mem  = quant.memory * (m*n + m*k + n*k) / mem_bw * 1000`
+/// - `sol      = max(sol_math, sol_mem)`
+///
+/// `tc_flops(quant)` follows Python `_get_quant_tc_flops`: compute factor
+/// 1 maps to `bfloat16_tc_flops`, 2 to `fp8_tc_flops`, 4 to `fp4_tc_flops`,
+/// with a `bfloat16_tc_flops * compute_factor` fallback when the spec
+/// entry is missing.
+pub(crate) fn gemm_sol_latency_ms(
+    spec: &SystemSpec,
+    quant: GemmQuantMode,
+    m: u32,
+    n: u32,
+    k: u32,
+) -> f64 {
+    let mapping = quant.mapping();
+    let m_f = m as f64;
+    let n_f = n as f64;
+    let k_f = k as f64;
+    let tc_flops = tc_flops_for_compute(spec, mapping.compute);
+    let sol_math = 2.0 * m_f * n_f * k_f / tc_flops * 1000.0;
+    let sol_mem = mapping.memory * (m_f * n_f + m_f * k_f + n_f * k_f)
+        / spec.gpu.mem_bw
+        * 1000.0;
+    sol_math.max(sol_mem)
+}
+
+fn tc_flops_for_compute(spec: &SystemSpec, compute_factor: f64) -> f64 {
+    let bf16 = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
+    let direct = match compute_factor as u32 {
+        1 => spec.gpu.bfloat16_tc_flops,
+        2 => spec.gpu.fp8_tc_flops,
+        4 => spec.gpu.fp4_tc_flops,
+        _ => None,
+    };
+    direct.unwrap_or(bf16 * compute_factor)
+}
+
+/// In-place SOL clamp for every entry in the GEMM grid set.
+///
+/// `bfloat16_tc_flops` is required for the bf16 SOL path; if the system
+/// YAML omits it (no real system in the repo does, but the schema marks
+/// it optional), we leave the grids untouched so the caller sees raw data
+/// rather than a corrupted clamp using `tc_flops == 0`.
+fn clamp_gemm_grids_to_sol(spec: &SystemSpec, grids: &mut GemmGrids) {
+    if spec.gpu.bfloat16_tc_flops.is_none() {
+        return;
+    }
+    for (quant_name, grid) in grids.by_quant.iter_mut() {
+        let Some(quant) = gemm_quant_by_name(quant_name) else {
+            continue;
+        };
+        for (&m, by_n) in grid.iter_mut() {
+            for (&n, by_k) in by_n.iter_mut() {
+                for (&k, latency) in by_k.iter_mut() {
+                    let sol = gemm_sol_latency_ms(spec, quant, m, n, k);
+                    if sol > *latency {
+                        *latency = sol;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn gemm_quant_by_name(name: &str) -> Option<GemmQuantMode> {
+    use GemmQuantMode::*;
+    Some(match name {
+        "bfloat16" => Bfloat16,
+        "int8_wo" => Int8Wo,
+        "int4_wo" => Int4Wo,
+        "fp8" => Fp8,
+        "fp8_static" => Fp8Static,
+        "sq" => Sq,
+        "fp8_block" => Fp8Block,
+        "fp8_ootb" => Fp8Ootb,
+        "nvfp4" => Nvfp4,
+        _ => return None,
+    })
+}
+
+/// Normalize the `fp8_static` quant mode to `fp8` for perf-table lookups.
+/// Mirrors Python `GEMM._normalize_for_lookup`: the `fp8_static` mode is
+/// behavioral (subtracts compute_scale + scale_matrix latency) but reuses
+/// the fp8 perf tables — the perf-DB never stores rows under
+/// `fp8_static`. Applied uniformly to the GEMM, compute_scale, and
+/// scale_matrix table queries.
+fn normalize_fp8_static_quant(quant: GemmQuantMode) -> GemmQuantMode {
+    if quant == GemmQuantMode::Fp8Static {
+        GemmQuantMode::Fp8
+    } else {
+        quant
     }
 }
 
@@ -310,9 +442,16 @@ mod tests {
             .join("src/aiconfigurator/systems/data/b200_sxm/vllm/0.19.0")
     }
 
+    fn b200_sxm_spec() -> SystemSpec {
+        let systems_yaml = PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator/systems/b200_sxm.yaml");
+        SystemSpec::load(&systems_yaml).expect("b200_sxm.yaml must parse")
+    }
+
     #[test]
     fn gemm_exact_hit_returns_recorded_latency() {
-        let table = GemmTable::new(b200_vllm_data_root());
+        let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
         // First row of b200_sxm/vllm/0.19.0/gemm_perf.txt (bfloat16 32768x65536x16384).
         let latency = table
             .query(GemmQuantMode::Bfloat16, 32768, 65536, 16384)
@@ -326,7 +465,7 @@ mod tests {
     #[test]
     fn gemm_query_returns_positive_latency_for_smoke_shape() {
         // Shape pulled from a MiniMax-M2.5 GEMM call: tp=8 ffn1 at hidden=6144.
-        let table = GemmTable::new(b200_vllm_data_root());
+        let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let latency = table
             .query(GemmQuantMode::Bfloat16, 1024, 6144, 6144)
             .expect("query must succeed");
@@ -340,7 +479,7 @@ mod tests {
         // We can't directly observe I/O count, but if the cache isn't being
         // hit the second query would still succeed, so verify both paths
         // return identical results (proxy for cache stability).
-        let table = GemmTable::new(b200_vllm_data_root());
+        let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let first = table.query(GemmQuantMode::Bfloat16, 32768, 65536, 16384).unwrap();
         let second = table.query(GemmQuantMode::Bfloat16, 32768, 65536, 16384).unwrap();
         assert_eq!(first, second);
@@ -348,7 +487,7 @@ mod tests {
 
     #[test]
     fn gemm_missing_quant_mode_errors() {
-        let table = GemmTable::new(b200_vllm_data_root());
+        let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
         // vLLM 0.19.0 b200 collects bfloat16/fp8/fp8_block/nvfp4 — int4_wo
         // is genuinely absent for this slice.
         match table.query(GemmQuantMode::Int4Wo, 1024, 4096, 4096) {
@@ -361,7 +500,7 @@ mod tests {
 
     #[test]
     fn gemm_missing_data_root_errors_on_query() {
-        let table = GemmTable::new(PathBuf::from("/nonexistent/aic/data/root"));
+        let table = GemmTable::new(PathBuf::from("/nonexistent/aic/data/root"), b200_sxm_spec());
         let err = table.query(GemmQuantMode::Bfloat16, 1, 1, 1).unwrap_err();
         // The lazy loader should surface the missing file as the cause,
         // and the second access should see the cached error too.
@@ -373,7 +512,7 @@ mod tests {
     #[test]
     fn compute_scale_absent_on_vllm_b200_errors_clearly() {
         // vLLM doesn't ship compute_scale data on b200; expect a clear IO error.
-        let table = GemmTable::new(b200_vllm_data_root());
+        let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let err = table
             .query_compute_scale(GemmQuantMode::Fp8Static, 1024, 4096)
             .unwrap_err();
