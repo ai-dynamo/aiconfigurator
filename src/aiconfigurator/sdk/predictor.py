@@ -2,29 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Scheduler strategy for single-point worker perf prediction.
+Predictor strategy for single-point worker perf prediction.
 
-A ``Scheduler`` defines *how* one config point's performance is predicted.
-Today's only implementation is :class:`StaticScheduler`, which wraps
+A ``Predictor`` defines *how* one config point's performance is predicted.
+Today's only implementation is :class:`AnalyticPredictor`, which wraps
 ``backend.run_agg`` (analytic IFB simulation, steady-state) and
 ``backend.run_static`` (single forward step) -- this matches the
-pre-Scheduler behavior of the SDK exactly.
+pre-Predictor behavior of the SDK exactly.
 
 Future implementations may swap in different prediction strategies:
 
-- ``DynamicScheduler`` -- models dynamic-traffic effects beyond the
-  steady-state assumption baked into the legacy static scheduler.
-- ``MockerScheduler`` -- delegates to Dynamo Mocker for request-level
+- ``DynamicPredictor`` -- models dynamic-traffic effects (queueing under
+  concurrency) beyond the steady-state assumption baked into the analytic
+  predictor.
+- ``MockerPredictor`` -- delegates to Dynamo Mocker for request-level
   discrete-event simulation; useful when the user has a real Mooncake-
   style trace and wants per-request metrics rather than aggregate
   latency / throughput numbers.
 
 Callers (``predict.predict_*``, ``sweep.sweep_*``, ``task.Task.run``)
-accept an optional ``scheduler`` argument that defaults to
-:data:`DEFAULT_SCHEDULER` (a single :class:`StaticScheduler` instance).
+accept an optional ``predictor`` argument that defaults to
+:data:`DEFAULT_PREDICTOR` (a single :class:`AnalyticPredictor` instance).
 The Protocol surface is intentionally minimal -- only the two prediction
 entry points the current SDK uses are required.  Future Mocker-style
-schedulers that need a different shape (e.g. whole-disagg-system replay
+predictors that need a different shape (e.g. whole-disagg-system replay
 rather than per-phase prediction) can extend the Protocol with
 additional methods at the time they are needed; today's two methods are
 sufficient for both agg and disagg paths.
@@ -44,7 +45,7 @@ DisaggRole = Literal["prefill", "decode"]
 
 
 @runtime_checkable
-class Scheduler(Protocol):
+class Predictor(Protocol):
     """Strategy for predicting one worker's perf at one config point.
 
     Implementations must provide both prediction entry points; agg and
@@ -79,16 +80,20 @@ class Scheduler(Protocol):
         ...
 
 
-class StaticScheduler:
-    """Default scheduler: steady-state analytic predictions.
+class AnalyticPredictor:
+    """Default predictor: steady-state analytic predictions (zero-queue).
 
     ``predict_agg_worker`` wraps ``backend.run_agg`` (which contains the
-    embedded num_mix_steps / num_genonly_steps static IFB scheduler today).
+    embedded num_mix_steps / num_genonly_steps analytic IFB scheduler).
     ``predict_disagg_phase`` wraps ``backend.run_static`` with the
     appropriate mode for prefill / decode.
 
-    This is exactly the SDK's pre-Scheduler behavior; using it as the
-    default keeps all current callers' results bit-identical.
+    The output assumes ideal zero-queue arrival -- it does not model
+    queueing-under-concurrency effects.  Sweep / picking layers apply
+    a separate TTFT correction on top.
+
+    This matches the SDK's pre-Predictor behavior exactly; using it as
+    the default keeps all current callers' results bit-identical.
     """
 
     _DISAGG_ROLE_TO_MODE: ClassVar[dict[str, str]] = {
@@ -136,9 +141,9 @@ class StaticScheduler:
         )
 
 
-#: The default Scheduler instance used when callers don't pass one.
-#: Module-level singleton; ``StaticScheduler`` is stateless so sharing is safe.
-DEFAULT_SCHEDULER: Scheduler = StaticScheduler()
+#: The default Predictor instance used when callers don't pass one.
+#: Module-level singleton; ``AnalyticPredictor`` is stateless so sharing is safe.
+DEFAULT_PREDICTOR: Predictor = AnalyticPredictor()
 
 
-__all__ = ["DEFAULT_SCHEDULER", "DisaggRole", "Scheduler", "StaticScheduler"]
+__all__ = ["DEFAULT_PREDICTOR", "AnalyticPredictor", "DisaggRole", "Predictor"]

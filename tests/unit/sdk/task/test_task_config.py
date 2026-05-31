@@ -467,8 +467,8 @@ def test_run_rejects_autoscale_in_agg_mode():
         t.run(autoscale=True)
 
 
-def test_run_forwards_scheduler_field_to_sweep_agg(monkeypatch):
-    """Task.scheduler is plumbed into sweep_agg's scheduler kwarg."""
+def test_run_forwards_predictor_field_to_sweep_agg(monkeypatch):
+    """Task.predictor is plumbed into sweep_agg's predictor kwarg."""
     from aiconfigurator.sdk import sweep
 
     captured: dict = {}
@@ -477,27 +477,27 @@ def test_run_forwards_scheduler_field_to_sweep_agg(monkeypatch):
         return "db"
 
     def fake_sweep_agg(**kwargs):
-        captured["scheduler"] = kwargs.get("scheduler")
+        captured["predictor"] = kwargs.get("predictor")
         return "agg-result"
 
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
     monkeypatch.setattr(sweep, "sweep_agg", fake_sweep_agg)
 
-    from aiconfigurator.sdk.scheduler import StaticScheduler
+    from aiconfigurator.sdk.predictor import AnalyticPredictor
 
-    custom = StaticScheduler()  # any Scheduler-compatible object
+    custom = AnalyticPredictor()  # any Predictor-compatible object
     t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
-        scheduler=custom,
+        predictor=custom,
     )
     t.run()
-    assert captured["scheduler"] is custom
+    assert captured["predictor"] is custom
 
 
-def test_run_forwards_scheduler_field_to_sweep_disagg(monkeypatch):
-    """Task.scheduler is plumbed into sweep_disagg's scheduler kwarg."""
+def test_run_forwards_predictor_field_to_sweep_disagg(monkeypatch):
+    """Task.predictor is plumbed into sweep_disagg's predictor kwarg."""
     from aiconfigurator.sdk import sweep
 
     captured: dict = {}
@@ -506,43 +506,43 @@ def test_run_forwards_scheduler_field_to_sweep_disagg(monkeypatch):
         return "db"
 
     def fake_sweep_disagg(**kwargs):
-        captured["scheduler"] = kwargs.get("scheduler")
+        captured["predictor"] = kwargs.get("predictor")
         return "disagg-result"
 
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
     monkeypatch.setattr(sweep, "sweep_disagg", fake_sweep_disagg)
 
-    from aiconfigurator.sdk.scheduler import StaticScheduler
+    from aiconfigurator.sdk.predictor import AnalyticPredictor
 
-    custom = StaticScheduler()
+    custom = AnalyticPredictor()
     t = Task(
         serving_mode="disagg",
         prefill_model_path="deepseek-ai/DeepSeek-V3",
         prefill_system_name="h200_sxm",
         decode_model_path="deepseek-ai/DeepSeek-V3",
         decode_system_name="h200_sxm",
-        scheduler=custom,
+        predictor=custom,
     )
     t.run()
-    assert captured["scheduler"] is custom
+    assert captured["predictor"] is custom
 
 
-def test_to_dict_skips_scheduler_strategy_field():
+def test_to_dict_skips_predictor_strategy_field():
     """Strategy fields (Python objects) shouldn't appear in to_dict / YAML output."""
-    from aiconfigurator.sdk.scheduler import StaticScheduler
+    from aiconfigurator.sdk.predictor import AnalyticPredictor
 
     t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
-        scheduler=StaticScheduler(),
+        predictor=AnalyticPredictor(),
     )
     d = t.to_dict()
-    assert "scheduler" not in d
+    assert "predictor" not in d
 
 
-def test_from_yaml_warns_and_skips_scheduler_key(caplog):
-    """YAML can't construct a Scheduler; from_yaml warns and ignores the key."""
+def test_from_yaml_warns_and_skips_predictor_key(caplog):
+    """YAML can't construct a Predictor; from_yaml warns and ignores the key."""
     import logging
 
     with caplog.at_level(logging.WARNING):
@@ -551,11 +551,11 @@ def test_from_yaml_warns_and_skips_scheduler_key(caplog):
                 "serving_mode": "agg",
                 "model_path": "deepseek-ai/DeepSeek-V3",
                 "system_name": "h200_sxm",
-                "scheduler": "MockerScheduler",  # not a real object
+                "predictor": "MockerPredictor",  # not a real object
             }
         )
-    assert "scheduler" in caplog.text
-    assert t.scheduler is None  # default kept; YAML value ignored
+    assert "predictor" in caplog.text
+    assert t.predictor is None  # default kept; YAML value ignored
 
 
 # ---------------------------------------------------------------------------

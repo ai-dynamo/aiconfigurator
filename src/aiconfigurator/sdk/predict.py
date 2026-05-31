@@ -7,19 +7,19 @@ Worker-level performance prediction primitives.
 Two functions, one per worker shape:
 
 - :func:`predict_disagg_phase` — one phase of a disaggregated worker
-  (prefill-only or decode-only).  Delegates to the scheduler's
+  (prefill-only or decode-only).  Delegates to the predictor's
   ``predict_disagg_phase`` (default: wraps
   ``backend.run_static(mode=static_ctx|static_gen)``).
 
 - :func:`predict_agg_worker` — an aggregated IFB worker.  Delegates to
-  the scheduler's ``predict_agg_worker`` (default: wraps
+  the predictor's ``predict_agg_worker`` (default: wraps
   ``backend.run_agg``, where the embedded num_mix_steps /
-  num_genonly_steps static IFB scheduler lives).
+  num_genonly_steps analytic IFB scheduler lives).
 
-Both functions accept an optional ``scheduler`` argument.  When omitted,
-``DEFAULT_SCHEDULER`` (a singleton :class:`StaticScheduler`) is used --
+Both functions accept an optional ``predictor`` argument.  When omitted,
+``DEFAULT_PREDICTOR`` (a singleton :class:`AnalyticPredictor`) is used --
 behavior is bit-identical to direct ``backend.run_*`` calls.  Future
-work can replace the scheduler with a dynamic-traffic / Mocker-based
+work can replace the predictor with a dynamic-traffic / Mocker-based
 implementation without changing this surface.
 
 Both functions are pure wrappers: they hold no state and do no
@@ -37,7 +37,7 @@ from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.inference_summary import InferenceSummary
 from aiconfigurator.sdk.models import BaseModel
 from aiconfigurator.sdk.perf_database import PerfDatabase
-from aiconfigurator.sdk.scheduler import DEFAULT_SCHEDULER, Scheduler
+from aiconfigurator.sdk.predictor import DEFAULT_PREDICTOR, Predictor
 
 DisaggRole = Literal["prefill", "decode"]
 
@@ -51,7 +51,7 @@ def predict_disagg_phase(
     role: DisaggRole,
     latency_correction: float = 1.0,
     stride: int = 32,
-    scheduler: Scheduler | None = None,
+    predictor: Predictor | None = None,
 ) -> InferenceSummary:
     """Predict perf for one phase of a disaggregated worker.
 
@@ -66,21 +66,21 @@ def predict_disagg_phase(
         latency_correction: Multiplicative correction applied to predicted
             latencies (passes through to backend.run_static).
         stride: Decode-loop sampling stride (passes through unchanged).
-        scheduler: Optional Scheduler strategy.  Defaults to the static
-            steady-state scheduler (zero behavior change from direct
+        predictor: Optional Predictor strategy.  Defaults to the analytic
+            zero-queue predictor (zero behavior change from direct
             backend.run_static calls).  Future Mocker / dynamic
-            schedulers can be injected here.
+            predictors can be injected here.
 
     Returns:
         InferenceSummary for the single-phase worker.
 
     Notes:
-        The current default scheduler models the phase as a single
-        static step.  When backends grow chunked-prefill support for
-        disagg prefill workers, the scheduler interface (and the call
-        site) can be extended without touching every caller.
+        The default predictor models the phase as a single static step.
+        When backends grow chunked-prefill support for disagg prefill
+        workers, the predictor interface (and the call site) can be
+        extended without touching every caller.
     """
-    return (scheduler or DEFAULT_SCHEDULER).predict_disagg_phase(
+    return (predictor or DEFAULT_PREDICTOR).predict_disagg_phase(
         model=model,
         backend=backend,
         database=database,
@@ -98,7 +98,7 @@ def predict_agg_worker(
     database: PerfDatabase,
     runtime_config: config.RuntimeConfig,
     ctx_tokens: int,
-    scheduler: Scheduler | None = None,
+    predictor: Predictor | None = None,
     **backend_kwargs: Any,
 ) -> InferenceSummary:
     """Predict perf for an aggregated IFB worker.
@@ -113,18 +113,18 @@ def predict_agg_worker(
             candidate values; chunked-prefill semantics are implicit in
             which values are tried (chunked off → ``ctx_tokens``
             constrained to multiples of isl).
-        scheduler: Optional Scheduler strategy.  Defaults to the static
-            steady-state scheduler (zero behavior change from direct
-            backend.run_agg calls).  Future Mocker / dynamic schedulers
+        predictor: Optional Predictor strategy.  Defaults to the analytic
+            zero-queue predictor (zero behavior change from direct
+            backend.run_agg calls).  Future Mocker / dynamic predictors
             can be injected here.
         **backend_kwargs: Other backend-specific kwargs forwarded
-            through the scheduler (e.g. max_seq_len,
+            through the predictor (e.g. max_seq_len,
             free_gpu_memory_fraction).
 
     Returns:
         InferenceSummary for the aggregated worker.
     """
-    return (scheduler or DEFAULT_SCHEDULER).predict_agg_worker(
+    return (predictor or DEFAULT_PREDICTOR).predict_agg_worker(
         model=model,
         backend=backend,
         database=database,

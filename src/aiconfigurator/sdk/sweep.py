@@ -256,7 +256,7 @@ def _sweep_one_parallel_agg(
     enable_chunked_prefill: bool,
     free_gpu_memory_fraction: float | None,
     max_seq_len: int | None,
-    scheduler: Any = None,
+    predictor: Any = None,
 ) -> tuple[pd.DataFrame, bool]:
     """Sweep batch_size x ctx_tokens for one fixed parallel choice.
 
@@ -321,7 +321,7 @@ def _sweep_one_parallel_agg(
                 database=database,
                 runtime_config=point_rt,
                 ctx_tokens=ctx_tokens,
-                scheduler=scheduler,
+                predictor=predictor,
                 **backend_kwargs,
             )
 
@@ -358,7 +358,7 @@ def sweep_agg(
     enable_chunked_prefill: bool = False,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
-    scheduler: Any = None,
+    predictor: Any = None,
 ) -> pd.DataFrame:
     """Sweep parallel x batch x ctx_tokens for agg; return feasible-candidate DataFrame.
 
@@ -470,7 +470,7 @@ def sweep_agg(
                     enable_chunked_prefill=enable_chunked_prefill,
                     free_gpu_memory_fraction=free_gpu_memory_fraction,
                     max_seq_len=max_seq_len,
-                    scheduler=scheduler,
+                    predictor=predictor,
                 )
                 if not all_oom:
                     all_configs_oom = False
@@ -538,7 +538,7 @@ def _get_disagg_worker_candidates(
     database: PerfDatabase,
     backend_name: str,
     latency_correction: float,
-    scheduler: Any = None,
+    predictor: Any = None,
 ) -> pd.DataFrame:
     """Enumerate (parallel, batch_size) worker candidates for a disagg role.
 
@@ -582,7 +582,7 @@ def _get_disagg_worker_candidates(
                     runtime_config=point_rt,
                     role=role,  # type: ignore[arg-type]
                     latency_correction=latency_correction,
-                    scheduler=scheduler,
+                    predictor=predictor,
                 )
                 if not summary.check_oom():
                     all_configs_oom = False
@@ -774,7 +774,7 @@ def sweep_disagg(
     rate_matching_prefill_degradation: float | None = None,
     rate_matching_decode_degradation: float | None = None,
     autoscale_ttft_correction_factor: float | None = None,
-    scheduler: Any = None,
+    predictor: Any = None,
 ) -> pd.DataFrame:
     """Sweep prefill_parallel x decode_parallel x batches x workers with rate matching.
 
@@ -841,7 +841,7 @@ def sweep_disagg(
         database=prefill_database,
         backend_name=prefill_backend_name,
         latency_correction=prefill_latency_correction,
-        scheduler=scheduler,
+        predictor=predictor,
     )
     decode_summary_df = _get_disagg_worker_candidates(
         model_path=model_path,
@@ -853,7 +853,7 @@ def sweep_disagg(
         database=decode_database,
         backend_name=decode_backend_name,
         latency_correction=decode_latency_correction,
-        scheduler=scheduler,
+        predictor=predictor,
     )
 
     if len(prefill_summary_df) == 0 or len(decode_summary_df) == 0:

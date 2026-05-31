@@ -396,15 +396,15 @@ class Task:
     # ``picking.pick_autoscale``; default 1.8 locked by parity test.
     autoscale_ttft_correction_factor: float = 1.8
 
-    # ====== 8.5 Scheduler strategy ======
-    # Optional Scheduler that decides how each single config point is
-    # predicted.  None (default) uses sdk.scheduler.StaticScheduler --
-    # bit-identical to the pre-Scheduler behavior.  Future implementations
-    # (e.g. MockerScheduler wrapping Dynamo Mocker, DynamicScheduler) can
+    # ====== 8.5 Predictor strategy ======
+    # Optional Predictor that decides how each single config point is
+    # predicted.  None (default) uses sdk.predictor.AnalyticPredictor --
+    # bit-identical to the pre-Predictor behavior.  Future implementations
+    # (e.g. MockerPredictor wrapping Dynamo Mocker, DynamicPredictor) can
     # be injected here without touching sweep / predict / Task internals.
     # Excluded from to_dict / YAML serialization (it is a strategy object,
     # not a primitive value).
-    scheduler: Any = field(default=None, repr=False)
+    predictor: Any = field(default=None, repr=False)
 
     # ====== 9. Internal — resolved in __post_init__ ======
     _is_moe: bool = field(default=False, repr=False, init=False)
@@ -425,14 +425,14 @@ class Task:
         keys are warned about but ignored.  ``overrides`` (kwargs) win over
         YAML values.
 
-        Strategy fields like ``scheduler`` cannot be expressed in YAML
+        Strategy fields like ``predictor`` cannot be expressed in YAML
         (they're Python objects); pass them via ``overrides`` or assign
         after construction.
         """
         valid_keys = {f.name for f in dataclasses.fields(cls) if f.init and not f.name.startswith("_")}
         # YAML cannot construct strategy objects; ignore them here even if
         # they're valid fields.
-        _yaml_skip: frozenset[str] = frozenset({"scheduler"})
+        _yaml_skip: frozenset[str] = frozenset({"predictor"})
         kwargs: dict[str, Any] = {}
         for k, v in yaml_data.items():
             if k not in valid_keys:
@@ -936,7 +936,7 @@ class Task:
         __post_init__?") and for writing an "effective config" report.
         """
         # Strategy fields hold non-serializable objects; skip them.
-        non_serializable: frozenset[str] = frozenset({"scheduler"})
+        non_serializable: frozenset[str] = frozenset({"predictor"})
 
         out: dict[str, Any] = {}
         for f in dataclasses.fields(self):
@@ -1052,7 +1052,7 @@ class Task:
             database = get_database(self.system_name, self.backend_name, self.backend_version)
             return sweep_agg(
                 **self.sweep_agg_kwargs(database=database),
-                scheduler=self.scheduler,
+                predictor=self.predictor,
             )
         if self.serving_mode == "disagg":
             prefill_database = get_database(
@@ -1064,7 +1064,7 @@ class Task:
             return sweep_disagg(
                 **self.sweep_disagg_kwargs(prefill_database=prefill_database, decode_database=decode_database),
                 autoscale=autoscale,
-                scheduler=self.scheduler,
+                predictor=self.predictor,
             )
         raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
 
@@ -1141,7 +1141,7 @@ class Task:
             database=database,
             runtime_config=runtime_config,
             ctx_tokens=ctx_tokens if ctx_tokens is not None else self.isl,
-            scheduler=self.scheduler,
+            predictor=self.predictor,
             **backend_kwargs,
         )
         if summary.check_oom():
@@ -1218,7 +1218,7 @@ class Task:
             runtime_config=p_rt,
             role="prefill",
             latency_correction=self.prefill_latency_correction,
-            scheduler=self.scheduler,
+            predictor=self.predictor,
         )
         if p_summary.check_oom():
             raise RuntimeError(
@@ -1246,7 +1246,7 @@ class Task:
             runtime_config=d_rt,
             role="decode",
             latency_correction=self.decode_latency_correction,
-            scheduler=self.scheduler,
+            predictor=self.predictor,
         )
         if d_summary.check_oom():
             raise RuntimeError(
