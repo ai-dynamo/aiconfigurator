@@ -24,50 +24,86 @@ Python retaining orchestration and compatibility wrappers during migration.
 
 ## Current State
 
-Phase 3 (C1-C10 + C12) and Phase 4 (D1-D5) have landed. The Rust crate
+Phase 3 (C1-C10 + C12) and Phase 4 (D1-D8) have landed. The Rust crate
 is a faithful apple-to-apple port of Python's engine-step latency path
-for the smoke slice, with parity asserted (no xfails) on 72 surfaces —
-18 cases x 4 modes — covering:
+with full 1↔1 family + op-primitive parity, asserted (no xfails) on
+164 surfaces — 41 cases x 4 modes — covering all 14 supported model
+families:
 
-- 3 model families today: Llama / Qwen3 dense (llama.rs), MoE
-  (moe.rs), and DeepSeek (deepseek.rs).
-- 9 distinct models: MiniMaxAI/MiniMax-M2.5 and M2.7, moonshotai/
-  Kimi-K2.5, deepseek-ai/DeepSeek-V3 and DeepSeek-R1, Qwen/Qwen3-30B-A3B
-  and Qwen3-235B-A22B, Qwen/Qwen3-32B, meta-llama/Meta-Llama-3.1-{70B, 8B}.
+- Dense / GQA: Llama (llama.rs), Qwen3 (uses llama.rs), GPT
+  (gpt.rs, non-gated FFN).
+- MoE: traditional MoE (moe.rs), Hybrid MoE (hybrid_moe.rs,
+  Llama-4 / MiMo-V2-Flash 4-bucket), Gemma 4 MoE (gemma4_moe.rs,
+  SWA+global with shared MLP + MoE).
+- DeepSeek family: standard (deepseek.rs), V3.2 / DSA (deepseek_v32.rs),
+  V4 / compressed attention (deepseek_v4.rs), SGLang DeepEP WideEP
+  variant (deepseek_wideep.rs), TRT-LLM WideEP variant
+  (deepseek_wideep_trtllm.rs); KimiK25 reuses standard DeepSeek.
+- Multimodal: Qwen3VL + Qwen3VlMoe (qwen3vl.rs + operators/vision.rs).
+- Hybrid state-space: NemotronH (nemotron_h.rs, Mamba2 + attention +
+  MLP), Qwen3.5 (qwen35.rs, GDN + full-attention or GDN + MoE).
+- NemotronNas (nemotron_nas.rs, per-block heterogeneous config).
+
+`factory.rs` has no `Err` arm; every `ModelFamily` variant routes to a
+concrete builder, with the `DeepSeek` family branching on
+`WideEpMode::{Off, SglangDeepEp, Trtllm}`.
+
+Smoke coverage spans:
+
 - 3 systems: b200_sxm, h200_sxm, h100_sxm.
-- 2 backends: vllm 0.19.0 and sglang 0.5.10.
+- 3 backends: vllm 0.19.0, sglang 0.5.10, trtllm 1.3.0rc10.
 - 4 modes per case: static_ctx, static_gen, mixed_step, agg, disagg.
+- Shape variations: decode-heavy, prefill-heavy, prefix-heavy,
+  large-batch (in addition to the baseline isl=1024/osl=2 shape).
+- Error-symmetry families (Python and Rust both raise on perf-DB
+  miss): Llama-4-Scout (HybridMoe), gpt-oss-20b (Gpt),
+  DeepSeek-V4-Flash (DeepSeekV4).
 
-Op-graph composition primitives now match Python:
+Op-graph composition primitives match Python:
 
-- `Op::Overlap` mirrors Python's `OverlapOp` (parallel CUDA streams
-  on the generation MoE; latency = `max(routed, shared)`).
-- `Op::Fallback` mirrors Python's `FallbackOp` (try `MLAModule`
-  primary; fall back to the granular `MlaBmm + ContextMla/GenerationMla
-  + MlaBmm` chain when the module-level perf data is missing).
+- `Op::Overlap` mirrors `OverlapOp` (parallel-stream MoE;
+  latency = `max(routed, shared)`).
+- `Op::Fallback` mirrors `FallbackOp` (try `MLAModule`; fall back to
+  granular `MlaBmm + ContextMla/GenerationMla + MlaBmm`).
+- `WideEpContextMlaOp` / `WideEpGenerationMlaOp` mirror Python's
+  WideEP MLA pair (the context op applies `prefix_correction` the
+  same way the standard MLA op does).
+- `WideEpMoeOp` mirrors the TRT-LLM WideEPMoE compute op (10-level
+  key with distribution-string fallback and `attention_dp_size`
+  scaling).
 
 Module shape today:
 
 - `common/{enums,error,system_spec}` — foundation types and YAML
   system-spec parsing.
-- `models/{base,config_loader,registry,factory,llama,moe,deepseek}` —
-  family-specific op-graph builders. Each builder populates
+- `models/{base,config_loader,registry,factory,llama,moe,deepseek,
+  deepseek_v32,deepseek_v4,deepseek_wideep,deepseek_wideep_trtllm,
+  gemma4_moe,gpt,hybrid_moe,nemotron_h,nemotron_nas,qwen35,qwen3vl}`
+  — family-specific op-graph builders. Each builder populates
   `Model.{context_ops, generation_ops}` exactly the way Python's
-  `models/*.py` populates the same lists.
+  `models/*.py` does. `base::WideEpMode` enum routes the DeepSeek
+  WideEP branch.
 - `operators/*` — typed `Op` enum with per-variant `query` methods
-  that go through `perf_database/*` lookups. Mirrors Python's
-  `operations/*.py`.
-- `perf_database/{gemm,attention,mla,moe,wideep,mhc,dsa,dsv4,
-  communication,state_space}` — per-op-owner tables with lazy
-  loading (Python Pattern A) and first-wins parity for duplicate
-  CSV rows.
-- `session.rs` — `Phase3Estimator` drives `run_context_phase`,
-  `run_generation_phase`, and `get_mix_step_latency_ms`. Mirrors
-  Python's `_run_context_phase` / `_run_generation_phase` /
-  `_get_mix_step_latency` in `base_backend.py`.
+  that go through `perf_database/*` lookups. Includes
+  `wideep_mla` and `wideep_moe` variants alongside the standard
+  attention / MLA / MoE / dispatch / comm / elementwise / embedding
+  / overlap / fallback set.
+- `perf_database/{gemm,attention,mla,moe,wideep_mla,wideep_moe,
+  mhc,dsa,dsv4,communication,state_space}` — per-op-owner tables
+  with lazy loading (Python Pattern A) and first-wins parity for
+  duplicate CSV rows. `dsa.rs` linear-extrapolates on y/z axes
+  via `interp_2d_1d_grid_extrapolate_inner` to match Python's
+  out-of-grid behavior on sparse `num_heads`.
+- `session.rs` — `Phase3Estimator` (`Arc`-wrapped, manual `Debug`
+  impl) drives `run_context_phase`, `run_generation_phase`, and
+  `get_mix_step_latency_ms`. Mix-step Pass-1 threads
+  `combined_prefix` through to ops so MLA `prefix_correction`
+  applies even when the MLA module is wrapped in `FallbackOp`.
 - `ffi.rs` + `src/aiconfigurator/sdk/rust_engine_step.py` — JSON-shaped
-  FFI for the FPM input and a Python ctypes wrapper. Stable across
-  Phase 3.
+  FFI for the FPM input and a Python ctypes wrapper. The Phase 3
+  hot-path entry-point now drives `EngineStepEstimator` directly;
+  the legacy aggregate path was removed in the C7 rewire and the
+  ~500-line dead-code residue was cleaned out as part of D8.
 
 Known gaps still on the roadmap:
 
@@ -77,19 +113,12 @@ Known gaps still on the roadmap:
   cache designs and an FFI fast-path that drift from the Python
   reference shape; landing them inside the parity PR would mix
   concerns.
-- Qwen3-VL configs are currently unwrapped to their text backbone and
-  classified as Llama/MoE-like. That matches text-only static
-  behavior. Vision encoder ops are not in Phase 3 scope: Qwen3-VL is
-  absent from every support matrix CSV today, and `cli_estimate`
-  errors out on the public path. Multimodal parity waits for the
-  Python path to be validated and the support matrix to be
-  regenerated (Phase 4 territory).
-- Gemma 4 and Nemotron-H config parsing handles the same top-level /
-  text-config and layer-pattern shapes as Python, but their
-  specialized op graphs are not part of the Phase 3 smoke slice.
+- Comprehensive matrix scan (originally Phase 4 vision) is gated on
+  Phase 5 hot-path work to keep wall-clock reasonable. Re-open as
+  Phase 4-bis once Phase 5 lands.
 - The FFI input is ForwardPassMetrics-shaped. For AIC's
   homogeneous-batch workload this is lossless (see Tradeoffs); no
-  schema enrichment is expected for Phase 3 parity. Phase 5 may
+  schema enrichment is expected for Phase 3/4 parity. Phase 5 may
   introduce a packed-primitive fast-path entry-point alongside the
   existing JSON entry-point.
 
@@ -149,14 +178,18 @@ Python callers are deprecated or removed.
 | Models | `models/gemma4_moe.py` | `src/models/gemma4_moe.rs` | Gemma 4 SWA/global attention and dense+MoE FFN graph. Not first latency slice. |
 | Models | `models/nemotron_h.py` | `src/models/nemotron_h.rs` | Nemotron-H graph. |
 | Models | `models/nemotron_nas.py` | `src/models/nemotron_nas.rs` | Nemotron NAS graph. |
-| Models | `models/qwen3vl.py` and `models/vit_ops.py` | `src/models/qwen3vl.rs`, `src/operators/vision.rs` | Vision encoder and multimodal graph. Not in Phase 3 scope: Qwen3-VL has no support matrix entry and `cli_estimate` is currently broken for it. |
+| Models | `models/qwen3vl.py` and `models/vit_ops.py` | `src/models/qwen3vl.rs`, `src/operators/vision.rs` | Vision encoder and multimodal graph. Landed in Phase 4 D7 (covers both `Qwen3Vl` and `Qwen3VlMoe`). |
+| Models | `models/deepseek_wideep.py` | `src/models/deepseek_wideep.rs` | SGLang DeepEP WideEP DeepSeek variant. Selected via `WideEpMode::SglangDeepEp`. |
+| Models | `models/deepseek_wideep_trtllm.py` | `src/models/deepseek_wideep_trtllm.rs` | TRT-LLM WideEP DeepSeek variant with `PDL_FACTOR=0.9`. Selected via `WideEpMode::Trtllm`. |
 | Operations | `operations/base.py` | `src/operators/base.rs` | `Operator` trait, `PerformanceResult`, scaling/source handling. |
 | Operations | `operations/gemm.py` | `src/operators/gemm.rs`, `src/perf_database/gemm.rs` | GEMM op plus GEMM/compute-scale/scale-matrix table logic. |
 | Operations | `operations/attention.py` | `src/operators/attention.rs`, `src/perf_database/attention.rs` | Context/generation attention ops and table queries. |
 | Operations | `operations/mla.py` | `src/operators/mla.rs`, `src/perf_database/mla.rs` | MLA, MLA module, MLA BMM tables. |
 | Operations | `operations/dsa.py` | `src/operators/dsa.rs`, `src/perf_database/dsa.rs` | DSA module tables. |
 | Operations | `operations/dsv4.py` | `src/operators/deepseek_v4.rs`, `src/perf_database/deepseek_v4.rs` | DeepSeek V4 module tables. |
-| Operations | `operations/moe.py` | `src/operators/moe.rs`, `src/perf_database/moe.rs` | MoE compute, dispatch, WideEP, DeepEP. |
+| Operations | `operations/moe.py` (MoE compute + dispatch) | `src/operators/moe.rs`, `src/perf_database/moe.rs` | Standard MoE compute, MoE dispatch (DeepEP normal/low-latency, custom_allreduce). |
+| Operations | `operations/moe.py` (TRT-LLM WideEPMoE compute) | `src/operators/wideep_moe.rs`, `src/perf_database/wideep_moe.rs` | WideEPMoE compute op with 10-level key + `attention_dp_size` scaling. |
+| Operations | `operations/mla.py` (WideEP MLA) | `src/operators/wideep_mla.rs`, `src/perf_database/wideep_mla.rs` | SGLang WideEP MLA context + generation pair (kernel/fmha/kv/heads/s/b nesting). |
 | Operations | `operations/communication.py` | `src/operators/communication.rs`, `src/perf_database/communication.rs` | Custom all-reduce, NCCL, P2P, all-to-all. |
 | Operations | `operations/elementwise.py` | `src/operators/elementwise.rs` | Memory-bandwidth formula ops. |
 | Operations | `operations/embedding.py` | `src/operators/embedding.rs` | Embedding latency/weight accounting. |
@@ -239,18 +272,15 @@ Scope for the Phase 3 implementation slice:
   `rust/aiconfigurator-core/parity_tests/`.
 - [x] Phase 3 modular implementation has landed (C1-C10 + C12): apple-to-apple
   port of Python's op graph for the smoke slice.
-- [x] All 12 smoke parity surfaces (3 cases x 4 modes) pass within 1% drift;
-  xfails have been flipped to hard assertions (C8-C10).
 - [x] Benchmark harness reports reproducible case parameters, Python/Rust setup
   cost, hot/cold step latency, and Rust-vs-Python speedup.
 - [x] Final Phase 3 benchmark snapshot recorded in `parity_tests/benchmarks.md`.
 - [x] Current-iteration open questions have been resolved into decisions.
 - [x] Comprehensive parity scan is documented as Phase 4.
 - [x] Hot-path optimization (≥3x speedup) is documented as Phase 5.
-- [x] Phase 4 expanded the smoke set from 3 cases x 4 modes (12
-  surfaces) to 18 cases x 4 modes (72 surfaces). Each "deferred
-  follow-up" in earlier write-ups turned out to be an apple-to-apple
-  translation, not a structural change:
+- [x] Phase 4 expanded the smoke set to 41 cases x 4 modes (164
+  surfaces). Each "deferred follow-up" in earlier write-ups turned
+  out to be an apple-to-apple translation, not a structural change:
   - D1: `llama.rs` missing `act_gate` + `logits_gemm` ops; force
     `use_qk_norm` for Qwen3 / MiniMax-M2 architectures.
   - D4: `Op::Overlap` for DeepSeek-V3 / R1 shared-expert overlap;
@@ -258,6 +288,19 @@ Scope for the Phase 3 implementation slice:
     default = `CustomAllReduce`.
   - D5: `Op::Fallback` for the SGLang / TRT-LLM MLA fallback chain;
     `MlaBmm` dispatch fix.
+  - D6: per-family builders for `Gpt`, `HybridMoe`, `DeepSeekV4`,
+    `Gemma4Moe`; DSv3 prefix-heavy fix (mix-step Pass-1
+    `combined_prefix` threading); DSv32 sglang DSA linear
+    extrapolation.
+  - D7: multimodal Qwen3VL + Qwen3VlMoe builders with vision
+    encoder ops.
+  - D8: WideEP MLA pair, TRT-LLM WideEPMoE compute op, both
+    DeepSeek WideEP variant builders (SglangDeepEp + Trtllm); ~500
+    dead lines removed from `lib.rs`; `Phase3Estimator` `Arc`-wrapped
+    for `ForwardPassPerfModel: Clone`. `factory.rs` now closes all
+    14 `ModelFamily` variants — no `Err` arm remains.
+- [x] Full 1↔1 Python↔Rust mapping at the model-family + op-primitive
+  level. No deferred ports for landed Phase 3/4 scope.
 
 Next implementation checkpoint: Phase 5 (hot-path optimization), or
 re-open Phase 4 as a comprehensive matrix scan now that all

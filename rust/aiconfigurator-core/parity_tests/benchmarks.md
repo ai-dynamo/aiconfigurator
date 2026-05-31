@@ -378,3 +378,153 @@ identity-based Python dicts). Landing them inside the parity PR would
 mix concerns and risk regressions against the parity invariants the
 xfail-flip just locked in. They are scheduled as a dedicated Phase 5
 (see `docs/migration-execution-plan.md`).
+
+## Post-Phase-4 Snapshot (Full Family Coverage)
+
+Captured 2026-05-29 on commit `5c1341e3` (branch `codex/rust-phase-3`).
+
+- Host: Apple M3 Pro (12 cores), Darwin 25.5.0 / macOS 26.5, arm64.
+- Toolchain: Python 3.12.12, rustc 1.95.0.
+- Workers: `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1` (BLAS pinned to 1 thread/worker).
+- Harness: `benchmark_engine_step.py --warmup 5 --iterations 30` per phase; two runs (one `--cache-mode hot`, one `--cache-mode cold`).
+
+### Smoke parallelism
+
+All cases run at `b200_sxm/vllm/0.19.0`, `isl=1024 osl=2 batch=1`. Parallelism mirrors the entries in `test_engine_step_parity.py::SMOKE_CASES` so the perf-DB tables are known to resolve — the user-requested Qwen3-30B-A3B `tp=8/moe_ep=8` configuration misses perf data for that model's expert count, so this case uses the smoke-suite `tp=4/moe_ep=4` instead; all others use the listed-in-request parallelism.
+
+### Per-case results
+
+#### `minimax-m25` — MoE (MiniMax hybrid)
+
+Model `MiniMaxAI/MiniMax-M2.5`, Phase 3 baseline.
+
+| Phase | Cache | Python p50 (us) | Rust p50 (us) | Speedup (p50) |
+| --- | --- | ---: | ---: | ---: |
+| context | warm | 24.02 | 18.19 | 1.32x |
+| context | cold | 3902.67 | 19.40 | 201.21x |
+| generation | warm | 22.65 | 21.42 | 1.06x |
+| generation | cold | 18618.15 | 20.54 | 906.35x |
+
+#### `kimi-k25` — DeepSeek family (Kimi MLA)
+
+Model `moonshotai/Kimi-K2.5`, Phase 3 baseline.
+
+| Phase | Cache | Python p50 (us) | Rust p50 (us) | Speedup (p50) |
+| --- | --- | ---: | ---: | ---: |
+| context | warm | 25.54 | 21.96 | 1.16x |
+| context | cold | 19943.92 | 20.46 | 974.87x |
+| generation | warm | 31.56 | 20.19 | 1.56x |
+| generation | cold | 18999.25 | 20.38 | 932.48x |
+
+#### `qwen3-32b` — Llama/Qwen3 dense
+
+Model `Qwen/Qwen3-32B`, tp=4.
+
+| Phase | Cache | Python p50 (us) | Rust p50 (us) | Speedup (p50) |
+| --- | --- | ---: | ---: | ---: |
+| context | warm | 26.69 | 19.46 | 1.37x |
+| context | cold | 22781.88 | 21.02 | 1083.79x |
+| generation | warm | 22.67 | 18.88 | 1.20x |
+| generation | cold | 19301.42 | 19.12 | 1009.22x |
+
+#### `qwen3-30b-a3b` — MoE (Qwen3 MoE)
+
+Model `Qwen/Qwen3-30B-A3B`, tp=4, moe_ep=4 (smoke-verified parallelism).
+
+| Phase | Cache | Python p50 (us) | Rust p50 (us) | Speedup (p50) |
+| --- | --- | ---: | ---: | ---: |
+| context | warm | 24.69 | 17.62 | 1.40x |
+| context | cold | 22519.56 | 17.69 | 1273.23x |
+| generation | warm | 23.23 | 18.42 | 1.26x |
+| generation | cold | 20318.83 | 18.42 | 1103.27x |
+
+#### `deepseek-v3` — DeepSeek family (DSv3 MLA)
+
+Model `deepseek-ai/DeepSeek-V3`, default tp=8/moe_ep=8.
+
+| Phase | Cache | Python p50 (us) | Rust p50 (us) | Speedup (p50) |
+| --- | --- | ---: | ---: | ---: |
+| context | warm | 25.60 | 18.54 | 1.38x |
+| context | cold | 19744.69 | 18.94 | 1042.62x |
+| generation | warm | 31.50 | 20.96 | 1.50x |
+| generation | cold | 19599.81 | 20.79 | 942.66x |
+
+#### `deepseek-v32` — DeepSeekV32 (DSA attention)
+
+Model `deepseek-ai/DeepSeek-V3.2`, default tp=8/moe_ep=8.
+
+| Phase | Cache | Python p50 (us) | Rust p50 (us) | Speedup (p50) |
+| --- | --- | ---: | ---: | ---: |
+| context | warm | 20.67 | 36.81 | 0.56x |
+| context | cold | 18361.85 | 37.23 | 493.21x |
+| generation | warm | 29.27 | 50.35 | 0.58x |
+| generation | cold | 19308.00 | 44.35 | 435.31x |
+
+#### `nemotron-nas-49b` — NemotronNas (Puzzle/DeciLM)
+
+Model `nvidia/Llama-3_3-Nemotron-Super-49B-v1`, default tp=8 (per-block config).
+
+| Phase | Cache | Python p50 (us) | Rust p50 (us) | Speedup (p50) |
+| --- | --- | ---: | ---: | ---: |
+| context | warm | 224.67 | 150.56 | 1.49x |
+| context | cold | 24410.40 | 150.73 | 161.95x |
+| generation | warm | 204.58 | 144.12 | 1.42x |
+| generation | cold | 23127.04 | 153.31 | 150.85x |
+
+#### `nemotron-h-56b` — NemotronH (Mamba2 hybrid)
+
+Model `nvidia/Nemotron-H-56B-Base-8K`, default tp=8.
+
+| Phase | Cache | Python p50 (us) | Rust p50 (us) | Speedup (p50) |
+| --- | --- | ---: | ---: | ---: |
+| context | warm | 32.50 | 19.12 | 1.70x |
+| context | cold | 23220.10 | 19.33 | 1201.06x |
+| generation | warm | 34.12 | 18.60 | 1.83x |
+| generation | cold | 20208.79 | 17.67 | 1143.87x |
+
+#### `qwen35-397b-a17b` — Qwen3.5 (GDN + MoE hybrid)
+
+Model `Qwen/Qwen3.5-397B-A17B`, default tp=8/moe_ep=8 (substitute for Qwen3-Next, see notes).
+
+| Phase | Cache | Python p50 (us) | Rust p50 (us) | Speedup (p50) |
+| --- | --- | ---: | ---: | ---: |
+| context | warm | 52.88 | 21.15 | 2.50x |
+| context | cold | 22349.40 | 21.40 | 1044.56x |
+| generation | warm | 56.15 | 20.71 | 2.71x |
+| generation | cold | 20482.19 | 23.62 | 866.97x |
+
+### Summary (p50 speedups, Rust vs Python)
+
+| Family | Model | Warm ctx | Warm gen | Cold ctx | Cold gen |
+| --- | --- | ---: | ---: | ---: | ---: |
+| MoE (MiniMax hybrid) | `MiniMaxAI/MiniMax-M2.5` | 1.32x | 1.06x | 201.2x | 906.3x |
+| DeepSeek family (Kimi MLA) | `moonshotai/Kimi-K2.5` | 1.16x | 1.56x | 974.9x | 932.5x |
+| Llama/Qwen3 dense | `Qwen/Qwen3-32B` | 1.37x | 1.20x | 1083.8x | 1009.2x |
+| MoE (Qwen3 MoE) | `Qwen/Qwen3-30B-A3B` | 1.40x | 1.26x | 1273.2x | 1103.3x |
+| DeepSeek family (DSv3 MLA) | `deepseek-ai/DeepSeek-V3` | 1.38x | 1.50x | 1042.6x | 942.7x |
+| DeepSeekV32 (DSA attention) | `deepseek-ai/DeepSeek-V3.2` | 0.56x | 0.58x | 493.2x | 435.3x |
+| NemotronNas (Puzzle/DeciLM) | `nvidia/Llama-3_3-Nemotron-Super-49B-v1` | 1.49x | 1.42x | 161.9x | 150.8x |
+| NemotronH (Mamba2 hybrid) | `nvidia/Nemotron-H-56B-Base-8K` | 1.70x | 1.83x | 1201.1x | 1143.9x |
+| Qwen3.5 (GDN + MoE hybrid) | `Qwen/Qwen3.5-397B-A17B` | 2.50x | 2.71x | 1044.6x | 867.0x |
+
+### Findings
+
+No family hits the >=3x warm-path target. Highest warm-path observation: Qwen3.5-397B-A17B at 2.50x context / 2.71x generation.
+
+Families falling short of >=3x warm-path on both phases:
+- `minimax-m25` (MoE (MiniMax hybrid)): warm ctx 1.32x, warm gen 1.06x.
+- `kimi-k25` (DeepSeek family (Kimi MLA)): warm ctx 1.16x, warm gen 1.56x.
+- `qwen3-32b` (Llama/Qwen3 dense): warm ctx 1.37x, warm gen 1.20x.
+- `qwen3-30b-a3b` (MoE (Qwen3 MoE)): warm ctx 1.40x, warm gen 1.26x.
+- `deepseek-v3` (DeepSeek family (DSv3 MLA)): warm ctx 1.38x, warm gen 1.50x.
+- `deepseek-v32` (DeepSeekV32 (DSA attention)): warm ctx 0.56x, warm gen 0.58x.
+- `nemotron-nas-49b` (NemotronNas (Puzzle/DeciLM)): warm ctx 1.49x, warm gen 1.42x.
+- `nemotron-h-56b` (NemotronH (Mamba2 hybrid)): warm ctx 1.70x, warm gen 1.83x.
+- `qwen35-397b-a17b` (Qwen3.5 (GDN + MoE hybrid)): warm ctx 2.50x, warm gen 2.71x.
+
+Cold-path numbers (~150x to ~1250x) reflect Python re-loading perf-DB tables from disk on every iteration after `_reset_python_runtime_caches`, while the Rust estimator amortises table loading inside its FFI-side cache. Cold-path measures perf-DB load amortisation, not engine-step compute.
+
+Notes:
+- The user request listed Qwen3-Next-80B-A3B-Instruct for the Qwen3.5 family. That HuggingFace ID is not in the b200_sxm support matrix; we substituted `Qwen/Qwen3.5-397B-A17B` (the Qwen3.5 MoE hybrid representative used by the smoke suite).
+- DeepSeek-V3.2 is the only family where Rust is currently slower than Python on the warm path (0.56x ctx, 0.58x gen) — likely a DSA-attention pipeline regression that is not yet covered by the Phase 3/4 hot-path optimisations.
+- Data-gap / multimodal families (Gpt/oss-20b, HybridMoe/Llama-4-Scout, DeepSeekV4/Flash, Gemma4Moe, Qwen3VL) were skipped because their perf-DB tables miss the smoke shape — they would error-symmetrically in both engines, producing no benchable signal.

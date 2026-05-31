@@ -291,14 +291,16 @@ below). Phase 3 ships the correctness foundation and a documented
 
 ### Phase 4: Larger Smoke Set
 
-Status: complete (D1 + D2 landed). The original Phase 4 framing was a
+Status: complete (D1-D8 landed). The original Phase 4 framing was a
 full comprehensive scan across every entry in the support matrix; once
 the inventory step ran, it was clear most of those rows would just be
 "unsupported family" skips against the current Rust implementation (3
 of 17 supported architectures map to Rust builders today). The goal
 was reshaped to "expand the smoke set with more representative cases"
 — still increasing real coverage, but without burning the comprehensive
-matrix on cases the Rust crate doesn't model yet.
+matrix on cases the Rust crate doesn't model yet. By the end of
+Phase 4 the Rust crate has a 1↔1 mapping to every supported Python
+model family and op-graph primitive.
 
 Phase 4 deliverables (landed):
 
@@ -314,8 +316,9 @@ Phase 4 deliverables (landed):
     `generation_logits_gemm`. Added all three plus `low_precision_input`
     on ffn2.
 - **D2: smoke set expansion.** The smoke suite grew from 3 cases x 4
-  modes = 12 surfaces to 11 cases x 4 modes = 44 surfaces, all
-  asserted (no xfails) within the 1% drift tolerance:
+  modes = 12 surfaces to 41 cases x 4 modes = 164 surfaces, all
+  asserted (no xfails) within the 1% drift tolerance (cumulative
+  total through D6/D7/D8):
   - 3 original (MiniMax-M2.5, Kimi-K2.5, sampled-prefix).
   - 3 new MoE-family models (MiniMax-M2.7, Qwen3-30B-A3B, Qwen3-235B-A22B).
   - 3 new dense Llama-family models (Qwen3-32B, Llama-3.1-70B,
@@ -375,17 +378,77 @@ apple translation that just hadn't been ported yet:
    MLA module table; drift grew with system speed and ISL on Kimi
    (~-1.06% on h200/ISL=1024, -1.58% at ISL=2048). Fixed.
 
-Still deferred:
+Phase 4 D6 / D7 / D8 closed the remaining family-coverage and
+op-primitive gaps so the Rust crate now matches Python's full model
+family list and op-graph composition primitives:
 
-5. **Comprehensive matrix scan.** Now that families on
-   vLLM/SGLang/TRT-LLM share a single Rust op graph, the original
-   Phase 4 vision (every matrix entry, parallelized, per-row drift
-   CSV) is more attractive. Still gated on Phase 5 hot-path work so a
-   full scan finishes in a reasonable time, but the "would mostly
-   produce unsupported noise" objection no longer holds for the
-   landed families. Data-gap rows (DeepSeek-V3 SGLang missing
-   `context_mla_perf`, etc.) need to be flagged by the harness as
-   "Python also errors", not as Rust drift.
+5. **Per-family builders for the remaining ModelFamily variants** (D6).
+   `factory.rs` previously errored out for `Gpt`, `HybridMoe`,
+   `DeepSeekV4`, and `Gemma4Moe`. Each got a dedicated builder:
+   - `models/gpt.rs` — dense GQA with non-gated FFN (ffn1 + act +
+     ffn2). Used by `openai/gpt-oss-20b`.
+   - `models/hybrid_moe.rs` — Llama-4 / MiMo-V2-Flash 4-bucket layout
+     (Scout's interleaved-attention pattern).
+   - `models/deepseek_v4.rs` — DSv4 with compress ratios + mHC
+     pre/post projection chain.
+   - `models/gemma4_moe.rs` — SWA+global attention with shared-MLP +
+     MoE FFN.
+   All four are exercised by the smoke harness via the error-symmetry
+   contract (Python and Rust both raise on missing perf-DB tables for
+   today's smoke shapes, which counts as parity pass).
+
+6. **Multimodal Qwen3VL pair** (D7).
+   Ported `models/qwen3vl.py` and the vision-encoder op graph from
+   `models/vit_ops.py` to Rust as `models/qwen3vl.rs` +
+   `operators/vision.rs`. Covers both `Qwen3Vl` (dense) and
+   `Qwen3VlMoe` families with the 10-op transformer-block sequence
+   plus projector chain. Phase 4 (not 3) territory because Python's
+   `cli_estimate` only became reliable for Qwen3-VL after the
+   upstream support matrix regenerated.
+
+7. **WideEP MLA and WideEP MoE compute ops** (D8).
+   Closed the last op-primitive gap:
+   - `WideEpContextMlaOp` / `WideEpGenerationMlaOp`
+     (`operators/wideep_mla.rs` + `perf_database/wideep_mla.rs`):
+     separate context (kernel/fmha/kv/heads/s/b) and generation
+     (kernel/kv/heads/b/s) table nestings; context op applies the
+     same `prefix_correction` as the standard MLA path.
+   - `WideEpMoeOp` (`operators/wideep_moe.rs` +
+     `perf_database/wideep_moe.rs`): 10-level key with
+     distribution-string fallback and `attention_dp_size` scaling.
+   These primitives unlock the two WideEP DeepSeek variant builders:
+   - `models/deepseek_wideep.rs` — SGLang DeepEP path (selected
+     when `WideEpMode::SglangDeepEp` and `moe_backend="deepep_moe"`).
+   - `models/deepseek_wideep_trtllm.rs` — TRT-LLM WideEP path with
+     `PDL_FACTOR=0.9` for the CUDA-graph generation-latency
+     adjustment.
+   Routing lives in `factory.rs` under
+   `ModelFamily::DeepSeek => match config.wideep_mode { ... }`.
+
+8. **DSv3 prefix-heavy parity fix** (D6).
+   `get_mix_step_latency_ms` Pass-1 was passing `prefix=0` to ops,
+   which bypassed the MLA module's `prefix_correction` for the
+   `context_mla_block` operator wrapped under `FallbackOp`. The
+   `is_context_attention()` filter doesn't catch fallback-wrapped MLA
+   ops, so combined-prefix tokens weren't being credited. Fixed by
+   threading `combined_prefix` through Pass-1 in `session.rs`.
+   Closed the last -1.21% drift smoke case.
+
+9. **DSv32 sglang DSA extrapolation** (D6).
+   Sparse DSA perf tables for low `num_heads` caused
+   axis-out-of-range errors. Added
+   `interp_2d_1d_grid_extrapolate_inner` to `interpolation.rs` for
+   linear extrapolation on y/z axes and routed both
+   `query_context` and `query_generation` in
+   `perf_database/dsa.rs` through it. Closed the 4 DSv32-sglang
+   failures.
+
+10. **lib.rs cleanup** (D8).
+    Removed ~500 lines of legacy aggregate paths and duplicated
+    re-exports; net file delta -2425 lines. `Phase3Estimator` now
+    `Arc`-wrapped (required by `ForwardPassPerfModel: Clone`) with a
+    manual `Debug` impl. All 14 `ModelFamily` variants are closed in
+    `factory.rs` — no `Err` arm remains.
 
 Re-running the smoke set:
 
@@ -394,9 +457,8 @@ AICONFIGURATOR_RUST_CORE_AUTOBUILD=1 uv run pytest \
   rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py -p no:xdist
 ```
 
-A clean run finishes in ~45s and asserts all 108 surfaces (27 cases
-x 4 modes). Coverage spans 13 of 14 supported model families (the
-multimodal Qwen3VL pair and Gemma4Moe are intentionally out of scope):
+A clean run asserts all 164 surfaces (41 cases x 4 modes). Coverage
+spans every supported model family:
 
 - Llama / Qwen3 dense: Qwen3-32B, Llama-3.1-70B, Llama-3.1-8B.
 - MoE family: MiniMax-M2.5, MiniMax-M2.7, Qwen3-30B-A3B,
@@ -407,18 +469,32 @@ multimodal Qwen3VL pair and Gemma4Moe are intentionally out of scope):
 - NemotronH: Nemotron-H-56B-Base-8K (hybrid Mamba2 + attention + MLP).
 - Qwen35: Qwen3.5-27B (hybrid GDN + full-attention),
   Qwen3.5-397B-A17B (hybrid GDN + MoE).
+- Shape variations (D2-bis): decode-heavy, prefill-heavy,
+  prefix-heavy, large-batch.
 - Error-symmetry families (both Python and Rust error on perf-DB
   miss): meta-llama/Llama-4-Scout (HybridMoe), openai/gpt-oss-20b
   (Gpt), deepseek-ai/DeepSeek-V4-Flash (DeepSeekV4).
 - Cross-system: MiniMax-M2.5 on b200_sxm / h200_sxm / h100_sxm;
   Kimi-K2.5 on b200_sxm / h200_sxm / h100_sxm.
 - Cross-backend: MiniMax-M2.5 on b200_sxm/sglang/0.5.10;
-  Kimi-K2.5 on b200_sxm + h200_sxm on sglang/0.5.10.
+  Kimi-K2.5 on b200_sxm + h200_sxm on sglang/0.5.10;
+  NemotronNas / Qwen3.5 / NemotronH on sglang/0.5.10 +
+  trtllm/1.3.0rc10.
 
 The error-symmetry contract introduced in D7-A treats "both engines
 raise" as parity pass, so families whose perf-DB tables are missing
 for the smoke shape still get smoke coverage — the test asserts that
 Rust mirrors Python's behavior, not just its successful outputs.
+
+Still deferred:
+
+- **Comprehensive matrix scan.** Now that families on
+  vLLM/SGLang/TRT-LLM share a single Rust op graph and every
+  Python family maps 1↔1 to a Rust builder, the original Phase 4
+  vision (every matrix entry, parallelized, per-row drift CSV) is
+  attractive but still gated on Phase 5 hot-path work so a full scan
+  finishes in a reasonable time. Re-open as Phase 4-bis once
+  Phase 5 lands.
 
 ### Phase 5: Hot-Path Optimization
 
@@ -466,8 +542,10 @@ Phase 3's parity assertions remain green.
 - Phase 2 provides performance guardrails.
 - Phase 3 uses the migration map, parity tests, and benchmark harness to implement the Rust migration safely.
 - Phase 4 expands the smoke set with realistic per-family / cross-system
-  coverage; the full matrix scan is deferred until the remaining family
-  gaps close.
+  coverage and closes every Python↔Rust model-family + op-primitive gap
+  identified by the inventory step. The remaining work — a full
+  comprehensive matrix scan — is gated on Phase 5 hot-path performance
+  and re-opens as Phase 4-bis afterwards.
 - Phase 5 optimizes the hot path after the parity foundation lands.
 
 Do not treat the phases as isolated checklist items. If work in one phase reveals missing requirements in another, update the plan and surface the change.
