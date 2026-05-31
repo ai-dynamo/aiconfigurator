@@ -115,6 +115,8 @@ disagg_full:
   # Speculative decoding (shared)
   nextn: 1
   nextn_accept_rates: [0.85, 0, 0, 0, 0]
+
+  # MoE communication backend (shared; e.g. "deepep_moe" for SGLang WideEP).
   moe_backend: null
 
   # --- Prefill worker spec ---
