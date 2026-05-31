@@ -638,6 +638,7 @@ def _find_best_disagg_under_constraint(
     require_same_tp: bool,
     prefill_degradation: float,
     decode_degradation: float,
+    autoscale_ttft_correction_factor: float = _AUTOSCALE_TTFT_CORRECTION_FACTOR,
 ) -> pd.DataFrame | None:
     """For one (ttft, tpot) pair, filter + rate-match + pick best per decode parallel.
 
@@ -674,7 +675,7 @@ def _find_best_disagg_under_constraint(
                     prefill_opt, decode_opt = p_num, d_num
         return prefill_opt, decode_opt
 
-    p_corrected = prefill_summary_df.assign(ttft=prefill_summary_df["ttft"] * _AUTOSCALE_TTFT_CORRECTION_FACTOR)
+    p_corrected = prefill_summary_df.assign(ttft=prefill_summary_df["ttft"] * autoscale_ttft_correction_factor)
     p_candidates = p_corrected[p_corrected["ttft"] < ttft_target]
     if len(p_candidates) == 0:
         logger.debug("sweep_disagg: no prefill candidates meet ttft<%sms", ttft_target)
@@ -772,6 +773,7 @@ def sweep_disagg(
     target_tpot: float | None = None,
     rate_matching_prefill_degradation: float | None = None,
     rate_matching_decode_degradation: float | None = None,
+    autoscale_ttft_correction_factor: float | None = None,
     scheduler: Any = None,
 ) -> pd.DataFrame:
     """Sweep prefill_parallel x decode_parallel x batches x workers with rate matching.
@@ -805,6 +807,11 @@ def sweep_disagg(
         rate_matching_decode_degradation
         if rate_matching_decode_degradation is not None
         else _RATE_MATCH_DECODE_DEGRADATION
+    )
+    ttft_corr = (
+        autoscale_ttft_correction_factor
+        if autoscale_ttft_correction_factor is not None
+        else _AUTOSCALE_TTFT_CORRECTION_FACTOR
     )
     p_num_workers = prefill_num_worker_list or []
     d_num_workers = decode_num_worker_list or []
@@ -868,6 +875,7 @@ def sweep_disagg(
             target_ttft=target_ttft_v,
             target_tpot=target_tpot_v,
             top_n=5,
+            ttft_correction_factor=ttft_corr,
         )
         df = result["best_config_df"]
         if df is None or df.empty:
@@ -907,6 +915,7 @@ def sweep_disagg(
             require_same_tp=require_same_tp,
             prefill_degradation=p_deg,
             decode_degradation=d_deg,
+            autoscale_ttft_correction_factor=ttft_corr,
         )
         if partial is not None:
             disagg_df = pd.concat([disagg_df, partial], axis=0, ignore_index=True)

@@ -385,6 +385,16 @@ class Task:
     decode_max_batch_size: int = 512
     prefill_latency_correction: float = 1.1
     decode_latency_correction: float = 1.08
+    # Rate-matching degradation factors: under (P_workers, D_workers) pairing,
+    # neither phase delivers its standalone throughput perfectly; these model
+    # the practical efficiency loss.  Calibrated against silicon (V1 default).
+    rate_match_prefill_degradation: float = 0.9
+    rate_match_decode_degradation: float = 0.92
+    # TTFT pre-correction applied to prefill candidates before the SLA filter,
+    # accounting for queueing-under-concurrency in the deployed system.
+    # Used by both ``_find_best_disagg_under_constraint`` and
+    # ``picking.pick_autoscale``; default 1.8 locked by parity test.
+    autoscale_ttft_correction_factor: float = 1.8
 
     # ====== 8.5 Scheduler strategy ======
     # Optional Scheduler that decides how each single config point is
@@ -1004,6 +1014,9 @@ class Task:
             "prefill_num_worker_list": prefill_worker_list,
             "decode_num_worker_list": decode_worker_list,
             "num_gpu_list": num_gpu_list,
+            "rate_matching_prefill_degradation": self.rate_match_prefill_degradation,
+            "rate_matching_decode_degradation": self.rate_match_decode_degradation,
+            "autoscale_ttft_correction_factor": self.autoscale_ttft_correction_factor,
         }
 
     # =====================================================================

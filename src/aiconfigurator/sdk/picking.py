@@ -393,6 +393,8 @@ def pick_autoscale(
     target_ttft: float,
     target_tpot: float,
     top_n: int = 5,
+    *,
+    ttft_correction_factor: float | None = None,
 ) -> dict[str, Any]:
     """Pick prefill and decode engines independently for autoscaling.
 
@@ -405,6 +407,9 @@ def pick_autoscale(
         target_ttft: TTFT SLA target in ms.
         target_tpot: TPOT SLA target in ms.
         top_n: Number of top combinations to return.
+        ttft_correction_factor: TTFT pre-correction multiplier for queueing
+            under concurrency.  Defaults to
+            :data:`_AUTOSCALE_TTFT_CORRECTION_FACTOR` when ``None``.
 
     Returns:
         Dict with keys:
@@ -421,7 +426,9 @@ def pick_autoscale(
     if prefill_df is None or prefill_df.empty or decode_df is None or decode_df.empty:
         return empty_result
 
-    correction_factor = _AUTOSCALE_TTFT_CORRECTION_FACTOR
+    correction_factor = (
+        ttft_correction_factor if ttft_correction_factor is not None else _AUTOSCALE_TTFT_CORRECTION_FACTOR
+    )
 
     # -- Filter prefill candidates by TTFT --
     prefill_candidates = prefill_df.copy()

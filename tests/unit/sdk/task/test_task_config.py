@@ -333,6 +333,32 @@ def test_sweep_disagg_kwargs_shape():
     assert kwargs["decode_max_num_tokens"] == 512
     assert len(kwargs["prefill_num_worker_list"]) == 32
     assert len(kwargs["decode_num_worker_list"]) == 32
+    # Rate-match degradation and autoscale TTFT correction defaults flow through.
+    assert kwargs["rate_matching_prefill_degradation"] == 0.9
+    assert kwargs["rate_matching_decode_degradation"] == 0.92
+    assert kwargs["autoscale_ttft_correction_factor"] == 1.8
+
+
+def test_disagg_calibration_overrides_flow_into_sweep_kwargs():
+    """Overriding the new Task fields propagates to sweep_disagg_kwargs."""
+    t = Task(
+        serving_mode="disagg",
+        prefill_model_path="deepseek-ai/DeepSeek-V3",
+        prefill_system_name="h200_sxm",
+        decode_model_path="deepseek-ai/DeepSeek-V3",
+        decode_system_name="h200_sxm",
+        prefill_latency_correction=1.3,
+        decode_latency_correction=1.15,
+        rate_match_prefill_degradation=0.85,
+        rate_match_decode_degradation=0.88,
+        autoscale_ttft_correction_factor=2.0,
+    )
+    kwargs = t.sweep_disagg_kwargs(prefill_database=None, decode_database=None)
+    assert kwargs["prefill_latency_correction"] == 1.3
+    assert kwargs["decode_latency_correction"] == 1.15
+    assert kwargs["rate_matching_prefill_degradation"] == 0.85
+    assert kwargs["rate_matching_decode_degradation"] == 0.88
+    assert kwargs["autoscale_ttft_correction_factor"] == 2.0
 
 
 def test_sweep_kwargs_mode_mismatch_raises():
