@@ -435,10 +435,20 @@ def estimate_mixed_step_latency_with_rust(
             }
         )
     if gen_tokens > 0:
+        # Mirror Python `base_backend._run_generation_phase:185` which scales
+        # the decode batch by `(_nextn + 1)` for every gen-phase call. The
+        # disagg path already pre-multiplies in
+        # `estimate_static_latency_breakdown_with_rust:374`; the agg-mode
+        # mix-step bridge must apply the same multiplier or Rust queries
+        # the perf-DB at half (or smaller) the batch Python sees, making
+        # Rust faster than Python by up to ~21% on DeepSeek-family +
+        # Qwen3.5 models in agg mode.
+        decode_multiplier = int(getattr(model, "_nextn", 0) or 0) + 1
+        effective_gen_tokens = gen_tokens * decode_multiplier
         scheduled_requests.update(
             {
-                "num_decode_requests": gen_tokens,
-                "sum_decode_kv_tokens": gen_tokens * (isl + osl // 2),
+                "num_decode_requests": effective_gen_tokens,
+                "sum_decode_kv_tokens": effective_gen_tokens * (isl + osl // 2),
             }
         )
 
@@ -462,9 +472,17 @@ def estimate_decode_step_latency_with_rust(
     gen_tokens = max(int(gen_tokens), 0)
     if gen_tokens == 0:
         return 0.0
+    # Mirror Python `base_backend._run_generation_phase:185` which scales
+    # the decode batch by `(_nextn + 1)` (MTP speculative decoding doubles
+    # the per-step engine work when nextn>=1). Without this multiplier the
+    # agg-mode genonly step queries the Rust perf-DB at the un-doubled
+    # batch and runs ~5-12% faster than Python. The disagg bridge at
+    # `estimate_static_latency_breakdown_with_rust:374` already does this.
+    decode_multiplier = int(getattr(model, "_nextn", 0) or 0) + 1
+    effective_batch = gen_tokens * decode_multiplier
     context_length = max(int(isl), 1) + max(int(osl), 1) // 2
     return estimator.forward_pass_time_ms(
-        _metrics_by_attention_dp_rank(model, _decode_metrics(batch_size=gen_tokens, context_length=context_length))
+        _metrics_by_attention_dp_rank(model, _decode_metrics(batch_size=effective_batch, context_length=context_length))
     )
 
 
