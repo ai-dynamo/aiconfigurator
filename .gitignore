@@ -21,3 +21,17 @@ env/
 *.pyc
 *.pyo
 *.pyd
+
+# Rust build artefacts and workspace lockfile.
+target/
+Cargo.lock
+
+# Local scan working artefacts (parity scan SQLite, logs, probe traces).
+# Findings are documented in
+# rust/aiconfigurator-core/docs/phase1/support-matrix-scan.md.
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.scan-probe.log
+scan-pareto*.log
+scan-pareto.log.*

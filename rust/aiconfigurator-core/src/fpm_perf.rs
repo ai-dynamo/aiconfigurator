@@ -1197,7 +1197,7 @@ fn can_fallback_to_regression(err: &AicError) -> bool {
             | AicError::ModelConfig(_)
             | AicError::PerfDatabase(_)
             | AicError::Io { .. }
-            | AicError::Csv { .. }
+            | AicError::Parquet { .. }
     )
 }
 

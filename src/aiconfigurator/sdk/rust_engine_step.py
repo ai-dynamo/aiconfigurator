@@ -5,15 +5,12 @@ from __future__ import annotations
 
 import copy
 import ctypes
-import hashlib
 import json
 import math
 import os
 import platform
 import shutil
 import subprocess
-import tempfile
-import uuid
 from functools import cache
 from importlib import resources as pkg_resources
 from pathlib import Path
@@ -24,17 +21,6 @@ from aiconfigurator.sdk.config import RuntimeConfig
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
 RUST_CORE_LIB_ENV = "AICONFIGURATOR_RUST_CORE_LIB"
 RUST_CORE_AUTOBUILD_ENV = "AICONFIGURATOR_RUST_CORE_AUTOBUILD"
-RUST_SYSTEMS_SOURCE_ENV = "AICONFIGURATOR_RUST_SYSTEMS_SOURCE_PATH"
-
-_RUST_VERSION_PERF_FILES = (
-    "gemm_perf.txt",
-    "context_attention_perf.txt",
-    "generation_attention_perf.txt",
-    "custom_allreduce_perf.txt",
-    "moe_perf.txt",
-    "context_mla_perf.txt",
-    "generation_mla_perf.txt",
-)
 
 
 class RustCoreUnavailableError(RuntimeError):
@@ -49,7 +35,7 @@ class RustEngineStepEstimator:
     """ctypes wrapper over the Rust `aiconfigurator-core` FPM estimator."""
 
     def __init__(self, config: dict[str, Any], *, autobuild: bool | None = None) -> None:
-        _configure_default_data_roots(config)
+        _configure_default_data_roots()
         self._lib = _load_library(bool(autobuild) or _truthy(os.environ.get(RUST_CORE_AUTOBUILD_ENV)))
         self._handle = ctypes.c_void_p()
         config_json = _json_bytes(config)
@@ -67,8 +53,12 @@ class RustEngineStepEstimator:
         _raise_for_error(self._lib, err)
         return float(out_ms.value)
 
-    # TODO(remove-after-rust-migration): parity check/benchmark-only cache reset.
     def clear_runtime_caches(self) -> None:
+        """Reset the Rust estimator's runtime caches.
+
+        Used by parity and benchmarking harnesses that need a cold cache
+        between iterations; production callers normally don't touch this.
+        """
         if not self._lib.__dict__.get("_aic_engine_step_estimator_clear_runtime_caches_available", False):
             raise RustCoreUnavailableError(
                 "Rust core shared library does not expose runtime cache reset. "
@@ -427,19 +417,38 @@ def estimate_mixed_step_latency_with_rust(
 
     scheduled_requests: dict[str, Any] = {}
     if ctx_tokens > 0:
+        # `ctx_tokens` is the chunk size in `isl`-equivalent units. The FPM
+        # convention (see `_prefill_metrics`) is that `sum_prefill_tokens`
+        # is the count of NEW prefill tokens to process, with prior cache
+        # reported separately in `sum_prefill_kv_tokens`. Subtract the
+        # cached portion here so the Rust mix-step interpretation lines up
+        # with Python's pass-1 formula
+        # (`effective_isl = num_tokens_combined - prefix`).
         num_prefill_requests = max(math.ceil(ctx_tokens / isl), 1)
+        cached_total = prefix * num_prefill_requests
+        new_prefill_tokens = max(ctx_tokens - cached_total, 1) if cached_total else ctx_tokens
         scheduled_requests.update(
             {
                 "num_prefill_requests": num_prefill_requests,
-                "sum_prefill_tokens": ctx_tokens,
-                "sum_prefill_kv_tokens": prefix * num_prefill_requests,
+                "sum_prefill_tokens": new_prefill_tokens,
+                "sum_prefill_kv_tokens": cached_total,
             }
         )
     if gen_tokens > 0:
+        # Mirror Python `base_backend._run_generation_phase:185` which scales
+        # the decode batch by `(_nextn + 1)` for every gen-phase call. The
+        # disagg path already pre-multiplies in
+        # `estimate_static_latency_breakdown_with_rust:374`; the agg-mode
+        # mix-step bridge must apply the same multiplier or Rust queries
+        # the perf-DB at half (or smaller) the batch Python sees, making
+        # Rust faster than Python by up to ~21% on DeepSeek-family +
+        # Qwen3.5 models in agg mode.
+        decode_multiplier = int(getattr(model, "_nextn", 0) or 0) + 1
+        effective_gen_tokens = gen_tokens * decode_multiplier
         scheduled_requests.update(
             {
-                "num_decode_requests": gen_tokens,
-                "sum_decode_kv_tokens": gen_tokens * (isl + osl // 2),
+                "num_decode_requests": effective_gen_tokens,
+                "sum_decode_kv_tokens": effective_gen_tokens * (isl + osl // 2),
             }
         )
 
@@ -463,9 +472,17 @@ def estimate_decode_step_latency_with_rust(
     gen_tokens = max(int(gen_tokens), 0)
     if gen_tokens == 0:
         return 0.0
+    # Mirror Python `base_backend._run_generation_phase:185` which scales
+    # the decode batch by `(_nextn + 1)` (MTP speculative decoding doubles
+    # the per-step engine work when nextn>=1). Without this multiplier the
+    # agg-mode genonly step queries the Rust perf-DB at the un-doubled
+    # batch and runs ~5-12% faster than Python. The disagg bridge at
+    # `estimate_static_latency_breakdown_with_rust:374` already does this.
+    decode_multiplier = int(getattr(model, "_nextn", 0) or 0) + 1
+    effective_batch = gen_tokens * decode_multiplier
     context_length = max(int(isl), 1) + max(int(osl), 1) // 2
     return estimator.forward_pass_time_ms(
-        _metrics_by_attention_dp_rank(model, _decode_metrics(batch_size=gen_tokens, context_length=context_length))
+        _metrics_by_attention_dp_rank(model, _decode_metrics(batch_size=effective_batch, context_length=context_length))
     )
 
 
@@ -489,6 +506,14 @@ def _metrics_by_attention_dp_rank(model: Any, metrics: dict[str, Any]) -> list[d
 
 def _engine_config_json(model: Any, database: Any) -> str:
     model_config = model.config
+    # Forward MTP speculative-decoding params so the Rust DeepSeek-family +
+    # Qwen3.5 model builders can compute the same `_mtp_scale_factor` Python
+    # applies (`sdk/models/base.py:105-110`). Python sets `nextn=1` for
+    # DeepSeek/DSv32/DSv4/Kimi-K2.5/Qwen3.5 by default (`sdk/task.py:448-449`)
+    # and stores it on the model object via `BaseModel._nextn`. Rust treats
+    # `nextn=None` or `nextn=0` as MTP-disabled (scale=1.0).
+    nextn = getattr(model, "_nextn", None)
+    nextn_accept_rates = getattr(model, "_nextn_accept_rates", None)
     config = {
         "schema_version": 1,
         "model_name": getattr(model, "model_path", getattr(model, "model_name", "")),
@@ -506,6 +531,8 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "activation_dtype": _quant_to_dtype(getattr(model_config, "fmha_quant_mode", None)),
         "kv_cache_dtype": _quant_to_dtype(getattr(model_config, "kvcache_quant_mode", None)),
         "kv_block_size": None,
+        "nextn": int(nextn) if nextn is not None else None,
+        "nextn_accept_rates": ([float(r) for r in nextn_accept_rates] if nextn_accept_rates is not None else None),
         "extra": {},
     }
     return json.dumps(config, sort_keys=True, separators=(",", ":"))
@@ -797,157 +824,15 @@ def _moe_quant_to_dtype(value: Any) -> str | None:
     return _quant_to_dtype(value)
 
 
-def _configure_default_data_roots(config: dict[str, Any] | None = None) -> None:
-    systems_root = _configured_systems_source_root()
-    if systems_root and systems_root.exists():
-        rust_systems_root = _ensure_rust_csv_systems_root(systems_root, config)
-        os.environ["AICONFIGURATOR_SYSTEMS_PATH"] = str(rust_systems_root)
-        if rust_systems_root != systems_root:
-            os.environ[RUST_SYSTEMS_SOURCE_ENV] = str(systems_root)
+def _configure_default_data_roots() -> None:
+    if "AICONFIGURATOR_SYSTEMS_PATH" not in os.environ:
+        systems_root = _python_sdk_systems_root() or Path(str(pkg_resources.files("aiconfigurator") / "systems"))
+        if systems_root.exists():
+            os.environ["AICONFIGURATOR_SYSTEMS_PATH"] = str(systems_root)
     if "AICONFIGURATOR_MODEL_CONFIGS_PATH" not in os.environ:
         model_configs_root = Path(str(pkg_resources.files("aiconfigurator") / "model_configs"))
         if model_configs_root.exists():
             os.environ["AICONFIGURATOR_MODEL_CONFIGS_PATH"] = str(model_configs_root)
-
-
-def _configured_systems_source_root() -> Path | None:
-    explicit = os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
-    if explicit:
-        explicit_path = Path(explicit)
-        source_override = os.environ.get(RUST_SYSTEMS_SOURCE_ENV)
-        if source_override and _is_rust_overlay_root(explicit_path):
-            return Path(source_override)
-        return explicit_path
-    source_override = os.environ.get(RUST_SYSTEMS_SOURCE_ENV)
-    if source_override:
-        return Path(source_override)
-    return _python_sdk_systems_root() or Path(str(pkg_resources.files("aiconfigurator") / "systems"))
-
-
-def _ensure_rust_csv_systems_root(systems_root: Path, config: dict[str, Any] | None) -> Path:
-    required_paths = _rust_perf_paths_for_config(systems_root, config)
-    if not required_paths:
-        return systems_root
-
-    needs_overlay = any(
-        not (systems_root / path).is_file() and (systems_root / path).with_suffix(".parquet").is_file()
-        for path in required_paths
-    )
-    if not needs_overlay:
-        return systems_root
-
-    source_key = hashlib.sha256(str(systems_root.resolve()).encode("utf-8")).hexdigest()[:16]
-    overlay_root = _rust_overlay_base() / source_key
-    _copy_system_file_for_rust_overlay(systems_root, overlay_root, config)
-    for path in required_paths:
-        _materialize_rust_perf_csv(systems_root, overlay_root, path)
-    return overlay_root
-
-
-def _rust_overlay_base() -> Path:
-    return Path(tempfile.gettempdir()) / "aiconfigurator-rust-perf-csv"
-
-
-def _is_rust_overlay_root(path: Path) -> bool:
-    try:
-        path.resolve().relative_to(_rust_overlay_base().resolve())
-        return True
-    except ValueError:
-        return False
-
-
-def _rust_perf_paths_for_config(systems_root: Path, config: dict[str, Any] | None) -> list[Path]:
-    if not config:
-        return []
-    system_name = str(config.get("system_name") or "").strip()
-    backend = str(config.get("backend") or "").strip()
-    if not system_name or not backend:
-        return []
-
-    system_file = systems_root / f"{system_name}.yaml"
-    if not system_file.is_file():
-        return []
-
-    try:
-        import yaml
-
-        system_spec = yaml.safe_load(system_file.read_text()) or {}
-    except Exception:
-        return []
-
-    data_dir = system_spec.get("data_dir")
-    if not data_dir:
-        return []
-
-    backend_root = systems_root / data_dir / backend
-    backend_version = config.get("backend_version")
-    if backend_version:
-        version_dirs = [backend_root / str(backend_version)]
-    elif backend_root.is_dir():
-        version_dirs = sorted(path for path in backend_root.iterdir() if path.is_dir())
-    else:
-        version_dirs = []
-
-    paths: list[Path] = []
-    for version_dir in version_dirs:
-        version_rel = version_dir.relative_to(systems_root)
-        paths.extend(version_rel / name for name in _RUST_VERSION_PERF_FILES)
-
-    nccl_version = (system_spec.get("misc") or {}).get("nccl_version")
-    if nccl_version:
-        paths.append(Path(data_dir) / "nccl" / str(nccl_version) / "nccl_perf.txt")
-    return paths
-
-
-def _copy_system_file_for_rust_overlay(systems_root: Path, overlay_root: Path, config: dict[str, Any] | None) -> None:
-    if not config:
-        return
-    system_name = str(config.get("system_name") or "").strip()
-    if not system_name:
-        return
-    source = systems_root / f"{system_name}.yaml"
-    target = overlay_root / f"{system_name}.yaml"
-    if source.is_file():
-        _copy_if_stale(source, target)
-
-
-def _materialize_rust_perf_csv(systems_root: Path, overlay_root: Path, relative_path: Path) -> None:
-    source_txt = systems_root / relative_path
-    source_parquet = source_txt.with_suffix(".parquet")
-    target_txt = overlay_root / relative_path
-    if source_txt.is_file():
-        _copy_if_stale(source_txt, target_txt)
-        return
-    if not source_parquet.is_file():
-        target_txt.parent.mkdir(parents=True, exist_ok=True)
-        return
-    if target_txt.is_file() and target_txt.stat().st_mtime_ns >= source_parquet.stat().st_mtime_ns:
-        return
-
-    try:
-        import pyarrow.csv as pc
-        import pyarrow.parquet as pq
-    except ImportError as exc:
-        raise RustCoreUnavailableError(
-            "Rust engine-step estimator currently consumes CSV perf files. "
-            "Materializing parquet perf data for Rust requires pyarrow."
-        ) from exc
-
-    target_txt.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = target_txt.with_name(f".{target_txt.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    try:
-        pc.write_csv(pq.read_table(source_parquet), tmp_path)
-        os.replace(tmp_path, target_txt)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
-
-
-def _copy_if_stale(source: Path, target: Path) -> None:
-    if target.is_file() and target.stat().st_mtime_ns >= source.stat().st_mtime_ns:
-        return
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target)
 
 
 def _python_sdk_systems_root() -> Path | None:

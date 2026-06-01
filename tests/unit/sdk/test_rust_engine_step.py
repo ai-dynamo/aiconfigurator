@@ -181,9 +181,15 @@ def test_mixed_and_decode_helpers_map_to_fpm(monkeypatch) -> None:
 
     assert mixed_ms == 8.5
     assert decode_ms == 9.5
+    # `sum_prefill_tokens` is the NEW prefill-token count (matches the
+    # static-path `_prefill_metrics` convention: cached prefix tokens are
+    # carried separately by `sum_prefill_kv_tokens`). For these inputs:
+    #   num_prefill_requests = ceil(384 / 256) = 2
+    #   cached_total = prefix(128) * num_prefill_requests(2) = 256
+    #   new_prefill_tokens = ctx_tokens(384) - cached_total(256) = 128
     assert calls[0][0]["scheduled_requests"] == {
         "num_prefill_requests": 2,
-        "sum_prefill_tokens": 384,
+        "sum_prefill_tokens": 128,
         "sum_prefill_kv_tokens": 256,
         "num_decode_requests": 7,
         "sum_decode_kv_tokens": 2688,
@@ -218,51 +224,15 @@ def test_engine_config_json_preserves_moe_specific_quant_mode() -> None:
     assert config["moe_dtype"] == "w4a16_mxfp4"
 
 
-def test_configure_data_roots_materializes_parquet_perf_for_rust(tmp_path, monkeypatch) -> None:
+def test_configure_data_roots_passes_systems_path_through(tmp_path, monkeypatch) -> None:
+    """Now that Rust reads parquet directly, the overlay is gone: the
+    wrapper just hands its `AICONFIGURATOR_SYSTEMS_PATH` through unchanged
+    to the Rust crate."""
     systems_root = tmp_path / "systems"
-    data_root = systems_root / "data" / "test_sxm" / "vllm" / "1.0.0"
-    data_root.mkdir(parents=True)
-    (systems_root / "test_sxm.yaml").write_text(
-        "data_dir: data/test_sxm\n"
-        "gpu:\n"
-        "  mem_bw: 1\n"
-        "node:\n"
-        "  num_gpus_per_node: 8\n"
-        "  inter_node_bw: 1\n"
-        "  intra_node_bw: 1\n"
-        "misc:\n"
-        "  nccl_version: '2.27.3'\n"
-    )
-    pq.write_table(
-        pa.table(
-            {
-                "gemm_dtype": ["bfloat16"],
-                "m": [1],
-                "n": [2],
-                "k": [3],
-                "latency": [4.0],
-            }
-        ),
-        data_root / "gemm_perf.parquet",
-    )
-
+    systems_root.mkdir(parents=True)
     monkeypatch.setenv("AICONFIGURATOR_SYSTEMS_PATH", str(systems_root))
-    monkeypatch.delenv("AICONFIGURATOR_RUST_SYSTEMS_SOURCE_PATH", raising=False)
-    rust_engine_step._configure_default_data_roots(
-        {
-            "system_name": "test_sxm",
-            "backend": "vllm",
-            "backend_version": "1.0.0",
-        }
-    )
-
-    rust_systems_root = Path(os.environ["AICONFIGURATOR_SYSTEMS_PATH"])
-    materialized = rust_systems_root / "data" / "test_sxm" / "vllm" / "1.0.0" / "gemm_perf.txt"
-
-    assert rust_systems_root != systems_root
-    assert (rust_systems_root / "test_sxm.yaml").is_file()
-    assert materialized.read_text().splitlines()[0] == '"gemm_dtype","m","n","k","latency"'
-    assert os.environ["AICONFIGURATOR_RUST_SYSTEMS_SOURCE_PATH"] == str(systems_root)
+    rust_engine_step._configure_default_data_roots()
+    assert Path(os.environ["AICONFIGURATOR_SYSTEMS_PATH"]) == systems_root
 
 
 def test_engine_step_estimator_can_load_old_core_without_forward_pass_perf_symbols(tmp_path, monkeypatch) -> None:
@@ -452,21 +422,55 @@ def test_ctypes_wrapper_calls_real_rust_core(tmp_path, monkeypatch) -> None:
 }
 """
     )
-    (data_root / "gemm_perf.txt").write_text(
-        "gemm_dtype,m,n,k,latency\n"
-        "bfloat16,20,64,32,1.0\n"
-        "bfloat16,20,32,32,2.0\n"
-        "bfloat16,20,128,32,3.0\n"
-        "bfloat16,20,32,64,4.0\n"
-        "bfloat16,2,160,32,0.5\n"
+    # The Rust crate reads parquet directly (no CSV fallback); the synthetic
+    # fixtures here mirror the row schemas of the production *_perf.parquet
+    # files. Integer columns are INT64 in the real perf-DB; encode them that
+    # way here so PerfReader's u32-narrowing path is exercised.
+    pq.write_table(
+        pa.table(
+            {
+                "gemm_dtype": ["bfloat16", "bfloat16", "bfloat16", "bfloat16", "bfloat16"],
+                "m": pa.array([20, 20, 20, 20, 2], type=pa.int64()),
+                "n": pa.array([64, 32, 128, 32, 160], type=pa.int64()),
+                "k": pa.array([32, 32, 32, 64, 32], type=pa.int64()),
+                "latency": [1.0, 2.0, 3.0, 4.0, 0.5],
+            }
+        ),
+        data_root / "gemm_perf.parquet",
+        compression="zstd",
     )
-    (data_root / "context_attention_perf.txt").write_text(
-        "attn_dtype,kv_cache_dtype,batch_size,isl,num_heads,num_key_value_heads,head_dim,latency\n"
-        "bfloat16,bfloat16,2,10,4,2,8,5.0\n"
+    pq.write_table(
+        pa.table(
+            {
+                "attn_dtype": ["bfloat16"],
+                "kv_cache_dtype": ["bfloat16"],
+                "batch_size": pa.array([2], type=pa.int64()),
+                "isl": pa.array([10], type=pa.int64()),
+                "num_heads": pa.array([4], type=pa.int64()),
+                "num_key_value_heads": pa.array([2], type=pa.int64()),
+                "head_dim": pa.array([8], type=pa.int64()),
+                "latency": [5.0],
+            }
+        ),
+        data_root / "context_attention_perf.parquet",
+        compression="zstd",
     )
-    (data_root / "generation_attention_perf.txt").write_text(
-        "attn_dtype,kv_cache_dtype,batch_size,isl,num_heads,num_key_value_heads,head_dim,step,latency\n"
-        "bfloat16,bfloat16,2,16,4,2,8,1,0.7\n"
+    pq.write_table(
+        pa.table(
+            {
+                "attn_dtype": ["bfloat16"],
+                "kv_cache_dtype": ["bfloat16"],
+                "batch_size": pa.array([2], type=pa.int64()),
+                "isl": pa.array([16], type=pa.int64()),
+                "num_heads": pa.array([4], type=pa.int64()),
+                "num_key_value_heads": pa.array([2], type=pa.int64()),
+                "head_dim": pa.array([8], type=pa.int64()),
+                "step": pa.array([1], type=pa.int64()),
+                "latency": [0.7],
+            }
+        ),
+        data_root / "generation_attention_perf.parquet",
+        compression="zstd",
     )
 
     monkeypatch.setenv("AICONFIGURATOR_SYSTEMS_PATH", str(systems_root))

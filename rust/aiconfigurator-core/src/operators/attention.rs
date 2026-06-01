@@ -1,0 +1,323 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Attention operators: context, generation, encoder.
+//!
+//! Mirrors `aiconfigurator.sdk.operations.attention.{ContextAttention,
+//! GenerationAttention, EncoderAttention}`. Each holds its config-time
+//! attention shape (n, n_kv, head_size, window_size, quant modes) and
+//! wraps the raw `AttentionTable` query with:
+//!
+//! - prefix correction `(full_s² − prefix²) / full_s²` for context paths
+//! - fused-op extras for context: qk_norm (optional), apply_rope, kv_write
+//!   via the analytic `mem_op` formula
+//! - 1.1× correction factor on the extras (matches Python)
+//! - `seq_imbalance_correction_scale` / `gen_seq_imbalance_correction_scale`
+//!   multiplier for unbalanced sequence distributions
+//! - `scale_factor` scaling at the end
+
+use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
+use crate::common::error::AicError;
+use crate::common::system_spec::SystemSpec;
+use crate::operators::base::{PerformanceResult, Source};
+use crate::perf_database::PerfDatabase;
+
+/// Analytic memory-op latency (ms). Matches Python's
+/// `PerfDatabase.query_mem_op` empirical path (the only path used for
+/// SILICON queries — there's no perf table for raw memory ops).
+pub(crate) fn mem_op_latency_ms(spec: &SystemSpec, mem_bytes: f64) -> f64 {
+    let mem_bw = spec.gpu.mem_bw.max(1.0);
+    let scaling = spec.gpu.mem_bw_empirical_scaling_factor.max(1e-9);
+    let constant = spec.gpu.mem_empirical_constant_latency;
+    (mem_bytes / (mem_bw * scaling) + constant) * 1000.0
+}
+
+fn prefix_correction(full_s: u32, prefix: u32) -> f64 {
+    if full_s == 0 {
+        return 0.0;
+    }
+    let f = full_s as f64;
+    let p = prefix as f64;
+    (f * f - p * p) / (f * f)
+}
+
+// ---------------------------------------------------------------------------
+// Context attention
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct ContextAttentionOp {
+    pub name: String,
+    pub scale_factor: f64,
+    pub n: u32,
+    pub n_kv: u32,
+    pub head_size: u32,
+    pub window_size: u32,
+    pub kv_cache_dtype: KvCacheQuantMode,
+    pub fmha_quant_mode: FmhaQuantMode,
+    pub use_qk_norm: bool,
+}
+
+impl ContextAttentionOp {
+    pub fn new(
+        name: impl Into<String>,
+        n: u32,
+        n_kv: u32,
+        head_size: u32,
+        kv_cache_dtype: KvCacheQuantMode,
+        fmha_quant_mode: FmhaQuantMode,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            scale_factor: 1.0,
+            n,
+            n_kv,
+            head_size,
+            window_size: 0,
+            kv_cache_dtype,
+            fmha_quant_mode,
+            use_qk_norm: false,
+        }
+    }
+
+    pub fn query(
+        &self,
+        db: &PerfDatabase,
+        batch_size: u32,
+        isl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+    ) -> Result<PerformanceResult, AicError> {
+        let full_s = isl + prefix;
+        let table_latency = db.attention.query_context(
+            batch_size,
+            full_s,
+            self.n,
+            self.n_kv,
+            self.head_size,
+            self.window_size,
+            self.kv_cache_dtype,
+            self.fmha_quant_mode,
+        )?;
+        let prefix_factor = prefix_correction(full_s, prefix);
+        let mut latency = table_latency * prefix_factor;
+
+        // Fused-op extras (qk_norm optional, rope + kv_write mandatory).
+        let q_num = (self.n * self.head_size) as f64;
+        let k_num = (self.n_kv * self.head_size) as f64;
+        let v_num = (self.n_kv * self.head_size) as f64;
+        let spec = &db.system_spec;
+
+        let mut extra = 0.0;
+        if self.use_qk_norm {
+            let qk_norm = 2.0 * mem_op_latency_ms(spec, q_num * 2.0)
+                + 2.0 * mem_op_latency_ms(spec, k_num * 2.0);
+            extra += qk_norm * 2.0; // elementwise before norm
+        }
+        let apply_rope = 2.0 * mem_op_latency_ms(spec, q_num * 2.0 + k_num * 2.0);
+        let kv_write = mem_op_latency_ms(spec, k_num * self.fmha_quant_mode.mapping().memory)
+            + mem_op_latency_ms(spec, v_num * self.fmha_quant_mode.mapping().memory);
+        extra += apply_rope + kv_write;
+
+        latency += extra * 1.1; // Python's correction factor for the fused extras.
+
+        if seq_imbalance_correction_scale != 1.0 {
+            latency *= seq_imbalance_correction_scale;
+        }
+
+        Ok(PerformanceResult::new(latency, Source::Silicon)
+            .clamp_non_negative()
+            .scaled(self.scale_factor))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generation attention
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct GenerationAttentionOp {
+    pub name: String,
+    pub scale_factor: f64,
+    pub n: u32,
+    pub n_kv: u32,
+    pub head_size: u32,
+    pub window_size: u32,
+    pub kv_cache_dtype: KvCacheQuantMode,
+}
+
+impl GenerationAttentionOp {
+    pub fn new(
+        name: impl Into<String>,
+        n: u32,
+        n_kv: u32,
+        head_size: u32,
+        kv_cache_dtype: KvCacheQuantMode,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            scale_factor: 1.0,
+            n,
+            n_kv,
+            head_size,
+            window_size: 0,
+            kv_cache_dtype,
+        }
+    }
+
+    pub fn query(
+        &self,
+        db: &PerfDatabase,
+        batch_size: u32,
+        kv_seq_tokens: u32,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> Result<PerformanceResult, AicError> {
+        let table_latency = db.attention.query_generation(
+            batch_size,
+            kv_seq_tokens,
+            self.n,
+            self.n_kv,
+            self.head_size,
+            self.window_size,
+            self.kv_cache_dtype,
+        )?;
+        let mut latency = table_latency;
+        if gen_seq_imbalance_correction_scale != 1.0 {
+            latency *= gen_seq_imbalance_correction_scale;
+        }
+        Ok(PerformanceResult::new(latency, Source::Silicon)
+            .clamp_non_negative()
+            .scaled(self.scale_factor))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Encoder attention (non-causal; vision encoder path)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct EncoderAttentionOp {
+    pub name: String,
+    pub scale_factor: f64,
+    pub n: u32,
+    pub head_size: u32,
+    pub fmha_quant_mode: FmhaQuantMode,
+}
+
+impl EncoderAttentionOp {
+    pub fn new(
+        name: impl Into<String>,
+        n: u32,
+        head_size: u32,
+        fmha_quant_mode: FmhaQuantMode,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            scale_factor: 1.0,
+            n,
+            head_size,
+            fmha_quant_mode,
+        }
+    }
+
+    pub fn query(
+        &self,
+        db: &PerfDatabase,
+        batch_size: u32,
+        s: u32,
+    ) -> Result<PerformanceResult, AicError> {
+        let latency = db.attention.query_encoder(
+            batch_size,
+            s,
+            self.n,
+            self.head_size,
+            self.fmha_quant_mode,
+        )?;
+        Ok(PerformanceResult::new(latency, Source::Silicon)
+            .clamp_non_negative()
+            .scaled(self.scale_factor))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const REPO_ROOT_HINT: &str = env!("CARGO_MANIFEST_DIR");
+
+    fn b200_vllm_db() -> PerfDatabase {
+        let systems_root = PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator/systems");
+        PerfDatabase::load(&systems_root, "b200_sxm", "vllm", "0.19.0").expect("db must load")
+    }
+
+    #[test]
+    fn context_attention_smoke() {
+        let db = b200_vllm_db();
+        let op = ContextAttentionOp::new(
+            "ctx",
+            64,
+            1,
+            128,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Bfloat16,
+        );
+        // prefix=0 means prefix_correction=1.0, table latency is consumed full.
+        let result = op
+            .query(&db, 8, 16384, 0, 1.0)
+            .expect("context attention query must succeed");
+        // Table value at exact hit is 19.82; mem_op extras add ~0-1ms on top.
+        assert!(result.latency_ms > 19.0 && result.latency_ms < 30.0);
+        assert_eq!(result.source, Source::Silicon);
+    }
+
+    #[test]
+    fn context_attention_prefix_correction_shrinks_latency() {
+        let db = b200_vllm_db();
+        let op = ContextAttentionOp::new(
+            "ctx",
+            64,
+            1,
+            128,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Bfloat16,
+        );
+        // prefix=8192 -> prefix_correction = (16384^2 - 8192^2)/16384^2 = 0.75
+        let with_prefix = op
+            .query(&db, 8, 8192, 8192, 1.0)
+            .expect("query must succeed")
+            .latency_ms;
+        let no_prefix = op.query(&db, 8, 16384, 0, 1.0).expect("query must succeed").latency_ms;
+        assert!(
+            with_prefix < no_prefix,
+            "prefix correction must shrink latency: {with_prefix} vs {no_prefix}"
+        );
+    }
+
+    #[test]
+    fn generation_attention_smoke() {
+        let db = b200_vllm_db();
+        let op = GenerationAttentionOp::new("gen", 64, 4, 128, KvCacheQuantMode::Fp8);
+        // Recorded: b=32 isl+step=2 n=64 n_kv=4 -> 0.00866ms.
+        let result = op
+            .query(&db, 32, 2, 1.0)
+            .expect("gen attention query must succeed");
+        assert!(
+            (result.latency_ms - 0.008661333471536636).abs() < 1e-9,
+            "expected recorded gen latency, got {}",
+            result.latency_ms
+        );
+    }
+
+    #[test]
+    fn mem_op_latency_uses_empirical_formula() {
+        let db = b200_vllm_db();
+        // b200_sxm.yaml: mem_bw=8e12, scaling=0.8, constant=3e-6.
+        // For 1MB: latency = (1e6 / (8e12 * 0.8) + 3e-6) * 1000 = 0.156... + 0.003 = 0.159ms.
+        let latency = mem_op_latency_ms(&db.system_spec, 1_000_000.0);
+        let expected = (1_000_000.0_f64 / (8e12 * 0.8) + 3e-6) * 1000.0;
+        assert!((latency - expected).abs() < 1e-12);
+    }
+}

@@ -6,9 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aiconfigurator_core::{
-    BackendKind, DataType, EngineConfig, EngineStepEstimator, ForwardPassMetrics,
-    ForwardPassPerfModel, ForwardPassPerfOptions, ForwardPassPerfReadiness, ForwardPassPerfSource,
-    ModelSpec, ScheduledRequestMetrics, ENGINE_CONFIG_SCHEMA_VERSION, FPM_VERSION,
+    load_model_config_path, BackendKind, DataType, EngineConfig, EngineStepEstimator,
+    ForwardPassMetrics, ForwardPassPerfModel, ForwardPassPerfOptions, ForwardPassPerfReadiness,
+    ForwardPassPerfSource, ScheduledRequestMetrics, ENGINE_CONFIG_SCHEMA_VERSION, FPM_VERSION,
 };
 use tempfile::TempDir;
 
@@ -662,7 +662,7 @@ fn all_checked_in_model_configs_are_classified_or_best_available_fallback() {
         if !file_name.ends_with("_config.json") {
             continue;
         }
-        match ModelSpec::load_path(&path) {
+        match load_model_config_path(&path) {
             Ok(_) => {}
             Err(_) => {
                 let model_name = file_name
@@ -1437,6 +1437,8 @@ fn engine_config() -> EngineConfig {
         activation_dtype: Some(DataType::Bfloat16),
         kv_cache_dtype: Some(DataType::Bfloat16),
         kv_block_size: None,
+        nextn: None,
+        nextn_accept_rates: None,
         extra: BTreeMap::new(),
     }
 }
