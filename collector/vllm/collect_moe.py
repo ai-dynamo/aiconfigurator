@@ -228,8 +228,7 @@ def run_moe_torch(
     supported_moe_types = {"bfloat16", "fp8", "fp8_block", "int4_wo", "nvfp4", "w4a16_mxfp4"}
     if moe_type not in supported_moe_types:
         raise ValueError(
-            f"Unsupported vLLM MoE quant mode {moe_type!r}. "
-            f"Supported modes: {sorted(supported_moe_types)}"
+            f"Unsupported vLLM MoE quant mode {moe_type!r}. Supported modes: {sorted(supported_moe_types)}"
         )
 
     use_int4_wo = moe_type == "int4_wo"
