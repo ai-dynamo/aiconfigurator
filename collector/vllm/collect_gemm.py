@@ -155,12 +155,18 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
         gemm.to(torch.device(device))
 
         if gemm_type in ("fp8", "fp8_static") and hasattr(gemm, "weight"):
-            new_weight = gemm.weight.data.t()
-            # print("new_weight stride:", new_weight.stride())
-            # mnk = 1,128,128 weight stride = (128,1)
-            # transpose to (1,128) for fp8 cutlass limit
-            gemm.weight = torch.nn.Parameter(new_weight)
-            # print("after fix, weight stride:", gemm.weight.data.stride())
+            with torch.no_grad():
+                fp8_weight = torch.randn(gemm.weight.shape, dtype=torch.float32, device=device).to(gemm.weight.dtype)
+                gemm.weight.copy_(fp8_weight)
+                if hasattr(gemm, "weight_scale"):
+                    gemm.weight_scale.fill_(1.0)
+                if hasattr(gemm, "input_scale") and gemm.input_scale is not None:
+                    gemm.input_scale.fill_(1.0)
+
+            quant_method = getattr(gemm, "quant_method", None)
+            if quant_method is None or not hasattr(quant_method, "process_weights_after_loading"):
+                raise RuntimeError("Unable to post-process vLLM fp8 linear weights")
+            quant_method.process_weights_after_loading(gemm)
         elif gemm_type == "fp8_block":
             block_n, block_k = FP8_BLOCK_SHAPE
             with torch.no_grad():
