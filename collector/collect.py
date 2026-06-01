@@ -11,6 +11,7 @@ modules own benchmark setup, while `model_cases.py` and YAML own case selection.
 
 import contextlib
 import functools
+import hashlib
 import os
 import warnings
 
@@ -1527,6 +1528,10 @@ def main():
             log_scope = ["dsv4"]
         else:
             log_scope = ops if ops else ["all"]
+        joined_log_scope = "+".join(log_scope)
+        if len(joined_log_scope) > 120:
+            scope_hash = hashlib.sha1(joined_log_scope.encode()).hexdigest()[:12]
+            log_scope = [f"{args.backend}_{len(log_scope)}ops_{scope_hash}"]
         logger = setup_logging(scope=log_scope, debug=args.debug)
     elif args.debug:
         # Update log level if debug flag changed

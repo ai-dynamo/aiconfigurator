@@ -72,10 +72,16 @@ class MockModelConfig:
         self.is_local_attention_model = False
 
         class MockHFConfig:
-            def __init__(self):
+            def __init__(self, num_attention_heads, num_key_value_heads, head_dim):
                 self.architectures = ["LlamaForCausalLM"]
+                self.num_attention_heads = num_attention_heads
+                self.num_key_value_heads = num_key_value_heads
+                self.head_dim = head_dim
+                self.hidden_size = num_attention_heads * head_dim
+                self.attn_logit_softcapping = None
 
-        self.hf_config = MockHFConfig()
+        self.hf_config = MockHFConfig(num_attention_heads, num_key_value_heads, head_dim)
+        self.hf_text_config = self.hf_config
         self.dtype = torch.bfloat16
 
     def get_num_kv_heads(self, tp_size):
@@ -103,6 +109,8 @@ class MockServerArgs:
         self.triton_attention_split_tile_size = None
         self.disable_cuda_graph = False
         self.chunked_prefill_size = -1
+        self.is_embedding = False
+        self.disable_radix_cache = False
 
 
 class MockModelRunner:
@@ -120,6 +128,7 @@ class MockModelRunner:
         self.token_to_kv_pool = None
         self.attn_backend = None
         self.server_args = MockServerArgs(page_size=page_size)
+        self.tp_size = 1
         self.attn_cp_size = 1  # Context parallelism size; required by FlashAttentionBackend in sglang >=0.5.10
         self.is_draft_worker = False
         self.model_is_mrope = False
