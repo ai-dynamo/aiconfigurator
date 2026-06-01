@@ -23,7 +23,7 @@ use crate::common::enums::{BackendKind, CommQuantMode, MoeQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::operators::base::{PerformanceResult, Source};
-use crate::operators::communication::CustomAllReduceOp;
+use crate::operators::communication::{CustomAllReduceOp, NcclOp};
 use crate::perf_database::PerfDatabase;
 
 /// MoE dispatch flavor.
@@ -95,11 +95,133 @@ impl MoEDispatchOp {
         let spec: &SystemSpec = &db.system_spec;
         match self.flavor {
             DispatchFlavor::CustomAllReduce => {
-                // Approximate via custom_allreduce on attention TP. Message size
-                // = num_tokens * hidden_size * comm-element-bytes (half = 2).
-                let tp = self.attention_tp_size();
-                let ar = CustomAllReduceOp::new(&self.name, self.scale_factor, self.hidden_size, tp);
-                ar.query(db, num_tokens)
+                // Backend-aware port of Python `MoEDispatch.query` for vLLM and
+                // SGLang non-DeepEP paths. Both backends pass through this
+                // flavor (set by `models/moe.rs::dispatch_flavor`) but compute
+                // dispatch latency very differently when attention_dp > 1.
+                //
+                // Python (`operations/moe.py`):
+                //  * vllm (:1003-1020):
+                //      comm = 0
+                //      if attn_tp > 1: comm += custom_allreduce(num_gpus, volume)
+                //      if attn_dp > 1: comm += nccl(num_gpus, "all_gather" if pre
+                //                                  else "reduce_scatter", volume * dp)
+                //      (both terms can add; Python asserts moe_tp==1 or moe_ep==1)
+                //  * sglang non-deepep pre_dispatch (:1043-1071):
+                //      if combined_tp_dp: nccl(attn_tp, "reduce_scatter", volume)
+                //                       + nccl(num_gpus, "all_gather", volume*dp)
+                //      elif tp > 1:       custom_allreduce(num_gpus, volume)
+                //      elif dp > 1:       nccl(num_gpus, "all_gather", volume*dp)
+                //      else:              0
+                //  * sglang non-deepep combine (:1072-1098): mirrors pre but swaps
+                //    reduce_scatter <-> all_gather and inverts the combined order.
+                //
+                // `num_gpus = moe_tp * moe_ep`; `attn_tp = num_gpus / attn_dp`;
+                // `volume = num_tokens * hidden_size` (element count, half-precision).
+                // Rust mirrors element-count semantics by passing
+                // `num_tokens * attn_dp` to the NCCL sub-op so its internal
+                // `message_size = num_tokens * dp * hidden_size = volume * dp`.
+                //
+                // Sub-ops are constructed with `scale_factor=1.0`; the outer
+                // op's `scale_factor` (e.g. layer count) is applied once at the
+                // end via `.scaled(self.scale_factor)`.
+                let num_gpus = (self.moe_tp_size * self.moe_ep_size).max(1);
+                let attn_tp = self.attention_tp_size();
+                let attn_dp = self.attention_dp_size.max(1);
+                let pre = self.pre_dispatch;
+
+                let comm_latency_ms = match self.backend {
+                    BackendKind::Vllm => {
+                        let mut total = 0.0;
+                        if attn_tp > 1 {
+                            let ar = CustomAllReduceOp::new(
+                                &self.name,
+                                1.0,
+                                self.hidden_size,
+                                num_gpus,
+                            );
+                            total += ar.query(db, num_tokens)?.latency_ms;
+                        }
+                        if attn_dp > 1 {
+                            let op_name = if pre { "all_gather" } else { "reduce_scatter" };
+                            let nccl = NcclOp::new(
+                                &self.name,
+                                1.0,
+                                self.hidden_size,
+                                num_gpus,
+                                op_name,
+                            );
+                            total += nccl.query(db, num_tokens * attn_dp)?.latency_ms;
+                        }
+                        total
+                    }
+                    BackendKind::Sglang => {
+                        let combined_tp_dp = attn_tp > 1 && attn_dp > 1;
+                        if combined_tp_dp {
+                            // Two NCCL terms; order/op differs between pre and combine.
+                            let (op1, gpus1, tokens1, op2, gpus2, tokens2) = if pre {
+                                (
+                                    "reduce_scatter",
+                                    attn_tp,
+                                    num_tokens,
+                                    "all_gather",
+                                    num_gpus,
+                                    num_tokens * attn_dp,
+                                )
+                            } else {
+                                (
+                                    "reduce_scatter",
+                                    num_gpus,
+                                    num_tokens * attn_dp,
+                                    "all_gather",
+                                    attn_tp,
+                                    num_tokens,
+                                )
+                            };
+                            let n1 = NcclOp::new(&self.name, 1.0, self.hidden_size, gpus1, op1);
+                            let n2 = NcclOp::new(&self.name, 1.0, self.hidden_size, gpus2, op2);
+                            n1.query(db, tokens1)?.latency_ms
+                                + n2.query(db, tokens2)?.latency_ms
+                        } else if attn_tp > 1 {
+                            let ar = CustomAllReduceOp::new(
+                                &self.name,
+                                1.0,
+                                self.hidden_size,
+                                num_gpus,
+                            );
+                            ar.query(db, num_tokens)?.latency_ms
+                        } else if attn_dp > 1 {
+                            let op_name = if pre { "all_gather" } else { "reduce_scatter" };
+                            let nccl = NcclOp::new(
+                                &self.name,
+                                1.0,
+                                self.hidden_size,
+                                num_gpus,
+                                op_name,
+                            );
+                            nccl.query(db, num_tokens * attn_dp)?.latency_ms
+                        } else {
+                            0.0
+                        }
+                    }
+                    BackendKind::Trtllm => {
+                        // Trtllm should use DispatchFlavor::TrtllmAlltoall, not
+                        // CustomAllReduce. Safety fallback: replicate the pre-fix
+                        // single-term behavior (custom_allreduce on attn_tp) so
+                        // downstream callers don't panic if a model mis-routes.
+                        let ar = CustomAllReduceOp::new(
+                            &self.name,
+                            1.0,
+                            self.hidden_size,
+                            attn_tp,
+                        );
+                        ar.query(db, num_tokens)?.latency_ms
+                    }
+                };
+
+                Ok(PerformanceResult::new(comm_latency_ms, Source::Silicon)
+                    .clamp_non_negative()
+                    .scaled(self.scale_factor))
             }
             DispatchFlavor::DeepEpNormal => {
                 let point = db.wideep.query_deepep_normal(
