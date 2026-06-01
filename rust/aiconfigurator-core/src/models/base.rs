@@ -197,6 +197,66 @@ pub enum WideEpMode {
     Trtllm,
 }
 
+/// Multi-Token Prediction speculative decoding parameters.
+///
+/// Mirrors `aiconfigurator.sdk.models.base.BaseModel._nextn` /
+/// `_nextn_accept_rates`. Python's `_mtp_scale_factor` scales every
+/// generation-phase op by `1/(1+E[accept]) * (nextn+layers)/layers`,
+/// reflecting that MTP adds `nextn` extra transformer layers but accepts
+/// `E[accept]` extra tokens per step. The default (disabled) keeps the
+/// scale at 1.0.
+///
+/// Only DeepSeek-family and Qwen3.5 builders consume this; Python's
+/// TaskConfig only sets `nextn=1` for those families
+/// (`sdk/task.py:448-449`).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct MtpConfig {
+    pub nextn: u32,
+    pub accept_rates: Vec<f64>,
+}
+
+impl MtpConfig {
+    /// Mirror of Python `helpers.calc_expectation` (`models/helpers.py:219`).
+    /// Recursive: `E[accept] = prod(rates[0..nextn-1]) + E[nextn-1]`.
+    fn calc_expectation(&self) -> f64 {
+        Self::calc_recursive(self.nextn, &self.accept_rates)
+    }
+
+    fn calc_recursive(nextn: u32, rates: &[f64]) -> f64 {
+        if nextn == 0 {
+            return 0.0;
+        }
+        let upper = (nextn as usize).min(rates.len());
+        let mut prob = 1.0_f64;
+        for i in 0..upper {
+            prob *= rates[i];
+        }
+        // Python's recursion assumes `rates[i]` exists for all `i < nextn`;
+        // if the caller provides a shorter list we treat missing entries as
+        // implicit zeros (the trailing `prob *= 0` factor wipes the term).
+        // This matches Python's index-out-of-range behavior at runtime —
+        // an out-of-range nextn is a configuration bug, not a normal path.
+        if nextn > 1 {
+            prob + Self::calc_recursive(nextn - 1, rates)
+        } else {
+            prob
+        }
+    }
+
+    /// Mirror of `BaseModel._mtp_scale_factor` (`models/base.py:105-110`):
+    /// `1/(1 + E[accept]) * (nextn + num_layers) / num_layers`.
+    /// Returns 1.0 when MTP is disabled (`nextn == 0`).
+    pub fn scale_factor(&self, num_layers: u32) -> f64 {
+        if self.nextn == 0 || num_layers == 0 {
+            return 1.0;
+        }
+        let exp = self.calc_expectation();
+        let layers = num_layers as f64;
+        let nextn = self.nextn as f64;
+        (1.0 / (1.0 + exp)) * (nextn + layers) / layers
+    }
+}
+
 /// Composite of (HF spec, parallelism, dtypes, system) — what every model
 /// constructor consumes to populate its op lists.
 #[derive(Clone, Debug)]
@@ -214,6 +274,11 @@ pub struct ModelConfig {
     /// SGLang's sglang DeepEP variant uses this for the prefill power-law
     /// alpha selection. Defaults to false.
     pub enable_eplb: bool,
+    /// Multi-Token Prediction speculative decoding parameters. Default
+    /// (`nextn=0`) produces `mtp_scale_factor=1.0` — i.e. no scaling. Only
+    /// DeepSeek-family + Qwen3.5 builders multiply per-layer generation-op
+    /// scale factors by this; other model builders ignore it.
+    pub mtp: MtpConfig,
 }
 
 impl ModelConfig {
@@ -234,6 +299,15 @@ impl ModelConfig {
     pub fn moe_intermediate_size_per_gpu(&self) -> u32 {
         let mt = self.parallel.moe_tp_size.max(1);
         (self.spec.moe_intermediate_size + mt - 1) / mt
+    }
+
+    /// Multi-Token Prediction scale factor for this config's model layers.
+    /// Returns 1.0 when MTP is disabled (`mtp.nextn == 0`). DeepSeek-family
+    /// + Qwen3.5 builders multiply per-layer generation-op scale_factors by
+    /// this value; non-MTP families ignore it (default `MtpConfig::default()`
+    /// → 1.0).
+    pub fn mtp_scale_factor(&self) -> f64 {
+        self.mtp.scale_factor(self.spec.num_hidden_layers)
     }
 }
 

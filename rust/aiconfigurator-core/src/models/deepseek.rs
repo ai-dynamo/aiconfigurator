@@ -28,6 +28,13 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
     let mut model = Model::new(config);
     let cfg = &model.config;
     let layers = cfg.spec.num_hidden_layers as f64;
+    // Python's `_mtp_scale_factor` (models/base.py:105-110): for
+    // DeepSeek-family models with `nextn >= 1`, generation ops are scaled
+    // by `1/(1+E[accept]) * (nextn+layers)/layers`. Context ops are NOT
+    // scaled (Python sets MTP scale only on the generation-side ops).
+    // When `nextn == 0` this returns 1.0 — no-op.
+    let mtp_scale = cfg.mtp_scale_factor();
+    let gen_layers = layers * mtp_scale;
     let h = cfg.spec.hidden_size;
     let tp = cfg.parallel.tp_size.max(1);
     let vocab_per_tp = cfg.spec.vocab_size / tp;
@@ -264,16 +271,21 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
     model.context_ops = ctx;
 
     // ---- Generation phase ----
+    // Every generation-side op uses `gen_layers = layers * mtp_scale`
+    // (where `mtp_scale = 1.0` when MTP is disabled). The once-per-forward
+    // ops (embedding, logits_gemm) multiply their constant by `mtp_scale`
+    // directly. Mirrors Python `deepseek.py:317-522` where every
+    // generation_op is scaled by `self._mtp_scale_factor`.
     let mut gen = Vec::with_capacity(12);
 
     gen.push(Op::Embedding({
         let mut e = EmbeddingOp::new("generation_embedding", vocab_per_tp, h, dtypes.gemm_quant);
-        e.scale_factor = 0.3;
+        e.scale_factor = 0.3 * mtp_scale;
         e
     }));
     gen.push(Op::Elementwise({
         let mut e = ElementwiseOp::new("generation_add_norm_1", norm_bytes);
-        e.scale_factor = layers;
+        e.scale_factor = gen_layers;
         e
     }));
     // Generation fallback chain (SGLang / TRT-LLM shape). The `h // tp`
@@ -282,7 +294,7 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
     let mut generation_mla_fallback: Vec<Op> = Vec::new();
     generation_mla_fallback.push(Op::Gemm({
         let mut g = GemmOp::new("generation_downscale_gemm", 2112, h, dtypes.gemm_quant);
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
     generation_mla_fallback.push(Op::Gemm({
@@ -292,7 +304,7 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
             1536,
             dtypes.gemm_quant,
         );
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
     // Generation attention: vLLM absorbs the KV projection into one
@@ -309,30 +321,30 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
                 vllm_head_size,
                 dtypes.kv_cache_quant,
             );
-            a.scale_factor = layers;
+            a.scale_factor = gen_layers;
             a
         }));
     } else {
         generation_mla_fallback.push(Op::MlaBmm({
             let mut b = MlaBmmOp::new("generation_bmm_pre", n_per_tp, mla_bmm_quant, true);
-            b.scale_factor = layers;
+            b.scale_factor = gen_layers;
             b
         }));
         generation_mla_fallback.push(Op::GenerationMla({
             let mut a =
                 GenerationMlaOp::new("generation_attention", mla_num_heads, dtypes.kv_cache_quant);
-            a.scale_factor = layers;
+            a.scale_factor = gen_layers;
             a
         }));
         generation_mla_fallback.push(Op::MlaBmm({
             let mut b = MlaBmmOp::new("generation_bmm_post", n_per_tp, mla_bmm_quant, false);
-            b.scale_factor = layers;
+            b.scale_factor = gen_layers;
             b
         }));
     }
     generation_mla_fallback.push(Op::Gemm({
         let mut g = GemmOp::new("generation_proj_gemm", h, h / tp, dtypes.gemm_quant);
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
 
@@ -344,7 +356,7 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
             dtypes.fmha_quant,
             dtypes.gemm_quant,
         );
-        m.scale_factor = layers;
+        m.scale_factor = gen_layers;
         m
     });
     gen.push(Op::Fallback(FallbackOp::new(
@@ -354,7 +366,7 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
     )));
     gen.push(Op::Elementwise({
         let mut e = ElementwiseOp::new("generation_add_norm_2", norm_bytes);
-        e.scale_factor = layers;
+        e.scale_factor = gen_layers;
         e
     }));
     // No per-layer AR — handled inside MoEDispatch.
@@ -371,12 +383,12 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
             h,
             dtypes.gemm_quant,
         );
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
     gen_shared.push(Op::Elementwise({
         let mut e = ElementwiseOp::new("generation_shared_act_gate", shared_act_gate_bytes);
-        e.scale_factor = layers;
+        e.scale_factor = gen_layers;
         e
     }));
     gen_shared.push(Op::Gemm({
@@ -386,7 +398,7 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
             moe_inter_per_tp,
             dtypes.gemm_quant,
         );
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
 
@@ -398,7 +410,7 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
             h,
             GemmQuantMode::Bfloat16,
         );
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
     gen_routed.push(Op::MoeDispatch({
@@ -414,7 +426,7 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
             backend,
             flavor,
         );
-        d.scale_factor = layers;
+        d.scale_factor = gen_layers;
         d
     }));
     gen_routed.push(Op::Moe({
@@ -429,7 +441,7 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
             dtypes.moe_quant,
             "power_law_1.01",
         );
-        m.scale_factor = layers;
+        m.scale_factor = gen_layers;
         m
     }));
     gen_routed.push(Op::MoeDispatch({
@@ -445,7 +457,7 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
             backend,
             flavor,
         );
-        d.scale_factor = layers;
+        d.scale_factor = gen_layers;
         d
     }));
 
@@ -455,19 +467,24 @@ pub fn build_deepseek_model(config: ModelConfig) -> Model {
         gen_shared,
     )));
 
-    gen.push(Op::Gemm(GemmOp::new(
-        "generation_logits_gemm",
-        vocab_per_tp,
-        h,
-        GemmQuantMode::Bfloat16,
-    )));
+    gen.push(Op::Gemm({
+        // Logits GEMM fires once per forward; Python's `1 * mtp_scale_factor`.
+        let mut g = GemmOp::new(
+            "generation_logits_gemm",
+            vocab_per_tp,
+            h,
+            GemmQuantMode::Bfloat16,
+        );
+        g.scale_factor = mtp_scale;
+        g
+    }));
     // No separate embedding_ar for DeepSeek — Python uses only the
     // conditional tp_allreduce below.
 
     if backend == BackendKind::Vllm {
         gen.push(Op::CustomAllReduce(CustomAllReduceOp::new(
             "generation_tp_allreduce",
-            2.0 * layers,
+            2.0 * gen_layers,
             h,
             tp,
         )));

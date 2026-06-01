@@ -70,6 +70,21 @@ pub struct EngineConfig {
 
     pub kv_block_size: Option<u32>,
 
+    /// Multi-Token Prediction speculative decoding depth (Python's
+    /// `task_config.nextn`). `None` (default) disables MTP scaling. Python
+    /// sets this to 1 for DeepSeek-family + Qwen3.5 models
+    /// (`sdk/task.py:448-449`); other families leave it at 0/None. Rust
+    /// model builders that don't consume MTP (everything except DeepSeek-
+    /// family + Qwen3.5) ignore the value.
+    #[serde(default)]
+    pub nextn: Option<u32>,
+
+    /// Per-step accept-rate prior used by MTP scaling. Mirrors Python's
+    /// `task_config.nextn_accept_rates` (default `[0.85, 0.3, 0.0, 0.0,
+    /// 0.0]`). Ignored when `nextn` is `None` or 0.
+    #[serde(default)]
+    pub nextn_accept_rates: Option<Vec<f64>>,
+
     #[serde(default)]
     pub extra: BTreeMap<String, String>,
 }
@@ -322,7 +337,29 @@ impl EngineStepEstimator {
             config.activation_dtype.as_ref(),
             config.kv_cache_dtype.as_ref(),
         );
-        let estimator = session::SessionEstimator::build(hf, system_spec, new_db, backend, parallel, dtypes)?;
+        let mtp = match (config.nextn, config.nextn_accept_rates.as_ref()) {
+            (Some(n), _) if n == 0 => crate::models::base::MtpConfig::default(),
+            (Some(n), Some(rates)) => crate::models::base::MtpConfig {
+                nextn: n,
+                accept_rates: rates.clone(),
+            },
+            (Some(n), None) => crate::models::base::MtpConfig {
+                nextn: n,
+                accept_rates: Vec::new(),
+            },
+            (None, _) => crate::models::base::MtpConfig::default(),
+        };
+        let estimator = session::SessionEstimator::build_with_options(
+            hf,
+            system_spec,
+            new_db,
+            backend,
+            parallel,
+            dtypes,
+            Default::default(),
+            false,
+            mtp,
+        )?;
 
         Ok(Self { config, session: Arc::new(estimator) })
     }

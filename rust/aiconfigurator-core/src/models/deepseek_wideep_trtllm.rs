@@ -55,7 +55,12 @@ pub fn build_trtllm_wideep_deepseek_model(config: ModelConfig) -> Result<Model, 
     let mut model = Model::new(config);
     let cfg = &model.config;
     let layers = cfg.spec.num_hidden_layers as f64;
-    let gen_layer_scale = layers * PDL_FACTOR; // mtp_scale = 1.0
+    // Python `_mtp_scale_factor` (models/base.py:105-110); see deepseek.rs.
+    // The TRT-LLM WideEP variant pre-multiplies by `PDL_FACTOR` for the
+    // overlap-aware path; MTP scale stacks on top of that for generation ops.
+    let mtp_scale = cfg.mtp_scale_factor();
+    let gen_layers = layers * mtp_scale;
+    let gen_layer_scale = layers * PDL_FACTOR * mtp_scale;
     let h = cfg.spec.hidden_size;
     let tp = cfg.parallel.tp_size.max(1);
     let pp = cfg.parallel.pp_size.max(1);
@@ -278,7 +283,7 @@ pub fn build_trtllm_wideep_deepseek_model(config: ModelConfig) -> Result<Model, 
             h,
             dtypes.gemm_quant,
         );
-        e.scale_factor = 0.3;
+        e.scale_factor = 0.3 * mtp_scale;
         e
     }));
     gen.push(Op::Elementwise({
@@ -433,20 +438,25 @@ pub fn build_trtllm_wideep_deepseek_model(config: ModelConfig) -> Result<Model, 
         e.scale_factor = gen_layer_scale;
         e
     }));
-    gen.push(Op::Gemm(GemmOp::new(
-        "generation_logits_gemm",
-        vocab_per_tp,
-        h,
-        GemmQuantMode::Bfloat16,
-    )));
+    gen.push(Op::Gemm({
+        // Logits GEMM fires once per forward; Python uses `1 * mtp_scale`.
+        let mut g = GemmOp::new(
+            "generation_logits_gemm",
+            vocab_per_tp,
+            h,
+            GemmQuantMode::Bfloat16,
+        );
+        g.scale_factor = mtp_scale;
+        g
+    }));
 
-    // P2P (per-layer, nextn = 0 so MTP scale is 1).
+    // P2P: generation side picks up MTP scale; context-side does not.
     let pp_scale = (pp as f64 - 1.0).max(0.0);
     let mut p2p_ctx = P2POp::new("context_p2p", pp, h);
     p2p_ctx.scale_factor = pp_scale;
     ctx.push(Op::P2P(p2p_ctx));
     let mut p2p_gen = P2POp::new("generation_p2p", pp, h);
-    p2p_gen.scale_factor = pp_scale;
+    p2p_gen.scale_factor = pp_scale * mtp_scale;
     gen.push(Op::P2P(p2p_gen));
 
     // proj_in_per_tp computed for parity with Python's

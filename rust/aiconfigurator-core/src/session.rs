@@ -48,12 +48,22 @@ impl SessionEstimator {
         parallel: ParallelConfig,
         dtypes: DtypeConfig,
     ) -> Result<Self, AicError> {
-        Self::build_with_options(hf, system_spec, db, backend, parallel, dtypes, Default::default(), false)
+        Self::build_with_options(
+            hf,
+            system_spec,
+            db,
+            backend,
+            parallel,
+            dtypes,
+            Default::default(),
+            false,
+            Default::default(),
+        )
     }
 
-    /// Build with WideEP routing knobs. The standard `build` defaults
-    /// these to `WideEpMode::Off + enable_eplb=false`, which keeps every
-    /// existing call site on the standard model-builder path.
+    /// Build with WideEP routing knobs + MTP speculative decoding params.
+    /// The standard `build` defaults all three to disabled, which keeps
+    /// every existing call site on the standard model-builder path.
     #[allow(clippy::too_many_arguments)]
     pub fn build_with_options(
         hf: HfModelConfig,
@@ -64,6 +74,7 @@ impl SessionEstimator {
         dtypes: DtypeConfig,
         wideep_mode: crate::models::base::WideEpMode,
         enable_eplb: bool,
+        mtp: crate::models::base::MtpConfig,
     ) -> Result<Self, AicError> {
         let spec: ModelSpec = hf.into();
         let config = ModelConfig {
@@ -74,6 +85,7 @@ impl SessionEstimator {
             backend,
             wideep_mode,
             enable_eplb,
+            mtp,
         };
         let model = build_model(config)?;
         Ok(Self { model, db, backend })

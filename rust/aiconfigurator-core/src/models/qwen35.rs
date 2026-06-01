@@ -68,6 +68,16 @@ pub fn build_qwen35_model(config: ModelConfig) -> Model {
         .iter()
         .filter(|t| t == &"full_attention")
         .count() as f64;
+    // Python `_mtp_scale_factor` (models/base.py:105-110): Qwen3.5 family
+    // sets `nextn=1` by default (`task.py:448`), so every generation-side
+    // op count gets multiplied by `sf = 1/(1+E[accept]) * (nextn+layers)/layers`.
+    // Python applies this as `c = counts[*] * sf` in `qwen35.py:305-355+`.
+    // `gen_num_linear` and `gen_num_full` carry the pre-scaled values; the
+    // once-per-forward ops (embedding, logits) use `mtp_scale` directly.
+    // When `nextn==0` all reduce to the un-scaled path.
+    let mtp_scale = cfg.mtp_scale_factor();
+    let gen_num_linear = num_linear * mtp_scale;
+    let gen_num_full = num_full * mtp_scale;
 
     let n_q_per_tp = num_heads / tp;
     let n_kv_per_tp = (num_kv_heads + tp - 1) / tp;
@@ -96,12 +106,12 @@ pub fn build_qwen35_model(config: ModelConfig) -> Model {
     )));
     gen.push(Op::Embedding({
         let mut e = EmbeddingOp::new("generation_embedding", vocab_per_tp, h, dtypes.gemm_quant);
-        e.scale_factor = 0.3;
+        e.scale_factor = 0.3 * mtp_scale;
         e
     }));
     gen.push(Op::CustomAllReduce(CustomAllReduceOp::new(
         "generation_embedding_ar",
-        1.0,
+        mtp_scale,
         h,
         tp,
     )));
@@ -146,7 +156,7 @@ pub fn build_qwen35_model(config: ModelConfig) -> Model {
         push_gdn_phase(
             &mut gen,
             "generation",
-            num_linear,
+            gen_num_linear,
             h,
             tp,
             dtypes,
@@ -161,7 +171,7 @@ pub fn build_qwen35_model(config: ModelConfig) -> Model {
         push_ffn_phase(
             &mut gen,
             "generation_gdn",
-            num_linear,
+            gen_num_linear,
             h,
             tp,
             moe_tp,
@@ -244,12 +254,12 @@ pub fn build_qwen35_model(config: ModelConfig) -> Model {
 
         gen.push(Op::Elementwise({
             let mut e = ElementwiseOp::new("generation_full_attn_norm", norm_bytes);
-            e.scale_factor = num_full;
+            e.scale_factor = gen_num_full;
             e
         }));
         gen.push(Op::Gemm({
             let mut g = GemmOp::new("generation_qkv_gemm", qkv_out, h, dtypes.gemm_quant);
-            g.scale_factor = num_full;
+            g.scale_factor = gen_num_full;
             g
         }));
         gen.push(Op::GenerationAttention({
@@ -260,7 +270,7 @@ pub fn build_qwen35_model(config: ModelConfig) -> Model {
                 head_size,
                 dtypes.kv_cache_quant,
             );
-            a.scale_factor = num_full;
+            a.scale_factor = gen_num_full;
             a
         }));
         gen.push(Op::Gemm({
@@ -270,20 +280,20 @@ pub fn build_qwen35_model(config: ModelConfig) -> Model {
                 n_q_per_tp * head_size,
                 dtypes.gemm_quant,
             );
-            g.scale_factor = num_full;
+            g.scale_factor = gen_num_full;
             g.low_precision_input = true;
             g
         }));
         gen.push(Op::CustomAllReduce(CustomAllReduceOp::new(
             "generation_full_ar",
-            num_full,
+            gen_num_full,
             h,
             tp,
         )));
         push_ffn_phase(
             &mut gen,
             "generation_full",
-            num_full,
+            gen_num_full,
             h,
             tp,
             moe_tp,
@@ -312,14 +322,19 @@ pub fn build_qwen35_model(config: ModelConfig) -> Model {
     let mut p2p_ctx = P2POp::new("context_p2p", pp, h);
     p2p_ctx.scale_factor = pp_scale;
     ctx.push(Op::P2P(p2p_ctx));
-    gen.push(Op::Gemm(GemmOp::new(
-        "generation_logits_gemm",
-        vocab_per_tp,
-        h,
-        GemmQuantMode::Bfloat16,
-    )));
+    gen.push(Op::Gemm({
+        // Logits GEMM fires once per forward; Python uses `1 * mtp_scale`.
+        let mut g = GemmOp::new(
+            "generation_logits_gemm",
+            vocab_per_tp,
+            h,
+            GemmQuantMode::Bfloat16,
+        );
+        g.scale_factor = mtp_scale;
+        g
+    }));
     let mut p2p_gen = P2POp::new("generation_p2p", pp, h);
-    p2p_gen.scale_factor = pp_scale;
+    p2p_gen.scale_factor = pp_scale * mtp_scale;
     gen.push(Op::P2P(p2p_gen));
 
     model.context_ops = ctx;

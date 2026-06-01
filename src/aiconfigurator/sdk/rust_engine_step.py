@@ -488,6 +488,14 @@ def _metrics_by_attention_dp_rank(model: Any, metrics: dict[str, Any]) -> list[d
 
 def _engine_config_json(model: Any, database: Any) -> str:
     model_config = model.config
+    # Forward MTP speculative-decoding params so the Rust DeepSeek-family +
+    # Qwen3.5 model builders can compute the same `_mtp_scale_factor` Python
+    # applies (`sdk/models/base.py:105-110`). Python sets `nextn=1` for
+    # DeepSeek/DSv32/DSv4/Kimi-K2.5/Qwen3.5 by default (`sdk/task.py:448-449`)
+    # and stores it on the model object via `BaseModel._nextn`. Rust treats
+    # `nextn=None` or `nextn=0` as MTP-disabled (scale=1.0).
+    nextn = getattr(model, "_nextn", None)
+    nextn_accept_rates = getattr(model, "_nextn_accept_rates", None)
     config = {
         "schema_version": 1,
         "model_name": getattr(model, "model_path", getattr(model, "model_name", "")),
@@ -505,6 +513,8 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "activation_dtype": _quant_to_dtype(getattr(model_config, "fmha_quant_mode", None)),
         "kv_cache_dtype": _quant_to_dtype(getattr(model_config, "kvcache_quant_mode", None)),
         "kv_block_size": None,
+        "nextn": int(nextn) if nextn is not None else None,
+        "nextn_accept_rates": ([float(r) for r in nextn_accept_rates] if nextn_accept_rates is not None else None),
         "extra": {},
     }
     return json.dumps(config, sort_keys=True, separators=(",", ":"))

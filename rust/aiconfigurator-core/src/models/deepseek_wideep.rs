@@ -45,6 +45,10 @@ pub fn build_sglang_wideep_deepseek_model(config: ModelConfig) -> Model {
     let mut model = Model::new(config);
     let cfg = &model.config;
     let layers = cfg.spec.num_hidden_layers as f64;
+    // Python `_mtp_scale_factor` (models/base.py:105-110); see deepseek.rs
+    // for the full rationale. `nextn=0` reduces both to identity.
+    let mtp_scale = cfg.mtp_scale_factor();
+    let gen_layers = layers * mtp_scale;
     let h = cfg.spec.hidden_size;
     let tp = cfg.parallel.tp_size.max(1);
     let pp = cfg.parallel.pp_size.max(1);
@@ -193,7 +197,7 @@ pub fn build_sglang_wideep_deepseek_model(config: ModelConfig) -> Model {
             h,
             dtypes.gemm_quant,
         );
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
     gen.push(Op::Embedding({
@@ -203,12 +207,12 @@ pub fn build_sglang_wideep_deepseek_model(config: ModelConfig) -> Model {
             h,
             dtypes.gemm_quant,
         );
-        e.scale_factor = 0.3;
+        e.scale_factor = 0.3 * mtp_scale;
         e
     }));
     gen.push(Op::Elementwise({
         let mut e = ElementwiseOp::new("generation_add_norm_1", norm_bytes);
-        e.scale_factor = layers;
+        e.scale_factor = gen_layers;
         e
     }));
     gen.push(Op::Gemm({
@@ -218,7 +222,7 @@ pub fn build_sglang_wideep_deepseek_model(config: ModelConfig) -> Model {
             h,
             dtypes.gemm_quant,
         );
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
     gen.push(Op::WideEpGenerationMla({
@@ -228,7 +232,7 @@ pub fn build_sglang_wideep_deepseek_model(config: ModelConfig) -> Model {
             dtypes.kv_cache_quant,
             dtypes.fmha_quant,
         );
-        a.scale_factor = layers;
+        a.scale_factor = gen_layers;
         a
     }));
     // Shared expert (gen).
@@ -239,17 +243,17 @@ pub fn build_sglang_wideep_deepseek_model(config: ModelConfig) -> Model {
             h,
             dtypes.gemm_quant,
         );
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
     gen.push(Op::Elementwise({
         let mut e = ElementwiseOp::new("generation_act_gate", shared_act_bytes);
-        e.scale_factor = layers;
+        e.scale_factor = gen_layers;
         e
     }));
     gen.push(Op::Gemm({
         let mut g = GemmOp::new("generation_ffn2_gemm", h, moe_inter, dtypes.gemm_quant);
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
     // DeepEP low-latency dispatch on decode.
@@ -266,7 +270,7 @@ pub fn build_sglang_wideep_deepseek_model(config: ModelConfig) -> Model {
             BackendKind::Sglang,
             DispatchFlavor::DeepEpLowLatency,
         );
-        d.scale_factor = layers;
+        d.scale_factor = gen_layers;
         d
     }));
     gen.push(Op::Moe({
@@ -281,23 +285,28 @@ pub fn build_sglang_wideep_deepseek_model(config: ModelConfig) -> Model {
             dtypes.moe_quant,
             generation_workload.clone(),
         );
-        m.scale_factor = layers;
+        m.scale_factor = gen_layers;
         m
     }));
-    gen.push(Op::Gemm(GemmOp::new(
-        "generation_logits_gemm",
-        vocab_per_tp,
-        h,
-        GemmQuantMode::Bfloat16,
-    )));
+    gen.push(Op::Gemm({
+        // Logits GEMM fires once per forward; Python uses `1 * mtp_scale`.
+        let mut g = GemmOp::new(
+            "generation_logits_gemm",
+            vocab_per_tp,
+            h,
+            GemmQuantMode::Bfloat16,
+        );
+        g.scale_factor = mtp_scale;
+        g
+    }));
 
-    // P2P (per-layer; nextn = 0 so no MTP scaling).
+    // P2P: generation-side picks up MTP scale; context-side does not.
     let pp_scale = (pp as f64 - 1.0).max(0.0);
     let mut p2p_ctx = P2POp::new("context_p2p", pp, h);
     p2p_ctx.scale_factor = pp_scale;
     ctx.push(Op::P2P(p2p_ctx));
     let mut p2p_gen = P2POp::new("generation_p2p", pp, h);
-    p2p_gen.scale_factor = pp_scale;
+    p2p_gen.scale_factor = pp_scale * mtp_scale;
     gen.push(Op::P2P(p2p_gen));
 
     model.context_ops = ctx;

@@ -30,6 +30,13 @@ pub fn build_deepseek_v32_model(config: ModelConfig) -> Model {
     let mut model = Model::new(config);
     let cfg = &model.config;
     let layers = cfg.spec.num_hidden_layers as f64;
+    // Python `_mtp_scale_factor` (models/base.py:105-110): when `nextn>=1`
+    // (default for DSv3.2), every generation-side scale_factor is multiplied
+    // by `1/(1+E[accept]) * (nextn+layers)/layers`. `gen_layers` carries the
+    // pre-multiplied value for per-layer ops; once-per-forward ops use
+    // `mtp_scale` directly. When `nextn==0`, both reduce to `layers` and `1.0`.
+    let mtp_scale = cfg.mtp_scale_factor();
+    let gen_layers = layers * mtp_scale;
     let h = cfg.spec.hidden_size;
     let tp = cfg.parallel.tp_size.max(1);
     let pp = cfg.parallel.pp_size.max(1);
@@ -175,12 +182,12 @@ pub fn build_deepseek_v32_model(config: ModelConfig) -> Model {
     let mut gen = Vec::new();
     gen.push(Op::Embedding({
         let mut e = EmbeddingOp::new("generation_embedding", vocab_per_tp, h, dtypes.gemm_quant);
-        e.scale_factor = 0.3;
+        e.scale_factor = 0.3 * mtp_scale;
         e
     }));
     gen.push(Op::Elementwise({
         let mut e = ElementwiseOp::new("generation_add_norm_1", norm_bytes);
-        e.scale_factor = layers;
+        e.scale_factor = gen_layers;
         e
     }));
     gen.push(Op::DsaGeneration({
@@ -192,12 +199,12 @@ pub fn build_deepseek_v32_model(config: ModelConfig) -> Model {
             dtypes.gemm_quant,
             architecture.clone(),
         );
-        a.scale_factor = layers;
+        a.scale_factor = gen_layers;
         a
     }));
     gen.push(Op::Elementwise({
         let mut e = ElementwiseOp::new("generation_add_norm_2", norm_bytes);
-        e.scale_factor = layers;
+        e.scale_factor = gen_layers;
         e
     }));
 
@@ -210,12 +217,12 @@ pub fn build_deepseek_v32_model(config: ModelConfig) -> Model {
             h,
             dtypes.gemm_quant,
         );
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
     gen_shared.push(Op::Elementwise({
         let mut e = ElementwiseOp::new("generation_shared_act_gate", shared_act_gate_bytes);
-        e.scale_factor = layers;
+        e.scale_factor = gen_layers;
         e
     }));
     gen_shared.push(Op::Gemm({
@@ -225,7 +232,7 @@ pub fn build_deepseek_v32_model(config: ModelConfig) -> Model {
             moe_inter_per_tp,
             dtypes.gemm_quant,
         );
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
 
@@ -237,7 +244,7 @@ pub fn build_deepseek_v32_model(config: ModelConfig) -> Model {
             h,
             GemmQuantMode::Bfloat16,
         );
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
     gen_routed.push(Op::MoeDispatch({
@@ -253,7 +260,7 @@ pub fn build_deepseek_v32_model(config: ModelConfig) -> Model {
             backend,
             flavor,
         );
-        d.scale_factor = layers;
+        d.scale_factor = gen_layers;
         d
     }));
     gen_routed.push(Op::Moe({
@@ -268,7 +275,7 @@ pub fn build_deepseek_v32_model(config: ModelConfig) -> Model {
             dtypes.moe_quant,
             "power_law_1.01",
         );
-        m.scale_factor = layers;
+        m.scale_factor = gen_layers;
         m
     }));
     gen_routed.push(Op::MoeDispatch({
@@ -284,7 +291,7 @@ pub fn build_deepseek_v32_model(config: ModelConfig) -> Model {
             backend,
             flavor,
         );
-        d.scale_factor = layers;
+        d.scale_factor = gen_layers;
         d
     }));
     gen.push(Op::Overlap(OverlapOp::new(
@@ -292,20 +299,27 @@ pub fn build_deepseek_v32_model(config: ModelConfig) -> Model {
         gen_routed,
         gen_shared,
     )));
-    gen.push(Op::Gemm(GemmOp::new(
-        "generation_logits_gemm",
-        vocab_per_tp,
-        h,
-        GemmQuantMode::Bfloat16,
-    )));
+    gen.push(Op::Gemm({
+        // Logits GEMM fires once per forward; Python `deepseek.py` uses
+        // `1 * self._mtp_scale_factor` as the count.
+        let mut g = GemmOp::new(
+            "generation_logits_gemm",
+            vocab_per_tp,
+            h,
+            GemmQuantMode::Bfloat16,
+        );
+        g.scale_factor = mtp_scale;
+        g
+    }));
 
-    // P2P (per-layer, no MTP scaling here — DSv32 base model has nextn=0).
+    // P2P: context-side uses the un-scaled `pp_scale`; generation-side is
+    // multiplied by `mtp_scale` (Python applies MTP to generation P2P too).
     let pp_scale = (pp as f64 - 1.0).max(0.0);
     let mut p2p_ctx = P2POp::new("context_p2p", pp, h);
     p2p_ctx.scale_factor = pp_scale;
     ctx.push(Op::P2P(p2p_ctx));
     let mut p2p_gen = P2POp::new("generation_p2p", pp, h);
-    p2p_gen.scale_factor = pp_scale;
+    p2p_gen.scale_factor = pp_scale * mtp_scale;
     gen.push(Op::P2P(p2p_gen));
 
     model.context_ops = ctx;

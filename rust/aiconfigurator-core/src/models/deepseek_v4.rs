@@ -73,6 +73,10 @@ pub fn build_deepseek_v4_model(config: ModelConfig) -> Result<Model, AicError> {
     let mut model = Model::new(config);
     let cfg = &model.config;
     let layers = cfg.spec.num_hidden_layers as f64;
+    // Python `_mtp_scale_factor` (models/base.py:105-110); see deepseek.rs
+    // for the full rationale. `nextn=0` reduces both to identity.
+    let mtp_scale = cfg.mtp_scale_factor();
+    let gen_layers = layers * mtp_scale;
     let h = cfg.spec.hidden_size;
     let tp = cfg.parallel.tp_size.max(1);
     let pp = cfg.parallel.pp_size.max(1);
@@ -257,20 +261,20 @@ pub fn build_deepseek_v4_model(config: ModelConfig) -> Result<Model, AicError> {
     let mut gen = Vec::new();
     gen.push(Op::Embedding({
         let mut e = EmbeddingOp::new("generation_embedding", vocab_per_tp, h, dtypes.gemm_quant);
-        e.scale_factor = 0.3;
+        e.scale_factor = 0.3 * mtp_scale;
         e
     }));
-    push_mhc(&mut gen, "generation_mhc_pre", layers);
+    push_mhc(&mut gen, "generation_mhc_pre", gen_layers);
     gen.push(Op::Elementwise({
         let mut e = ElementwiseOp::new("generation_attn_norm", attn_norm_bytes);
-        e.scale_factor = layers;
+        e.scale_factor = gen_layers;
         e
     }));
     push_attention(&mut gen, false);
-    push_mhc(&mut gen, "generation_mhc_post", layers);
+    push_mhc(&mut gen, "generation_mhc_post", gen_layers);
     gen.push(Op::Elementwise({
         let mut e = ElementwiseOp::new("generation_ffn_norm", attn_norm_bytes);
-        e.scale_factor = layers;
+        e.scale_factor = gen_layers;
         e
     }));
     // Overlap: shared FFN ‖ routed MoE.
@@ -282,12 +286,12 @@ pub fn build_deepseek_v4_model(config: ModelConfig) -> Result<Model, AicError> {
             h,
             dtypes.gemm_quant,
         );
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
     gen_shared.push(Op::Elementwise({
         let mut e = ElementwiseOp::new("generation_shared_act_gate", shared_act_gate_bytes);
-        e.scale_factor = layers;
+        e.scale_factor = gen_layers;
         e
     }));
     gen_shared.push(Op::Gemm({
@@ -297,7 +301,7 @@ pub fn build_deepseek_v4_model(config: ModelConfig) -> Result<Model, AicError> {
             moe_inter_per_tp,
             dtypes.gemm_quant,
         );
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
 
@@ -309,7 +313,7 @@ pub fn build_deepseek_v4_model(config: ModelConfig) -> Result<Model, AicError> {
             h,
             GemmQuantMode::Bfloat16,
         );
-        g.scale_factor = layers;
+        g.scale_factor = gen_layers;
         g
     }));
     gen_routed.push(Op::MoeDispatch({
@@ -325,7 +329,7 @@ pub fn build_deepseek_v4_model(config: ModelConfig) -> Result<Model, AicError> {
             backend,
             flavor,
         );
-        d.scale_factor = layers;
+        d.scale_factor = gen_layers;
         d
     }));
     gen_routed.push(Op::Moe({
@@ -340,7 +344,7 @@ pub fn build_deepseek_v4_model(config: ModelConfig) -> Result<Model, AicError> {
             dtypes.moe_quant,
             "power_law_1.01",
         );
-        m.scale_factor = layers;
+        m.scale_factor = gen_layers;
         m
     }));
     gen_routed.push(Op::MoeDispatch({
@@ -356,7 +360,7 @@ pub fn build_deepseek_v4_model(config: ModelConfig) -> Result<Model, AicError> {
             backend,
             flavor,
         );
-        d.scale_factor = layers;
+        d.scale_factor = gen_layers;
         d
     }));
     gen.push(Op::Overlap(OverlapOp::new(
@@ -364,20 +368,27 @@ pub fn build_deepseek_v4_model(config: ModelConfig) -> Result<Model, AicError> {
         gen_routed,
         gen_shared,
     )));
-    gen.push(Op::Gemm(GemmOp::new(
-        "generation_logits_gemm",
-        vocab_per_tp,
-        h,
-        GemmQuantMode::Bfloat16,
-    )));
+    gen.push(Op::Gemm({
+        // Logits GEMM fires once per forward; Python uses `1 * mtp_scale`.
+        let mut g = GemmOp::new(
+            "generation_logits_gemm",
+            vocab_per_tp,
+            h,
+            GemmQuantMode::Bfloat16,
+        );
+        g.scale_factor = mtp_scale;
+        g
+    }));
 
-    // P2P (per-layer; DSv4 base nextn=0 so no MTP scaling).
+    // P2P: generation side picks up MTP scale (Python `_mtp_scale_factor`
+    // multiplies all generation-phase op scales). `nextn=0` reduces this
+    // to the un-scaled path.
     let pp_scale = (pp as f64 - 1.0).max(0.0);
     let mut p2p_ctx = P2POp::new("context_p2p", pp, h);
     p2p_ctx.scale_factor = pp_scale;
     ctx.push(Op::P2P(p2p_ctx));
     let mut p2p_gen = P2POp::new("generation_p2p", pp, h);
-    p2p_gen.scale_factor = pp_scale;
+    p2p_gen.scale_factor = pp_scale * mtp_scale;
     gen.push(Op::P2P(p2p_gen));
 
     model.context_ops = ctx;
