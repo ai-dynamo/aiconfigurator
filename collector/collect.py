@@ -1525,6 +1525,8 @@ def main():
         # (the joined scope may exceed Linux filename length limit).
         if _dsv4_auto_expand:
             log_scope = ["dsv4"]
+        elif args.model_cases_full:
+            log_scope = ["model_cases_full"]
         else:
             log_scope = ops if ops else ["all"]
         logger = setup_logging(scope=log_scope, debug=args.debug)
