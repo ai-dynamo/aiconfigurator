@@ -329,6 +329,13 @@ def _add_default_mode_arguments(parser):
         "When set, MoE models use EP-only parallelism with deepep_moe backend. "
         "Applies to both DeepSeek and Qwen3-235B on SGLang.",
     )
+    parser.add_argument(
+        "--moe-backend",
+        type=str,
+        choices=["deepep_moe", "megamoe"],
+        default=None,
+        help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell.",
+    )
 
 
 def _add_experiments_mode_arguments(parser):
@@ -984,6 +991,7 @@ def build_default_task_configs(
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
     enable_wideep: bool = False,
+    moe_backend: str | None = None,
     engine_step_backend: str | None = None,
 ) -> dict[str, TaskConfig]:
     """Build agg and disagg task configs for default mode comparison.
@@ -1007,6 +1015,7 @@ def build_default_task_configs(
         nextn_accept_rates: Acceptance rates for MTP draft tokens.
         enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
         enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
+        moe_backend: Explicit SGLang MoE backend override.
         engine_step_backend: Experimental static latency backend ("python" or "rust").
 
     Returns:
@@ -1018,6 +1027,8 @@ def build_default_task_configs(
     decode_system = decode_system or system
     # Expand "auto" backend to all available backends
     backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
+    if backend == "auto" and moe_backend == "megamoe":
+        backends_to_sweep = [common.BackendName.sglang.value]
 
     if backend == "auto":
         supported = perf_database.get_supported_databases()
@@ -1130,10 +1141,12 @@ def build_default_task_configs(
         "engine_step_backend": engine_step_backend,
     }
 
-    # Auto-set moe_backend for SGLang wideep, matching webapp behavior
-    # (webapp/events/event_fn.py sets moe_backend="deepep_moe" when enable_wideep + sglang)
-    if enable_wideep:
-        common_kwargs["moe_backend"] = "deepep_moe"
+    def _sglang_moe_backend_override(backend_name: str) -> str | None:
+        if backend_name != common.BackendName.sglang.value:
+            return None
+        # Auto-set moe_backend for SGLang wideep, matching webapp behavior
+        # (webapp/events/event_fn.py sets moe_backend="deepep_moe" when enable_wideep + sglang)
+        return moe_backend or ("deepep_moe" if enable_wideep else None)
 
     # Create yaml_config to pass nextn and nextn_accept_rates if specified
     yaml_config = None
@@ -1152,6 +1165,8 @@ def build_default_task_configs(
         # Create agg task for this backend
         agg_kwargs = dict(common_kwargs)
         agg_kwargs["backend_name"] = backend_name
+        if backend_moe := _sglang_moe_backend_override(backend_name):
+            agg_kwargs["moe_backend"] = backend_moe
         if yaml_config:
             agg_kwargs["yaml_config"] = yaml_config
         agg_task = TaskConfig(serving_mode="agg", **agg_kwargs)
@@ -1159,7 +1174,7 @@ def build_default_task_configs(
         task_configs[exp_name] = agg_task
 
         # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
-        if backend_name == "sglang" and not enable_wideep and is_moe_model:
+        if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
             skip_reason = _sglang_deepep_perf_data_skip_reason(system, None, backend_version)
             if skip_reason:
                 logger.info("Skipping SGLang DeepEP agg sweep: %s", skip_reason)
@@ -1182,6 +1197,8 @@ def build_default_task_configs(
         disagg_kwargs = dict(common_kwargs)
         disagg_kwargs["backend_name"] = backend_name
         disagg_kwargs["decode_system_name"] = decode_system
+        if backend_moe := _sglang_moe_backend_override(backend_name):
+            disagg_kwargs["moe_backend"] = backend_moe
         if yaml_config:
             disagg_kwargs["yaml_config"] = yaml_config
         disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
@@ -1189,7 +1206,7 @@ def build_default_task_configs(
         task_configs[exp_name] = disagg_task
 
         # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
-        if backend_name == "sglang" and not enable_wideep and is_moe_model:
+        if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
             skip_reason = _sglang_deepep_perf_data_skip_reason(system, decode_system, backend_version)
             if skip_reason:
                 logger.info("Skipping SGLang DeepEP disagg sweep: %s", skip_reason)
@@ -1222,6 +1239,7 @@ _EXPERIMENT_RESERVED_KEYS = {
     "tpot",
     "request_latency",
     "enable_wideep",
+    "moe_backend",
     "enable_eplb",
     "total_gpus",
     "database_mode",
@@ -1360,6 +1378,8 @@ def build_experiment_task_configs(
 
         if "enable_wideep" in exp_config:
             task_kwargs["enable_wideep"] = exp_config["enable_wideep"]
+        if "moe_backend" in exp_config:
+            task_kwargs["moe_backend"] = exp_config["moe_backend"]
         if "enable_eplb" in exp_config:
             task_kwargs["enable_eplb"] = exp_config["enable_eplb"]
         if "enable_chunked_prefill" in exp_config:
@@ -2015,6 +2035,7 @@ def main(args):
             max_seq_len=args.max_seq_len,
             engine_step_backend=args.engine_step_backend,
             enable_wideep=getattr(args, "enable_wideep", False),
+            moe_backend=getattr(args, "moe_backend", None),
         )
     elif args.mode == "exp":
         try:
