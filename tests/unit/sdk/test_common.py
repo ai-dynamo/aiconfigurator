@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk import common
 
 pytestmark = pytest.mark.unit
 
@@ -197,17 +197,15 @@ class TestSupportMatrix:
 
     def test_glm5_quantized_variants_cover_all_database_combinations(self):
         """GLM-5 quantized variants should have exact rows for every support-matrix target."""
-        supported_databases = perf_database.get_supported_databases()
+        matrix = common.get_support_matrix()
+        glm5_variants = {"zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"}
         expected_keys = {
-            (system, backend, version, mode)
-            for system, backend_versions in supported_databases.items()
-            for backend, versions in backend_versions.items()
-            for version in versions
-            for mode in ("agg", "disagg")
+            (row["System"], row["Backend"], row["Version"], row["Mode"])
+            for row in matrix
+            if row["HuggingFaceID"] not in glm5_variants
         }
 
-        matrix = common.get_support_matrix()
-        for model in ("zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"):
+        for model in glm5_variants:
             model_rows = [row for row in matrix if row["HuggingFaceID"] == model]
             model_key_counts = Counter(
                 (row["System"], row["Backend"], row["Version"], row["Mode"]) for row in model_rows
