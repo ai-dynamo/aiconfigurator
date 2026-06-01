@@ -566,6 +566,9 @@ def _parse_hf_config_json(config: dict) -> dict:
             chunk_size=config["chunk_size"],
             # Optional: 0 for non-MoE NemotronH models (e.g., Nemotron-H-56B)
             moe_shared_expert_intermediate_size=config.get("moe_shared_expert_intermediate_size", 0),
+            # Optional: latent compression dim for routed experts (Nemotron-3-Super).
+            # HF config uses None to mean "no compression"; map to 0 here.
+            moe_latent_size=config.get("moe_latent_size") or 0,
         )
         logger.info(
             f"NemotronH hybrid config: pattern={extra_params.hybrid_override_pattern}, "
@@ -704,12 +707,22 @@ def _parse_hf_config_json(config: dict) -> dict:
             raise ValueError(f"Gemma 4 layer_types length {len(layer_types_raw)} != num_hidden_layers {layers}")
         if any(lt not in ("sliding_attention", "full_attention") for lt in layer_types_raw):
             raise ValueError("Gemma 4 layer_types must contain only 'sliding_attention' or 'full_attention'")
-        extra_params = common.Gemma4MoEConfig(
+        # Dense Gemma 4 variants (e.g. E2B/E4B/31B) leave the global-attention
+        # head fields as null; fall back to the model-wide values in that case.
+        swa_num_kv = config["num_key_value_heads"]
+        swa_hd = config["head_dim"]
+        global_num_kv = config.get("num_global_key_value_heads")
+        if global_num_kv is None:
+            global_num_kv = swa_num_kv
+        global_hd = config.get("global_head_dim")
+        if global_hd is None:
+            global_hd = swa_hd
+        extra_params = common.Gemma4MixConfig(
             layer_types=tuple(layer_types_raw),
-            swa_num_kv_heads=config["num_key_value_heads"],
-            swa_head_dim=config["head_dim"],
-            global_num_kv_heads=config["num_global_key_value_heads"],
-            global_head_dim=config["global_head_dim"],
+            swa_num_kv_heads=swa_num_kv,
+            swa_head_dim=swa_hd,
+            global_num_kv_heads=global_num_kv,
+            global_head_dim=global_hd,
             sliding_window_size=config.get("sliding_window", 0),
             attention_k_eq_v=bool(config.get("attention_k_eq_v", False)),
         )

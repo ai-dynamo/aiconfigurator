@@ -82,6 +82,24 @@ def get_sample_leaf_value(data: dict):
     return current
 
 
+def _get_cached_extracted_metrics(cache: dict, ndim: int, data: dict, extractor):
+    """Extract latency/energy views and cache them by object identity.
+
+    The cache keeps the original object in the entry so an ``id(data)`` reused by
+    a different short-lived dict cannot return stale extracted metrics.
+    """
+    cache_key = (ndim, id(data))
+    cached = cache.get(cache_key)
+    if cached is not None:
+        cached_data, extracted = cached
+        if cached_data is data:
+            return extracted
+
+    extracted = extractor(data)
+    cache[cache_key] = (data, extracted)
+    return extracted
+
+
 def nearest_1d_point_helper(x: int, values: list[int], inner_only: bool = True) -> tuple[int, int]:
     """Return the two values bracketing ``x`` from ``values``.
 
@@ -158,35 +176,35 @@ def extract_latency_and_energy_3d(data: dict) -> tuple[dict, dict]:
 
 
 def interp_1d(x: list[int], y: list, value: int):
-    """Linear interpolation in 1-D. Handles both float and dict leaf values."""
+    """Linear interpolation in 1-D. Handles both float and dict leaf values.
+
+    When the leaves are dicts, every numeric metric present in BOTH endpoints
+    is interpolated (e.g. ``latency``, ``power``, ``energy``). Dropping
+    ``energy`` here used to zero out every extrapolated grid point and made
+    the SDK power model return 0 W for any GEMM shape that wasn't an exact
+    collection point.
+    """
     x0, x1 = x
     y0, y1 = y
 
+    def _interp_scalar(v0, v1):
+        a, b = v0, v1
+        if (x0 - x1) * (a - b) < 0 and (value - x0) * (value - x1) > 0:
+            b = a
+        if a == b:
+            return a
+        return a + (b - a) / (x1 - x0) * (value - x0)
+
     if isinstance(y0, dict) and isinstance(y1, dict):
+        result = {}
+        for key in y0.keys() & y1.keys():
+            v0 = y0[key]
+            v1 = y1[key]
+            if isinstance(v0, (int, float)) and isinstance(v1, (int, float)):
+                result[key] = _interp_scalar(v0, v1)
+        return result
 
-        def _interp_metric(metric0, metric1):
-            if (x0 - x1) * (metric0 - metric1) < 0 and (value - x0) * (value - x1) > 0:
-                metric1 = metric0
-            if metric0 == metric1:
-                return metric0
-            return metric0 + (metric1 - metric0) / (x1 - x0) * (value - x0)
-
-        lat0, lat1 = y0["latency"], y1["latency"]
-        pow0, pow1 = y0["power"], y1["power"]
-        energy0 = y0.get("energy", pow0 * lat0)
-        energy1 = y1.get("energy", pow1 * lat1)
-
-        return {
-            "latency": _interp_metric(lat0, lat1),
-            "power": _interp_metric(pow0, pow1),
-            "energy": _interp_metric(energy0, energy1),
-        }
-
-    if (x0 - x1) * (y0 - y1) < 0 and (value - x0) * (value - x1) > 0:
-        y1 = y0
-    if y0 == y1:
-        return y0
-    return y0 + (y1 - y0) / (x1 - x0) * (value - x0)
+    return _interp_scalar(y0, y1)
 
 
 # ---------------------------------------------------------------------------
@@ -221,10 +239,9 @@ def interp_2d_linear(x: int, y: int, data: dict, extracted_metrics_cache: dict |
     sample_value = get_sample_leaf_value(data)
 
     if isinstance(sample_value, dict):
-        data_id = id(data)
-        if data_id not in extracted_metrics_cache:
-            extracted_metrics_cache[data_id] = extract_latency_and_energy_2d(data)
-        latency_data, energy_data = extracted_metrics_cache[data_id]
+        latency_data, energy_data = _get_cached_extracted_metrics(
+            extracted_metrics_cache, 2, data, extract_latency_and_energy_2d
+        )
 
         points_list = []
         latency_values = []
@@ -351,10 +368,9 @@ def interp_3d(
     sample_value = get_sample_leaf_value(data)
 
     if isinstance(sample_value, dict):
-        data_id = id(data)
-        if data_id not in extracted_metrics_cache:
-            extracted_metrics_cache[data_id] = extract_latency_and_energy_3d(data)
-        latency_data, energy_data = extracted_metrics_cache[data_id]
+        latency_data, energy_data = _get_cached_extracted_metrics(
+            extracted_metrics_cache, 3, data, extract_latency_and_energy_3d
+        )
 
         if method == "linear":
             latency = interp_3d_linear(x, y, z, latency_data)
@@ -523,25 +539,21 @@ def extrapolate_data_grid(
                     y_right_value = data_dict[x][y_right][z]
                     assert y_right_value is not None, "y_right_value cannot be None"
                     if sqrt_y_value:
-                        if isinstance(y_left_value, dict):
-                            y_left_value = {
-                                "latency": math.sqrt(y_left_value["latency"]),
-                                "power": math.sqrt(y_left_value["power"]) if y_left_value["power"] > 0 else 0.0,
-                            }
-                            y_right_value = {
-                                "latency": math.sqrt(y_right_value["latency"]),
-                                "power": math.sqrt(y_right_value["power"]) if y_right_value["power"] > 0 else 0.0,
-                            }
-                        else:
-                            y_left_value = math.sqrt(y_left_value)
-                            y_right_value = math.sqrt(y_right_value)
+
+                        def _sqrt_leaf(v):
+                            if isinstance(v, dict):
+                                return {
+                                    key: (math.sqrt(metric) if isinstance(metric, (int, float)) and metric > 0 else 0.0)
+                                    for key, metric in v.items()
+                                }
+                            return math.sqrt(v) if v > 0 else 0.0
+
+                        y_left_value = _sqrt_leaf(y_left_value)
+                        y_right_value = _sqrt_leaf(y_right_value)
                     value = interp_1d([y_left, y_right], [y_left_value, y_right_value], y)
                     if sqrt_y_value:
                         if isinstance(value, dict):
-                            value = {
-                                "latency": value["latency"] * value["latency"],
-                                "power": value["power"] * value["power"],
-                            }
+                            value = {key: metric * metric for key, metric in value.items()}
                         else:
                             value = value * value
 

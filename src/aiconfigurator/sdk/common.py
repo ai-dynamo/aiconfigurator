@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import csv
+import json
 from collections import namedtuple
 from dataclasses import dataclass
 from enum import Enum
@@ -19,6 +20,34 @@ def parse_support_matrix_version(version: str | None) -> Version | None:
         return Version(version)
     except InvalidVersion:
         return None
+
+
+SupportMatrixSystemOrder = (
+    "b200",
+    "gb200",
+    "b300",
+    "gb300",
+    "rtx_pro_6000",
+    "h200",
+    "h100",
+    "l40s",
+    "a100",
+    "b60",
+)
+
+
+def get_support_matrix_system_sort_key(system: str) -> tuple[int, str]:
+    """Sort support-matrix systems by product priority, then by name."""
+    normalized_system = system.lower()
+    for index, prefix in enumerate(SupportMatrixSystemOrder):
+        if normalized_system.startswith(prefix):
+            return index, normalized_system
+    return len(SupportMatrixSystemOrder), normalized_system
+
+
+def sort_support_matrix_systems(systems):
+    """Return systems in the preferred support-matrix display order."""
+    return sorted(systems, key=get_support_matrix_system_sort_key)
 
 
 @dataclass(frozen=True)
@@ -60,6 +89,9 @@ class NemotronHConfig:
         n_groups (int): Number of groups for Mamba2
         chunk_size (int): Chunk size for Mamba2 chunked scan
         moe_shared_expert_intermediate_size (int): Intermediate size for shared expert
+        moe_latent_size (int): Latent dim for routed-expert projections (0 disables
+            latent compression and routed experts run on hidden_size directly).
+            Used by latent-MoE variants like Nemotron-3-Super.
     """
 
     hybrid_override_pattern: str
@@ -70,6 +102,7 @@ class NemotronHConfig:
     n_groups: int
     chunk_size: int
     moe_shared_expert_intermediate_size: int = 0  # Optional: 0 for non-MoE NemotronH models
+    moe_latent_size: int = 0  # Optional: 0 means routed experts use hidden_size directly
 
 
 @dataclass(frozen=True)
@@ -143,7 +176,7 @@ class VisionEncoderConfig:
 
 
 @dataclass(frozen=True)
-class Gemma4MoEConfig:
+class Gemma4MixConfig:
     """Config for Google Gemma 4 (gemma4_text) hybrid attention + dense-MLP-plus-MoE FFN.
 
     Every layer runs both a shared dense MLP (intermediate_size, ``Gemma4TextMLP``) and a
@@ -238,9 +271,25 @@ def _iter_support_matrix_resources():
     split_matrix_resource = systems_resource / "support_matrix"
 
     if split_matrix_resource.is_dir():
+        csv_resources = {
+            resource.name: resource for resource in split_matrix_resource.iterdir() if resource.name.endswith(".csv")
+        }
+        index_resource = split_matrix_resource / "index.json"
+        if index_resource.is_file():
+            try:
+                index_data = json.loads(index_resource.read_text())
+                ordered_files = index_data.get("files", []) if isinstance(index_data, dict) else []
+            except (OSError, json.JSONDecodeError):
+                ordered_files = []
+
+            for file_name in ordered_files:
+                resource = csv_resources.pop(file_name, None)
+                if resource is not None:
+                    yield resource
+
         yield from sorted(
-            (resource for resource in split_matrix_resource.iterdir() if resource.name.endswith(".csv")),
-            key=lambda resource: resource.name,
+            csv_resources.values(),
+            key=lambda resource: get_support_matrix_system_sort_key(resource.name.removesuffix(".csv")),
         )
         return
 
@@ -507,7 +556,7 @@ ModelFamily = {
     "NEMOTRONH",
     "HYBRIDMOE",
     "QWEN35",
-    "GEMMA4MOE",
+    "GEMMA4MIX",
 }
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
@@ -534,7 +583,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Llama4ForConditionalGeneration": "HYBRIDMOE",
     "Qwen3_5ForConditionalGeneration": "QWEN35",
     "Qwen3_5MoeForConditionalGeneration": "QWEN35",
-    "Gemma4ForConditionalGeneration": "GEMMA4MOE",
+    "Gemma4ForConditionalGeneration": "GEMMA4MIX",
 }
 
 # Multimodal architectures whose LLM config lives under a nested key (e.g. "text_config").
@@ -734,51 +783,52 @@ class PerfDataFilename(Enum):
     Perf data filename for database to load.
     """
 
-    gemm = "gemm_perf.txt"
-    nccl = "nccl_perf.txt"
-    oneccl = "oneccl_perf.txt"
-    generation_attention = "generation_attention_perf.txt"
-    context_attention = "context_attention_perf.txt"
-    context_mla = "context_mla_perf.txt"
-    generation_mla = "generation_mla_perf.txt"
-    mla_bmm = "mla_bmm_perf.txt"
-    moe = "moe_perf.txt"
-    custom_allreduce = "custom_allreduce_perf.txt"
-    wideep_context_mla = "wideep_context_mla_perf.txt"
-    wideep_generation_mla = "wideep_generation_mla_perf.txt"
-    wideep_context_moe = "wideep_context_moe_perf.txt"
-    wideep_generation_moe = "wideep_generation_moe_perf.txt"
-    wideep_deepep_normal = "wideep_deepep_normal_perf.txt"
-    wideep_deepep_ll = "wideep_deepep_ll_perf.txt"
+    gemm = "gemm_perf.parquet"
+    nccl = "nccl_perf.parquet"
+    oneccl = "oneccl_perf.parquet"
+    generation_attention = "generation_attention_perf.parquet"
+    context_attention = "context_attention_perf.parquet"
+    encoder_attention = "encoder_attention_perf.parquet"
+    context_mla = "context_mla_perf.parquet"
+    generation_mla = "generation_mla_perf.parquet"
+    mla_bmm = "mla_bmm_perf.parquet"
+    moe = "moe_perf.parquet"
+    custom_allreduce = "custom_allreduce_perf.parquet"
+    wideep_context_mla = "wideep_context_mla_perf.parquet"
+    wideep_generation_mla = "wideep_generation_mla_perf.parquet"
+    wideep_context_moe = "wideep_context_moe_perf.parquet"
+    wideep_generation_moe = "wideep_generation_moe_perf.parquet"
+    wideep_deepep_normal = "wideep_deepep_normal_perf.parquet"
+    wideep_deepep_ll = "wideep_deepep_ll_perf.parquet"
     # TensorRT-LLM WideEP specific
-    wideep_moe_compute = "wideep_moe_perf.txt"
+    wideep_moe_compute = "wideep_moe_perf.parquet"
     # TensorRT-LLM AlltoAll (covers WideEP NVLinkTwoSided + CutlassFusedMoE NVLinkOneSided)
-    trtllm_alltoall = "trtllm_alltoall_perf.txt"
-    compute_scale = "computescale_perf.txt"
-    scale_matrix = "scale_matrix_perf.txt"
-    mamba2 = "mamba2_perf.txt"
-    gdn = "gdn_perf.txt"
+    trtllm_alltoall = "trtllm_alltoall_perf.parquet"
+    compute_scale = "computescale_perf.parquet"
+    scale_matrix = "scale_matrix_perf.parquet"
+    mamba2 = "mamba2_perf.parquet"
+    gdn = "gdn_perf.parquet"
     # Module-level attention profiling (complete self_attn forward)
-    mla_context_module = "mla_context_module_perf.txt"
-    mla_generation_module = "mla_generation_module_perf.txt"
-    dsa_context_module = "dsa_context_module_perf.txt"
-    dsa_generation_module = "dsa_generation_module_perf.txt"
-    mhc_module = "mhc_module_perf.txt"
-    # DeepSeek-V4 module-level data — one CSV per (attn_kind ∈ {csa, hca},
-    # mode ∈ {context, generation}) = 4 files.  Each file contains all
+    mla_context_module = "mla_context_module_perf.parquet"
+    mla_generation_module = "mla_generation_module_perf.parquet"
+    dsa_context_module = "dsa_context_module_perf.parquet"
+    dsa_generation_module = "dsa_generation_module_perf.parquet"
+    mhc_module = "mhc_module_perf.parquet"
+    # DeepSeek-V4 module-level data — one file per (attn_kind ∈ {csa, hca},
+    # mode ∈ {context, generation}) = 4 files. Each file contains all
     # (tp_size, gemm_type, b, s) rows for that kind+mode.  SWA layers are
     # folded into HCA at the model layer (see models.py:_attention_ops),
     # so no separate SWA collector / data is needed.
-    dsv4_csa_context_module = "dsv4_csa_context_module_perf.txt"
-    dsv4_hca_context_module = "dsv4_hca_context_module_perf.txt"
-    dsv4_csa_generation_module = "dsv4_csa_generation_module_perf.txt"
-    dsv4_hca_generation_module = "dsv4_hca_generation_module_perf.txt"
+    dsv4_csa_context_module = "dsv4_csa_context_module_perf.parquet"
+    dsv4_hca_context_module = "dsv4_hca_context_module_perf.parquet"
+    dsv4_csa_generation_module = "dsv4_csa_generation_module_perf.parquet"
+    dsv4_hca_generation_module = "dsv4_hca_generation_module_perf.parquet"
     # DeepSeek-V4 sparse-kernel data (kernel-level past_kv Δ correction).
     # Indexed by ``arch -> tp -> past_kv -> isl -> bs``.
     # topk_512 and csa_attn are modeled analytically — no CSV needed.
-    dsv4_paged_mqa_logits_module = "dsv4_paged_mqa_logits_module_perf.txt"
-    dsv4_hca_attn_module = "dsv4_hca_attn_module_perf.txt"
-    dsv4_megamoe_module = "dsv4_megamoe_module_perf.txt"
+    dsv4_paged_mqa_logits_module = "dsv4_paged_mqa_logits_module_perf.parquet"
+    dsv4_hca_attn_module = "dsv4_hca_attn_module_perf.parquet"
+    dsv4_megamoe_module = "dsv4_megamoe_module_perf.parquet"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])

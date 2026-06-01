@@ -39,9 +39,8 @@ common_case_values:
       - 32
       - 16
       - 8
-    top_level_head_counts:
-      - 128
-      - 64
+    module_tp_sizes:
+      - 1
     module_precision_combos:
       - compute_dtype: bfloat16
         kv_cache_dtype: bfloat16
@@ -60,6 +59,72 @@ common_case_values:
       - 'generation: batch_size * sequence_length <= 262144'
       - 'generation: sequence_length >= 8192 requires batch_size <= 16'
     # top_level_head_counts keep ModelRunner-loading subprocess counts manageable.
+  mla_module_sglang:
+    description: SGLang full MLA/DSA module sweep. Quantized DSA checkpoints keep DSA projections in bf16 but may use fp8 KV cache.
+    module_tp_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+    module_precision_combos:
+      - compute_dtype: bfloat16
+        kv_cache_dtype: bfloat16
+        gemm_type: bfloat16
+      - compute_dtype: bfloat16
+        kv_cache_dtype: fp8
+        gemm_type: bfloat16
+        min_sm: 90
+    generation_sequence_lengths:
+      - 1
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 2048
+      - 4096
+      - 8192
+      - 16384
+      - 32768
+      - 65536
+      - 131072
+    context:
+      max_tokens: 131072
+      large_sequence_min: 8192
+      large_sequence_max_batch_size: 8
+      prefix_lengths:
+        - 0
+        - 1
+        - 4
+        - 8
+        - 16
+        - 32
+        - 64
+        - 128
+        - 256
+        - 512
+        - 1024
+        - 1536
+        - 2048
+        - 3072
+        - 4096
+        - 6144
+        - 8192
+        - 10000
+        - 10240
+        - 12288
+        - 16384
+        - 32768
+        - 65536
+        - 131072
+        - 262144
+        - 524288
+        - 1000000
+        - 1048575
   mla_module_trtllm:
     description: Exact TRT-LLM full MLA/DSA module micro-benchmark sweep.
     context_batch_sizes:

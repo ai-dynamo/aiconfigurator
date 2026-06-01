@@ -50,7 +50,7 @@ class BaseBackend:
     # Model families whose MoE block-scale dispatch workspace is added on top of
     # the base activation budget.
     MOE_WORKSPACE_FAMILIES: ClassVar[tuple[str, ...]] = (
-        "GEMMA4MOE",
+        "GEMMA4MIX",
         "DEEPSEEK",
         "DEEPSEEKV32",
         "DEEPSEEKV4",

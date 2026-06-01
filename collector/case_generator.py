@@ -102,6 +102,11 @@ def get_attention_generation_shape_sweeps(backend: str) -> list[dict[str, object
     return get_merged_base_op_case_specs(backend, "attention_generation")
 
 
+def get_attention_encoder_shape_sweeps(backend: str) -> list[dict[str, object]]:
+    """Return YAML-backed encoder (non-causal) attention shape sweeps for one backend."""
+    return get_merged_base_op_case_specs(backend, "attention_encoder")
+
+
 def get_base_common_case_values(name: str) -> dict[str, object]:
     """Return shared scalar/list values from base op case YAML files."""
     try:
@@ -233,6 +238,7 @@ class MLAModuleSweepSpec:
     generation_sequence_lengths: list[int]
     inner_sweep_head_counts: list[int]
     top_level_head_counts: list[int]
+    module_tp_sizes: list[int]
     module_precision_combos: list[tuple[str, str, str]]
     context_max_tokens: int
     context_large_sequence_min: int
@@ -241,6 +247,7 @@ class MLAModuleSweepSpec:
     generation_large_sequence_min: int
     generation_large_sequence_max_batch_size: int
     generation_large_cache_tokens: int
+    context_prefix_lengths: list[int]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -418,6 +425,11 @@ def get_mla_module_sweep_spec(backend: str | None = None) -> MLAModuleSweepSpec:
         field_name="mla_module.top_level_head_counts",
         default=inner_sweep_head_counts,
     )
+    module_tp_sizes = _optional_int_list(
+        values.get("module_tp_sizes"),
+        field_name="mla_module.module_tp_sizes",
+        default=[1],
+    )
 
     return MLAModuleSweepSpec(
         batch_sizes=batch_sizes or context_batch_sizes,
@@ -428,6 +440,7 @@ def get_mla_module_sweep_spec(backend: str | None = None) -> MLAModuleSweepSpec:
         generation_sequence_lengths=generation_sequence_lengths,
         inner_sweep_head_counts=inner_sweep_head_counts,
         top_level_head_counts=top_level_head_counts,
+        module_tp_sizes=module_tp_sizes,
         module_precision_combos=precision_combos,
         context_max_tokens=int(context["max_tokens"]),
         context_large_sequence_min=_optional_int(context.get("large_sequence_min")),
@@ -436,6 +449,11 @@ def get_mla_module_sweep_spec(backend: str | None = None) -> MLAModuleSweepSpec:
         generation_large_sequence_min=_optional_int(generation.get("large_sequence_min")),
         generation_large_sequence_max_batch_size=_optional_int(generation.get("large_sequence_max_batch_size")),
         generation_large_cache_tokens=_optional_int(generation.get("large_cache_tokens")),
+        context_prefix_lengths=_optional_int_list(
+            context.get("prefix_lengths"),
+            field_name="mla_module.context.prefix_lengths",
+            default=[0],
+        ),
     )
 
 
@@ -1480,6 +1498,10 @@ _DSV4_MODULE_SEQ_LENGTHS = _as_int_list(
     _DSV4_CONFIG["module_sequence_lengths"],
     field_name="dsv4.module_sequence_lengths",
 )
+_DSV4_MODULE_PAST_KV_LIST = _as_int_list(
+    _DSV4_CONFIG["module_past_kv_lengths"],
+    field_name="dsv4.module_past_kv_lengths",
+)
 _DSV4_MODULE_TP_SIZES = _as_int_list(_DSV4_CONFIG["module_tp_sizes"], field_name="dsv4.module_tp_sizes")
 _DSV4_SPARSE_BS_LIST = _as_int_list(_DSV4_CONFIG["sparse_batch_sizes"], field_name="dsv4.sparse_batch_sizes")
 _DSV4_SPARSE_ISL_LIST = _as_int_list(
@@ -1503,6 +1525,11 @@ _DSV4_SPARSE_TP_LIST_INDEXER = _as_int_list(
 )
 
 
+def is_dsv4_attention_model(model_name: str) -> bool:
+    """Return True for DeepSeek-V4 Flash/Pro models using the DSV4 attention collectors."""
+    return model_name in _DSV4_SUPPORTED_MODELS
+
+
 def _selected_dsv4_models() -> tuple[str, ...]:
     """Apply collect.py's model-path filter to DSV4 case generation."""
     filt = _get_model_path_filter()
@@ -1513,7 +1540,24 @@ def _selected_dsv4_models() -> tuple[str, ...]:
     return ()
 
 
-def _dsv4_module_precision_combos(phase: str):
+def _has_native_fp4_experts() -> bool:
+    """True when the device has native FP4 tensor cores (Blackwell SM100+)."""
+    try:
+        import torch as _t
+
+        if not _t.cuda.is_available():
+            return False
+        return _t.cuda.get_device_capability(0)[0] >= 10
+    except Exception:
+        return False
+
+
+def _dsv4_module_needs_native_fp4(model_path: str) -> bool:
+    """Return True for native DeepSeek-V4 checkpoints with FP4 routed experts."""
+    return model_path.startswith("deepseek-ai/")
+
+
+def _dsv4_module_precision_combos(phase: str, model_path: str):
     """``(compute_dtype, kv_cache_dtype, gemm_type)`` triples.
 
     DeepseekV4ForCausalLM rejects bfloat16 KV cache (asserts at load time),
@@ -1521,12 +1565,43 @@ def _dsv4_module_precision_combos(phase: str):
       * ``bfloat16``  — projections through cuBLASLt nvjet kernels
       * ``fp8_block`` — fp8 block-quantised weights → DeepGEMM
                         ``sm90_fp8_gemm_1d2d_impl`` (matches production)
+
+    ``fp8_block`` is omitted on pre-Blackwell parts only for native
+    ``deepseek-ai/*`` checkpoints; ``sgl-project/*-FP8`` checkpoints are
+    already converted for Hopper-side FP8 collection.
     """
     del phase
-    return [
-        ("bfloat16", "fp8", "bfloat16"),
-        ("bfloat16", "fp8", "fp8_block"),
-    ]
+    combos = [("bfloat16", "fp8", "bfloat16")]
+    if not _dsv4_module_needs_native_fp4(model_path) or _has_native_fp4_experts():
+        combos.append(("bfloat16", "fp8", "fp8_block"))
+    else:
+        print(
+            "[dsv4-test-cases] device lacks native FP4 experts (pre-Blackwell); omitting fp8_block from gemm_type sweep"
+        )
+    return combos
+
+
+def _dsv4_module_is_valid_shape(mode: str, bs: int, sl: int, past_kv: int = 0) -> bool:
+    """Return whether a DeepSeek-V4 full-module sample fits scheduler/model limits."""
+    if bs <= 0 or sl <= 0 or past_kv < 0:
+        return False
+    if mode == "context":
+        return True
+    if mode == "generation":
+        if bs * sl > 1024 * 1024:
+            return False
+        if sl >= 524288 and bs > 1:
+            return False
+        if sl >= 262144 and bs > 2:
+            return False
+        if sl >= 131072 and bs > 4:
+            return False
+        if sl >= 65536 and bs > 8:
+            return False
+        if sl >= 32768 and bs > 16:
+            return False
+        return not (sl >= 8192 and bs > 64)
+    raise ValueError(f"unsupported DeepSeek-V4 mode: {mode}")
 
 
 def _dsv4_module_filter_pairs(mode: str, batch_sizes, seq_lens):
@@ -1539,28 +1614,11 @@ def _dsv4_module_filter_pairs(mode: str, batch_sizes, seq_lens):
         sl≥32768→bs≤16, sl≥65536→bs≤8, sl≥131072→bs≤4, sl≥262144→bs≤2,
         sl≥524288→bs==1).  Ensures bs=1 is always allowed at every sl.
     """
-    is_context = mode == "context"
     pairs = []
     for bs in batch_sizes:
         for sl in seq_lens:
-            if is_context:
-                if bs * sl > 8192:
-                    continue
-            else:
-                if bs * sl > 1024 * 1024:
-                    continue
-                if sl >= 524288 and bs > 1:
-                    continue
-                if sl >= 262144 and bs > 2:
-                    continue
-                if sl >= 131072 and bs > 4:
-                    continue
-                if sl >= 65536 and bs > 8:
-                    continue
-                if sl >= 32768 and bs > 16:
-                    continue
-                if sl >= 8192 and bs > 64:
-                    continue
+            if not _dsv4_module_is_valid_shape(mode, bs, sl):
+                continue
             pairs.append((bs, sl))
     return pairs
 
@@ -1587,7 +1645,7 @@ def _build_dsv4_module_test_cases(mode: str, attn_kinds=DSV4_ATTN_KINDS):
     cases: list[list] = []
     for model_path in _selected_dsv4_models():
         for attn_kind in attn_kinds:
-            for compute_dtype, kv_dtype, gemm_type in _dsv4_module_precision_combos(mode):
+            for compute_dtype, kv_dtype, gemm_type in _dsv4_module_precision_combos(mode, model_path):
                 for tp_size in _DSV4_MODULE_TP_SIZES:
                     for bs in bs_set:
                         cases.append(
@@ -1698,6 +1756,7 @@ _DSV4_FLASH_MODEL_PATH = _DSV4_DEFAULT_MODELS[0]
 DSV4_FLASH_ATTN_KINDS = DSV4_ATTN_KINDS
 _DSV4_FLASH_MODULE_BATCH_SIZES = _DSV4_MODULE_BATCH_SIZES
 _DSV4_FLASH_MODULE_SEQ_LENGTHS = _DSV4_MODULE_SEQ_LENGTHS
+_DSV4_FLASH_MODULE_PAST_KV_LIST = _DSV4_MODULE_PAST_KV_LIST
 _DSV4_FLASH_MODULE_TP_SIZES = _DSV4_MODULE_TP_SIZES
 _DSV4_FLASH_SPARSE_BS_LIST = _DSV4_SPARSE_BS_LIST
 _DSV4_FLASH_SPARSE_ISL_LIST = _DSV4_SPARSE_ISL_LIST

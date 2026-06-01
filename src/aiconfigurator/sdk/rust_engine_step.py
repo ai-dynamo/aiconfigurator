@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import copy
 import ctypes
+import hashlib
 import json
 import math
 import os
 import platform
 import shutil
 import subprocess
+import tempfile
+import uuid
 from functools import cache
 from importlib import resources as pkg_resources
 from pathlib import Path
@@ -21,6 +24,17 @@ from aiconfigurator.sdk.config import RuntimeConfig
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
 RUST_CORE_LIB_ENV = "AICONFIGURATOR_RUST_CORE_LIB"
 RUST_CORE_AUTOBUILD_ENV = "AICONFIGURATOR_RUST_CORE_AUTOBUILD"
+RUST_SYSTEMS_SOURCE_ENV = "AICONFIGURATOR_RUST_SYSTEMS_SOURCE_PATH"
+
+_RUST_VERSION_PERF_FILES = (
+    "gemm_perf.txt",
+    "context_attention_perf.txt",
+    "generation_attention_perf.txt",
+    "custom_allreduce_perf.txt",
+    "moe_perf.txt",
+    "context_mla_perf.txt",
+    "generation_mla_perf.txt",
+)
 
 
 class RustCoreUnavailableError(RuntimeError):
@@ -35,7 +49,7 @@ class RustEngineStepEstimator:
     """ctypes wrapper over the Rust `aiconfigurator-core` FPM estimator."""
 
     def __init__(self, config: dict[str, Any], *, autobuild: bool | None = None) -> None:
-        _configure_default_data_roots()
+        _configure_default_data_roots(config)
         self._lib = _load_library(bool(autobuild) or _truthy(os.environ.get(RUST_CORE_AUTOBUILD_ENV)))
         self._handle = ctypes.c_void_p()
         config_json = _json_bytes(config)
@@ -53,11 +67,281 @@ class RustEngineStepEstimator:
         _raise_for_error(self._lib, err)
         return float(out_ms.value)
 
+    # TODO(remove-after-rust-migration): parity check/benchmark-only cache reset.
+    def clear_runtime_caches(self) -> None:
+        if not self._lib.__dict__.get("_aic_engine_step_estimator_clear_runtime_caches_available", False):
+            raise RustCoreUnavailableError(
+                "Rust core shared library does not expose runtime cache reset. "
+                "Build a newer aiconfigurator-core shared library."
+            )
+        err = self._lib.aic_engine_step_estimator_clear_runtime_caches(self._handle)
+        _raise_for_error(self._lib, err)
+
     def close(self) -> None:
+        """API: `model.close() -> None`.
+
+        Description: release the underlying Rust forward-pass perf model handle.
+        """
         handle = getattr(self, "_handle", None)
         if handle is None or not handle.value:
             return
         self._lib.aic_engine_step_estimator_free(handle)
+        self._handle = ctypes.c_void_p()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+class RustForwardPassPerfModel:
+    """ctypes wrapper over the tuned/fallback Rust forward-pass perf model.
+
+    This wrapper is forward-pass-level only. It does not model TTFT, ITL, SLA,
+    queueing, or engine limits. `estimate_forward_pass_time_ms()` takes one
+    iteration as a list of FPM dictionaries, one per attention-DP rank. Single
+    rank callers may pass either one FPM dictionary or a one-element list.
+
+    The Rust model infers the workload kind from each iteration's scheduled FPM
+    fields:
+
+    * prefill: scheduled prefill tokens and no scheduled decode work, using
+      `[sum_prefill_tokens]`
+    * decode: scheduled decode work and no scheduled prefill tokens, using
+      `[num_decode_requests, sum_decode_kv_tokens]`
+    * mixed/agg: both scheduled prefill and decode work, using
+      `[sum_prefill_tokens, sum_decode_kv_tokens]`
+    * empty: no scheduled prefill or decode work, estimates `0.0` and is not
+      used for tuning
+
+    Queued request fields are accepted for schema compatibility but ignored by
+    this AIC forward-pass model. `estimate_forward_pass_time_ms()` treats FPM as
+    a workload descriptor: scheduled request fields are used, while `wall_time`
+    is ignored. `tune_with_fpms()` treats FPM as observed telemetry: scheduled
+    request fields are used as features and positive `wall_time` is the latency
+    target. For tuning, `tune_with_fpms()` accepts multiple iterations as
+    `[[iter0_rank0, iter0_rank1], [iter1_rank0, iter1_rank1]]`. Each iteration
+    is merged using max-rank load features and max positive `wall_time` across
+    ranks.
+
+    Correction grids use fixed constructor-time ranges from `options`:
+    `max_num_tokens` bounds `sum_prefill_tokens` and defaults to `8192`,
+    `max_batch_size` bounds `num_decode_requests` and defaults to `512`, and
+    `max_kv_tokens` bounds `sum_decode_kv_tokens` and defaults to `2000000`.
+    """
+
+    def __init__(self, handle: ctypes.c_void_p, lib: ctypes.CDLL) -> None:
+        self._handle = handle
+        self._lib = lib
+
+    @classmethod
+    def from_native(
+        cls,
+        config: dict[str, Any],
+        options: dict[str, Any] | None = None,
+        *,
+        autobuild: bool | None = None,
+    ) -> RustForwardPassPerfModel:
+        """API: `RustForwardPassPerfModel.from_native(config, options=None, *, autobuild=None)`.
+
+        Description: create a strict native AIC forward-pass model.
+
+        This constructor raises `RustCoreError` if the config is unsupported by
+        the native estimator. Use `best_available()` when unsupported configs
+        should fall back to the learned regression model.
+        """
+        return cls._create(
+            "aic_forward_pass_perf_model_from_native",
+            config=config,
+            options=options,
+            autobuild=autobuild,
+        )
+
+    @classmethod
+    def best_available(
+        cls,
+        config: dict[str, Any],
+        options: dict[str, Any] | None = None,
+        *,
+        autobuild: bool | None = None,
+    ) -> RustForwardPassPerfModel:
+        """API: `RustForwardPassPerfModel.best_available(config, options=None, *, autobuild=None)`.
+
+        Description: create a native model when possible, otherwise fall back to
+        regression.
+
+        Fallback reason is available from `diagnostics()["last_warning"]`.
+        """
+        return cls._create(
+            "aic_forward_pass_perf_model_best_available",
+            config=config,
+            options=options,
+            autobuild=autobuild,
+        )
+
+    @classmethod
+    def from_regression(
+        cls,
+        options: dict[str, Any] | None = None,
+        *,
+        autobuild: bool | None = None,
+    ) -> RustForwardPassPerfModel:
+        """API: `RustForwardPassPerfModel.from_regression(options=None, *, autobuild=None)`.
+
+        Description: create a regression-only forward-pass model.
+
+        Regression models return `None` for non-empty estimates until enough
+        samples have been provided for the inferred workload kind through
+        `tune_with_fpms()`. Correction factor getters return `None` in this
+        mode.
+        """
+        return cls._create(
+            "aic_forward_pass_perf_model_from_regression",
+            options=options,
+            autobuild=autobuild,
+        )
+
+    @classmethod
+    def _create(
+        cls,
+        function_name: str,
+        *,
+        config: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+        autobuild: bool | None = None,
+    ) -> RustForwardPassPerfModel:
+        _configure_default_data_roots()
+        lib = _load_library(bool(autobuild) or _truthy(os.environ.get(RUST_CORE_AUTOBUILD_ENV)))
+        _bind_forward_pass_perf_model_api(lib)
+        handle = ctypes.c_void_p()
+        constructor = getattr(lib, function_name)
+        if config is None:
+            err = constructor(_optional_json_bytes(options), ctypes.byref(handle))
+        else:
+            err = constructor(_json_bytes(config), _optional_json_bytes(options), ctypes.byref(handle))
+        _raise_for_error(lib, err)
+        return cls(handle, lib)
+
+    def estimate_forward_pass_time_ms(self, metrics: dict[str, Any] | list[dict[str, Any]]) -> float | None:
+        """API: `model.estimate_forward_pass_time_ms(metrics) -> float | None`.
+
+        Description: estimate one forward-pass iteration in milliseconds.
+
+        `metrics` represents one iteration. Pass a list of FPM dictionaries for
+        attention-DP ranks, or a single FPM dictionary for a single-rank
+        convenience form. The inferred workload kind uses only `scheduled_requests`;
+        queued fields and `wall_time` are ignored for estimation.
+
+        Native models return an estimate immediately, multiplied by the
+        correction factor for the matching workload region. Inferred workload
+        kinds with fewer than `min_observations` total samples and empty regions
+        use the default factor `1.0`. Queries outside the configured correction
+        bounds in `options` also use factor `1.0`. Regression models return
+        `None` until the matching inferred workload kind has enough tuned
+        observations. Empty scheduled work returns `0.0`.
+        """
+        out_ms = ctypes.c_double()
+        out_has_value = ctypes.c_bool()
+        err = self._lib.aic_forward_pass_perf_model_estimate_forward_pass_time_ms(
+            self._handle,
+            _json_bytes(metrics),
+            ctypes.byref(out_ms),
+            ctypes.byref(out_has_value),
+        )
+        _raise_for_error(self._lib, err)
+        return float(out_ms.value) if out_has_value.value else None
+
+    def tune_with_fpms(self, iterations: dict[str, Any] | list[Any]) -> None:
+        """API: `model.tune_with_fpms(iterations) -> None`.
+
+        Description: tune the model with one or more observed FPM iterations.
+
+        The canonical input is a nested list:
+        `[[iter0_rank0, iter0_rank1], [iter1_rank0, iter1_rank1]]`.
+        Each inner list is one iteration's per-attention-DP-rank FPMs. For
+        convenience, a single FPM dictionary is normalized to `[[fpm]]`, and a
+        list of FPM dictionaries is normalized to one iteration.
+
+        Tuning infers the workload kind from scheduled request fields. It
+        ignores empty iterations and iterations with no positive finite
+        `wall_time`. For native models, each observation updates only its
+        matching correction region; those regions are used after the inferred
+        workload kind has enough total samples. Native correction ignores
+        observations outside the configured correction bounds. For multi-rank
+        input, one observation is recorded using max-rank load features and max
+        positive `wall_time` across ranks.
+        """
+        err = self._lib.aic_forward_pass_perf_model_tune_with_fpms(
+            self._handle,
+            _json_bytes(_normalize_tuning_iterations(iterations)),
+        )
+        _raise_for_error(self._lib, err)
+
+    def diagnostics(self) -> dict[str, Any]:
+        """API: `model.diagnostics() -> dict[str, Any]`.
+
+        Description: return source, readiness, retained sample count, and
+        fallback warning.
+        """
+        out_json = ctypes.c_void_p()
+        err = self._lib.aic_forward_pass_perf_model_diagnostics_json(
+            self._handle,
+            ctypes.byref(out_json),
+        )
+        _raise_for_error(self._lib, err)
+        try:
+            message = ctypes.cast(out_json, ctypes.c_char_p).value
+            return json.loads((message or b"{}").decode("utf-8", errors="replace"))
+        finally:
+            self._lib.aic_engine_step_string_free(out_json)
+
+    def get_min_correction_factor(self) -> float | None:
+        """API: `model.get_min_correction_factor() -> float | None`.
+
+        Description: return the smallest ready native correction factor.
+
+        Regression-only models return `None`. Native models return `None` until
+        at least one correction bucket has enough observations.
+        """
+        return self._get_correction_factor("aic_forward_pass_perf_model_min_correction_factor")
+
+    def get_max_correction_factor(self) -> float | None:
+        """API: `model.get_max_correction_factor() -> float | None`.
+
+        Description: return the largest ready native correction factor.
+
+        Regression-only models return `None`. Native models return `None` until
+        at least one correction bucket has enough observations.
+        """
+        return self._get_correction_factor("aic_forward_pass_perf_model_max_correction_factor")
+
+    def get_avg_correction_factor(self) -> float | None:
+        """API: `model.get_avg_correction_factor() -> float | None`.
+
+        Description: return the average ready native correction factor.
+
+        Regression-only models return `None`. Native models return `None` until
+        at least one correction bucket has enough observations.
+        """
+        return self._get_correction_factor("aic_forward_pass_perf_model_avg_correction_factor")
+
+    def _get_correction_factor(self, function_name: str) -> float | None:
+        out_value = ctypes.c_double()
+        out_has_value = ctypes.c_bool()
+        err = getattr(self._lib, function_name)(
+            self._handle,
+            ctypes.byref(out_value),
+            ctypes.byref(out_has_value),
+        )
+        _raise_for_error(self._lib, err)
+        return float(out_value.value) if out_has_value.value else None
+
+    def close(self) -> None:
+        handle = getattr(self, "_handle", None)
+        if handle is None or not handle.value:
+            return
+        self._lib.aic_forward_pass_perf_model_free(handle)
         self._handle = ctypes.c_void_p()
 
     def __del__(self) -> None:
@@ -251,9 +535,12 @@ def _decode_metrics(*, batch_size: int, context_length: int) -> dict[str, Any]:
 
 @cache
 def _load_library(autobuild: bool) -> ctypes.CDLL:
-    library_path = _find_library(include_debug=not autobuild)
-    if library_path is None and autobuild:
+    if autobuild and not os.environ.get(RUST_CORE_LIB_ENV):
         library_path = _build_rust_core()
+    else:
+        library_path = _find_library(include_debug=not autobuild)
+        if library_path is None and autobuild:
+            library_path = _build_rust_core()
     if library_path is None:
         raise RustCoreUnavailableError(
             "Rust core shared library not found. Build it with "
@@ -270,11 +557,85 @@ def _load_library(autobuild: bool) -> ctypes.CDLL:
         ctypes.POINTER(ctypes.c_double),
     ]
     lib.aic_engine_step_forward_pass_time_ms.restype = ctypes.c_void_p
+    try:
+        lib.aic_engine_step_estimator_clear_runtime_caches.argtypes = [ctypes.c_void_p]
+        lib.aic_engine_step_estimator_clear_runtime_caches.restype = ctypes.c_void_p
+        lib.__dict__["_aic_engine_step_estimator_clear_runtime_caches_available"] = True
+    except AttributeError:
+        lib.__dict__["_aic_engine_step_estimator_clear_runtime_caches_available"] = False
     lib.aic_engine_step_estimator_free.argtypes = [ctypes.c_void_p]
     lib.aic_engine_step_estimator_free.restype = None
     lib.aic_engine_step_string_free.argtypes = [ctypes.c_void_p]
     lib.aic_engine_step_string_free.restype = None
     return lib
+
+
+def _bind_forward_pass_perf_model_api(lib: ctypes.CDLL) -> None:
+    if lib.__dict__.get("_aic_forward_pass_perf_model_api_bound", False):
+        return
+
+    try:
+        _bind_forward_pass_perf_model_symbols(lib)
+    except AttributeError as exc:
+        raise RustCoreUnavailableError(
+            "Rust core shared library does not expose the ForwardPassPerfModel API. "
+            "Build a newer aiconfigurator-core shared library with "
+            "`cargo build --release --manifest-path rust/aiconfigurator-core/Cargo.toml`, "
+            f"set {RUST_CORE_LIB_ENV} to that library, or set {RUST_CORE_AUTOBUILD_ENV}=1."
+        ) from exc
+
+    lib.__dict__["_aic_forward_pass_perf_model_api_bound"] = True
+
+
+def _bind_forward_pass_perf_model_symbols(lib: ctypes.CDLL) -> None:
+    lib.aic_forward_pass_perf_model_from_native.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    lib.aic_forward_pass_perf_model_from_native.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_best_available.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    lib.aic_forward_pass_perf_model_best_available.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_from_regression.argtypes = [
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    lib.aic_forward_pass_perf_model_from_regression.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_estimate_forward_pass_time_ms.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_bool),
+    ]
+    lib.aic_forward_pass_perf_model_estimate_forward_pass_time_ms.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_tune_with_fpms.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+    ]
+    lib.aic_forward_pass_perf_model_tune_with_fpms.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_diagnostics_json.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    lib.aic_forward_pass_perf_model_diagnostics_json.restype = ctypes.c_void_p
+    for name in [
+        "aic_forward_pass_perf_model_min_correction_factor",
+        "aic_forward_pass_perf_model_max_correction_factor",
+        "aic_forward_pass_perf_model_avg_correction_factor",
+    ]:
+        function = getattr(lib, name)
+        function.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_bool),
+        ]
+        function.restype = ctypes.c_void_p
+    lib.aic_forward_pass_perf_model_free.argtypes = [ctypes.c_void_p]
+    lib.aic_forward_pass_perf_model_free.restype = None
 
 
 def _find_library(*, include_debug: bool = True) -> Path | None:
@@ -288,10 +649,7 @@ def _find_library(*, include_debug: bool = True) -> Path | None:
     crate_root = _crate_root()
     if crate_root is None:
         return None
-    lib_name = _library_name()
-    candidates = [crate_root / "target" / "release" / lib_name]
-    if include_debug:
-        candidates.append(crate_root / "target" / "debug" / lib_name)
+    candidates = _library_candidates(crate_root, include_debug=include_debug)
     return next((path for path in candidates if path.is_file()), None)
 
 
@@ -306,10 +664,36 @@ def _build_rust_core() -> Path:
         ["cargo", "build", "--release", "--manifest-path", str(crate_root / "Cargo.toml")],
         check=True,
     )
-    library_path = crate_root / "target" / "release" / _library_name()
-    if not library_path.is_file():
-        raise RustCoreUnavailableError(f"cargo build completed but did not produce {library_path}")
-    return library_path
+    for library_path in _library_candidates(crate_root, include_debug=False):
+        if library_path.is_file():
+            return library_path
+    expected = ", ".join(str(path) for path in _library_candidates(crate_root, include_debug=False))
+    raise RustCoreUnavailableError(f"cargo build completed but did not produce any expected library: {expected}")
+
+
+def _library_candidates(crate_root: Path, *, include_debug: bool = True) -> list[Path]:
+    lib_name = _library_name()
+    target_roots = _cargo_target_roots(crate_root)
+    profiles = ["release"]
+    if include_debug:
+        profiles.append("debug")
+    return [target_root / "target" / profile / lib_name for target_root in target_roots for profile in profiles]
+
+
+def _cargo_target_roots(crate_root: Path) -> list[Path]:
+    roots: list[Path] = []
+    for ancestor in crate_root.parents:
+        cargo_toml = ancestor / "Cargo.toml"
+        if not cargo_toml.is_file():
+            continue
+        try:
+            if "[workspace]" in cargo_toml.read_text(encoding="utf-8"):
+                roots.append(ancestor)
+        except OSError:
+            pass
+        break
+    roots.append(crate_root)
+    return roots
 
 
 def _crate_root() -> Path | None:
@@ -345,8 +729,24 @@ def _raise_for_error(lib: ctypes.CDLL, error_ptr: int | None) -> None:
         lib.aic_engine_step_string_free(error_ptr)
 
 
-def _json_bytes(value: dict[str, Any]) -> bytes:
+def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def _optional_json_bytes(value: dict[str, Any] | None) -> bytes | None:
+    if value is None:
+        return None
+    return _json_bytes(value)
+
+
+def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list[Any]:
+    if isinstance(iterations, dict):
+        return [[iterations]]
+    if not iterations:
+        return []
+    if all(isinstance(item, dict) for item in iterations):
+        return [iterations]
+    return iterations
 
 
 def _backend_name(value: Any) -> str:
@@ -397,15 +797,157 @@ def _moe_quant_to_dtype(value: Any) -> str | None:
     return _quant_to_dtype(value)
 
 
-def _configure_default_data_roots() -> None:
-    if "AICONFIGURATOR_SYSTEMS_PATH" not in os.environ:
-        systems_root = _python_sdk_systems_root() or Path(str(pkg_resources.files("aiconfigurator") / "systems"))
-        if systems_root.exists():
-            os.environ["AICONFIGURATOR_SYSTEMS_PATH"] = str(systems_root)
+def _configure_default_data_roots(config: dict[str, Any] | None = None) -> None:
+    systems_root = _configured_systems_source_root()
+    if systems_root and systems_root.exists():
+        rust_systems_root = _ensure_rust_csv_systems_root(systems_root, config)
+        os.environ["AICONFIGURATOR_SYSTEMS_PATH"] = str(rust_systems_root)
+        if rust_systems_root != systems_root:
+            os.environ[RUST_SYSTEMS_SOURCE_ENV] = str(systems_root)
     if "AICONFIGURATOR_MODEL_CONFIGS_PATH" not in os.environ:
         model_configs_root = Path(str(pkg_resources.files("aiconfigurator") / "model_configs"))
         if model_configs_root.exists():
             os.environ["AICONFIGURATOR_MODEL_CONFIGS_PATH"] = str(model_configs_root)
+
+
+def _configured_systems_source_root() -> Path | None:
+    explicit = os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
+    if explicit:
+        explicit_path = Path(explicit)
+        source_override = os.environ.get(RUST_SYSTEMS_SOURCE_ENV)
+        if source_override and _is_rust_overlay_root(explicit_path):
+            return Path(source_override)
+        return explicit_path
+    source_override = os.environ.get(RUST_SYSTEMS_SOURCE_ENV)
+    if source_override:
+        return Path(source_override)
+    return _python_sdk_systems_root() or Path(str(pkg_resources.files("aiconfigurator") / "systems"))
+
+
+def _ensure_rust_csv_systems_root(systems_root: Path, config: dict[str, Any] | None) -> Path:
+    required_paths = _rust_perf_paths_for_config(systems_root, config)
+    if not required_paths:
+        return systems_root
+
+    needs_overlay = any(
+        not (systems_root / path).is_file() and (systems_root / path).with_suffix(".parquet").is_file()
+        for path in required_paths
+    )
+    if not needs_overlay:
+        return systems_root
+
+    source_key = hashlib.sha256(str(systems_root.resolve()).encode("utf-8")).hexdigest()[:16]
+    overlay_root = _rust_overlay_base() / source_key
+    _copy_system_file_for_rust_overlay(systems_root, overlay_root, config)
+    for path in required_paths:
+        _materialize_rust_perf_csv(systems_root, overlay_root, path)
+    return overlay_root
+
+
+def _rust_overlay_base() -> Path:
+    return Path(tempfile.gettempdir()) / "aiconfigurator-rust-perf-csv"
+
+
+def _is_rust_overlay_root(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(_rust_overlay_base().resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _rust_perf_paths_for_config(systems_root: Path, config: dict[str, Any] | None) -> list[Path]:
+    if not config:
+        return []
+    system_name = str(config.get("system_name") or "").strip()
+    backend = str(config.get("backend") or "").strip()
+    if not system_name or not backend:
+        return []
+
+    system_file = systems_root / f"{system_name}.yaml"
+    if not system_file.is_file():
+        return []
+
+    try:
+        import yaml
+
+        system_spec = yaml.safe_load(system_file.read_text()) or {}
+    except Exception:
+        return []
+
+    data_dir = system_spec.get("data_dir")
+    if not data_dir:
+        return []
+
+    backend_root = systems_root / data_dir / backend
+    backend_version = config.get("backend_version")
+    if backend_version:
+        version_dirs = [backend_root / str(backend_version)]
+    elif backend_root.is_dir():
+        version_dirs = sorted(path for path in backend_root.iterdir() if path.is_dir())
+    else:
+        version_dirs = []
+
+    paths: list[Path] = []
+    for version_dir in version_dirs:
+        version_rel = version_dir.relative_to(systems_root)
+        paths.extend(version_rel / name for name in _RUST_VERSION_PERF_FILES)
+
+    nccl_version = (system_spec.get("misc") or {}).get("nccl_version")
+    if nccl_version:
+        paths.append(Path(data_dir) / "nccl" / str(nccl_version) / "nccl_perf.txt")
+    return paths
+
+
+def _copy_system_file_for_rust_overlay(systems_root: Path, overlay_root: Path, config: dict[str, Any] | None) -> None:
+    if not config:
+        return
+    system_name = str(config.get("system_name") or "").strip()
+    if not system_name:
+        return
+    source = systems_root / f"{system_name}.yaml"
+    target = overlay_root / f"{system_name}.yaml"
+    if source.is_file():
+        _copy_if_stale(source, target)
+
+
+def _materialize_rust_perf_csv(systems_root: Path, overlay_root: Path, relative_path: Path) -> None:
+    source_txt = systems_root / relative_path
+    source_parquet = source_txt.with_suffix(".parquet")
+    target_txt = overlay_root / relative_path
+    if source_txt.is_file():
+        _copy_if_stale(source_txt, target_txt)
+        return
+    if not source_parquet.is_file():
+        target_txt.parent.mkdir(parents=True, exist_ok=True)
+        return
+    if target_txt.is_file() and target_txt.stat().st_mtime_ns >= source_parquet.stat().st_mtime_ns:
+        return
+
+    try:
+        import pyarrow.csv as pc
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise RustCoreUnavailableError(
+            "Rust engine-step estimator currently consumes CSV perf files. "
+            "Materializing parquet perf data for Rust requires pyarrow."
+        ) from exc
+
+    target_txt.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target_txt.with_name(f".{target_txt.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        pc.write_csv(pq.read_table(source_parquet), tmp_path)
+        os.replace(tmp_path, target_txt)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
+def _copy_if_stale(source: Path, target: Path) -> None:
+    if target.is_file() and target.stat().st_mtime_ns >= source.stat().st_mtime_ns:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
 
 
 def _python_sdk_systems_root() -> Path | None:

@@ -11,11 +11,13 @@ from aiconfigurator.sdk.backends.sglang_backend import SGLANGBackend
 from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.models import get_model
+from aiconfigurator.sdk.operations.dsv4 import (
+    _deep_merge_dsv4_dicts,
+    _dsv4_robust_3d_lookup,
+)
 from aiconfigurator.sdk.perf_database import (
     LoadedOpData,
     PerfDataNotAvailableError,
-    _deep_merge_dsv4_dicts,
-    _dsv4_robust_3d_lookup,
     load_mhc_module_data,
 )
 

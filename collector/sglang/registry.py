@@ -68,6 +68,13 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.GENERATION_ATTENTION,
     ),
     OpEntry(
+        op="encoder_attention",
+        module="collector.sglang.collect_attn_encoder",
+        get_func="get_encoder_attention_test_cases",
+        run_func="run_encoder_attention_torch",
+        perf_filename=PerfFile.ENCODER_ATTENTION,
+    ),
+    OpEntry(
         op="dsa_context_module",
         module="collector.sglang.collect_mla_module",
         get_func="get_dsa_context_module_test_cases",
@@ -110,7 +117,10 @@ REGISTRY: list[OpEntry] = [
         run_func="run_dsv4_attn_worker",
         perf_filename=PerfFile.DSV4_HCA_GENERATION_MODULE,
     ),
-    # DeepSeek-V4 sparse-kernel data (kernel-level past_kv Δ correction)
+    # DeepSeek-V4 currently models CSA/HCA through full attention-module data
+    # above.  Keep these kernel-level collectors as supporting data for future
+    # prefix/past_kv correction and residual analysis; they are not the primary
+    # modeling path.
     OpEntry(
         op="dsv4_paged_mqa_logits_module",
         module="collector.sglang.deepseekv4_sparse_modules",
