@@ -15,6 +15,7 @@ import os
 from types import SimpleNamespace
 
 import torch
+from packaging.version import InvalidVersion, Version
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
@@ -26,6 +27,18 @@ from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.vllm.utils import setup_distributed, with_exit_stack
 
 FP8_BLOCK_SHAPE = (128, 128)
+
+
+def _vllm_version_at_least(min_version: str) -> bool:
+    try:
+        return Version(vllm_version.split("+", 1)[0]) >= Version(min_version)
+    except InvalidVersion:
+        return False
+
+
+def _static_fp8_cutlass_available(sm: int) -> bool:
+    return not (90 <= sm < 100 and _vllm_version_at_least("0.22.0"))
+
 
 # NVFP4 GEMM support (Blackwell SM100+).
 # Uses CompressedTensors W4A4 scheme -> auto-selects FLASHINFER_CUTLASS by default.
@@ -54,7 +67,7 @@ def get_gemm_test_cases():
     sm = get_sm_version()
 
     gemm_list = ["bfloat16"]
-    if sm > 86:
+    if sm > 86 and _static_fp8_cutlass_available(sm):
         gemm_list += ["fp8", "fp8_static"]
     # Blockwise FP8 kernels are available on Hopper/Blackwell+
     if sm >= 90:
@@ -161,6 +174,9 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
             # transpose to (1,128) for fp8 cutlass limit
             gemm.weight = torch.nn.Parameter(new_weight)
             # print("after fix, weight stride:", gemm.weight.data.stride())
+            quant_method = getattr(gemm, "quant_method", None)
+            if quant_method is not None and hasattr(quant_method, "process_weights_after_loading"):
+                quant_method.process_weights_after_loading(gemm)
         elif gemm_type == "fp8_block":
             block_n, block_k = FP8_BLOCK_SHAPE
             with torch.no_grad():
