@@ -122,80 +122,21 @@ pub type Grid3<T> = BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, T>>>;
 
 /// 3-D interpolation done as bilinear over (`y`, `z`) followed by linear
 /// over `x`. Mirrors `interpolation.interp_2d_1d` with `method="bilinear"`,
-/// which is what the GEMM/attention queries use as their fallback path.
-///
-/// Each axis is looked up independently per outer slice — the inner axes
-/// may differ between adjacent `x` slices (sparse grids are supported).
+/// which is what the GEMM/attention/MLA/DSv4 queries use as their fallback
+/// path. Now a thin wrapper over [`interp_2d_1d_grid_extrapolate_inner`]
+/// because the two functions have converged: both extrapolate on all axes
+/// (`inner_only=false`), and the buggy version of this function that took
+/// z-axis bracket keys only from `left_row` raised
+/// `"missing point at (x,y,z)"` whenever the perf grid was sparse across
+/// y-rows (e.g. the attention/GEMM parquet shipped by b200_sxm/vllm has
+/// `batch=1024` recorded at `seq=256` but not at `seq=512`, so a query at
+/// `seq` between 256 and 512 with `batch=1024` looked the corner up in the
+/// shorter `seq=512` row and crashed). The intersect-then-bracket pattern
+/// in [`interp_2d_1d_grid_extrapolate_inner`] mirrors Python's load-time
+/// `extrapolate_data_grid` densification, so call sites get the same
+/// result Python would produce after pre-fill.
 pub fn interp_2d_1d_grid(grid: &Grid3<f64>, x: u32, y: u32, z: u32) -> Result<f64, AicError> {
-    let x_keys: Vec<u32> = grid.keys().copied().collect();
-    // `inner_only=false`: when a query lands above the axis maximum or below
-    // the minimum, return the boundary pair so `interp_1d` extrapolates
-    // linearly. This mirrors Python's behavior, which pre-extends the table
-    // grid at load time via `interpolation.extrapolate_data_grid` so every
-    // query lands within the (extended) grid. We do the equivalent
-    // extrapolation at query time instead of pre-expanding the table.
-    // For in-grid queries this is identical to the old `inner_only=true`
-    // path — only out-of-grid behavior changes.
-    let (x_left, x_right) = nearest_neighbors(x, &x_keys, false)?;
-
-    let interpolate_yz_at = |slice_key: u32| -> Result<f64, AicError> {
-        let slice = grid
-            .get(&slice_key)
-            .ok_or_else(|| AicError::PerfDatabase(format!("missing slice at x={slice_key}")))?;
-        let y_keys: Vec<u32> = slice.keys().copied().collect();
-        let (y_left, y_right) = nearest_neighbors(y, &y_keys, false)?;
-
-        let left_row = slice.get(&y_left).ok_or_else(|| {
-            AicError::PerfDatabase(format!("missing row at x={slice_key},y={y_left}"))
-        })?;
-        let right_row = slice.get(&y_right).ok_or_else(|| {
-            AicError::PerfDatabase(format!("missing row at x={slice_key},y={y_right}"))
-        })?;
-
-        let z_keys_left: Vec<u32> = left_row.keys().copied().collect();
-        let (z_left, z_right) = nearest_neighbors(z, &z_keys_left, false)?;
-
-        let q00 = *left_row.get(&z_left).ok_or_else(|| missing(slice_key, y_left, z_left))?;
-        let q01 = *left_row.get(&z_right).ok_or_else(|| missing(slice_key, y_left, z_right))?;
-        let q10 = *right_row.get(&z_left).ok_or_else(|| missing(slice_key, y_right, z_left))?;
-        let q11 = *right_row.get(&z_right).ok_or_else(|| missing(slice_key, y_right, z_right))?;
-
-        if y_left == y_right && z_left == z_right {
-            return Ok(q00);
-        }
-        if y_left == y_right {
-            return Ok(interp_1d(z_left as f64, z_right as f64, q00, q01, z as f64));
-        }
-        if z_left == z_right {
-            return Ok(interp_1d(y_left as f64, y_right as f64, q00, q10, y as f64));
-        }
-        Ok(bilinear(
-            y_left as f64,
-            y_right as f64,
-            z_left as f64,
-            z_right as f64,
-            q00,
-            q01,
-            q10,
-            q11,
-            y as f64,
-            z as f64,
-        ))
-    };
-
-    let v_left = interpolate_yz_at(x_left)?;
-    let v_right = interpolate_yz_at(x_right)?;
-
-    if x_left == x_right {
-        return Ok(v_left);
-    }
-    Ok(interp_1d(
-        x_left as f64,
-        x_right as f64,
-        v_left,
-        v_right,
-        x as f64,
-    ))
+    interp_2d_1d_grid_extrapolate_inner(grid, x, y, z)
 }
 
 /// Same as [`interp_2d_1d_grid`] but allows linear extrapolation on the
