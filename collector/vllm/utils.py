@@ -64,6 +64,11 @@ from vllm.distributed.parallel_state import ensure_model_parallel_initialized
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+try:
+    from vllm.v1.kv_cache_interface import KVQuantMode
+except ImportError:
+    KVQuantMode = None  # type: ignore
+
 _COMMON_ATTN_METADATA_PARAMS = set(inspect.signature(CommonAttentionMetadata).parameters)
 
 
@@ -214,12 +219,16 @@ def get_attention_backend(backend_name: AttentionBackendEnum):
 
 def create_standard_kv_cache_spec(vllm_config: VllmConfig, use_fp8_kv_cache: bool = False) -> FullAttentionSpec:
     """Create a FullAttentionSpec from ModelParams only."""
+    kwargs = {}
+    if use_fp8_kv_cache and KVQuantMode is not None and hasattr(KVQuantMode, "FP8_PER_TENSOR"):
+        kwargs["kv_quant_mode"] = KVQuantMode.FP8_PER_TENSOR
     return FullAttentionSpec(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config),
         head_size=vllm_config.model_config.get_head_size(),
         dtype=current_platform.fp8_dtype() if use_fp8_kv_cache else vllm_config.model_config.dtype,
         sliding_window=vllm_config.model_config.get_sliding_window(),
+        **kwargs,
     )
 
 

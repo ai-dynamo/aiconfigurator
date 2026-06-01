@@ -14,6 +14,7 @@ __compat__ = "sglang>=0.5.10rc0"
 import math
 import os
 import random
+from types import SimpleNamespace
 
 import pkg_resources
 import sglang.srt.layers.dp_attention
@@ -113,8 +114,13 @@ class MockModelConfig:
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
         self.v_head_dim = v_head_dim
+        self.head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.scaling = scaling
         self.is_local_attention_model = False
+        self.hf_text_config = SimpleNamespace(
+            num_attention_heads=num_attention_heads,
+            attn_logit_softcapping=None,
+        )
 
     def get_num_kv_heads(self, tp_size: int):
         return 1
@@ -134,6 +140,8 @@ class MockServerArgs:
         self.decode_attention_backend = "fa3"
         self.page_size = page_size
         self.device = "cuda"
+        self.is_embedding = False
+        self.disable_radix_cache = False
         self.disable_chunked_prefix_cache = True
         self.disaggregation_mode = None
         self.flashinfer_mla_disable_ragged = False
@@ -162,6 +170,7 @@ class MockModelRunner:
         self.token_to_kv_pool = None
         self.token_to_kv_pool_allocator = None
         self.attn_backend = None
+        self.tp_size = 1
         self.sliding_window_size = None
         self.is_hybrid = False
         self.hybrid_gdn_config = None

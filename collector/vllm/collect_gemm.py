@@ -50,6 +50,21 @@ _NVFP4_QUANT_ARGS = {
 }
 
 
+def _set_logical_output_size(layer, output_size: int) -> None:
+    quant_method = getattr(layer, "quant_method", None)
+    for candidate in (
+        quant_method,
+        getattr(quant_method, "fp8_linear", None),
+        getattr(quant_method, "kernel", None),
+    ):
+        if (
+            candidate is not None
+            and hasattr(candidate, "logical_output_size")
+            and getattr(candidate, "logical_output_size", None) is None
+        ):
+            candidate.logical_output_size = output_size
+
+
 def get_gemm_test_cases():
     sm = get_sm_version()
 
@@ -201,6 +216,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
                 gemm.input_global_scale.data.fill_(1.0 / in_gscale_val)
             gemm.scheme.process_weights_after_loading(gemm)
 
+        _set_logical_output_size(gemm, n)
         gemm.forward(x)  # dry run to init
 
         return gemm
