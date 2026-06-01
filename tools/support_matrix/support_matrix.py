@@ -336,8 +336,10 @@ def _known_framework_incompatibility_message(
             or "failed to query moe data" in normalized
         ):
             return error_message
-        if backend == common.BackendName.sglang.value and version == "0.5.10":
-            if (
+        if (
+            backend == common.BackendName.sglang.value
+            and version == "0.5.10"
+            and (
                 "unsupported gemm quant mode 'fp8_block'" in normalized
                 or "unsupported moe quant mode 'nvfp4'" in normalized
                 or (
@@ -345,10 +347,13 @@ def _known_framework_incompatibility_message(
                     and "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
                 )
                 or "dsa_context_module_perf.txt" in normalized
-            ):
-                return error_message
-        if backend == common.BackendName.trtllm.value and version == "1.3.0rc10":
-            if (
+            )
+        ):
+            return error_message
+        if (
+            backend == common.BackendName.trtllm.value
+            and version == "1.3.0rc10"
+            and (
                 "unsupported moe quant mode 'fp8_block'" in normalized
                 or ("DeepSeek-V4" in model and "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized)
                 or (
@@ -357,11 +362,15 @@ def _known_framework_incompatibility_message(
                 )
                 or (model == "moonshotai/Kimi-K2.5" and "unsupported moe quant mode 'int4_wo'" in normalized)
                 or "dsa_context_module_perf.txt" in normalized
-            ):
-                return error_message
-        if backend == common.BackendName.vllm.value and version == "0.19.0":
-            if "unsupported moe quant mode 'nvfp4'" in normalized or "dsa_context_module_perf.txt" in normalized:
-                return error_message
+            )
+        ):
+            return error_message
+        if (
+            backend == common.BackendName.vllm.value
+            and version == "0.19.0"
+            and ("unsupported moe quant mode 'nvfp4'" in normalized or "dsa_context_module_perf.txt" in normalized)
+        ):
+            return error_message
 
     if (
         model == "moonshotai/Kimi-K2.5"
@@ -806,6 +815,12 @@ class SupportMatrix:
             yaml_config=yaml_config,
         )
         result = TaskRunner().run(task_config)
+        if result is None:
+            raise RuntimeError(
+                "TaskRunner returned no result for "
+                f"model={model!r}, system={system!r}, backend={backend!r}, "
+                f"version={version!r}, mode={mode!r}"
+            )
         return result.get("pareto_df")
 
     @staticmethod
