@@ -883,6 +883,7 @@ class SupportMatrix:
             "prefix": constraints.prefix,
             "ttft": constraints.ttft,
             "tpot": constraints.tpot,
+            "database_mode": common.DatabaseMode.SILICON.name,
             "engine_step_backend": engine_step_backend,
         }
         if mode == "disagg":
@@ -914,6 +915,12 @@ class SupportMatrix:
             yaml_config=yaml_config,
         )
         result = TaskRunner().run(task_config)
+        if result is None:
+            raise RuntimeError(
+                "TaskRunner returned no result for "
+                f"model={model!r}, system={system!r}, backend={backend!r}, "
+                f"version={version!r}, mode={mode!r}"
+            )
         return result.get("pareto_df")
 
     @staticmethod

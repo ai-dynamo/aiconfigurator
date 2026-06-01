@@ -139,6 +139,34 @@ def test_run_single_test_can_return_row_replay_commands(monkeypatch):
     }
 
 
+def test_run_mode_uses_silicon_database_mode_and_rejects_none_task_result(monkeypatch):
+    captured_kwargs: dict = {}
+
+    class FakeTaskConfig:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    class FakeTaskRunner:
+        def run(self, _task_config):
+            return None
+
+    monkeypatch.setattr(support_matrix_module, "TaskConfig", FakeTaskConfig)
+    monkeypatch.setattr(support_matrix_module, "TaskRunner", FakeTaskRunner)
+
+    with pytest.raises(RuntimeError, match="TaskRunner returned no result"):
+        SupportMatrix._run_mode(
+            mode="agg",
+            model="Qwen/Qwen3-32B",
+            system="a100_sxm",
+            backend="sglang",
+            version="0.5.12",
+            constraints=TestConstraints(total_gpus=8, isl=256, osl=256, prefix=128, ttft=2000.0, tpot=50.0),
+            engine_step_backend=None,
+        )
+
+    assert captured_kwargs["database_mode"] == support_matrix_module.common.DatabaseMode.SILICON.name
+
+
 def test_generate_support_matrix_reports_empty_filter(monkeypatch, capsys):
     class EmptySupportMatrix:
         def __init__(self, **_kwargs):
