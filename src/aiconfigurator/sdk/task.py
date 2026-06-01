@@ -847,7 +847,11 @@ class Task:
     ) -> None:
         """For one role, fetch its perf DB and verify each quant mode is supported."""
         from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
-        from aiconfigurator.sdk.perf_database import get_database
+        from aiconfigurator.sdk.perf_database import (
+            PerfDataNotAvailableError,
+            get_database,
+            has_perf_data_not_available_cause,
+        )
 
         system = self._role_attr(role, "system_name")
         backend = self._role_attr(role, "backend_name")
@@ -857,9 +861,17 @@ class Task:
 
         try:
             database = get_database(system, backend, version)
-        except Exception:
+        except (PerfDataNotAvailableError, FileNotFoundError) as exc:
             # DB unavailable; let sweep surface the real error later.
+            logger.debug("validate: skipping DB-side quant check (DB unavailable): %s", exc)
             return
+        except Exception as exc:
+            # Match the legacy "DB error" envelope (e.g. wrapped FileNotFoundError
+            # inside RuntimeError) without swallowing programmer typos.
+            if has_perf_data_not_available_cause(exc):
+                logger.debug("validate: skipping DB-side quant check (DB unavailable): %s", exc)
+                return
+            raise
 
         supported: dict = getattr(database, "supported_quant_mode", {}) or {}
         enable_wideep = bool(self._role_attr(role, "enable_wideep"))

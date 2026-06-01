@@ -66,6 +66,7 @@ def run(yaml_path: Path, exp_key: str | None, output_dir: Path) -> Path:
     """Run the new sweep path; return the path to the written CSV."""
     yaml_data = _load_yaml(yaml_path, exp_key)
     task = Task.from_yaml(yaml_data)
+    task.validate()  # fail-fast on invalid YAML before loading DBs
     logger.info(
         "Loaded Task: mode=%s model=%s is_moe=%s family=%s",
         task.serving_mode,
