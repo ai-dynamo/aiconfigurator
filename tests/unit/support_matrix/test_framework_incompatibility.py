@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+
 import pytest
 
 from tools.support_matrix import support_matrix as support_matrix_module
@@ -29,6 +31,63 @@ def _patch_large_constraints(monkeypatch) -> None:
         "_get_test_constraints",
         lambda _model: TestConstraints(total_gpus=128, isl=256, osl=256, prefix=128, ttft=2_000_000, tpot=50_000),
     )
+
+
+def test_missing_exact_database_reports_collection_gap(monkeypatch):
+    def fake_get_database(_system, _backend, _version, **kwargs):
+        if kwargs.get("allow_missing_data"):
+            return SimpleNamespace(system_spec=_l40s_system_spec())
+        return None
+
+    def fail_run_mode(**_kwargs):
+        raise AssertionError("TaskRunner should not run when the exact SILICON database is missing")
+
+    monkeypatch.setattr(support_matrix_module.perf_database, "get_database", fake_get_database)
+    monkeypatch.setattr(
+        support_matrix_module.perf_database,
+        "get_supported_databases",
+        lambda: {"l40s": {"sglang": ["0.5.9", "0.5.10"]}},
+    )
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="Qwen/Qwen3-0.6B",
+        system="l40s",
+        backend="sglang",
+        version="0.5.12",
+        modes_to_test=("agg",),
+    )
+
+    assert statuses == {"agg": STATUS_FAIL}
+    assert "No perf database for system=l40s backend=sglang version=0.5.12" in errors["agg"]
+    assert "Available versions: 0.5.9, 0.5.10" in errors["agg"]
+
+
+def test_missing_exact_database_still_runs_hardware_preflight(monkeypatch):
+    def fake_get_database(_system, _backend, _version, **kwargs):
+        if kwargs.get("allow_missing_data"):
+            return SimpleNamespace(system_spec=_l40s_system_spec())
+        return None
+
+    def fail_run_mode(**_kwargs):
+        raise AssertionError("TaskRunner should not run for hardware-incompatible combinations")
+
+    monkeypatch.setattr(support_matrix_module.perf_database, "get_database", fake_get_database)
+    monkeypatch.setattr(support_matrix_module.perf_database, "get_supported_databases", lambda: {})
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="nvidia/MiniMax-M2.5-NVFP4",
+        system="l40s",
+        backend="sglang",
+        version="0.5.12",
+        modes_to_test=("agg",),
+    )
+
+    assert statuses == {"agg": STATUS_HW_INCOMPATIBLE}
+    assert "does not support FP4" in errors["agg"]
 
 
 def test_dsv4_vllm_019_unsupported_mxfp8_quant_is_framework_incompatible(monkeypatch):

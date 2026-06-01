@@ -274,6 +274,28 @@ def _should_retry_with_large_worker(error_message: str | None) -> bool:
     )
 
 
+def _missing_perf_database_message(*, system: str, backend: str, version: str) -> str:
+    supported = perf_database.get_supported_databases()
+    versions = supported.get(system, {}).get(backend, [])
+    available = ", ".join(versions) if versions else "none"
+    return (
+        f"No perf database for system={system} backend={backend} version={version}. "
+        f"Available versions: {available}. Exact-version perf data must be collected before "
+        "this SILICON support-matrix row can pass."
+    )
+
+
+def _load_system_spec_for_preflight(*, system: str, backend: str, version: str) -> dict | None:
+    database = perf_database.get_database(
+        system,
+        backend,
+        version,
+        allow_missing_data=True,
+        database_mode="SOL",
+    )
+    return database.system_spec if database is not None else None
+
+
 def _is_known_framework_incompatible_gap(
     *,
     model: str,
@@ -795,6 +817,11 @@ class SupportMatrix:
             yaml_config=yaml_config,
         )
         result = TaskRunner().run(task_config)
+        if result is None:
+            raise RuntimeError(
+                f"TaskRunner returned no result for model={model}, system={system}, backend={backend}, "
+                f"version={version}, mode={mode}."
+            )
         return result.get("pareto_df")
 
     @staticmethod
@@ -862,7 +889,16 @@ class SupportMatrix:
 
         if system_spec is None:
             database = perf_database.get_database(system, backend, version)
-            system_spec = database.system_spec if database is not None else None
+            missing_database_message = None
+            if database is None:
+                missing_database_message = _missing_perf_database_message(
+                    system=system, backend=backend, version=version
+                )
+                system_spec = _load_system_spec_for_preflight(system=system, backend=backend, version=version)
+            else:
+                system_spec = database.system_spec
+        else:
+            missing_database_message = None
 
         if system_spec is not None:
             try:
@@ -882,6 +918,13 @@ class SupportMatrix:
                 if include_commands:
                     return statuses, error_messages, commands
                 return statuses, error_messages
+
+        if missing_database_message is not None:
+            statuses = dict.fromkeys(modes_to_test, STATUS_FAIL)
+            error_messages = dict.fromkeys(modes_to_test, _format_exception_for_csv(missing_database_message))
+            if include_commands:
+                return statuses, error_messages, commands
+            return statuses, error_messages
 
         for mode in modes_to_test:
             attempt_queue = [TaskAttempt("default")]
