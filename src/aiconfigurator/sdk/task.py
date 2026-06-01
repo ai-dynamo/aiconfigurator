@@ -789,6 +789,17 @@ class Task:
     def _validate_disagg(self) -> None:
         if not self.prefill_model_path or not self.decode_model_path:
             raise ValueError("disagg mode requires both prefill_model_path and decode_model_path.")
+        if self.prefill_model_path != self.decode_model_path:
+            # sweep_disagg currently takes a single model_path used for both
+            # phases (Task.sweep_disagg_kwargs passes self.prefill_model_path).
+            # Hetero-disagg means different *systems*, not different models;
+            # enforce that explicitly so cross-model setups fail loud instead
+            # of silently using the prefill model on the decode side.
+            raise ValueError(
+                f"disagg mode requires prefill_model_path == decode_model_path; "
+                f"got prefill={self.prefill_model_path!r}, decode={self.decode_model_path!r}.  "
+                "Hetero-model disagg is not supported by sweep_disagg today."
+            )
         if not self.prefill_system_name or not self.decode_system_name:
             raise ValueError("disagg mode requires both prefill_system_name and decode_system_name.")
         for role in ("prefill", "decode"):

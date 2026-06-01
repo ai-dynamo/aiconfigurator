@@ -829,6 +829,19 @@ def test_validate_disagg_requires_both_role_model_paths():
         t.validate()
 
 
+def test_validate_disagg_rejects_mismatched_prefill_decode_model_paths():
+    """Hetero-model disagg is not supported; mismatch must fail loud."""
+    t = Task(
+        serving_mode="disagg",
+        prefill_model_path="deepseek-ai/DeepSeek-V3",
+        prefill_system_name="h200_sxm",
+        decode_model_path="Qwen/Qwen3-32B",
+        decode_system_name="h200_sxm",
+    )
+    with pytest.raises(ValueError, match="prefill_model_path == decode_model_path"):
+        t.validate()
+
+
 def test_validate_disagg_rejects_fp8_static_on_non_trtllm_per_role():
     t = Task(
         serving_mode="disagg",

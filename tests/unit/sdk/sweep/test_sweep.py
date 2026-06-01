@@ -100,3 +100,25 @@ def test_sweep_disagg_rejects_invalid_max_decode_gpus():
             decode_latency_correction=1.0,
             max_decode_gpus=-5,
         )
+
+
+def test_sweep_disagg_rejects_empty_num_worker_lists():
+    """Empty worker lists silently skipped the rate-match inner loop in earlier
+    versions; now fail loud to avoid surprising zero-result sweeps."""
+    with pytest.raises(ValueError, match="non-empty prefill_num_worker_list and decode_num_worker_list"):
+        sweep_disagg(
+            model_path="x",
+            runtime_config=None,
+            prefill_database=None,
+            prefill_backend_name="trtllm",
+            prefill_model_config=None,
+            prefill_parallel_config_list=[],
+            prefill_latency_correction=1.0,
+            decode_database=None,
+            decode_backend_name="trtllm",
+            decode_model_config=None,
+            decode_parallel_config_list=[],
+            decode_latency_correction=1.0,
+            prefill_num_worker_list=[],
+            decode_num_worker_list=[1, 2, 4],
+        )

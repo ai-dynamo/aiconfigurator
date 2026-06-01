@@ -815,6 +815,13 @@ def sweep_disagg(
     )
     p_num_workers = prefill_num_worker_list or []
     d_num_workers = decode_num_worker_list or []
+    if not p_num_workers or not d_num_workers:
+        raise ValueError(
+            "sweep_disagg requires non-empty prefill_num_worker_list and decode_num_worker_list. "
+            "Empty lists silently produce zero results because the rate-matching inner loop "
+            "iterates over them.  Pass an explicit range (e.g. list(range(1, 33))) or omit the "
+            "argument entirely to let Task fill in defaults."
+        )
     num_gpu_set: set[int] = set(num_gpu_list) if num_gpu_list else set()
 
     if decode_max_num_tokens < 1:
@@ -924,5 +931,8 @@ def sweep_disagg(
         logger.debug("sweep_disagg: no disagg result satisfies any constraint")
         return pd.DataFrame(columns=common.ColumnsDisagg)
 
-    disagg_df = disagg_df.drop_duplicates(ignore_index=True)
-    return disagg_df
+    return (
+        disagg_df.drop_duplicates(ignore_index=True)
+        .sort_values(by="tokens/s/gpu", ascending=False)
+        .reset_index(drop=True)
+    )
