@@ -12,6 +12,7 @@ case files; this file should stay focused on reusable execution mechanics.
 
 import csv
 import functools
+import hashlib
 import heapq
 import json
 import logging
@@ -451,6 +452,24 @@ def setup_signal_handlers(worker_id):
 # Global tracking
 _LOGGING_CONFIGURED = False
 _LOG_DIR = None
+_MAX_LOG_SCOPE_BYTES = 160
+
+
+def _collector_log_scope_name(scope: Iterable[str]) -> str:
+    """Return a filesystem-safe collector log scope name with bounded length."""
+    scope_parts = [str(part) for part in scope] or ["all"]
+    name = "+".join(scope_parts)
+    if len(name.encode()) <= _MAX_LOG_SCOPE_BYTES:
+        return name
+
+    digest = hashlib.sha1(name.encode()).hexdigest()[:12]
+    prefix = f"{scope_parts[0]}+{len(scope_parts)}ops"
+    if len(scope_parts) > 1:
+        prefix = f"{prefix}+{scope_parts[-1]}"
+    max_prefix_bytes = _MAX_LOG_SCOPE_BYTES - len(digest) - 1
+    while len(prefix.encode()) > max_prefix_bytes:
+        prefix = prefix[:-1]
+    return f"{prefix}-{digest}"
 
 
 def setup_logging(scope=["all"], debug=False, worker_id=None):
@@ -537,7 +556,7 @@ def setup_logging(scope=["all"], debug=False, worker_id=None):
 
     # Create log directory
     time_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    _LOG_DIR = Path(f"{'+'.join(scope)}_{time_stamp}")
+    _LOG_DIR = Path(f"{_collector_log_scope_name(scope)}_{time_stamp}")
     if not _LOG_DIR.is_dir():
         _LOG_DIR.mkdir()
 
