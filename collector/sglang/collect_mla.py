@@ -14,6 +14,7 @@ __compat__ = "sglang>=0.5.10rc0"
 import math
 import os
 import random
+from types import SimpleNamespace
 
 import pkg_resources
 import sglang.srt.layers.dp_attention
@@ -109,10 +110,12 @@ class MockModelConfig:
         self.swa_attention_layer_ids = None
         self.full_attention_layer_ids = None
         self.num_attention_heads = num_attention_heads
+        self.hf_text_config = SimpleNamespace(num_attention_heads=num_attention_heads, attn_logit_softcapping=None)
         self.kv_lora_rank = kv_lora_rank
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
         self.v_head_dim = v_head_dim
+        self.head_dim = v_head_dim
         self.scaling = scaling
         self.is_local_attention_model = False
 
@@ -134,10 +137,12 @@ class MockServerArgs:
         self.decode_attention_backend = "fa3"
         self.page_size = page_size
         self.device = "cuda"
+        self.is_embedding = False
         self.disable_chunked_prefix_cache = True
         self.disaggregation_mode = None
         self.flashinfer_mla_disable_ragged = False
         self.chunked_prefill_size = -1
+        self.disable_radix_cache = False
         self.triton_attention_num_kv_splits = 8
         self.triton_attention_split_tile_size = None
         # sglang >=0.5.10: FlashAttentionBackend.__init__ reads disable_cuda_graph
@@ -169,6 +174,7 @@ class MockModelRunner:
         self.model_config = MockModelConfig(num_attention_heads=num_attention_heads, scaling=scaling)
         # Keep attributes for compatibility across sglang versions (older code ignores them)
         self.is_hybrid_swa = self.model_config.is_hybrid_swa
+        self.tp_size = 1
         self.attn_cp_size = 1  # Context parallelism size; required by FlashAttentionBackend in sglang >=0.5.10
         self.server_args = MockServerArgs(kv_cache_dtype, page_size)
         self.use_mla_backend = True
@@ -396,6 +402,7 @@ def run_mla(
     # Must update config BEFORE creating attn_backend so it picks up the right v_head_dim
     model_runner.model_config.kv_lora_rank = kv_lora_rank
     model_runner.model_config.v_head_dim = v_head_dim
+    model_runner.model_config.head_dim = v_head_dim
     model_runner.model_config.qk_nope_head_dim = qk_nope_head_dim
     model_runner.model_config.qk_rope_head_dim = qk_rope_head_dim
     model_runner.model_config.scaling = MLA_SCALING
