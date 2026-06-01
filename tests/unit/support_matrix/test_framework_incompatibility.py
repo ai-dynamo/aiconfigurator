@@ -157,8 +157,7 @@ def test_l40s_fp8_block_other_backend_error_is_hardware_incompatible(monkeypatch
 def test_l40s_gpt_oss_mxfp4_moe_gap_is_hardware_incompatible(monkeypatch, model):
     def fake_run_mode(**_kwargs):
         raise ValueError(
-            "Unsupported moe quant mode 'w4a16_mxfp4' for system='l40s', "
-            "backend='sglang', version='0.5.10'."
+            "Unsupported moe quant mode 'w4a16_mxfp4' for system='l40s', backend='sglang', version='0.5.10'."
         )
 
     monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
@@ -179,8 +178,7 @@ def test_l40s_gpt_oss_mxfp4_moe_gap_is_hardware_incompatible(monkeypatch, model)
 def test_l40s_sglang_fp8_attention_gap_is_hardware_incompatible(monkeypatch):
     def fake_run_mode(**_kwargs):
         raise ValueError(
-            "Unsupported context_attention quant mode 'fp8' for system='l40s', "
-            "backend='sglang', version='0.5.10'."
+            "Unsupported context_attention quant mode 'fp8' for system='l40s', backend='sglang', version='0.5.10'."
         )
 
     monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
@@ -201,8 +199,7 @@ def test_l40s_sglang_fp8_attention_gap_is_hardware_incompatible(monkeypatch):
 def test_l40s_sglang_dsa_missing_data_gap_is_hardware_incompatible(monkeypatch):
     def fake_run_mode(**_kwargs):
         raise RuntimeError(
-            "File does not exist at "
-            "src/aiconfigurator/systems/data/l40s/sglang/0.5.10/dsa_context_module_perf.parquet"
+            "File does not exist at src/aiconfigurator/systems/data/l40s/sglang/0.5.10/dsa_context_module_perf.parquet"
         )
 
     monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
