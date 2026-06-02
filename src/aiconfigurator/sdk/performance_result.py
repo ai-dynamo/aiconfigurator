@@ -12,9 +12,9 @@ class PerformanceResult(float):
 
     Behaves exactly like a float for backward compatibility, but stores energy
     instead of power internally. Power is derived as energy / latency. A
-    ``source`` tag records whether the value came from silicon table data, an
-    empirical fallback, or an explicit SOL estimate, and is propagated through
-    arithmetic.
+    ``source`` tag records whether the value came from silicon table data, a
+    tagged fallback estimate, an empirical fallback, or an explicit SOL
+    estimate, and is propagated through arithmetic.
 
     Supports all arithmetic and comparison operations for full float compatibility.
 
@@ -22,9 +22,10 @@ class PerformanceResult(float):
         - latency: milliseconds (ms)
         - energy: watt-milliseconds (W·ms) = millijoules (mJ)
         - power: watts (W) - derived property
-        - source: ``"silicon"`` (table data) | ``"empirical"`` (empirical
-          formula fallback) | ``"sol"`` (explicit SOL estimate) | ``"mixed"``
-          (sum of values from different sources)
+        - source: ``"silicon"`` (table data) | ``"fallback"`` (tagged
+          non-silicon substitution) | ``"empirical"`` (empirical formula
+          fallback) | ``"sol"`` (explicit SOL estimate) | ``"mixed"`` (sum of
+          values from different sources)
 
     Note: 1 W·ms = 1 mJ. We use W·ms to match latency units (ms).
           To convert to Joules: divide by 1000 (J = W·s = W·ms / 1000)
@@ -69,9 +70,9 @@ class PerformanceResult(float):
             latency: The latency value in milliseconds (acts as the float value)
             energy: The energy value in watt-milliseconds (W·ms)
             source: Where this measurement came from -- "silicon" (table data),
-                "empirical" (empirical formula fallback), "sol" (explicit SOL
-                estimate), or "mixed"
-                (sum of values from different sources).
+                "fallback" (tagged non-silicon substitution), "empirical"
+                (empirical formula fallback), "sol" (explicit SOL estimate), or
+                "mixed" (sum of values from different sources).
         """
         instance = float.__new__(cls, latency)
         return instance

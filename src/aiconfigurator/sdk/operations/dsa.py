@@ -443,6 +443,7 @@ class ContextDSAModule(Operation):
             and database.backend == common.BackendName.sglang.value
             and database.version == "0.5.10"
         )
+        used_fallback = False
 
         def missing_context_dsa_error() -> PerfDataNotAvailableError:
             return PerfDataNotAvailableError(
@@ -467,6 +468,7 @@ class ContextDSAModule(Operation):
                     dsa_dict = dsa_module_data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][
                         common.GEMMQuantMode.bfloat16
                     ][architecture]
+                    used_fallback = True
                 except (KeyError, TypeError):
                     raise missing_context_dsa_error() from exc
             raw_dsa_dict = None
@@ -481,6 +483,7 @@ class ContextDSAModule(Operation):
                         raw_dsa_dict = raw_dsa_module_data[common.FMHAQuantMode.bfloat16][
                             common.KVCacheQuantMode.bfloat16
                         ][common.GEMMQuantMode.bfloat16][architecture]
+                        used_fallback = True
                     except (KeyError, TypeError):
                         raw_dsa_dict = None
 
@@ -558,6 +561,7 @@ class ContextDSAModule(Operation):
                 return result if _finite_result(result) else None
 
             def _lookup_prefix_module_at(prefix_value: int):
+                nonlocal used_fallback
                 result = _lookup_prefix_module_at_heads(prefix_value, num_heads)
                 if result is not None or not allow_reduced_head_dsa_fallback:
                     return result
@@ -574,6 +578,7 @@ class ContextDSAModule(Operation):
                 if not _finite_result(anchor_result):
                     return None
 
+                used_fallback = True
                 anchor_sol = get_sol(b, s, prefix_value, anchor_heads, kvcache_quant_mode, fmha_quant_mode)[0]
                 target_sol = get_sol(b, s, prefix_value, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
                 head_scale = 1.0 if anchor_sol <= 0 else target_sol / anchor_sol
@@ -620,7 +625,7 @@ class ContextDSAModule(Operation):
                 energy = result.get("energy", 0.0)
             except (KeyError, TypeError, ValueError, AssertionError) as exc:
                 raise missing_context_dsa_error() from exc
-            return database._interp_pr(latency, energy=energy)
+            return PerformanceResult(latency, energy=energy, source="fallback" if used_fallback else "silicon")
         except Exception as e:
             if database_mode == common.DatabaseMode.HYBRID:
                 logger.debug(
@@ -891,6 +896,7 @@ class GenerationDSAModule(Operation):
             and database.backend == common.BackendName.sglang.value
             and database.version == "0.5.10"
         )
+        used_fallback = False
 
         def missing_generation_dsa_error() -> PerfDataNotAvailableError:
             return PerfDataNotAvailableError(
@@ -915,6 +921,7 @@ class GenerationDSAModule(Operation):
                     dsa_dict = dsa_module_data[common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][
                         architecture
                     ]
+                    used_fallback = True
                 except (KeyError, TypeError):
                     raise missing_generation_dsa_error() from exc
             try:
@@ -1024,6 +1031,7 @@ class GenerationDSAModule(Operation):
                                 anchor_heads, b, anchor_s, dsa_dict, "cubic", database._extracted_metrics_cache
                             )
                         if anchor_result is not None:
+                            used_fallback = True
                             anchor_sol = get_sol(b, s, anchor_heads, kv_cache_dtype)[0]
                             target_sol = get_sol(b, s, num_heads, kv_cache_dtype)[0]
                             head_scale = 1.0 if anchor_sol <= 0 else target_sol / anchor_sol
@@ -1040,7 +1048,7 @@ class GenerationDSAModule(Operation):
                 energy = result.get("energy", 0.0)
             except (KeyError, TypeError, ValueError, AssertionError) as exc:
                 raise missing_generation_dsa_error() from exc
-            return database._interp_pr(latency, energy=energy)
+            return PerformanceResult(latency, energy=energy, source="fallback" if used_fallback else "silicon")
         except Exception as e:
             if database_mode == common.DatabaseMode.HYBRID:
                 logger.debug(
@@ -1087,8 +1095,10 @@ class GenerationDSAModule(Operation):
         s = kwargs.get("s")
         kv_cache_dtype = self._kv_cache_dtype
         supported_modes = (getattr(database, "supported_quant_mode", {}) or {}).get("dsa_generation_module", []) or []
+        used_fallback = False
         if kv_cache_dtype.name not in supported_modes and common.KVCacheQuantMode.bfloat16.name in supported_modes:
             kv_cache_dtype = common.KVCacheQuantMode.bfloat16
+            used_fallback = True
 
         result = database.query_generation_dsa_module(
             b=batch_size,
@@ -1101,7 +1111,7 @@ class GenerationDSAModule(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source="fallback" if used_fallback else getattr(result, "source", "silicon"),
         )
 
     def get_weights(self, **kwargs):

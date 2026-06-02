@@ -265,6 +265,7 @@ class ContextAttention(Operation):
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             n_kv_lookup = 0 if n == n_kv else n_kv
             attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
+            used_fallback = False
 
             lookup_s = full_s
             available_s = {observed_s for per_n_data in attention_dict.values() for observed_s in per_n_data}
@@ -272,11 +273,13 @@ class ContextAttention(Operation):
                 nearest_s = min(available_s, key=lambda observed_s: abs(observed_s - lookup_s))
                 if abs(nearest_s - lookup_s) <= max(1, int(lookup_s * 0.01)):
                     lookup_s = nearest_s
+                    used_fallback = True
 
             def sample_metric(sample, metric: str) -> float:
                 return float(interpolation.get_value(sample, metric))
 
             def get_batch_sample(per_b_data: dict, s_i: int):
+                nonlocal used_fallback
                 if b in per_b_data:
                     return per_b_data[b]
 
@@ -292,6 +295,7 @@ class ContextAttention(Operation):
                 if left_b is not None and right_b is not None:
                     if left_b == right_b:
                         return per_b_data[left_b]
+                    used_fallback = True
                     left = per_b_data[left_b]
                     right = per_b_data[right_b]
                     ratio = (b - left_b) / (right_b - left_b)
@@ -304,6 +308,7 @@ class ContextAttention(Operation):
                         + (sample_metric(right, "energy") - sample_metric(left, "energy")) * ratio,
                     }
 
+                used_fallback = True
                 nearest_b = min(b_keys, key=lambda observed_b: abs(observed_b - b))
                 sample = per_b_data[nearest_b]
                 source_sol = get_sol(
@@ -336,6 +341,7 @@ class ContextAttention(Operation):
                 }
 
             def get_same_shape_sample(s_i: int):
+                nonlocal used_fallback
                 exact_n = attention_dict.get(n)
                 if not exact_n:
                     return None
@@ -357,6 +363,7 @@ class ContextAttention(Operation):
                 if left_s == right_s:
                     return get_batch_sample(exact_n[left_s], left_s)
 
+                used_fallback = True
                 left = get_batch_sample(exact_n[left_s], left_s)
                 right = get_batch_sample(exact_n[right_s], right_s)
                 ratio = (s_i - left_s) / (right_s - left_s)
@@ -376,7 +383,7 @@ class ContextAttention(Operation):
                 )
             latency = sample_metric(result, "latency") * prefix_correction
             energy = sample_metric(result, "energy") * prefix_correction
-            return database._interp_pr(latency, energy=energy)
+            return PerformanceResult(latency, energy=energy, source="fallback" if used_fallback else "silicon")
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,
@@ -658,11 +665,13 @@ class GenerationAttention(Operation):
             n_kv_lookup = n_kv if n_kv != n else 0
 
             attention_dict = data_wrapper[kvcache_quant_mode][n_kv_lookup][head_size][window_size]
+            used_fallback = False
 
             def sample_metric(sample, metric: str) -> float:
                 return float(interpolation.get_value(sample, metric))
 
             def get_same_shape_sample(s_i: int):
+                nonlocal used_fallback
                 exact_n = attention_dict.get(n)
                 exact_b = exact_n.get(b) if exact_n else None
                 if not exact_b:
@@ -685,6 +694,7 @@ class GenerationAttention(Operation):
                 if left_s == right_s:
                     return exact_b[left_s]
 
+                used_fallback = True
                 left = exact_b[left_s]
                 right = exact_b[right_s]
                 ratio = (s_i - left_s) / (right_s - left_s)
@@ -715,7 +725,7 @@ class GenerationAttention(Operation):
 
             latency = latency_sum / sample_cnt
             energy = energy_sum / sample_cnt
-            return database._interp_pr(latency, energy=energy)
+            return PerformanceResult(latency, energy=energy, source="fallback" if used_fallback else "silicon")
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,

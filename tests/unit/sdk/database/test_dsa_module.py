@@ -9,8 +9,13 @@ import pyarrow.parquet as pq
 import pytest
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.dsa import DEFAULT_DSA_ARCHITECTURE, load_context_dsa_module_data
+from aiconfigurator.sdk.operations.dsa import (
+    DEFAULT_DSA_ARCHITECTURE,
+    GenerationDSAModule,
+    load_context_dsa_module_data,
+)
 from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataNotAvailableError
+from aiconfigurator.sdk.performance_result import PerformanceResult
 
 pytestmark = pytest.mark.unit
 
@@ -69,6 +74,26 @@ class TestContextDSAModule:
                 database_mode=common.DatabaseMode.SILICON,
                 architecture="GlmMoeDsaForCausalLM",
             )
+
+    def test_quant_mode_substitution_is_tagged_fallback(self, stub_perf_db):
+        dsa_dict = {32: {0: {256: {1: _dsa_value(10.0)}}}}
+        stub_perf_db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data(dsa_dict), common.PerfDataFilename.dsa_context_module, "bf16-only"
+        )
+
+        result = stub_perf_db.query_context_dsa_module(
+            b=1,
+            s=256,
+            prefix=0,
+            num_heads=32,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.fp8,
+            gemm_quant_mode=common.GEMMQuantMode.fp8,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        assert float(result) == pytest.approx(10.0)
+        assert result.source == "fallback"
 
     def test_glm5_context_loader_requires_step_column(self, tmp_path):
         data_path = tmp_path / "dsa_context_module_perf.txt"
@@ -556,6 +581,43 @@ class TestGenerationDSAModule:
         )
 
         assert float(result) == pytest.approx(20.0)
+
+    def test_quant_mode_substitution_is_tagged_fallback(self, stub_perf_db):
+        dsa_dict = {32: {1: {256: _dsa_value(10.0)}}}
+        stub_perf_db._generation_dsa_module_data = LoadedOpData(
+            _generation_dsa_data(dsa_dict), common.PerfDataFilename.dsa_generation_module, "bf16-only"
+        )
+
+        result = stub_perf_db.query_generation_dsa_module(
+            b=1,
+            s=256,
+            num_heads=32,
+            kv_cache_dtype=common.KVCacheQuantMode.fp8,
+            gemm_quant_mode=common.GEMMQuantMode.fp8,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        assert float(result) == pytest.approx(10.0)
+        assert result.source == "fallback"
+
+    def test_operation_dtype_substitution_is_tagged_fallback(self, stub_perf_db):
+        stub_perf_db.supported_quant_mode = {"dsa_generation_module": [common.KVCacheQuantMode.bfloat16.name]}
+        stub_perf_db.query_generation_dsa_module = lambda **_kwargs: PerformanceResult(
+            10.0, energy=100.0, source="silicon"
+        )
+        op = GenerationDSAModule(
+            "dsa_generation",
+            1.0,
+            32,
+            common.KVCacheQuantMode.fp8,
+            common.GEMMQuantMode.bfloat16,
+        )
+
+        result = op.query(stub_perf_db, batch_size=1, s=256, beam_width=1)
+
+        assert float(result) == pytest.approx(10.0)
+        assert result.energy == pytest.approx(100.0)
+        assert result.source == "fallback"
 
     def test_sol_returns_positive(self, comprehensive_perf_db):
         result = comprehensive_perf_db.query_generation_dsa_module(
