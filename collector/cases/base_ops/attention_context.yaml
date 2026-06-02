@@ -107,6 +107,7 @@ framework_specific_op_cases:
         - 256
         window_sizes:
         - 0
+        - 128
         - 1024
       - id: sglang_gemma4_head_dim_512_context
         batch_sizes:
