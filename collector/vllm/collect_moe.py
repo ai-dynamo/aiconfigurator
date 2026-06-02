@@ -11,13 +11,18 @@ logits, and perf logging.
 
 __compat__ = "vllm>=0.17.0"
 
+import inspect
 import os
 
 import torch
 import torch.nn.functional as F
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config, int4_w4a16_moe_quant_config
-from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
+
+try:
+    from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
+except ImportError:
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
 # Compatibility: block FP8 helpers may differ by version.
@@ -284,22 +289,24 @@ def run_moe_torch(
         # one process, so keep FusedMoE's runtime parallel config single-process.
         mxfp4_vllm_cfg = VllmConfig()
         with set_current_vllm_config(mxfp4_vllm_cfg):
-            moe_module = FusedMoE(
-                num_experts=num_experts,
-                top_k=topk,
-                hidden_size=hidden_size,
-                intermediate_size=local_inter_size,
-                reduce_results=False,
-                renormalize=True,
-                quant_config=mxfp4_quant_config,
-                tp_size=1,
-                dp_size=1,
-                ep_size=moe_ep_size,
-                prefix="",
-                has_bias=bool(mxfp4_module_config.get("has_bias", False)),
-                activation=str(mxfp4_module_config.get("activation", "silu")),
-                pcp_size=1,
-            )
+            fused_moe_kwargs = {
+                "num_experts": num_experts,
+                "top_k": topk,
+                "hidden_size": hidden_size,
+                "intermediate_size": local_inter_size,
+                "renormalize": True,
+                "quant_config": mxfp4_quant_config,
+                "tp_size": 1,
+                "dp_size": 1,
+                "ep_size": moe_ep_size,
+                "prefix": "",
+                "has_bias": bool(mxfp4_module_config.get("has_bias", False)),
+                "activation": str(mxfp4_module_config.get("activation", "silu")),
+                "pcp_size": 1,
+            }
+            if "reduce_results" in inspect.signature(FusedMoE.__init__).parameters:
+                fused_moe_kwargs["reduce_results"] = False
+            moe_module = FusedMoE(**fused_moe_kwargs)
             moe_module.to(device)
             moe_module.eval()
             moe_module.requires_grad_(False)
