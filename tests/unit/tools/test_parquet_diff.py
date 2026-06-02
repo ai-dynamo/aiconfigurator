@@ -142,6 +142,63 @@ def test_row_diff_pairs_duplicate_keys_within_key(parquet_diff_module, tmp_path)
     assert row_diff.note == "duplicate keys; unmatched rows paired within key"
 
 
+def test_full_diff_artifacts_include_every_changed_perf_file(parquet_diff_module, tmp_path, monkeypatch):
+    entries = [
+        parquet_diff_module.DiffEntry("M", "src/aiconfigurator/systems/data/h100/gemm_perf.parquet"),
+        parquet_diff_module.DiffEntry("D", "src/aiconfigurator/systems/data/h100/moe_perf.txt"),
+    ]
+    file_lines = {
+        ("base", "src/aiconfigurator/systems/data/h100/gemm_perf.parquet"): [
+            "framework,latency",
+            "vllm,1.0",
+        ],
+        ("head", "src/aiconfigurator/systems/data/h100/gemm_perf.parquet"): [
+            "framework,latency",
+            "vllm,1.5",
+        ],
+        ("base", "src/aiconfigurator/systems/data/h100/moe_perf.txt"): [
+            "framework,latency",
+            "sglang,2.0",
+        ],
+    }
+
+    monkeypatch.setattr(parquet_diff_module, "_git_file_exists", lambda ref, path: (ref, path) in file_lines)
+    monkeypatch.setattr(parquet_diff_module, "_file_text_lines", lambda ref, path: file_lines[(ref, path)])
+
+    artifacts = parquet_diff_module._write_full_diff_artifacts(
+        detail_dir=tmp_path,
+        base_ref="base",
+        head_ref="head",
+        entries=entries,
+    )
+    parquet_diff_module._write_diff_manifest(tmp_path, artifacts)
+
+    assert [artifact.diff_file for artifact in artifacts] == [
+        "diffs/src/aiconfigurator/systems/data/h100/gemm_perf.parquet.diff",
+        "diffs/src/aiconfigurator/systems/data/h100/moe_perf.txt.diff",
+    ]
+    assert "+vllm,1.5" in (tmp_path / artifacts[0].diff_file).read_text()
+    assert "-sglang,2.0" in (tmp_path / artifacts[1].diff_file).read_text()
+
+    with (tmp_path / "changed-files.csv").open(newline="") as f:
+        manifest_rows = list(csv.DictReader(f))
+
+    assert manifest_rows == [
+        {
+            "status": "M",
+            "file": "src/aiconfigurator/systems/data/h100/gemm_perf.parquet",
+            "old_file": "",
+            "full_diff_file": "diffs/src/aiconfigurator/systems/data/h100/gemm_perf.parquet.diff",
+        },
+        {
+            "status": "D",
+            "file": "src/aiconfigurator/systems/data/h100/moe_perf.txt",
+            "old_file": "",
+            "full_diff_file": "diffs/src/aiconfigurator/systems/data/h100/moe_perf.txt.diff",
+        },
+    ]
+
+
 def test_report_includes_row_level_counts(parquet_diff_module):
     comparison = parquet_diff_module.Comparison(
         path="src/aiconfigurator/systems/data/h100/vllm/0.19.0/gemm_perf.parquet",
@@ -171,10 +228,19 @@ def test_report_includes_row_level_counts(parquet_diff_module):
         entries=[parquet_diff_module.DiffEntry("M", comparison.path)],
         comparisons=[comparison],
         legacy_perf_changes=[],
+        full_diff_artifacts=[
+            parquet_diff_module.FullDiffArtifact(
+                status="M",
+                path=comparison.path,
+                old_path=None,
+                diff_file="diffs/src/aiconfigurator/systems/data/h100/vllm/0.19.0/gemm_perf.parquet.diff",
+            )
+        ],
     )
 
     assert "- Row-level changes: +1 / -1 / ~1" in report
-    assert "| M | src/aiconfigurator/systems/data/h100/vllm/0.19.0/gemm_perf.parquet | 3 | 3 | 1 | 1 | 1 |" in report
-    assert "Exact row-level CSVs are attached" in report
-    assert "### Per-File Row Diff Preview" in report
-    assert "latency__base,latency__head" in report
+    assert "- Full per-file diff artifacts: 1 file under `parquet-diff-details/diffs/`" in report
+    assert "### Other Parquet Changes" not in report
+    assert "| M | src/aiconfigurator/systems/data/h100/vllm/0.19.0/gemm_perf.parquet |" not in report
+    assert "Full per-file unified diffs: `parquet-diff-details/diffs/` (1 file)" in report
+    assert "Exact row-level CSVs: `parquet-diff-details/` (listed in `summary.csv`)" in report

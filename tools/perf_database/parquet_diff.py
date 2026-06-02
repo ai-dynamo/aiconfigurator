@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import difflib
 import hashlib
 import io
 import json
@@ -24,6 +25,7 @@ PERF_DATA_PREFIX = "src/aiconfigurator/systems/data"
 COMMENT_MARKER = "<!-- perf-parquet-diff-comment -->"
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
 DEFAULT_DETAIL_DIR = "parquet-diff-details"
+FULL_DIFF_SUBDIR = "diffs"
 INLINE_PREVIEW_ROWS = 3
 MAX_INLINE_PREVIEW_CHARS = 45_000
 MEASUREMENT_COLUMNS = frozenset(
@@ -51,6 +53,14 @@ class DiffEntry:
     status: str
     path: str
     old_path: str | None = None
+
+
+@dataclass(frozen=True)
+class FullDiffArtifact:
+    status: str
+    path: str
+    old_path: str | None
+    diff_file: str
 
 
 @dataclass
@@ -289,6 +299,49 @@ def _write_modified_csv(
         writer.writerows(rows)
 
 
+def _ensure_trailing_newline(text: str) -> str:
+    if text and not text.endswith("\n"):
+        return f"{text}\n"
+    return text
+
+
+def _file_text_lines(ref: str, path: str) -> list[str]:
+    data = _read_git_file(ref, path)
+    suffix = Path(path).suffix.lower()
+    if suffix == ".parquet":
+        table = pq.read_table(pa.BufferReader(data))
+        text = _rows_to_csv_text(_row_dicts(table), table.schema.names)
+    else:
+        text = data.decode("utf-8", errors="replace")
+    return _ensure_trailing_newline(text).splitlines()
+
+
+def _render_file_diff(
+    *,
+    status: str,
+    base_path: str | None,
+    head_path: str | None,
+    base_lines: list[str],
+    head_lines: list[str],
+) -> str:
+    fromfile = f"a/{base_path}" if base_path else "/dev/null"
+    tofile = f"b/{head_path}" if head_path else "/dev/null"
+    diff = "\n".join(
+        difflib.unified_diff(
+            base_lines,
+            head_lines,
+            fromfile=fromfile,
+            tofile=tofile,
+            lineterm="",
+        )
+    )
+    if diff:
+        return f"{diff}\n"
+
+    path = head_path or base_path or "unknown"
+    return f"# {status} {path}\n# No content changes after perf text conversion.\n"
+
+
 def _detail_output_path(detail_dir: Path, parquet_path: str, kind: str) -> tuple[Path, str]:
     relative_path = Path(f"{parquet_path}.{kind}.csv")
     return detail_dir / relative_path, relative_path.as_posix()
@@ -322,6 +375,51 @@ def _write_detail_modified_rows(
     output_path, relative_path = _detail_output_path(detail_dir, parquet_path, "modified")
     _write_modified_csv(output_path, modified_rows, key_columns=key_columns, compare_columns=compare_columns)
     return relative_path
+
+
+def _full_diff_output_path(detail_dir: Path, entry: DiffEntry) -> tuple[Path, str]:
+    relative_path = Path(FULL_DIFF_SUBDIR) / f"{entry.path}.diff"
+    return detail_dir / relative_path, relative_path.as_posix()
+
+
+def _write_full_diff_artifacts(
+    *,
+    detail_dir: Path,
+    base_ref: str,
+    head_ref: str,
+    entries: list[DiffEntry],
+) -> list[FullDiffArtifact]:
+    artifacts: list[FullDiffArtifact] = []
+    for entry in entries:
+        base_path = None if entry.status.startswith("A") else entry.old_path or entry.path
+        head_path = None if entry.status.startswith("D") else entry.path
+        if base_path and not _git_file_exists(base_ref, base_path):
+            base_path = None
+        if head_path and not _git_file_exists(head_ref, head_path):
+            head_path = None
+
+        base_lines = _file_text_lines(base_ref, base_path) if base_path else []
+        head_lines = _file_text_lines(head_ref, head_path) if head_path else []
+        output_path, relative_path = _full_diff_output_path(detail_dir, entry)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            _render_file_diff(
+                status=entry.status,
+                base_path=base_path,
+                head_path=head_path,
+                base_lines=base_lines,
+                head_lines=head_lines,
+            )
+        )
+        artifacts.append(
+            FullDiffArtifact(
+                status=entry.status,
+                path=entry.path,
+                old_path=entry.old_path,
+                diff_file=relative_path,
+            )
+        )
+    return artifacts
 
 
 def _has_duplicate_keys(rows: list[dict[str, object]], key_columns: list[str]) -> bool:
@@ -584,7 +682,26 @@ def _diff_snapshots(
     )
 
 
-def _write_detail_summary(detail_dir: Path, comparisons: list[Comparison]) -> None:
+def _write_diff_manifest(detail_dir: Path, full_diff_artifacts: list[FullDiffArtifact]) -> None:
+    rows = [
+        {
+            "status": artifact.status,
+            "file": artifact.path,
+            "old_file": artifact.old_path or "",
+            "full_diff_file": artifact.diff_file,
+        }
+        for artifact in full_diff_artifacts
+    ]
+    if rows:
+        _write_rows_csv(detail_dir / "changed-files.csv", rows, ["status", "file", "old_file", "full_diff_file"])
+
+
+def _write_detail_summary(
+    detail_dir: Path,
+    comparisons: list[Comparison],
+    full_diff_artifacts: list[FullDiffArtifact] | None = None,
+) -> None:
+    full_diff_files = {artifact.path: artifact.diff_file for artifact in full_diff_artifacts or []}
     rows: list[dict[str, object]] = []
     for comparison in comparisons:
         row_diff = comparison.row_diff
@@ -601,6 +718,7 @@ def _write_detail_summary(detail_dir: Path, comparisons: list[Comparison]) -> No
                 "modified_rows": row_diff.modified_rows,
                 "key_columns": ",".join(row_diff.key_columns),
                 "detail_files": ",".join(row_diff.detail_files.values()),
+                "full_diff_file": full_diff_files.get(comparison.path, ""),
                 "note": row_diff.note or "",
             }
         )
@@ -618,6 +736,7 @@ def _write_detail_summary(detail_dir: Path, comparisons: list[Comparison]) -> No
                 "modified_rows",
                 "key_columns",
                 "detail_files",
+                "full_diff_file",
                 "note",
             ],
         )
@@ -731,6 +850,7 @@ def render_report(
     entries: list[DiffEntry],
     comparisons: list[Comparison],
     legacy_perf_changes: list[DiffEntry],
+    full_diff_artifacts: list[FullDiffArtifact] | None = None,
 ) -> str:
     converted = [c for c in comparisons if c.base_path and c.base_path.endswith(".txt")]
     converted_ok = [c for c in converted if c.columns_match and c.content_match]
@@ -759,8 +879,14 @@ def render_report(
         f"- Deleted parquet files: {len(deleted)}",
         f"- Legacy `*_perf.txt` files added or modified: {len(legacy_perf_changes)}",
         f"- Row-level changes: +{added_rows} / -{removed_rows} / ~{modified_rows}",
-        "",
     ]
+    if full_diff_artifacts is not None:
+        diff_artifact_label = "file" if len(full_diff_artifacts) == 1 else "files"
+        lines.append(
+            f"- Full per-file diff artifacts: {len(full_diff_artifacts)} {diff_artifact_label} under "
+            f"`{DEFAULT_DETAIL_DIR}/{FULL_DIFF_SUBDIR}/`"
+        )
+    lines.append("")
 
     if not entries:
         lines.append("No perf data changes found.")
@@ -794,41 +920,18 @@ def render_report(
             lines.append(f"\n...and {len(legacy_perf_changes) - 50} more legacy text perf changes.")
         lines.append("")
 
-    interesting = [c for c in added + modified + deleted if c not in converted_bad]
-    if interesting:
-        lines.extend(["### Other Parquet Changes", ""])
-        rows = [["Status", "File", "Base rows", "Head rows", "Rows +", "Rows -", "Rows ~", "Details"]]
-        for item in interesting[:75]:
-            row_diff = item.row_diff
-            if row_diff is None:
-                rows.append([item.status, item.path, item.base_rows, item.head_rows, "n/a", "n/a", "n/a", "n/a"])
-                continue
-            detail_kinds = ", ".join(row_diff.detail_files.keys()) or "none"
-            if row_diff.note:
-                detail_kinds = f"{detail_kinds}; {row_diff.note}"
-            rows.append(
-                [
-                    item.status,
-                    item.path,
-                    item.base_rows,
-                    item.head_rows,
-                    row_diff.added_rows,
-                    row_diff.removed_rows,
-                    row_diff.modified_rows,
-                    detail_kinds,
-                ]
-            )
-        lines.extend(_render_table(rows))
-        if len(interesting) > 75:
-            lines.append(f"\n...and {len(interesting) - 75} more parquet changes.")
-        lines.append("")
-        if any(item.row_diff and item.row_diff.detail_files for item in interesting):
+    has_row_detail_files = any(c.row_diff and c.row_diff.detail_files for c in comparisons)
+    if full_diff_artifacts is not None or has_row_detail_files:
+        lines.extend(["### Artifact Contents", ""])
+        if full_diff_artifacts is not None:
+            diff_artifact_label = "file" if len(full_diff_artifacts) == 1 else "files"
             lines.append(
-                f"Exact row-level CSVs are attached to the workflow artifact under `{DEFAULT_DETAIL_DIR}/` "
-                "with filenames matching `<source>.{added,removed,modified}.csv`."
+                f"- Full per-file unified diffs: `{DEFAULT_DETAIL_DIR}/{FULL_DIFF_SUBDIR}/` "
+                f"({len(full_diff_artifacts)} {diff_artifact_label})"
             )
-            lines.append("")
-            lines.extend(_render_inline_diff_previews(interesting))
+        if has_row_detail_files:
+            lines.append(f"- Exact row-level CSVs: `{DEFAULT_DETAIL_DIR}/` (listed in `summary.csv`)")
+        lines.append("")
 
     if converted and not converted_bad and not legacy_perf_changes:
         lines.append("All detected CSV-to-parquet conversions preserve column names and Arrow table content.")
@@ -860,7 +963,7 @@ def main() -> int:
         "--detail-dir",
         type=Path,
         default=None,
-        help="Directory for exact row-level CSV artifacts.",
+        help="Directory for full diff and exact row-level CSV artifacts.",
     )
     parser.add_argument("--no-strict", action="store_true", help="Do not fail on conversion mismatches.")
     args = parser.parse_args()
@@ -871,14 +974,23 @@ def main() -> int:
     comparisons = [
         _compare(args.base_ref, args.head_ref, entry, detail_dir=args.detail_dir) for entry in parquet_entries
     ]
+    full_diff_artifacts = None
     if args.detail_dir:
-        _write_detail_summary(args.detail_dir, comparisons)
+        full_diff_artifacts = _write_full_diff_artifacts(
+            detail_dir=args.detail_dir,
+            base_ref=args.base_ref,
+            head_ref=args.head_ref,
+            entries=entries,
+        )
+        _write_diff_manifest(args.detail_dir, full_diff_artifacts)
+        _write_detail_summary(args.detail_dir, comparisons, full_diff_artifacts)
     report = render_report(
         base_ref=args.base_ref,
         head_ref=args.head_ref,
         entries=entries,
         comparisons=comparisons,
         legacy_perf_changes=legacy_perf_changes,
+        full_diff_artifacts=full_diff_artifacts,
     )
 
     if args.output:

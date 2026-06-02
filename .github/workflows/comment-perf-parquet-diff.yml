@@ -82,12 +82,12 @@ jobs:
               }
 
               comment = comment.replace(
-                `Exact row-level CSVs are attached to the workflow artifact under \`${ARTIFACT_DETAIL_DIR}/\``,
-                `Exact row-level CSVs are in the ${artifactLink} artifact under \`${ARTIFACT_DETAIL_DIR}/\``
+                `Full per-file unified diffs: \`${ARTIFACT_DETAIL_DIR}/diffs/\``,
+                `Full per-file unified diffs: ${artifactLink} artifact under \`${ARTIFACT_DETAIL_DIR}/diffs/\``
               );
               comment = comment.replace(
-                `Full exact CSVs are in \`${ARTIFACT_DETAIL_DIR}/\`.`,
-                `Full exact CSVs are in the ${artifactLink} artifact under \`${ARTIFACT_DETAIL_DIR}/\`.`
+                `Exact row-level CSVs: \`${ARTIFACT_DETAIL_DIR}/\``,
+                `Exact row-level CSVs: ${artifactLink} artifact under \`${ARTIFACT_DETAIL_DIR}/\``
               );
             }
 
