@@ -68,8 +68,8 @@ def test_run_single_test_retries_large_worker_after_recoverable_failure(monkeypa
     assert statuses == {"agg": STATUS_PASS, "disagg": STATUS_PASS}
     assert errors == {"agg": None, "disagg": None}
     assert [call["yaml_config"] is None for call in calls] == [True, False, True, False]
-    assert calls[1]["yaml_config"]["config"]["worker_config"]["num_gpu_per_worker"] == [16]
-    assert calls[3]["yaml_config"]["config"]["prefill_worker_config"]["pp_list"] == [2]
+    assert calls[1]["yaml_config"]["config"]["worker_config"]["num_gpu_per_worker"] == [16, 32, 64]
+    assert calls[3]["yaml_config"]["config"]["prefill_worker_config"]["pp_list"] == [2, 4, 8]
 
 
 def test_run_single_test_reports_large_worker_replay_command(monkeypatch):
