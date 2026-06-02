@@ -185,7 +185,13 @@ def test_full_row_delta_preserves_original_nested_values(parquet_diff_module):
 def test_full_diff_artifacts_include_every_changed_perf_file(parquet_diff_module, tmp_path, monkeypatch):
     entries = [
         parquet_diff_module.DiffEntry("M", "src/aiconfigurator/systems/data/h100/gemm_perf.parquet"),
+        parquet_diff_module.DiffEntry("A", "src/aiconfigurator/systems/data/h100/new_perf.parquet"),
         parquet_diff_module.DiffEntry("D", "src/aiconfigurator/systems/data/h100/moe_perf.txt"),
+        parquet_diff_module.DiffEntry(
+            "R100",
+            "src/aiconfigurator/systems/data/h100/nccl_perf.parquet",
+            old_path="src/aiconfigurator/systems/data/h100/comm_perf.parquet",
+        ),
     ]
     file_lines = {
         ("base", "src/aiconfigurator/systems/data/h100/gemm_perf.parquet"): [
@@ -196,9 +202,21 @@ def test_full_diff_artifacts_include_every_changed_perf_file(parquet_diff_module
             "framework,latency",
             "vllm,1.5",
         ],
+        ("head", "src/aiconfigurator/systems/data/h100/new_perf.parquet"): [
+            "framework,latency",
+            "trtllm,3.0",
+        ],
         ("base", "src/aiconfigurator/systems/data/h100/moe_perf.txt"): [
             "framework,latency",
             "sglang,2.0",
+        ],
+        ("base", "src/aiconfigurator/systems/data/h100/comm_perf.parquet"): [
+            "framework,bandwidth",
+            "nccl,900",
+        ],
+        ("head", "src/aiconfigurator/systems/data/h100/nccl_perf.parquet"): [
+            "framework,bandwidth",
+            "nccl,950",
         ],
     }
 
@@ -215,10 +233,17 @@ def test_full_diff_artifacts_include_every_changed_perf_file(parquet_diff_module
 
     assert [artifact.diff_file for artifact in artifacts] == [
         "diffs/src/aiconfigurator/systems/data/h100/gemm_perf.parquet.diff",
+        "diffs/src/aiconfigurator/systems/data/h100/new_perf.parquet.diff",
         "diffs/src/aiconfigurator/systems/data/h100/moe_perf.txt.diff",
+        "diffs/src/aiconfigurator/systems/data/h100/nccl_perf.parquet.diff",
     ]
     assert "+vllm,1.5" in (tmp_path / artifacts[0].diff_file).read_text()
-    assert "-sglang,2.0" in (tmp_path / artifacts[1].diff_file).read_text()
+    assert "+trtllm,3.0" in (tmp_path / artifacts[1].diff_file).read_text()
+    assert "-sglang,2.0" in (tmp_path / artifacts[2].diff_file).read_text()
+    assert "comm_perf.parquet" in (tmp_path / artifacts[3].diff_file).read_text()
+    assert "nccl_perf.parquet" in (tmp_path / artifacts[3].diff_file).read_text()
+    assert "-nccl,900" in (tmp_path / artifacts[3].diff_file).read_text()
+    assert "+nccl,950" in (tmp_path / artifacts[3].diff_file).read_text()
 
     with (tmp_path / "changed-files.csv").open(newline="") as f:
         manifest_rows = list(csv.DictReader(f))
@@ -231,10 +256,22 @@ def test_full_diff_artifacts_include_every_changed_perf_file(parquet_diff_module
             "full_diff_file": "diffs/src/aiconfigurator/systems/data/h100/gemm_perf.parquet.diff",
         },
         {
+            "status": "A",
+            "file": "src/aiconfigurator/systems/data/h100/new_perf.parquet",
+            "old_file": "",
+            "full_diff_file": "diffs/src/aiconfigurator/systems/data/h100/new_perf.parquet.diff",
+        },
+        {
             "status": "D",
             "file": "src/aiconfigurator/systems/data/h100/moe_perf.txt",
             "old_file": "",
             "full_diff_file": "diffs/src/aiconfigurator/systems/data/h100/moe_perf.txt.diff",
+        },
+        {
+            "status": "R100",
+            "file": "src/aiconfigurator/systems/data/h100/nccl_perf.parquet",
+            "old_file": "src/aiconfigurator/systems/data/h100/comm_perf.parquet",
+            "full_diff_file": "diffs/src/aiconfigurator/systems/data/h100/nccl_perf.parquet.diff",
         },
     ]
 
@@ -257,7 +294,8 @@ def test_report_includes_row_level_counts(parquet_diff_module):
             modified_rows=1,
             detail_files={"added": "gemm.added.csv", "removed": "gemm.removed.csv", "modified": "gemm.modified.csv"},
             detail_previews={
-                "modified": "framework,gemm_dtype,m,n,k,latency__base,latency__head\nvllm,fp8,1,16,16,1.0,1.5"
+                "added": "framework,gemm_dtype,m,n,k,latency\nvllm,fp8,4,16,16,4.0",
+                "modified": "framework,gemm_dtype,m,n,k,latency__base,latency__head\nvllm,fp8,1,16,16,1.0,1.5",
             },
         ),
     )
@@ -284,3 +322,7 @@ def test_report_includes_row_level_counts(parquet_diff_module):
     assert "| M | src/aiconfigurator/systems/data/h100/vllm/0.19.0/gemm_perf.parquet |" not in report
     assert "Full per-file unified diffs: `parquet-diff-details/diffs/` (1 file)" in report
     assert "Exact row-level CSVs: `parquet-diff-details/` (listed in `summary.csv`)" in report
+    assert "**added rows** - full CSV: `parquet-diff-details/gemm.added.csv`" in report
+    assert "vllm,fp8,4,16,16,4.0" in report
+    assert "**modified rows** - full CSV: `parquet-diff-details/gemm.modified.csv`" in report
+    assert "vllm,fp8,1,16,16,1.0,1.5" in report

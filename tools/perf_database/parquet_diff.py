@@ -932,6 +932,8 @@ def render_report(
             lines.append(f"\n...and {len(legacy_perf_changes) - 50} more legacy text perf changes.")
         lines.append("")
 
+    lines.extend(_render_inline_diff_previews(comparisons))
+
     has_row_detail_files = any(c.row_diff and c.row_diff.detail_files for c in comparisons)
     if full_diff_artifacts is not None or has_row_detail_files:
         lines.extend(["### Artifact Contents", ""])
