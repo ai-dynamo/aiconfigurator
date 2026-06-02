@@ -37,6 +37,21 @@ jobs:
           lfs: true
           persist-credentials: false
 
+      - name: Validate workflow_dispatch inputs
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          BASE_REF: ${{ inputs.base-ref }}
+          HEAD_REFSPEC: ${{ inputs.head-ref }}
+        run: |
+          if [[ ! "${BASE_REF}" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "base-ref contains unsupported characters"
+            exit 1
+          fi
+          if [[ -n "${HEAD_REFSPEC}" && ! "${HEAD_REFSPEC}" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "head-ref contains unsupported characters"
+            exit 1
+          fi
+
       - name: Fetch comparison refs and LFS objects
         env:
           BASE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.base-ref || github.event.pull_request.base.ref }}

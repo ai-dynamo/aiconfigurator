@@ -13,7 +13,7 @@ import json
 import math
 import subprocess
 import sys
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -191,7 +191,7 @@ def _merge_columns(*column_lists: list[str]) -> list[str]:
 def _select_key_columns(base_columns: list[str], head_columns: list[str]) -> list[str]:
     common_columns = [column for column in base_columns if column in head_columns]
     key_columns = [column for column in common_columns if column not in MEASUREMENT_COLUMNS]
-    return key_columns or common_columns
+    return key_columns
 
 
 def _freeze_value(value: object) -> object:
@@ -435,17 +435,28 @@ def _counter_rows_delta(
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     base_counter = Counter(_row_key(row, columns) for row in base_rows)
     head_counter = Counter(_row_key(row, columns) for row in head_rows)
+    base_by_key = _rows_by_key(base_rows, columns)
+    head_by_key = _rows_by_key(head_rows, columns)
     added_rows: list[dict[str, object]] = []
     removed_rows: list[dict[str, object]] = []
-    for key, count in (head_counter - base_counter).items():
-        added_rows.extend(dict(zip(columns, key, strict=True)) for _ in range(count))
-    for key, count in (base_counter - head_counter).items():
-        removed_rows.extend(dict(zip(columns, key, strict=True)) for _ in range(count))
-    return added_rows, removed_rows
+    for key, count in sorted((head_counter - base_counter).items(), key=lambda item: repr(item[0])):
+        added_rows.extend(head_by_key[key].popleft() for _ in range(count))
+    for key, count in sorted((base_counter - head_counter).items(), key=lambda item: repr(item[0])):
+        removed_rows.extend(base_by_key[key].popleft() for _ in range(count))
+    return (
+        sorted(added_rows, key=lambda row: _sort_key(row, columns)),
+        sorted(removed_rows, key=lambda row: _sort_key(row, columns)),
+    )
 
 
-def _dict_from_key(columns: list[str], key: tuple[object, ...]) -> dict[str, object]:
-    return dict(zip(columns, key, strict=True))
+def _rows_by_key(
+    rows: list[dict[str, object]],
+    columns: list[str],
+) -> defaultdict[tuple[object, ...], deque[dict[str, object]]]:
+    rows_by_key: defaultdict[tuple[object, ...], deque[dict[str, object]]] = defaultdict(deque)
+    for row in sorted(rows, key=lambda item: _sort_key(item, columns)):
+        rows_by_key[_row_key(row, columns)].append(row)
+    return rows_by_key
 
 
 def _unmatched_full_rows(
@@ -456,9 +467,10 @@ def _unmatched_full_rows(
 ) -> list[dict[str, object]]:
     counter = Counter(_row_key(row, columns) for row in rows)
     unmatched = counter - matched_rows
+    rows_by_key = _rows_by_key(rows, columns)
     result: list[dict[str, object]] = []
-    for key, count in unmatched.items():
-        result.extend(_dict_from_key(columns, key) for _ in range(count))
+    for key, count in sorted(unmatched.items(), key=lambda item: repr(item[0])):
+        result.extend(rows_by_key[key].popleft() for _ in range(count))
     return sorted(result, key=lambda row: _sort_key(row, columns))
 
 

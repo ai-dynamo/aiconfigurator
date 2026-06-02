@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import math
 import sys
 from pathlib import Path
 
@@ -140,6 +141,45 @@ def test_row_diff_pairs_duplicate_keys_within_key(parquet_diff_module, tmp_path)
     assert row_diff.removed_rows == 0
     assert row_diff.modified_rows == 1
     assert row_diff.note == "duplicate keys; unmatched rows paired within key"
+
+
+def test_measurement_only_columns_use_full_row_delta(parquet_diff_module, tmp_path):
+    base = _snapshot(parquet_diff_module, "latency_perf.parquet", [{"latency": 1.0}, {"latency": 2.0}])
+    head = _snapshot(parquet_diff_module, "latency_perf.parquet", [{"latency": 2.0}, {"latency": 3.0}])
+
+    row_diff = parquet_diff_module._diff_snapshots(
+        "src/aiconfigurator/systems/data/h100/vllm/0.19.0/latency_perf.parquet",
+        base,
+        head,
+        detail_dir=tmp_path,
+    )
+
+    assert row_diff.key_columns == []
+    assert row_diff.added_rows == 1
+    assert row_diff.removed_rows == 1
+    assert row_diff.modified_rows == 0
+    assert row_diff.note == "unavailable keys; exact full-row add/remove diff used"
+
+
+def test_full_row_delta_preserves_original_nested_values(parquet_diff_module):
+    row = {"latency": float("nan"), "power": {"rails": ["gpu", "soc"]}}
+
+    added_rows, removed_rows = parquet_diff_module._counter_rows_delta(
+        base_rows=[],
+        head_rows=[row],
+        columns=["latency", "power"],
+    )
+    unmatched_rows = parquet_diff_module._unmatched_full_rows(
+        [row],
+        matched_rows=parquet_diff_module.Counter(),
+        columns=["latency", "power"],
+    )
+
+    assert removed_rows == []
+    assert added_rows[0] is row
+    assert unmatched_rows[0] is row
+    assert math.isnan(added_rows[0]["latency"])
+    assert isinstance(added_rows[0]["power"], dict)
 
 
 def test_full_diff_artifacts_include_every_changed_perf_file(parquet_diff_module, tmp_path, monkeypatch):

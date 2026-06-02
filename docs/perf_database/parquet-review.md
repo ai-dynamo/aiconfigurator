@@ -30,7 +30,7 @@ The summary checks row counts, column names, and Arrow table content hashes.
 When a PR replaces `*_perf.txt` with `*.parquet`, the tool compares the new
 parquet file against the base branch's legacy text file. A GitHub workflow also
 uploads and comments this report on PRs that touch perf data. The artifact
-bundle includes `parquet-diff-details/changed-files.csv` plus full unified diffs
-for every changed perf data file under `parquet-diff-details/diffs/`; row-level
-CSV details are also included when the tool can classify added, removed, or
-modified rows.
+bundle includes `parquet-diff-details/changed-files.csv`, full unified diffs for
+every changed perf data file under `parquet-diff-details/diffs/`, and
+`parquet-diff-details/summary.csv` with row-level CSV details when the tool can
+classify added, removed, or modified rows.
