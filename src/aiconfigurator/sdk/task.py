@@ -1440,7 +1440,7 @@ class TaskRunner:
                 task_config.worker_config.backend_name,
                 task_config.worker_config.backend_version,
             )
-            return None
+            raise
         logger.debug("Task %s: Setting up model config", task_config.task_name)
         task_workload_distribution = _config_get(task_config, "workload_distribution", "power_law")
         worker_workload_distribution = _config_get(task_config.worker_config, "workload_distribution", None)
@@ -1479,7 +1479,7 @@ class TaskRunner:
                 task_config.worker_config.backend_name,
                 task_config.worker_config.backend_version,
             )
-            return None
+            raise
 
         logger.info("Task %s: Listing parallelism configs to evaluate: ", task_config.task_name)
         for i, parallel_config in enumerate(parallel_config_list):
@@ -1554,7 +1554,7 @@ class TaskRunner:
                 task_config.prefill_worker_config.backend_name,
                 task_config.prefill_worker_config.backend_version,
             )
-            return None
+            raise
         logger.debug("Task %s: Setting up prefill model config", task_config.task_name)
         prefill_model_config = config.ModelConfig(
             gemm_quant_mode=task_config.prefill_worker_config.gemm_quant_mode,
@@ -1593,7 +1593,7 @@ class TaskRunner:
                 task_config.prefill_worker_config.backend_name,
                 task_config.prefill_worker_config.backend_version,
             )
-            return None
+            raise
 
         logger.info("Task %s: Listing prefill parallelism configs to evaluate: ", task_config.task_name)
         for i, parallel_config in enumerate(prefill_parallel_config_list):
@@ -1617,7 +1617,7 @@ class TaskRunner:
                 task_config.decode_worker_config.backend_name,
                 task_config.decode_worker_config.backend_version,
             )
-            return None
+            raise
         logger.debug("Task %s: Setting up decode model config", task_config.task_name)
         decode_model_config = config.ModelConfig(
             gemm_quant_mode=task_config.decode_worker_config.gemm_quant_mode,
@@ -1656,7 +1656,7 @@ class TaskRunner:
                 task_config.decode_worker_config.backend_name,
                 task_config.decode_worker_config.backend_version,
             )
-            return None
+            raise
 
         logger.info("Task %s: Listing decode parallelism configs to evaluate: ", task_config.task_name)
         for i, parallel_config in enumerate(decode_parallel_config_list):

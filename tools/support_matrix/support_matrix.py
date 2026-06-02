@@ -678,6 +678,11 @@ class SupportMatrix:
             engine_step_backend=engine_step_backend,
         )
         result = TaskRunner().run(task_config)
+        if result is None:
+            raise RuntimeError(
+                "TaskRunner returned no result before producing pareto_df for "
+                f"{mode=}, {model=}, {system=}, {backend=}, {version=}"
+            )
         return result.get("pareto_df")
 
     @staticmethod

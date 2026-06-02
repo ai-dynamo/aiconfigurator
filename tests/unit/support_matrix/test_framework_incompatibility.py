@@ -88,6 +88,22 @@ def test_non_dsv4_vllm_019_error_remains_fail(monkeypatch):
     assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
 
 
+def test_run_mode_reports_missing_taskrunner_result(monkeypatch):
+    monkeypatch.setattr(SupportMatrix, "_create_task_config", staticmethod(lambda **_kwargs: object()))
+    monkeypatch.setattr(support_matrix_module.TaskRunner, "run", lambda _self, _task_config: None)
+
+    with pytest.raises(RuntimeError, match="TaskRunner returned no result"):
+        SupportMatrix._run_mode(
+            mode="agg",
+            model="Qwen/Qwen3-0.6B",
+            system="b200_sxm",
+            backend="sglang",
+            version="0.5.12",
+            constraints=TestConstraints(total_gpus=4, isl=256, osl=256, prefix=128, ttft=1500, tpot=50),
+            engine_step_backend=None,
+        )
+
+
 def test_kimi_moonshot_trtllm_b200_int4_wo_is_framework_incompatible(monkeypatch):
     def fake_run_mode(**_kwargs):
         raise ValueError(
