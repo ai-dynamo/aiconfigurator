@@ -45,7 +45,7 @@ except ImportError:
 from vllm.config import set_current_vllm_config
 
 from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
-from collector.helper import benchmark_with_power, get_sm_version, log_perf
+from collector.helper import EXIT_CODE_RESTART, benchmark_with_power, get_sm_version, log_perf
 from collector.vllm.utils import (
     BatchSpec,
     create_and_prepopulate_kv_cache,
@@ -72,6 +72,23 @@ class MockAttentionLayer:
 
 # https://github.com/vllm-project/vllm/tree/main/vllm/v1/attention/backends
 # support MHA GQA MQA bfloat16 tensor and bfloat16/fp8 kv cache
+
+
+def _skip_vllm_sm89_022_fp8_kv_cache(use_fp8_kv_cache: bool) -> bool:
+    return use_fp8_kv_cache and vllm_version.startswith("0.22.0") and get_sm_version() == 89
+
+
+def _skip_vllm_sm89_022_flashinfer_head_dim(head_dim: int) -> bool:
+    return vllm_version.startswith("0.22.0") and get_sm_version() == 89 and head_dim >= 512
+
+
+def _restart_vllm_sm89_022_after_attention_case(head_dim: int) -> bool:
+    return (
+        os.environ.get("AIC_VLLM_ATTENTION_RESTART_AFTER_CASE") == "1"
+        and vllm_version.startswith("0.22.0")
+        and get_sm_version() == 89
+        and head_dim >= 192
+    )
 
 
 @with_exit_stack
@@ -401,6 +418,9 @@ def run_attention_torch(
         power_stats=results["power_stats"],
     )
 
+    if _restart_vllm_sm89_022_after_attention_case(head_dim):
+        raise SystemExit(EXIT_CODE_RESTART)
+
 
 def get_context_attention_test_cases(if_unit_test=False):
     test_cases = []
@@ -461,7 +481,11 @@ def get_context_attention_test_cases(if_unit_test=False):
                                 continue
 
                             for window_size in window_sizes:
+                                if _skip_vllm_sm89_022_flashinfer_head_dim(head_dim):
+                                    continue
                                 for is_fp8_kv_cache in kv_cache_dtype_list:
+                                    if _skip_vllm_sm89_022_fp8_kv_cache(is_fp8_kv_cache):
+                                        continue
                                     test_cases.append(
                                         [
                                             b,
@@ -531,6 +555,8 @@ def get_generation_attention_test_cases():
                     for n_kv in [int(value) for value in shape_sweep["kv_head_counts"]]:
                         if n_kv > n or n % n_kv != 0:
                             continue
+                        if _skip_vllm_sm89_022_flashinfer_head_dim(head_dim):
+                            continue
                         # On SM100 (Blackwell), vLLM uses FlashInfer which routes
                         # decode to trtllm_batch_decode_with_kv_cache. That kernel
                         # only supports GQA ratios up to 16.
@@ -539,6 +565,8 @@ def get_generation_attention_test_cases():
                         for s in target_s_list:
                             for window_size in window_sizes:
                                 for is_fp8_kv_cache in kv_cache_dtype_list:
+                                    if _skip_vllm_sm89_022_fp8_kv_cache(is_fp8_kv_cache):
+                                        continue
                                     test_cases.append(
                                         [
                                             b,
