@@ -160,6 +160,8 @@ class VisionEncoderConfig:
             Dimensions are absolute (before TP sharding); build_encoder_ops applies TP.
         projector_n_instances (int): Number of projector instances to model (e.g.,
             1 + len(deepstack_visual_indexes) for Qwen3VL deepstack variants).
+        partial_rotary_factor (float): Fraction of head_dim that RoPE rotates on Q/K
+            in each ViT attention block. 0.0 means no RoPE.
     """
 
     depth: int
@@ -173,6 +175,7 @@ class VisionEncoderConfig:
     deepstack_visual_indexes: tuple[int, ...] = ()
     projector_dims: tuple[tuple[int, int], ...] = ()
     projector_n_instances: int = 1
+    partial_rotary_factor: float = 0.0
 
 
 @dataclass(frozen=True)

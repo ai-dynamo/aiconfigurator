@@ -14,7 +14,7 @@ For a ViT with depth D and projector_dims with P (in, out) pairs::
   _vit_transformer_ops  →  10 ops, each with count=depth:
     encoder_add_norm_1    ElementWise
     encoder_qkv_gemm      GEMM
-    encoder_attention     ContextAttention
+    encoder_attention     EncoderAttention   (non-causal, MHA, no KV cache)
     encoder_proj_gemm     GEMM  (low_precision_input=True)
     encoder_ar_1          CustomAllReduce
     encoder_add_norm_2    ElementWise
@@ -69,7 +69,6 @@ def _vit_transformer_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> l
     # ViT always runs in bfloat16 regardless of LLM quantization settings
     vit_gemm_mode = common.GEMMQuantMode.bfloat16
     vit_fmha_mode = common.FMHAQuantMode.bfloat16
-    vit_kvcache_mode = common.KVCacheQuantMode.bfloat16
 
     return [
         ops.ElementWise("encoder_add_norm_1", depth, 2 * h_vit, 2 * h_vit, 0.8),
@@ -80,14 +79,13 @@ def _vit_transformer_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> l
             h_vit,
             vit_gemm_mode,
         ),
-        ops.ContextAttention(
+        ops.EncoderAttention(
             "encoder_attention",
             depth,
             n_vit // tp_size,
-            n_vit // tp_size,  # ViT has no GQA: n_kv == n
-            vit_kvcache_mode,
-            vit_fmha_mode,
-            head_size=head_size_vit,
+            head_size_vit,
+            fmha_quant_mode=vit_fmha_mode,
+            partial_rotary_factor=enc_cfg.partial_rotary_factor,
         ),
         ops.GEMM(
             "encoder_proj_gemm",

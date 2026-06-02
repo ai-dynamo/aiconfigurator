@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import inspect
 import logging
 from collections import defaultdict
@@ -122,6 +123,31 @@ class BaseBackend:
         """Build the cache key for ``run_agg`` results."""
         return (isl, osl, b, ctx_tokens, engine_step_backend_key)
 
+    @staticmethod
+    def _visual_context_tokens(model: BaseModel, runtime_config: RuntimeConfig) -> int:
+        enc_cfg = getattr(model, "encoder_config", None)
+        if enc_cfg is None or runtime_config.num_images_per_request <= 0:
+            return 0
+        post_merge, _ = BaseBackend._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
+        return post_merge * runtime_config.num_images_per_request
+
+    @staticmethod
+    def _fold_visual_context_into_isl(runtime_config: RuntimeConfig, model: BaseModel) -> int:
+        img_ctx_tokens = BaseBackend._visual_context_tokens(model, runtime_config)
+        if img_ctx_tokens > 0:
+            runtime_config.isl += img_ctx_tokens
+        runtime_config.image_height = 0
+        runtime_config.image_width = 0
+        runtime_config.num_images_per_request = 0
+        runtime_config.num_image_tokens = 0
+        return img_ctx_tokens
+
+    @staticmethod
+    def _runtime_config_for_agg_candidate(runtime_config: RuntimeConfig, batch_size: int) -> RuntimeConfig:
+        candidate = copy.deepcopy(runtime_config)
+        candidate.batch_size = batch_size
+        return candidate
+
     def _memory_usage_kwargs_for_agg(self, num_tokens: int, agg_extra: dict) -> dict:
         """Kwargs for the ``_get_memory_usage`` call from ``run_agg``.
 
@@ -141,6 +167,91 @@ class BaseBackend:
         return {}
 
     # ============== STATIC INFERENCE (shared) ==========================
+
+    @staticmethod
+    def _encoder_pre_merge_per_visual(
+        runtime_config: RuntimeConfig,
+        enc_cfg,
+    ) -> tuple[int, int]:
+        """Resolve the per-image pre-merge / post-merge token counts from
+        RuntimeConfig + VisionEncoderConfig.
+
+        Resolution order:
+            1. image_height + image_width (computed from patch/merge sizes)
+            2. num_image_tokens (explicit per-image override)
+
+        Returns ``(tokens_post_merge_per_image, pre_merge_per_image)``.
+        Returns ``(0, 0)`` when neither is set (text-only path).
+        """
+        has_image_dims = runtime_config.image_height > 0 and runtime_config.image_width > 0
+        if has_image_dims:
+            img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
+            tokens_per_image = (runtime_config.image_height // img_stride) * (
+                runtime_config.image_width // img_stride
+            )
+            pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
+                runtime_config.image_width // enc_cfg.patch_size
+            )
+        elif runtime_config.num_image_tokens > 0:
+            tokens_per_image = runtime_config.num_image_tokens
+            pre_merge_per_image = tokens_per_image * (enc_cfg.spatial_merge_size**2)
+        else:
+            return 0, 0
+        if tokens_per_image <= 0 or pre_merge_per_image <= 0:
+            return 0, 0
+        return tokens_per_image, pre_merge_per_image
+
+    def _run_encoder_phase(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        runtime_config: RuntimeConfig,
+        batch_size: int,
+    ) -> tuple[dict[str, float], dict[str, float], int]:
+        # Run the encoder phase (Currently VL models only).
+        encoder_latency_dict = defaultdict(float)
+        encoder_energy_wms_dict = defaultdict(float)
+
+        if not model.encoder_ops:
+            return encoder_latency_dict, encoder_energy_wms_dict, 0
+
+        enc_cfg = getattr(model, "encoder_config", None)
+        num_images = runtime_config.num_images_per_request
+        if num_images <= 0 or enc_cfg is None:
+            return encoder_latency_dict, encoder_energy_wms_dict, 0
+
+        tokens_per_image, pre_merge_per_image = self._encoder_pre_merge_per_visual(
+            runtime_config, enc_cfg
+        )
+        if tokens_per_image == 0:
+            # No image dimensions specified; skip encoder modeling.
+            return encoder_latency_dict, encoder_energy_wms_dict, 0
+
+        n_img_post = tokens_per_image * num_images  # post-merge: injected into LLM context
+        n_img_pre = pre_merge_per_image * num_images  # pre-merge: processed by ViT transformer
+
+        for op in model.encoder_ops:
+            use_post = "encoder_projector" in op._name
+            # ViT attention uses cu_seqlens: each image is an independent
+            # varlen sequence of pre_merge_per_image patches.
+            use_varlen = "encoder_attention" in op._name
+            n_img = n_img_post if use_post else n_img_pre
+            eff_batch = batch_size * num_images if use_varlen else batch_size
+            eff_s = pre_merge_per_image if use_varlen else n_img
+            x = eff_batch * eff_s
+            result = op.query(
+                database,
+                x=x,
+                batch_size=eff_batch,
+                beam_width=1,
+                s=eff_s,
+                prefix=0,
+                model_name=getattr(model, "model_name", ""),
+            )
+            encoder_latency_dict[op._name] += float(result)
+            encoder_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
+
+        return encoder_latency_dict, encoder_energy_wms_dict, n_img_post
 
     def _run_context_phase(
         self,
@@ -262,6 +373,10 @@ class BaseBackend:
         generation_latency_dict, generation_energy_wms_dict, generation_source_dict = {}, {}, {}
 
         if should_use_rust_engine_step(runtime_config):
+            rust_runtime_config = runtime_config
+            if img_ctx_tokens:
+                rust_runtime_config = copy.copy(runtime_config)
+                rust_runtime_config.isl = isl_eff
             (
                 context_latency_dict,
                 generation_latency_dict,
@@ -270,7 +385,7 @@ class BaseBackend:
             ) = estimate_static_latency_breakdown_with_rust(
                 model,
                 database,
-                runtime_config,
+                rust_runtime_config,
                 mode,
                 stride,
                 latency_correction_scale,
@@ -335,6 +450,19 @@ class BaseBackend:
         This shares the same latency breakdown path as ``run_static`` but skips
         building an ``InferenceSummary``.
         """
+        if mode == "static_gen":
+            encoder_latency = 0.0
+            img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
+        else:
+            encoder_latency_dict, encoder_energy_wms_dict, img_ctx_tokens = self._run_encoder_phase(
+                model, database, runtime_config, runtime_config.batch_size
+            )
+            if latency_correction_scale != 1.0:
+                for op in encoder_latency_dict:
+                    encoder_latency_dict[op] *= latency_correction_scale
+                    encoder_energy_wms_dict[op] *= latency_correction_scale
+            encoder_latency = sum(encoder_latency_dict.values())
+
         (
             context_latency_dict,
             _,
@@ -342,8 +470,16 @@ class BaseBackend:
             _,
             _,
             _,
-        ) = self._run_static_breakdown(model, database, runtime_config, mode, stride, latency_correction_scale)
-        return sum(context_latency_dict.values()) + sum(generation_latency_dict.values())
+        ) = self._run_static_breakdown(
+            model,
+            database,
+            runtime_config,
+            mode,
+            stride,
+            latency_correction_scale,
+            img_ctx_tokens=img_ctx_tokens,
+        )
+        return encoder_latency + sum(context_latency_dict.values()) + sum(generation_latency_dict.values())
 
     def run_static(
         self,
@@ -370,80 +506,7 @@ class BaseBackend:
         """
 
         def _run_encoder(batch_size: int) -> tuple[dict[str, float], dict[str, float], int]:
-            """
-            Run vision encoder phase (VL models only).
-
-            ViT transformer ops use pre-merge patch count: (H // patch_size)²
-            Only encoder_proj_to_llm_gemm uses post-merge token count: (H // stride)²
-            Returns img_ctx_tokens (post-merge x n_img) as effective ISL offset for
-            the LLM context and generation phases.
-
-            token count resolution order:
-                1. image_height + image_width (computed from VisionEncoderConfig patch/merge sizes)
-                2. num_image_tokens (explicit override, per image)
-                3. isl (fallback for text-only or unconfigured VL requests)
-
-            Returns:
-                tuple: (encoder_latency_dict, encoder_energy_wms_dict, img_ctx_tokens)
-                        latency in ms, energy in W·ms, img_ctx_tokens is post-merge token count
-            """
-            encoder_latency_dict = defaultdict(float)
-            encoder_energy_wms_dict = defaultdict(float)
-
-            if not model.encoder_ops:
-                return encoder_latency_dict, encoder_energy_wms_dict, 0
-
-            enc_cfg = getattr(model, "encoder_config", None)
-            num_images = runtime_config.num_images_per_request
-
-            if runtime_config.num_images_per_request <= 0 or enc_cfg is None:
-                return encoder_latency_dict, encoder_energy_wms_dict, 0
-
-            has_image_dims = runtime_config.image_height > 0 and runtime_config.image_width > 0
-            if has_image_dims:
-                img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
-                tokens_per_image = (runtime_config.image_height // img_stride) * (
-                    runtime_config.image_width // img_stride
-                )
-                pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
-                    runtime_config.image_width // enc_cfg.patch_size
-                )
-            elif runtime_config.num_image_tokens > 0:
-                tokens_per_image = runtime_config.num_image_tokens
-                pre_merge_per_image = tokens_per_image * (enc_cfg.spatial_merge_size**2)
-            else:
-                # No image dimensions or token override specified; model this as a text-only request.
-                return encoder_latency_dict, encoder_energy_wms_dict, 0
-
-            if tokens_per_image <= 0 or pre_merge_per_image <= 0:
-                return encoder_latency_dict, encoder_energy_wms_dict, 0
-
-            n_img_post = tokens_per_image * num_images  # post-merge: injected into LLM context
-            n_img_pre = pre_merge_per_image * num_images  # pre-merge: processed by ViT transformer
-
-            for op in model.encoder_ops:
-                use_post = "encoder_projector" in op._name
-                # ViT attention: each image is an independent varlen sequence.
-                # Model as batch_size*num_images sequences of pre_merge_per_image tokens
-                # rather than one concatenated sequence of n_img_pre tokens.
-                use_varlen = "encoder_attention" in op._name
-                n_img = n_img_post if use_post else n_img_pre
-                eff_batch = batch_size * num_images if use_varlen else batch_size
-                eff_s = pre_merge_per_image if use_varlen else n_img
-                x = eff_batch * eff_s
-                result = op.query(
-                    database,
-                    x=x,
-                    batch_size=eff_batch,
-                    beam_width=1,
-                    s=eff_s,
-                    prefix=0,
-                    model_name=getattr(model, "model_name", ""),
-                )
-                encoder_latency_dict[op._name] += float(result)
-                encoder_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
-
-            return encoder_latency_dict, encoder_energy_wms_dict, n_img_post
+            return self._run_encoder_phase(model, database, runtime_config, batch_size)
 
         def _run_context(bs: int, effective_isl: int, pfx: int):
             return self._run_context_phase(model, database, runtime_config, bs, effective_isl, pfx)
@@ -460,8 +523,11 @@ class BaseBackend:
             runtime_config.prefix,
         )
 
-        # Run encoder (VL models only; no-op for standard models)
-        encoder_latency_dict, encoder_energy_wms_dict, img_ctx_tokens = _run_encoder(batch_size)
+        if mode == "static_gen":
+            encoder_latency_dict, encoder_energy_wms_dict = defaultdict(float), defaultdict(float)
+            img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
+        else:
+            encoder_latency_dict, encoder_energy_wms_dict, img_ctx_tokens = _run_encoder(batch_size)
 
         if latency_correction_scale != 1.0:
             for op in encoder_latency_dict:
@@ -487,7 +553,13 @@ class BaseBackend:
 
         if mode == "static_ctx":
             memory = self._get_memory_usage(
-                model, database, batch_size, beam_width, isl + img_ctx_tokens, 1, prefix=prefix
+                model,
+                database,
+                batch_size,
+                beam_width,
+                isl + img_ctx_tokens,
+                1,
+                prefix=prefix,
             )
         elif mode == "static_gen":
             memory = self._get_memory_usage(
@@ -502,7 +574,13 @@ class BaseBackend:
             )
         else:
             memory = self._get_memory_usage(
-                model, database, batch_size, beam_width, isl + img_ctx_tokens, osl, prefix=prefix
+                model,
+                database,
+                batch_size,
+                beam_width,
+                isl + img_ctx_tokens,
+                osl,
+                prefix=prefix,
             )
 
         # Calculate total latencies and energies (simple sums - decoupled!)
@@ -621,7 +699,7 @@ class BaseBackend:
         summary.set_memory_and_check_oom(memory, database.system_spec["gpu"]["mem_capacity"])
         # KV-per-seq context for capacity probing in CLI detail reports.
         try:
-            kv_seq_len_used = isl + beam_width * osl
+            kv_seq_len_used = isl + img_ctx_tokens + beam_width * osl
             kv_bytes_per_seq = model.get_kvcache_bytes_per_sequence(kv_seq_len_used)
             summary.set_kv_per_seq(kv_bytes_per_seq, kv_seq_len_used)
         except Exception:
@@ -629,12 +707,10 @@ class BaseBackend:
             pass
 
         # Encoder-node memory (VL models only): weights = ViT only, activations = patches, kvcache = 0.
-        if img_ctx_tokens > 0:
+        if encoder_latency_ms > 0 and img_ctx_tokens > 0:
             enc_cfg = getattr(model, "encoder_config", None)
             if enc_cfg is not None:
-                pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
-                    runtime_config.image_width // enc_cfg.patch_size
-                )
+                _, pre_merge_per_image = self._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
                 enc_num_tokens = batch_size * runtime_config.num_images_per_request * pre_merge_per_image
                 summary.set_encoder_memory(self._get_encoder_node_memory(model, database, enc_num_tokens))
 
@@ -993,10 +1069,12 @@ class BaseBackend:
         self, model: BaseModel, database: PerfDatabase, runtime_config: RuntimeConfig, **kwargs
     ) -> InferenceSummary:
         """Run the agg (continuous-batching) inference for a single (b, ctx_tokens) point."""
-        isl = runtime_config.isl
+        text_isl = runtime_config.isl
         osl = runtime_config.osl
         prefix = runtime_config.prefix
         b = runtime_config.batch_size
+        img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
+        isl = text_isl + img_ctx_tokens
         engine_step_backend_key = "rust" if should_use_rust_engine_step(runtime_config) else "python"
         ctx_tokens = kwargs.get("ctx_tokens")
         assert ctx_tokens is not None, "ctx_tokens is required"
@@ -1006,10 +1084,24 @@ class BaseBackend:
         # free_gpu_memory_fraction; others: {}).
         agg_extra = self._resolve_agg_kwargs(kwargs, isl=isl, osl=osl)
 
-        cache_key = self._make_agg_cache_key(isl, osl, b, ctx_tokens, engine_step_backend_key, agg_extra)
+        visual_cache_key = (
+            runtime_config.image_height,
+            runtime_config.image_width,
+            runtime_config.num_images_per_request,
+        )
+        cache_key = (
+            self._make_agg_cache_key(isl, osl, b, ctx_tokens, engine_step_backend_key, agg_extra),
+            visual_cache_key,
+        )
         cached = self._agg_cache.get(cache_key)
         if cached is not None:
             return cached
+
+        encoder_latency_dict, encoder_energy_wms_dict, _ = self._run_encoder_phase(
+            model, database, runtime_config, b
+        )
+        encoder_latency_ms = sum(encoder_latency_dict.values())
+        encoder_energy_wms = sum(encoder_energy_wms_dict.values())
 
         # Compute num_mix_steps / num_genonly_steps within osl steps such that
         # all ctx tokens are consumed.
@@ -1064,9 +1156,9 @@ class BaseBackend:
             per_ops_source["genonly_step"] = genonly_per_ops_src
 
         # TTFT: assume a 10x request queue, capped correction factor at 4.
-        ttft = mix_step_latency_ms * np.ceil(isl / ctx_tokens)
+        llm_ttft = mix_step_latency_ms * np.ceil(isl / ctx_tokens)
         correction_factor = min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)
-        ttft *= correction_factor
+        ttft = encoder_latency_ms + llm_ttft * correction_factor
         logger.debug(
             f"ttft correction factor: {2 + (steps_to_finish_ctx - 3) / 2 / 10} capped to "
             f"{correction_factor} when b: {b}, ctx_tokens: {ctx_tokens} isl {isl}"
@@ -1080,7 +1172,9 @@ class BaseBackend:
             if _tpot_steps > 0
             else 0.0
         )
-        _total_step_latency_ms = num_mix_steps * mix_step_latency_ms + num_genonly_steps * genonly_step_latency_ms
+        _total_step_latency_ms = (
+            encoder_latency_ms + num_mix_steps * mix_step_latency_ms + num_genonly_steps * genonly_step_latency_ms
+        )
         output_throughput = (
             (1000 / _total_step_latency_ms * b * (osl - 1)) if (osl > 1 and _total_step_latency_ms > 0) else 0.0
         )
@@ -1098,8 +1192,10 @@ class BaseBackend:
         logger.debug(f"ttft: {ttft}, tpot: {tpot}, output_throughput: {output_throughput}")
 
         # Weighted average power: total energy / total latency.
-        total_energy_wms = num_mix_steps * mix_step_energy_wms + num_genonly_steps * genonly_step_energy_wms
-        total_latency_ms = num_mix_steps * mix_step_latency_ms + num_genonly_steps * genonly_step_latency_ms
+        total_energy_wms = (
+            encoder_energy_wms + num_mix_steps * mix_step_energy_wms + num_genonly_steps * genonly_step_energy_wms
+        )
+        total_latency_ms = _total_step_latency_ms
         agg_power_avg_w = total_energy_wms / total_latency_ms if total_latency_ms > 0 else 0.0
         logger.debug(f"Aggregated power: {agg_power_avg_w}W (from {total_energy_wms} W·ms / {total_latency_ms} ms)")
 
@@ -1154,7 +1250,7 @@ class BaseBackend:
 
         result_dict = {
             "model": model.model_path,
-            "isl": isl,
+            "isl": text_isl,
             "osl": osl,
             "prefix": prefix,
             "concurrency": concurrency,
@@ -1211,6 +1307,8 @@ class BaseBackend:
             "mix_step_latency_ms": float(mix_step_latency_ms),
             "genonly_step_latency_ms": float(genonly_step_latency_ms),
         }
+        if encoder_latency_dict:
+            per_ops_data["encoder"] = dict(encoder_latency_dict)
         summary.set_per_ops_data(per_ops_data)
         summary.set_per_ops_source(per_ops_source)
 
@@ -1239,6 +1337,7 @@ class BaseBackend:
             A summary of the best agg result under constraints.
         """
         isl = runtime_config.isl
+        isl_eff = isl + self._visual_context_tokens(model, runtime_config)
         osl = runtime_config.osl
         ttft = runtime_config.ttft
         tpot = runtime_config.tpot
@@ -1250,7 +1349,7 @@ class BaseBackend:
 
         # Resolve backend-specific kwargs once; forward into run_agg so each
         # (b, ctx_tokens) point sees the same backend params.
-        sweep_extra = self._resolve_agg_kwargs(kwargs, isl=isl, osl=osl)
+        sweep_extra = self._resolve_agg_kwargs(kwargs, isl=isl_eff, osl=osl)
 
         # when b is larger than 1024, the result is not good as the data collection is not enough
         # to cover this.
@@ -1273,7 +1372,7 @@ class BaseBackend:
         # during the loop, as b, ctx_tokens and system memory are monotonic, we can break the
         # inner loop when the system is oom.
         b_list = [b for b in b_list_default if b <= max_batch_size]
-        ctx_tokens_list = self._get_ctx_tokens_list_for_agg_sweep(isl, ctx_stride, enable_chunked_prefill)
+        ctx_tokens_list = self._get_ctx_tokens_list_for_agg_sweep(isl_eff, ctx_stride, enable_chunked_prefill)
 
         results_df = pd.DataFrame(columns=common.ColumnsAgg)
         results_dict_list: list[dict] = []
@@ -1282,16 +1381,16 @@ class BaseBackend:
         all_oom = True
         for b in b_list:
             for ctx_tokens in ctx_tokens_list:
-                if b - np.ceil(ctx_tokens / isl) < 0:  # allow b==1
+                if b - np.ceil(ctx_tokens / isl_eff) < 0:  # allow b==1
                     break
 
                 if b > 1 and (
-                    b - np.ceil(ctx_tokens / isl) < 1
+                    b - np.ceil(ctx_tokens / isl_eff) < 1
                 ):  # general case, to ensure there's at least one gen req
                     break
 
                 # filter out repeated records for balance score correction
-                balance_score = isl * b / ctx_tokens / osl
+                balance_score = isl_eff * b / ctx_tokens / osl
                 if balance_score > 1:
                     gen_tokens = b // balance_score
                     if gen_tokens > 1 and gen_tokens in capped_b:
@@ -1302,15 +1401,7 @@ class BaseBackend:
                 summary = self.run_agg(
                     model=model,
                     database=database,
-                    runtime_config=RuntimeConfig(
-                        batch_size=b,
-                        isl=isl,
-                        osl=osl,
-                        prefix=prefix,
-                        seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
-                        gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
-                        engine_step_backend=runtime_config.engine_step_backend,
-                    ),
+                    runtime_config=self._runtime_config_for_agg_candidate(runtime_config, b),
                     ctx_tokens=ctx_tokens,
                     **sweep_extra,
                 )
