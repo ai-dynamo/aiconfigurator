@@ -63,6 +63,70 @@ def _skip_trtllm_sm120_fp8_context_fmha(
     )
 
 
+def _skip_trtllm_sm89_rc15_long_context_gqa(
+    batch_size: int,
+    input_len: int,
+    num_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+) -> bool:
+    if not (tensorrt_llm.__version__.startswith("1.3.0rc15") and get_sm_version() == 89):
+        return False
+
+    if num_key_value_heads not in {1, 2, 4, 8}:
+        return False
+
+    num_tokens = batch_size * input_len
+    if num_heads == 96:
+        if head_dim == 128:
+            return num_tokens >= 98304
+        if head_dim >= 256:
+            return num_tokens >= 49152
+        return head_dim >= 192 and num_tokens >= 65536
+    if num_heads == 64:
+        if head_dim >= 256:
+            return num_tokens >= 81920
+        return head_dim >= 192 and num_tokens >= 98304
+    if num_heads == 48:
+        if head_dim >= 256:
+            return num_tokens >= 98304
+        return head_dim >= 192 and num_tokens >= 131072
+    if num_heads == 40:
+        return head_dim >= 256 and num_tokens >= 131072
+    return False
+
+
+def _skip_trtllm_sm89_rc15_fp8_context_mha(
+    batch_size: int,
+    input_len: int,
+    num_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+    use_fp8_kv_cache: bool,
+    use_fp8_context_fmha: bool,
+) -> bool:
+    if not (tensorrt_llm.__version__.startswith("1.3.0rc15") and get_sm_version() == 89):
+        return False
+
+    if not (use_fp8_kv_cache and use_fp8_context_fmha and num_heads == num_key_value_heads):
+        return False
+
+    num_tokens = batch_size * input_len
+    if num_heads == 96:
+        if head_dim == 128:
+            return num_tokens >= 65536
+        if head_dim >= 256:
+            return num_tokens >= 32768
+        return head_dim >= 192 and num_tokens >= 40960
+    if num_heads == 64:
+        if head_dim >= 256:
+            return num_tokens >= 49152
+        return head_dim >= 192 and num_tokens >= 65536
+    if num_heads == 48:
+        return head_dim >= 256 and num_tokens >= 65536
+    return False
+
+
 def run_attention_torch(
     batch_size,
     input_len,
@@ -384,6 +448,8 @@ def get_context_attention_test_cases():
                                 num_kv_heads,
                                 h,
                             )
+                            if _skip_trtllm_sm89_rc15_long_context_gqa(b, s, n, num_kv_heads, h):
+                                continue
                             for attention_window_size in _attention_window_options(shape_sweep, h):
                                 for precision_case in shape_sweep["precision_cases"]:
                                     use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
@@ -391,6 +457,16 @@ def get_context_attention_test_cases():
                                     if not has_fp8 and use_fp8_kv_cache:
                                         continue
                                     if skip_fp8_context_fmha and use_fp8_context_fmha:
+                                        continue
+                                    if _skip_trtllm_sm89_rc15_fp8_context_mha(
+                                        b,
+                                        s,
+                                        n,
+                                        num_kv_heads,
+                                        h,
+                                        use_fp8_kv_cache,
+                                        use_fp8_context_fmha,
+                                    ):
                                         continue
                                     test_cases.append(
                                         [
