@@ -137,7 +137,9 @@ framework_specific_op_cases:
         batch_sizes:
         - 1
         sequence_lengths:
+        - 231
         - 258
+        - 359
         - 386
         mha_query_head_counts:
         - 8
@@ -157,6 +159,7 @@ framework_specific_op_cases:
         - 192
         window_sizes:
         - 0
+        - 128
         max_mha_tokens_per_step: 8388608
         max_xqa_tokens_per_step: 16777216
         min_batch_options_per_sequence: 1
