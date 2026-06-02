@@ -159,6 +159,32 @@ def _get_exact_3d(data: dict, x: int, y: int, z: int):
     return y_data[z]
 
 
+def _require_3d_axis_coverage(data: dict, *, context: str) -> None:
+    """Require non-exact 3-D interpolation inputs to vary on every axis."""
+    x_values = set(data)
+    y_values = set()
+    z_values = set()
+
+    for x_data in data.values():
+        if not isinstance(x_data, dict):
+            continue
+        y_values.update(x_data.keys())
+        for y_data in x_data.values():
+            if isinstance(y_data, dict):
+                z_values.update(y_data.keys())
+
+    missing_axes = [
+        axis_name for axis_name, values in (("x", x_values), ("y", y_values), ("z", z_values)) if len(values) < 2
+    ]
+    if missing_axes:
+        axes = ", ".join(missing_axes)
+        raise ValueError(
+            f"{context} requires data that varies across all 3 dimensions; "
+            f"missing variation on axis/axes: {axes}. "
+            "Collect more perf data points instead of reducing to lower-dimensional interpolation."
+        )
+
+
 def nearest_1d_point_helper(x: int, values: list[int], inner_only: bool = True) -> tuple[int, int]:
     """Return the two values bracketing ``x`` from ``values``.
 
@@ -366,6 +392,7 @@ def interp_3d_linear(x: int, y: int, z: int, data: dict) -> float:
     exact = _get_exact_3d(data, x, y, z)
     if exact is not _MISSING:
         return exact
+    _require_3d_axis_coverage(data, context="3-D linear interpolation")
 
     points_list = []
     values_list = []
@@ -399,6 +426,7 @@ def interp_2d_1d(
     exact = _get_exact_3d(data, x, y, z)
     if exact is not _MISSING:
         return exact
+    _require_3d_axis_coverage(data, context=f"3-D {method} interpolation")
 
     x_values = []
     point_helper = nearest_1d_point_allow_singleton_axis if allow_singleton_axes else nearest_1d_point_helper

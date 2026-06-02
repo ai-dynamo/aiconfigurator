@@ -184,26 +184,24 @@ class TestInterpolationMethods:
         assert result == 90.0
 
     def test_interp_3d_linear_degenerate_axis(self, comprehensive_perf_db):
-        """3D interpolation should reduce exact dimensions before calling Qhull."""
+        """Non-exact 3D interpolation should not reduce to a lower-dimensional slice."""
         data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
         for x in [256, 512]:
             for z in [0, 512]:
                 data[x][1][z] = x + z
 
-        result = interpolation.interp_3d_linear(384, 1, 256, data)
-
-        assert result == 640.0
+        with pytest.raises(ValueError, match="requires data that varies across all 3 dimensions"):
+            interpolation.interp_3d_linear(384, 1, 256, data)
 
     def test_interp_3d_cubic_degenerate_axis(self, comprehensive_perf_db):
-        """Cubic 2D-then-1D interpolation should reduce exact dimensions."""
+        """Cubic 2D-then-1D interpolation should require true 3D coverage."""
         data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
         for x in [256, 512]:
             for z in [0, 512]:
                 data[x][1][z] = x + z
 
-        result = interpolation.interp_3d(384, 1, 256, data, "cubic", comprehensive_perf_db._extracted_metrics_cache)
-
-        assert result["latency"] == 640.0
+        with pytest.raises(ValueError, match="requires data that varies across all 3 dimensions"):
+            interpolation.interp_3d(384, 1, 256, data, "cubic", comprehensive_perf_db._extracted_metrics_cache)
 
     def test_interp_3d_exact_sparse_point(self, comprehensive_perf_db):
         """Exact data should be returned before building a broader stencil."""
@@ -216,16 +214,15 @@ class TestInterpolationMethods:
 
         assert result["latency"] == 220.0
 
-    def test_interp_3d_exact_axis_uses_available_curve(self, comprehensive_perf_db):
-        """Exact axes should not require neighboring sparse slices."""
+    def test_interp_3d_exact_axis_requires_full_3d_coverage(self, comprehensive_perf_db):
+        """Non-exact 3D interpolation should not use a lower-dimensional curve."""
         data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
         data[16][256][1] = 100.0
         data[16][258][1] = 104.0
         data[32][256][1] = 200.0
 
-        result = interpolation.interp_3d(16, 257, 1, data, "cubic", comprehensive_perf_db._extracted_metrics_cache)
-
-        assert result["latency"] == 102.0
+        with pytest.raises(ValueError, match="requires data that varies across all 3 dimensions"):
+            interpolation.interp_3d(16, 257, 1, data, "cubic", comprehensive_perf_db._extracted_metrics_cache)
 
     def test_interp_2d_1d(self, comprehensive_perf_db):
         """Test 2D-1D interpolation methods."""
