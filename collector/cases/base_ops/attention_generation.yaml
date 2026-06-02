@@ -95,6 +95,7 @@ framework_specific_op_cases:
         - 256
         window_sizes:
         - 0
+        - 128
         - 1024
   trtllm:
     attention_generation:
