@@ -9,7 +9,7 @@ Shared MoE shapes come from YAML; this file owns TRT-LLM version quirks and
 kernel-specific filters.
 """
 
-__compat__ = "trtllm>=1.0.0,<=1.3.0rc10"
+__compat__ = "trtllm>=1.0.0,<=1.3.0rc15"
 
 import gc
 import glob
@@ -170,6 +170,7 @@ def get_moe_test_cases():
         # SM90 (Hopper) and SM100 (Blackwell) both support fp8_block.
         # SM90 uses CUTLASS backend with FP32 scale.
         # SM100 uses DEEPGEMM/TRTLLM backend with UE8M0 scale (MXFP8 style).
+    if sm_version >= 90:
         moe_list += ["fp8_block"]
 
     # SM90 specific quant mode.

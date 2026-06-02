@@ -23,9 +23,9 @@ import math
 
 import numpy as np
 from scipy import interpolate
-from scipy.spatial import QhullError
 
 logger = logging.getLogger(__name__)
+_MISSING = object()
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +49,51 @@ def validate_interpolation_result(value):
     if np.any(value_array < 0.0):
         logger.debug(f"Negative value detected {value}, pass")
     return value
+
+
+def _reduced_griddata(points: list[list[int]], values: list, target: tuple[int, ...], method: str):
+    """Interpolate after reducing constant dimensions before scipy griddata.
+
+    ``scipy.interpolate.griddata(..., method="linear")`` requires the point cloud
+    or ``method="cubic"`` requires the point cloud to be full-dimensional. Perf
+    tables often have one exact dimension, such as a fixed batch size, while
+    still needing interpolation over the other dimensions. Removing those
+    constant axes keeps the query on the requested method whenever possible and
+    falls back to exact/1-D interpolation when the reduced cloud is lower-rank.
+    """
+    point_array = np.asarray(points, dtype=float)
+    value_array = np.asarray(values, dtype=float)
+    target_array = np.asarray(target, dtype=float)
+
+    unique = {}
+    for point, value in zip(point_array, value_array, strict=True):
+        unique[tuple(point.tolist())] = value
+    point_array = np.asarray(list(unique.keys()), dtype=float)
+    value_array = np.asarray(list(unique.values()), dtype=float)
+
+    varying = np.ptp(point_array, axis=0) > 0
+    if not np.all(varying):
+        constant_dims = np.where(~varying)[0]
+        for dim in constant_dims:
+            if not math.isclose(target_array[dim], point_array[0, dim]):
+                raise ValueError(
+                    f"Target coordinate does not match constant interpolation dimension. "
+                    f"target={target_array[dim]}, value={point_array[0, dim]}, dim={dim}"
+                )
+
+    reduced_points = point_array[:, varying]
+    reduced_target = target_array[varying]
+    if reduced_points.shape[1] == 0:
+        return value_array[0]
+    if reduced_points.shape[1] == 1:
+        order = np.argsort(reduced_points[:, 0])
+        return np.interp(reduced_target[0], reduced_points[order, 0], value_array[order])
+
+    return interpolate.griddata(reduced_points, value_array, tuple(reduced_target), method=method)
+
+
+def _linear_griddata(points: list[list[int]], values: list, target: tuple[int, ...]):
+    return _reduced_griddata(points, values, target, "linear")
 
 
 def get_sample_leaf_value(data: dict):
@@ -101,6 +146,19 @@ def _get_cached_extracted_metrics(cache: dict, ndim: int, data: dict, extractor)
     return extracted
 
 
+def _get_exact_3d(data: dict, x: int, y: int, z: int):
+    """Return an exact 3-D leaf without mutating defaultdict-backed data."""
+    if x not in data:
+        return _MISSING
+    x_data = data[x]
+    if y not in x_data:
+        return _MISSING
+    y_data = x_data[y]
+    if z not in y_data:
+        return _MISSING
+    return y_data[z]
+
+
 def nearest_1d_point_helper(x: int, values: list[int], inner_only: bool = True) -> tuple[int, int]:
     """Return the two values bracketing ``x`` from ``values``.
 
@@ -115,6 +173,8 @@ def nearest_1d_point_helper(x: int, values: list[int], inner_only: bool = True) 
         return values[0], values[0]
 
     sorted_values = sorted(values)
+    if x in sorted_values:
+        return x, x
 
     if x < sorted_values[0]:
         if inner_only:
@@ -227,6 +287,14 @@ def bilinear_interpolation(x_list: list[int], y_list: list[int], x: int, y: int,
     """Bilinear interpolation on a 2-D rectangular grid."""
     x1, x2 = x_list
     y1, y2 = y_list
+
+    if x1 == x2 and y1 == y2:
+        return data[x1][y1]
+    if x1 == x2:
+        return interp_1d([y1, y2], [data[x1][y1], data[x1][y2]], y)
+    if y1 == y2:
+        return interp_1d([x1, x2], [data[x1][y1], data[x2][y1]], x)
+
     Q11, Q12, Q21, Q22 = data[x1][y1], data[x1][y2], data[x2][y1], data[x2][y2]  # noqa: N806
 
     f_x1_y1 = Q11 * (x2 - x) * (y2 - y)
@@ -263,9 +331,7 @@ def interp_2d_linear(x: int, y: int, data: dict, extracted_metrics_cache: dict |
                 points_list.append([i, j])
                 latency_values.append(latency_data[i][j])
 
-        latency = validate_interpolation_result(
-            interpolate.griddata(np.array(points_list), np.array(latency_values), (x, y), method="linear")
-        )
+        latency = validate_interpolation_result(_linear_griddata(points_list, latency_values, (x, y)))
 
         energy_values = []
         for i in [x_left, x_right]:
@@ -273,9 +339,7 @@ def interp_2d_linear(x: int, y: int, data: dict, extracted_metrics_cache: dict |
             for j in [y_left, y_right]:
                 energy_values.append(energy_data[i][j])
 
-        energy = validate_interpolation_result(
-            interpolate.griddata(np.array(points_list), np.array(energy_values), (x, y), method="linear")
-        )
+        energy = validate_interpolation_result(_linear_griddata(points_list, energy_values, (x, y)))
 
         return {"latency": latency, "power": 0.0, "energy": energy}
 
@@ -288,9 +352,7 @@ def interp_2d_linear(x: int, y: int, data: dict, extracted_metrics_cache: dict |
             points_list.append([i, j])
             values_list.append(data[i][j])
 
-    latency = validate_interpolation_result(
-        interpolate.griddata(np.array(points_list), np.array(values_list), (x, y), method="linear")
-    )
+    latency = validate_interpolation_result(_linear_griddata(points_list, values_list, (x, y)))
     return {"latency": latency, "power": 0.0, "energy": 0.0}
 
 
@@ -301,6 +363,10 @@ def interp_2d_linear(x: int, y: int, data: dict, extracted_metrics_cache: dict |
 
 def interp_3d_linear(x: int, y: int, z: int, data: dict) -> float:
     """3-D linear interpolation via scipy.interpolate.griddata."""
+    exact = _get_exact_3d(data, x, y, z)
+    if exact is not _MISSING:
+        return exact
+
     points_list = []
     values_list = []
     x_left, x_right = nearest_1d_point_helper(x, list(data.keys()))
@@ -313,9 +379,7 @@ def interp_3d_linear(x: int, y: int, z: int, data: dict) -> float:
             values_list.append(data[i][j][z_left])
             values_list.append(data[i][j][z_right])
 
-    return validate_interpolation_result(
-        interpolate.griddata(np.array(points_list), np.array(values_list), (x, y, z), method="linear")
-    )
+    return validate_interpolation_result(_linear_griddata(points_list, values_list, (x, y, z)))
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +396,10 @@ def interp_2d_1d(
     allow_singleton_axes: bool = False,
 ) -> float:
     """3-D interpolation done as 2-D (over y, z) followed by 1-D (over x)."""
+    exact = _get_exact_3d(data, x, y, z)
+    if exact is not _MISSING:
+        return exact
+
     x_values = []
     point_helper = nearest_1d_point_allow_singleton_axis if allow_singleton_axes else nearest_1d_point_helper
     x_left, x_right = point_helper(x, list(data.keys()))
@@ -347,24 +415,7 @@ def interp_2d_1d(
             values_list.append(data[i][j][z_left])
             values_list.append(data[i][j][z_right])
         if method == "cubic":
-            try:
-                value = interpolate.griddata(np.array(points_list), np.array(values_list), (y, z), method="cubic")
-                x_values.append(validate_interpolation_result(value))
-            except (QhullError, ValueError) as exc:
-                logger.debug("Falling back to linear 2D interpolation for degenerate cubic slice: %s", exc)
-                x_values.append(
-                    validate_interpolation_result(
-                        interp_2d_rectangular_slice(
-                            y_left,
-                            y_right,
-                            z_left,
-                            z_right,
-                            y,
-                            z,
-                            data[i],
-                        )
-                    )
-                )
+            x_values.append(validate_interpolation_result(_reduced_griddata(points_list, values_list, (y, z), "cubic")))
         elif method == "bilinear":
             x_values.append(
                 validate_interpolation_result(
@@ -600,6 +651,16 @@ def extrapolate_data_grid(
                     y_left_value = data_dict[x][y_left][z]
                     y_right_value = data_dict[x][y_right][z]
                     assert y_right_value is not None, "y_right_value cannot be None"
+                    if (
+                        sqrt_y_value
+                        and isinstance(y_left_value, dict)
+                        and (y_left_value["latency"] < 0 or y_right_value["latency"] < 0)
+                    ):
+                        logger.warning(
+                            f"Skipping interpolation for y={y}, z={z} because boundary latency is negative "
+                            f"for x={x}, y_left={y_left}, y_right={y_right}"
+                        )
+                        continue
                     if sqrt_y_value:
 
                         def _sqrt_leaf(v):
@@ -658,6 +719,12 @@ def extrapolate_data_grid(
                     x_right_value = data_dict[x_right][y][z]
                     assert x_right_value is not None, "x_right_value cannot be None"
                     value = interp_1d([x_left, x_right], [x_left_value, x_right_value], x)
+                    if sqrt_y_value and isinstance(value, dict) and value["latency"] < 0:
+                        logger.warning(
+                            f"Skipping interpolation for x={x}, y={y}, z={z} because interpolated latency is negative "
+                            f"from x_left={x_left}, x_right={x_right}"
+                        )
+                        continue
                     if x not in data_dict:
                         data_dict[x] = {y: {z: value}}
                     elif y not in data_dict[x]:
