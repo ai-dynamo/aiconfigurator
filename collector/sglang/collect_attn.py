@@ -63,6 +63,8 @@ class MockModelConfig:
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
         self.head_dim = head_dim
+        self.v_head_dim = head_dim
+        self.swa_v_head_dim = head_dim
         # Align with newer sglang ModelConfig while remaining harmless on older versions
         self.is_hybrid_swa = False
         self.swa_attention_layer_ids = []
@@ -85,6 +87,7 @@ class MockModelConfig:
 class MockServerArgs:
     def __init__(self, page_size: int):
         self.enable_lora = False
+        self.enable_mis = False
         self.enable_deterministic_inference = False
         self.kv_cache_dtype = "auto"
         self.speculative_eagle_topk = 0
@@ -140,6 +143,7 @@ class MockModelRunner:
         self.gpu_id = 0
         self.hybrid_gdn_config = None
         self.kimi_linear_config = None
+        self.linear_attn_model_spec = None
 
 
 def create_req_to_token_pool(batch_size, total_len, page_size, torch_device, device_str):
@@ -164,6 +168,10 @@ def _int_list(values):
 
 def _kv_head_options(values, num_heads):
     return [num_heads if value == "self" else int(value) for value in values]
+
+
+def _is_power_of_two(value: int) -> bool:
+    return value > 0 and (value & (value - 1)) == 0
 
 
 def get_context_attention_test_cases():
@@ -213,6 +221,11 @@ def get_context_attention_test_cases():
                                     use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
                                     use_fp8_context_fmha = bool(precision_case["fp8_context_fmha"])
                                     if skip_fp8 and use_fp8_kv_cache:
+                                        continue
+                                    # SGLang 0.5.12's Triton FP8 KV-cache path
+                                    # uses tl.arange(0, BLOCK_HEAD), which
+                                    # requires a power-of-two KV head block.
+                                    if use_fp8_kv_cache and not _is_power_of_two(num_kv_heads):
                                         continue
                                     test_cases.append(
                                         [
@@ -306,7 +319,7 @@ def get_generation_attention_test_cases():
                     if b >= min_drop_batch:
                         target_s_list = target_s_list[:-1]
                     for n_kv in _int_list(shape_sweep["kv_head_counts"]):
-                        if n_kv >= n:
+                        if n_kv >= n or n % n_kv != 0:
                             continue
                         for s in target_s_list:
                             for window_size in window_sizes:
@@ -341,6 +354,9 @@ def run_attention_torch(
 
     torch_device = torch.device(device)
     device_str = str(torch_device)
+    sm_version = get_sm_version()
+    use_triton_attention = sm_version >= 110 or (sm_version >= 100 and head_dim == 192)
+    sliding_window_size = None if use_triton_attention and window_size <= 0 else window_size
 
     model_runner = MockModelRunner(
         torch_device,
@@ -351,7 +367,7 @@ def run_attention_torch(
         head_dim=head_dim,
     )
     model_runner.kv_cache_dtype = kvtype
-    model_runner.sliding_window_size = window_size
+    model_runner.sliding_window_size = sliding_window_size
 
     total_len = input_len if is_context_phase else input_len + 1
     req_to_token_pool, token_matrix = create_req_to_token_pool(
@@ -380,8 +396,6 @@ def run_attention_torch(
     )
     model_runner.token_to_kv_pool = kv_pool
 
-    sm_version = get_sm_version()
-    use_triton_attention = sm_version >= 110 or (sm_version >= 100 and head_dim == 192)
     if use_triton_attention:
         # SM120+ (workstation Blackwell): TRTLLM prefill (TllmGenFmhaRunner) is unsupported;
         # FA3 is not compiled for SM120. B200/SM100 TRTLLM also lacks head-dim 192
@@ -414,7 +428,7 @@ def run_attention_torch(
         num_kv_heads=num_key_value_heads,
         layer_id=0,
     ).to(torch_device)
-    layer.sliding_window_size = window_size
+    layer.sliding_window_size = sliding_window_size
 
     seqlen_q = input_len if is_context_phase else 1
     q = torch.randn(

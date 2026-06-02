@@ -186,7 +186,15 @@ def _is_glm5_dsa_model(model_id: str) -> bool:
 def _enable_glm5_dsa_piecewise_graph(attn_type: str, model_id: str) -> bool:
     if _env_flag("AIC_DISABLE_PIECEWISE_CUDA_GRAPH"):
         return False
-    return _env_flag("AIC_ENABLE_PIECEWISE_CUDA_GRAPH") or (attn_type == "dsa" and _is_glm5_dsa_model(model_id))
+    if _env_flag("AIC_ENABLE_PIECEWISE_CUDA_GRAPH"):
+        return True
+    # SGLang 0.5.12's GLM-5 DSA path passes topk_indices to
+    # unified_attention_with_output during piecewise CUDA graph warmup, but the
+    # registered op schema does not accept that keyword. Keep the runtime path
+    # enabled while avoiding the broken graph-capture default.
+    if attn_type == "dsa" and _is_glm5_dsa_model(model_id):
+        return False
+    return False
 
 
 def _piecewise_cuda_graph_tokens_for_cases(test_cases, is_prefill: bool) -> list[int] | None:

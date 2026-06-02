@@ -100,6 +100,7 @@ known_exceptions:
   - framework: sglang
     op: attention_context
     reason_type: framework_version_unsupported
+    version_prefixes: ["0.5.10"]
     source: collector/sglang/collect_attn.py
     fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase, window_size]
     reason: >
@@ -115,6 +116,7 @@ known_exceptions:
   - framework: sglang
     op: attention_context
     reason_type: framework_version_unsupported
+    version_prefixes: ["0.5.10"]
     source: collector/sglang/collect_attn.py
     fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase, window_size]
     reason: >
