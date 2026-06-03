@@ -9,7 +9,7 @@ from aiconfigurator.sdk.pareto_analysis import (
     get_pareto_front,
 )
 from aiconfigurator.sdk.picking import pick_default, pick_load_match
-from aiconfigurator.sdk.task_v1 import TaskConfig
+from aiconfigurator.sdk.task import TaskConfig
 
 logger = logging.getLogger(__name__)
 

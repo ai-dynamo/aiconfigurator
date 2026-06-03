@@ -28,7 +28,7 @@ from aiconfigurator.generator.naive import (
 from aiconfigurator.generator.rendering.engine import render_backend_templates
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.models import check_is_moe
-from aiconfigurator.sdk.task_v1 import build_disagg_parallel_lists
+from aiconfigurator.sdk.task import build_disagg_parallel_lists
 from aiconfigurator.sdk.utils import (
     enumerate_parallel_config,
     get_model_config_from_model_path,

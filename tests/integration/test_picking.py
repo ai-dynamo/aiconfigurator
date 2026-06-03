@@ -16,7 +16,7 @@ import yaml
 from aiconfigurator.cli.main import _execute_task_configs, build_default_task_configs
 from aiconfigurator.generator.api import generate_backend_artifacts
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
-from aiconfigurator.sdk.task_v1 import TaskConfig, TaskRunner
+from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 pytestmark = pytest.mark.integration
 

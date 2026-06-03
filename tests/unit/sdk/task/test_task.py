@@ -30,10 +30,10 @@ _SRC = _find_repo_root(pathlib.Path(__file__)) / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-import aiconfigurator.sdk.task_v1 as task_module
+import aiconfigurator.sdk.task as task_module
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.perf_database import get_systems_paths, set_systems_paths
-from aiconfigurator.sdk.task_v1 import TaskConfig, TaskRunner
+from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 
 @pytest.fixture(autouse=True)
@@ -1050,7 +1050,7 @@ def test_vllm_disagg_does_not_require_same_tp(monkeypatch):
 # PD-split independent WideEP / EPLB configuration
 # ---------------------------------------------------------------------------
 
-from aiconfigurator.sdk.task_v1 import build_disagg_parallel_lists
+from aiconfigurator.sdk.task import build_disagg_parallel_lists
 
 
 class TestBuildDisaggParallelListsMixedWideep:

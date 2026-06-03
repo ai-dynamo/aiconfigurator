@@ -1,0 +1,1285 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+Task — flat user-facing config for sweep_agg / sweep_disagg.
+
+Replaces the legacy ``sdk.task.TaskConfig`` (still present alongside
+this module until V1 callers — chiefly ``cli/api.py:cli_estimate`` — are
+migrated).  The legacy YAML format is NOT supported; new YAML uses field
+names that map 1:1 to this dataclass.
+
+Design:
+- Flat dataclass, SGLang-style.  No nested DefaultMunch, no deep_merge.
+- ``__post_init__`` resolves model identity, backend version, quant modes,
+  search candidates.  After construction, every active field has a
+  concrete value.
+- Strict prefix discipline: in disagg mode, top-level worker-spec fields
+  (model_path, system_name, backend_name, quant_*, enable_wideep, ...)
+  are not used and setting them raises ValueError.  Use prefill_* /
+  decode_* fields explicitly.
+- ``from_yaml`` is a thin pass-through: YAML keys must equal field names.
+- ``sweep_agg_kwargs()`` / ``sweep_disagg_kwargs()`` build the exact
+  kwargs needed by :mod:`aiconfigurator.sdk.sweep` — no caller
+  marshalling required.
+
+See ``src/aiconfigurator/cli/exps/example_new.yaml`` for the canonical YAML format.
+"""
+
+from __future__ import annotations
+
+import copy
+import dataclasses
+import logging
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.models import (
+    _infer_quant_modes_from_raw_config,
+    check_is_moe,
+    get_model_family,
+)
+from aiconfigurator.sdk.perf_database import get_latest_database_version
+from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config_from_model_path
+
+logger = logging.getLogger(__name__)
+
+ParallelChoice = tuple[int, int, int, int, int]  # (tp, pp, dp, moe_tp, moe_ep)
+
+
+_DEFAULT_NEXTN_ACCEPT_RATES: list[float] = [0.85, 0.8, 0.6, 0.0, 0.0]
+
+QUANT_PRESETS: dict[str, dict[str, str]] = {
+    "fp8": {
+        "gemm_quant_mode": "fp8",
+        "moe_quant_mode": "fp8",
+        "kvcache_quant_mode": "fp8",
+        "fmha_quant_mode": "fp8",
+        "comm_quant_mode": "half",
+    },
+    "fp8_static": {
+        "gemm_quant_mode": "fp8_static",
+        "moe_quant_mode": "fp8",
+        "kvcache_quant_mode": "fp8",
+        "fmha_quant_mode": "fp8",
+        "comm_quant_mode": "half",
+    },
+    "bfloat16": {
+        "gemm_quant_mode": "bfloat16",
+        "moe_quant_mode": "bfloat16",
+        "kvcache_quant_mode": "bfloat16",
+        "fmha_quant_mode": "bfloat16",
+        "comm_quant_mode": "half",
+    },
+    "nvfp4": {
+        "gemm_quant_mode": "nvfp4",
+        "moe_quant_mode": "nvfp4",
+        "kvcache_quant_mode": "fp8",
+        "fmha_quant_mode": "fp8",
+        "comm_quant_mode": "half",
+    },
+    "mxfp4": {
+        "gemm_quant_mode": "bfloat16",
+        "moe_quant_mode": "w4a16_mxfp4",
+        "kvcache_quant_mode": "bfloat16",
+        "fmha_quant_mode": "bfloat16",
+        "comm_quant_mode": "half",
+    },
+}
+
+_QUANT_ENUM_TABLES: dict[str, type] = {
+    "gemm_quant_mode": common.GEMMQuantMode,
+    "moe_quant_mode": common.MoEQuantMode,
+    "kvcache_quant_mode": common.KVCacheQuantMode,
+    "fmha_quant_mode": common.FMHAQuantMode,
+    "comm_quant_mode": common.CommQuantMode,
+}
+
+_QUANT_FALLBACKS: dict[str, object] = {
+    "gemm_quant_mode": common.GEMMQuantMode.bfloat16,
+    "moe_quant_mode": common.MoEQuantMode.bfloat16,
+    "kvcache_quant_mode": common.KVCacheQuantMode.bfloat16,
+    "fmha_quant_mode": common.FMHAQuantMode.bfloat16,
+    "comm_quant_mode": common.CommQuantMode.half,
+}
+
+
+def _resolve_quant_str(key: str, value: Any) -> Any:
+    # Accept role-prefixed keys (e.g. "prefill_gemm_quant_mode") by stripping
+    # the prefix before looking up the enum table.
+    bare = key
+    for role in ("prefill_", "decode_"):
+        if bare.startswith(role):
+            bare = bare[len(role) :]
+            break
+    enum_cls = _QUANT_ENUM_TABLES.get(bare)
+    if enum_cls is not None and isinstance(value, str):
+        return enum_cls[value]
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Default disagg search space (mirror of legacy build_disagg_parallel_lists)
+# ---------------------------------------------------------------------------
+
+
+def _default_disagg_search(
+    *,
+    backend_name: str,
+    is_moe: bool,
+    prefill_system: str,
+    decode_system: str,
+    prefill_enable_wideep: bool,
+    decode_enable_wideep: bool,
+    moe_backend: str | None,
+    should_enable_pp: bool = False,
+) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
+    """Inlined version of legacy sdk.task.build_disagg_parallel_lists.
+
+    Kept here so the new sdk.task_v2 module does not depend on V1 (sdk.task).
+    Algorithm identical; locked by integration parity test.
+    """
+    prefill_cfg: dict[str, list[int]] = {
+        "num_gpu_per_worker": [1, 2, 4, 8],
+        "tp_list": [1, 2, 4, 8],
+        "pp_list": [1, 2, 4, 8] if should_enable_pp else [1],
+        "dp_list": [1],
+        "moe_tp_list": [1],
+        "moe_ep_list": [1, 2, 4, 8] if is_moe else [1],
+    }
+    decode_cfg: dict[str, list[int]] = {
+        "num_gpu_per_worker": [1, 2, 4, 8],
+        "tp_list": [1, 2, 4, 8],
+        "pp_list": [1, 2, 4, 8] if should_enable_pp else [1],
+        "dp_list": [1, 2, 4, 8] if is_moe else [1],
+        "moe_tp_list": [1],
+        "moe_ep_list": [1, 2, 4, 8] if is_moe else [1],
+    }
+    if not is_moe:
+        if prefill_system in ("gb200", "gb300"):
+            prefill_cfg["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
+            prefill_cfg["tp_list"] = [1, 2, 4, 8, 16]
+            prefill_cfg["pp_list"] = [1]
+        if decode_system in ("gb200", "gb300"):
+            decode_cfg["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
+            decode_cfg["tp_list"] = [1, 2, 4, 8, 16]
+            decode_cfg["pp_list"] = [1]
+        return prefill_cfg, decode_cfg
+
+    if backend_name == "trtllm":
+        if prefill_enable_wideep:
+            prefill_cfg = {
+                "num_gpu_per_worker": [4, 8, 16, 32],
+                "tp_list": [1, 2, 4, 8],
+                "pp_list": [1, 2, 4, 8, 16, 32] if should_enable_pp else [1],
+                "dp_list": [4, 8, 16, 32],
+                "moe_tp_list": [1],
+                "moe_ep_list": [4, 8, 16, 32],
+            }
+        else:
+            x = [1, 2, 4, 8]
+            prefill_cfg = {
+                "num_gpu_per_worker": x,
+                "tp_list": x,
+                "pp_list": x if should_enable_pp else [1],
+                "dp_list": x,
+                "moe_tp_list": x,
+                "moe_ep_list": x,
+            }
+        if decode_enable_wideep:
+            decode_cfg = {
+                "num_gpu_per_worker": [4, 8, 16, 32, 64],
+                "tp_list": [1, 2, 4, 8],
+                "pp_list": [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1],
+                "dp_list": [4, 8, 16, 32, 64],
+                "moe_tp_list": [1],
+                "moe_ep_list": [4, 8, 16, 32, 64],
+            }
+        else:
+            x = [1, 2, 4, 8]
+            decode_cfg = {
+                "num_gpu_per_worker": x,
+                "tp_list": x,
+                "pp_list": x if should_enable_pp else [1],
+                "dp_list": x,
+                "moe_tp_list": x,
+                "moe_ep_list": x,
+            }
+    elif backend_name == "sglang":
+        if prefill_enable_wideep or decode_enable_wideep:
+            prefill_cfg = {
+                "num_gpu_per_worker": [8, 16, 32],
+                "tp_list": [1, 2, 4, 8],
+                "pp_list": [1, 2, 4, 8, 16, 32] if should_enable_pp else [1],
+                "dp_list": [1, 2, 4, 8, 16, 32],
+                "moe_tp_list": [1],
+                "moe_ep_list": [8, 16, 32],
+            }
+            decode_cfg = {
+                "num_gpu_per_worker": [8, 16, 32, 64],
+                "tp_list": [1, 2, 4, 8],
+                "pp_list": [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1],
+                "dp_list": [1, 2, 4, 8, 16, 32, 64],
+                "moe_tp_list": [1],
+                "moe_ep_list": [8, 16, 32, 64],
+            }
+        elif moe_backend == "deepep_moe":
+            x = [1, 2, 4, 8]
+            for cfg in (prefill_cfg, decode_cfg):
+                cfg["num_gpu_per_worker"] = x
+                cfg["tp_list"] = x
+                cfg["pp_list"] = x if should_enable_pp else [1]
+                cfg["dp_list"] = x
+                cfg["moe_tp_list"] = [1]
+                cfg["moe_ep_list"] = [1, 2, 4, 8]
+        else:
+            x = [1, 2, 4, 8]
+            prefill_cfg = {
+                "num_gpu_per_worker": x,
+                "tp_list": x,
+                "pp_list": x if should_enable_pp else [1],
+                "dp_list": x,
+                "moe_tp_list": x,
+                "moe_ep_list": [1, 2, 4, 8],
+            }
+            decode_cfg = {
+                "num_gpu_per_worker": x,
+                "tp_list": x,
+                "pp_list": x if should_enable_pp else [1],
+                "dp_list": x,
+                "moe_tp_list": x,
+                "moe_ep_list": [1, 2, 4, 8],
+            }
+    elif backend_name == "vllm":
+        x = [1, 2, 4, 8]
+        prefill_cfg = {
+            "num_gpu_per_worker": x,
+            "tp_list": x,
+            "pp_list": x if should_enable_pp else [1],
+            "dp_list": x,
+            "moe_tp_list": x,
+            "moe_ep_list": x,
+        }
+        decode_cfg = copy.deepcopy(prefill_cfg)
+    else:
+        raise ValueError(f"Invalid backend: {backend_name}")
+
+    return prefill_cfg, decode_cfg
+
+
+# ---------------------------------------------------------------------------
+# Task
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Task:
+    """Flat user-facing optimization task.
+
+    Holds every knob the user controls (workload, model spec, search space,
+    SLA targets) as a flat dataclass.  Construction (or ``__post_init__``)
+    resolves model identity, backend version, quant modes, and search
+    candidates so the resulting object is fully concrete.
+
+    Entry point: ``.run()`` loads the perf database(s) internally and
+    dispatches to :mod:`aiconfigurator.sdk.sweep` -- callers don't need to
+    know about databases or which sweep function applies to their serving
+    mode.
+
+    See module docstring for design notes.
+    """
+
+    # ====== 1. Mode + workload ======
+    serving_mode: Literal["agg", "disagg"] = "agg"
+    isl: int = 4000
+    osl: int = 1000
+    prefix: int = 0
+    ttft: float = 1000.0
+    tpot: float = 50.0
+    request_latency: float | None = None
+    total_gpus: int | None = None
+    database_mode: str | None = None
+    free_gpu_memory_fraction: float | None = None
+    max_seq_len: int | None = None
+    engine_step_backend: str | None = None
+
+    # ====== 2. Agg worker spec (serving_mode='agg') ======
+    model_path: str = ""
+    system_name: str = ""
+    backend_name: str = "trtllm"
+    backend_version: str | None = None
+    enable_wideep: bool = False
+    enable_chunked_prefill: bool = False
+    enable_eplb: bool = False
+    nextn: int | None = None
+    nextn_accept_rates: list[float] = field(default_factory=lambda: list(_DEFAULT_NEXTN_ACCEPT_RATES))
+    moe_backend: str | None = None
+    quant_preset: str | None = None
+    gemm_quant_mode: common.GEMMQuantMode | None = None
+    moe_quant_mode: common.MoEQuantMode | None = None
+    kvcache_quant_mode: common.KVCacheQuantMode | None = None
+    fmha_quant_mode: common.FMHAQuantMode | None = None
+    comm_quant_mode: common.CommQuantMode | None = None
+
+    # ====== 3. Agg search space ======
+    agg_num_gpu_candidates: list[int] | None = None
+    agg_tp_candidates: list[int] | None = None
+    agg_pp_candidates: list[int] | None = None
+    agg_dp_candidates: list[int] | None = None
+    agg_moe_tp_candidates: list[int] | None = None
+    agg_moe_ep_candidates: list[int] | None = None
+
+    # ====== 4. Disagg prefill worker spec ======
+    prefill_model_path: str = ""
+    prefill_system_name: str = ""
+    prefill_backend_name: str = "trtllm"
+    prefill_backend_version: str | None = None
+    prefill_enable_wideep: bool = False
+    prefill_enable_chunked_prefill: bool = False
+    prefill_enable_eplb: bool = False
+    prefill_quant_preset: str | None = None
+    prefill_gemm_quant_mode: common.GEMMQuantMode | None = None
+    prefill_moe_quant_mode: common.MoEQuantMode | None = None
+    prefill_kvcache_quant_mode: common.KVCacheQuantMode | None = None
+    prefill_fmha_quant_mode: common.FMHAQuantMode | None = None
+    prefill_comm_quant_mode: common.CommQuantMode | None = None
+
+    # ====== 5. Disagg prefill search space ======
+    prefill_num_gpu_candidates: list[int] | None = None
+    prefill_tp_candidates: list[int] | None = None
+    prefill_pp_candidates: list[int] | None = None
+    prefill_dp_candidates: list[int] | None = None
+    prefill_moe_tp_candidates: list[int] | None = None
+    prefill_moe_ep_candidates: list[int] | None = None
+
+    # ====== 6. Disagg decode worker spec ======
+    decode_model_path: str = ""
+    decode_system_name: str = ""
+    decode_backend_name: str = "trtllm"
+    decode_backend_version: str | None = None
+    decode_enable_wideep: bool = False
+    decode_enable_eplb: bool = False
+    decode_quant_preset: str | None = None
+    decode_gemm_quant_mode: common.GEMMQuantMode | None = None
+    decode_moe_quant_mode: common.MoEQuantMode | None = None
+    decode_kvcache_quant_mode: common.KVCacheQuantMode | None = None
+    decode_fmha_quant_mode: common.FMHAQuantMode | None = None
+    decode_comm_quant_mode: common.CommQuantMode | None = None
+
+    # ====== 7. Disagg decode search space ======
+    decode_num_gpu_candidates: list[int] | None = None
+    decode_tp_candidates: list[int] | None = None
+    decode_pp_candidates: list[int] | None = None
+    decode_dp_candidates: list[int] | None = None
+    decode_moe_tp_candidates: list[int] | None = None
+    decode_moe_ep_candidates: list[int] | None = None
+
+    # ====== 8. Disagg orchestration ======
+    num_gpu_per_replica: list[int] | None = None
+    max_gpu_per_replica: int | None = None
+    max_prefill_workers: int | None = None
+    max_decode_workers: int | None = None
+    prefill_max_batch_size: int = 1
+    decode_max_batch_size: int = 512
+    prefill_latency_correction: float = 1.1
+    decode_latency_correction: float = 1.08
+    # Rate-matching degradation factors: under (P_workers, D_workers) pairing,
+    # neither phase delivers its standalone throughput perfectly; these model
+    # the practical efficiency loss.  Calibrated against silicon (V1 default).
+    rate_match_prefill_degradation: float = 0.9
+    rate_match_decode_degradation: float = 0.92
+    # TTFT pre-correction applied to prefill candidates before the SLA filter,
+    # accounting for queueing-under-concurrency in the deployed system.
+    # Used by both ``_find_best_disagg_under_constraint`` and
+    # ``picking.pick_autoscale``; default 1.8 locked by parity test.
+    autoscale_ttft_correction_factor: float = 1.8
+
+    # ====== 8.5 Predictor strategy ======
+    # Optional Predictor that decides how each single config point is
+    # predicted.  None (default) uses sdk.predictor.AnalyticPredictor --
+    # bit-identical to the pre-Predictor behavior.  Future implementations
+    # (e.g. MockerPredictor wrapping Dynamo Mocker, DynamicPredictor) can
+    # be injected here without touching sweep / predict / Task internals.
+    # Excluded from to_dict / YAML serialization (it is a strategy object,
+    # not a primitive value).
+    predictor: Any = field(default=None, repr=False)
+
+    # ====== 9. Internal — resolved in __post_init__ ======
+    _is_moe: bool = field(default=False, repr=False, init=False)
+    _model_family: str = field(default="", repr=False, init=False)
+    _raw_config: dict = field(default_factory=dict, repr=False, init=False)
+    _architecture: str = field(default="", repr=False, init=False)
+
+    # =====================================================================
+    # Construction
+    # =====================================================================
+
+    @classmethod
+    def from_yaml(cls, yaml_data: dict, **overrides: Any) -> Task:
+        """Construct from a flat YAML dict.
+
+        YAML keys must match Task field names directly.  String values
+        for quant_mode fields are converted to the matching enum.  Unknown
+        keys are warned about but ignored.  ``overrides`` (kwargs) win over
+        YAML values.
+
+        Strategy fields like ``predictor`` cannot be expressed in YAML
+        (they're Python objects); pass them via ``overrides`` or assign
+        after construction.
+        """
+        valid_keys = {f.name for f in dataclasses.fields(cls) if f.init and not f.name.startswith("_")}
+        # YAML cannot construct strategy objects; ignore them here even if
+        # they're valid fields.
+        _yaml_skip: frozenset[str] = frozenset({"predictor"})
+        kwargs: dict[str, Any] = {}
+        for k, v in yaml_data.items():
+            if k not in valid_keys:
+                logger.warning("from_yaml: ignoring unknown key %r", k)
+                continue
+            if k in _yaml_skip:
+                logger.warning("from_yaml: %r is a strategy object, not YAML-expressible; pass via overrides", k)
+                continue
+            kwargs[k] = _resolve_quant_str(k, v) if k.endswith("quant_mode") else v
+        kwargs.update({k: v for k, v in overrides.items() if v is not None})
+        return cls(**kwargs)
+
+    @classmethod
+    def from_cli(cls, **kwargs: Any) -> Task:
+        """Construct from CLI kwargs.  Filters None to let __post_init__ defaults run."""
+        return cls(**{k: v for k, v in kwargs.items() if v is not None})
+
+    # =====================================================================
+    # __post_init__
+    # =====================================================================
+
+    def __post_init__(self) -> None:
+        self._check_prefix_discipline()
+        self._resolve_model_identity()
+        self._resolve_backend_version()
+        self._resolve_quant_modes()
+        self._resolve_search_space()
+
+    def _check_prefix_discipline(self) -> None:
+        """In disagg mode, top-level worker-spec fields must be at their defaults.
+
+        Setting top-level ``enable_wideep=True`` while serving_mode='disagg'
+        is the kind of silent override that the legacy V1/V2 paths swallowed
+        without warning.  Be explicit here.
+        """
+        if self.serving_mode != "disagg":
+            return
+        leakage = []
+        if self.model_path:
+            leakage.append("model_path")
+        if self.system_name:
+            leakage.append("system_name")
+        # Don't flag enable_wideep=False (default), only True.
+        if self.enable_wideep:
+            leakage.append("enable_wideep")
+        if self.enable_chunked_prefill:
+            leakage.append("enable_chunked_prefill")
+        if self.enable_eplb:
+            leakage.append("enable_eplb")
+        if self.quant_preset is not None:
+            leakage.append("quant_preset")
+        for q in _QUANT_ENUM_TABLES:
+            if getattr(self, q) is not None:
+                leakage.append(q)
+        if leakage:
+            raise ValueError(
+                f"Disagg mode: top-level worker fields are not used and must not be set "
+                f"(got {leakage}).  Use prefill_* / decode_* variants instead."
+            )
+
+    def _resolve_model_identity(self) -> None:
+        primary = self.model_path if self.serving_mode == "agg" else self.prefill_model_path
+        if not primary:
+            return
+        info = get_model_config_from_model_path(primary)
+        self._raw_config = info.get("raw_config", {})
+        self._architecture = info["architecture"]
+        self._model_family = get_model_family(primary)
+        self._is_moe = check_is_moe(primary)
+
+        text_key = common.MULTIMODAL_TEXT_CONFIG_KEY.get(self._architecture)
+        cfg = self._raw_config[text_key] if text_key and text_key in self._raw_config else self._raw_config
+        hf_nextn = cfg.get("num_nextn_predict_layers", 0)
+        if self.nextn is None:
+            self.nextn = hf_nextn
+        elif self.nextn != hf_nextn:
+            logger.debug("nextn overridden: HF config=%d, using user value=%d", hf_nextn, self.nextn)
+
+    def _resolve_backend_version(self) -> None:
+        def _resolve(system: str, backend: str, current: str | None) -> str | None:
+            if current is not None:
+                return current
+            return get_latest_database_version(system=system, backend=backend)
+
+        if self.serving_mode == "agg":
+            if self.system_name and self.backend_name:
+                self.backend_version = _resolve(self.system_name, self.backend_name, self.backend_version)
+        else:
+            if self.prefill_system_name and self.prefill_backend_name:
+                self.prefill_backend_version = _resolve(
+                    self.prefill_system_name, self.prefill_backend_name, self.prefill_backend_version
+                )
+            if self.decode_system_name and self.decode_backend_name:
+                self.decode_backend_version = _resolve(
+                    self.decode_system_name, self.decode_backend_name, self.decode_backend_version
+                )
+
+    def _resolve_quant_modes(self) -> None:
+        """Resolve quant modes for the active role(s).
+
+        Priority (highest wins): explicit field > preset > HF base > bfloat16 fallback.
+        """
+        roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
+        base = _infer_quant_modes_from_raw_config(self._raw_config)
+
+        for role in roles:
+            preset_name = self._role_attr(role, "quant_preset")
+            preset_overrides: dict[str, object] = {}
+            if preset_name is not None:
+                preset_def = QUANT_PRESETS.get(preset_name)
+                if preset_def is None:
+                    logger.warning("Unknown quant_preset %r for role %s, ignoring", preset_name, role)
+                else:
+                    for k, v in preset_def.items():
+                        preset_overrides[k] = _resolve_quant_str(k, v)
+
+            for key in _QUANT_ENUM_TABLES:
+                explicit = self._role_attr(role, key)
+                from_preset = preset_overrides.get(key)
+                from_hf = base.get(key)
+                fallback = _QUANT_FALLBACKS[key]
+
+                if explicit is not None:
+                    continue
+                resolved = from_preset if from_preset is not None else (from_hf if from_hf is not None else fallback)
+                self._set_role_attr(role, key, resolved)
+
+        # Backend / architecture fixups
+        for role in roles:
+            fmha = self._role_attr(role, "fmha_quant_mode")
+            if (
+                self._architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
+                and fmha == common.FMHAQuantMode.fp8
+            ):
+                self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
+            backend_name = self._role_attr(role, "backend_name")
+            if backend_name == "vllm" and self._role_attr(role, "fmha_quant_mode") == common.FMHAQuantMode.fp8:
+                self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
+
+    def _resolve_search_space(self) -> None:
+        if self.serving_mode == "agg":
+            self._resolve_agg_search()
+        else:
+            self._resolve_disagg_search()
+
+    def _resolve_agg_search(self) -> None:
+        def _set(name: str, values: list[int]) -> None:
+            if getattr(self, name) is None:
+                setattr(self, name, values)
+
+        if not self._is_moe:
+            blackwell = self.system_name in ("gb200", "gb300")
+            wide = [1, 2, 4, 8, 16] if blackwell else [1, 2, 4, 8]
+            _set("agg_num_gpu_candidates", wide)
+            _set("agg_tp_candidates", wide)
+            _set("agg_pp_candidates", [1])
+            _set("agg_dp_candidates", [1])
+            _set("agg_moe_tp_candidates", [1])
+            _set("agg_moe_ep_candidates", [1])
+            return
+
+        if self.backend_name == "trtllm" and self.enable_wideep:
+            _set("agg_num_gpu_candidates", [2, 4, 8, 16, 32, 64])
+            _set("agg_tp_candidates", [1, 2, 4, 8])
+            _set("agg_pp_candidates", [1])
+            _set("agg_dp_candidates", [2, 4, 8, 16, 32, 64])
+            _set("agg_moe_tp_candidates", [1])
+            _set("agg_moe_ep_candidates", [2, 4, 8, 16, 32, 64])
+        elif self.backend_name == "sglang" and self.enable_wideep:
+            _set("agg_num_gpu_candidates", [8, 16, 32, 64])
+            _set("agg_tp_candidates", [1, 2, 4, 8])
+            _set("agg_pp_candidates", [1])
+            _set("agg_dp_candidates", [1, 2, 4, 8, 16, 32, 64])
+            _set("agg_moe_tp_candidates", [1])
+            _set("agg_moe_ep_candidates", [8, 16, 32, 64])
+        elif self.backend_name == "sglang" and not self.enable_wideep:
+            _set("agg_num_gpu_candidates", [1, 2, 4, 8])
+            _set("agg_tp_candidates", [1, 2, 4, 8])
+            _set("agg_pp_candidates", [1])
+            _set("agg_dp_candidates", [1, 2, 4, 8])
+            _set("agg_moe_tp_candidates", [1, 2, 4, 8])
+            _set("agg_moe_ep_candidates", [1])
+        elif self.backend_name in ("trtllm", "vllm"):
+            x = [1, 2, 4, 8]
+            _set("agg_num_gpu_candidates", x)
+            _set("agg_tp_candidates", x)
+            _set("agg_pp_candidates", [1])
+            _set("agg_dp_candidates", x)
+            _set("agg_moe_tp_candidates", x)
+            _set("agg_moe_ep_candidates", x)
+        else:
+            raise ValueError(f"Unsupported backend: {self.backend_name}")
+
+    def _resolve_disagg_search(self) -> None:
+        prefill_cfg, decode_cfg = _default_disagg_search(
+            backend_name=self.prefill_backend_name,
+            is_moe=self._is_moe,
+            prefill_system=self.prefill_system_name,
+            decode_system=self.decode_system_name,
+            prefill_enable_wideep=self.prefill_enable_wideep,
+            decode_enable_wideep=self.decode_enable_wideep,
+            moe_backend=self.moe_backend,
+        )
+        for role, src in (("prefill", prefill_cfg), ("decode", decode_cfg)):
+            self._fill_role_search(role, src)
+
+        # Replica defaults
+        if self.prefill_enable_wideep or self.decode_enable_wideep:
+            if self.max_gpu_per_replica is None:
+                self.max_gpu_per_replica = 512
+        else:
+            if self.num_gpu_per_replica is None:
+                self.num_gpu_per_replica = [1, 2, 4, 8] + list(range(16, 129, 8))
+            if self.max_gpu_per_replica is None:
+                self.max_gpu_per_replica = 128
+        if self.max_prefill_workers is None:
+            self.max_prefill_workers = 32
+        if self.max_decode_workers is None:
+            self.max_decode_workers = 32
+
+    def _fill_role_search(self, role: str, src: dict[str, list[int]]) -> None:
+        map_to_attr = {
+            "num_gpu_per_worker": f"{role}_num_gpu_candidates",
+            "tp_list": f"{role}_tp_candidates",
+            "pp_list": f"{role}_pp_candidates",
+            "dp_list": f"{role}_dp_candidates",
+            "moe_tp_list": f"{role}_moe_tp_candidates",
+            "moe_ep_list": f"{role}_moe_ep_candidates",
+        }
+        for k_src, k_attr in map_to_attr.items():
+            if getattr(self, k_attr) is None:
+                setattr(self, k_attr, src[k_src])
+
+    # =====================================================================
+    # Role attribute access (no fallback across prefixes — strict discipline)
+    # =====================================================================
+
+    def _role_attr(self, role: str, name: str) -> Any:
+        return getattr(self, name if role == "agg" else f"{role}_{name}")
+
+    def _set_role_attr(self, role: str, name: str, value: Any) -> None:
+        setattr(self, name if role == "agg" else f"{role}_{name}", value)
+
+    # =====================================================================
+    # Builders consumed by sweep.py
+    # =====================================================================
+
+    def build_runtime_config(self, batch_size: int | None = None) -> config.RuntimeConfig:
+        rt = config.RuntimeConfig(
+            isl=self.isl,
+            osl=self.osl,
+            prefix=self.prefix,
+            ttft=self.ttft,
+            tpot=self.tpot,
+            request_latency=self.request_latency,
+            engine_step_backend=self.engine_step_backend,
+        )
+        if batch_size is not None:
+            rt.batch_size = batch_size
+        return rt
+
+    def build_model_config(self, *, role: Literal["agg", "prefill", "decode"]) -> config.ModelConfig:
+        """Build a ModelConfig template for the given role (parallelism unset).
+
+        ``sweep_agg`` / ``sweep_disagg`` overwrite tp/pp/dp/moe_tp/moe_ep per
+        sweep point.  This template carries the resolved quant / nextn /
+        feature flags only.
+        """
+        return config.ModelConfig(
+            gemm_quant_mode=self._role_attr(role, "gemm_quant_mode"),
+            moe_quant_mode=self._role_attr(role, "moe_quant_mode"),
+            kvcache_quant_mode=self._role_attr(role, "kvcache_quant_mode"),
+            fmha_quant_mode=self._role_attr(role, "fmha_quant_mode"),
+            comm_quant_mode=self._role_attr(role, "comm_quant_mode"),
+            nextn=self.nextn or 0,
+            nextn_accept_rates=self.nextn_accept_rates,
+            enable_wideep=self._role_attr(role, "enable_wideep"),
+            enable_eplb=self._role_attr(role, "enable_eplb"),
+        )
+
+    def iter_parallel(self, role: Literal["agg", "prefill", "decode"]) -> Iterator[ParallelChoice]:
+        """Yield (tp, pp, dp, moe_tp, moe_ep) tuples for the role.
+
+        Uses sdk.utils.enumerate_parallel_config so MoE constraints match
+        the legacy path exactly.
+        """
+        prefix = "agg_" if role == "agg" else f"{role}_"
+
+        def _cands(dim: str) -> list[int]:
+            return getattr(self, f"{prefix}{dim}_candidates")
+
+        return iter(
+            enumerate_parallel_config(
+                num_gpu_list=_cands("num_gpu"),
+                tp_list=_cands("tp"),
+                pp_list=_cands("pp"),
+                dp_list=_cands("dp"),
+                moe_tp_list=_cands("moe_tp"),
+                moe_ep_list=_cands("moe_ep"),
+                is_moe=self._is_moe,
+                backend=common.BackendName[self._role_attr(role, "backend_name")],
+                enable_wideep=self._role_attr(role, "enable_wideep"),
+                moe_backend=self.moe_backend,
+            )
+        )
+
+    # =====================================================================
+    # Validation
+    # =====================================================================
+
+    def validate(self) -> None:
+        """Check that the resolved task is internally consistent and supported.
+
+        Two layers:
+        - Static checks: required fields, fp8_static→trtllm constraint,
+          DeepSeek+vLLM exclusion.  Always run, no I/O.
+        - Database-dependent checks: each user-selected quant mode is in
+          the perf database's ``supported_quant_mode`` list for its op
+          (gemm, moe / wideep_*_moe, context_attention / context_mla /
+          dsa_context_module / deepseek_v4_context_module / wideep_context_mla,
+          and the corresponding generation_* op).  Skipped silently if
+          the DB cannot be loaded, or if the model is DeepSeek-V4 in a
+          synthetic database mode (SOL / SOL_FULL / EMPIRICAL / HYBRID).
+
+        Database load is cheap (``get_database`` is module-level cached),
+        and the load happens later in sweep anyway — failing here just
+        moves the error to a friendlier point.
+
+        Raises:
+            ValueError / NotImplementedError on a contradiction.
+            UnsupportedWideepConfigError specifically for wideep_* ops
+            (lets callers distinguish from generic ``ValueError``).
+        """
+        if self.serving_mode == "agg":
+            self._validate_agg()
+        elif self.serving_mode == "disagg":
+            self._validate_disagg()
+        else:
+            raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
+        self._validate_database_quant_modes()
+
+    def _validate_agg(self) -> None:
+        if not self.model_path:
+            raise ValueError("agg mode requires model_path")
+        if not self.system_name:
+            raise ValueError("agg mode requires system_name")
+        if self.backend_name == "vllm" and self._model_family == "DEEPSEEK":
+            raise NotImplementedError("AIConfigurator does not yet support the DeepSeek family on the vLLM backend.")
+        if self.gemm_quant_mode == common.GEMMQuantMode.fp8_static and self.backend_name != "trtllm":
+            raise ValueError(
+                f"fp8_static GEMM mode is only supported on the trtllm backend, got backend={self.backend_name!r}."
+            )
+
+    def _validate_disagg(self) -> None:
+        if not self.prefill_model_path or not self.decode_model_path:
+            raise ValueError("disagg mode requires both prefill_model_path and decode_model_path.")
+        if self.prefill_model_path != self.decode_model_path:
+            # sweep_disagg currently takes a single model_path used for both
+            # phases (Task.sweep_disagg_kwargs passes self.prefill_model_path).
+            # Hetero-disagg means different *systems*, not different models;
+            # enforce that explicitly so cross-model setups fail loud instead
+            # of silently using the prefill model on the decode side.
+            raise ValueError(
+                f"disagg mode requires prefill_model_path == decode_model_path; "
+                f"got prefill={self.prefill_model_path!r}, decode={self.decode_model_path!r}.  "
+                "Hetero-model disagg is not supported by sweep_disagg today."
+            )
+        if not self.prefill_system_name or not self.decode_system_name:
+            raise ValueError("disagg mode requires both prefill_system_name and decode_system_name.")
+        for role in ("prefill", "decode"):
+            backend = self._role_attr(role, "backend_name")
+            gemm = self._role_attr(role, "gemm_quant_mode")
+            if gemm == common.GEMMQuantMode.fp8_static and backend != "trtllm":
+                raise ValueError(
+                    f"fp8_static GEMM mode is only supported on the trtllm backend, "
+                    f"got {role}_backend_name={backend!r}."
+                )
+            if backend == "vllm" and self._model_family == "DEEPSEEK":
+                raise NotImplementedError(
+                    f"AIConfigurator does not yet support the DeepSeek family on the vLLM backend ({role} side)."
+                )
+
+    def _validate_database_quant_modes(self) -> None:
+        """Validate user's quant modes against the perf database's supported list.
+
+        Mirrors the per-op check in V1's ``TaskConfig.validate``.  Skipped
+        silently if the DB can't be loaded or for DeepSeek-V4 in synthetic
+        modes (where the supported_quant_mode table is incomplete).
+        """
+        # DeepSeek-V4 in synthetic database modes: DB's supported_quant_mode
+        # list is incomplete; skip entirely (V1 parity).
+        if self._model_family == "DEEPSEEKV4" and self.database_mode in (
+            "SOL",
+            "SOL_FULL",
+            "EMPIRICAL",
+            "HYBRID",
+        ):
+            return
+
+        if self.serving_mode == "agg":
+            self._check_role_against_db("agg", validate_context=True, validate_generation=True)
+        else:
+            self._check_role_against_db("prefill", validate_context=True, validate_generation=False)
+            self._check_role_against_db("decode", validate_context=False, validate_generation=True)
+
+    def _check_role_against_db(
+        self,
+        role: str,
+        *,
+        validate_context: bool,
+        validate_generation: bool,
+    ) -> None:
+        """For one role, fetch its perf DB and verify each quant mode is supported."""
+        from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
+        from aiconfigurator.sdk.perf_database import (
+            PerfDataNotAvailableError,
+            get_database,
+            has_perf_data_not_available_cause,
+        )
+
+        system = self._role_attr(role, "system_name")
+        backend = self._role_attr(role, "backend_name")
+        version = self._role_attr(role, "backend_version")
+        if not (system and backend and version):
+            return  # nothing to validate against
+
+        try:
+            database = get_database(system, backend, version)
+        except (PerfDataNotAvailableError, FileNotFoundError) as exc:
+            # DB unavailable; let sweep surface the real error later.
+            logger.debug("validate: skipping DB-side quant check (DB unavailable): %s", exc)
+            return
+        except Exception as exc:
+            # Match the legacy "DB error" envelope (e.g. wrapped FileNotFoundError
+            # inside RuntimeError) without swallowing programmer typos.
+            if has_perf_data_not_available_cause(exc):
+                logger.debug("validate: skipping DB-side quant check (DB unavailable): %s", exc)
+                return
+            raise
+
+        supported: dict = getattr(database, "supported_quant_mode", {}) or {}
+        enable_wideep = bool(self._role_attr(role, "enable_wideep"))
+        moe_backend = self.moe_backend  # shared across roles
+        is_moe = self._is_moe
+        fam = self._model_family
+
+        # Pick the attention-module op keys for this (model family, backend, wideep).
+        if fam == "DEEPSEEKV4":
+            ctx_op, gen_op = "deepseek_v4_context_module", "deepseek_v4_generation_module"
+        elif fam == "DEEPSEEKV32":
+            ctx_op, gen_op = "dsa_context_module", "dsa_generation_module"
+        elif fam in ("DEEPSEEK", "KIMIK25") and backend != "vllm":
+            if backend == "sglang" and enable_wideep:
+                ctx_op, gen_op = "wideep_context_mla", "wideep_generation_mla"
+            else:
+                ctx_op, gen_op = "context_mla", "generation_mla"
+        else:
+            ctx_op, gen_op = "context_attention", "generation_attention"
+
+        def _check(op: str, mode: Any) -> None:
+            if mode is None:
+                return
+            modes = supported.get(op, []) or []
+            if not modes:
+                return  # DB doesn't record support for this op; skip
+            name = mode.name if hasattr(mode, "name") else str(mode)
+            if name in modes:
+                return
+            exc_type = UnsupportedWideepConfigError if op.startswith("wideep_") else ValueError
+            raise exc_type(
+                f"Unsupported {op} quant mode {name!r} for system={system!r}, "
+                f"backend={backend!r}, version={version!r}. "
+                f"Supported {op} modes: {sorted(modes)}"
+            )
+
+        # GEMM is always validated (applies to all worker shapes).
+        _check("gemm", self._role_attr(role, "gemm_quant_mode"))
+
+        # MoE — only when model is MoE.
+        if is_moe:
+            moe_mode = self._role_attr(role, "moe_quant_mode")
+            if backend == "sglang" and moe_backend == "deepep_moe":
+                # WideEP MoE: per-phase op keys (raises UnsupportedWideepConfigError).
+                if validate_context:
+                    _check("wideep_context_moe", moe_mode)
+                if validate_generation:
+                    _check("wideep_generation_moe", moe_mode)
+            else:
+                _check("moe", moe_mode)
+
+        # FMHA: only meaningful for context-using workers (agg, prefill).
+        if validate_context:
+            _check(ctx_op, self._role_attr(role, "fmha_quant_mode"))
+
+        # KV cache: only meaningful for generation-using workers (agg, decode).
+        if validate_generation:
+            _check(gen_op, self._role_attr(role, "kvcache_quant_mode"))
+
+    # =====================================================================
+    # Properties
+    # =====================================================================
+
+    @property
+    def is_moe(self) -> bool:
+        return self._is_moe
+
+    @property
+    def model_family(self) -> str:
+        return self._model_family
+
+    # =====================================================================
+    # Serialization
+    # =====================================================================
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a flat dict snapshot of every user-facing field after resolution.
+
+        Internal fields (those starting with ``_``) are excluded.  Enum
+        values are emitted as their ``.name`` string (e.g.
+        ``GEMMQuantMode.fp8_block`` → ``"fp8_block"``).  None values
+        are kept (so the caller can see which fields are still unresolved).
+
+        Useful for debugging ("what did the user actually get after
+        __post_init__?") and for writing an "effective config" report.
+        """
+        # Strategy fields hold non-serializable objects; skip them.
+        non_serializable: frozenset[str] = frozenset({"predictor"})
+
+        out: dict[str, Any] = {}
+        for f in dataclasses.fields(self):
+            if f.name.startswith("_") or not f.init:
+                continue
+            if f.name in non_serializable:
+                continue
+            value = getattr(self, f.name)
+            if hasattr(value, "name") and hasattr(value, "value"):
+                # Enum — emit its name
+                value = value.name
+            out[f.name] = value
+        return out
+
+    def to_yaml(self) -> str:
+        """Return a YAML string of :func:`to_dict` output.
+
+        The result is round-trippable through :func:`from_yaml` (modulo
+        None fields which are accepted by the constructor as defaults).
+        """
+        import yaml
+
+        return yaml.safe_dump(self.to_dict(), sort_keys=False)
+
+    # =====================================================================
+    # sweep.py kwargs builders
+    # =====================================================================
+
+    def sweep_agg_kwargs(self, *, database) -> dict[str, Any]:
+        """Return the exact kwargs needed for sweep.sweep_agg.
+
+        Caller is responsible for loading the perf database (so it can be
+        shared across multiple Tasks).
+        """
+        if self.serving_mode != "agg":
+            raise ValueError(f"sweep_agg_kwargs requires serving_mode='agg', got {self.serving_mode!r}")
+        parallel_config_list = list(self.iter_parallel("agg"))
+        return {
+            "model_path": self.model_path,
+            "runtime_config": self.build_runtime_config(),
+            "database": database,
+            "backend_name": self.backend_name,
+            "model_config": self.build_model_config(role="agg"),
+            "parallel_config_list": parallel_config_list,
+            "enable_chunked_prefill": self.enable_chunked_prefill,
+            "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
+            "max_seq_len": self.max_seq_len,
+        }
+
+    def sweep_disagg_kwargs(self, *, prefill_database, decode_database) -> dict[str, Any]:
+        """Return the exact kwargs needed for sweep.sweep_disagg."""
+        if self.serving_mode != "disagg":
+            raise ValueError(f"sweep_disagg_kwargs requires serving_mode='disagg', got {self.serving_mode!r}")
+        prefill_parallel = list(self.iter_parallel("prefill"))
+        decode_parallel = list(self.iter_parallel("decode"))
+        # Derive worker count ranges from replica constraints (legacy semantics).
+        prefill_worker_list = list(range(1, (self.max_prefill_workers or 32) + 1))
+        decode_worker_list = list(range(1, (self.max_decode_workers or 32) + 1))
+        num_gpu_list = self.num_gpu_per_replica if self.num_gpu_per_replica else None
+        return {
+            "model_path": self.prefill_model_path,
+            "runtime_config": self.build_runtime_config(),
+            "prefill_database": prefill_database,
+            "prefill_backend_name": self.prefill_backend_name,
+            "prefill_model_config": self.build_model_config(role="prefill"),
+            "prefill_parallel_config_list": prefill_parallel,
+            "prefill_latency_correction": self.prefill_latency_correction,
+            "decode_database": decode_database,
+            "decode_backend_name": self.decode_backend_name,
+            "decode_model_config": self.build_model_config(role="decode"),
+            "decode_parallel_config_list": decode_parallel,
+            "decode_latency_correction": self.decode_latency_correction,
+            "prefill_max_num_tokens": max(self.prefill_max_batch_size, 1) * self.isl,
+            "decode_max_num_tokens": self.decode_max_batch_size,
+            "prefill_num_worker_list": prefill_worker_list,
+            "decode_num_worker_list": decode_worker_list,
+            "num_gpu_list": num_gpu_list,
+            "rate_matching_prefill_degradation": self.rate_match_prefill_degradation,
+            "rate_matching_decode_degradation": self.rate_match_decode_degradation,
+            "autoscale_ttft_correction_factor": self.autoscale_ttft_correction_factor,
+        }
+
+    # =====================================================================
+    # Optimization entry point
+    # =====================================================================
+
+    def run(self, *, autoscale: bool = False):
+        """Run the sweep and return a feasible-candidate DataFrame.
+
+        Loads the perf database(s) for the active role(s) internally and
+        dispatches to ``sweep_agg`` or ``sweep_disagg`` based on
+        ``serving_mode``.  Callers do not need to know about databases or
+        which sweep function applies.
+
+        Args:
+            autoscale: disagg-only.  When True, prefill and decode workers
+                are picked independently via ``picking.pick_autoscale`` --
+                no rate matching is performed and the result has
+                ``(p)workers=1`` and ``(d)workers=1``.  Ignored in agg mode.
+
+        Returns:
+            pandas.DataFrame -- ``common.ColumnsAgg`` schema for agg,
+            ``common.ColumnsDisagg`` for disagg.  This is the SLA-feasible
+            candidate set; Pareto frontier computation is downstream in
+            ``aiconfigurator.sdk.picking``.
+        """
+        from aiconfigurator.sdk.perf_database import get_database
+        from aiconfigurator.sdk.sweep import sweep_agg, sweep_disagg
+
+        if self.serving_mode == "agg":
+            if autoscale:
+                raise ValueError("autoscale is only supported in disagg mode")
+            database = get_database(self.system_name, self.backend_name, self.backend_version)
+            return sweep_agg(
+                **self.sweep_agg_kwargs(database=database),
+                predictor=self.predictor,
+            )
+        if self.serving_mode == "disagg":
+            prefill_database = get_database(
+                self.prefill_system_name, self.prefill_backend_name, self.prefill_backend_version
+            )
+            decode_database = get_database(
+                self.decode_system_name, self.decode_backend_name, self.decode_backend_version
+            )
+            return sweep_disagg(
+                **self.sweep_disagg_kwargs(prefill_database=prefill_database, decode_database=decode_database),
+                autoscale=autoscale,
+                predictor=self.predictor,
+            )
+        raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
+
+    # =====================================================================
+    # Single-point evaluation (subsumes cli_estimate)
+    # =====================================================================
+
+    def run_single_agg(
+        self,
+        *,
+        tp: int,
+        pp: int = 1,
+        dp: int = 1,
+        moe_tp: int = 1,
+        moe_ep: int = 1,
+        batch_size: int,
+        ctx_tokens: int | None = None,
+    ) -> dict:
+        """Evaluate one fixed agg config point and return its row dict.
+
+        Subsumes the per-point use case that ``cli/api.cli_estimate``
+        handles today (40 separate kwargs, custom model/backend wiring).
+        Reads model_path / system_name / backend / quant / nextn / isl /
+        osl from the Task itself; only the per-point dimensions are
+        passed as method args.
+
+        Args:
+            tp / pp / dp / moe_tp / moe_ep: parallelism for this single point.
+            batch_size: concurrency (max in-flight requests).
+            ctx_tokens: per-step context-token budget for the IFB
+                scheduler.  Defaults to ``self.isl`` (full prefill in
+                one step) -- matching ``cli_estimate`` semantics.
+
+        Returns:
+            Row dict in ``common.ColumnsAgg`` schema, equivalent to one
+            row of what ``run()`` would produce for the same point.
+
+        Raises:
+            ValueError: if called on a disagg Task.  Use
+                :meth:`run_single_disagg` instead.
+            RuntimeError: on OOM at this config point.
+        """
+        if self.serving_mode != "agg":
+            raise ValueError(
+                f"run_single_agg requires serving_mode='agg', got {self.serving_mode!r}; "
+                "use run_single_disagg for disagg."
+            )
+        from aiconfigurator.sdk.backends.factory import get_backend
+        from aiconfigurator.sdk.models import get_model
+        from aiconfigurator.sdk.perf_database import get_database
+        from aiconfigurator.sdk.predict import predict_agg_worker
+
+        model_config = self.build_model_config(role="agg")
+        model_config.tp_size = tp
+        model_config.pp_size = pp
+        model_config.attention_dp_size = dp if self._is_moe else 1
+        model_config.moe_tp_size = moe_tp
+        model_config.moe_ep_size = moe_ep
+
+        runtime_config = self.build_runtime_config(batch_size=batch_size)
+        database = get_database(self.system_name, self.backend_name, self.backend_version)
+        backend = get_backend(self.backend_name)
+        model = get_model(self.model_path, model_config, self.backend_name)
+
+        backend_kwargs: dict[str, Any] = {}
+        if self.max_seq_len is not None:
+            backend_kwargs["max_seq_len"] = self.max_seq_len
+        if self.free_gpu_memory_fraction is not None:
+            backend_kwargs["free_gpu_memory_fraction"] = self.free_gpu_memory_fraction
+
+        summary = predict_agg_worker(
+            model=model,
+            backend=backend,
+            database=database,
+            runtime_config=runtime_config,
+            ctx_tokens=ctx_tokens if ctx_tokens is not None else self.isl,
+            predictor=self.predictor,
+            **backend_kwargs,
+        )
+        if summary.check_oom():
+            raise RuntimeError(
+                f"OOM at tp={tp} pp={pp} dp={dp} moe_tp={moe_tp} moe_ep={moe_ep} "
+                f"batch_size={batch_size}.  Reduce batch_size, increase parallelism, "
+                "or use a quantized model."
+            )
+        result = summary.get_result_dict()
+        if result is None:
+            raise RuntimeError("run_single_agg produced no result; configuration may be invalid.")
+        return result
+
+    def run_single_disagg(
+        self,
+        *,
+        prefill_tp: int,
+        prefill_pp: int = 1,
+        prefill_dp: int = 1,
+        prefill_moe_tp: int = 1,
+        prefill_moe_ep: int = 1,
+        prefill_batch_size: int = 1,
+        prefill_num_workers: int = 1,
+        decode_tp: int,
+        decode_pp: int = 1,
+        decode_dp: int = 1,
+        decode_moe_tp: int = 1,
+        decode_moe_ep: int = 1,
+        decode_batch_size: int,
+        decode_num_workers: int = 1,
+    ) -> dict:
+        """Evaluate one fixed disagg config point and return its row dict.
+
+        Subsumes the disagg per-point use case from ``cli_estimate``.
+        Reads workload + model_path + quant from the Task; per-role
+        parallelism, batch_size, and num_workers come from args.
+
+        Returns:
+            Row dict in ``common.ColumnsDisagg`` schema (one rate-matched
+            P/D pair).
+
+        Raises:
+            ValueError: if called on an agg Task.
+            RuntimeError: on OOM in either phase.
+        """
+        if self.serving_mode != "disagg":
+            raise ValueError(
+                f"run_single_disagg requires serving_mode='disagg', got {self.serving_mode!r}; "
+                "use run_single_agg for agg."
+            )
+        from aiconfigurator.sdk.backends.factory import get_backend
+        from aiconfigurator.sdk.models import get_model
+        from aiconfigurator.sdk.perf_database import get_database
+        from aiconfigurator.sdk.predict import predict_disagg_phase
+        from aiconfigurator.sdk.sweep import _rate_match_dict
+
+        # --- Prefill phase ---
+        p_mc = self.build_model_config(role="prefill")
+        p_mc.tp_size = prefill_tp
+        p_mc.pp_size = prefill_pp
+        p_mc.attention_dp_size = prefill_dp if self._is_moe else 1
+        p_mc.moe_tp_size = prefill_moe_tp
+        p_mc.moe_ep_size = prefill_moe_ep
+
+        p_rt = self.build_runtime_config(batch_size=prefill_batch_size)
+        p_db = get_database(self.prefill_system_name, self.prefill_backend_name, self.prefill_backend_version)
+        p_backend = get_backend(self.prefill_backend_name)
+        p_model = get_model(self.prefill_model_path, p_mc, self.prefill_backend_name)
+
+        p_summary = predict_disagg_phase(
+            model=p_model,
+            backend=p_backend,
+            database=p_db,
+            runtime_config=p_rt,
+            role="prefill",
+            latency_correction=self.prefill_latency_correction,
+            predictor=self.predictor,
+        )
+        if p_summary.check_oom():
+            raise RuntimeError(
+                f"OOM in prefill phase at tp={prefill_tp} pp={prefill_pp} dp={prefill_dp} "
+                f"batch_size={prefill_batch_size}."
+            )
+
+        # --- Decode phase ---
+        d_mc = self.build_model_config(role="decode")
+        d_mc.tp_size = decode_tp
+        d_mc.pp_size = decode_pp
+        d_mc.attention_dp_size = decode_dp if self._is_moe else 1
+        d_mc.moe_tp_size = decode_moe_tp
+        d_mc.moe_ep_size = decode_moe_ep
+
+        d_rt = self.build_runtime_config(batch_size=decode_batch_size)
+        d_db = get_database(self.decode_system_name, self.decode_backend_name, self.decode_backend_version)
+        d_backend = get_backend(self.decode_backend_name)
+        d_model = get_model(self.decode_model_path, d_mc, self.decode_backend_name)
+
+        d_summary = predict_disagg_phase(
+            model=d_model,
+            backend=d_backend,
+            database=d_db,
+            runtime_config=d_rt,
+            role="decode",
+            latency_correction=self.decode_latency_correction,
+            predictor=self.predictor,
+        )
+        if d_summary.check_oom():
+            raise RuntimeError(
+                f"OOM in decode phase at tp={decode_tp} pp={decode_pp} dp={decode_dp} batch_size={decode_batch_size}."
+            )
+
+        # --- Rate-match the pair ---
+        p_dict = p_summary.get_summary_df().iloc[0].to_dict()
+        d_dict = d_summary.get_summary_df().iloc[0].to_dict()
+        return _rate_match_dict(p_dict, prefill_num_workers, d_dict, decode_num_workers)
+
+
+__all__ = ["QUANT_PRESETS", "ParallelChoice", "Task"]

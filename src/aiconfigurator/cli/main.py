@@ -26,7 +26,7 @@ from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import check_is_moe
-from aiconfigurator.sdk.task_v1 import TaskConfig, TaskRunner, UnsupportedWideepConfigError
+from aiconfigurator.sdk.task import TaskConfig, TaskRunner, UnsupportedWideepConfigError
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)

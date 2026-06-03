@@ -25,7 +25,7 @@ from aiconfigurator.cli.main import (
 from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.models import check_is_moe
-from aiconfigurator.sdk.task_v1 import (
+from aiconfigurator.sdk.task import (
     DEFAULT_DECODE_LATENCY_CORRECTION_SCALE,
     DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE,
     TaskConfig,

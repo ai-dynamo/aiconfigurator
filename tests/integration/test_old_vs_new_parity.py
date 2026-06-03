@@ -3,9 +3,9 @@
 
 """Integration parity test: legacy CLI path vs new sweep path.
 
-Verifies that the new sdk/sweep.py + sdk/task.py pipeline produces
+Verifies that the new sdk/sweep.py + sdk/task_v2.py pipeline produces
 the same Pareto DataFrame as the legacy
-sdk.task_v1.TaskRunner -> sdk.pareto_analysis.agg_pareto/disagg_pareto
+sdk.task.TaskRunner -> sdk.pareto_analysis.agg_pareto/disagg_pareto
 pipeline when describing the SAME task.
 
 Each side is constructed via its native interface:
@@ -98,8 +98,8 @@ def _skip_if_no_db(system: str, backend: str, version: str) -> None:
 
 
 def _old_path_agg(params: dict) -> pd.DataFrame:
-    from aiconfigurator.sdk.task_v1 import TaskConfig as V1TaskConfig
-    from aiconfigurator.sdk.task_v1 import TaskRunner
+    from aiconfigurator.sdk.task import TaskConfig as V1TaskConfig
+    from aiconfigurator.sdk.task import TaskRunner
 
     yaml_config = {
         "config": {
@@ -130,8 +130,8 @@ def _old_path_agg(params: dict) -> pd.DataFrame:
 
 
 def _old_path_disagg(params: dict) -> pd.DataFrame:
-    from aiconfigurator.sdk.task_v1 import TaskConfig as V1TaskConfig
-    from aiconfigurator.sdk.task_v1 import TaskRunner
+    from aiconfigurator.sdk.task import TaskConfig as V1TaskConfig
+    from aiconfigurator.sdk.task import TaskRunner
 
     yaml_config = {
         "config": {
@@ -185,7 +185,7 @@ _LEGACY_TPOT_SWEEP = list(range(1, 20, 1)) + list(range(20, 300, 5))
 
 
 def _new_path_agg(params: dict) -> pd.DataFrame:
-    from aiconfigurator.sdk.task import Task
+    from aiconfigurator.sdk.task_v2 import Task
 
     yaml_data = {"serving_mode": "agg", **params}
     task = Task.from_yaml(yaml_data)
@@ -197,7 +197,7 @@ def _new_path_agg(params: dict) -> pd.DataFrame:
 
 
 def _new_path_disagg(params: dict) -> pd.DataFrame:
-    from aiconfigurator.sdk.task import Task
+    from aiconfigurator.sdk.task_v2 import Task
 
     # Legacy disagg uses a single shared model_path + system_name; the new
     # Task requires explicit prefill_/decode_ fields.
@@ -275,8 +275,8 @@ def test_old_vs_new_pareto_parity_disagg():
 
 def _old_path_agg_request_latency(params: dict, request_latency: float) -> pd.DataFrame:
     """Old path with request_latency-driven (ttft, tpot) constraint pairs."""
-    from aiconfigurator.sdk.task_v1 import TaskConfig as V1TaskConfig
-    from aiconfigurator.sdk.task_v1 import TaskRunner
+    from aiconfigurator.sdk.task import TaskConfig as V1TaskConfig
+    from aiconfigurator.sdk.task import TaskRunner
 
     yaml_config = {
         "config": {
@@ -308,7 +308,7 @@ def _old_path_agg_request_latency(params: dict, request_latency: float) -> pd.Da
 
 
 def _new_path_agg_request_latency(params: dict, request_latency: float) -> pd.DataFrame:
-    from aiconfigurator.sdk.task import Task
+    from aiconfigurator.sdk.task_v2 import Task
 
     yaml_data = {"serving_mode": "agg", **params, "request_latency": request_latency}
     task = Task.from_yaml(yaml_data)
@@ -333,8 +333,8 @@ def test_old_vs_new_pareto_parity_agg_request_latency():
 
 def _old_path_disagg_autoscale(params: dict) -> pd.DataFrame:
     """Old disagg autoscale path (picks prefill and decode independently)."""
-    from aiconfigurator.sdk.task_v1 import TaskConfig as V1TaskConfig
-    from aiconfigurator.sdk.task_v1 import TaskRunner
+    from aiconfigurator.sdk.task import TaskConfig as V1TaskConfig
+    from aiconfigurator.sdk.task import TaskRunner
 
     yaml_config = {
         "config": {
@@ -380,7 +380,7 @@ def _old_path_disagg_autoscale(params: dict) -> pd.DataFrame:
 
 
 def _new_path_disagg_autoscale(params: dict) -> pd.DataFrame:
-    from aiconfigurator.sdk.task import Task
+    from aiconfigurator.sdk.task_v2 import Task
 
     yaml_data: dict = {
         "serving_mode": "disagg",
@@ -429,8 +429,8 @@ HETERO_DISAGG_PARAMS = {
 
 def _old_path_hetero_disagg(params: dict) -> pd.DataFrame:
     """Hetero-disagg: prefill on one system, decode on another."""
-    from aiconfigurator.sdk.task_v1 import TaskConfig as V1TaskConfig
-    from aiconfigurator.sdk.task_v1 import TaskRunner
+    from aiconfigurator.sdk.task import TaskConfig as V1TaskConfig
+    from aiconfigurator.sdk.task import TaskRunner
 
     yaml_config = {
         "config": {
@@ -476,7 +476,7 @@ def _old_path_hetero_disagg(params: dict) -> pd.DataFrame:
 
 
 def _new_path_hetero_disagg(params: dict) -> pd.DataFrame:
-    from aiconfigurator.sdk.task import Task
+    from aiconfigurator.sdk.task_v2 import Task
 
     yaml_data: dict = {
         "serving_mode": "disagg",

@@ -11,7 +11,7 @@ prefix discipline, and the build_* helpers.
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.task import Task
+from aiconfigurator.sdk.task_v2 import Task
 
 pytestmark = pytest.mark.unit
 

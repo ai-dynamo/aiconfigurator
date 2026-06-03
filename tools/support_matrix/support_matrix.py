@@ -28,7 +28,7 @@ from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk import config as sdk_config
 from aiconfigurator.sdk.models import _get_model_info
 from aiconfigurator.sdk.models.helpers import _apply_model_quant_defaults
-from aiconfigurator.sdk.task_v1 import TaskConfig, TaskRunner
+from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 logger = logging.getLogger(__name__)
 

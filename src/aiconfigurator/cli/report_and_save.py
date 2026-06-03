@@ -22,7 +22,7 @@ from aiconfigurator.generator.module_bridge import task_config_to_generator_conf
 from aiconfigurator.logging_utils import _cli_bold, _cli_underline
 from aiconfigurator.sdk import pareto_analysis
 from aiconfigurator.sdk.pareto_analysis import draw_pareto_to_string
-from aiconfigurator.sdk.task_v1 import TaskConfig
+from aiconfigurator.sdk.task import TaskConfig
 from aiconfigurator.sdk.utils import safe_mkdir
 
 logger = logging.getLogger(__name__)
