@@ -304,9 +304,7 @@ def cli_exp(
     Args:
         yaml_path: Path to a YAML file containing experiment definitions.
         config: Dict containing experiment definitions (alternative to yaml_path).
-            Keys are experiment names, values are experiment configs. Most
-            top-level experiment fields may be lists; list-valued fields are
-            expanded into a Cartesian sweep of experiment configs.
+            Keys are experiment names, values are experiment configs.
         top_n: Number of top configurations to return for each experiment. Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
 
@@ -353,8 +351,8 @@ def cli_exp(
           serving_mode: agg
           model_path: Qwen/Qwen3-32B
           system_name: h200_sxm
-          backend_name: [trtllm, sglang]
-          total_gpus: [4, 8]
+          backend_name: trtllm
+          total_gpus: 8
           isl: 4000
           osl: 1000
 

@@ -3,7 +3,6 @@
 
 import argparse
 import copy
-import itertools
 import logging
 import os
 import sys
@@ -1149,19 +1148,15 @@ def build_default_task_configs(
         # (webapp/events/event_fn.py sets moe_backend="deepep_moe" when enable_wideep + sglang)
         return moe_backend or ("deepep_moe" if enable_wideep else None)
 
-    # Create yaml_config to pass nextn settings into generated TaskConfigs.
+    # Create yaml_config to pass nextn and nextn_accept_rates if specified
     yaml_config = None
     if nextn > 0:
-        if yaml_config is None:
-            yaml_config = {"mode": "patch", "config": {}}
-        yaml_config.setdefault("mode", "patch")
-        yaml_config.setdefault("config", {})
-        yaml_config["config"].update(
-            {
+        yaml_config = {
+            "config": {
                 "nextn": nextn,
                 "nextn_accept_rates": nextn_accept_rates,
             }
-        )
+        }
 
     task_configs: dict[str, TaskConfig] = {}
     is_moe_model = check_is_moe(model_path)
@@ -1246,98 +1241,10 @@ _EXPERIMENT_RESERVED_KEYS = {
     "enable_wideep",
     "moe_backend",
     "enable_eplb",
-    "enable_chunked_prefill",
     "total_gpus",
     "database_mode",
-    "free_gpu_memory_fraction",
-    "max_seq_len",
     "engine_step_backend",
 }
-
-# Expand only TaskConfig constructor-level fields. Lists inside ``config`` are
-# already meaningful search spaces, for example worker_config.tp_list.
-_EXPERIMENT_SWEEP_KEYS = (
-    "serving_mode",
-    "model_path",
-    "system_name",
-    "decode_system_name",
-    "backend_name",
-    "backend_version",
-    "isl",
-    "osl",
-    "prefix",
-    "ttft",
-    "tpot",
-    "request_latency",
-    "enable_wideep",
-    "enable_eplb",
-    "enable_chunked_prefill",
-    "total_gpus",
-    "database_mode",
-    "free_gpu_memory_fraction",
-    "max_seq_len",
-    "engine_step_backend",
-)
-
-_EXPERIMENT_SWEEP_NAME_ALIASES = {
-    "serving_mode": "mode",
-    "model_path": "model",
-    "system_name": "system",
-    "decode_system_name": "decode_system",
-    "backend_name": "backend",
-    "backend_version": "version",
-    "total_gpus": "gpus",
-    "database_mode": "db",
-    "free_gpu_memory_fraction": "mem_frac",
-    "max_seq_len": "max_seq",
-    "engine_step_backend": "engine",
-}
-
-
-def _sweep_value_suffix(value: Any) -> str:
-    if value is None:
-        return "default"
-    if isinstance(value, bool):
-        return str(value).lower()
-    safe_value = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in str(value)).strip("-")
-    return safe_value[:80] or "value"
-
-
-def _expand_experiment_config(exp_name: str, exp_config: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    sweep_keys = [key for key in _EXPERIMENT_SWEEP_KEYS if isinstance(exp_config.get(key), list)]
-    if not sweep_keys:
-        return [(exp_name, copy.deepcopy(exp_config))]
-
-    for key in sweep_keys:
-        if not exp_config[key]:
-            logger.warning("Skipping experiment '%s': sweep field '%s' is an empty list.", exp_name, key)
-            return []
-
-    multi_value_keys = {key for key in sweep_keys if len(exp_config[key]) > 1}
-    expanded_configs: list[tuple[str, dict[str, Any]]] = []
-    for values in itertools.product(*(exp_config[key] for key in sweep_keys)):
-        expanded_config = copy.deepcopy(exp_config)
-        for key, value in zip(sweep_keys, values, strict=True):
-            expanded_config[key] = value
-
-        suffix_parts = []
-        for key, value in zip(sweep_keys, values, strict=True):
-            if key in multi_value_keys:
-                suffix_key = _EXPERIMENT_SWEEP_NAME_ALIASES.get(key, key)
-                suffix_parts.append(f"{suffix_key}-{_sweep_value_suffix(value)}")
-        expanded_name = exp_name if not suffix_parts else f"{exp_name}__{'__'.join(suffix_parts)}"
-        expanded_configs.append((expanded_name, expanded_config))
-
-    return expanded_configs
-
-
-def _unique_experiment_name(exp_name: str, existing_names: set[str]) -> str:
-    if exp_name not in existing_names:
-        return exp_name
-    index = 2
-    while f"{exp_name}__{index}" in existing_names:
-        index += 1
-    return f"{exp_name}__{index}"
 
 
 def _build_yaml_config(exp_config: dict, config_section: dict) -> dict | None:
@@ -1366,9 +1273,7 @@ def build_experiment_task_configs(
     Args:
         yaml_path: Path to a YAML file containing experiment definitions.
         config: Dict containing experiment definitions (alternative to yaml_path).
-            Keys are experiment names, values are experiment configs. Most
-            top-level experiment fields may be lists; list-valued fields are
-            expanded into a Cartesian sweep before TaskConfig construction.
+            Keys are experiment names, values are experiment configs.
         engine_step_backend: Optional global experimental static-latency backend.
             Per-experiment ``engine_step_backend`` entries take precedence.
 
@@ -1411,101 +1316,88 @@ def build_experiment_task_configs(
             logger.warning("Skipping experiment '%s': configuration is not a mapping.", exp_name)
             continue
 
-        for expanded_name, expanded_config in _expand_experiment_config(exp_name, exp_config):
-            config_section = expanded_config.get("config")
-            if not isinstance(config_section, dict):
-                config_section = {}
-            else:
-                config_section = copy.deepcopy(config_section)
+        config_section = exp_config.get("config")
+        if not isinstance(config_section, dict):
+            config_section = {}
+        else:
+            config_section = copy.deepcopy(config_section)
 
-            serving_mode = expanded_config.get("serving_mode")
-            model_path = expanded_config.get("model_path")
-            if serving_mode not in {"agg", "disagg"} or not model_path:
-                logger.warning("Skipping experiment '%s': missing serving_mode or model_path.", expanded_name)
-                continue
+        serving_mode = exp_config.get("serving_mode")
+        model_path = exp_config.get("model_path")
+        if serving_mode not in {"agg", "disagg"} or not model_path:
+            logger.warning("Skipping experiment '%s': missing serving_mode or model_path.", exp_name)
+            continue
 
-            # system
-            if serving_mode == "agg":
-                inferred_system = expanded_config.get("system_name")
-                inferred_decode_system = None
-            else:
-                inferred_system = expanded_config.get("system_name")
-                inferred_decode_system = expanded_config.get("decode_system_name") or inferred_system
-            system_name = inferred_system
-            if not system_name:
-                logger.warning(
-                    "Skipping experiment '%s': no system name provided "
-                    "(provide system_name at the top level or inside worker config).",
-                    expanded_name,
-                )
-                continue
+        # system
+        if serving_mode == "agg":
+            inferred_system = exp_config.get("system_name")
+            inferred_decode_system = None
+        else:
+            inferred_system = exp_config.get("system_name")
+            inferred_decode_system = exp_config.get("decode_system_name") or inferred_system
+        system_name = inferred_system
+        if not system_name:
+            logger.warning(
+                "Skipping experiment '%s': no system name provided "
+                "(provide system_name at the top level or inside worker config).",
+                exp_name,
+            )
+            continue
 
-            # backend, default to trtllm
-            backend_name = expanded_config.get("backend_name") or common.BackendName.trtllm.value
-            backend_version = expanded_config.get("backend_version")
-            database_mode = expanded_config.get("database_mode", common.DatabaseMode.SILICON.name)
+        # backend, default to trtllm
+        backend_name = exp_config.get("backend_name") or common.BackendName.trtllm.value
+        backend_version = exp_config.get("backend_version")
 
-            total_gpus = expanded_config.get("total_gpus")
-            if total_gpus is None:
-                logger.warning("Skipping experiment '%s': total_gpus not provided.", expanded_name)
-                continue
+        total_gpus = exp_config.get("total_gpus")
+        if total_gpus is None:
+            logger.warning("Skipping experiment '%s': total_gpus not provided.", exp_name)
+            continue
 
-            task_kwargs: dict[str, Any] = {
-                "serving_mode": serving_mode,
-                "model_path": model_path,
-                "system_name": system_name,
-                "backend_name": backend_name,
-                "total_gpus": total_gpus,
-                "profiles": expanded_config.get("profiles", []),
-            }
+        task_kwargs: dict[str, Any] = {
+            "serving_mode": serving_mode,
+            "model_path": model_path,
+            "system_name": system_name,
+            "backend_name": backend_name,
+            "total_gpus": total_gpus,
+            "profiles": exp_config.get("profiles", []),
+        }
 
-            if database_mode == common.DatabaseMode.SILICON.name or backend_version is not None:
-                _ensure_backend_version_available(system_name, backend_name, backend_version)
-                if serving_mode == "disagg" and inferred_decode_system and inferred_decode_system != system_name:
-                    _ensure_backend_version_available(inferred_decode_system, backend_name, backend_version)
-            if backend_version is not None:
-                task_kwargs["backend_version"] = backend_version
+        if backend_version is not None:
+            _ensure_backend_version_available(system_name, backend_name, backend_version)
+            if serving_mode == "disagg" and inferred_decode_system and inferred_decode_system != system_name:
+                _ensure_backend_version_available(inferred_decode_system, backend_name, backend_version)
+            task_kwargs["backend_version"] = backend_version
 
-            if serving_mode == "disagg":
-                task_kwargs["decode_system_name"] = inferred_decode_system or system_name
+        if serving_mode == "disagg":
+            task_kwargs["decode_system_name"] = inferred_decode_system or system_name
 
-            # Per-experiment overrides for runtime numeric parameters if provided at top level
-            for numeric_key in (
-                "isl",
-                "osl",
-                "prefix",
-                "ttft",
-                "tpot",
-                "request_latency",
-                "free_gpu_memory_fraction",
-                "max_seq_len",
-            ):
-                if numeric_key in expanded_config:
-                    task_kwargs[numeric_key] = expanded_config[numeric_key]
+        # Per-experiment overrides for runtime numeric parameters if provided at top level
+        for numeric_key in ("isl", "osl", "prefix", "ttft", "tpot", "request_latency"):
+            if numeric_key in exp_config:
+                task_kwargs[numeric_key] = exp_config[numeric_key]
 
-            if "enable_wideep" in expanded_config:
-                task_kwargs["enable_wideep"] = expanded_config["enable_wideep"]
-            if "moe_backend" in expanded_config:
-                task_kwargs["moe_backend"] = expanded_config["moe_backend"]
-            if "enable_eplb" in expanded_config:
-                task_kwargs["enable_eplb"] = expanded_config["enable_eplb"]
-            if "enable_chunked_prefill" in expanded_config:
-                task_kwargs["enable_chunked_prefill"] = expanded_config["enable_chunked_prefill"]
-            if "database_mode" in expanded_config:
-                task_kwargs["database_mode"] = database_mode
-            effective_engine_step_backend = expanded_config.get("engine_step_backend", engine_step_backend)
-            if effective_engine_step_backend is not None:
-                task_kwargs["engine_step_backend"] = effective_engine_step_backend
+        if "enable_wideep" in exp_config:
+            task_kwargs["enable_wideep"] = exp_config["enable_wideep"]
+        if "moe_backend" in exp_config:
+            task_kwargs["moe_backend"] = exp_config["moe_backend"]
+        if "enable_eplb" in exp_config:
+            task_kwargs["enable_eplb"] = exp_config["enable_eplb"]
+        if "enable_chunked_prefill" in exp_config:
+            task_kwargs["enable_chunked_prefill"] = exp_config["enable_chunked_prefill"]
+        if "database_mode" in exp_config:
+            task_kwargs["database_mode"] = exp_config["database_mode"]
+        effective_engine_step_backend = exp_config.get("engine_step_backend", engine_step_backend)
+        if effective_engine_step_backend is not None:
+            task_kwargs["engine_step_backend"] = effective_engine_step_backend
 
-            yaml_config = _build_yaml_config(expanded_config, config_section)
-            if yaml_config:
-                task_kwargs["yaml_config"] = yaml_config
+        yaml_config = _build_yaml_config(exp_config, config_section)
+        if yaml_config:
+            task_kwargs["yaml_config"] = yaml_config
 
-            unique_name = _unique_experiment_name(expanded_name, set(task_configs))
-            try:
-                task_configs[unique_name] = TaskConfig(**task_kwargs)
-            except Exception:
-                logger.exception("Failed to build TaskConfig for experiment '%s'", unique_name)
+        try:
+            task_configs[exp_name] = TaskConfig(**task_kwargs)
+        except Exception:
+            logger.exception("Failed to build TaskConfig for experiment '%s'", exp_name)
 
     return task_configs
 
