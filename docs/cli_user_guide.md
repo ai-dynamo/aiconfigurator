@@ -988,15 +988,15 @@ Use the generated artifacts to launch the service. For bare-metal (single-node):
 
 ```bash
 mkdir -p /workspace/engine_configs
-cp results/.../disagg/top1/*_config.yaml /workspace/engine_configs/
-cd results/.../disagg/top1/
+cp results/.../disagg/top1/disagg/*_config.yaml /workspace/engine_configs/
+cd results/.../disagg/top1/disagg/
 bash node_0_run.sh
 ```
 
 For Kubernetes (Dynamo):
 
 ```bash
-kubectl apply -f results/.../disagg/top1/k8s_deploy.yaml
+kubectl apply -f results/.../disagg/top1/disagg/k8s_deploy.yaml
 ```
 
 For llm-d (Helm):
@@ -1014,10 +1014,10 @@ After the service is healthy, run the generated benchmark sweep to validate perf
 
 ```bash
 # Bare-metal
-bash results/.../disagg/top1/bench_run.sh
+bash results/.../disagg/top1/disagg/bench_run.sh
 
 # Or Kubernetes
-kubectl apply -f results/.../disagg/top1/k8s_bench.yaml
+kubectl apply -f results/.../disagg/top1/disagg/k8s_bench.yaml
 ```
 
 Compare the measured TTFT, TPOT, and tokens/s/gpu against the AIConfigurator estimates printed in Step 2. See [Benchmark Artifacts](#benchmark-artifacts) for details on the generated scripts.
