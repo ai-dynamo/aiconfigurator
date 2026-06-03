@@ -220,7 +220,7 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
 
             return gemm_op
 
-        elif gemm_type == "fp8":
+        elif gemm_type in ("fp8", "fp8_static"):
             fp8_info = torch.finfo(torch.float8_e4m3fn)
             a_bf16 = torch.randn(M, K, dtype=dtype, device=device)
             b_fp32 = (torch.rand(N, K, device=device) - 0.5) * 2 * fp8_info.max
@@ -233,22 +233,6 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
             def gemm_op():
                 sgl_per_token_quant_fp8(a_bf16, output_fp8, scale_a)
                 return fp8_scaled_mm(output_fp8, b_fp8, scale_a, scale_b, dtype)
-
-            return gemm_op
-
-        elif gemm_type == "fp8_static":
-            fp8_info = torch.finfo(torch.float8_e4m3fn)
-            a_fp32 = (torch.rand(M, K, device=device) - 0.5) * 2 * fp8_info.max
-            a_fp8 = a_fp32.clamp(min=fp8_info.min, max=fp8_info.max).to(torch.float8_e4m3fn)
-            del a_fp32
-            b_fp32 = (torch.rand(N, K, device=device) - 0.5) * 2 * fp8_info.max
-            b_fp8 = b_fp32.clamp(min=fp8_info.min, max=fp8_info.max).to(torch.float8_e4m3fn).t()
-            del b_fp32
-            scale_a = torch.ones((M, 1), device=device, dtype=torch.float32)
-            scale_b = torch.ones((N,), device=device, dtype=torch.float32)
-
-            def gemm_op():
-                return fp8_scaled_mm(a_fp8, b_fp8, scale_a, scale_b, dtype)
 
             return gemm_op
 

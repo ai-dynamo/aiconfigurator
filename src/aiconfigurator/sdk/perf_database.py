@@ -948,7 +948,7 @@ class _LazySupportMatrix:
             from aiconfigurator.sdk.operations.gemm import GEMM
 
             GEMM.load_data(db)
-            return _enum_key_names(getattr(db, "_gemm_data", None))
+            return _gemm_key_names(db)
 
         if key == "context_attention":
             from aiconfigurator.sdk.operations.attention import ContextAttention
@@ -1107,6 +1107,27 @@ def _merge_key_names(*sources) -> list[str]:
     for source in sources:
         merged.update(_enum_key_names(source))
     return sorted(merged)
+
+
+def _contains_quant_mode(data, quant_mode: common.GEMMQuantMode) -> bool:
+    if not data:
+        return False
+    try:
+        return quant_mode in data
+    except PerfDataNotAvailableError:
+        return False
+
+
+def _gemm_key_names(database) -> list[str]:
+    """Return GEMM modes, requiring overhead tables for static FP8 support."""
+    names = set(_enum_key_names(getattr(database, "_gemm_data", None)))
+    fp8_static_name = common.GEMMQuantMode.fp8_static.name
+    if fp8_static_name in names and not (
+        _contains_quant_mode(getattr(database, "_compute_scale_data", None), common.GEMMQuantMode.fp8)
+        and _contains_quant_mode(getattr(database, "_scale_matrix_data", None), common.GEMMQuantMode.fp8)
+    ):
+        names.remove(fp8_static_name)
+    return sorted(names)
 
 
 class PerfDatabase:
@@ -1278,7 +1299,7 @@ class PerfDatabase:
                     wideep_generation_mla_modes.add(kv_cache_dtype.name)
 
             self.supported_quant_mode = {
-                "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
+                "gemm": _gemm_key_names(self),
                 "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
                 "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
                 "context_mla": _merge_key_names(
@@ -1305,7 +1326,7 @@ class PerfDatabase:
             }
         elif self.backend == "trtllm":
             self.supported_quant_mode = {
-                "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
+                "gemm": _gemm_key_names(self),
                 "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
                 "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
                 "context_mla": _merge_key_names(
@@ -1327,7 +1348,7 @@ class PerfDatabase:
             }
         elif self.backend == "vllm":
             self.supported_quant_mode = {
-                "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
+                "gemm": _gemm_key_names(self),
                 "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
                 "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
                 "context_mla": _merge_key_names(
