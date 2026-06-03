@@ -72,10 +72,12 @@ class MockModelConfig:
         self.is_local_attention_model = False
 
         class MockHFConfig:
-            def __init__(self):
+            def __init__(self, num_attention_heads):
                 self.architectures = ["LlamaForCausalLM"]
+                self.num_attention_heads = num_attention_heads
 
-        self.hf_config = MockHFConfig()
+        self.hf_config = MockHFConfig(num_attention_heads)
+        self.hf_text_config = self.hf_config
         self.dtype = torch.bfloat16
 
     def get_num_kv_heads(self, tp_size):
@@ -103,6 +105,8 @@ class MockServerArgs:
         self.triton_attention_split_tile_size = None
         self.disable_cuda_graph = False
         self.chunked_prefill_size = -1
+        self.is_embedding = False
+        self.disable_radix_cache = False
 
 
 class MockModelRunner:
@@ -136,6 +140,7 @@ class MockModelRunner:
         self.is_hybrid_swa = self.model_config.is_hybrid_swa
         self.server_args.kv_cache_dtype = kv_cache_dtype
         self.server_args.page_size = page_size
+        self.tp_size = 1
         # Required by TritonAttnBackend
         self.gpu_id = 0
         self.hybrid_gdn_config = None
