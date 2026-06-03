@@ -121,6 +121,7 @@ class TestCLIArgumentParsing:
         assert args.prefix == 0
         assert args.engine_step_backend is None
         assert args.config_yaml is None
+        assert args.config_yaml_inline is None
 
     def test_inclusive_tpot_default_false_in_exp_mode(self, cli_parser, mock_exp_yaml_path):
         """--inclusive-tpot defaults to False in exp mode."""

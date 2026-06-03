@@ -338,6 +338,13 @@ def _add_default_mode_arguments(parser):
         "Use this for advanced search-space controls such as worker_config.",
     )
     parser.add_argument(
+        "--config-yaml-inline",
+        type=str,
+        default=None,
+        help="Inline YAML/JSON patch applied to both default-mode agg and disagg search configs. "
+        "Use this for self-contained replay commands.",
+    )
+    parser.add_argument(
         "--moe-backend",
         type=str,
         choices=["deepep_moe", "megamoe"],
@@ -1519,7 +1526,26 @@ def build_experiment_task_configs(
     return task_configs
 
 
-def _load_default_yaml_config(path: str | None) -> dict[str, Any] | None:
+def _normalize_default_yaml_config(loaded: Any, source: str) -> dict[str, Any]:
+    if not isinstance(loaded, dict):
+        raise TypeError(f"{source} must contain a mapping")
+    if "config" not in loaded:
+        loaded = {"mode": "patch", "config": loaded}
+    if not isinstance(loaded.get("config"), dict):
+        raise TypeError(f"{source} config must be a mapping")
+    loaded.setdefault("mode", "patch")
+    return loaded
+
+
+def _load_default_yaml_config(path: str | None, inline: str | None = None) -> dict[str, Any] | None:
+    if path is not None and inline is not None:
+        raise ValueError("Use only one of --config-yaml or --config-yaml-inline")
+    if inline is not None:
+        try:
+            loaded = yaml.safe_load(inline) or {}
+        except Exception as exc:
+            raise ValueError("Error loading inline default config YAML") from exc
+        return _normalize_default_yaml_config(loaded, "Inline default config YAML")
     if path is None:
         return None
     try:
@@ -1527,14 +1553,7 @@ def _load_default_yaml_config(path: str | None) -> dict[str, Any] | None:
             loaded = yaml.safe_load(fh) or {}
     except Exception as exc:
         raise ValueError(f"Error loading default config YAML file '{path}'") from exc
-    if not isinstance(loaded, dict):
-        raise TypeError(f"Default config YAML file '{path}' must contain a mapping")
-    if "config" not in loaded:
-        loaded = {"mode": "patch", "config": loaded}
-    if not isinstance(loaded.get("config"), dict):
-        raise TypeError(f"Default config YAML file '{path}' config must be a mapping")
-    loaded.setdefault("mode", "patch")
-    return loaded
+    return _normalize_default_yaml_config(loaded, f"Default config YAML file '{path}'")
 
 
 def _execute_task_configs(
@@ -2171,7 +2190,7 @@ def main(args):
             engine_step_backend=args.engine_step_backend,
             enable_wideep=getattr(args, "enable_wideep", False),
             moe_backend=getattr(args, "moe_backend", None),
-            yaml_config=_load_default_yaml_config(args.config_yaml),
+            yaml_config=_load_default_yaml_config(args.config_yaml, args.config_yaml_inline),
         )
     elif args.mode == "exp":
         try:

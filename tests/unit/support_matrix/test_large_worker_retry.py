@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+import shlex
+
 import pandas as pd
 import pytest
 
@@ -101,9 +104,13 @@ def test_run_single_test_reports_large_worker_replay_command(monkeypatch):
     assert statuses == {"agg": STATUS_PASS}
     assert errors == {"agg": None}
     assert len(calls) == 2
-    assert commands["agg"].endswith(
-        "--top-n 1 --no-color --config-yaml tools/support_matrix/configs/large_pipeline_parallel_worker.yaml"
-    )
+    command_parts = shlex.split(commands["agg"])
+    assert "--config-yaml" not in command_parts
+    assert "--config-yaml-inline" in command_parts
+    inline_config = json.loads(command_parts[command_parts.index("--config-yaml-inline") + 1])
+    assert inline_config["config"]["worker_config"]["num_gpu_per_worker"] == [16]
+    assert inline_config["config"]["prefill_worker_config"]["pp_list"] == [2]
+    assert inline_config["config"]["replica_config"]["num_gpu_per_replica"] == [32, 64, 128]
 
 
 def test_run_single_test_can_return_row_replay_commands(monkeypatch):

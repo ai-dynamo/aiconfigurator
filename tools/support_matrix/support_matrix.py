@@ -54,7 +54,6 @@ DEFAULT_ENGINE_STEP_COMPARISON_RTOL = 0.05
 DEFAULT_ENGINE_STEP_COMPARISON_ATOL = 1e-3
 DEFAULT_ENGINE_STEP_FRONTIER_RTOL = 0.75
 DEFAULT_ENGINE_STEP_FRONTIER_ATOL = 1e-3
-LARGE_PIPELINE_CONFIG_PATH = "tools/support_matrix/configs/large_pipeline_parallel_worker.yaml"
 _RUST_CORE_AUTOBUILD_ENV = "AICONFIGURATOR_RUST_CORE_AUTOBUILD"
 _APPROXIMATE_ENGINE_STEP_COLUMNS = frozenset(
     {
@@ -128,6 +127,7 @@ def _support_matrix_row_command(
     engine_step_comparison_atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
     engine_step_frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
     engine_step_frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
+    yaml_config: dict | None = None,
     yaml_config_path: str | None = None,
 ) -> str:
     """Return the repo-local CLI command that checks this model/system/backend path."""
@@ -165,7 +165,10 @@ def _support_matrix_row_command(
         "1",
         "--no-color",
     ]
-    if yaml_config_path is not None:
+    if yaml_config is not None:
+        inline_config = json.dumps(yaml_config, sort_keys=True, separators=(",", ":"))
+        parts.extend(["--config-yaml-inline", inline_config])
+    elif yaml_config_path is not None:
         parts.extend(["--config-yaml", yaml_config_path])
     if compare_engine_step_backends:
         # ``cli default`` does not expose the support-matrix Python/Rust
@@ -258,6 +261,30 @@ def _large_pipeline_parallel_attempt(
         name="large-pipeline-parallel-worker",
         yaml_config={"mode": "patch", "config": config},
     )
+
+
+def _large_pipeline_default_yaml_config() -> dict:
+    """Return the self-contained default-mode YAML patch used in replay commands."""
+    worker_config = {
+        "num_gpu_per_worker": [16],
+        "tp_list": [8],
+        "pp_list": [2],
+        "dp_list": [1],
+        "moe_tp_list": [1, 2, 4, 8],
+        "moe_ep_list": [1, 2, 4, 8],
+    }
+    return {
+        "mode": "patch",
+        "config": {
+            "worker_config": worker_config,
+            "prefill_worker_config": worker_config,
+            "decode_worker_config": worker_config,
+            "replica_config": {
+                "max_gpu_per_replica": 128,
+                "num_gpu_per_replica": [32, 64, 128],
+            },
+        },
+    }
 
 
 def _should_retry_with_large_worker(error_message: str | None) -> bool:
@@ -906,7 +933,7 @@ class SupportMatrix:
                             engine_step_comparison_atol=engine_step_comparison_atol,
                             engine_step_frontier_rtol=engine_step_frontier_rtol,
                             engine_step_frontier_atol=engine_step_frontier_atol,
-                            yaml_config_path=LARGE_PIPELINE_CONFIG_PATH,
+                            yaml_config=_large_pipeline_default_yaml_config(),
                         )
                     break
 
