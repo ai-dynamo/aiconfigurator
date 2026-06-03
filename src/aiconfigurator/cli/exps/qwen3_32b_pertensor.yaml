@@ -11,7 +11,7 @@ exp_agg:
   serving_mode: "agg" # required
   model_path: "Qwen/Qwen3-32B-FP8-Static-PerTensor" # required, HuggingFace model ID
   total_gpus: 16 # required
-  system_name: "b200_sxm" # required, for prefill
+  system_name: "h200_sxm" # required, for prefill
   backend_name: "trtllm"
   isl: 4000 # input sequence length
   osl: 500 # output sequence length
@@ -23,7 +23,7 @@ exp_agg_fp8_mimic:
   serving_mode: "agg" # required
   model_path: "Qwen/Qwen3-32B-FP8" # required, HuggingFace model ID
   total_gpus: 16 # required
-  system_name: "b200_sxm" # required, for prefill
+  system_name: "h200_sxm" # required, for prefill
   backend_name: "trtllm"
   profiles: ["fp8_static"]
   isl: 4000 # input sequence length
