@@ -23,13 +23,13 @@ def test_manifest_exposes_current_framework_versions_and_images():
     trtllm = get_collector_runtime("trtllm")
     vllm = get_collector_runtime("vllm")
 
-    assert sglang.version == "0.5.10"
-    assert sglang.image() == "lmsysorg/sglang:v0.5.10"
-    assert sglang.image("cu130") == "lmsysorg/sglang:v0.5.10-cu130"
-    assert trtllm.version == "1.3.0rc10"
-    assert trtllm.image() == "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10"
-    assert vllm.version == "0.19.0"
-    assert vllm.image("cu130") == "vllm/vllm-openai:v0.19.0-cu130"
+    assert sglang.version == "0.5.12"
+    assert sglang.image() == "lmsysorg/sglang:v0.5.12-cu130"
+    assert sglang.image("cu130") == "lmsysorg/sglang:v0.5.12-cu130"
+    assert trtllm.version == "1.3.0rc15"
+    assert trtllm.image() == "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc15"
+    assert vllm.version == "0.22.0"
+    assert vllm.image("cu130") == "vllm/vllm-openai:v0.22.0"
 
 
 def test_wideep_versions_stay_aligned_with_default_framework_versions():

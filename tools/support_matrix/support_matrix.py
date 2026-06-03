@@ -1297,24 +1297,54 @@ class SupportMatrix:
             output_file: Path to the output directory, or a legacy output CSV file
         """
         output_path = Path(output_file)
+        compare_engine_step_backends = getattr(self, "compare_engine_step_backends", False)
+        engine_step_comparison_rtol = getattr(
+            self,
+            "engine_step_comparison_rtol",
+            DEFAULT_ENGINE_STEP_COMPARISON_RTOL,
+        )
+        engine_step_comparison_atol = getattr(
+            self,
+            "engine_step_comparison_atol",
+            DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
+        )
+        engine_step_frontier_rtol = getattr(
+            self,
+            "engine_step_frontier_rtol",
+            DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
+        )
+        engine_step_frontier_atol = getattr(
+            self,
+            "engine_step_frontier_atol",
+            DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
+        )
 
         def _row_values(row: tuple[str, ...]) -> tuple[str, str, str, str, str, str, str, str, str]:
             if len(row) == 9:
                 huggingface_id, architecture, system, backend, version, mode, status, err_msg, command = row
             elif len(row) == 8:
                 huggingface_id, architecture, system, backend, version, mode, status, err_msg = row
-                command = _support_matrix_row_command(
-                    model=huggingface_id,
-                    system=system,
-                    backend=backend,
-                    version=version,
-                    mode=mode,
-                    compare_engine_step_backends=self.compare_engine_step_backends,
-                    engine_step_comparison_rtol=self.engine_step_comparison_rtol,
-                    engine_step_comparison_atol=self.engine_step_comparison_atol,
-                    engine_step_frontier_rtol=self.engine_step_frontier_rtol,
-                    engine_step_frontier_atol=self.engine_step_frontier_atol,
-                )
+                command_kwargs = {
+                    "model": huggingface_id,
+                    "system": system,
+                    "backend": backend,
+                    "version": version,
+                    "mode": mode,
+                    "compare_engine_step_backends": compare_engine_step_backends,
+                    "engine_step_comparison_rtol": engine_step_comparison_rtol,
+                    "engine_step_comparison_atol": engine_step_comparison_atol,
+                    "engine_step_frontier_rtol": engine_step_frontier_rtol,
+                    "engine_step_frontier_atol": engine_step_frontier_atol,
+                }
+                try:
+                    command = _support_matrix_row_command(**command_kwargs)
+                except Exception:
+                    logger.warning(
+                        "Falling back to default constraints while writing support-matrix command for %s",
+                        huggingface_id,
+                        exc_info=True,
+                    )
+                    command = _support_matrix_row_command(**command_kwargs, constraints=_DEFAULT_TIER)
             else:
                 raise ValueError(f"Invalid support-matrix result row length: {len(row)}")
             return (
