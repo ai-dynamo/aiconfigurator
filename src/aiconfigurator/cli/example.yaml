@@ -2,9 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # define your experiments here, the order will determine the execution order. If not defined, every exp will be executed.
-# Most top-level experiment fields can be a list, e.g. backend_name: [trtllm, sglang]
-# and total_gpus: [4, 8], which expands the experiment into a Cartesian sweep.
-# Lists inside config, such as worker_config.tp_list, stay as search-space lists.
 exps:
   - exp_agg_full
   - exp_agg_simplified
