@@ -265,31 +265,15 @@ class ContextAttention(Operation):
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             n_kv_lookup = 0 if n == n_kv else n_kv
             attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
-            # Prefer measured points for exact n slices; cubic interpolation can
-            # be unstable when a collected sparse sweep has a flat axis.
-            exact_n = attention_dict.get(n) if isinstance(attention_dict, dict) else None
-            sparse_by_s = {}
-            if isinstance(exact_n, dict):
-                for seq_len, batch_data in exact_n.items():
-                    if not isinstance(batch_data, dict) or not batch_data:
-                        continue
-                    sparse_by_s[seq_len] = (
-                        batch_data[b]
-                        if b in batch_data
-                        else database._interp_metric_fields_1d(batch_data, b, inner_only=False)
-                    )
-            if sparse_by_s:
-                result = database._interp_metric_fields_1d(sparse_by_s, full_s, inner_only=False)
-            else:
-                result = interpolation.interp_3d(
-                    n,
-                    full_s,
-                    b,
-                    attention_dict,
-                    "cubic",
-                    database._extracted_metrics_cache,
-                    allow_singleton_axes=True,
-                )
+            result = interpolation.interp_3d(
+                n,
+                full_s,
+                b,
+                attention_dict,
+                "cubic",
+                database._extracted_metrics_cache,
+                allow_singleton_axes=True,
+            )
             latency = result["latency"] * prefix_correction
             energy = result.get("energy", 0.0) * prefix_correction
             return database._interp_pr(latency, energy=energy)
@@ -588,20 +572,7 @@ class GenerationAttention(Operation):
             latency_sum = 0.0
             energy_sum = 0.0
             for s_i in s_samples:
-                exact_n = attention_dict.get(n) if isinstance(attention_dict, dict) else None
-                sparse_by_b = {}
-                if isinstance(exact_n, dict):
-                    for batch_size, seq_data in exact_n.items():
-                        if isinstance(seq_data, dict) and seq_data:
-                            sparse_by_b[batch_size] = database._interp_metric_fields_1d(
-                                seq_data,
-                                s_i,
-                                inner_only=False,
-                            )
-                if sparse_by_b:
-                    r = database._interp_metric_fields_1d(sparse_by_b, b, inner_only=False)
-                else:
-                    r = interpolation.interp_3d(n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache)
+                r = interpolation.interp_3d(n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache)
                 latency_sum += float(r["latency"])
                 energy_sum += float(r.get("energy", 0.0))
 
