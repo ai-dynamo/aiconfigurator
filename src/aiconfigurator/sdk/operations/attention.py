@@ -296,69 +296,14 @@ class ContextAttention(Operation):
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             n_kv_lookup = 0 if n == n_kv else n_kv
             attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
-            if n in attention_dict and full_s in attention_dict[n] and b in attention_dict[n][full_s]:
-                result = attention_dict[n][full_s][b]
-            elif n in attention_dict:
-                batch_samples = {}
-                batch_keys = sorted({batch_key for seq_dict in attention_dict[n].values() for batch_key in seq_dict})
-                for batch_key in batch_keys:
-                    seq_samples = {
-                        seq_key: seq_dict[batch_key]
-                        for seq_key, seq_dict in attention_dict[n].items()
-                        if batch_key in seq_dict
-                    }
-                    if full_s in seq_samples:
-                        batch_samples[batch_key] = seq_samples[full_s]
-                        continue
-                    seq_keys = sorted(seq_samples)
-                    if len(seq_keys) < 2:
-                        continue
-                    left, right = interpolation.nearest_1d_point_helper(full_s, seq_keys, inner_only=False)
-                    batch_samples[batch_key] = {
-                        metric: interpolation.interp_1d(
-                            [left, right],
-                            [
-                                interpolation.get_value(seq_samples[left], metric),
-                                interpolation.get_value(seq_samples[right], metric),
-                            ],
-                            full_s,
-                        )
-                        for metric in ("latency", "power", "energy")
-                    }
-
-                if b in batch_samples:
-                    result = batch_samples[b]
-                elif len(batch_samples) >= 2:
-                    left, right = interpolation.nearest_1d_point_helper(b, sorted(batch_samples), inner_only=False)
-                    result = {
-                        metric: interpolation.interp_1d(
-                            [left, right],
-                            [
-                                interpolation.get_value(batch_samples[left], metric),
-                                interpolation.get_value(batch_samples[right], metric),
-                            ],
-                            b,
-                        )
-                        for metric in ("latency", "power", "energy")
-                    }
-                else:
-                    result = interpolation.interp_3d(
-                        n,
-                        full_s,
-                        b,
-                        attention_dict,
-                        "cubic",
-                        database._extracted_metrics_cache,
-                    )
-            else:
-                result = interpolation.interp_3d(
-                    n,
-                    full_s,
-                    b,
-                    attention_dict,
-                    "cubic",
-                    database._extracted_metrics_cache,
-                )
+            result = interpolation.interp_3d(
+                n,
+                full_s,
+                b,
+                attention_dict,
+                "cubic",
+                database._extracted_metrics_cache,
+            )
             latency = interpolation.get_value(result, "latency") * prefix_correction
             energy = interpolation.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
@@ -652,67 +597,7 @@ class GenerationAttention(Operation):
             latency_sum = 0.0
             energy_sum = 0.0
             for s_i in s_samples:
-                r = None
-                if n in attention_dict and b in attention_dict[n]:
-                    seq_dict = attention_dict[n][b]
-                    if s_i in seq_dict:
-                        r = seq_dict[s_i]
-                    else:
-                        seq_keys = sorted(seq_dict)
-                        if len(seq_keys) >= 2:
-                            left, right = interpolation.nearest_1d_point_helper(s_i, seq_keys, inner_only=False)
-                            r = {
-                                metric: interpolation.interp_1d(
-                                    [left, right],
-                                    [
-                                        interpolation.get_value(seq_dict[left], metric),
-                                        interpolation.get_value(seq_dict[right], metric),
-                                    ],
-                                    s_i,
-                                )
-                                for metric in ("latency", "power", "energy")
-                            }
-
-                if r is None and n in attention_dict:
-                    batch_dict = {}
-                    for batch_key, seq_dict in attention_dict[n].items():
-                        if s_i in seq_dict:
-                            batch_dict[batch_key] = seq_dict[s_i]
-                            continue
-                        seq_keys = sorted(seq_dict)
-                        if len(seq_keys) < 2:
-                            continue
-                        left, right = interpolation.nearest_1d_point_helper(s_i, seq_keys, inner_only=False)
-                        batch_dict[batch_key] = {
-                            metric: interpolation.interp_1d(
-                                [left, right],
-                                [
-                                    interpolation.get_value(seq_dict[left], metric),
-                                    interpolation.get_value(seq_dict[right], metric),
-                                ],
-                                s_i,
-                            )
-                            for metric in ("latency", "power", "energy")
-                        }
-                    batch_keys = sorted(batch_dict)
-                    if len(batch_keys) >= 2:
-                        left, right = interpolation.nearest_1d_point_helper(b, batch_keys, inner_only=False)
-                        r = {
-                            metric: interpolation.interp_1d(
-                                [left, right],
-                                [
-                                    interpolation.get_value(batch_dict[left], metric),
-                                    interpolation.get_value(batch_dict[right], metric),
-                                ],
-                                b,
-                            )
-                            for metric in ("latency", "power", "energy")
-                        }
-
-                if r is None:
-                    r = interpolation.interp_3d(
-                        n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache
-                    )
+                r = interpolation.interp_3d(n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache)
                 latency_sum += float(interpolation.get_value(r, "latency"))
                 energy_sum += float(interpolation.get_value(r, "energy"))
 
