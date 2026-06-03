@@ -211,6 +211,90 @@ result = cli_estimate(
 )
 ```
 
+#### Static estimate modes (`static`, `static_ctx`, `static_gen`)
+
+`agg` and `disagg` model continuous (in-flight) batching. The three `static` modes instead run a **single forward pass** through the model — no IFB scheduling — and report the per-phase latency and memory layout for that one pass. They mirror the webapp's Static tab and are the quickest way to see where time and memory go for a given shape and parallelism.
+
+- `static` — one full pass over both phases; reports TTFT (context), TPOT (one decode step), and request latency.
+- `static_ctx` — context (prefill) phase only; reports TTFT.
+- `static_gen` — generation (decode) phase only; reports TPOT.
+
+`--stride N` (static modes only, default `32`) sets the stride `run_static` uses to accelerate the OSL sweep; it is ignored for `agg`/`disagg`.
+
+```bash
+aiconfigurator cli estimate \
+  --model-path Qwen/Qwen3-32B --system h200_sxm \
+  --estimate-mode static --isl 4096 --osl 1024 --tp-size 4 --batch-size 32
+```
+
+> A static estimate is a single-pass breakdown, not a served-throughput number — use `agg`/`disagg` for SLA-driven throughput. If the configuration does not fit in memory, the static report still renders but prints an OOM warning.
+
+#### Breakdown report (`--detail`)
+
+`--detail` prints additional breakdown sections after the summary box, for **any** estimate mode (`agg`, `disagg`, or the static modes). Pass a comma-separated list of sections, or `all`:
+
+| Section | Shows |
+|---|---|
+| `summary` | High-level latency / throughput recap. |
+| `memory` | Per-component memory (weights, kvcache, activations, nccl, others) as a share of GPU capacity, the KV footprint per sequence, and a KV-bound max-batch upper bound. |
+| `time` | Per-op latency bars in context → generation order, each op's share of the phase, and (in static modes) a Speed-of-Light (SOL) comparison plus the per-op data source. |
+| `energy` | Per-op energy breakdown, when energy data is available for the system. |
+| `source` | Per-op data-source attribution — `silicon` (measured), `empirical` (interpolated / formula), or `mixed` — so you can tell which numbers are measured vs estimated. |
+| `all` | Every section above. |
+
+`--detail` replaces the removed `--print-per-ops-latency` (the old flag still works as a deprecation alias).
+
+```bash
+aiconfigurator cli estimate \
+  --model-path Qwen/Qwen3-32B --system h200_sxm \
+  --estimate-mode static --isl 4096 --osl 1024 --tp-size 4 --batch-size 32 \
+  --detail all
+```
+
+Abbreviated output (static modes add the SOL columns and per-op `source` tags shown below; `agg`/`disagg` omit the SOL comparison):
+
+```text
+Memory Layout (capacity 141.00 GiB)
+  weights        15.256 GiB  ████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   10.8%
+  kvcache        10.000 GiB  ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    7.1%
+  activations    10.000 GiB  ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    7.1%
+  nccl            0.383 GiB  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    0.3%
+  others          3.500 GiB  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    2.5%
+  ----------------------------------------------------------------------
+  total          39.139 GiB  ███████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   27.8%  (free 101.861 GiB)
+
+  kvcache/seq    0.3125 GiB (seq_len=5120)
+  max batch (KV-bound, same isl/osl) ≈ 357
+    note: ignores activation growth with batch; treat as an upper bound.
+
+Latency Summary
+  metric                 latency            SOL     SOL%
+  ttft               3900.357 ms    2997.913 ms    76.9%
+  tpot                 10.970 ms       5.572 ms    50.8%
+  request latency   15122.575 ms    8697.917 ms    57.5%
+
+Context phase (total = 3900.357 ms, SOL = 2997.913 ms, SOL% = 76.9%)
+  op                            latency            SOL     SOL%  share (%)             source
+  ...
+  context_qkv_gemm           279.049 ms     222.348 ms    79.7%  █░░░░░░░░░░░    7.2%  [silicon]
+  context_attention          334.500 ms     142.303 ms    42.5%  █░░░░░░░░░░░    8.6%  [mixed]
+  context_gate_ffn1_gemm    1415.684 ms    1111.741 ms    78.5%  ████░░░░░░░░   36.3%  [silicon]
+  context_ffn2_gemm          667.966 ms     555.870 ms    83.2%  ██░░░░░░░░░░   17.1%  [silicon]
+  ...
+
+Generation phase (total = 11222.218 ms, SOL = 5700.004 ms, SOL% = 50.8%)
+  op                               latency            SOL     SOL%  share (%)             source
+  ...
+  generation_attention         4470.776 ms    2055.779 ms    46.0%  █████░░░░░░░   39.8%  [silicon]
+  generation_gate_ffn1_gemm    2509.475 ms    1803.466 ms    71.9%  ███░░░░░░░░░   22.4%  [silicon]
+  generation_ffn2_gemm         1345.669 ms     903.968 ms    67.2%  █░░░░░░░░░░░   12.0%  [silicon]
+  ...
+
+Data Source Breakdown (per-op)
+  context     silicon=8, empirical=5, mixed=1
+  generation  silicon=9, empirical=5
+```
+
 ### Support mode (optional)
 This is an optional pre-flight check to verify if AIConfigurator supports a specific model and hardware combination for both aggregated and disaggregated serving modes. You can skip this and run `cli default` directly. Support is determined by a majority-vote of tests in the support matrix for models sharing the same architecture.
 
