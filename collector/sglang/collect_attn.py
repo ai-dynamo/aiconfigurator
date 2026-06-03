@@ -63,6 +63,8 @@ class MockModelConfig:
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
         self.head_dim = head_dim
+        self.v_head_dim = head_dim
+        self.swa_v_head_dim = head_dim
         # Align with newer sglang ModelConfig while remaining harmless on older versions
         self.is_hybrid_swa = False
         self.swa_attention_layer_ids = []
@@ -94,6 +96,7 @@ class MockServerArgs:
         self.multi_item_scoring_delimiter = None
         self.dllm_algorithm = None
         self.dllm_algorithm_config = None
+        self.enable_mis = False
         self.enable_piecewise_cuda_graph = False  # sglang <=0.5.9
         self.disable_piecewise_cuda_graph = True  # sglang >=0.5.10
         self.model_path = None
@@ -140,6 +143,7 @@ class MockModelRunner:
         self.gpu_id = 0
         self.hybrid_gdn_config = None
         self.kimi_linear_config = None
+        self.linear_attn_model_spec = None
 
 
 def create_req_to_token_pool(batch_size, total_len, page_size, torch_device, device_str):
@@ -306,7 +310,7 @@ def get_generation_attention_test_cases():
                     if b >= min_drop_batch:
                         target_s_list = target_s_list[:-1]
                     for n_kv in _int_list(shape_sweep["kv_head_counts"]):
-                        if n_kv >= n:
+                        if n_kv >= n or n % n_kv != 0:
                             continue
                         for s in target_s_list:
                             for window_size in window_sizes:
@@ -351,7 +355,6 @@ def run_attention_torch(
         head_dim=head_dim,
     )
     model_runner.kv_cache_dtype = kvtype
-    model_runner.sliding_window_size = window_size
 
     total_len = input_len if is_context_phase else input_len + 1
     req_to_token_pool, token_matrix = create_req_to_token_pool(
@@ -381,13 +384,27 @@ def run_attention_torch(
     model_runner.token_to_kv_pool = kv_pool
 
     sm_version = get_sm_version()
-    use_triton_attention = sm_version >= 110 or (sm_version >= 100 and head_dim == 192)
+    use_triton_attention = sm_version >= 110 or (
+        sm_version >= 100
+        and (
+            head_dim == 192
+            or head_dim == 512
+            or (use_fp8_kv_cache and num_key_value_heads == 3)
+            or (window_size > 0 and head_dim == 256)
+            or (window_size > 0 and num_key_value_heads != num_heads and num_key_value_heads == 2 and head_dim == 128)
+        )
+    )
+    active_window_size = window_size if window_size > 0 else None
     if use_triton_attention:
         # SM120+ (workstation Blackwell): TRTLLM prefill (TllmGenFmhaRunner) is unsupported;
         # FA3 is not compiled for SM120. B200/SM100 TRTLLM also lacks head-dim 192
-        # kernels, which MiMo-style models need. Use Triton JIT-compiled backend instead.
+        # kernels, which MiMo-style models need. On SM100/SM103, TRTLLM-GEN also
+        # lacks some kernels that Triton can JIT for head_dim=512, fp8
+        # kv-head-3, sliding-window head-dim-256, and sliding-window kv-head-2
+        # head-dim-128 cases. Use Triton JIT-compiled backend instead.
         from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
 
+        model_runner.sliding_window_size = active_window_size
         attn_backend = TritonAttnBackend(model_runner)
         attn_backend_name = "triton"
     elif sm_version >= 100:
@@ -396,12 +413,17 @@ def run_attention_torch(
                 TRTLLMHAAttnBackend,
             )
 
+            # FlashInfer's TRTLLM context kernel uses -1 for dense no-window attention.
+            active_window_size = window_size if window_size > 0 else -1
+            model_runner.sliding_window_size = active_window_size
             attn_backend = TRTLLMHAAttnBackend(model_runner)
             attn_backend_name = "trtllm_mha"
         except ImportError:
+            model_runner.sliding_window_size = active_window_size
             attn_backend = FlashAttentionBackend(model_runner)
             attn_backend_name = "flash_attention"
     else:
+        model_runner.sliding_window_size = active_window_size
         attn_backend = FlashAttentionBackend(model_runner)
         attn_backend_name = "flash_attention"
 
@@ -414,7 +436,7 @@ def run_attention_torch(
         num_kv_heads=num_key_value_heads,
         layer_id=0,
     ).to(torch_device)
-    layer.sliding_window_size = window_size
+    layer.sliding_window_size = active_window_size
 
     seqlen_q = input_len if is_context_phase else 1
     q = torch.randn(
@@ -538,13 +560,25 @@ def run_attention_torch(
     def run_iter():
         layer(q, k, v, forward_batch)
 
-    warmup = 3
+    attention_elements = batch_size * max(input_len, 1) * num_heads * head_dim
+    if attention_elements >= 100_000_000:
+        # Large GB300 Triton attention shapes are multi-second kernels; fewer
+        # repetitions keep full collection practical while still measuring real
+        # runtime execution.
+        warmup = 1
+        num_runs = 1
+    elif attention_elements >= 10_000_000:
+        warmup = 1
+        num_runs = 5
+    else:
+        warmup = 3
+        num_runs = 20
     # Use benchmark_with_power context manager
     with benchmark_with_power(
         device=torch_device,
         kernel_func=run_iter,
         num_warmups=warmup,
-        num_runs=20,
+        num_runs=num_runs,
         repeat_n=1,
     ) as results:
         pass

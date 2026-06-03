@@ -536,10 +536,13 @@ def setup_logging(scope=["all"], debug=False, worker_id=None):
         return logging.getLogger()
 
     # Create log directory
-    time_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    _LOG_DIR = Path(f"{'+'.join(scope)}_{time_stamp}")
-    if not _LOG_DIR.is_dir():
-        _LOG_DIR.mkdir()
+    configured_log_dir = os.environ.get("COLLECTOR_LOG_DIR")
+    if configured_log_dir:
+        _LOG_DIR = Path(configured_log_dir)
+    else:
+        time_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _LOG_DIR = Path(f"{'+'.join(scope)}_{time_stamp}")
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     # Set environment variables for workers
     os.environ["COLLECTOR_DEBUG"] = "true" if debug else "false"

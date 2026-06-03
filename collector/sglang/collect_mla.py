@@ -123,6 +123,7 @@ class MockModelConfig:
 class MockServerArgs:
     def __init__(self, kv_cache_dtype: torch.dtype, page_size: int):
         self.enable_lora = False
+        self.enable_mis = False
         self.enable_deterministic_inference = False
         self.kv_cache_dtype = "fp8" if kv_cache_dtype == torch.float8_e4m3fn else "bfloat16"
         self.speculative_eagle_topk = 0

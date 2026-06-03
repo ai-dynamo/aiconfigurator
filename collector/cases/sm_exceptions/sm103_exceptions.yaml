@@ -13,6 +13,16 @@ description: >
 
 framework_specific_op_exceptions:
   sglang:
+    gemm:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.12"]
+          reason: SGLang 0.5.12 DeepGEMM block-FP8 GEMM raises CUDA invalid argument on SM103 for M=32768, K=65536.
+          fields: [gemm_type, token_count, output_features, input_features]
+          match:
+            gemm_type: fp8_block
+            token_count: 32768
+            input_features: 65536
     moe:
       rules:
         - reason_type: framework_version_unsupported

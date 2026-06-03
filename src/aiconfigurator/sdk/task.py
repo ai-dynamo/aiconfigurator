@@ -190,6 +190,62 @@ def _get_database_with_optional_missing_data(
     return get_database(**kwargs)
 
 
+def _enum_name(value: object | None) -> str | None:
+    if value is None:
+        return None
+    return value.name if hasattr(value, "name") else str(value)
+
+
+def _filter_fp8_block_moe_parallel_configs(
+    *,
+    model_path: str,
+    model_config: config.ModelConfig,
+    parallel_config_list: list[list[int]],
+) -> list[list[int]]:
+    if _enum_name(getattr(model_config, "moe_quant_mode", None)) != common.MoEQuantMode.fp8_block.name:
+        return parallel_config_list
+
+    try:
+        model_info = get_model_config_from_model_path(model_path) or {}
+    except Exception:
+        logger.debug("Could not load model config for fp8-block MoE parallel filtering: %s", model_path)
+        return parallel_config_list
+
+    raw_config = model_info.get("raw_config") or {}
+    quant_config = raw_config.get("quantization_config") or {}
+    weight_block_size = quant_config.get("weight_block_size", [128, 128])
+    if isinstance(weight_block_size, (list, tuple)):
+        weight_block_size = weight_block_size[0] if weight_block_size else 128
+    try:
+        block_size = int(weight_block_size)
+    except (TypeError, ValueError):
+        block_size = 128
+
+    moe_inter_size = model_info.get("moe_inter_size") or raw_config.get("moe_intermediate_size")
+    if not moe_inter_size or block_size <= 0:
+        return parallel_config_list
+
+    try:
+        moe_inter_size = int(moe_inter_size)
+    except (TypeError, ValueError):
+        return parallel_config_list
+
+    filtered = [
+        parallel_config
+        for parallel_config in parallel_config_list
+        if moe_inter_size % parallel_config[3] == 0 and (moe_inter_size // parallel_config[3]) % block_size == 0
+    ]
+    if not filtered:
+        return parallel_config_list
+    if len(filtered) != len(parallel_config_list):
+        logger.info(
+            "Filtered %d fp8-block MoE parallel config(s) for %s due to expert shard block-size alignment",
+            len(parallel_config_list) - len(filtered),
+            model_path,
+        )
+    return filtered
+
+
 def build_disagg_parallel_lists(
     backend_name: str,
     prefill_system: str,
@@ -1330,6 +1386,11 @@ class TaskRunner:
                 enable_wideep=task_config.enable_wideep,
                 moe_backend=task_config.moe_backend,
             )
+            parallel_config_list = _filter_fp8_block_moe_parallel_configs(
+                model_path=task_config.model_path,
+                model_config=model_config,
+                parallel_config_list=parallel_config_list,
+            )
         except Exception:  # pragma: no cover
             logger.exception(
                 "Error enumerating parallel config for %s %s %s",
@@ -1445,6 +1506,11 @@ class TaskRunner:
                 enable_wideep=prefill_enable_wideep,
                 moe_backend=prefill_moe_backend,
             )
+            prefill_parallel_config_list = _filter_fp8_block_moe_parallel_configs(
+                model_path=task_config.model_path,
+                model_config=prefill_model_config,
+                parallel_config_list=prefill_parallel_config_list,
+            )
         except Exception:  # pragma: no cover
             logger.exception(
                 "Error enumerating prefill parallel config for %s %s %s",
@@ -1506,6 +1572,11 @@ class TaskRunner:
                 backend=common.BackendName(task_config.decode_worker_config.backend_name),
                 enable_wideep=decode_enable_wideep,
                 moe_backend=decode_moe_backend,
+            )
+            decode_parallel_config_list = _filter_fp8_block_moe_parallel_configs(
+                model_path=task_config.model_path,
+                model_config=decode_model_config,
+                parallel_config_list=decode_parallel_config_list,
             )
         except Exception:  # pragma: no cover
             logger.exception(

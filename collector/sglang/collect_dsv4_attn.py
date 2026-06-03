@@ -825,6 +825,7 @@ def _log_result(
     perf_filename_prefix: str = "dsv4",
     gemm_type: str = "bfloat16",
     tp_size: int = 1,
+    native_heads: int = NATIVE_HEADS,
     step: int | None = None,
 ) -> None:
     # V4-Flash output layout: ONE CSV per (attn_kind, mode) — 3 kinds x 2
@@ -850,7 +851,7 @@ def _log_result(
                 "mla_dtype": "bfloat16",
                 "kv_cache_dtype": kv_cache_dtype,
                 "gemm_type": gemm_type,
-                "num_heads": max(1, NATIVE_HEADS // tp_size),
+                "num_heads": native_heads,
                 "batch_size": batch_size,
                 "isl": seq_len if is_prefill else 1,
                 "tp_size": tp_size,
@@ -925,6 +926,7 @@ def run_dsv4_mla_module(
     )
 
     attention_module = model_runner.model.model.layers[layer_id].self_attn
+    native_heads = int(getattr(model_runner.model_config.hf_config, "num_attention_heads", NATIVE_HEADS))
     actual_ratio = getattr(attention_module, "compress_ratio", None)
     if actual_ratio != compress_ratio:
         raise RuntimeError(f"target layer compress_ratio mismatch: expected {compress_ratio}, got {actual_ratio}")
@@ -1028,6 +1030,7 @@ def run_dsv4_mla_module(
                             perf_filename_prefix=perf_filename_prefix,
                             gemm_type=gemm_type,
                             tp_size=tp_size,
+                            native_heads=native_heads,
                             step=cur_prefix if is_prefill else None,
                         )
                         stats.update(

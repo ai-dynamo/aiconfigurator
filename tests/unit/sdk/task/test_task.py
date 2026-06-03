@@ -31,6 +31,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import aiconfigurator.sdk.task as task_module
+from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
@@ -79,6 +80,56 @@ def stub_pareto_analysis(monkeypatch):
 
 def _enum_name(value):
     return value.name if hasattr(value, "name") else value
+
+
+def test_fp8_block_moe_parallel_filter_skips_invalid_shards(monkeypatch):
+    monkeypatch.setattr(
+        task_module,
+        "get_model_config_from_model_path",
+        lambda _model_path: {
+            "moe_inter_size": 1536,
+            "raw_config": {"quantization_config": {"weight_block_size": [128, 128]}},
+        },
+    )
+    model_config = config.ModelConfig(moe_quant_mode=common.MoEQuantMode.fp8_block)
+
+    filtered = task_module._filter_fp8_block_moe_parallel_configs(
+        model_path="MiniMaxAI/MiniMax-M2.5",
+        model_config=model_config,
+        parallel_config_list=[
+            [1, 1, 1, 1, 1],
+            [2, 1, 1, 2, 1],
+            [4, 1, 1, 4, 1],
+            [8, 1, 1, 8, 1],
+        ],
+    )
+
+    assert filtered == [
+        [1, 1, 1, 1, 1],
+        [2, 1, 1, 2, 1],
+        [4, 1, 1, 4, 1],
+    ]
+
+
+def test_fp8_block_moe_parallel_filter_preserves_all_invalid_for_explicit_error(monkeypatch):
+    monkeypatch.setattr(
+        task_module,
+        "get_model_config_from_model_path",
+        lambda _model_path: {
+            "moe_inter_size": 96,
+            "raw_config": {"quantization_config": {"weight_block_size": [128, 128]}},
+        },
+    )
+    model_config = config.ModelConfig(moe_quant_mode=common.MoEQuantMode.fp8_block)
+    parallel_config_list = [[1, 1, 1, 1, 1], [2, 1, 1, 2, 1]]
+
+    filtered = task_module._filter_fp8_block_moe_parallel_configs(
+        model_path="example/invalid-fp8-block-moe",
+        model_config=model_config,
+        parallel_config_list=parallel_config_list,
+    )
+
+    assert filtered == parallel_config_list
 
 
 def test_taskconfig_agg_default():
