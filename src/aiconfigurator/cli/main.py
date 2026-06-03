@@ -331,20 +331,6 @@ def _add_default_mode_arguments(parser):
         "Applies to both DeepSeek and Qwen3-235B on SGLang.",
     )
     parser.add_argument(
-        "--config-yaml",
-        type=str,
-        default=None,
-        help="YAML patch applied to both default-mode agg and disagg search configs. "
-        "Use this for advanced search-space controls such as worker_config.",
-    )
-    parser.add_argument(
-        "--config-yaml-inline",
-        type=str,
-        default=None,
-        help="Inline YAML/JSON patch applied to both default-mode agg and disagg search configs. "
-        "Use this for self-contained replay commands.",
-    )
-    parser.add_argument(
         "--moe-backend",
         type=str,
         choices=["deepep_moe", "megamoe"],
@@ -1008,7 +994,6 @@ def build_default_task_configs(
     enable_wideep: bool = False,
     moe_backend: str | None = None,
     engine_step_backend: str | None = None,
-    yaml_config: dict[str, Any] | None = None,
 ) -> dict[str, TaskConfig]:
     """Build agg and disagg task configs for default mode comparison.
 
@@ -1033,7 +1018,6 @@ def build_default_task_configs(
         enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
         moe_backend: Explicit SGLang MoE backend override.
         engine_step_backend: Experimental static latency backend ("python" or "rust").
-        yaml_config: Optional TaskConfig YAML patch applied to generated agg/disagg tasks.
 
     Returns:
         Dict with TaskConfig objects. When backend='auto', returns 6 configs
@@ -1165,8 +1149,8 @@ def build_default_task_configs(
         # (webapp/events/event_fn.py sets moe_backend="deepep_moe" when enable_wideep + sglang)
         return moe_backend or ("deepep_moe" if enable_wideep else None)
 
-    # Create yaml_config to pass search-space overrides and nextn settings.
-    yaml_config = copy.deepcopy(yaml_config) if yaml_config else None
+    # Create yaml_config to pass nextn settings into generated TaskConfigs.
+    yaml_config = None
     if nextn > 0:
         if yaml_config is None:
             yaml_config = {"mode": "patch", "config": {}}
@@ -1524,36 +1508,6 @@ def build_experiment_task_configs(
                 logger.exception("Failed to build TaskConfig for experiment '%s'", unique_name)
 
     return task_configs
-
-
-def _normalize_default_yaml_config(loaded: Any, source: str) -> dict[str, Any]:
-    if not isinstance(loaded, dict):
-        raise TypeError(f"{source} must contain a mapping")
-    if "config" not in loaded:
-        loaded = {"mode": "patch", "config": loaded}
-    if not isinstance(loaded.get("config"), dict):
-        raise TypeError(f"{source} config must be a mapping")
-    loaded.setdefault("mode", "patch")
-    return loaded
-
-
-def _load_default_yaml_config(path: str | None, inline: str | None = None) -> dict[str, Any] | None:
-    if path is not None and inline is not None:
-        raise ValueError("Use only one of --config-yaml or --config-yaml-inline")
-    if inline is not None:
-        try:
-            loaded = yaml.safe_load(inline) or {}
-        except Exception as exc:
-            raise ValueError("Error loading inline default config YAML") from exc
-        return _normalize_default_yaml_config(loaded, "Inline default config YAML")
-    if path is None:
-        return None
-    try:
-        with open(path, encoding="utf-8") as fh:
-            loaded = yaml.safe_load(fh) or {}
-    except Exception as exc:
-        raise ValueError(f"Error loading default config YAML file '{path}'") from exc
-    return _normalize_default_yaml_config(loaded, f"Default config YAML file '{path}'")
 
 
 def _execute_task_configs(
@@ -2190,7 +2144,6 @@ def main(args):
             engine_step_backend=args.engine_step_backend,
             enable_wideep=getattr(args, "enable_wideep", False),
             moe_backend=getattr(args, "moe_backend", None),
-            yaml_config=_load_default_yaml_config(args.config_yaml, args.config_yaml_inline),
         )
     elif args.mode == "exp":
         try:
