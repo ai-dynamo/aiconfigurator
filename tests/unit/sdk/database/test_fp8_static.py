@@ -28,8 +28,24 @@ def _gemm_loaded_data(*quant_modes: common.GEMMQuantMode) -> LoadedOpData:
     )
 
 
+def _overhead_loaded_data(filename: common.PerfDataFilename) -> LoadedOpData:
+    return LoadedOpData(
+        {
+            common.GEMMQuantMode.fp8: {
+                32: {
+                    512: {"latency": 1.0, "energy": 10.0},
+                }
+            }
+        },
+        filename,
+        "dummy_path",
+    )
+
+
 @pytest.mark.parametrize("backend", [common.BackendName.trtllm.value, common.BackendName.vllm.value])
-def test_supported_quant_modes_include_fp8_static_only_when_data_exists(mutable_comprehensive_perf_db, backend):
+def test_supported_quant_modes_include_fp8_static_only_when_overhead_data_exists(
+    mutable_comprehensive_perf_db, backend
+):
     db = mutable_comprehensive_perf_db
     db.backend = backend
     db._gemm_data = _gemm_loaded_data(common.GEMMQuantMode.fp8)
@@ -41,6 +57,12 @@ def test_supported_quant_modes_include_fp8_static_only_when_data_exists(mutable_
 
     db._gemm_data = _gemm_loaded_data(common.GEMMQuantMode.fp8, common.GEMMQuantMode.fp8_static)
     db._update_support_matrix()
+    modes = db.supported_quant_mode["gemm"]
+    assert common.GEMMQuantMode.fp8_static.name not in modes
+
+    db._compute_scale_data = _overhead_loaded_data(common.PerfDataFilename.compute_scale)
+    db._scale_matrix_data = _overhead_loaded_data(common.PerfDataFilename.scale_matrix)
+    db._update_support_matrix()
 
     modes = db.supported_quant_mode["gemm"]
     assert common.GEMMQuantMode.fp8.name in modes
@@ -48,7 +70,9 @@ def test_supported_quant_modes_include_fp8_static_only_when_data_exists(mutable_
     assert modes.count(common.GEMMQuantMode.fp8_static.name) == 1
 
 
-def test_sglang_supported_quant_modes_include_fp8_static_only_when_data_exists(mutable_comprehensive_perf_db):
+def test_sglang_supported_quant_modes_include_fp8_static_only_when_overhead_data_exists(
+    mutable_comprehensive_perf_db,
+):
     db = mutable_comprehensive_perf_db
     db.backend = common.BackendName.sglang.value
     db._gemm_data = LoadedOpData(
@@ -90,6 +114,12 @@ def test_sglang_supported_quant_modes_include_fp8_static_only_when_data_exists(m
         common.PerfDataFilename.gemm,
         "dummy_path",
     )
+    db._update_support_matrix()
+    modes = db.supported_quant_mode["gemm"]
+    assert common.GEMMQuantMode.fp8_static.name not in modes
+
+    db._compute_scale_data = _overhead_loaded_data(common.PerfDataFilename.compute_scale)
+    db._scale_matrix_data = _overhead_loaded_data(common.PerfDataFilename.scale_matrix)
     db._update_support_matrix()
 
     modes = db.supported_quant_mode["gemm"]
@@ -261,11 +291,10 @@ def test_query_scale_matrix_fp8_static_reuses_fp8_table(mutable_comprehensive_pe
     assert clamped.energy == pytest.approx(fp8_max_m.energy)
 
 
-def test_trtllm_gemm_query_subtracts_overheads_for_fp8_static():
+def test_gemm_query_subtracts_overheads_for_fp8_static():
     class FakeDatabase:
-        backend = common.BackendName.trtllm.value
-
         def __init__(self):
+            self.backend = common.BackendName.sglang.value
             self.calls: list[tuple[str, common.GEMMQuantMode]] = []
 
         def query_gemm(self, m, n, k, quant_mode, database_mode=None):
@@ -327,35 +356,3 @@ def test_trtllm_gemm_query_subtracts_overheads_for_fp8_static():
     assert float(result3) == pytest.approx(10.0)
     assert result3.energy == pytest.approx(100.0)
     assert db3.calls == [("gemm", common.GEMMQuantMode.fp8)]
-
-
-@pytest.mark.parametrize("backend", [common.BackendName.vllm.value, common.BackendName.sglang.value])
-def test_non_trtllm_gemm_query_does_not_subtract_overheads_for_fp8_static(backend):
-    class FakeDatabase:
-        def __init__(self):
-            self.backend = backend
-            self.calls: list[tuple[str, common.GEMMQuantMode]] = []
-
-        def query_gemm(self, m, n, k, quant_mode, database_mode=None):
-            self.calls.append(("gemm", quant_mode))
-            return PerformanceResult(10.0, energy=100.0)
-
-        def query_compute_scale(self, m, k, quant_mode, database_mode=None):
-            raise AssertionError(f"{backend} fp8_static GEMM should not query compute_scale")
-
-        def query_scale_matrix(self, m, k, quant_mode, database_mode=None):
-            raise AssertionError(f"{backend} fp8_static GEMM should not query scale_matrix")
-
-    db = FakeDatabase()
-    op = ops.GEMM(
-        "context_proj_gemm",
-        1.0,
-        n=128,
-        k=256,
-        quant_mode=common.GEMMQuantMode.fp8_static,
-        low_precision_input=True,
-    )
-    result = op.query(db, x=64, model_name="Qwen/Qwen3-32B")
-    assert float(result) == pytest.approx(10.0)
-    assert result.energy == pytest.approx(100.0)
-    assert db.calls == [("gemm", common.GEMMQuantMode.fp8_static)]

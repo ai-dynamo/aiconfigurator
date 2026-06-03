@@ -110,7 +110,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
     if gemm_type in ("fp8", "fp8_static"):
         qc = Fp8Config(
             is_checkpoint_fp8_serialized=True,
-            activation_scheme="static",
+            activation_scheme="dynamic",
             ignored_layers=None,
             weight_block_size=None,
         )

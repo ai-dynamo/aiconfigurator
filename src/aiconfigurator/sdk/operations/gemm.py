@@ -662,10 +662,10 @@ class GEMM(Operation):
         energy = result.energy
         source = getattr(result, "source", "silicon")
 
-        # TRT-LLM's static-FP8 GEMM timing includes quantization overhead that
-        # AIC tracks separately. SGLang/vLLM static-FP8 rows are already direct
-        # runtime measurements and should not subtract those overhead tables.
-        if is_fp8_static and getattr(database, "backend", None) == common.BackendName.trtllm.value:
+        # Static-FP8 GEMM rows use the dynamic FP8 base measurement across
+        # backends; subtract the separately collected activation-quantization
+        # pieces to model BF16-input and already-low-precision-input cases.
+        if is_fp8_static:
             compute_scale_result = database.query_compute_scale(x, self._k, quant_mode)
             latency -= float(compute_scale_result)
             energy -= compute_scale_result.energy
