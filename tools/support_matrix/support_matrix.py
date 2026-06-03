@@ -108,12 +108,6 @@ class HardwareIncompatibility:
     reason: str
 
 
-@dataclass(frozen=True)
-class TaskAttempt:
-    name: str
-    yaml_config: dict | None = None
-
-
 def _support_matrix_row_command(
     *,
     model: str,
@@ -127,8 +121,6 @@ def _support_matrix_row_command(
     engine_step_comparison_atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
     engine_step_frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
     engine_step_frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
-    yaml_config: dict | None = None,
-    yaml_config_path: str | None = None,
 ) -> str:
     """Return the repo-local CLI command that checks this model/system/backend path."""
     if constraints is None:
@@ -165,11 +157,6 @@ def _support_matrix_row_command(
         "1",
         "--no-color",
     ]
-    if yaml_config is not None:
-        inline_config = json.dumps(yaml_config, sort_keys=True, separators=(",", ":"))
-        parts.extend(["--config-yaml-inline", inline_config])
-    elif yaml_config_path is not None:
-        parts.extend(["--config-yaml", yaml_config_path])
     if compare_engine_step_backends:
         # ``cli default`` does not expose the support-matrix Python/Rust
         # comparator; use the default Python engine-step path for the public
@@ -217,87 +204,6 @@ def _get_test_constraints(model_path: str) -> TestConstraints:
         _DEFAULT_TIER,
     )
     return _DEFAULT_TIER
-
-
-def _large_pipeline_parallel_attempt(
-    *,
-    mode: str,
-    backend: str,
-    constraints: TestConstraints,
-) -> TaskAttempt | None:
-    """Return a support-matrix retry that shards one large-model worker across nodes."""
-    if backend not in {
-        common.BackendName.sglang.value,
-        common.BackendName.trtllm.value,
-        common.BackendName.vllm.value,
-    }:
-        return None
-    if constraints.total_gpus < 16:
-        return None
-
-    # Some very large checkpoints are too large for the default one-node search.
-    # Keep attention TP at 8 and add PP=2 so a single serving worker can span 16
-    # GPUs. This also constrains MoE splits away from uncollected smaller shapes
-    # when the viable data was collected for larger model-parallel workers.
-    worker_config = {
-        "num_gpu_per_worker": [16],
-        "tp_list": [8],
-        "pp_list": [2],
-        "dp_list": [1],
-        "moe_tp_list": [1, 2, 4, 8],
-        "moe_ep_list": [1, 2, 4, 8],
-    }
-    config = {"worker_config": worker_config}
-    if mode == "disagg":
-        config = {
-            "prefill_worker_config": worker_config,
-            "decode_worker_config": worker_config,
-            "replica_config": {
-                "max_gpu_per_replica": 128,
-                "num_gpu_per_replica": [32, 64, 128],
-            },
-        }
-    return TaskAttempt(
-        name="large-pipeline-parallel-worker",
-        yaml_config={"mode": "patch", "config": config},
-    )
-
-
-def _large_pipeline_default_yaml_config() -> dict:
-    """Return the self-contained default-mode YAML patch used in replay commands."""
-    worker_config = {
-        "num_gpu_per_worker": [16],
-        "tp_list": [8],
-        "pp_list": [2],
-        "dp_list": [1],
-        "moe_tp_list": [1, 2, 4, 8],
-        "moe_ep_list": [1, 2, 4, 8],
-    }
-    return {
-        "mode": "patch",
-        "config": {
-            "worker_config": worker_config,
-            "prefill_worker_config": worker_config,
-            "decode_worker_config": worker_config,
-            "replica_config": {
-                "max_gpu_per_replica": 128,
-                "num_gpu_per_replica": [32, 64, 128],
-            },
-        },
-    }
-
-
-def _should_retry_with_large_worker(error_message: str | None) -> bool:
-    if not error_message:
-        return False
-    normalized = error_message.lower()
-    return (
-        "does not fit in gpu memory" in normalized
-        or "try increasing --total-gpus" in normalized
-        or "try increasing total gpus" in normalized
-        or "failed to query moe data" in normalized
-        or "missing silicon data for the requested lookup" in normalized
-    )
 
 
 def _is_known_framework_incompatible_gap(
@@ -732,7 +638,6 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         engine_step_backend: str | None,
-        yaml_config: dict | None = None,
     ) -> TaskConfig:
         task_config_kwargs = {
             "serving_mode": mode,
@@ -750,8 +655,6 @@ class SupportMatrix:
         }
         if mode == "disagg":
             task_config_kwargs["decode_system_name"] = system
-        if yaml_config is not None:
-            task_config_kwargs["yaml_config"] = yaml_config
         return TaskConfig(**task_config_kwargs)
 
     @staticmethod
@@ -764,7 +667,6 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         engine_step_backend: str | None,
-        yaml_config: dict | None = None,
     ) -> pd.DataFrame | None:
         task_config = SupportMatrix._create_task_config(
             mode=mode,
@@ -774,7 +676,6 @@ class SupportMatrix:
             version=version,
             constraints=constraints,
             engine_step_backend=engine_step_backend,
-            yaml_config=yaml_config,
         )
         result = TaskRunner().run(task_config)
         return result.get("pareto_df")
@@ -866,121 +767,76 @@ class SupportMatrix:
                 return statuses, error_messages
 
         for mode in modes_to_test:
-            attempt_queue = [TaskAttempt("default")]
-            retry_attempt = _large_pipeline_parallel_attempt(
-                mode=mode,
-                backend=backend,
-                constraints=constraints,
-            )
+            try:
+                python_pareto_df = SupportMatrix._run_mode(
+                    mode=mode,
+                    model=model,
+                    system=system,
+                    backend=backend,
+                    version=version,
+                    constraints=constraints,
+                    engine_step_backend="python" if compare_engine_step_backends else None,
+                )
 
-            while attempt_queue:
-                attempt = attempt_queue.pop(0)
-                try:
-                    python_pareto_df = SupportMatrix._run_mode(
-                        mode=mode,
-                        model=model,
-                        system=system,
-                        backend=backend,
-                        version=version,
-                        constraints=constraints,
-                        engine_step_backend="python" if compare_engine_step_backends else None,
-                        yaml_config=attempt.yaml_config,
-                    )
+                # Note that we do not use pareto_frontier_df here because for the pareto_df
+                # if is not None and not empty, it means the pareto_frontier_df is also not None and not empty.
+                if python_pareto_df is None or python_pareto_df.empty:
+                    raise RuntimeError("Configuration returned no results, failed to catch traceback")
 
-                    # Note that we do not use pareto_frontier_df here because for the pareto_df
-                    # if is not None and not empty, it means the pareto_frontier_df is also not None and not empty.
-                    if python_pareto_df is None or python_pareto_df.empty:
-                        raise RuntimeError("Configuration returned no results, failed to catch traceback")
-
-                    if compare_engine_step_backends:
-                        with _rust_core_autobuild_enabled():
-                            rust_pareto_df = SupportMatrix._run_mode(
-                                mode=mode,
-                                model=model,
-                                system=system,
-                                backend=backend,
-                                version=version,
-                                constraints=constraints,
-                                engine_step_backend="rust",
-                                yaml_config=attempt.yaml_config,
-                            )
-                        if rust_pareto_df is None or rust_pareto_df.empty:
-                            raise RuntimeError("Rust engine-step backend returned no results")
-
-                        mismatch = _compare_pareto_dfs(
-                            python_pareto_df,
-                            rust_pareto_df,
-                            rtol=engine_step_comparison_rtol,
-                            atol=engine_step_comparison_atol,
-                            frontier_rtol=engine_step_frontier_rtol,
-                            frontier_atol=engine_step_frontier_atol,
-                        )
-                        if mismatch:
-                            raise RuntimeError(mismatch)
-
-                    statuses[mode] = STATUS_PASS
-                    error_messages[mode] = None
-                    if include_commands and attempt.yaml_config is not None:
-                        commands[mode] = _support_matrix_row_command(
+                if compare_engine_step_backends:
+                    with _rust_core_autobuild_enabled():
+                        rust_pareto_df = SupportMatrix._run_mode(
+                            mode=mode,
                             model=model,
                             system=system,
                             backend=backend,
                             version=version,
-                            mode=mode,
                             constraints=constraints,
-                            compare_engine_step_backends=compare_engine_step_backends,
-                            engine_step_comparison_rtol=engine_step_comparison_rtol,
-                            engine_step_comparison_atol=engine_step_comparison_atol,
-                            engine_step_frontier_rtol=engine_step_frontier_rtol,
-                            engine_step_frontier_atol=engine_step_frontier_atol,
-                            yaml_config=_large_pipeline_default_yaml_config(),
+                            engine_step_backend="rust",
                         )
-                    break
+                    if rust_pareto_df is None or rust_pareto_df.empty:
+                        raise RuntimeError("Rust engine-step backend returned no results")
 
-                except Exception as e:
-                    raw_error = traceback.format_exc()
-                    logger.warning(
-                        "Configuration failed: %s, %s, %s, %s, mode=%s, attempt=%s - Error: %s",
-                        model,
-                        system,
-                        backend,
-                        version,
-                        mode,
-                        attempt.name,
-                        str(e),
+                    mismatch = _compare_pareto_dfs(
+                        python_pareto_df,
+                        rust_pareto_df,
+                        rtol=engine_step_comparison_rtol,
+                        atol=engine_step_comparison_atol,
+                        frontier_rtol=engine_step_frontier_rtol,
+                        frontier_atol=engine_step_frontier_atol,
                     )
-                    if (
-                        attempt.name == "default"
-                        and retry_attempt is not None
-                        and _should_retry_with_large_worker(raw_error)
-                    ):
-                        logger.info(
-                            "Retrying support-matrix check with %s: %s, %s, %s, %s, mode=%s",
-                            retry_attempt.name,
-                            model,
-                            system,
-                            backend,
-                            version,
-                            mode,
-                        )
-                        attempt_queue.append(retry_attempt)
-                        continue
+                    if mismatch:
+                        raise RuntimeError(mismatch)
 
-                    if _is_known_framework_incompatible_gap(
-                        model=model,
-                        system=system,
-                        backend=backend,
-                        version=version,
-                        error_message=raw_error,
-                    ):
-                        statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
-                    else:
-                        statuses[mode] = STATUS_FAIL
-                    error_messages[mode] = raw_error
-                    break
+                statuses[mode] = STATUS_PASS
+                error_messages[mode] = None
 
-                finally:
-                    perf_database.clear_database_runtime_caches(system, backend, version)
+            except Exception as e:
+                raw_error = traceback.format_exc()
+                logger.warning(
+                    "Configuration failed: %s, %s, %s, %s, mode=%s - Error: %s",
+                    model,
+                    system,
+                    backend,
+                    version,
+                    mode,
+                    str(e),
+                )
+
+                if _is_known_framework_incompatible_gap(
+                    model=model,
+                    system=system,
+                    backend=backend,
+                    version=version,
+                    error_message=raw_error,
+                ):
+                    statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
+                else:
+                    statuses[mode] = STATUS_FAIL
+                error_messages[mode] = raw_error
+
+            finally:
+                perf_database.clear_database_runtime_caches(system, backend, version)
 
             error_messages[mode] = _format_exception_for_csv(error_messages.get(mode))
         if include_commands:
