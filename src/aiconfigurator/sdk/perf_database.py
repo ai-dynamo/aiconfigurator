@@ -15,7 +15,7 @@ from typing import ClassVar, Optional
 
 import yaml
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.common import PerfDataFilename, parse_support_matrix_version
 from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.system_spec import SystemSpec
@@ -1441,43 +1441,6 @@ class PerfDatabase:
         explicit formula fallbacks should be tagged as ``"empirical"``.
         """
         return PerformanceResult(latency, energy=energy, source="silicon")
-
-    def _interp_metric_fields_1d(self, data: dict, value, inner_only: bool = True) -> dict:
-        left_key, right_key = interpolation.nearest_1d_point_helper(value, list(data.keys()), inner_only=inner_only)
-        left = data[left_key]
-        right = data[right_key]
-        if left_key == right_key:
-            return {
-                "latency": interpolation.get_value(left, "latency"),
-                "power": interpolation.get_value(left, "power"),
-                "energy": interpolation.get_value(left, "energy"),
-            }
-        return {
-            field: interpolation.interp_1d(
-                [left_key, right_key],
-                [
-                    interpolation.get_value(left, field),
-                    interpolation.get_value(right, field),
-                ],
-                value,
-            )
-            for field in ("latency", "power", "energy")
-        }
-
-    def _interp_metric_fields_3d_sparse(self, data: dict, x, y, z) -> dict:
-        sparse_by_x = {}
-        for x_key, y_data in data.items():
-            if not isinstance(y_data, dict):
-                continue
-            sparse_by_y = {}
-            for y_key, z_data in y_data.items():
-                if isinstance(z_data, dict) and z_data:
-                    sparse_by_y[y_key] = self._interp_metric_fields_1d(z_data, z, inner_only=False)
-            if sparse_by_y:
-                sparse_by_x[x_key] = self._interp_metric_fields_1d(sparse_by_y, y, inner_only=False)
-        if not sparse_by_x:
-            raise ValueError("No sparse perf data points available for interpolation.")
-        return self._interp_metric_fields_1d(sparse_by_x, x, inner_only=False)
 
     def _query_silicon_or_hybrid(
         self,
