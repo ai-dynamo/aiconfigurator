@@ -926,7 +926,7 @@ def run_mla_module(
         step = 0
     else:
         isl = 1
-        step = seq_len
+        step = max(seq_len - 1, 0)
 
     op_name = f"{attn_type}_{phase}_module"
 

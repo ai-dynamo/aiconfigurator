@@ -1690,7 +1690,7 @@ def _run_decode(
         power_stats = results["power_stats"]
 
         # Log perf — wideep MLA uses isl=seq_len, step=0 (old convention).
-        # DSA uses isl=1, step=seq_len (matches vllm convention).
+        # DSA uses isl=1, step=past_kv so isl + step is the total decode length.
         # The wideep generation loader computes s = isl + step, so both
         # conventions yield the same effective key when step=0 → s=seq_len.
         try:
@@ -1705,7 +1705,7 @@ def _run_decode(
                 op_name = f"{attn_type}_generation_module"
                 kernel_source = f"{attn_type}_{backend_name}"
                 log_isl = 1
-                log_step = seq_length
+                log_step = max(seq_length - 1, 0)
             perf_filename = _resolve_perf_path(output_path, perf_fname)
             log_perf(
                 item_list=[

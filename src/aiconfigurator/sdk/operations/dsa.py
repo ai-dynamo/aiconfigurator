@@ -864,27 +864,14 @@ class GenerationDSAModule(Operation):
                 )
             try:
                 dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
-                # Generation callers pass ``s`` as total decode length, while
-                # some collectors persist the same point as past-KV length.
-                # Try both exact keys before falling back to interpolation.
-                sequence_candidates = [s]
-                if s > 0:
-                    sequence_candidates.append(s - 1)
-
-                sequence_dicts = list(dsa_dict.get(num_heads, {}).values())
-                normalized_s = s
-                for seq_key in sequence_candidates:
-                    if any(seq_key in seq_dict for seq_dict in sequence_dicts):
-                        normalized_s = seq_key
-                        break
 
                 def sequence_value(seq_dict):
-                    if normalized_s in seq_dict:
-                        return seq_dict[normalized_s]
+                    if s in seq_dict:
+                        return seq_dict[s]
                     seq_keys = sorted(seq_dict)
                     if len(seq_keys) < 2:
                         return None
-                    left, right = interpolation.nearest_1d_point_helper(normalized_s, seq_keys, inner_only=False)
+                    left, right = interpolation.nearest_1d_point_helper(s, seq_keys, inner_only=False)
 
                     def interp_sequence_metric(metric: str) -> float:
                         return interpolation.interp_1d(
@@ -893,7 +880,7 @@ class GenerationDSAModule(Operation):
                                 interpolation.get_value(seq_dict[left], metric),
                                 interpolation.get_value(seq_dict[right], metric),
                             ],
-                            normalized_s,
+                            s,
                         )
 
                     return {
@@ -932,7 +919,7 @@ class GenerationDSAModule(Operation):
                         }
                 if result is None:
                     result = interpolation.interp_3d(
-                        num_heads, b, normalized_s, dsa_dict, "cubic", database._extracted_metrics_cache
+                        num_heads, b, s, dsa_dict, "cubic", database._extracted_metrics_cache
                     )
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
