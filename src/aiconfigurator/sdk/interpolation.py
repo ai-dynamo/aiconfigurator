@@ -176,35 +176,35 @@ def extract_latency_and_energy_3d(data: dict) -> tuple[dict, dict]:
 
 
 def interp_1d(x: list[int], y: list, value: int):
-    """Linear interpolation in 1-D. Handles both float and dict leaf values."""
+    """Linear interpolation in 1-D. Handles both float and dict leaf values.
+
+    When the leaves are dicts, every numeric metric present in BOTH endpoints
+    is interpolated (e.g. ``latency``, ``power``, ``energy``). Dropping
+    ``energy`` here used to zero out every extrapolated grid point and made
+    the SDK power model return 0 W for any GEMM shape that wasn't an exact
+    collection point.
+    """
     x0, x1 = x
     y0, y1 = y
 
+    def _interp_scalar(v0, v1):
+        a, b = v0, v1
+        if (x0 - x1) * (a - b) < 0 and (value - x0) * (value - x1) > 0:
+            b = a
+        if a == b:
+            return a
+        return a + (b - a) / (x1 - x0) * (value - x0)
+
     if isinstance(y0, dict) and isinstance(y1, dict):
-        lat0, lat1 = y0["latency"], y1["latency"]
-        pow0, pow1 = y0["power"], y1["power"]
+        result = {}
+        for key in y0.keys() & y1.keys():
+            v0 = y0[key]
+            v1 = y1[key]
+            if isinstance(v0, (int, float)) and isinstance(v1, (int, float)):
+                result[key] = _interp_scalar(v0, v1)
+        return result
 
-        if (x0 - x1) * (lat0 - lat1) < 0 and (value - x0) * (value - x1) > 0:
-            lat1 = lat0
-        if lat0 == lat1:
-            lat_result = lat0
-        else:
-            lat_result = lat0 + (lat1 - lat0) / (x1 - x0) * (value - x0)
-
-        if (x0 - x1) * (pow0 - pow1) < 0 and (value - x0) * (value - x1) > 0:
-            pow1 = pow0
-        if pow0 == pow1:
-            pow_result = pow0
-        else:
-            pow_result = pow0 + (pow1 - pow0) / (x1 - x0) * (value - x0)
-
-        return {"latency": lat_result, "power": pow_result}
-
-    if (x0 - x1) * (y0 - y1) < 0 and (value - x0) * (value - x1) > 0:
-        y1 = y0
-    if y0 == y1:
-        return y0
-    return y0 + (y1 - y0) / (x1 - x0) * (value - x0)
+    return _interp_scalar(y0, y1)
 
 
 # ---------------------------------------------------------------------------
@@ -539,25 +539,21 @@ def extrapolate_data_grid(
                     y_right_value = data_dict[x][y_right][z]
                     assert y_right_value is not None, "y_right_value cannot be None"
                     if sqrt_y_value:
-                        if isinstance(y_left_value, dict):
-                            y_left_value = {
-                                "latency": math.sqrt(y_left_value["latency"]),
-                                "power": math.sqrt(y_left_value["power"]) if y_left_value["power"] > 0 else 0.0,
-                            }
-                            y_right_value = {
-                                "latency": math.sqrt(y_right_value["latency"]),
-                                "power": math.sqrt(y_right_value["power"]) if y_right_value["power"] > 0 else 0.0,
-                            }
-                        else:
-                            y_left_value = math.sqrt(y_left_value)
-                            y_right_value = math.sqrt(y_right_value)
+
+                        def _sqrt_leaf(v):
+                            if isinstance(v, dict):
+                                return {
+                                    key: (math.sqrt(metric) if isinstance(metric, (int, float)) and metric > 0 else 0.0)
+                                    for key, metric in v.items()
+                                }
+                            return math.sqrt(v) if v > 0 else 0.0
+
+                        y_left_value = _sqrt_leaf(y_left_value)
+                        y_right_value = _sqrt_leaf(y_right_value)
                     value = interp_1d([y_left, y_right], [y_left_value, y_right_value], y)
                     if sqrt_y_value:
                         if isinstance(value, dict):
-                            value = {
-                                "latency": value["latency"] * value["latency"],
-                                "power": value["power"] * value["power"],
-                            }
+                            value = {key: metric * metric for key, metric in value.items()}
                         else:
                             value = value * value
 

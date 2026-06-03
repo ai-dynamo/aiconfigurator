@@ -104,6 +104,40 @@ class TestInterpolationMethods:
         result = interpolation.interp_1d(x, y, 25)
         assert result == 250.0
 
+    def test_interp_1d_preserves_energy_dict_leaves(self, comprehensive_perf_db):
+        """Regression test for the power-feature interp bug.
+
+        Per-op data leaves carry latency/power/energy. `interp_1d` used to
+        return only {"latency", "power"}, silently dropping `energy`.
+        After `_extrapolate_data_grid` filled the grid, every extrapolated
+        cell had energy=0 -> the SDK reported 0 W for any GEMM shape near
+        an extrapolated point. This test guards against regression.
+        """
+        x = [10, 20]
+        y = [
+            {"latency": 1.0, "power": 400.0, "energy": 400.0},
+            {"latency": 3.0, "power": 600.0, "energy": 1800.0},
+        ]
+
+        # Midpoint: every metric should interpolate linearly.
+        mid = interpolation.interp_1d(x, y, 15)
+        assert isinstance(mid, dict)
+        assert mid["latency"] == pytest.approx(2.0)
+        assert mid["power"] == pytest.approx(500.0)
+        assert mid["energy"] == pytest.approx(1100.0), (
+            "Energy must not be dropped during 1D interpolation -- regression of the H200 vLLM bfloat16 zero-power bug."
+        )
+
+        # Endpoints
+        left = interpolation.interp_1d(x, y, 10)
+        assert left["energy"] == pytest.approx(400.0)
+        right = interpolation.interp_1d(x, y, 20)
+        assert right["energy"] == pytest.approx(1800.0)
+
+        # Extrapolation also preserves energy.
+        far = interpolation.interp_1d(x, y, 25)
+        assert far["energy"] == pytest.approx(2500.0)
+
     def test_bilinear_interpolation(self, comprehensive_perf_db):
         """Test bilinear interpolation."""
         # Create a simple 2x2 grid
@@ -273,6 +307,46 @@ class TestExtrapolateDataGrid:
             interpolation.extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
             # Should warn about insufficient data
             assert "only one data point" in caplog.text
+
+    def test_extrapolate_data_grid_preserves_energy_dict_leaves(self, comprehensive_perf_db):
+        """Regression test: extrapolated grid cells must carry energy too.
+
+        Before the fix, `_extrapolate_data_grid` filled in new cells via
+        `interp_1d` on dict leaves and quietly dropped the `energy` field.
+        That produced grid points with valid latency but `energy=0`, which
+        was the root cause of the H200 vLLM bfloat16 zero-power bug
+        (see PR153 power-validation docs, section 10.8.8).
+        """
+        data_dict = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        # 2x2x2 cube of dict-leaf data with non-trivial energy.
+        for x in [10, 20]:
+            for y in [30, 40]:
+                for z in [50, 60]:
+                    lat = (x + y + z) / 10.0
+                    power = 100.0 + x + y + z
+                    data_dict[x][y][z] = {
+                        "latency": lat,
+                        "power": power,
+                        "energy": lat * power,
+                    }
+
+        target_x_list = [10, 15, 20]
+        target_y_list = [30, 35, 40]
+        target_z_list = [50, 55, 60]
+        interpolation.extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
+
+        # Every newly created cell must have a positive energy field.
+        new_cells = [
+            data_dict[10][30][55],
+            data_dict[10][35][50],
+            data_dict[15][30][50],
+            data_dict[15][35][55],
+            data_dict[20][35][60],
+        ]
+        for cell in new_cells:
+            assert isinstance(cell, dict), f"expected dict leaf, got {type(cell)}"
+            assert "energy" in cell, f"energy field missing from extrapolated cell: {cell}"
+            assert cell["energy"] > 0, f"extrapolated cell has zero energy: {cell}"
 
     def test_extrapolate_data_grid_boundary_extension(self, comprehensive_perf_db):
         """Test extrapolation beyond original data boundaries."""

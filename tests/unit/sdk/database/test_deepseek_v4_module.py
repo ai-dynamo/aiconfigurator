@@ -650,6 +650,7 @@ def test_sglang_deepseek_v4_pro_moe_workspace_uses_residual_hidden_size(mutable_
         kvcache_quant_mode=common.KVCacheQuantMode.fp8,
         fmha_quant_mode=common.FMHAQuantMode.bfloat16,
         comm_quant_mode=common.CommQuantMode.half,
+        moe_backend="megamoe",
         nextn=0,
     )
     model = get_model("deepseek-ai/DeepSeek-V4-Pro", model_config, backend_name="sglang")
@@ -666,6 +667,9 @@ def test_sglang_deepseek_v4_pro_moe_workspace_uses_residual_hidden_size(mutable_
     num_tokens = 8192
     attention_width = model._num_heads * model._head_size
     residual_width = model._hidden_size
+    assert model.activation_hidden_size == residual_width
+    assert attention_width > residual_width
+
     tp_activation_factor = 28
     attention_workspace = 2 * num_tokens * attention_width * tp_activation_factor
     moe_scale_workspace = (

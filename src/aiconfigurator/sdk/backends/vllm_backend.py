@@ -3,6 +3,8 @@
 
 import logging
 
+import numpy as np
+
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
@@ -27,7 +29,7 @@ class VLLMBackend(BaseBackend):
     ACTIVATION_COEFFICIENTS = TRTLLMBackend.ACTIVATION_COEFFICIENTS
 
     # Mirror TRT-LLM's MoE workspace accounting (raw h for DEEPSEEK family,
-    # ``_hidden_size`` for GEMMA4MOE). Plain class-attribute alias to the
+    # ``_hidden_size`` for GEMMA4MIX). Plain class-attribute alias to the
     # function object — Python binds it to the VLLMBackend instance at call
     # time; the function does not touch any TRTLLMBackend-specific state.
     _moe_workspace_width = TRTLLMBackend._moe_workspace_width
@@ -35,3 +37,12 @@ class VLLMBackend(BaseBackend):
     def __init__(self):
         super().__init__()
         self.name = common.BackendName.vllm
+
+    def _mix_step_gen_tokens(self, b: int, ctx_tokens: int, isl: int, osl: int) -> int:
+        # vLLM v1 scheduler sets max_num_partial_prefills=1 by default, meaning
+        # exactly one request is in partial-prefill state per forward pass.
+        # The remaining b - ceil(ctx_tokens/isl) requests are in decode phase.
+        # This applies regardless of whether steps_to_finish_ctx >= osl or not,
+        # giving a consistent formula across both scheduling regimes.
+        # Source: vllm/v1/core/sched/scheduler.py, SchedulerConfig.max_num_partial_prefills
+        return max(1, b - int(np.ceil(ctx_tokens / isl)))

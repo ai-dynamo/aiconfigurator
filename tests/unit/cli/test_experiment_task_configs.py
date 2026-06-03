@@ -4,6 +4,7 @@
 import pytest
 import yaml
 
+import aiconfigurator.sdk.task as task_module
 from aiconfigurator.cli.main import build_experiment_task_configs
 
 pytestmark = pytest.mark.unit
@@ -72,3 +73,48 @@ def test_build_experiment_task_configs_keeps_no_config_prefix_out_of_yaml_patch(
     exported = next(iter(yaml.safe_load(task_config.to_yaml()).values()))
     assert exported["prefix"] == 1000
     assert "prefix" not in exported.get("config", {})
+
+
+def test_build_experiment_task_configs_forwards_top_level_moe_backend_before_yaml_patch(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 100}}
+            self.supported_quant_mode = {
+                "gemm": ["fp8_block"],
+                "moe": ["bfloat16"],
+                "dsv4_megamoe_module": ["w4a8_mxfp4_mxfp8"],
+                "deepseek_v4_context_module": ["bfloat16"],
+                "deepseek_v4_generation_module": ["fp8"],
+            }
+
+    def fake_get_database(*args, **kwargs):
+        return FakeDatabase()
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+
+    task_configs = build_experiment_task_configs(
+        config={
+            "exps": ["exp_megamoe"],
+            "exp_megamoe": {
+                "mode": "patch",
+                "serving_mode": "agg",
+                "model_path": "deepseek-ai/DeepSeek-V4-Pro",
+                "total_gpus": 32,
+                "system_name": "gb200",
+                "backend_name": "sglang",
+                "backend_version": "0.5.10",
+                "database_mode": "HYBRID",
+                "moe_backend": "megamoe",
+            },
+        }
+    )
+
+    task_config = task_configs["exp_megamoe"]
+    worker_config = task_config.config.worker_config
+
+    assert task_config.moe_backend == "megamoe"
+    assert task_config.config.moe_backend == "megamoe"
+    assert task_config.yaml_patch == {}
+    assert worker_config.num_gpu_per_worker == [4, 8, 16, 32]
+    assert worker_config.moe_tp_list == [1]
+    assert worker_config.moe_ep_list == [4, 8, 16, 32]

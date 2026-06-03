@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar, Optional
 
@@ -1282,6 +1283,218 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         )
 
 
+class DeepSeekV4MegaMoEModule(Operation):
+    """
+    SGLang DeepSeek-V4 MegaMoE routed module.
+
+    This models the measured routed MegaMoE module boundary used by
+    ``collector/sglang/collect_dsv4_megamoe.py``: prepared hidden states and
+    top-k tensors -> SGLang pre-dispatch -> ``deep_gemm.fp8_fp4_mega_moe`` ->
+    routed output scaling. Gate/top-k and shared experts are modeled outside
+    this operation.
+    """
+
+    _data_cache: ClassVar[dict] = {}
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        moe_tp_size: int,
+        moe_ep_size: int,
+        quant_mode: common.MoEQuantMode,
+        workload_distribution: str,
+        is_context: bool = True,
+        source_policy: str = "random",
+        pre_dispatch: str = "sglang_jit",
+        num_fused_shared_experts: int = 0,
+        kernel_source: str = "deepgemm_megamoe",
+        kernel_dtype: str = "fp8_fp4",
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._hidden_size = hidden_size
+        self._inter_size = inter_size
+        self._topk = topk
+        self._num_experts = num_experts
+        self._moe_tp_size = moe_tp_size
+        self._moe_ep_size = moe_ep_size
+        self._quant_mode = quant_mode
+        self._workload_distribution = self._normalize_distribution(workload_distribution)
+        self._is_context = is_context
+        self._source_policy = source_policy
+        self._pre_dispatch = pre_dispatch
+        self._num_fused_shared_experts = num_fused_shared_experts
+        self._kernel_source = kernel_source
+        self._kernel_dtype = kernel_dtype
+        self._weights = (
+            self._hidden_size
+            * self._inter_size
+            * self._num_experts
+            * quant_mode.value.memory
+            # DSv4 MegaMoE is always gated SwiGLU: 3 GEMMs (gate, up, down).
+            * 3
+            // self._moe_ep_size
+            // self._moe_tp_size
+        )
+
+    @staticmethod
+    def _normalize_distribution(workload_distribution: str) -> str:
+        if workload_distribution == "uniform":
+            return "balanced"
+        return workload_distribution
+
+    @classmethod
+    def _cache_key(cls, database: PerfDatabase) -> tuple:
+        return _cache_key(database)
+
+    @classmethod
+    def load_data(cls, database: PerfDatabase) -> None:
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
+
+        key = cls._cache_key(database)
+        if key not in cls._data_cache:
+            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+            data_dir = os.path.join(system_data_root, database.backend, database.version)
+            primary_path = os.path.join(data_dir, PerfDataFilename.dsv4_megamoe_module.value)
+            cls._data_cache[key] = LoadedOpData(
+                load_dsv4_megamoe_module_data(primary_path), PerfDataFilename.dsv4_megamoe_module, primary_path
+            )
+            cls._record_load()
+
+        if "_dsv4_megamoe_module_data" not in database.__dict__:
+            database._dsv4_megamoe_module_data = cls._data_cache[key]
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        cls._data_cache.clear()
+
+    @classmethod
+    def _query_megamoe_table(
+        cls,
+        database: PerfDatabase,
+        num_tokens: int,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        moe_tp_size: int,
+        moe_ep_size: int,
+        quant_mode: common.MoEQuantMode,
+        workload_distribution: str,
+        is_context: bool = True,
+        source_policy: str = "random",
+        pre_dispatch: str = "sglang_jit",
+        num_fused_shared_experts: int = 0,
+        kernel_source: str = "deepgemm_megamoe",
+        kernel_dtype: str = "fp8_fp4",
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult:
+        """
+        Query DeepSeek-V4 MegaMoE full-module latency.
+
+        This table is intentionally strict: it models only measured fused
+        MegaMoE rows and does not fall back to uniform/random distributions or
+        analytical constants when a row is missing. New databases use the
+        unified ``dsv4_megamoe_module`` file for both context and generation;
+        ``is_context`` selects the phase stored inside that table.
+        """
+        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        cls.load_data(database)
+
+        if database_mode is None:
+            database_mode = database._default_database_mode
+        if database_mode not in (common.DatabaseMode.SILICON, common.DatabaseMode.HYBRID):
+            raise PerfDataNotAvailableError(
+                f"DSv4 MegaMoE module only supports measured SILICON data, got {database_mode=}."
+            )
+
+        if not isinstance(quant_mode, common.MoEQuantMode):
+            quant_mode = common.MoEQuantMode[str(quant_mode)]
+        phase = "context" if is_context else "generation"
+
+        module_data = getattr(database, "_dsv4_megamoe_module_data", None)
+        if module_data is None:
+            raise PerfDataNotAvailableError(
+                f"DSv4 MegaMoE module data not loaded for system='{database.system}', "
+                f"backend='{database.backend}', version='{database.version}'."
+            )
+        module_data.raise_if_not_loaded()
+
+        try:
+            token_dict = module_data[phase][kernel_source][kernel_dtype][quant_mode][pre_dispatch][source_policy][
+                workload_distribution
+            ][topk][num_experts][num_fused_shared_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+        except KeyError as exc:
+            raise PerfDataNotAvailableError(
+                f"No DSv4 MegaMoE {phase} module data for {kernel_source=}, {kernel_dtype=}, {quant_mode=}, "
+                f"{pre_dispatch=}, {source_policy=}, {workload_distribution=}, {topk=}, {num_experts=}, "
+                f"{num_fused_shared_experts=}, {hidden_size=}, {inter_size=}, "
+                f"{moe_tp_size=}, {moe_ep_size=}."
+            ) from exc
+
+        num_left, num_right = interpolation.nearest_1d_point_helper(
+            num_tokens, list(token_dict.keys()), inner_only=False
+        )
+        result = interpolation.interp_1d(
+            [num_left, num_right], [token_dict[num_left], token_dict[num_right]], num_tokens
+        )
+        if isinstance(result, dict):
+            latency = float(result["latency"])
+            energy = float(result["energy"])
+        else:
+            latency = float(result)
+            energy = 0.0
+        return PerformanceResult(latency, energy=energy)
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """Query measured MegaMoE routed-module latency."""
+        sm_version = int(database.system_spec.get("gpu", {}).get("sm_version", -1))
+        if sm_version < 100:
+            raise ValueError(
+                "DeepSeek-V4 MegaMoE is only supported on Blackwell-class GPUs "
+                f"(SM >= 100); got sm_version={sm_version}."
+            )
+
+        # DSv4 MegaMoE perf rows are indexed by local-rank tokens. Do not
+        # multiply by attention_dp_size here; the old decomposed MoE table is
+        # indexed differently.
+        x = int(kwargs.get("x"))
+        overwrite_quant_mode = kwargs.get("quant_mode")
+        quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
+
+        result = database.query_dsv4_megamoe_module(
+            num_tokens=x,
+            hidden_size=self._hidden_size,
+            inter_size=self._inter_size,
+            topk=self._topk,
+            num_experts=self._num_experts,
+            moe_tp_size=self._moe_tp_size,
+            moe_ep_size=self._moe_ep_size,
+            quant_mode=quant_mode,
+            workload_distribution=self._workload_distribution,
+            is_context=self._is_context,
+            source_policy=self._source_policy,
+            pre_dispatch=self._pre_dispatch,
+            num_fused_shared_experts=self._num_fused_shared_experts,
+            kernel_source=self._kernel_source,
+            kernel_dtype=self._kernel_dtype,
+        )
+
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
 # ───────────────────────────────────────────────────────────────────────
 # Init-time split-file merge helper (formerly in PerfDatabase.__init__)
 # ───────────────────────────────────────────────────────────────────────
@@ -1472,6 +1685,130 @@ def load_generation_dsv4_kind_module_data(file_path: str):
             "energy": power * latency,
         }
     return data
+
+
+def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
+    """
+    Load DeepSeek-V4 MegaMoE full-module data.
+
+    The collected latency is the SGLang/DeepGEMM MegaMoE routed path:
+    prepared hidden states and top-k tensors -> pre-dispatch -> fused MegaMoE.
+    Gate/top-k generation is intentionally outside the measured region.
+
+    Returns:
+        dict: Nested dict whose leaves contain latency, power, energy and
+        routing metadata.
+    """
+    if dsv4_megamoe_module_file is None:
+        return None
+
+    if isinstance(dsv4_megamoe_module_file, list | tuple):
+        raise TypeError("DSv4 MegaMoE data loader expects a single unified perf file path")
+
+    source_label = os.fspath(dsv4_megamoe_module_file)
+    rows = _read_filtered_rows(source_label)
+    if rows is None:
+        logger.debug(f"DeepSeek-V4 MegaMoE data file {source_label} not found.")
+        return None
+
+    def _to_bool(value: object) -> bool:
+        return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+    row_bool_invariants = [
+        ("used_cuda_graph", True, None, "DSv4 MegaMoE perf row was not collected with CUDA Graph"),
+        (
+            "includes_gate_topk",
+            False,
+            "true",
+            "DSv4 MegaMoE perf row includes gate/top-k outside the supported boundary",
+        ),
+        ("includes_routed_scale", True, None, "DSv4 MegaMoE perf row does not include SGLang routed output scaling"),
+    ]
+
+    def _row_phase(row: dict[str, str]) -> str:
+        phase = row.get("phase", "").strip()
+        if not phase:
+            raise ValueError(f"DSv4 MegaMoE unified perf file requires a phase column: {source_label} {row}")
+        if phase not in {"context", "generation"}:
+            raise ValueError(f"DSv4 MegaMoE perf row has unsupported phase={phase!r}: {row}")
+        return phase
+
+    def _put_nested(root: dict, keys: list[object], value: dict) -> None:
+        current = root
+        for key in keys[:-1]:
+            current = current.setdefault(key, {})
+        leaf_key = keys[-1]
+        if leaf_key in current:
+            raise ValueError(f"duplicate DSv4 MegaMoE data row for {source_label} {keys}")
+        current[leaf_key] = value
+
+    dsv4_megamoe_data: dict = {}
+    logger.debug(f"Loading DeepSeek-V4 MegaMoE module data from: {source_label}")
+    for row in rows:
+        for field, expected_value, default, error in row_bool_invariants:
+            if _to_bool(row.get(field, default)) != expected_value:
+                raise ValueError(f"{error}: {source_label} {row}")
+
+        kernel_source = row.get("kernel_source", "deepgemm_megamoe")
+        kernel_dtype = row["kernel_dtype"]
+        quant_mode = common.MoEQuantMode[row["moe_dtype"]]
+        pre_dispatch = row["pre_dispatch"]
+        source_policy = row["source_policy"]
+        distribution = row["distribution"]
+        topk = int(row["topk"])
+        num_experts = int(row["num_experts"])
+        num_fused_shared_experts = int(row.get("num_fused_shared_experts", 0))
+        hidden_size = int(row["hidden_size"])
+        inter_size = int(row["inter_size"])
+        moe_tp_size = int(row.get("moe_tp_size", 1))
+        moe_ep_size = int(row["moe_ep_size"])
+        num_tokens = int(row["num_tokens"])
+        latency = float(row["latency"])
+        power = float(row.get("power") or 0.0)
+        energy = power * latency
+        num_max_tokens_per_rank = int(row.get("num_max_tokens_per_rank") or 0)
+        effective_num_max_tokens_per_rank = int(row.get("effective_num_max_tokens_per_rank") or num_max_tokens_per_rank)
+
+        entry = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+            "global_num_tokens": int(row.get("global_num_tokens") or num_tokens * moe_ep_size),
+            "num_max_tokens_per_rank": num_max_tokens_per_rank,
+            "effective_num_max_tokens_per_rank": effective_num_max_tokens_per_rank,
+            "used_cuda_graph": True,
+            "kernel_dtype": kernel_dtype,
+            "routed_scaling_factor": float(row["routed_scaling_factor"]),
+            "includes_routed_scale": True,
+            "includes_gate_topk": False,
+            "buffer_policy": row.get("buffer_policy", ""),
+            "includes_buffer_init": _to_bool(row.get("includes_buffer_init", "false")),
+        }
+        phase = _row_phase(row)
+        entry["phase"] = phase
+        _put_nested(
+            dsv4_megamoe_data,
+            [
+                phase,
+                kernel_source,
+                kernel_dtype,
+                quant_mode,
+                pre_dispatch,
+                source_policy,
+                distribution,
+                topk,
+                num_experts,
+                num_fused_shared_experts,
+                hidden_size,
+                inter_size,
+                moe_tp_size,
+                moe_ep_size,
+                num_tokens,
+            ],
+            entry,
+        )
+
+    return dsv4_megamoe_data
 
 
 def load_dsv4_sparse_kernel_data(file_path: str):

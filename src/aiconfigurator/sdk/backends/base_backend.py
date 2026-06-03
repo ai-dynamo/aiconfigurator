@@ -50,7 +50,7 @@ class BaseBackend:
     # Model families whose MoE block-scale dispatch workspace is added on top of
     # the base activation budget.
     MOE_WORKSPACE_FAMILIES: ClassVar[tuple[str, ...]] = (
-        "GEMMA4MOE",
+        "GEMMA4MIX",
         "DEEPSEEK",
         "DEEPSEEKV32",
         "DEEPSEEKV4",
@@ -82,6 +82,21 @@ class BaseBackend:
         the DEEPSEEK family (legacy accounting, predates V4).
         """
         return getattr(model, "_hidden_size", h)
+
+    def _mix_step_gen_tokens(self, b: int, ctx_tokens: int, isl: int, osl: int) -> int:
+        """Return the number of decode tokens per mix step for a batch of b requests.
+
+        A mix step is a forward pass that contains both prefill tokens (for requests
+        still completing their context phase) and decode tokens (for requests already
+        generating). This method encodes the engine's scheduling policy for how many
+        decode-phase requests participate alongside the prefilling request(s).
+
+        Subclasses should override to match their engine's scheduling behaviour.
+        """
+        steps_to_finish_ctx = np.ceil(isl * b / ctx_tokens)
+        if steps_to_finish_ctx >= osl:
+            return max(1, int(b // (steps_to_finish_ctx / osl)))
+        return max(1, b - int(np.ceil(ctx_tokens / isl)))
 
     def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int) -> dict:
         """Resolve backend-specific run_agg kwargs to defaults.
@@ -930,10 +945,13 @@ class BaseBackend:
         num_mix_steps = num_genonly_steps = 0
         num_mix_steps_for_tpot_calc = 0  # correction for tpot calc only
         if b > 1:
+            num_mix_gen_tokens = self._mix_step_gen_tokens(b, ctx_tokens, isl, osl)
+            assert num_mix_gen_tokens >= 1, (
+                f"num_mix_gen_tokens: {num_mix_gen_tokens}, b: {b}, ctx_tokens: {ctx_tokens}, isl: {isl}"
+            )
+            num_mix_ctx_tokens = ctx_tokens
             if steps_to_finish_ctx >= osl:
                 num_mix_steps = steps_to_finish_ctx
-                num_mix_ctx_tokens = ctx_tokens
-                num_mix_gen_tokens = max(1, b // (steps_to_finish_ctx / osl))
                 num_genonly_steps = 0
                 num_genonly_tokens = 0
                 num_mix_steps_for_tpot_calc = num_mix_steps
@@ -941,11 +959,6 @@ class BaseBackend:
                 # 3-step is an empirical correction for pipelining requests where new requests
                 # cannot be enqueued immediately after last request's exit
                 num_mix_steps = steps_to_finish_ctx
-                num_mix_ctx_tokens = ctx_tokens
-                num_mix_gen_tokens = b - np.ceil(ctx_tokens / isl)  # the error check is outside
-                assert num_mix_gen_tokens >= 1, (
-                    f"num_mix_gen_tokens: {num_mix_gen_tokens}, b: {b}, ctx_tokens: {ctx_tokens}, isl: {isl}"
-                )
                 num_genonly_steps = osl - num_mix_steps
                 num_genonly_tokens = b
                 num_mix_steps_for_tpot_calc = max(1, num_mix_steps - 3)
