@@ -328,6 +328,34 @@ class TestBuildDefaultTaskConfigs:
         # TaskConfig should be called twice (agg + disagg)
         assert mock_task_config.call_count == 2
 
+    @patch("aiconfigurator.cli.main.TaskConfig")
+    @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
+    def test_auto_megamoe_sweeps_only_sglang(self, mock_supported_databases, mock_task_config):
+        """The SGLang-only MegaMoE override must not be passed to TRT-LLM or vLLM."""
+        mock_supported_databases.return_value = {
+            "gb200": {
+                "trtllm": ["0.5.10"],
+                "sglang": ["0.5.10"],
+                "vllm": ["0.5.10"],
+            }
+        }
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        result = build_default_task_configs(
+            model_path="deepseek-ai/DeepSeek-V4-Pro",
+            total_gpus=2,
+            system="gb200",
+            backend="auto",
+            backend_version="0.5.10",
+            moe_backend="megamoe",
+        )
+
+        assert set(result) == {"agg_sglang", "disagg_sglang"}
+        assert mock_task_config.call_count == 2
+        for call in mock_task_config.call_args_list:
+            assert call.kwargs["backend_name"] == "sglang"
+            assert call.kwargs["moe_backend"] == "megamoe"
+
     @patch("aiconfigurator.cli.main.check_is_moe", return_value=True)
     @patch("aiconfigurator.cli.main.TaskConfig")
     def test_skips_optional_sglang_deepep_when_perf_data_missing(

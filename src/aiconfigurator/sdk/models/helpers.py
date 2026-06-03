@@ -31,7 +31,7 @@ _MOE_MODEL_FAMILIES = {
     "KIMIK25",
     "HYBRIDMOE",
     "QWEN3VL_MOE",
-    "GEMMA4MOE",
+    "GEMMA4MIX",
 }
 
 

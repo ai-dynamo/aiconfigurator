@@ -9,13 +9,13 @@ from aiconfigurator.sdk.models.base import BaseModel, register_model
 from aiconfigurator.sdk.models.helpers import calc_expectation
 
 
-@register_model("GEMMA4MOE")
-class Gemma4MoEModel(BaseModel):
+@register_model("GEMMA4MIX")
+class Gemma4MixModel(BaseModel):
     """
     Google Gemma 4 (gemma4_text): hybrid SWA/global attention + shared dense MLP
     running in parallel with routed top-k MoE on every layer.
 
-    Two layer-type recipes are emitted, driven by ``Gemma4MoEConfig.layer_types``:
+    Two layer-type recipes are emitted, driven by ``Gemma4MixConfig.layer_types``:
 
     - **sliding_attention (SWA)**: 16 Q heads x ``swa_head_dim``, ``swa_num_kv_heads``
       KV heads, separate K and V projections (standard GQA), token window =
@@ -59,14 +59,27 @@ class Gemma4MoEModel(BaseModel):
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
-        assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
-        ), (
-            f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
-        )
-        assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
+        # Gemma 4 family includes both MoE variants (e.g. gemma-4-26B-A4B-it,
+        # topk=8/num_experts=128) and dense variants (e.g. gemma-4-31B-it,
+        # gemma-4-E2B-it, gemma-4-E4B-it: topk=0/num_experts=None). For dense
+        # variants every layer is just the shared dense MLP -- there is no
+        # routed-MoE block, so MoE-related parallelism constraints don't apply.
+        self._is_dense = not topk or not num_experts
+        if not self._is_dense:
+            assert (
+                self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
+            ), (
+                f"tp_size ({self.config.tp_size}) * attention_dp_size "
+                f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
+                f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+            )
+            assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
+        else:
+            # Dense Gemma 4: collapse the MoE search-space to ep=1 so pareto
+            # iteration doesn't enumerate equivalent dense configurations.
+            assert self.config.moe_ep_size == 1, (
+                f"dense Gemma 4 variants require moe_ep_size=1, got {self.config.moe_ep_size}"
+            )
         self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
@@ -78,25 +91,25 @@ class Gemma4MoEModel(BaseModel):
             if self._nextn > 0
             else 1.0
         )
-        self._gemma4_config: common.Gemma4MoEConfig | None = None
+        self._gemma4_config: common.Gemma4MixConfig | None = None
         self._power_law_alpha = 1.01
 
-    def set_gemma4_config(self, cfg: common.Gemma4MoEConfig) -> None:
-        """Apply Gemma4MoEConfig and rebuild context/generation ops.
+    def set_gemma4_config(self, cfg: common.Gemma4MixConfig) -> None:
+        """Apply Gemma4MixConfig and rebuild context/generation ops.
 
         Validates that ``layer_types`` length matches ``num_layers`` and contains only
         recognized values before accepting the config.
         """
-        if cfg is None or not isinstance(cfg, common.Gemma4MoEConfig):
-            raise ValueError(f"Gemma4MoEModel requires a Gemma4MoEConfig, got {type(cfg).__name__}")
+        if cfg is None or not isinstance(cfg, common.Gemma4MixConfig):
+            raise ValueError(f"Gemma4MixModel requires a Gemma4MixConfig, got {type(cfg).__name__}")
         if len(cfg.layer_types) != self._num_layers:
             raise ValueError(
-                f"Gemma4MoEConfig.layer_types length ({len(cfg.layer_types)}) "
+                f"Gemma4MixConfig.layer_types length ({len(cfg.layer_types)}) "
                 f"does not match num_layers ({self._num_layers})"
             )
         for i, lt in enumerate(cfg.layer_types):
             if lt not in ("sliding_attention", "full_attention"):
-                raise ValueError(f"Gemma4MoEConfig layer {i} has invalid type {lt!r}")
+                raise ValueError(f"Gemma4MixConfig layer {i} has invalid type {lt!r}")
         self._gemma4_config = cfg
         self._build_context_ops()
         self._build_generation_ops()
@@ -158,7 +171,12 @@ class Gemma4MoEModel(BaseModel):
         moe_q: common.MoEQuantMode,
         wl_dist: str,
     ) -> list:
-        """Routed-MoE ops: router GEMM (when num_experts ≥ 128), pre-dispatch, MoE, post-dispatch."""
+        """Routed-MoE ops: router GEMM (when num_experts ≥ 128), pre-dispatch, MoE, post-dispatch.
+
+        Returns an empty list for dense Gemma 4 variants (no routed-MoE block).
+        """
+        if self._is_dense:
+            return []
         router_ops = (
             [ops.GEMM(f"{prefix}_router_gemm", count, self._num_experts, h, common.GEMMQuantMode.bfloat16)]
             if self._num_experts >= 128

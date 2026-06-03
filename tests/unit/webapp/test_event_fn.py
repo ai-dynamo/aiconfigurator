@@ -32,8 +32,8 @@ from aiconfigurator.webapp.events.event_fn import EventFn
 class TestUpdateModelRelatedComponents:
     """Regression guards for the family-keyed MoE-control visibility branch."""
 
-    def test_gemma4moe_shows_moe_controls(self):
-        """`google/gemma-4-26B-A4B` resolves to the GEMMA4MOE family and is MoE,
+    def test_gemma4mix_shows_moe_controls(self):
+        """`google/gemma-4-26B-A4B` resolves to the GEMMA4MIX family and is MoE,
         so every MoE-related control (nextn, accept_rates, enable_wideep,
         moe_quant_mode, moe_tp_size, moe_ep_size, dp_size) must render visible.
         """
@@ -41,4 +41,4 @@ class TestUpdateModelRelatedComponents:
         assert len(result) == 7, "expected 7 gr.update objects (nextn + 6 MoE controls)"
         for i, update in enumerate(result):
             visible = update.get("visible") if hasattr(update, "get") else getattr(update, "visible", None)
-            assert visible is True, f"component {i} hidden for GEMMA4MOE — DYN-3044-style regression"
+            assert visible is True, f"component {i} hidden for GEMMA4MIX — DYN-3044-style regression"

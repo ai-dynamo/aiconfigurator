@@ -22,6 +22,7 @@ from aiconfigurator.sdk.operations.communication import NCCL, P2P, CustomAllRedu
 from aiconfigurator.sdk.operations.dsa import ContextDSAModule, GenerationDSAModule
 from aiconfigurator.sdk.operations.dsv4 import (
     ContextDeepSeekV4AttentionModule,
+    DeepSeekV4MegaMoEModule,
     DeepSeekV4MHCModule,
     GenerationDeepSeekV4AttentionModule,
     _BaseDeepSeekV4AttentionModule,
@@ -56,6 +57,7 @@ __all__ = [
     "ContextMLA",
     "CustomAllReduce",
     "DeepSeekV4MHCModule",
+    "DeepSeekV4MegaMoEModule",
     "ElementWise",
     "Embedding",
     "EncoderAttention",

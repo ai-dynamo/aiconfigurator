@@ -176,7 +176,7 @@ class VisionEncoderConfig:
 
 
 @dataclass(frozen=True)
-class Gemma4MoEConfig:
+class Gemma4MixConfig:
     """Config for Google Gemma 4 (gemma4_text) hybrid attention + dense-MLP-plus-MoE FFN.
 
     Every layer runs both a shared dense MLP (intermediate_size, ``Gemma4TextMLP``) and a
@@ -558,7 +558,7 @@ ModelFamily = {
     "QWEN35",
     "QWEN3VL",
     "QWEN3VL_MOE",
-    "GEMMA4MOE",
+    "GEMMA4MIX",
 }
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
@@ -585,7 +585,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Llama4ForConditionalGeneration": "HYBRIDMOE",
     "Qwen3_5ForConditionalGeneration": "QWEN35",
     "Qwen3_5MoeForConditionalGeneration": "QWEN35",
-    "Gemma4ForConditionalGeneration": "GEMMA4MOE",
+    "Gemma4ForConditionalGeneration": "GEMMA4MIX",
 }
 
 # Multimodal architectures whose LLM config lives under a nested key (e.g. "text_config").
@@ -830,6 +830,7 @@ class PerfDataFilename(Enum):
     # topk_512 and csa_attn are modeled analytically — no CSV needed.
     dsv4_paged_mqa_logits_module = "dsv4_paged_mqa_logits_module_perf.parquet"
     dsv4_hca_attn_module = "dsv4_hca_attn_module_perf.parquet"
+    dsv4_megamoe_module = "dsv4_megamoe_module_perf.parquet"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])

@@ -8,10 +8,12 @@ Tests model validation, default models, and model-specific configurations.
 """
 
 from collections import Counter
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
 
+import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config, models
 from aiconfigurator.sdk.models import (
     LLAMAModel,
@@ -21,6 +23,7 @@ from aiconfigurator.sdk.models import (
     get_model,
     get_model_family,
 )
+from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.task import TaskConfig
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
@@ -438,6 +441,98 @@ class TestHFModelSupport:
         assert generation_act._dim_in == 2 * local_inter_size
         assert generation_act._dim_out == local_inter_size
         assert generation_down._k == local_inter_size
+
+    def test_deepseek_v4_sglang_megamoe_backend_uses_megamoe_module(self):
+        model_config = config.ModelConfig(
+            tp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=8,
+            moe_backend="megamoe",
+            workload_distribution="uniform",
+            nextn=1,
+            nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+        )
+        model = get_model("deepseek-ai/DeepSeek-V4-Pro", model_config, backend_name="sglang")
+
+        context_names = [op._name for op in model.context_ops]
+        assert "context_megamoe" in context_names
+        assert "context_moe_pre_dispatch" not in context_names
+        assert "context_moe_post_dispatch" not in context_names
+
+        generation_overlap = next(op for op in model.generation_ops if op._name == "generation_moe_overlap")
+        generation_names = [op._name for op in generation_overlap._group_a]
+        assert "generation_megamoe" in generation_names
+        assert "generation_moe_pre_dispatch" not in generation_names
+        generation_megamoe = next(op for op in generation_overlap._group_a if op._name == "generation_megamoe")
+        assert generation_megamoe._workload_distribution == "balanced"
+
+    def test_deepseek_v4_sglang_deepep_backend_keeps_decomposed_moe(self):
+        model_config = config.ModelConfig(
+            tp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=8,
+            moe_backend="deepep_moe",
+            nextn=1,
+            nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+        )
+        model = get_model("deepseek-ai/DeepSeek-V4-Pro", model_config, backend_name="sglang")
+
+        context_names = [op._name for op in model.context_ops]
+        assert "context_megamoe" not in context_names
+        assert "context_moe_pre_dispatch" in context_names
+        assert "context_moe_post_dispatch" in context_names
+
+    def test_deepseek_v4_megamoe_module_query_uses_local_rank_tokens(self):
+        class FakeDatabase:
+            system_spec: ClassVar[dict[str, dict[str, int]]] = {"gpu": {"sm_version": 100}}
+
+            def query_dsv4_megamoe_module(self, **kwargs):
+                self.kwargs = kwargs
+                return PerformanceResult(2.0, energy=3.0)
+
+        database = FakeDatabase()
+        op = ops.DeepSeekV4MegaMoEModule(
+            "test_megamoe",
+            2,
+            hidden_size=7168,
+            inter_size=3072,
+            topk=6,
+            num_experts=384,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            quant_mode=common.MoEQuantMode.w4a8_mxfp4_mxfp8,
+            workload_distribution="uniform",
+        )
+
+        result = op.query(database, x=16)
+
+        assert float(result) == 4.0
+        assert result.energy == 6.0
+        assert database.kwargs["num_tokens"] == 16
+        assert database.kwargs["workload_distribution"] == "balanced"
+        assert database.kwargs["source_policy"] == "random"
+
+    def test_deepseek_v4_megamoe_module_rejects_non_blackwell_database(self):
+        class FakeDatabase:
+            system_spec: ClassVar[dict[str, dict[str, int]]] = {"gpu": {"sm_version": 90}}
+
+        op = ops.DeepSeekV4MegaMoEModule(
+            "test_megamoe",
+            1,
+            hidden_size=7168,
+            inter_size=3072,
+            topk=6,
+            num_experts=384,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            quant_mode=common.MoEQuantMode.w4a8_mxfp4_mxfp8,
+            workload_distribution="power_law_1.01",
+        )
+
+        with pytest.raises(ValueError, match="Blackwell"):
+            op.query(FakeDatabase(), x=16)
 
     def test_deepseek_v32_kvcache_bytes_include_indexer_cache(self):
         model_config = config.ModelConfig(

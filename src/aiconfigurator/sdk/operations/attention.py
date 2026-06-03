@@ -396,6 +396,12 @@ class GenerationAttention(Operation):
 
             cls._correct_sol(database, cls._data_cache[key])
             cls._extrapolate(cls._data_cache[key])
+            # Re-clamp after extrapolation: interpolated/extrapolated grid
+            # points can land below the SOL bound. The legacy init path ran
+            # ``_correct_data()`` a second time which caught these; replicate
+            # that here so standalone ``load_data`` callers get the same
+            # physically-consistent floor.
+            cls._correct_sol(database, cls._data_cache[key])
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).

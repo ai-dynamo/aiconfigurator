@@ -137,7 +137,7 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
 
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
-    assert len(get_common_moe_test_cases()) == 4086
+    assert len(get_common_moe_test_cases()) == 4314
     assert len(get_context_mla_case_specs()) == 550
     assert len(get_generation_mla_case_specs()) == 885
     assert len(get_common_mamba2_test_cases()) == 8
