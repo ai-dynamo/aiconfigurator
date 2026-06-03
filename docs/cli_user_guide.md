@@ -5,6 +5,20 @@ As mentioned in root Readme, CLI supports five modes: `default`, `exp`, `generat
 Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).  
 For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP8`) or a local model directory containing those files.
 
+## Common Arguments (all modes)
+
+These flags are shared across modes (a few are sweep-only, as noted):
+
+- `--debug`: Enable verbose debug logging. (all modes)
+- `--no-color`: Disable ANSI colors in output. (all modes)
+- `--save-dir DIR`: Directory to write results and generated deployment artifacts. (`default`, `exp`, `generate`, `estimate`)
+- `--top-n N`: Number of top configurations to output — per experiment in `exp` mode, or per serving mode (agg/disagg) in `default` mode. Default: `5`. (`default`, `exp`, `generate`, `estimate`)
+- `--systems-paths`: System search paths (comma-separated). Use `default` for the built-in systems path; the first match wins for an identical system/backend/version. (`default`, `exp`, `generate`, `estimate`)
+- `--deployment-target`: Generated-artifact platform — `dynamo-j2` (default), `dynamo-python`, or `llm-d`. See [Deployment Target Selection](#default-mode). (`default`, `exp`, `generate`, `estimate`)
+- `--engine-step-backend`: Experimental static-latency backend — `python` (default) or `rust` (routes static step estimates through the Rust FPM estimator). (`default`, `exp`, `generate`, `estimate`)
+
+The `support` mode accepts only `--debug` and `--no-color` from this list. Generator-artifact flags (`--generator-config`, `--generator-set`, `--generator-help`, `--generator-help-backend`, `--generated-config-version`, `--generator-dynamo-version`) are documented under [Default mode](#default-mode).
+
 ## Defaults and Implicit Behavior
 
 When using `default` mode, several parameters have default values that affect
@@ -22,6 +36,9 @@ the corresponding flag is not specified:
 | Backend | trtllm | `--backend` | Inference backend used for estimation |
 | Prefix Cache Length | 0 | `--prefix` | Prefix cache length for KV reuse |
 | Database Mode | SILICON | `--database-mode` | Source of performance data |
+| Free GPU Memory Fraction | 1.0 | `--free-gpu-memory-fraction` | KV-cache memory budget used to filter batch sizes |
+| Max Sequence Length | isl + osl | `--max-seq-len` | KV blocks TRT-LLM pre-allocates per sequence |
+| Chunked Prefill | off | `--enable-chunked-prefill` | Finer-grained context-token sweep |
 
 > **Important:** The TTFT and TPOT defaults act as **SLA filters** — configurations
 > that exceed these thresholds are excluded from results. If you see fewer
@@ -94,26 +111,33 @@ aiconfigurator cli estimate --model-path Qwen/Qwen3-32B --system h200_sxm --tp-s
 - `--system`: System name (`h200_sxm`, `h100_sxm`, `h100_pcie`, `b200_sxm`, `gb200`, `a100_sxm`, `a100_pcie`, `l40s`, `l4`, `a30`, `gb300`)
 
 **Optional arguments (shared):**
-- `--estimate-mode`: `agg` (default) or `disagg`
+- `--estimate-mode`: `agg` (default, IFB) or `disagg` (separate prefill/decode workers), or one of the single-pass static breakdown modes `static` / `static_ctx` / `static_gen` (mirrors the webapp Static tab)
 - `--backend`: Backend name (`trtllm`, `vllm`, `sglang`). Default: `trtllm`
 - `--backend-version`: Backend database version. Default: latest
 - `--database-mode`: Database mode (`SILICON`, `HYBRID`, `EMPIRICAL`, `SOL`). Default: `SILICON`
 - `--isl`: Input sequence length. Default: `1024`
 - `--osl`: Output sequence length. Default: `1024`
-- `--batch-size`: Batch size (max concurrent requests, used for agg). Default: `128`
-- `--ctx-tokens`: Context tokens budget for IFB scheduling. Default: same as ISL
-- `--tp-size`: Tensor parallelism size. Default: `1`
-- `--pp-size`: Pipeline parallelism size. Default: `1`
-- `--attention-dp-size`: Attention data parallelism size. Default: `1`
-- `--moe-tp-size`: MoE tensor parallelism size (auto-inferred if omitted)
-- `--moe-ep-size`: MoE expert parallelism size (auto-inferred if omitted)
+- `--batch-size` (alias `--bs`): Batch size (max concurrent requests, used for agg/static). Default: `128`
+- `--ctx-tokens`: Context tokens budget for IFB scheduling (agg only). Default: same as ISL
+- `--tp-size` (alias `--tp`): Tensor parallelism size. Default: `1`
+- `--pp-size` (alias `--pp`): Pipeline parallelism size. Default: `1`
+- `--attention-dp-size` (alias `--dp`): Attention data parallelism size. Default: `1`
+- `--moe-tp-size` (alias `--etp`): MoE tensor parallelism size (auto-inferred if omitted)
+- `--moe-ep-size` (alias `--ep`): MoE expert parallelism size (auto-inferred if omitted)
 - `--gemm-quant-mode`: GEMM quantization mode (auto-inferred from model config if omitted)
 - `--kvcache-quant-mode`: KV cache quantization mode (auto-inferred if omitted)
 - `--fmha-quant-mode`: FMHA quantization mode (auto-inferred if omitted)
 - `--moe-quant-mode`: MoE quantization mode (auto-inferred if omitted)
-- `--comm-quant-mode`: Communication quantization mode (auto-inferred if omitted)
-- `--print-per-ops-latency`: Print per-operation latency breakdown
-- `--systems-paths`: Override system YAML/data search paths (comma-separated; `default` maps to the built-in systems path)
+- `--comm-quant-mode`: Communication quantization mode (auto-inferred; default `half`)
+- `--prefix`: Prefix cache length (subset of ISL already cached per request). Default: `0`
+- `--nextn`: Number of MTP/speculative draft tokens. Default: `0`. Unlike `cli default`, `estimate` does **not** auto-enable MTP for DeepSeek/Qwen3.5 — pass `--nextn 1` explicitly
+- `--nextn-accept-rates`: Comma-separated acceptance rates for the MTP draft tokens (only the first `--nextn` are used). Default: `0.85,0.3,0,0,0`
+- `--stride`: (static modes only) OSL-sweep stride used by `run_static`; ignored for `agg`/`disagg`. Default: `32`
+- `--free-gpu-memory-fraction`: Fraction of free GPU memory for KV cache. Default: `0.9`. Used to estimate max concurrent sequences and warn when batch size exceeds KV cache capacity
+- `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls KV blocks pre-allocated per sequence; set to match your deployment for an accurate KV-capacity warning
+- `--detail`: Comma-separated breakdown sections to print after the summary box. Choices: `summary`, `memory`, `time`, `energy`, `source`, `all`. Example: `--detail memory,time`. Default: none (use `all` to print every section)
+
+> Shared flags such as `--save-dir`, `--top-n`, and `--systems-paths` are listed in [Common Arguments](#common-arguments-all-modes).
 
 **Disagg-specific arguments** (used when `--estimate-mode disagg`):
 - `--decode-system`: System name for decode workers. Defaults to `--system`
@@ -239,6 +263,25 @@ aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --sys
 ```
 `model_path`, `total_gpus`, `system` are three required arguments to define the problem.  
 If you want to specify your problem with more details, we allow to define `ttft`, `tpot`, `isl`, `osl` and `prefix`.
+
+#### Additional arguments
+
+Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode accepts:
+
+- `--decode-system`: System (GPU type) for disagg decode workers. Defaults to `--system`. Use it for heterogeneous prefill/decode (e.g. B200 prefill + H200 decode).
+- `--backend-version`: Backend database version. Default: latest.
+- `--free-gpu-memory-fraction`: Fraction of free GPU memory TRT-LLM allocates for KV cache (default: `1.0`). Filters batch sizes that would exceed KV cache capacity.
+- `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls how many KV blocks are pre-allocated per sequence; set to match your deployment for accurate KV-capacity filtering.
+- `--enable-chunked-prefill`: Enable chunked prefill for a finer-grained context-token sweep. When off (default), the context-token stride is aligned to ISL for faster sweeping.
+- `--enable-wideep`: Enable Wide Expert Parallelism (WideEP) for MoE models — EP-only parallelism via the `deepep_moe` backend. Applies to DeepSeek and Qwen3-235B on SGLang.
+- `--moe-backend`: Explicit SGLang MoE backend — `deepep_moe` or `megamoe` (use `megamoe` to model DeepSeek-V4 MegaMoE on Blackwell).
+
+**Vision-language inputs** (multimodal models such as Qwen3-VL):
+
+- `--image-height`, `--image-width`: Image dimensions in pixels. Default: `0` (disabled — the request is modeled as text-only).
+- `--num-images`: Number of images per request. Default: `1`.
+
+The SLA, precision, and speculative-decoding flags (`--strict-sla`, `--request-latency`, `--inclusive-tpot`, `--nextn`, `--nextn-accept-rates`, `--database-mode`) have dedicated subsections below. Shared flags such as `--save-dir`, `--top-n`, and `--systems-paths` are described in [Common Arguments](#common-arguments-all-modes).
 
 #### Backend Selection
 
@@ -947,7 +990,7 @@ Use the generated artifacts to launch the service. For bare-metal (single-node):
 mkdir -p /workspace/engine_configs
 cp results/.../disagg/top1/*_config.yaml /workspace/engine_configs/
 cd results/.../disagg/top1/
-bash run_0.sh
+bash node_0_run.sh
 ```
 
 For Kubernetes (Dynamo):
