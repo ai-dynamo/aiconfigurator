@@ -74,6 +74,29 @@ common_case_values:
         kv_cache_dtype: fp8
         gemm_type: bfloat16
         min_sm: 90
+      - compute_dtype: bfloat16
+        kv_cache_dtype: bfloat16
+        gemm_type: fp8_block
+        min_sm: 89
+      - compute_dtype: bfloat16
+        kv_cache_dtype: fp8
+        gemm_type: fp8_block
+        min_sm: 90
+    context_sequence_lengths:
+      - 1
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 2048
+      - 4096
+      - 8192
+      - 16384
     generation_sequence_lengths:
       - 1
       - 4
@@ -197,6 +220,9 @@ common_case_values:
       - 1
     context:
       max_tokens: 131072
+      prefix_lengths:
+        - 0
+        - 128
     generation:
       max_tokens: 33554432
   mla_module_vllm:
@@ -316,6 +342,9 @@ common_case_values:
         phases: [context]
     context:
       max_tokens: 131072
+      prefix_lengths:
+        - 0
+        - 128
     generation:
       max_tokens: 33554432
       large_cache_tokens: 16777216

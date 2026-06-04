@@ -140,6 +140,7 @@ except ModuleNotFoundError:
 
 _is_hip = is_hip()
 _MOE_RUNNER_CONFIG_PARAMS = set(inspect.signature(MoeRunnerConfig).parameters)
+_NON_GATED_MOE_MODEL_PATTERNS = ("Nemotron-3", "nemotron-ultra", "Nemotron-H")
 
 
 def _make_moe_runner_config(swiglu_limit: float | None = None) -> MoeRunnerConfig:
@@ -149,6 +150,10 @@ def _make_moe_runner_config(swiglu_limit: float | None = None) -> MoeRunnerConfi
     elif "gemm1_clamp_limit" in _MOE_RUNNER_CONFIG_PARAMS:
         kwargs["gemm1_clamp_limit"] = swiglu_limit
     return MoeRunnerConfig(**kwargs)
+
+
+def _uses_relu2_moe_activation(model_name: str) -> bool:
+    return any(pattern in model_name for pattern in _NON_GATED_MOE_MODEL_PATTERNS)
 
 
 def get_moe_test_cases():
@@ -762,10 +767,9 @@ def benchmark_config(
                 )
 
     elif use_nvfp4 and use_trtllm_bf16_fp4 and workloads is None:
-        from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe
+        from flashinfer.fused_moe import ActivationType, trtllm_fp4_block_scale_routed_moe
         from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
             _pack_topk_for_flashinfer_routed,
-            get_activation_type,
             quantize_hidden_states_fp4,
         )
 
@@ -817,6 +821,9 @@ def benchmark_config(
         tune_max_num_tokens = max(1, 1 << (num_tokens - 1).bit_length())
         scale_ones = torch.ones(num_experts, dtype=torch.float32, device=device)
         input_scale_quant = torch.ones((), dtype=torch.float32, device=device)
+        activation_type = (
+            ActivationType.Relu2 if _uses_relu2_moe_activation(config.model_name) else ActivationType.Swiglu
+        )
         topk_config = TopKConfig(
             top_k=topk,
             renormalize=True,
@@ -864,7 +871,7 @@ def benchmark_config(
                 routed_scaling_factor=None,
                 routing_method_type=1,
                 do_finalize=True,
-                activation_type=get_activation_type("silu"),
+                activation_type=activation_type,
                 output=output,
                 tune_max_num_tokens=tune_max_num_tokens,
             )
