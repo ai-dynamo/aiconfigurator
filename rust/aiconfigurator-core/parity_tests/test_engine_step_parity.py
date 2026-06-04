@@ -3,22 +3,24 @@
 
 """Smoke parity checks for Python SDK engine-step latency versus Rust core.
 
-These tests are expected to xfail while the Rust implementation is still
-catching up; the xfail message records the measured drift for each surface.
+Each test compares an apples-to-apples Python and Rust value for the
+surface under test (static_ctx + static_gen, the agg/disagg pipelines
+through `cli_estimate`, and Python's `_get_mix_step_latency` vs Rust's
+mix-step FPM). A drift outside ``PARITY_RTOL`` fails the assertion with
+a per-metric delta report so the failure mode is informative.
 """
 
 from __future__ import annotations
 
 import contextlib
 import io
-import json
-import shutil
 from dataclasses import dataclass
 
 import pytest
 
 from aiconfigurator.cli.api import cli_estimate
 from aiconfigurator.sdk import config, perf_database, rust_engine_step
+from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.models import get_model
 
 pytestmark = pytest.mark.integration
@@ -48,6 +50,7 @@ class EngineStepParityCase:
 
 
 SMOKE_CASES = [
+    # Original 3 smoke cases (Phase 3).
     pytest.param(
         EngineStepParityCase(model_path="MiniMaxAI/MiniMax-M2.5"),
         id="minimax-m25-b200-vllm-019-isl1024-osl2",
@@ -66,9 +69,467 @@ SMOKE_CASES = [
         ),
         id="minimax-m25-b200-vllm-019-sampled-prefix",
     ),
+    # Phase 4 D1: extra MoE coverage on b200_sxm/vllm/0.19.0.
+    pytest.param(
+        EngineStepParityCase(model_path="MiniMaxAI/MiniMax-M2.7"),
+        id="minimax-m27-b200-vllm-019-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-30B-A3B",
+            tp_size=4,
+            moe_ep_size=4,
+        ),
+        id="qwen3-30b-a3b-b200-vllm-019-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(model_path="Qwen/Qwen3-235B-A22B"),
+        id="qwen3-235b-a22b-b200-vllm-019-isl1024-osl2",
+    ),
+    # Phase 4 D1: dense (Llama-family) coverage on b200_sxm/vllm/0.19.0.
+    # The smoke MoE defaults (`moe_ep_size=8`) are unused by the dense path
+    # but pass through `cli_estimate` without harm.
+    pytest.param(
+        EngineStepParityCase(model_path="Qwen/Qwen3-32B"),
+        id="qwen3-32b-b200-vllm-019-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(model_path="meta-llama/Meta-Llama-3.1-70B"),
+        id="llama31-70b-b200-vllm-019-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(model_path="meta-llama/Meta-Llama-3.1-8B"),
+        id="llama31-8b-b200-vllm-019-isl1024-osl2",
+    ),
+    # Phase 4 D1: cross-system coverage on the smoke MiniMax model.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="MiniMaxAI/MiniMax-M2.5",
+            system_name="h200_sxm",
+        ),
+        id="minimax-m25-h200-vllm-019-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="MiniMaxAI/MiniMax-M2.5",
+            system_name="h100_sxm",
+        ),
+        id="minimax-m25-h100-vllm-019-isl1024-osl2",
+    ),
+    # Phase 4 D4: DeepSeek-family coverage unlocked by the `Op::Overlap`
+    # variant + `128 // tp_size` MLA head count fix.
+    pytest.param(
+        EngineStepParityCase(model_path="deepseek-ai/DeepSeek-V3"),
+        id="deepseek-v3-b200-vllm-019-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(model_path="deepseek-ai/DeepSeek-R1"),
+        id="deepseek-r1-b200-vllm-019-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="moonshotai/Kimi-K2.5",
+            system_name="h200_sxm",
+        ),
+        id="kimi-k25-h200-vllm-019-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="moonshotai/Kimi-K2.5",
+            system_name="h100_sxm",
+        ),
+        id="kimi-k25-h100-vllm-019-isl1024-osl2",
+    ),
+    # Phase 4 D4: cross-backend (SGLang non-DeepEP path) coverage.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="MiniMaxAI/MiniMax-M2.5",
+            backend_name="sglang",
+            backend_version="0.5.10",
+        ),
+        id="minimax-m25-b200-sglang-0510-isl1024-osl2",
+    ),
+    # Phase 4 D5: DeepSeek-family on SGLang, unlocked by the
+    # `Op::Fallback` variant that mirrors Python's `FallbackOp` (primary
+    # `MLAModule` -> granular `MlaBmm + ContextMla/GenerationMla + MlaBmm`
+    # chain when the module-level perf data is absent, which is the case
+    # for SGLang and TRT-LLM).
+    pytest.param(
+        EngineStepParityCase(
+            model_path="moonshotai/Kimi-K2.5",
+            backend_name="sglang",
+            backend_version="0.5.10",
+        ),
+        id="kimi-k25-b200-sglang-0510-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="moonshotai/Kimi-K2.5",
+            system_name="h200_sxm",
+            backend_name="sglang",
+            backend_version="0.5.10",
+        ),
+        id="kimi-k25-h200-sglang-0510-isl1024-osl2",
+    ),
+    # Phase 4 D6: NemotronNas (Puzzle / DeciLM per-block architecture).
+    pytest.param(
+        EngineStepParityCase(model_path="nvidia/Llama-3_3-Nemotron-Super-49B-v1"),
+        id="nemotron-nas-b200-vllm-019-isl1024-osl2",
+    ),
+    # Phase 4 D7-B: Qwen3.5 hybrid GDN + full-attention.
+    pytest.param(
+        EngineStepParityCase(model_path="Qwen/Qwen3.5-27B"),
+        id="qwen35-27b-b200-vllm-019-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(model_path="Qwen/Qwen3.5-397B-A17B"),
+        id="qwen35-397b-a17b-b200-vllm-019-isl1024-osl2",
+    ),
+    # Phase 4 D7-D: NemotronH hybrid Mamba2 + attention + MLP.
+    pytest.param(
+        EngineStepParityCase(model_path="nvidia/Nemotron-H-56B-Base-8K"),
+        id="nemotron-h-56b-b200-vllm-019-isl1024-osl2",
+    ),
+    # Phase 4 D7-E: DeepSeekV32 family (DSA attention + MoE).
+    pytest.param(
+        EngineStepParityCase(model_path="deepseek-ai/DeepSeek-V3.2"),
+        id="deepseek-v32-b200-vllm-019-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(model_path="zai-org/GLM-5"),
+        id="glm5-b200-vllm-019-isl1024-osl2",
+    ),
+    # Phase 4 D7-F: backend coverage for newly-ported families. The
+    # builders are backend-independent (the per-backend conditional
+    # `_attn_dp` / `_tp_allreduce` branches are handled inside each
+    # family's `build_*` function), but the perf-DB tables live in
+    # per-backend directories — these cases prove the same Rust
+    # builder matches Python on sglang and trtllm tables, not just
+    # vllm.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="nvidia/Llama-3_3-Nemotron-Super-49B-v1",
+            backend_name="sglang",
+            backend_version="0.5.10",
+        ),
+        id="nemotron-nas-b200-sglang-0510-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="nvidia/Llama-3_3-Nemotron-Super-49B-v1",
+            backend_name="trtllm",
+            backend_version="1.3.0rc10",
+        ),
+        id="nemotron-nas-b200-trtllm-130rc10-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.5-27B",
+            backend_name="sglang",
+            backend_version="0.5.10",
+        ),
+        id="qwen35-27b-b200-sglang-0510-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.5-27B",
+            backend_name="trtllm",
+            backend_version="1.3.0rc10",
+        ),
+        id="qwen35-27b-b200-trtllm-130rc10-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.5-397B-A17B",
+            backend_name="sglang",
+            backend_version="0.5.10",
+        ),
+        id="qwen35-397b-a17b-b200-sglang-0510-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.5-397B-A17B",
+            backend_name="trtllm",
+            backend_version="1.3.0rc10",
+        ),
+        id="qwen35-397b-a17b-b200-trtllm-130rc10-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="nvidia/Nemotron-H-56B-Base-8K",
+            backend_name="sglang",
+            backend_version="0.5.10",
+        ),
+        id="nemotron-h-56b-b200-sglang-0510-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="nvidia/Nemotron-H-56B-Base-8K",
+            backend_name="trtllm",
+            backend_version="1.3.0rc10",
+        ),
+        id="nemotron-h-56b-b200-trtllm-130rc10-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="deepseek-ai/DeepSeek-V3.2",
+            backend_name="sglang",
+            backend_version="0.5.10",
+        ),
+        id="deepseek-v32-b200-sglang-0510-isl1024-osl2",
+    ),
+    # Phase 4 D7-G: shape-variation coverage. All previous cases run at
+    # `(batch=1, isl=1024, osl=2)` (plus one prefix variant). The four
+    # cases below sweep the four parity-sensitive shape directions, each
+    # placed on a different family + backend combination so a regression
+    # in one direction also implicates the family/backend it lands on:
+    #
+    #  - decode-heavy: short isl, long osl -> stresses gen-side seq
+    #    interpolation and per-step accumulation (MoE on vllm).
+    #  - prefill-heavy: long isl, short osl -> exercises context-attention
+    #    interp at the upper axis bound (dense on trtllm).
+    #  - prefix coverage: mid isl + large prefix -> MLA prefix correction
+    #    and prefix-slice picking (MLA family on vllm).
+    #  - larger batch: bs > 1 -> Mamba2 batch interpolation away from
+    #    bs=1 (state-space family on sglang); also bumps the agg/disagg
+    #    batch defaults so the bs effect actually reaches those pipelines.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="MiniMaxAI/MiniMax-M2.5",
+            isl=128,
+            osl=64,
+        ),
+        id="minimax-m25-b200-vllm-019-shape-decode-heavy",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-32B",
+            backend_name="trtllm",
+            backend_version="1.3.0rc10",
+            isl=8192,
+            osl=2,
+        ),
+        id="qwen3-32b-b200-trtllm-130rc10-shape-prefill-heavy",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="deepseek-ai/DeepSeek-V3",
+            isl=2048,
+            osl=16,
+            prefix=1024,
+        ),
+        id="deepseek-v3-b200-vllm-019-shape-prefix-heavy",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="nvidia/Nemotron-H-56B-Base-8K",
+            backend_name="sglang",
+            backend_version="0.5.10",
+            batch_size=8,
+            agg_batch_size=8,
+            disagg_decode_batch_size=8,
+        ),
+        id="nemotron-h-56b-b200-sglang-0510-shape-batch8",
+    ),
+    # Phase 4 D7-H: GPT family (gpt.py -> gpt.rs). Dense GQA transformer
+    # with non-gated FFN; the b200/vllm case used to be error-symmetric
+    # (no perf data) and now lands at full numeric parity through the
+    # Rust builder. The b200/trtllm/1.3.0rc10 case (support matrix
+    # PASS) verifies the same builder against the trtllm tables.
+    pytest.param(
+        EngineStepParityCase(model_path="openai/gpt-oss-20b"),
+        id="gpt-oss-20b-b200-vllm-019-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="openai/gpt-oss-20b",
+            backend_name="trtllm",
+            backend_version="1.3.0rc10",
+        ),
+        id="gpt-oss-20b-b200-trtllm-130rc10-isl1024-osl2",
+    ),
+    # Phase 4 D7-C: data-gap families. Python errors with
+    # `PerfDataNotAvailableError` because the perf DB doesn't ship the
+    # required tables for these shapes; Rust errors at the equivalent
+    # query point (`AicError::PerfDatabase`). The error-symmetry contract
+    # asserts both engines fail together — same outcome, even if the
+    # exact failure point in the op graph differs.
+    pytest.param(
+        EngineStepParityCase(model_path="meta-llama/Llama-4-Scout-17B-16E-Instruct"),
+        id="llama4-scout-b200-vllm-019-isl1024-osl2",
+    ),
+    pytest.param(
+        EngineStepParityCase(model_path="deepseek-ai/DeepSeek-V4-Flash"),
+        id="deepseek-v4-flash-b200-vllm-019-isl1024-osl2",
+    ),
+    # Phase 5 D8: smoke coverage for the 14 unique (model, system, backend,
+    # version) tuples that surfaced as DRIFT in the 2026-06-01 full
+    # support-matrix Pareto scan (16 entries; 14 unique combos because two
+    # gb200/vllm/0.14.0 models drifted in both agg and disagg modes).
+    # Each combo here exercises all four parity surfaces (static, mixed,
+    # agg, disagg). Adding them at the default smoke shape means:
+    #   - Tuples where the NCCL/OneCCL path fix (5ce469ff) was the root
+    #     cause now compute and assert numeric parity going forward.
+    #   - Tuples where the perf-DB lacks data for the smoke shape
+    #     (`tp=8, moe_ep=8, isl=1024, osl=2`) error symmetrically in both
+    #     engines, exercising the error-symmetry contract.
+    # See docs/phase1/support-matrix-scan.md "Scan outcome -- 2026-06-01" for the
+    # full triage / cluster table.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-1.7B",
+            system_name="h100_sxm",
+            backend_name="vllm",
+            backend_version="0.14.0",
+        ),
+        id="qwen3-17b-h100-vllm-014-scan-coverage",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-30B-A3B",
+            system_name="b60",
+            backend_name="vllm",
+            backend_version="0.12.0",
+            tp_size=4,
+            moe_ep_size=4,
+        ),
+        id="qwen3-30b-a3b-b60-vllm-012-scan-coverage",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-30B-A3B",
+            system_name="h200_sxm",
+            backend_name="sglang",
+            backend_version="0.5.9",
+            tp_size=4,
+            moe_ep_size=4,
+        ),
+        id="qwen3-30b-a3b-h200-sglang-059-scan-coverage",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-30B-A3B",
+            system_name="gb300",
+            backend_name="sglang",
+            backend_version="0.5.9",
+            tp_size=4,
+            moe_ep_size=4,
+        ),
+        id="qwen3-30b-a3b-gb300-sglang-059-scan-coverage",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-8B",
+            backend_name="trtllm",
+            backend_version="1.2.0rc5",
+        ),
+        id="qwen3-8b-b200-trtllm-120rc5-scan-coverage",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.5-27B",
+            system_name="b300_sxm",
+            backend_name="trtllm",
+            backend_version="1.3.0rc10",
+        ),
+        id="qwen35-27b-b300-trtllm-130rc10-scan-coverage",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="deepseek-ai/DeepSeek-R1",
+            system_name="gb200",
+            backend_name="vllm",
+            backend_version="0.14.0",
+        ),
+        id="deepseek-r1-gb200-vllm-014-scan-coverage",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="gb200",
+            backend_name="vllm",
+            backend_version="0.14.0",
+        ),
+        id="deepseek-v3-gb200-vllm-014-scan-coverage",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="meta-llama/Meta-Llama-3.1-405B",
+            system_name="b300_sxm",
+            backend_name="sglang",
+            backend_version="0.5.10",
+        ),
+        id="llama31-405b-b300-sglang-0510-scan-coverage",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="meta-llama/Meta-Llama-3.1-8B",
+            system_name="gb200",
+            backend_name="trtllm",
+            backend_version="1.3.0rc10",
+        ),
+        id="llama31-8b-gb200-trtllm-130rc10-scan-coverage",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="moonshotai/Kimi-K2.5",
+            system_name="b300_sxm",
+            backend_name="vllm",
+            backend_version="0.19.0",
+        ),
+        id="kimi-k25-b300-vllm-019-scan-coverage",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="moonshotai/Kimi-K2.5",
+            system_name="gb300",
+            backend_name="vllm",
+            backend_version="0.19.0",
+        ),
+        id="kimi-k25-gb300-vllm-019-scan-coverage",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="moonshotai/Kimi-K2.5",
+            system_name="h200_sxm",
+            backend_name="vllm",
+            backend_version="0.14.0",
+        ),
+        id="kimi-k25-h200-vllm-014-scan-coverage",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="nvidia/Nemotron-H-56B-Base-8K",
+            system_name="h200_sxm",
+            backend_name="vllm",
+            backend_version="0.19.0",
+        ),
+        id="nemotron-h-56b-h200-vllm-019-scan-coverage",
+    ),
 ]
 
 PARITY_RTOL = 0.01
+
+
+# Error-symmetry contract: when Python raises one of these, Rust is
+# expected to raise (Python's `PerfDataNotAvailableError` and friends
+# travel through `cli_estimate` as `ValueError` / `RuntimeError`
+# subclasses; the Rust FFI surfaces perf-DB misses as
+# `RustCoreError`). Tests count any exception in either as a sentinel
+# value `_ERROR` and assert that *both* engines either compute or
+# error consistently. Numeric tolerance only applies when both
+# compute.
+class _ErrorSentinel:
+    """Singleton marker for "this metric raised an exception"."""
+
+    __slots__ = ("kind", "message")
+
+    def __init__(self, exc: BaseException) -> None:
+        self.kind = type(exc).__name__
+        self.message = str(exc).splitlines()[0][:200]
+
+    def __repr__(self) -> str:
+        return f"ERROR({self.kind}: {self.message})"
 
 
 def _quiet_call(func, *args, **kwargs):
@@ -77,12 +538,24 @@ def _quiet_call(func, *args, **kwargs):
         return func(*args, **kwargs)
 
 
+def _safe_value(thunk) -> float | _ErrorSentinel:
+    """Run `thunk()` and return its numeric result, or an `_ErrorSentinel`
+    capturing the exception type+message if it raised. The harness
+    treats two sentinels as "matching" regardless of message — both
+    engines erroring is the parity outcome we expect for data-gap
+    families."""
+    try:
+        return float(thunk())
+    except Exception as exc:
+        return _ErrorSentinel(exc)
+
+
 def _static_metrics(
     case: EngineStepParityCase,
     *,
     engine_step_backend: str,
     osl: int | None = None,
-) -> dict[str, float]:
+) -> dict[str, float | _ErrorSentinel]:
     kwargs = {
         "model_path": case.model_path,
         "system_name": case.system_name,
@@ -100,37 +573,59 @@ def _static_metrics(
         "stride": 1,
         "engine_step_backend": engine_step_backend,
     }
-    ctx = _quiet_call(cli_estimate, mode="static_ctx", **kwargs).summary.get_summary_df().iloc[0]
-    gen = _quiet_call(cli_estimate, mode="static_gen", **kwargs).summary.get_summary_df().iloc[0]
-    context_ms = float(ctx["context_latency"])
-    generation_ms = float(gen["generation_latency"])
+    context_ms = _safe_value(
+        lambda: _quiet_call(cli_estimate, mode="static_ctx", **kwargs)
+        .summary.get_summary_df()
+        .iloc[0]["context_latency"]
+    )
+    generation_ms = _safe_value(
+        lambda: _quiet_call(cli_estimate, mode="static_gen", **kwargs)
+        .summary.get_summary_df()
+        .iloc[0]["generation_latency"]
+    )
+    if isinstance(context_ms, _ErrorSentinel) or isinstance(generation_ms, _ErrorSentinel):
+        total: float | _ErrorSentinel = context_ms if isinstance(context_ms, _ErrorSentinel) else generation_ms
+    else:
+        total = context_ms + generation_ms
     return {
         "context_ms": context_ms,
         "generation_ms": generation_ms,
-        "total_ms": context_ms + generation_ms,
+        "total_ms": total,
     }
 
 
-def _agg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dict[str, float]:
-    result = _quiet_call(
-        cli_estimate,
-        mode="agg",
-        model_path=case.model_path,
-        system_name=case.system_name,
-        backend_name=case.backend_name,
-        backend_version=case.backend_version,
-        batch_size=case.agg_batch_size,
-        ctx_tokens=case.agg_ctx_tokens or case.isl,
-        isl=case.isl,
-        osl=case.osl,
-        prefix=case.prefix,
-        tp_size=case.tp_size,
-        pp_size=case.pp_size,
-        attention_dp_size=case.attention_dp_size,
-        moe_tp_size=case.moe_tp_size,
-        moe_ep_size=case.moe_ep_size,
-        engine_step_backend=engine_step_backend,
-    )
+def _agg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dict[str, float | _ErrorSentinel]:
+    def call():
+        return _quiet_call(
+            cli_estimate,
+            mode="agg",
+            model_path=case.model_path,
+            system_name=case.system_name,
+            backend_name=case.backend_name,
+            backend_version=case.backend_version,
+            batch_size=case.agg_batch_size,
+            ctx_tokens=case.agg_ctx_tokens or case.isl,
+            isl=case.isl,
+            osl=case.osl,
+            prefix=case.prefix,
+            tp_size=case.tp_size,
+            pp_size=case.pp_size,
+            attention_dp_size=case.attention_dp_size,
+            moe_tp_size=case.moe_tp_size,
+            moe_ep_size=case.moe_ep_size,
+            engine_step_backend=engine_step_backend,
+        )
+
+    # Errors propagate from a single call site — capture once, surface
+    # the same sentinel for every metric.
+    err: _ErrorSentinel | None = None
+    try:
+        result = call()
+    except Exception as exc:
+        err = _ErrorSentinel(exc)
+        result = None
+    if err is not None:
+        return {"ttft_ms": err, "tpot_ms": err, "request_latency_ms": err}
     return {
         "ttft_ms": float(result.ttft),
         "tpot_ms": float(result.tpot),
@@ -138,28 +633,38 @@ def _agg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dic
     }
 
 
-def _disagg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dict[str, float]:
-    result = _quiet_call(
-        cli_estimate,
-        mode="disagg",
-        model_path=case.model_path,
-        system_name=case.system_name,
-        backend_name=case.backend_name,
-        backend_version=case.backend_version,
-        isl=case.isl,
-        osl=case.osl,
-        prefix=case.prefix,
-        tp_size=case.tp_size,
-        pp_size=case.pp_size,
-        attention_dp_size=case.attention_dp_size,
-        moe_tp_size=case.moe_tp_size,
-        moe_ep_size=case.moe_ep_size,
-        prefill_batch_size=case.disagg_prefill_batch_size,
-        prefill_num_workers=case.disagg_prefill_num_workers,
-        decode_batch_size=case.disagg_decode_batch_size,
-        decode_num_workers=case.disagg_decode_num_workers,
-        engine_step_backend=engine_step_backend,
-    )
+def _disagg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dict[str, float | _ErrorSentinel]:
+    def call():
+        return _quiet_call(
+            cli_estimate,
+            mode="disagg",
+            model_path=case.model_path,
+            system_name=case.system_name,
+            backend_name=case.backend_name,
+            backend_version=case.backend_version,
+            isl=case.isl,
+            osl=case.osl,
+            prefix=case.prefix,
+            tp_size=case.tp_size,
+            pp_size=case.pp_size,
+            attention_dp_size=case.attention_dp_size,
+            moe_tp_size=case.moe_tp_size,
+            moe_ep_size=case.moe_ep_size,
+            prefill_batch_size=case.disagg_prefill_batch_size,
+            prefill_num_workers=case.disagg_prefill_num_workers,
+            decode_batch_size=case.disagg_decode_batch_size,
+            decode_num_workers=case.disagg_decode_num_workers,
+            engine_step_backend=engine_step_backend,
+        )
+
+    err: _ErrorSentinel | None = None
+    try:
+        result = call()
+    except Exception as exc:
+        err = _ErrorSentinel(exc)
+        result = None
+    if err is not None:
+        return {"ttft_ms": err, "tpot_ms": err, "request_latency_ms": err}
     return {
         "ttft_ms": float(result.ttft),
         "tpot_ms": float(result.tpot),
@@ -167,13 +672,29 @@ def _disagg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> 
     }
 
 
-def _direct_mixed_step_fpm_ms(case: EngineStepParityCase) -> float:
+def _mix_step_shape(case: EngineStepParityCase) -> dict:
+    """Mix-step (chunked-prefill + decode) shape for a smoke case.
+
+    Treats the case's single prefill request as one chunk with `case.isl`
+    isl-equivalent tokens (matching Python's agg orchestration). Decode
+    batch is `case.batch_size` (matches the FPM constructor below).
+    """
+    return {
+        "ctx_tokens": case.isl,
+        "gen_tokens": case.batch_size,
+        "isl": case.isl,
+        "osl": max(case.osl, 2),
+        "prefix": case.prefix,
+    }
+
+
+def _python_mixed_step_ms(case: EngineStepParityCase) -> float:
+    """Python `_get_mix_step_latency` for the case's mix-step shape."""
     database = _quiet_call(perf_database.get_database, case.system_name, case.backend_name, case.backend_version)
     if database is None:
         raise RuntimeError(
             f"failed to load perf database for {case.system_name}/{case.backend_name}/{case.backend_version}"
         )
-
     model_config = config.ModelConfig(
         tp_size=case.tp_size,
         pp_size=case.pp_size,
@@ -182,30 +703,86 @@ def _direct_mixed_step_fpm_ms(case: EngineStepParityCase) -> float:
         moe_ep_size=case.moe_ep_size,
     )
     model = _quiet_call(get_model, case.model_path, model_config, case.backend_name)
-    estimator = rust_engine_step.RustEngineStepEstimator(
-        json.loads(rust_engine_step._engine_config_json(model, database))
+    backend = get_backend(case.backend_name)
+    runtime_config = config.RuntimeConfig(
+        batch_size=case.batch_size,
+        beam_width=1,
+        isl=case.isl,
+        osl=max(case.osl, 2),
+        prefix=case.prefix,
     )
-    metrics = {
-        "version": 1,
-        "scheduled_requests": {
-            "num_prefill_requests": case.batch_size,
-            "sum_prefill_tokens": case.batch_size * max(case.isl - case.prefix, 0),
-            "sum_prefill_kv_tokens": case.batch_size * case.prefix,
-            "num_decode_requests": case.batch_size,
-            "sum_decode_kv_tokens": case.batch_size * case.isl,
-        },
-    }
-    try:
-        return estimator.forward_pass_time_ms(rust_engine_step._metrics_by_attention_dp_rank(model, metrics))
-    finally:
-        estimator.close()
+    shape = _mix_step_shape(case)
+    latency_ms, _, _, _ = _quiet_call(
+        backend._get_mix_step_latency,
+        model,
+        database,
+        runtime_config,
+        shape["ctx_tokens"],
+        shape["gen_tokens"],
+        shape["isl"],
+        shape["osl"],
+        shape["prefix"],
+    )
+    return float(latency_ms)
 
 
-def _parity_mismatch_reason(comparisons: dict[str, tuple[float, float]]) -> str | None:
+def _rust_mixed_step_ms(case: EngineStepParityCase) -> float:
+    """Rust mix-step latency for the case's mix-step shape (same FPM)."""
+    database = _quiet_call(perf_database.get_database, case.system_name, case.backend_name, case.backend_version)
+    if database is None:
+        raise RuntimeError(
+            f"failed to load perf database for {case.system_name}/{case.backend_name}/{case.backend_version}"
+        )
+    model_config = config.ModelConfig(
+        tp_size=case.tp_size,
+        pp_size=case.pp_size,
+        attention_dp_size=case.attention_dp_size,
+        moe_tp_size=case.moe_tp_size,
+        moe_ep_size=case.moe_ep_size,
+    )
+    model = _quiet_call(get_model, case.model_path, model_config, case.backend_name)
+    shape = _mix_step_shape(case)
+    return rust_engine_step.estimate_mixed_step_latency_with_rust(
+        model,
+        database,
+        ctx_tokens=shape["ctx_tokens"],
+        gen_tokens=shape["gen_tokens"],
+        isl=shape["isl"],
+        osl=shape["osl"],
+        prefix=shape["prefix"],
+    )
+
+
+def _parity_mismatch_reason(
+    comparisons: dict[str, tuple[float | _ErrorSentinel, float | _ErrorSentinel]],
+) -> str | None:
+    """Compare Python and Rust per-metric outputs with three valid pairings:
+
+      - both compute    -> numeric tolerance check
+      - both error      -> pass (error-symmetry contract)
+      - only one errors -> fail with the asymmetric reason
+
+    Returns ``None`` when every metric in `comparisons` matches under
+    one of those rules; otherwise returns a formatted multi-row diff.
+    """
     rows = []
     has_mismatch = False
     metric_width = max([len("metric"), *(len(name) for name in comparisons)])
     for name, (python_value, rust_value) in comparisons.items():
+        py_err = isinstance(python_value, _ErrorSentinel)
+        rs_err = isinstance(rust_value, _ErrorSentinel)
+        if py_err and rs_err:
+            # Both errored — symmetric. Pass.
+            rows.append(f"{name:<{metric_width}} {'ERROR':>10} {'ERROR':>10} {'-':>10} {'-':>10} {'-':>10}    sym")
+            continue
+        if py_err != rs_err:
+            # Asymmetric — one errored, the other didn't.
+            has_mismatch = True
+            py_repr = repr(python_value) if py_err else f"{python_value:.3f}"
+            rs_repr = repr(rust_value) if rs_err else f"{rust_value:.3f}"
+            rows.append(f"{name:<{metric_width}} {py_repr:>10} {rs_repr:>10} {'-':>10} {'-':>10} {'-':>10}  asym")
+            continue
+        # Both compute — apply numeric tolerance.
         allowed = max(abs(python_value) * PARITY_RTOL, 1e-9)
         delta = rust_value - python_value
         delta_pct = delta / abs(python_value) * 100 if python_value else float("inf")
@@ -237,10 +814,14 @@ def _static_comparison_metrics(case: EngineStepParityCase) -> dict[str, tuple[fl
     }
 
 
-def _mixed_step_comparison_metrics(case: EngineStepParityCase) -> dict[str, tuple[float, float]]:
-    python_metrics = _static_metrics(case, engine_step_backend="python", osl=2)
+def _mixed_step_comparison_metrics(
+    case: EngineStepParityCase,
+) -> dict[str, tuple[float | _ErrorSentinel, float | _ErrorSentinel]]:
     return {
-        "mixed_step": (python_metrics["total_ms"], _direct_mixed_step_fpm_ms(case)),
+        "mixed_step": (
+            _safe_value(lambda: _python_mixed_step_ms(case)),
+            _safe_value(lambda: _rust_mixed_step_ms(case)),
+        ),
     }
 
 
@@ -265,12 +846,16 @@ def _disagg_comparison_metrics(case: EngineStepParityCase) -> dict[str, tuple[fl
 
 
 def _prepare_rust_core(monkeypatch: pytest.MonkeyPatch) -> None:
-    if shutil.which("cargo") is None and not rust_engine_step.is_rust_core_available(autobuild=False):
-        pytest.skip("cargo or a prebuilt Rust core shared library is required")
-
-    monkeypatch.setenv("AICONFIGURATOR_RUST_CORE_AUTOBUILD", "1")
-    rust_engine_step._load_library.cache_clear()
-    rust_engine_step._cached_estimator.cache_clear()
+    # Phase 1.5 (E7): the live path is the compiled-engine ``EngineHandle``
+    # (Python builds the ``EngineSpec``, the PyO3 ``aiconfigurator_core``
+    # extension executes it). The legacy ctypes dylib is gone, so the only
+    # requirement is that the maturin-built extension is importable.
+    pytest.importorskip(
+        "aiconfigurator_core",
+        reason="maturin-built aiconfigurator_core extension is required "
+        "(`uv run maturin develop -m rust/aiconfigurator-core/Cargo.toml`)",
+    )
+    rust_engine_step._engine_handle_cache_clear()
 
 
 class TestRustEngineStepStaticParity:
@@ -283,8 +868,7 @@ class TestRustEngineStepStaticParity:
         _prepare_rust_core(monkeypatch)
 
         reason = _parity_mismatch_reason(_static_comparison_metrics(case))
-        if reason:
-            pytest.xfail(reason)
+        assert reason is None, reason
 
 
 class TestRustEngineStepMixedStepParity:
@@ -297,8 +881,7 @@ class TestRustEngineStepMixedStepParity:
         _prepare_rust_core(monkeypatch)
 
         reason = _parity_mismatch_reason(_mixed_step_comparison_metrics(case))
-        if reason:
-            pytest.xfail(reason)
+        assert reason is None, reason
 
 
 class TestRustEngineStepAggParity:
@@ -311,8 +894,7 @@ class TestRustEngineStepAggParity:
         _prepare_rust_core(monkeypatch)
 
         reason = _parity_mismatch_reason(_agg_comparison_metrics(case))
-        if reason:
-            pytest.xfail(reason)
+        assert reason is None, reason
 
 
 class TestRustEngineStepDisaggParity:
@@ -325,5 +907,4 @@ class TestRustEngineStepDisaggParity:
         _prepare_rust_core(monkeypatch)
 
         reason = _parity_mismatch_reason(_disagg_comparison_metrics(case))
-        if reason:
-            pytest.xfail(reason)
+        assert reason is None, reason
