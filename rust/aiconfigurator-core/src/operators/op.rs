@@ -86,7 +86,7 @@ impl Default for RuntimeContext {
 /// `Op::Vision` is part of the shared session path and derives serde with
 /// the rest, but it is **never emitted into a compiled `EngineSpec`**:
 /// `compile_engine` decomposes the vision encoder into its child
-/// `Gemm`/`EncoderAttention`/`Elementwise` ops instead (see the E0 audit).
+/// `Gemm`/`EncoderAttention`/`Elementwise` ops instead.
 /// Production specs therefore never contain a `Vision` variant.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Op {

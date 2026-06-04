@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end embedded round-trip (Phase 1.5 acceptance #2).
+//! End-to-end embedded round-trip.
 //!
 //! Drives the full Rust → Python → Rust embedded build path: calls
 //! [`aiconfigurator_core::build_aic_engine`] for a real fixture model, which

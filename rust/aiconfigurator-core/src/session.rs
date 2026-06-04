@@ -16,7 +16,7 @@ use crate::perf_database::PerfDatabase;
 
 /// Python `_run_context_phase` (`base_backend.py:144`) — one full pass over
 /// the context op list. A free function so the compiled
-/// [`crate::engine::Engine`] (E3) iterates one canonical body over its op list.
+/// [`crate::engine::Engine`] iterates one canonical body over its op list.
 ///
 /// `effective_isl = isl - prefix` is the caller's responsibility (Python
 /// computes it in `_run_context_phase` and `_run_static_breakdown`); this

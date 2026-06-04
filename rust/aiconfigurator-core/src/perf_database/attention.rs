@@ -29,7 +29,7 @@ use std::sync::OnceLock;
 use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
-use crate::interpolation::{interp_2d_1d_grid, Grid3};
+use super::interpolation::{interp_2d_1d_grid, Grid3};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct AttentionTable {

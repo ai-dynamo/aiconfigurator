@@ -162,3 +162,164 @@ def test_configure_data_roots_passes_systems_path_through(tmp_path, monkeypatch)
     monkeypatch.setenv("AICONFIGURATOR_SYSTEMS_PATH", str(systems_root))
     rust_engine_step._configure_default_data_roots()
     assert Path(os.environ["AICONFIGURATOR_SYSTEMS_PATH"]) == systems_root
+
+
+# ---- ForwardPassPerfModel wrapper (PR #1152, re-platformed onto the PyO3 core) ----
+
+
+def test_normalize_tuning_iterations_handles_convenience_forms() -> None:
+    """The wrapper normalizes single FPM / single-iteration / nested inputs to
+    the canonical nested-list shape before marshalling to the Rust core."""
+    single = {"version": 1}
+    assert rust_engine_step._normalize_tuning_iterations(single) == [[single]]
+    # A flat list of FPM dicts is one iteration's per-rank list.
+    assert rust_engine_step._normalize_tuning_iterations([single, single]) == [[single, single]]
+    # An already-nested list passes through.
+    nested = [[single], [single]]
+    assert rust_engine_step._normalize_tuning_iterations(nested) == nested
+    assert rust_engine_step._normalize_tuning_iterations([]) == []
+
+
+def test_forward_pass_perf_model_regression_marshalling(monkeypatch) -> None:
+    """The wrapper marshals FPM dicts to JSON and unwraps the Rust results,
+    without needing a native engine (regression-only fake inner)."""
+    calls = {"estimate": [], "tune": [], "diag": 0}
+
+    class _FakeInner:
+        def estimate_forward_pass_time_ms(self, fpm_json):
+            calls["estimate"].append(json.loads(fpm_json))
+            return None
+
+        def tune_with_fpms(self, iterations_json):
+            calls["tune"].append(json.loads(iterations_json))
+
+        def diagnostics(self):
+            calls["diag"] += 1
+            return json.dumps({"source": "fallback_regression", "readiness": "insufficient_data"})
+
+        def min_correction_factor(self):
+            return None
+
+        def max_correction_factor(self):
+            return None
+
+        def avg_correction_factor(self):
+            return None
+
+    model = rust_engine_step.RustForwardPassPerfModel(_FakeInner())
+
+    single_fpm = {"version": 1, "scheduled_requests": {"num_prefill_requests": 1, "sum_prefill_tokens": 10}}
+    assert model.estimate_forward_pass_time_ms(single_fpm) is None
+    # The single dict is marshalled verbatim (the Rust core accepts a bare obj).
+    assert calls["estimate"][0] == single_fpm
+
+    model.tune_with_fpms(single_fpm)
+    assert calls["tune"][0] == [[single_fpm]]
+
+    model.tune_with_fpms([single_fpm, single_fpm])
+    assert calls["tune"][1] == [[single_fpm, single_fpm]]
+
+    assert model.diagnostics()["source"] == "fallback_regression"
+    assert model.get_min_correction_factor() is None
+
+
+@pytest.mark.integration
+def test_forward_pass_perf_model_native_end_to_end() -> None:
+    """End-to-end native forward-pass model over a real fixture.
+
+    Builds a native model via ``compile_engine`` (crossing into the Rust core),
+    estimates a prefill iteration, then tunes with an observation engineered to
+    drive the correction factor to exactly 2.0 off the model's own native
+    estimate. Requires the compiled ``aiconfigurator_core`` extension.
+    """
+    pytest.importorskip("aiconfigurator_core")
+    from aiconfigurator.sdk.rust_engine_step import RustForwardPassPerfModel
+
+    config = {
+        "schema_version": 1,
+        "model_name": "Qwen/Qwen3-32B",
+        "system_name": "h200_sxm",
+        "backend": "trtllm",
+        "backend_version": "1.3.0rc10",
+        "tp_size": 4,
+        "pp_size": 1,
+        "moe_tp_size": None,
+        "moe_ep_size": None,
+        "attention_dp_size": 1,
+        "weight_dtype": None,
+        "moe_dtype": None,
+        "activation_dtype": None,
+        "kv_cache_dtype": None,
+        "kv_block_size": None,
+        "nextn": None,
+        "nextn_accept_rates": None,
+        "extra": {},
+    }
+    model = RustForwardPassPerfModel.from_native(config, {"min_observations": 2})
+
+    prefill = [
+        {
+            "version": 1,
+            "scheduled_requests": {
+                "num_prefill_requests": 2,
+                "sum_prefill_tokens": 2048,
+                "sum_prefill_kv_tokens": 0,
+            },
+        }
+    ]
+    native_ms = model.estimate_forward_pass_time_ms(prefill)
+    assert native_ms is not None and native_ms > 0.0
+
+    assert model.get_min_correction_factor() is None
+    assert model.diagnostics()["source"] == "aic"
+
+    obs = [
+        {
+            "version": 1,
+            "wall_time": native_ms * 2.0 / 1000.0,
+            "scheduled_requests": {
+                "num_prefill_requests": 2,
+                "sum_prefill_tokens": 2048,
+                "sum_prefill_kv_tokens": 0,
+            },
+        }
+    ]
+    model.tune_with_fpms([obs, obs])
+
+    corrected = model.estimate_forward_pass_time_ms(prefill)
+    assert corrected == pytest.approx(native_ms * 2.0)
+    assert model.get_min_correction_factor() == pytest.approx(2.0)
+    assert model.diagnostics()["source"] == "aic_with_correction"
+
+
+@pytest.mark.integration
+def test_forward_pass_perf_model_best_available_falls_back_on_bad_config() -> None:
+    """``best_available`` falls back to regression when the native engine cannot
+    be compiled (an unknown model), recording the reason in diagnostics."""
+    pytest.importorskip("aiconfigurator_core")
+    from aiconfigurator.sdk.rust_engine_step import RustForwardPassPerfModel
+
+    config = {
+        "schema_version": 1,
+        "model_name": "this/model-does-not-exist-xyz",
+        "system_name": "h200_sxm",
+        "backend": "trtllm",
+        "backend_version": "1.3.0rc10",
+        "tp_size": 1,
+        "pp_size": 1,
+        "moe_tp_size": None,
+        "moe_ep_size": None,
+        "attention_dp_size": 1,
+        "weight_dtype": None,
+        "moe_dtype": None,
+        "activation_dtype": None,
+        "kv_cache_dtype": None,
+        "kv_block_size": None,
+        "nextn": None,
+        "nextn_accept_rates": None,
+        "extra": {},
+    }
+    model = RustForwardPassPerfModel.best_available(config, {"min_observations": 2})
+    diag = model.diagnostics()
+    assert diag["source"] == "fallback_regression"
+    assert diag["last_warning"] is not None

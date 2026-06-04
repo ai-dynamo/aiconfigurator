@@ -20,6 +20,7 @@ pub mod communication;
 pub mod dsa;
 pub mod dsv4;
 pub mod gemm;
+mod interpolation;
 pub mod mhc;
 pub mod mla;
 pub mod moe;

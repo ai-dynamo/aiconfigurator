@@ -117,6 +117,11 @@ features = ["pyo3/extension-module"]
 # templates. (Editable `maturin develop` resolves these in-place from src/;
 # these globs cover the wheel/sdist case mirrored from the old package-data.)
 include = [
+    # maturin auto-packages only the `aiconfigurator_core` package (the one the
+    # extension's module-name lives in). The pure-Python `aiconfigurator`
+    # package is a second top-level package under `src/`, so its modules must be
+    # included explicitly or the non-editable wheel ships without them.
+    "src/aiconfigurator/**/*.py",
     "src/aiconfigurator/cli/*.yaml",
     "src/aiconfigurator/cli/exps/*.yaml",
     "src/aiconfigurator/generator/config/**/*.yaml",

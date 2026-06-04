@@ -5,8 +5,9 @@
 //!
 //! Holds the serializable wire format ([`spec::EngineSpec`]) that Python's
 //! `compile_engine` emits and the Rust runner consumes ([`spec`]), plus the
-//! runtime [`Engine`] (E3) that builds from an `EngineSpec` and executes the
-//! static-inference composition. PyO3 bindings over `Engine` land in E4.
+//! runtime [`Engine`] that builds from an `EngineSpec` and executes the
+//! static-inference composition. PyO3 bindings over `Engine` live in
+//! [`crate::py`].
 
 pub mod runtime;
 pub mod spec;

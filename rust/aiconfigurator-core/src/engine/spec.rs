@@ -3,8 +3,8 @@
 
 //! `EngineSpec`: the serializable engine wire format.
 //!
-//! `EngineSpec` is what Python's `compile_engine` (E5) emits and what the
-//! Rust `Engine` (E3) consumes. It bundles the engine identity
+//! `EngineSpec` is what Python's `compile_engine` emits and what the
+//! Rust `Engine` consumes. It bundles the engine identity
 //! ([`EngineConfig`], needed later to load the matching [`PerfDatabase`]) with
 //! the precompiled context / generation op lists. Each op is an
 //! [`OpSpec`] — a public alias for the crate's [`Op`] enum — and the lists
@@ -13,8 +13,8 @@
 //!
 //! ## Vision is never on the wire
 //!
-//! [`Op::Vision`] derives serde with every other variant (it stays part of
-//! the shared session path until E7), but a compiled `EngineSpec` never
+//! [`Op::Vision`] derives serde with every other variant (it remains part of
+//! the shared session path), but a compiled `EngineSpec` never
 //! contains a `Vision` op: `compile_engine` decomposes the vision encoder
 //! into its child `Gemm` / `EncoderAttention` / `Elementwise` ops, each an
 //! existing variant. The type round-trips soundly (see the test below); the
@@ -28,7 +28,7 @@ use crate::common::error::AicError;
 use crate::{EngineConfig, ENGINE_SPEC_SCHEMA_VERSION};
 
 /// Public name for the serializable op. Aliases the crate's [`Op`] enum so
-/// the plan's "OpSpec" surface exists without duplicating the definition.
+/// the "OpSpec" surface exists without duplicating the definition.
 pub use crate::operators::op::Op as OpSpec;
 
 /// Serializable compiled engine.
@@ -50,7 +50,7 @@ pub use crate::operators::op::Op as OpSpec;
 pub struct EngineSpec {
     pub schema_version: u32,
     /// Engine identity (model / system / backend / parallelism / quant).
-    /// Needed by E3 to locate and load the `PerfDatabase`.
+    /// Needed to locate and load the `PerfDatabase`.
     pub engine: EngineConfig,
     /// Context-phase ops, in execution order. Never contains `OpSpec::Vision`
     /// (decomposed into child ops at compile time).

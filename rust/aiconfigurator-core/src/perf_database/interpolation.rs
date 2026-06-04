@@ -7,7 +7,7 @@
 //! Python module also carries dict-leaf (latency + power + energy) and
 //! topk-piecewise variants; this Rust port covers the scalar latency cases
 //! used by GEMM and the attention/MoE families. The topk-piecewise variants
-//! land in C3c next to the DSA table loader.
+//! are not ported here.
 
 use std::collections::BTreeMap;
 

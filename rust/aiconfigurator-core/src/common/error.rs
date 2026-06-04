@@ -14,12 +14,24 @@ use thiserror::Error;
 /// All errors surfaced by the Rust core.
 #[derive(Debug, Error)]
 pub enum AicError {
+    #[error("unsupported schema version for {kind}: got {got}, expected {expected}")]
+    UnsupportedSchemaVersion {
+        kind: &'static str,
+        got: u32,
+        expected: u32,
+    },
     #[error("invalid engine config: {0}")]
     InvalidEngineConfig(String),
     #[error("engine spec wire-format error: {0}")]
     EngineSpec(String),
+    #[error("invalid forward pass metrics: {0}")]
+    InvalidForwardPassMetrics(String),
+    #[error("unsupported model for Rust core estimator: {0}")]
+    UnsupportedModel(String),
     #[error("failed to find AIC data roots: {0}")]
     DataRoot(String),
+    #[error("model config error: {0}")]
+    ModelConfig(String),
     #[error("perf database error: {0}")]
     PerfDatabase(String),
     #[error("I/O error at {path}: {source}")]

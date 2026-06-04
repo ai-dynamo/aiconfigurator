@@ -10,7 +10,7 @@ and verifies the Rust engine-step backend matches the Python reference within
 tolerance. Results land in a single SQLite file so the run is resumable
 across crashes, SIGINTs, or multi-day wall-clock budgets.
 
-See `rust/aiconfigurator-core/docs/phase1/support-matrix-scan.md` for the full
+See the support-matrix scan design notes in the project docs for the full
 design rationale.
 """
 

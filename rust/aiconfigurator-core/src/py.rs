@@ -1,19 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! PyO3 bindings for the Phase 1.5 compiled-engine core (commit E4).
+//! PyO3 bindings for the compiled-engine core.
 //!
 //! Exposes two call directions over a single PyO3 dependency:
 //!
 //! * **Python → Rust (hot path).** [`AicEngine`] is a `#[pyclass]` wrapping the
-//!   E3 [`Engine`]. Its `#[pymethods]` (`from_spec`, `run_static`,
+//!   [`Engine`]. Its `#[pymethods]` (`from_spec`, `run_static`,
 //!   `predict_prefill_latency`, `predict_decode_latency`, `mixed_step_latency`,
 //!   `decode_step_latency`) are the surface the Python sweep / Mocker bridge
 //!   calls per point. The agg sweep is orchestrated in Python; there is no
 //!   Rust `run_agg`. Each method
 //!   releases the GIL around the Rust compute via [`Python::allow_threads`],
-//!   so the migration's whole point — Rust computing without holding the GIL —
-//!   holds.
+//!   so the Rust compute runs without holding the GIL.
 //! * **Rust → Python → Rust (embedded path).** [`build_aic_engine`] is a plain
 //!   `pub` Rust fn (NOT a `#[pyfunction]`): Rust callers such as the Dynamo
 //!   Mocker call it with flat scalars, it crosses into Python once to run
@@ -34,12 +33,12 @@ use pyo3::prelude::*;
 
 use crate::common::error::AicError;
 use crate::engine::runtime::{Engine, RuntimeConfig, StaticMode, StaticResult, DEFAULT_STATIC_STRIDE};
-use crate::ENGINE_CONFIG_SCHEMA_VERSION;
+use crate::{DataType, EngineConfig, ENGINE_CONFIG_SCHEMA_VERSION};
 
-/// Trivial smoke export retained from E1: returns the engine-config schema
-/// version so callers can confirm the extension built and imported correctly.
+/// Trivial smoke export: returns the engine-config schema version so callers
+/// can confirm the extension built and imported correctly.
 #[pyfunction]
-fn _phase15_smoke() -> u32 {
+fn _build_smoke() -> u32 {
     ENGINE_CONFIG_SCHEMA_VERSION
 }
 
@@ -85,7 +84,7 @@ fn resolve_systems_root(systems_path: Option<&str>) -> PyResult<PathBuf> {
     })
 }
 
-/// PyO3 wrapper around the E3 [`Engine`]: a compiled engine the Python sweep /
+/// PyO3 wrapper around the [`Engine`]: a compiled engine the Python sweep /
 /// Mocker bridge drives per point.
 ///
 /// Holds `Arc<Engine>` (the `Engine` already owns its `Arc<PerfDatabase>`), so
@@ -150,7 +149,7 @@ impl AicEngine {
     /// Python `run_static` / `run_static_latency_only` restricted to the
     /// latency breakdown. Returns `(context_ms, generation_ms, total_ms)`.
     ///
-    /// Positional args mirror Phase 1's `BaseBackend.run_static` runtime shape,
+    /// Positional args mirror the Python `BaseBackend.run_static` runtime shape,
     /// in this exact order: `batch_size, beam_width, isl, osl, prefix,
     /// seq_imbalance_correction_scale, gen_seq_imbalance_correction_scale`
     /// (all seven required), then `mode` (`"static"|"static_ctx"|"static_gen"`,
@@ -273,19 +272,17 @@ fn engine_spec_bincode_from_json(spec_json: &str) -> PyResult<Vec<u8>> {
 /// run `aiconfigurator.sdk.engine.compile_engine`, which walks the model's
 /// op lists and returns bincoded [`EngineSpec`] bytes; it then builds the
 /// [`Engine`] from those bytes (via [`Engine::from_spec_bytes`], which does
-/// `from_bincode` + `PerfDatabase::load` + `Engine::build`). Follows the
-/// plan's "Rust → Python call shape" skeleton (`with_gil → import →
-/// call_method1("compile_engine", ...) → extract::<Vec<u8>>() → build`).
+/// `from_bincode` + `PerfDatabase::load` + `Engine::build`). The call shape is
+/// `with_gil → import → call_method1("compile_engine", ...) →
+/// extract::<Vec<u8>>() → build`.
 ///
-/// The flat arg list matches the E0 `compile_engine` signature decision
-/// (`docs/phase-1.5-opspec-audit.md`). `systems_path` is the Rust-side perf-DB
-/// root (it is also forwarded to `compile_engine` so the two stay aligned).
+/// The flat arg list matches the `compile_engine` signature. `systems_path` is
+/// the Rust-side perf-DB root (it is also forwarded to `compile_engine` so the
+/// two stay aligned).
 ///
-/// **NOT end-to-end testable in E4:** Python's `compile_engine`
-/// (`sdk/engine.py`) does not exist until E5, so any test that calls this is
-/// gated `#[ignore]` ("un-ignore at E5"). The full round-trip validation lands
-/// in E7's `tests/embedded_round_trip.rs`.
-// `pub` and re-exported from `lib.rs` for E5/E7 embedded callers (Mocker,
+/// The full Rust → Python → Rust round-trip is validated end-to-end by
+/// `tests/embedded_round_trip.rs`.
+// `pub` and re-exported from `lib.rs` for embedded callers (the Dynamo Mocker,
 // `tests/embedded_round_trip.rs`).
 #[allow(clippy::too_many_arguments)]
 pub fn build_aic_engine(
@@ -308,6 +305,55 @@ pub fn build_aic_engine(
     kv_block_size: Option<u32>,
     systems_path: Option<&str>,
 ) -> Result<AicEngine, AicError> {
+    let engine = compile_engine_from_flat(
+        model_path,
+        system,
+        backend,
+        backend_version,
+        tp_size,
+        pp_size,
+        attention_dp_size,
+        moe_tp_size,
+        moe_ep_size,
+        gemm_quant_mode,
+        moe_quant_mode,
+        kvcache_quant_mode,
+        fmha_quant_mode,
+        comm_quant_mode,
+        nextn,
+        nextn_accept_rates,
+        kv_block_size,
+        systems_path,
+    )?;
+    Ok(AicEngine::new(engine))
+}
+
+/// Shared `Rust → Python → Rust` compile body: cross into Python once to run
+/// `compile_engine` over flat kwargs, then build an [`Engine`] from the returned
+/// bincode bytes (`from_bincode` + `PerfDatabase::load` + `Engine::build`).
+/// `build_aic_engine` and [`compile_engine_to_engine`] share this so there is
+/// exactly one Python-compile shape.
+#[allow(clippy::too_many_arguments)]
+fn compile_engine_from_flat(
+    model_path: &str,
+    system: &str,
+    backend: &str,
+    backend_version: Option<&str>,
+    tp_size: u32,
+    pp_size: u32,
+    attention_dp_size: u32,
+    moe_tp_size: Option<u32>,
+    moe_ep_size: Option<u32>,
+    gemm_quant_mode: Option<&str>,
+    moe_quant_mode: Option<&str>,
+    kvcache_quant_mode: Option<&str>,
+    fmha_quant_mode: Option<&str>,
+    comm_quant_mode: Option<&str>,
+    nextn: u32,
+    nextn_accept_rates: Option<Vec<f64>>,
+    kv_block_size: Option<u32>,
+    systems_path: Option<&str>,
+) -> Result<Engine, AicError> {
     let spec_bytes: Vec<u8> = Python::with_gil(|py| -> PyResult<Vec<u8>> {
         let engine_mod = py.import("aiconfigurator.sdk.engine")?;
         let kwargs = pyo3::types::PyDict::new(py);
@@ -344,8 +390,237 @@ pub fn build_aic_engine(
                 )
             })?,
     };
-    let engine = Engine::from_spec_bytes(&spec_bytes, systems_root.as_path() as &Path)?;
-    Ok(AicEngine::new(engine))
+    Engine::from_spec_bytes(&spec_bytes, systems_root.as_path() as &Path)
+}
+
+/// Build a compiled [`Engine`] from a modular [`EngineConfig`] (the
+/// `fpm::ForwardPassPerfModel::from_native` entry point). Maps the
+/// config's nested fields onto the flat `compile_engine` kwargs and reuses the
+/// shared [`compile_engine_from_flat`] body.
+///
+/// Quantization: each `DataType` is mapped to the matching backend quant-mode
+/// enum NAME per target field (see [`gemm_quant_name`] etc.). DataTypes with no
+/// valid name in a given target enum (e.g. `float16` for GEMM) map to `None`,
+/// so `compile_engine` auto-infers quant from the model's HF config — which is
+/// the correct behavior for quantized HF model IDs (quant is override-when-
+/// present in `_apply_model_quant_defaults`). `pub(crate)` and called from the
+/// private `fpm` module via `crate::py::compile_engine_to_engine`.
+pub(crate) fn compile_engine_to_engine(
+    config: &EngineConfig,
+    systems_path: Option<&str>,
+) -> Result<Engine, AicError> {
+    let nextn = config
+        .speculative
+        .as_ref()
+        .and_then(|s| s.nextn)
+        .unwrap_or(0);
+    let nextn_accept_rates = config
+        .speculative
+        .as_ref()
+        .and_then(|s| s.nextn_accept_rates.clone());
+
+    compile_engine_from_flat(
+        &config.model_name,
+        &config.system_name,
+        config.backend.as_str(),
+        config.backend_version.as_deref(),
+        config.parallel.tp_size,
+        config.parallel.pp_size,
+        config.parallel.attention_dp_size.unwrap_or(1),
+        config.parallel.moe_tp_size,
+        config.parallel.moe_ep_size,
+        gemm_quant_name(config.quantization.weight_dtype.as_ref()),
+        moe_quant_name(config.quantization.moe_dtype.as_ref()),
+        kvcache_quant_name(config.quantization.kv_cache_dtype.as_ref()),
+        fmha_quant_name(config.quantization.activation_dtype.as_ref()),
+        None, // comm quant is not carried on EngineConfig; let Python default it.
+        nextn,
+        nextn_accept_rates,
+        config.kv_block_size,
+        systems_path,
+    )
+}
+
+/// `DataType` → `GEMMQuantMode` enum name. `None` (auto-infer) for DataTypes
+/// with no GEMM equivalent. Identity for bf16/fp8/fp8_static/fp8_block/nvfp4;
+/// `int8`→`int8_wo`, `int4`→`int4_wo`.
+fn gemm_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
+    match dtype? {
+        DataType::Bfloat16 => Some("bfloat16"),
+        DataType::Fp8 => Some("fp8"),
+        DataType::Fp8Static => Some("fp8_static"),
+        DataType::Fp8Block => Some("fp8_block"),
+        DataType::Nvfp4 => Some("nvfp4"),
+        DataType::Int8 => Some("int8_wo"),
+        DataType::Int4 => Some("int4_wo"),
+        // float16, w4afp8, w4a16_mxfp4, w4a8_mxfp4_mxfp8 have no GEMM enum name.
+        _ => None,
+    }
+}
+
+/// `DataType` → `MoEQuantMode` enum name. `None` for unmapped.
+fn moe_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
+    match dtype? {
+        DataType::Bfloat16 => Some("bfloat16"),
+        DataType::Fp8 => Some("fp8"),
+        DataType::Fp8Block => Some("fp8_block"),
+        DataType::Nvfp4 => Some("nvfp4"),
+        DataType::Int4 => Some("int4_wo"),
+        DataType::W4afp8 => Some("w4afp8"),
+        DataType::W4a16Mxfp4 => Some("w4a16_mxfp4"),
+        DataType::W4a8Mxfp4Mxfp8 => Some("w4a8_mxfp4_mxfp8"),
+        _ => None,
+    }
+}
+
+/// `DataType` → `FMHAQuantMode` enum name. Only bf16/fp8/fp8_block exist.
+fn fmha_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
+    match dtype? {
+        DataType::Bfloat16 => Some("bfloat16"),
+        DataType::Fp8 => Some("fp8"),
+        DataType::Fp8Block => Some("fp8_block"),
+        _ => None,
+    }
+}
+
+/// `DataType` → `KVCacheQuantMode` enum name. Only bf16/int8/fp8 exist.
+fn kvcache_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
+    match dtype? {
+        DataType::Bfloat16 => Some("bfloat16"),
+        DataType::Int8 => Some("int8"),
+        DataType::Fp8 => Some("fp8"),
+        _ => None,
+    }
+}
+
+/// PyO3 wrapper around [`crate::ForwardPassPerfModel`] (PR #1152), the
+/// forward-pass latency model with online correction + regression fallback.
+///
+/// The hot path (`estimate_forward_pass_time_ms` / `tune_with_fpms`) is pure
+/// Rust over the embedded [`Engine`] with NO Python re-entry — the GIL is
+/// released via [`Python::allow_threads`] around each compute. Only the
+/// constructors (`from_native` / `best_available`) cross into Python once to
+/// compile the model (`compile_engine`); that crossing re-acquires the GIL via
+/// `with_gil`, which is re-entrant, so calling it from inside a `#[pymethod]`
+/// staticmethod is fine.
+///
+/// Constructors take the engine config + options as JSON strings (the same
+/// marshalling the Python `RustForwardPassPerfModel` wrapper used to pass over
+/// ctypes), so the Python wrapper's public surface is unchanged.
+#[pyclass(name = "RustForwardPassPerfModel")]
+pub struct PyForwardPassPerfModel {
+    inner: crate::ForwardPassPerfModel,
+}
+
+/// Parse the optional options JSON into [`ForwardPassPerfOptions`], defaulting
+/// when `None`/empty. Serde fills missing fields from the per-field defaults.
+fn parse_fpm_options(options_json: Option<&str>) -> PyResult<crate::ForwardPassPerfOptions> {
+    match options_json {
+        None => Ok(crate::ForwardPassPerfOptions::default()),
+        Some(s) if s.trim().is_empty() => Ok(crate::ForwardPassPerfOptions::default()),
+        Some(s) => serde_json::from_str(s)
+            .map_err(|e| PyValueError::new_err(format!("invalid options JSON: {e}"))),
+    }
+}
+
+/// Parse an FPM payload JSON into one iteration's per-rank list. Accepts either
+/// a single FPM object or a JSON array of FPM objects (the wrapper's
+/// single-rank convenience form). Matches the old ctypes marshalling.
+fn parse_fpm_iteration(fpm_json: &str) -> PyResult<Vec<crate::ForwardPassMetrics>> {
+    let value: serde_json::Value = serde_json::from_str(fpm_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid FPM JSON: {e}")))?;
+    let metrics: Vec<crate::ForwardPassMetrics> = if value.is_array() {
+        serde_json::from_value(value)
+    } else {
+        serde_json::from_value(value).map(|m| vec![m])
+    }
+    .map_err(|e| PyValueError::new_err(format!("invalid FPM payload: {e}")))?;
+    Ok(metrics)
+}
+
+#[pymethods]
+impl PyForwardPassPerfModel {
+    /// `RustForwardPassPerfModel.from_native(config_json, options_json=None)`:
+    /// strict native AIC model. Compiles the engine via Python `compile_engine`;
+    /// raises if the config cannot be compiled.
+    #[staticmethod]
+    #[pyo3(signature = (config_json, options_json=None))]
+    fn from_native(config_json: &str, options_json: Option<&str>) -> PyResult<Self> {
+        let config: EngineConfig = serde_json::from_str(config_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid engine config JSON: {e}")))?;
+        let options = parse_fpm_options(options_json)?;
+        let inner =
+            crate::ForwardPassPerfModel::from_native(config, options).map_err(aic_to_py)?;
+        Ok(Self { inner })
+    }
+
+    /// `RustForwardPassPerfModel.best_available(config_json, options_json=None)`:
+    /// native when possible, else regression fallback (reason in
+    /// `diagnostics()["last_warning"]`).
+    #[staticmethod]
+    #[pyo3(signature = (config_json, options_json=None))]
+    fn best_available(config_json: &str, options_json: Option<&str>) -> PyResult<Self> {
+        let config: EngineConfig = serde_json::from_str(config_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid engine config JSON: {e}")))?;
+        let options = parse_fpm_options(options_json)?;
+        let inner =
+            crate::ForwardPassPerfModel::best_available(config, options).map_err(aic_to_py)?;
+        Ok(Self { inner })
+    }
+
+    /// `RustForwardPassPerfModel.from_regression(options_json=None)`:
+    /// regression-only model (no native engine, no Python compile).
+    #[staticmethod]
+    #[pyo3(signature = (options_json=None))]
+    fn from_regression(options_json: Option<&str>) -> PyResult<Self> {
+        let options = parse_fpm_options(options_json)?;
+        let inner = crate::ForwardPassPerfModel::from_regression(options).map_err(aic_to_py)?;
+        Ok(Self { inner })
+    }
+
+    /// Estimate one forward-pass iteration in ms. `fpm_json` is one iteration as
+    /// a single FPM object or a per-attention-DP-rank array. Returns `None` for
+    /// regression models without enough data yet. Pure-Rust compute (GIL freed).
+    fn estimate_forward_pass_time_ms(
+        &self,
+        py: Python<'_>,
+        fpm_json: &str,
+    ) -> PyResult<Option<f64>> {
+        let metrics = parse_fpm_iteration(fpm_json)?;
+        py.allow_threads(|| self.inner.estimate_forward_pass_time_ms(&metrics))
+            .map_err(aic_to_py)
+    }
+
+    /// Tune from observed FPM iterations. `iterations_json` is the nested list
+    /// `[[iter0_rank0, ...], [iter1_rank0, ...]]` (the wrapper normalizes the
+    /// convenience forms before calling). Pure-Rust compute (GIL freed).
+    fn tune_with_fpms(&mut self, py: Python<'_>, iterations_json: &str) -> PyResult<()> {
+        let iterations: Vec<Vec<crate::ForwardPassMetrics>> = serde_json::from_str(iterations_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid tuning iterations JSON: {e}")))?;
+        py.allow_threads(|| self.inner.tune_with_fpms(&iterations))
+            .map_err(aic_to_py)
+    }
+
+    /// Diagnostics (source / readiness / retained count / warning) as JSON.
+    fn diagnostics(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner.diagnostics())
+            .map_err(|e| PyValueError::new_err(format!("diagnostics serialize: {e}")))
+    }
+
+    /// Smallest ready native correction factor; `None` until a bucket is ready.
+    fn min_correction_factor(&self) -> Option<f64> {
+        self.inner.min_correction_factor()
+    }
+
+    /// Largest ready native correction factor; `None` until a bucket is ready.
+    fn max_correction_factor(&self) -> Option<f64> {
+        self.inner.max_correction_factor()
+    }
+
+    /// Mean ready native correction factor; `None` until a bucket is ready.
+    fn avg_correction_factor(&self) -> Option<f64> {
+        self.inner.avg_correction_factor()
+    }
 }
 
 /// The compiled extension module `aiconfigurator_core._aiconfigurator_core`.
@@ -363,9 +638,10 @@ pub fn build_aic_engine(
 /// entry point for embedded callers, not part of the Python surface.
 #[pymodule]
 fn _aiconfigurator_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(_phase15_smoke, m)?)?;
+    m.add_function(wrap_pyfunction!(_build_smoke, m)?)?;
     m.add_function(wrap_pyfunction!(engine_spec_bincode_from_json, m)?)?;
     m.add_class::<AicEngine>()?;
+    m.add_class::<PyForwardPassPerfModel>()?;
     Ok(())
 }
 
@@ -472,10 +748,9 @@ mod tests {
         }
     }
 
-    /// Build bincoded `EngineSpec` bytes from hand-built op lists (the model
-    /// layer that previously sourced them was deleted in E7). The lists query
-    /// the real b200_sxm/vllm/0.19.0 perf tables so the binding pass-through
-    /// numbers are real, not synthetic.
+    /// Build bincoded `EngineSpec` bytes from hand-built op lists. The lists
+    /// query the real b200_sxm/vllm/0.19.0 perf tables so the binding
+    /// pass-through numbers are real, not synthetic.
     fn fixture_spec_bytes() -> Vec<u8> {
         let spec = EngineSpec::new(fixture_engine_config(), context_ops(), generation_ops());
         spec.to_bincode().unwrap()

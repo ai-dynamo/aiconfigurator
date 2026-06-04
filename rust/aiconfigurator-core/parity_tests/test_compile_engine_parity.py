@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""E5 pre-validation: the NEW ``compile_engine`` + ``EngineHandle`` path.
+"""Parity for the ``compile_engine`` + ``EngineHandle`` path.
 
 Two surfaces:
 
@@ -11,15 +11,13 @@ Two surfaces:
    match the model's actual ``context_ops`` / ``generation_ops``. This is where
    a misnamed field or a wrong phase-pair tag would surface loudly.
 
-2. **Integration pre-validation (the de-risker).** For a smoke subset of the
-   existing ``EngineStepParityCase``s — spanning all three backends (vllm +
-   sglang + trtllm) so backend-specific op-transfer divergences (the
-   ``MoEDispatch`` flavor split, trtllm comm quant, the SGLang/TRT-LLM
-   Fallback-MLA chain) are validated here rather than surfacing in E6 — compare
-   the NEW path against Python's ``BaseBackend`` reference for static_ctx,
-   static_gen, mixed-step, and decode-step within ``PARITY_RTOL``. This moves
-   the E6 gate early — E5 must NOT rewire the live ctypes path, so this test
-   exercises ``compile_engine`` / ``EngineHandle`` directly.
+2. **Integration parity.** For a smoke subset of the existing
+   ``EngineStepParityCase``s — spanning all three backends (vllm + sglang +
+   trtllm) so backend-specific op-transfer divergences (the ``MoEDispatch``
+   flavor split, trtllm comm quant, the SGLang/TRT-LLM Fallback-MLA chain) are
+   covered — compare the compiled-engine path against Python's ``BaseBackend``
+   reference for static_ctx, static_gen, mixed-step, and decode-step within
+   ``PARITY_RTOL``, exercising ``compile_engine`` / ``EngineHandle`` directly.
 
 These tests require the maturin-built ``aiconfigurator_core`` extension.
 """
@@ -44,12 +42,12 @@ from aiconfigurator.sdk.models import get_model
 pytestmark = pytest.mark.integration
 
 
-# The pre-validation subset deliberately spans ALL THREE backends. E6 flips the
-# live path and re-runs the full `test_engine_step_parity.py` harness over
-# vllm + sglang + trtllm; validating only vllm here would leave backend-specific
-# op-transfer fidelity bugs (e.g. the `MoEDispatch` flavor split — trtllm emits
-# `TrtllmAlltoall`, sglang/vllm emit `CustomAllReduce` — trtllm comm quant, and
-# the SGLang/TRT-LLM-only Fallback-MLA chain) to surface as a tangle in E6.
+# The subset deliberately spans ALL THREE backends. The full
+# `test_engine_step_parity.py` harness runs over vllm + sglang + trtllm;
+# validating only vllm here would leave backend-specific op-transfer fidelity
+# bugs (e.g. the `MoEDispatch` flavor split — trtllm emits `TrtllmAlltoall`,
+# sglang/vllm emit `CustomAllReduce` — trtllm comm quant, and the
+# SGLang/TRT-LLM-only Fallback-MLA chain) uncovered here.
 #
 # Cases drawn straight from `SMOKE_CASES` so this tracks the same matrix. All
 # compute (no error-symmetry cases), so every surface yields a real number.
@@ -90,8 +88,8 @@ _SUBSET_CASES = [_SUBSET_BY_ID[cid] for ids in _SUBSET_IDS_BY_BACKEND.values() f
 
 # --------------------------------------------------------------------------- #
 # Per-backend max-rtol collector. `_assert_within` only emits numbers on
-# failure, but reporting the observed worst-case drift per backend is an
-# explicit E5 deliverable. Each surface check records its observed rtol here;
+# failure; reporting the observed worst-case drift per backend is useful for
+# tracking parity. Each surface check records its observed rtol here;
 # a session-scoped fixture prints the per-backend maxima at teardown (visible
 # under `pytest -s` / `-rP`).
 # --------------------------------------------------------------------------- #
@@ -336,10 +334,10 @@ class TestCompileEngineDecodeStepParity:
 class TestDeterminism:
     @pytest.mark.parametrize("case", _SUBSET_CASES[:2])
     def test_run_static_deterministic(self, case: EngineStepParityCase) -> None:
-        # The actual RAYON_NUM_THREADS sweep is driven by the test runner (the
-        # E5 instructions run this file with =1 and =8). Within a single process
-        # we still assert repeated calls are bit-identical (pure per-call
-        # execution, no cross-call state).
+        # The actual RAYON_NUM_THREADS sweep is driven by the test runner (run
+        # this file with =1 and =8). Within a single process we still assert
+        # repeated calls are bit-identical (pure per-call execution, no
+        # cross-call state).
         handle = _compile_handle(case)
         a = handle.run_static(batch_size=case.batch_size, isl=case.isl, osl=max(case.osl, 2), stride=1)
         b = handle.run_static(batch_size=case.batch_size, isl=case.isl, osl=max(case.osl, 2), stride=1)

@@ -27,8 +27,7 @@ thiserror = "2.0"
 # `[tool.maturin] features = ["pyo3/extension-module"]` in pyproject.toml).
 # It must NEVER be a default feature: `cargo build`/`cargo test` link
 # libpython (via `auto-initialize`) for the Rust->Python embedding path,
-# while the maturin-built `.so` skips libpython linkage. See the
-# Phase 1.5 execution plan, "Build-system transition".
+# while the maturin-built `.so` skips libpython linkage.
 default = []
 
 [dev-dependencies]

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! `Engine`: the compiled-spec execution core (E3).
+//! `Engine`: the compiled-spec execution core.
 //!
 //! Mirrors `aiconfigurator.sdk.backends.base_backend`'s static orchestration
 //! (`run_static` / `run_static_latency_only` / `_run_static_breakdown` /
@@ -11,9 +11,9 @@
 //! ([`run_context_ops`] / [`run_generation_ops_step`]); the `Engine` wraps the
 //! stride quadrature and the `(nextn + 1)` decode-batch multiplier around it.
 //!
-//! E3 is pure-Rust internals. PyO3 bindings (`run_static`,
+//! The `Engine` is pure-Rust internals; its PyO3 bindings (`run_static`,
 //! `predict_*_latency`, `mixed_step_latency`, `decode_step_latency`,
-//! `build_aic_engine`) land in E4/E5. The agg sweep is orchestrated in
+//! `build_aic_engine`) live in [`crate::py`]. The agg sweep is orchestrated in
 //! Python — there is no Rust `run_agg`.
 
 use std::sync::Arc;
@@ -22,14 +22,15 @@ use crate::common::error::AicError;
 use crate::engine::spec::EngineSpec;
 use crate::operators::Op;
 use crate::perf_database::PerfDatabase;
-use crate::session::{run_context_ops, run_generation_ops_step};
+use crate::session::{get_mix_step_ops, run_context_ops, run_generation_ops_step};
+use crate::{validate_forward_pass_metrics, ForwardPassMetrics};
 
-/// Per-call runtime inputs. Field-for-field mirror of Phase 1's
-/// `sdk/config.RuntimeConfig` (and the plan's `RuntimeConfig`).
+/// Per-call runtime inputs. Field-for-field mirror of the Python
+/// `sdk/config.RuntimeConfig`.
 ///
-/// E3 only consumes the fields the static composition reads (`batch_size`,
+/// Only the fields the static composition reads are consumed (`batch_size`,
 /// `beam_width`, `isl`, `osl`, `prefix`). The two imbalance-correction scales
-/// are carried for E4 wire parity but are not yet threaded into the op
+/// are carried for wire parity but are not yet threaded into the op
 /// queries (the live FPM path hard-codes them to 1.0; see
 /// `session::run_context_ops`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,9 +77,9 @@ pub enum StaticMode {
 
 /// Result of [`Engine::run_static`]. Mirrors the latency portion of Python's
 /// `run_static_latency_only` (`base_backend.py:322`): per-phase latency plus
-/// the total. The latencies are **pre-`latency_correction_scale`** — the plan
-/// intentionally drops that param from the `run_static(runtime, mode, stride)`
-/// signature; it is a flat post-multiply the Python bridge applies at E6.
+/// the total. The latencies are **pre-`latency_correction_scale`** — that param
+/// is intentionally dropped from the `run_static(runtime, mode, stride)`
+/// signature; it is a flat post-multiply the Python bridge applies downstream.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaticResult {
     /// Context-phase latency in ms (0.0 for `StaticMode::Generation`).
@@ -105,7 +106,7 @@ pub struct Engine {
     context_ops: Vec<Op>,
     /// Generation-phase ops in execution order (from `spec.generation_ops`).
     generation_ops: Vec<Op>,
-    /// Loaded perf database. `Arc` so the E4 `AicEngine` can share it with the
+    /// Loaded perf database. `Arc` so the `AicEngine` can share it with the
     /// capacity API; free fns take `&PerfDatabase`, so deref works either way.
     db: Arc<PerfDatabase>,
     /// MTP speculative-decoding depth. The decode batch is scaled by
@@ -128,7 +129,7 @@ impl Engine {
     /// Build an `Engine` from a spec and a pre-loaded database.
     ///
     /// Extracts the op lists and the `nextn` scalar from `spec.engine`. The
-    /// caller (E4 `build_aic_engine` / `from_spec_bytes`) is responsible for
+    /// caller (`build_aic_engine` / `from_spec_bytes`) is responsible for
     /// having loaded the matching `PerfDatabase` from `spec.engine`'s identity.
     pub fn build(spec: EngineSpec, db: Arc<PerfDatabase>) -> Result<Engine, AicError> {
         let nextn = spec
@@ -148,7 +149,7 @@ impl Engine {
     /// Convenience constructor: deserialize a bincode `EngineSpec` and load the
     /// matching `PerfDatabase` from its identity, then [`Engine::build`].
     ///
-    /// Mirrors the plan's `Engine::from_spec_bytes(bytes) + PerfDatabase::load`
+    /// Runs the `Engine::from_spec_bytes(bytes) + PerfDatabase::load`
     /// flow. `systems_root` points at `src/aiconfigurator/systems` (callers
     /// that have a `systems_path` override on `spec.engine` should pass it).
     pub fn from_spec_bytes(bytes: &[u8], systems_root: &std::path::Path) -> Result<Engine, AicError> {
@@ -170,6 +171,21 @@ impl Engine {
     /// Shared perf database handle.
     pub fn database(&self) -> &Arc<PerfDatabase> {
         &self.db
+    }
+
+    /// Test-only accessor for the context op list (the field is private, but
+    /// `fpm`'s `#[cfg(test)]` parity tests compare `forward_pass_time_ms`
+    /// against the shared session free fns over these exact ops).
+    #[cfg(test)]
+    pub(crate) fn context_ops_for_test(&self) -> &[Op] {
+        &self.context_ops
+    }
+
+    /// Test-only accessor for the generation op list. See
+    /// [`Self::context_ops_for_test`].
+    #[cfg(test)]
+    pub(crate) fn generation_ops_for_test(&self) -> &[Op] {
+        &self.generation_ops
     }
 
     /// Python `run_static` / `run_static_latency_only` (`base_backend.py:347`,
@@ -379,6 +395,104 @@ impl Engine {
         let effective_batch = gen_tokens * (self.nextn + 1);
         let context_length = isl.max(1) + osl.max(1) / 2;
         run_generation_ops_step(&self.generation_ops, &self.db, effective_batch, context_length)
+    }
+
+    /// Compute one forward-pass latency from a list of per-rank FPM entries.
+    ///
+    /// Re-platformed from the (deleted) `SessionEstimator::forward_pass_time_ms`
+    /// (commit 520dcfff `session.rs:289`): validate every rank, dispatch each
+    /// rank on its scheduled workload via [`Self::rank_latency_ms`], and take the
+    /// max across ranks (attention-DP ranks run in lockstep, so the slowest rank
+    /// gates the iteration).
+    ///
+    /// Unlike [`Self::mixed_step_latency`] / [`Self::decode_step_latency`], this
+    /// consumes ALREADY-PACKED telemetry: the FPM fields are the observed
+    /// per-iteration counts, so the `(nextn + 1)` MTP multiplier is NOT applied
+    /// here (it is already baked into the scheduled-decode counts the engine
+    /// emitted). The dispatch reuses the shared [`run_context_ops`] /
+    /// [`run_generation_ops_step`] / [`get_mix_step_ops`] free fns so this path
+    /// and the live engine-step path stay numerically identical.
+    pub fn forward_pass_time_ms(
+        &self,
+        metrics_by_rank: &[ForwardPassMetrics],
+    ) -> Result<f64, AicError> {
+        if metrics_by_rank.is_empty() {
+            return Err(AicError::InvalidForwardPassMetrics(
+                "at least one attention-DP rank metric required".to_string(),
+            ));
+        }
+        for metrics in metrics_by_rank {
+            validate_forward_pass_metrics(metrics)?;
+        }
+        let mut max_latency = 0.0_f64;
+        for metrics in metrics_by_rank {
+            let rank_latency = self.rank_latency_ms(metrics)?;
+            if rank_latency > max_latency {
+                max_latency = rank_latency;
+            }
+        }
+        Ok(max_latency)
+    }
+
+    /// Dispatch one rank's FPM on its scheduled workload. Literal port of
+    /// `SessionEstimator::rank_latency_ms` (520dcfff `session.rs:308`):
+    /// prefill+decode -> mix step ([`get_mix_step_ops`]); prefill-only ->
+    /// [`run_context_ops`]; decode-only -> [`run_generation_ops_step`]. The FPM
+    /// counts pass through unscaled (no `nextn` multiplier — see
+    /// [`Self::forward_pass_time_ms`]).
+    fn rank_latency_ms(&self, metrics: &ForwardPassMetrics) -> Result<f64, AicError> {
+        let sched = &metrics.scheduled_requests;
+        let has_prefill = sched.num_prefill_requests > 0;
+        let has_decode = sched.num_decode_requests > 0;
+
+        if has_prefill && has_decode {
+            // Mix step (continuous batching): compose like Python's
+            // `_get_mix_step_latency`. `sum_prefill_kv_tokens` is exactly the
+            // combined-prefix value the pass-1 non-attention call needs; pass
+            // it through unchanged.
+            let n_prefill = sched.num_prefill_requests.max(1);
+            let new_tokens_per_req = sched.sum_prefill_tokens / n_prefill;
+            let prefix_per_req = sched.sum_prefill_kv_tokens / n_prefill;
+            let n_decode = sched.num_decode_requests.max(1);
+            let kv_per_req = sched.sum_decode_kv_tokens / n_decode;
+            let ctx_tokens = sched.sum_prefill_tokens;
+            let gen_tokens = sched.num_decode_requests;
+            return get_mix_step_ops(
+                &self.context_ops,
+                &self.generation_ops,
+                &self.db,
+                ctx_tokens,
+                gen_tokens,
+                new_tokens_per_req.max(1),
+                prefix_per_req,
+                sched.sum_prefill_kv_tokens,
+                kv_per_req,
+                n_decode,
+            );
+        }
+
+        let mut total = 0.0_f64;
+
+        if has_prefill {
+            let n_prefill = sched.num_prefill_requests.max(1);
+            let new_tokens_per_req = sched.sum_prefill_tokens / n_prefill;
+            let prefix_per_req = sched.sum_prefill_kv_tokens / n_prefill;
+            total += run_context_ops(
+                &self.context_ops,
+                &self.db,
+                n_prefill,
+                new_tokens_per_req,
+                prefix_per_req,
+            )?;
+        }
+
+        if has_decode {
+            let n_decode = sched.num_decode_requests.max(1);
+            let kv_per_req = sched.sum_decode_kv_tokens / n_decode;
+            total += run_generation_ops_step(&self.generation_ops, &self.db, n_decode, kv_per_req)?;
+        }
+
+        Ok(total)
     }
 }
 

@@ -1,15 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Phase 1.5 compiled-engine builder (commit E5).
+"""Compiled-engine builder.
 
 This module is the Python half of the "Python builds, Rust executes"
 architecture. ``compile_engine`` reuses the existing, unmodified Python model
 layer (``sdk/models/*.py``) to build a model, walks its
 ``context_ops`` / ``generation_ops`` lists, converts each ``Operation`` to the
-plain-data ``OpSpec`` wire form (per the E0 audit field-mapping table), and
-ships the whole thing across the boundary as a bincode-serialised
-``EngineSpec``.
+plain-data ``OpSpec`` wire form, and ships the whole thing across the boundary
+as a bincode-serialised ``EngineSpec``.
 
 The wire is shaped in two hops:
 
@@ -29,9 +28,7 @@ per-call surface (``run_static`` / ``predict_*_latency`` / ``mixed_step_latency`
 / ``decode_step_latency``). The agg sweep is orchestrated in Python, so there is
 no ``run_agg`` here.
 
-This is the standalone NEW path; E6 rewires the live ``rust_engine_step.py``
-helpers onto it. E5 builds and pre-validates it without touching the ctypes
-path.
+The live ``rust_engine_step.py`` helpers build on this path.
 """
 
 from __future__ import annotations
@@ -99,8 +96,8 @@ class OpConversionError(RuntimeError):
 #
 # Each helper returns the inner field dict (Rust struct field names). The
 # dispatch table below wraps it in `{"<VariantTag>": <fields>}`. All values
-# read directly off the Python instance attributes (the E0 audit certifies
-# every field is a build-time instance attr); the few cat-2 derived fields
+# read directly off the Python instance attributes (every field is a
+# build-time instance attr); the few cat-2 derived fields
 # (Elementwise.bytes_per_token, DSv4.attn_kind, MoeDispatch.flavor,
 # WideEpMoe.kernel_source) replicate the Rust model-builder derivation.
 # --------------------------------------------------------------------------- #
@@ -252,7 +249,7 @@ def _dispatch_flavor(backend: str) -> str:
     rename, so emit the exact Rust variant name. The fine SGLang-DeepEP /
     NVL72 gating stays inside the Rust `MoEDispatchOp::query`.
 
-    KNOWN LIMITATION (WideEP / DeepEP, out of scope for E5): this binary
+    KNOWN LIMITATION (WideEP / DeepEP, out of scope): this binary
     `trtllm -> TrtllmAlltoall, else -> CustomAllReduce` mapping is correct for
     the standard (non-WideEP) MoE path that the gated parity harness
     (`test_engine_step_parity.py`) and `cli_estimate` exercise. It does NOT emit
@@ -427,8 +424,8 @@ def _wideep_generation_mla(op: WideEPGenerationMLA) -> dict:
 
 def _wideep_moe(op: TrtLLMWideEPMoE, *, database: Any) -> dict:
     # `kernel_source` is resolved in Python `_select_kernel(database, quant)` at
-    # query time. Pre-bake the resolved value (E0 audit recommendation) so the
-    # Rust side doesn't rely on its hardcoded default + table-presence fallback.
+    # query time. Pre-bake the resolved value so the Rust side doesn't rely on
+    # its hardcoded default + table-presence fallback.
     kernel_source = "moe_torch_flow"
     if database is not None:
         try:

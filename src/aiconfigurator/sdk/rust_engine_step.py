@@ -3,9 +3,8 @@
 
 """Thin facade over the compiled Rust engine (``aiconfigurator_core``).
 
-Phase 1.5 (E7): the legacy ctypes JSON FFI path (``RustEngineStepEstimator`` /
-``RustForwardPassPerfModel`` over ``libaiconfigurator_core``) is gone. The only
-supported path is "Python builds, Rust executes": ``sdk.engine.compile_engine``
+The only supported path is "Python builds, Rust executes":
+``sdk.engine.compile_engine``
 walks the model once and emits a bincoded ``EngineSpec``; an ``EngineHandle``
 wraps the bytes plus a PyO3 ``AicEngine`` and runs the static / per-step
 composition pure-Rust. The helpers here map ``RuntimeConfig`` / raw step args
@@ -23,6 +22,201 @@ from typing import Any
 from aiconfigurator.sdk.config import RuntimeConfig
 
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
+
+
+class RustForwardPassPerfModel:
+    """Facade over the compiled Rust forward-pass perf model (PR #1152).
+
+    Built on the PyO3 ``aiconfigurator_core`` extension (the compiled
+    ``Engine``). The public class name and method signatures match PR #1152 so
+    callers (the Dynamo planner / mocker) are unaffected; FPM inputs are passed
+    as Python dictionaries and marshalled to JSON for the Rust boundary.
+
+    This wrapper is forward-pass-level only. It does not model TTFT, ITL, SLA,
+    queueing, or engine limits. ``estimate_forward_pass_time_ms()`` takes one
+    iteration as a list of FPM dictionaries, one per attention-DP rank. Single
+    rank callers may pass either one FPM dictionary or a one-element list.
+
+    The Rust model infers the workload kind from each iteration's scheduled FPM
+    fields:
+
+    * prefill: scheduled prefill tokens and no scheduled decode work, using
+      ``[sum_prefill_tokens]``
+    * decode: scheduled decode work and no scheduled prefill tokens, using
+      ``[num_decode_requests, sum_decode_kv_tokens]``
+    * mixed/agg: both scheduled prefill and decode work, using
+      ``[sum_prefill_tokens, sum_decode_kv_tokens]``
+    * empty: no scheduled prefill or decode work, estimates ``0.0`` and is not
+      used for tuning
+
+    Queued request fields are accepted for schema compatibility but ignored by
+    this AIC forward-pass model. ``estimate_forward_pass_time_ms()`` treats FPM
+    as a workload descriptor: scheduled request fields are used, while
+    ``wall_time`` is ignored. ``tune_with_fpms()`` treats FPM as observed
+    telemetry: scheduled request fields are used as features and positive
+    ``wall_time`` is the latency target. For tuning, ``tune_with_fpms()`` accepts
+    multiple iterations as ``[[iter0_rank0, iter0_rank1], [iter1_rank0,
+    iter1_rank1]]``. Each iteration is merged using max-rank load features and
+    max positive ``wall_time`` across ranks.
+
+    Correction grids use fixed constructor-time ranges from ``options``:
+    ``max_num_tokens`` bounds ``sum_prefill_tokens`` and defaults to ``8192``,
+    ``max_batch_size`` bounds ``num_decode_requests`` and defaults to ``512``,
+    and ``max_kv_tokens`` bounds ``sum_decode_kv_tokens`` and defaults to
+    ``2000000``.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    @classmethod
+    def from_native(
+        cls,
+        config: dict[str, Any],
+        options: dict[str, Any] | None = None,
+    ) -> RustForwardPassPerfModel:
+        """API: ``RustForwardPassPerfModel.from_native(config, options=None)``.
+
+        Description: create a strict native AIC forward-pass model.
+
+        Crosses into the Rust core, which compiles ``config`` via
+        ``aiconfigurator.sdk.engine.compile_engine``. Raises if the config is
+        unsupported by the native estimator. Use ``best_available()`` when
+        unsupported configs should fall back to the learned regression model.
+        """
+        _configure_default_data_roots()
+        import aiconfigurator_core
+
+        inner = aiconfigurator_core.RustForwardPassPerfModel.from_native(
+            _json_dumps(config),
+            _optional_json_dumps(options),
+        )
+        return cls(inner)
+
+    @classmethod
+    def best_available(
+        cls,
+        config: dict[str, Any],
+        options: dict[str, Any] | None = None,
+    ) -> RustForwardPassPerfModel:
+        """API: ``RustForwardPassPerfModel.best_available(config, options=None)``.
+
+        Description: create a native model when possible, otherwise fall back to
+        regression. Fallback reason is available from
+        ``diagnostics()["last_warning"]``.
+        """
+        _configure_default_data_roots()
+        import aiconfigurator_core
+
+        inner = aiconfigurator_core.RustForwardPassPerfModel.best_available(
+            _json_dumps(config),
+            _optional_json_dumps(options),
+        )
+        return cls(inner)
+
+    @classmethod
+    def from_regression(
+        cls,
+        options: dict[str, Any] | None = None,
+    ) -> RustForwardPassPerfModel:
+        """API: ``RustForwardPassPerfModel.from_regression(options=None)``.
+
+        Description: create a regression-only forward-pass model. Regression
+        models return ``None`` for non-empty estimates until enough samples have
+        been provided for the inferred workload kind through
+        ``tune_with_fpms()``. Correction factor getters return ``None`` in this
+        mode.
+        """
+        _configure_default_data_roots()
+        import aiconfigurator_core
+
+        inner = aiconfigurator_core.RustForwardPassPerfModel.from_regression(
+            _optional_json_dumps(options),
+        )
+        return cls(inner)
+
+    def estimate_forward_pass_time_ms(self, metrics: dict[str, Any] | list[dict[str, Any]]) -> float | None:
+        """API: ``model.estimate_forward_pass_time_ms(metrics) -> float | None``.
+
+        Description: estimate one forward-pass iteration in milliseconds.
+
+        ``metrics`` represents one iteration. Pass a list of FPM dictionaries
+        for attention-DP ranks, or a single FPM dictionary for a single-rank
+        convenience form. The inferred workload kind uses only
+        ``scheduled_requests``; queued fields and ``wall_time`` are ignored for
+        estimation. Regression models return ``None`` until the matching
+        inferred workload kind has enough tuned observations. Empty scheduled
+        work returns ``0.0``.
+        """
+        return self._inner.estimate_forward_pass_time_ms(_json_dumps(metrics))
+
+    def tune_with_fpms(self, iterations: dict[str, Any] | list[Any]) -> None:
+        """API: ``model.tune_with_fpms(iterations) -> None``.
+
+        Description: tune the model with one or more observed FPM iterations.
+
+        The canonical input is a nested list ``[[iter0_rank0, iter0_rank1],
+        [iter1_rank0, iter1_rank1]]``. Each inner list is one iteration's
+        per-attention-DP-rank FPMs. For convenience, a single FPM dictionary is
+        normalized to ``[[fpm]]``, and a list of FPM dictionaries is normalized
+        to one iteration.
+        """
+        self._inner.tune_with_fpms(_json_dumps(_normalize_tuning_iterations(iterations)))
+
+    def diagnostics(self) -> dict[str, Any]:
+        """API: ``model.diagnostics() -> dict[str, Any]``.
+
+        Description: return source, readiness, retained sample count, and
+        fallback warning.
+        """
+        return json.loads(self._inner.diagnostics())
+
+    def get_min_correction_factor(self) -> float | None:
+        """API: ``model.get_min_correction_factor() -> float | None``.
+
+        Description: return the smallest ready native correction factor.
+        Regression-only models return ``None``; native models return ``None``
+        until at least one correction bucket has enough observations.
+        """
+        return self._inner.min_correction_factor()
+
+    def get_max_correction_factor(self) -> float | None:
+        """API: ``model.get_max_correction_factor() -> float | None``.
+
+        Description: return the largest ready native correction factor.
+        """
+        return self._inner.max_correction_factor()
+
+    def get_avg_correction_factor(self) -> float | None:
+        """API: ``model.get_avg_correction_factor() -> float | None``.
+
+        Description: return the average ready native correction factor.
+        """
+        return self._inner.avg_correction_factor()
+
+    def close(self) -> None:
+        # PyO3 objects are reference-counted; dropping the handle is enough.
+        self._inner = None
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def _optional_json_dumps(value: dict[str, Any] | None) -> str | None:
+    if value is None:
+        return None
+    return _json_dumps(value)
+
+
+def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list[Any]:
+    if isinstance(iterations, dict):
+        return [[iterations]]
+    if not iterations:
+        return []
+    if all(isinstance(item, dict) for item in iterations):
+        return [iterations]
+    return iterations
 
 
 def should_use_rust_engine_step(runtime_config: RuntimeConfig) -> bool:

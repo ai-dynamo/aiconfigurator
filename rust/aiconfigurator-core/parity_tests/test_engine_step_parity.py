@@ -373,7 +373,7 @@ SMOKE_CASES = [
     #   - Tuples where the perf-DB lacks data for the smoke shape
     #     (`tp=8, moe_ep=8, isl=1024, osl=2`) error symmetrically in both
     #     engines, exercising the error-symmetry contract.
-    # See docs/phase1/support-matrix-scan.md "Scan outcome -- 2026-06-01" for the
+    # See the support-matrix scan triage notes in the project docs for the
     # full triage / cluster table.
     pytest.param(
         EngineStepParityCase(
@@ -846,10 +846,10 @@ def _disagg_comparison_metrics(case: EngineStepParityCase) -> dict[str, tuple[fl
 
 
 def _prepare_rust_core(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Phase 1.5 (E7): the live path is the compiled-engine ``EngineHandle``
-    # (Python builds the ``EngineSpec``, the PyO3 ``aiconfigurator_core``
-    # extension executes it). The legacy ctypes dylib is gone, so the only
-    # requirement is that the maturin-built extension is importable.
+    # The live path is the compiled-engine ``EngineHandle`` (Python builds the
+    # ``EngineSpec``, the PyO3 ``aiconfigurator_core`` extension executes it).
+    # The legacy ctypes dylib is gone, so the only requirement is that the
+    # maturin-built extension is importable.
     pytest.importorskip(
         "aiconfigurator_core",
         reason="maturin-built aiconfigurator_core extension is required "

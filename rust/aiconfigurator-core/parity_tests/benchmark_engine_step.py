@@ -133,8 +133,8 @@ def _clear_caches(case: BenchmarkCase) -> None:
 
 
 def _ensure_rust_library_present() -> None:
-    # Phase 1.5 (E7): the compiled engine ships as the maturin-built
-    # ``aiconfigurator_core`` extension; importing it is the availability check.
+    # The compiled engine ships as the maturin-built ``aiconfigurator_core``
+    # extension; importing it is the availability check.
     import aiconfigurator_core  # noqa: F401
 
 

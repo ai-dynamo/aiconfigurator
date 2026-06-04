@@ -32,7 +32,7 @@ use std::sync::OnceLock;
 
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
-use crate::interpolation::{interp_1d, nearest_neighbors};
+use super::interpolation::{interp_1d, nearest_neighbors};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct WideEpMoeTable {

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
-use crate::interpolation::{interp_2d_1d_grid, Grid3};
+use super::interpolation::{interp_2d_1d_grid, Grid3};
 use crate::perf_database::parquet_loader::PerfReader;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

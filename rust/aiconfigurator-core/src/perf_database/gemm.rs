@@ -21,7 +21,7 @@ use std::sync::OnceLock;
 use crate::common::enums::GemmQuantMode;
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
-use crate::interpolation::{interp_1d, interp_2d_1d_grid, nearest_neighbors, Grid3};
+use super::interpolation::{interp_1d, interp_2d_1d_grid, nearest_neighbors, Grid3};
 use crate::perf_database::parquet_loader::PerfReader;
 
 /// GEMM-family perf-data owner for one `<system>/<backend>/<version>` slice.
@@ -343,7 +343,7 @@ fn query_two_d(
     if k_left == k_right {
         return Ok(interp_1d(m_left as f64, m_right as f64, q00, q10, m as f64));
     }
-    Ok(crate::interpolation::bilinear(
+    Ok(super::interpolation::bilinear(
         m_left as f64,
         m_right as f64,
         k_left as f64,

@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
-use crate::interpolation::{interp_1d, interp_2d_1d_grid, nearest_neighbors, Grid3};
+use super::interpolation::{interp_1d, interp_2d_1d_grid, nearest_neighbors, Grid3};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct MlaTable {
