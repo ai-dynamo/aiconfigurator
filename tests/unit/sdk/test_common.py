@@ -199,11 +199,7 @@ class TestSupportMatrix:
         """GLM-5 quantized variants should have exact rows for every support-matrix target."""
         matrix = common.get_support_matrix()
         target_models = {"zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"}
-        expected_keys = {
-            (row["System"], row["Backend"], row["Version"], row["Mode"])
-            for row in matrix
-            if row["HuggingFaceID"] not in target_models
-        }
+        expected_keys = {(row["System"], row["Backend"], row["Version"], row["Mode"]) for row in matrix}
         for model in target_models:
             model_rows = [row for row in matrix if row["HuggingFaceID"] == model]
             model_key_counts = Counter(
