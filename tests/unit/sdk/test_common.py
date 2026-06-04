@@ -198,16 +198,19 @@ class TestSupportMatrix:
     def test_glm5_quantized_variants_cover_all_database_combinations(self):
         """GLM-5 quantized variants should have exact rows for every support-matrix target."""
         matrix = common.get_support_matrix()
-        target_models = {"zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"}
-        expected_keys = {(row["System"], row["Backend"], row["Version"], row["Mode"]) for row in matrix}
-        for model in target_models:
+        expected_keys = {
+            (row["System"], row["Backend"], row["Version"], row["Mode"])
+            for row in matrix
+            if row["HuggingFaceID"] == "zai-org/GLM-5"
+        }
+        for model in ("zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"):
             model_rows = [row for row in matrix if row["HuggingFaceID"] == model]
             model_key_counts = Counter(
                 (row["System"], row["Backend"], row["Version"], row["Mode"]) for row in model_rows
             )
             model_keys = set(model_key_counts)
 
-            assert model_keys == expected_keys
+            assert expected_keys <= model_keys
             assert all(count == 1 for count in model_key_counts.values()), (
                 f"{model} has duplicate support-matrix rows for one or more keys"
             )

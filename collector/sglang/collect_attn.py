@@ -106,8 +106,6 @@ class MockServerArgs:
         self.dllm_algorithm_config = None
         self.enable_piecewise_cuda_graph = False  # sglang <=0.5.9
         self.disable_piecewise_cuda_graph = True  # sglang >=0.5.10
-        self.is_embedding = False
-        self.disable_radix_cache = False
         self.enable_dp_attention = False
         self.model_path = None
         self.revision = None
@@ -116,6 +114,8 @@ class MockServerArgs:
         self.triton_attention_split_tile_size = None
         self.disable_cuda_graph = False
         self.chunked_prefill_size = -1
+        self.disable_radix_cache = True
+        self.is_embedding = False
 
 
 class MockModelRunner:
@@ -134,6 +134,7 @@ class MockModelRunner:
         self.attn_backend = None
         self.server_args = MockServerArgs(page_size=page_size)
         self.attn_cp_size = 1  # Context parallelism size; required by FlashAttentionBackend in sglang >=0.5.10
+        self.tp_size = 1
         self.is_draft_worker = False
         self.model_is_mrope = False
         self.sliding_window_size = 0
