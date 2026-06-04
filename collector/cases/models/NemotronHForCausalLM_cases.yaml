@@ -25,8 +25,18 @@ model_case_values:
       inter_size: 2688
       topk: 22
       num_experts: 512
+    - model_path: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+      hidden_size: 1024
+      inter_size: 2688
+      topk: 22
+      num_experts: 512
     - model_path: nvidia/nemotron-ultra-rl-050826
       hidden_size: 8192
+      inter_size: 5120
+      topk: 22
+      num_experts: 512
+    - model_path: nvidia/nemotron-ultra-rl-050826
+      hidden_size: 2048
       inter_size: 5120
       topk: 22
       num_experts: 512
