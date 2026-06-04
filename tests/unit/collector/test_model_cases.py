@@ -61,6 +61,43 @@ def test_base_gemm_cases_are_readable_shape_specs():
     assert filtered == ["case0", "case1"]
 
 
+def test_include_base_false_custom_rules_do_not_expand_full_base_grid(tmp_path: Path):
+    model_cases = tmp_path / "one_node_gemm_cases.yaml"
+    model_cases.write_text(
+        """
+schema_version: 1
+architecture: OneNodeDenseGemm
+model_path: Qwen/Qwen3-0.6B
+include_base: false
+framework_specific_op_cases:
+  trtllm:
+    gemm:
+      cases:
+      rules:
+        - fields: [gemm_type, token_count, output_features, input_features]
+          match:
+            gemm_type: bfloat16
+            token_count: 128
+            output_features: 4096
+            input_features: 1024
+""",
+        encoding="utf-8",
+    )
+    plan = build_collection_case_plan(backend="trtllm", model_cases_path=str(model_cases))
+    gemm_plan = plan.op_cases["gemm"]
+    cases = [["bfloat16", 128, 4096, 1024], ["bfloat16", 128, 2048, 1024]]
+
+    filtered = filter_test_cases(
+        cases,
+        plan=gemm_plan,
+        full_module_name="trtllm.gemm",
+        run_func_name="run_gemm",
+    )
+
+    assert gemm_plan.include.all_cases is False
+    assert filtered == [cases[0]]
+
+
 def test_moe_model_quantization_policy_is_yaml_backed():
     assert moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "w4a8_mxfp4_mxfp8")
     assert moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "bfloat16")
@@ -138,7 +175,7 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     moe_cases = get_common_moe_test_cases()
-    assert len(moe_cases) == 4548
+    assert len(moe_cases) == 4503
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024

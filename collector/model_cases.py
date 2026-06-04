@@ -268,20 +268,22 @@ def _parse_selector(raw: Any, *, default_all: bool) -> CaseSelector:
     return selector
 
 
-def _ensure_op_plan(op_cases: dict[str, OpCasePlan], op: str) -> OpCasePlan:
+def _ensure_op_plan(op_cases: dict[str, OpCasePlan], op: str, *, include_all: bool = True) -> OpCasePlan:
     if op not in op_cases:
-        op_cases[op] = OpCasePlan()
+        op_cases[op] = OpCasePlan(include=CaseSelector(all_cases=include_all))
     return op_cases[op]
 
 
-def _merge_model_ops(op_cases: dict[str, OpCasePlan], data: dict[str, Any]) -> None:
+def _merge_model_ops(op_cases: dict[str, OpCasePlan], data: dict[str, Any], *, include_all: bool = True) -> None:
     for op in _as_list(data.get("model_ops"), field_name="model_ops"):
-        _ensure_op_plan(op_cases, str(op))
+        _ensure_op_plan(op_cases, str(op), include_all=include_all)
 
 
-def _merge_case_section(op_cases: dict[str, OpCasePlan], section: dict[str, Any]) -> None:
+def _merge_case_section(op_cases: dict[str, OpCasePlan], section: dict[str, Any], *, include_all: bool = True) -> None:
     for op, raw_selector in section.items():
-        _ensure_op_plan(op_cases, str(op)).include.merge(_parse_selector(raw_selector, default_all=True))
+        _ensure_op_plan(op_cases, str(op), include_all=include_all).include.merge(
+            _parse_selector(raw_selector, default_all=True)
+        )
 
 
 def _merge_exception_section(op_cases: dict[str, OpCasePlan], section: dict[str, Any]) -> None:
@@ -392,16 +394,22 @@ def _merge_known_exception_section(op_cases: dict[str, OpCasePlan], data: dict[s
         _ensure_op_plan(op_cases, str(op)).expected_failures.merge(selector)
 
 
-def _merge_case_file(op_cases: dict[str, OpCasePlan], data: dict[str, Any], backend: str) -> None:
-    _merge_model_ops(op_cases, data)
-    _merge_case_section(op_cases, _section(data, "all_frameworks_op_cases"))
+def _merge_case_file(
+    op_cases: dict[str, OpCasePlan],
+    data: dict[str, Any],
+    backend: str,
+    *,
+    include_all: bool = True,
+) -> None:
+    _merge_model_ops(op_cases, data, include_all=include_all)
+    _merge_case_section(op_cases, _section(data, "all_frameworks_op_cases"), include_all=include_all)
     framework_cases = _section(data, "framework_specific_op_cases")
     backend_cases = framework_cases.get(backend, {})
     if backend_cases is None:
         return
     if not isinstance(backend_cases, dict):
         raise TypeError(f"framework_specific_op_cases.{backend} must be a mapping")
-    _merge_case_section(op_cases, backend_cases)
+    _merge_case_section(op_cases, backend_cases, include_all=include_all)
 
 
 def _merge_exception_file(op_cases: dict[str, OpCasePlan], data: dict[str, Any], backend: str) -> None:
@@ -528,7 +536,7 @@ def build_collection_case_plan(
         for base_data in base_data_files:
             _merge_case_file(op_cases, base_data, backend)
     for data in model_data:
-        _merge_case_file(op_cases, data, backend)
+        _merge_case_file(op_cases, data, backend, include_all=include_base)
 
     resolved_sm_version = resolve_sm_version(gpu_type=gpu_type, sm_version=sm_version)
     resolved_sm_exceptions_path = None
