@@ -170,7 +170,7 @@
   "time_step_floor": 0.0001,
   "time_step_limit": [
     0.0,
-    Infinity
+    1e308
   ],
   "time_step_max": 0.1,
   "time_step_min": 0.001,

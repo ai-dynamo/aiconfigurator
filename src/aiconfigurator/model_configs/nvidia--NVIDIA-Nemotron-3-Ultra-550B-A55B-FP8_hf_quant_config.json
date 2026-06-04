@@ -1,0 +1,6 @@
+{
+  "quantization": {
+    "quant_algo": "FP8",
+    "kv_cache_quant_algo": "FP8"
+  }
+}
