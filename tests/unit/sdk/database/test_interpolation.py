@@ -206,6 +206,52 @@ class TestInterpolationMethods:
         with pytest.raises(NotImplementedError):
             interpolation.interp_2d_1d(15, 35, 55, data, method="invalid")
 
+    def test_interp_2d_1d_handles_singleton_inner_axis(self, comprehensive_perf_db):
+        """Sparse singleton axes should collapse instead of failing bracketing."""
+        data = {
+            1: {256: {1: 11.0, 2: 12.0}},
+            2: {256: {1: 21.0, 2: 22.0}},
+        }
+
+        result = interpolation.interp_2d_1d(
+            1.5,
+            257,
+            1.5,
+            data,
+            method="bilinear",
+            allow_singleton_axes=True,
+        )
+
+        assert result == pytest.approx(16.5)
+
+    def test_interp_2d_1d_rejects_singleton_axis_by_default(self, comprehensive_perf_db):
+        """Generic callers should not silently accept sparse shape misses."""
+        data = {
+            1: {256: {1: 11.0, 2: 12.0}},
+            2: {256: {1: 21.0, 2: 22.0}},
+        }
+
+        with pytest.raises(ValueError, match="only value"):
+            interpolation.interp_2d_1d(1.5, 257, 1.5, data, method="bilinear")
+
+    def test_interp_2d_1d_cubic_falls_back_on_degenerate_slice(self, comprehensive_perf_db):
+        """Cubic interpolation should fall back when a 2-D slice is degenerate."""
+        data = {
+            1: {256: {1: 11.0, 2: 12.0}},
+            2: {256: {1: 21.0, 2: 22.0}},
+        }
+
+        result = interpolation.interp_2d_1d(
+            1.5,
+            257,
+            1.5,
+            data,
+            method="cubic",
+            allow_singleton_axes=True,
+        )
+
+        assert result == pytest.approx(16.5)
+
     def test_interp_3d(self, comprehensive_perf_db):
         """Test general 3D interpolation dispatcher."""
         data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
