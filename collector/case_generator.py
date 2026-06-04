@@ -11,6 +11,7 @@ legacy tuple/dataclass shapes consumed by collector modules.
 
 import copy
 import dataclasses
+import functools
 import itertools
 import os
 import sys
@@ -43,6 +44,7 @@ def _merge_base_case_data(target: dict, source: dict) -> None:
         target_framework_cases.setdefault(backend, {}).update(backend_cases or {})
 
 
+@functools.lru_cache(maxsize=1)
 def _load_base_cases_data() -> dict:
     merged: dict = {}
     if not BASE_OP_CASES_DIR.exists():
@@ -133,6 +135,7 @@ def _get_model_path_filter() -> str | None:
     return val if val else None
 
 
+@functools.lru_cache(maxsize=1)
 def _load_model_cases_data() -> list[dict]:
     data = []
     for path in sorted(MODEL_CASES_DIR.glob("*_cases.yaml")):
@@ -325,9 +328,9 @@ def _merged_mla_module_values(backend: str | None = None) -> dict[str, object]:
         if override:
             merged = copy.deepcopy(values)
             merged.update(override)
-            if "context_batch_sizes" in override or "generation_batch_sizes" in override:
+            if "context_batch_sizes" in override and "generation_batch_sizes" in override:
                 merged.pop("batch_sizes", None)
-            if "context_sequence_lengths" in override or "generation_sequence_lengths" in override:
+            if "context_sequence_lengths" in override and "generation_sequence_lengths" in override:
                 merged.pop("sequence_lengths", None)
             if "head_counts" in override:
                 merged.pop("inner_sweep_head_counts", None)

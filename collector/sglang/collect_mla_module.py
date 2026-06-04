@@ -32,6 +32,7 @@ import sys
 import tempfile
 import traceback
 import types
+from contextlib import nullcontext
 from importlib.metadata import version as get_version
 
 import numpy as np
@@ -130,12 +131,13 @@ def _parse_int_list(value: str | None) -> list[int] | None:
 
 
 def _filter_cases_from_env(test_cases, *, is_prefill: bool, attn_type: str):
-    if not (is_prefill and attn_type == "dsa"):
+    if attn_type != "dsa":
         return test_cases
 
-    seq_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_SEQ_LENS"))
-    prefix_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_PREFIX_LENS"))
-    batch_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_BATCH_SIZES"))
+    phase = "CONTEXT" if is_prefill else "GENERATION"
+    seq_filter = _parse_int_list(os.environ.get(f"AIC_DSA_{phase}_SEQ_LENS"))
+    batch_filter = _parse_int_list(os.environ.get(f"AIC_DSA_{phase}_BATCH_SIZES"))
+    prefix_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_PREFIX_LENS")) if is_prefill else None
 
     if seq_filter is None and prefix_filter is None and batch_filter is None:
         return test_cases
@@ -153,8 +155,14 @@ def _filter_cases_from_env(test_cases, *, is_prefill: bool, attn_type: str):
         if prefix_set is not None and prefix_len not in prefix_set:
             continue
         filtered.append((bs, seq_len, ip, prefix_len))
-    print(f"[DSA] Env-filtered context cases: {len(filtered)}/{len(test_cases)}")
+    print(f"[DSA] Env-filtered {phase.lower()} cases: {len(filtered)}/{len(test_cases)}")
     return filtered
+
+
+def _maybe_forward_context(forward_context_type, forward_context_fn, attn_backend):
+    if forward_context_fn is None or forward_context_type is None:
+        return nullcontext()
+    return forward_context_fn(forward_context_type(attn_backend=attn_backend))
 
 
 def _is_glm5_dsa_model(model_id: str) -> bool:
@@ -1337,7 +1345,11 @@ def _run_prefill(
                     )
                     set_is_extend_in_batch(False)
                     with (
-                        forward_context(forward_context_type(attn_backend=runner.model_runner.attn_backend)),
+                        _maybe_forward_context(
+                            forward_context_type,
+                            forward_context,
+                            runner.model_runner.attn_backend,
+                        ),
                         set_piecewise_forward_context(
                             static_forward_batch,
                             runner.attention_layers,
@@ -1408,7 +1420,7 @@ def _run_prefill(
                 print(f"  Module piecewise runner={model_runner.piecewise_cuda_graph_runner is not None}")
 
         def call_attention_module():
-            with forward_context(forward_context_type(attn_backend=model_runner.attn_backend)):
+            with _maybe_forward_context(forward_context_type, forward_context, model_runner.attn_backend):
                 if use_module_piecewise_context:
                     with (
                         enable_piecewise_cuda_graph(),
@@ -1668,7 +1680,7 @@ def _run_decode(
             _patch_nsa_indexer_compile_for_module_cuda_graph(attention_module)
 
         def kernel_func():
-            with forward_context(forward_context_type(attn_backend=model_runner.attn_backend)):
+            with _maybe_forward_context(forward_context_type, forward_context, model_runner.attn_backend):
                 attention_module(
                     positions=decode_positions,
                     hidden_states=decode_hidden,

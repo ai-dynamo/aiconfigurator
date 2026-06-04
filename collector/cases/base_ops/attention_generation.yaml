@@ -89,13 +89,45 @@ framework_specific_op_cases:
     attention_generation:
       cases:
       - id: base_attention_generation_shape_sweep
+        mha_query_head_counts:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 8
+        - 12
+        - 16
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        - 96
+        xqa_query_head_counts:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 8
+        - 12
+        - 16
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        - 96
+        - 128
         head_dims:
+        - 64
         - 128
         - 192
         - 256
+        - 512
         window_sizes:
         - 0
         - 1024
+        - 8192
   trtllm:
     attention_generation:
       cases:

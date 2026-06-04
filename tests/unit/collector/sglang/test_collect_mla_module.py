@@ -111,12 +111,28 @@ class TestGetBackends:
 
 
 class TestGetContextTestCases:
+    def test_sglang_context_lengths_survive_generation_override(self):
+        """SGLang custom generation lengths must not erase context collection."""
+        mod = _import_module()
+        sweep = mod.get_mla_module_sweep_spec("sglang")
+
+        assert 128 in sweep.context_sequence_lengths
+
     def test_memory_guard(self):
         """No test case exceeds batch_size * seq_len > 128K."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             for case in mod.get_context_test_cases("mla"):
                 assert case[0] * case[1] <= 128 * 1024
+
+    def test_dsa_context_includes_deepseek_v32_missing_lookup_shape(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=90):
+            cases = mod.get_context_test_cases("dsa")
+
+        assert [128, 1, 16, "bfloat16", "bfloat16", "fp8_block"] in cases
+        assert [129, 1, 16, "bfloat16", "bfloat16", "fp8_block"] in cases
+        assert [257, 1, 16, "bfloat16", "bfloat16", "fp8_block"] in cases
 
     def test_large_seq_guard(self):
         """seq_len >= 8192 only with batch_size <= 8."""
@@ -135,6 +151,28 @@ class TestGetContextTestCases:
 
 
 class TestGetGenerationTestCases:
+    def test_dsa_generation_includes_deepseek_v32_missing_lookup_shape(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=90):
+            cases = mod.get_generation_test_cases("dsa")
+
+        assert [257, 4, 128, "bfloat16", "bfloat16", "fp8_block"] in cases
+        assert [384, 2, 16, "bfloat16", "bfloat16", "fp8_block"] in cases
+        assert [385, 4, 32, "bfloat16", "bfloat16", "fp8_block"] in cases
+
+    def test_dsa_generation_env_filter(self, monkeypatch):
+        mod = _import_module()
+        monkeypatch.setenv("AIC_DSA_GENERATION_BATCH_SIZES", "2")
+        monkeypatch.setenv("AIC_DSA_GENERATION_SEQ_LENS", "256,384")
+
+        cases = mod._filter_cases_from_env(
+            [(1, 256, False, 0), (2, 256, False, 0), (2, 384, False, 0), (2, 512, False, 0)],
+            is_prefill=False,
+            attn_type="dsa",
+        )
+
+        assert cases == [(2, 256, False, 0), (2, 384, False, 0)]
+
     def test_memory_guard(self):
         """No test case exceeds batch_size * seq_len > 256K."""
         mod = _import_module()
@@ -241,6 +279,7 @@ class TestBuildModuleTestCases:
             combos = mod._get_module_precision_combos()
         assert ("bfloat16", "bfloat16", "bfloat16") in combos
         assert ("bfloat16", "fp8", "bfloat16") in combos
+        assert ("bfloat16", "bfloat16", "fp8_block") in combos
 
     def test_dsa_includes_both_models(self):
         mod = _import_module()

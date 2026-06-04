@@ -793,6 +793,15 @@ def benchmark_config(
             quantize_hidden_states_fp4,
         )
 
+        try:
+            from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import get_activation_type
+        except ImportError:
+
+            def get_activation_type(activation: str) -> int:
+                if activation == "silu":
+                    return 3
+                raise ValueError(f"Unsupported FlashInfer TRTLLM activation: {activation}")
+
         if hidden_size % 32 != 0 or (shard_intermediate_size // 2) % 32 != 0:
             raise ValueError(
                 "FlashInfer TRTLLM BF16xFP4 MoE requires hidden and intermediate dimensions "

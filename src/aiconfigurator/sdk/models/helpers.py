@@ -160,13 +160,20 @@ def _apply_model_quant_defaults(
     if applied:
         logger.debug("Using model-provided quantization defaults: %s", ", ".join(applied))
 
-    # DSA module (DeepSeek-V3.2 / GLM-5): DSA perf tables only have bfloat16 FMHA currently.
+    # DSA module (DeepSeek-V3.2 / GLM-5): DSA perf tables only have bfloat16
+    # attention currently, including generation tables keyed by KV-cache dtype.
     if (
         architecture in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM")
         and backend_name in ("trtllm", "sglang")
         and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
     ):
         model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
+    if (
+        architecture in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM")
+        and backend_name in ("trtllm", "sglang")
+        and model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+    ):
+        model_config.kvcache_quant_mode = common.KVCacheQuantMode.bfloat16
 
     # DeepSeek-V4 compressed attention collectors record the attention module as
     # BF16 even when projections/KV cache are quantized.
