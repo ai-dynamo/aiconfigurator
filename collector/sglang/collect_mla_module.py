@@ -37,6 +37,42 @@ from importlib.metadata import version as get_version
 import numpy as np
 import torch
 
+# The collector writes an AIC-local config.json for DeepSeek-V3.2/GLM-5 so
+# SGLang can load them through its DeepSeek-V3 NSA path.  Letting SGLang's
+# layer-count backup auto-rewrite run here can remap DeepSeek-V3.2 to the
+# DeepSeek-V4 compressed-attention path before the DSA module is benchmarked.
+os.environ.setdefault("SGLANG_APPLY_CONFIG_BACKUP", "none")
+
+
+def _piecewise_forward_context(
+    set_forward_context,
+    forward_batch,
+    attention_layers,
+    quant_config,
+    moe_layers,
+    moe_fusions,
+    *,
+    dsa_indexers=None,
+):
+    kwargs = {}
+    try:
+        import inspect
+
+        if "dsa_indexers" in inspect.signature(set_forward_context).parameters:
+            kwargs["dsa_indexers"] = dsa_indexers
+    except (TypeError, ValueError):
+        pass
+
+    return set_forward_context(
+        forward_batch,
+        attention_layers,
+        quant_config,
+        moe_layers,
+        moe_fusions,
+        **kwargs,
+    )
+
+
 try:
     from helper import benchmark_with_power, get_sm_version, log_perf
 except ModuleNotFoundError:
@@ -130,12 +166,13 @@ def _parse_int_list(value: str | None) -> list[int] | None:
 
 
 def _filter_cases_from_env(test_cases, *, is_prefill: bool, attn_type: str):
-    if not (is_prefill and attn_type == "dsa"):
+    if attn_type != "dsa":
         return test_cases
 
-    seq_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_SEQ_LENS"))
-    prefix_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_PREFIX_LENS"))
-    batch_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_BATCH_SIZES"))
+    phase = "CONTEXT" if is_prefill else "GENERATION"
+    seq_filter = _parse_int_list(os.environ.get(f"AIC_DSA_{phase}_SEQ_LENS"))
+    batch_filter = _parse_int_list(os.environ.get(f"AIC_DSA_{phase}_BATCH_SIZES"))
+    prefix_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_PREFIX_LENS")) if is_prefill else None
 
     if seq_filter is None and prefix_filter is None and batch_filter is None:
         return test_cases
@@ -153,7 +190,7 @@ def _filter_cases_from_env(test_cases, *, is_prefill: bool, attn_type: str):
         if prefix_set is not None and prefix_len not in prefix_set:
             continue
         filtered.append((bs, seq_len, ip, prefix_len))
-    print(f"[DSA] Env-filtered context cases: {len(filtered)}/{len(test_cases)}")
+    print(f"[DSA] Env-filtered {phase.lower()} cases: {len(filtered)}/{len(test_cases)}")
     return filtered
 
 
@@ -776,6 +813,11 @@ def _import_sglang_forward_context():
     return ForwardContext, forward_context
 
 
+def _sglang_forward_context(attn_backend):
+    forward_context_type, forward_context = _import_sglang_forward_context()
+    return forward_context(forward_context_type(attn_backend=attn_backend))
+
+
 def load_model_runner(
     model_path: str,
     head_num: int,
@@ -1338,13 +1380,14 @@ def _run_prefill(
                     set_is_extend_in_batch(False)
                     with (
                         forward_context(forward_context_type(attn_backend=runner.model_runner.attn_backend)),
-                        set_piecewise_forward_context(
+                        _piecewise_forward_context(
+                            set_piecewise_forward_context,
                             static_forward_batch,
                             runner.attention_layers,
                             runner.quant_config,
                             runner.moe_layers,
                             runner.moe_fusions,
-                            dsa_indexers=runner.dsa_indexers,
+                            dsa_indexers=getattr(runner, "dsa_indexers", None),
                         ),
                     ):
                         return runner.model_runner.model.forward(
@@ -1412,7 +1455,8 @@ def _run_prefill(
                 if use_module_piecewise_context:
                     with (
                         enable_piecewise_cuda_graph(),
-                        set_piecewise_forward_context(
+                        _piecewise_forward_context(
+                            set_piecewise_forward_context,
                             forward_batch,
                             getattr(model_runner, "attention_layers", []),
                             getattr(model_runner.model, "quant_config", None),
@@ -1876,6 +1920,7 @@ def run_mla_module(
         and model_path == "deepseek-ai/DeepSeek-V3.2"
         and head_num <= 32
         and get_sm_version() == 100
+        and not _env_flag("AIC_FORCE_DSA_REDUCED_HEAD_GENERATION")
     ):
         before = len(cases)
         cases = [(bs, seq_len, ip, prefix_len) for (bs, seq_len, ip, prefix_len) in cases if seq_len < 256]

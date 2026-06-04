@@ -32,6 +32,7 @@ _MOE_MODEL_FAMILIES = {
     "HYBRIDMOE",
     "QWEN3VL_MOE",
     "GEMMA4MIX",
+    "GEMMA4MOE",
 }
 
 
@@ -160,13 +161,19 @@ def _apply_model_quant_defaults(
     if applied:
         logger.debug("Using model-provided quantization defaults: %s", ", ".join(applied))
 
-    # DSA module (DeepSeek-V3.2 / GLM-5): DSA perf tables only have bfloat16 FMHA currently.
-    if (
-        architecture in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM")
-        and backend_name in ("trtllm", "sglang")
-        and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
-    ):
-        model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
+    # SGLang GB200 tables do not split static-FP8 GEMM from dynamic FP8.
+    if backend_name == "sglang" and model_config.gemm_quant_mode == common.GEMMQuantMode.fp8_static:
+        model_config.gemm_quant_mode = common.GEMMQuantMode.fp8
+
+    # DSA module (DeepSeek-V3.2 / GLM-5): current SGLang/TRT-LLM DSA
+    # module perf tables are keyed by bfloat16 attention and KV cache.
+    # GLM-5 unquantized DSA projections are modeled per op via
+    # dsa_gemm_quant_mode so model-level GEMM quantization remains intact.
+    if architecture in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM") and backend_name in ("trtllm", "sglang"):
+        if model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
+            model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
+        if model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8:
+            model_config.kvcache_quant_mode = common.KVCacheQuantMode.bfloat16
 
     # DeepSeek-V4 compressed attention collectors record the attention module as
     # BF16 even when projections/KV cache are quantized.

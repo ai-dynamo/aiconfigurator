@@ -3,6 +3,7 @@
 
 import sys
 import types
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -48,6 +49,38 @@ def _import_module():
     sys.modules[mod_name] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def test_sglang_forward_context_is_optional_on_0510(monkeypatch):
+    mod = _import_module()
+    monkeypatch.delitem(sys.modules, "sglang.srt.model_executor.forward_context", raising=False)
+
+    with mod._sglang_forward_context("backend"):
+        pass
+
+
+def test_sglang_forward_context_uses_legacy_module_when_available(monkeypatch):
+    mod = _import_module()
+    calls = []
+    fake_forward_context_mod = types.ModuleType("sglang.srt.model_executor.forward_context")
+
+    class ForwardContext:
+        def __init__(self, *, attn_backend):
+            self.attn_backend = attn_backend
+
+    @contextmanager
+    def forward_context(ctx):
+        calls.append(ctx.attn_backend)
+        yield
+
+    fake_forward_context_mod.ForwardContext = ForwardContext
+    fake_forward_context_mod.forward_context = forward_context
+    monkeypatch.setitem(sys.modules, "sglang.srt.model_executor.forward_context", fake_forward_context_mod)
+
+    with mod._sglang_forward_context("backend"):
+        pass
+
+    assert calls == ["backend"]
 
 
 class TestGetPrecisionCombos:
@@ -141,6 +174,23 @@ class TestGetGenerationTestCases:
         with patch.object(mod, "get_sm_version", return_value=90):
             for case in mod.get_generation_test_cases("dsa"):
                 assert case[0] * case[1] <= 256 * 1024
+
+    def test_dsa_generation_env_filter(self, monkeypatch):
+        mod = _import_module()
+        monkeypatch.setenv("AIC_DSA_GENERATION_SEQ_LENS", "257,385")
+        monkeypatch.setenv("AIC_DSA_GENERATION_BATCH_SIZES", "2")
+
+        cases = [
+            (2, 257, False, 0),
+            (2, 385, False, 0),
+            (4, 257, False, 0),
+            (2, 128, False, 0),
+        ]
+
+        assert mod._filter_cases_from_env(cases, is_prefill=False, attn_type="dsa") == [
+            (2, 257, False, 0),
+            (2, 385, False, 0),
+        ]
 
 
 class TestDsaContextPrefixShape:

@@ -338,6 +338,7 @@ def run_attention_torch(
     if use_fp8_context_fmha:
         assert use_fp8_kv_cache, "If you want to use fp8 context fmha, kv cache must be fp8"
     kvtype = torch.float8_e4m3fn if use_fp8_kv_cache else torch.bfloat16
+    runtime_window_size = window_size if window_size > 0 else -1
 
     torch_device = torch.device(device)
     device_str = str(torch_device)
@@ -351,7 +352,7 @@ def run_attention_torch(
         head_dim=head_dim,
     )
     model_runner.kv_cache_dtype = kvtype
-    model_runner.sliding_window_size = window_size
+    model_runner.sliding_window_size = runtime_window_size
 
     total_len = input_len if is_context_phase else input_len + 1
     req_to_token_pool, token_matrix = create_req_to_token_pool(
@@ -414,7 +415,7 @@ def run_attention_torch(
         num_kv_heads=num_key_value_heads,
         layer_id=0,
     ).to(torch_device)
-    layer.sliding_window_size = window_size
+    layer.sliding_window_size = runtime_window_size
 
     seqlen_q = input_len if is_context_phase else 1
     q = torch.randn(

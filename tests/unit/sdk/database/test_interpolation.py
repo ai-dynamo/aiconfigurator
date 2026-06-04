@@ -156,6 +156,14 @@ class TestInterpolationMethods:
         result = interpolation.bilinear_interpolation([10, 30], [20, 40], 10, 30, data)
         assert result == 150.0  # Average of 100 and 200
 
+    def test_bilinear_interpolation_handles_degenerate_axis(self, comprehensive_perf_db):
+        """Degenerate 2-D slices should reduce to 1-D interpolation."""
+        data = {10: {20: 100}, 30: {20: 300}}
+
+        result = comprehensive_perf_db._bilinear_interpolation([10, 30], [20, 20], 20, 20, data)
+
+        assert result == 200.0
+
     def test_interp_3d_linear(self, comprehensive_perf_db):
         """Test 3D linear interpolation."""
         # Create a simple 3D data structure
@@ -281,6 +289,45 @@ class TestInterpolationMethods:
             assert result_bilinear["power"] >= 0
         else:
             assert result_bilinear > 0
+
+    def test_interp_3d_returns_exact_sparse_scalar_leaf(self, comprehensive_perf_db):
+        """Exact measured points should not require an interpolation hull."""
+        data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        data[8][256][1] = 0.42
+
+        result = comprehensive_perf_db._interp_3d(8, 256, 1, data, "cubic")
+
+        assert result == {"latency": 0.42, "power": 0.0, "energy": 0.0}
+
+    def test_interp_3d_returns_exact_sparse_metric_leaf(self, comprehensive_perf_db):
+        """Exact metric leaves should preserve latency, power, and energy."""
+        data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        data[8][256][1] = {"latency": 0.42, "power": 700.0, "energy": 294.0}
+
+        result = comprehensive_perf_db._interp_3d(8, 256, 1, data, "cubic")
+
+        assert result == {"latency": 0.42, "power": 700.0, "energy": 294.0}
+
+    def test_interp_3d_cubic_reduces_sparse_metric_slice_to_1d(self, comprehensive_perf_db):
+        """Sparse fixed-axis metric slices should interpolate along the remaining axis."""
+        data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        data[5][256][1] = {"latency": 10.0, "power": 0.0, "energy": 20.0}
+        data[5][516][1] = {"latency": 20.0, "power": 0.0, "energy": 40.0}
+
+        result = comprehensive_perf_db._interp_3d(5, 386, 1, data, "cubic")
+
+        assert result == {"latency": 15.0, "power": 0.0, "energy": 30.0}
+
+    def test_interp_3d_pins_exact_outer_axis_before_sparse_fallback(self, comprehensive_perf_db):
+        """Exact outer-axis matches should not require neighboring sparse slices."""
+        data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        data[5][256][1] = 10.0
+        data[5][256][6] = 20.0
+        data[40][256][1] = 100.0
+
+        result = comprehensive_perf_db._interp_3d(5, 256, 6, data, "cubic")
+
+        assert result == {"latency": 20.0, "power": 0.0, "energy": 0.0}
 
 
 class TestExtrapolateDataGrid:

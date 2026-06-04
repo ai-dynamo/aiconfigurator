@@ -227,6 +227,14 @@ def bilinear_interpolation(x_list: list[int], y_list: list[int], x: int, y: int,
     """Bilinear interpolation on a 2-D rectangular grid."""
     x1, x2 = x_list
     y1, y2 = y_list
+
+    if x1 == x2 and y1 == y2:
+        return data[x1][y1]
+    if x1 == x2:
+        return interp_1d([y1, y2], [data[x1][y1], data[x1][y2]], y)
+    if y1 == y2:
+        return interp_1d([x1, x2], [data[x1][y1], data[x2][y1]], x)
+
     Q11, Q12, Q21, Q22 = data[x1][y1], data[x1][y2], data[x2][y1], data[x2][y2]  # noqa: N806
 
     f_x1_y1 = Q11 * (x2 - x) * (y2 - y)
@@ -334,14 +342,23 @@ def interp_2d_1d(
     """3-D interpolation done as 2-D (over y, z) followed by 1-D (over x)."""
     x_values = []
     point_helper = nearest_1d_point_allow_singleton_axis if allow_singleton_axes else nearest_1d_point_helper
-    x_left, x_right = point_helper(x, list(data.keys()))
+    if x in data:
+        x_left = x_right = x
+    else:
+        x_left, x_right = point_helper(x, list(data.keys()))
 
     for i in [x_left, x_right]:
         points_list = []
         values_list = []
-        y_left, y_right = point_helper(y, list(data[i].keys()))
+        if y in data[i]:
+            y_left = y_right = y
+        else:
+            y_left, y_right = point_helper(y, list(data[i].keys()))
         for j in [y_left, y_right]:
-            z_left, z_right = point_helper(z, list(data[i][j].keys()))
+            if z in data[i][j]:
+                z_left = z_right = z
+            else:
+                z_left, z_right = point_helper(z, list(data[i][j].keys()))
             points_list.append([j, z_left])
             points_list.append([j, z_right])
             values_list.append(data[i][j][z_left])
@@ -426,6 +443,20 @@ def interp_3d(
     """
     if extracted_metrics_cache is None:
         extracted_metrics_cache = {}
+
+    # Prefer measured data when the requested point is present exactly. This
+    # also avoids Qhull failures for sparse one-off rows where interpolation
+    # would see a flat point cloud.
+    level1 = data.get(x) if isinstance(data, dict) else None
+    level2 = level1.get(y) if isinstance(level1, dict) else None
+    exact = level2.get(z) if isinstance(level2, dict) else None
+    if exact is not None:
+        if isinstance(exact, dict):
+            latency = exact.get("latency", 0.0)
+            power = exact.get("power", 0.0)
+            energy = exact.get("energy", power * latency)
+            return {"latency": latency, "power": power, "energy": energy}
+        return {"latency": exact, "power": 0.0, "energy": 0.0}
 
     sample_value = get_sample_leaf_value(data)
 

@@ -364,6 +364,10 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
     assert vllm_sweep.inner_sweep_head_counts == [128, 64, 32, 16, 8, 4, 2, 1]
     assert vllm_sweep.generation_max_tokens == 33554432
     assert vllm_sweep.generation_large_cache_tokens == 16777216
+
+    sglang_sweep = get_mla_module_sweep_spec("sglang")
+    assert sglang_sweep.context_sequence_lengths[-2:] == [8192, 16384]
+    assert sglang_sweep.generation_sequence_lengths[-1] == 131072
     assert [
         (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
         for spec in get_mla_module_precision_specs("vllm", phase="generation", sm_version=90)

@@ -793,6 +793,15 @@ def benchmark_config(
             quantize_hidden_states_fp4,
         )
 
+        try:
+            from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import get_activation_type
+        except ImportError:
+
+            def get_activation_type(name: str) -> int:
+                if name != "silu":
+                    raise ValueError(f"Unsupported activation type for FlashInfer TRTLLM FP4 MoE: {name}")
+                return 3
+
         if hidden_size % 32 != 0 or (shard_intermediate_size // 2) % 32 != 0:
             raise ValueError(
                 "FlashInfer TRTLLM BF16xFP4 MoE requires hidden and intermediate dimensions "
@@ -1405,7 +1414,10 @@ def run_moe_torch(
     use_mxfp4_w4a8 = moe_type == "w4a8_mxfp4_mxfp8"
     use_mxfp4_moe = use_mxfp4_w4a16 or use_mxfp4_w4a8
     use_nvfp4_kernel = moe_type in ("nvfp4", "w4a8_mxfp4_mxfp8")
-    use_trtllm_bf16_fp4 = moe_type == "nvfp4" and moe_ep_size == 1
+    nvfp4_local_intermediate = inter_size // moe_tp_size if moe_tp_size else inter_size
+    use_trtllm_bf16_fp4 = (
+        moe_type == "nvfp4" and moe_ep_size == 1 and hidden_size % 32 == 0 and nvfp4_local_intermediate % 32 == 0
+    )
     # int4_wo uses block_shape=[0, group_size] for grouped scales (group_size=128)
     if use_int4_w4a16:
         block_shape = [0, 128]

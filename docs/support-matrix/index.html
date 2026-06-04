@@ -448,9 +448,12 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
   const frameworkUnsupportedVersions = [];
   const errorEntries = [];
   const detailEntries = [];
+  const errorByVersion = {};
+  const detailByVersion = {};
 
   const statusFromResult = (result) => {
     if (result.version === null) return 'missing';
+    if (result.version === STATUS_FRAMEWORK_INCOMPATIBLE) return 'framework_unsupported';
     if (result.version === 'FAIL') {
       return isFrameworkUnsupported(result.error) ? 'framework_unsupported' : 'fail';
     }
@@ -524,10 +527,14 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
     else failVersions.push(version);
 
     if (verError) {
-      errorEntries.push({ version, message: `[${version}] ${verError}` });
+      const message = `[${version}] ${verError}`;
+      errorEntries.push({ version, message });
+      errorByVersion[version] = message;
     }
     if (verDetail) {
-      detailEntries.push({ version, message: `[${version}]\n${verDetail}` });
+      const message = `[${version}]\n${verDetail}`;
+      detailEntries.push({ version, message });
+      detailByVersion[version] = message;
     }
   }
 
@@ -540,6 +547,8 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
       failVersions: [],
       frameworkUnsupportedVersions: [],
       hwVersions: [],
+      errorByVersion: {},
+      detailByVersion: {},
       error: null,
       detail,
     };
@@ -584,6 +593,8 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
     failVersions: failVersions.slice().sort(sortDesc),
     frameworkUnsupportedVersions: frameworkUnsupportedVersions.slice().sort(sortDesc),
     hwVersions: hwVersions.slice().sort(sortDesc),
+    errorByVersion,
+    detailByVersion,
     error: errorEntries.length
       ? errorEntries
         .slice()
@@ -599,6 +610,71 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
         .join('\n\n---\n\n')
       : null,
   };
+}
+
+function combineCellDetailsForVersions(cell, versions) {
+  const messages = [];
+  const seen = new Set();
+  for (const version of versions || []) {
+    if (!version || seen.has(version)) continue;
+    seen.add(version);
+    const detail = cell.detailByVersion && cell.detailByVersion[version];
+    const error = cell.errorByVersion && cell.errorByVersion[version];
+    if (detail) messages.push(detail);
+    else if (error) messages.push(error);
+  }
+  return messages.length ? messages.join('\n\n---\n\n') : null;
+}
+
+function sortedIssueVersions(cell) {
+  return [
+    ...(cell.partialVersions || []).map(version => ({ version, kind: 'partial' })),
+    ...(cell.failVersions || []).map(version => ({ version, kind: 'fail' })),
+    ...(cell.frameworkUnsupportedVersions || []).map(version => ({ version, kind: 'framework_unsupported' })),
+    ...(cell.hwVersions || []).map(version => ({ version, kind: 'hw_incompatible' })),
+  ].sort((a, b) => compareVersionTuples(versionSortKey(b.version), versionSortKey(a.version)));
+}
+
+function visibleDetailVersions(cell) {
+  if (
+    (cell.status === 'pass' || cell.status === 'latest_pass_with_older_issues')
+    && cell.passVersions && cell.passVersions.length
+  ) {
+    return [cell.passVersions[0]];
+  }
+
+  if (cell.status === 'older_pass_only') {
+    const versions = [];
+    const latestIssue = sortedIssueVersions(cell)[0];
+    if (latestIssue) versions.push(latestIssue.version);
+    if (cell.passVersions && cell.passVersions.length) versions.push(cell.passVersions[0]);
+    return versions;
+  }
+
+  if (cell.status === 'partial') {
+    const latestIssue = sortedIssueVersions(cell)[0];
+    return latestIssue ? [latestIssue.version] : (cell.partialVersions || []).slice(0, 1);
+  }
+
+  if (cell.status === 'fail') {
+    if (cell.failVersions && cell.failVersions.length) return [cell.failVersions[0]];
+    if (cell.partialVersions && cell.partialVersions.length) return [cell.partialVersions[0]];
+  }
+
+  if (cell.status === 'framework_unsupported' && cell.frameworkUnsupportedVersions && cell.frameworkUnsupportedVersions.length) {
+    return [cell.frameworkUnsupportedVersions[0]];
+  }
+
+  if (cell.status === 'hw_incompatible' && cell.hwVersions && cell.hwVersions.length) {
+    return [cell.hwVersions[0]];
+  }
+
+  return [];
+}
+
+function visibleCellDetail(cell, showAllVersions) {
+  if (showAllVersions) return cell.detail || cell.error;
+  return combineCellDetailsForVersions(cell, visibleDetailVersions(cell)) || cell.detail || cell.error;
 }
 
 function buildMatrixForMode(rows, systemName, modeFilter) {
@@ -1288,7 +1364,7 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
                     </td>
                   );
                 }
-                const detail = cell.detail || cell.error;
+                const detail = visibleCellDetail(cell, showAllVersions);
                 const clickable = Boolean(detail);
                 // Native browser tooltip with the full version breakdown so the
                 // user can always inspect all versions regardless of the
