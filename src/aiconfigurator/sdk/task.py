@@ -44,6 +44,12 @@ _DEEPSEEK_V4_MEGAMOE_SUPPORTED_MODELS = {
     "deepseek-ai/DeepSeek-V4-Pro",
     "sgl-project/DeepSeek-V4-Pro-FP8",
 }
+_LARGE_PIPELINE_PARALLEL_MODEL_FAMILIES = {"DEEPSEEKV32", "DEEPSEEKV4"}
+_LARGE_PIPELINE_PARALLEL_BACKENDS = {
+    common.BackendName.sglang.value,
+    common.BackendName.trtllm.value,
+    common.BackendName.vllm.value,
+}
 
 
 def _is_hopper_system(system_name: str | None) -> bool:
@@ -70,6 +76,39 @@ def _sglang_megamoe_parallel_lists(system_name: str, should_enable_pp: bool) -> 
         "moe_tp_list": [1],
         "moe_ep_list": ep_list,
     }
+
+
+def _merge_int_list(values: list[int], additions: list[int]) -> list[int]:
+    return sorted(dict.fromkeys([*values, *additions]))
+
+
+def _large_pipeline_parallel_worker_defaults_apply(ctx: TaskContext) -> bool:
+    if not ctx.is_moe:
+        return False
+    if ctx.model_family not in _LARGE_PIPELINE_PARALLEL_MODEL_FAMILIES:
+        return False
+    if ctx.backend_name not in _LARGE_PIPELINE_PARALLEL_BACKENDS:
+        return False
+    if ctx.enable_wideep or ctx.moe_backend in {"deepep_moe", "megamoe"}:
+        return False
+    if ctx.total_gpus is None or ctx.total_gpus < 16:
+        return False
+    systems = [ctx.system_name]
+    if ctx.decode_system_name:
+        systems.append(ctx.decode_system_name)
+    try:
+        return all(_is_blackwell_system(system) for system in systems)
+    except Exception:
+        return False
+
+
+def _include_large_pipeline_parallel_worker(config: dict) -> None:
+    config["num_gpu_per_worker"] = _merge_int_list(config["num_gpu_per_worker"], [16])
+    config["tp_list"] = _merge_int_list(config["tp_list"], [8])
+    config["pp_list"] = _merge_int_list(config["pp_list"], [2])
+    config["dp_list"] = _merge_int_list(config["dp_list"], [1])
+    config["moe_tp_list"] = _merge_int_list(config["moe_tp_list"], [1, 2, 4, 8])
+    config["moe_ep_list"] = _merge_int_list(config["moe_ep_list"], [1, 2, 4, 8])
 
 
 def _validate_deepseek_v4_model_hardware_support(
@@ -623,6 +662,9 @@ class TaskConfigFactory:
             else:
                 raise ValueError(f"Invalid backend: {ctx.backend_name}")
 
+        if _large_pipeline_parallel_worker_defaults_apply(ctx):
+            _include_large_pipeline_parallel_worker(worker_config)
+
         return {
             "is_moe": ctx.is_moe,
             "worker_config": worker_config,
@@ -656,6 +698,10 @@ class TaskConfigFactory:
             wc.setdefault("enable_eplb", None)
             wc.setdefault("moe_backend", ctx.moe_backend)
             wc.setdefault("attention_backend", "flashinfer")
+
+        if _large_pipeline_parallel_worker_defaults_apply(ctx):
+            _include_large_pipeline_parallel_worker(prefill_worker_config)
+            _include_large_pipeline_parallel_worker(decode_worker_config)
 
         replica_config = {
             "num_gpu_per_replica": [
@@ -1015,27 +1061,6 @@ class TaskConfig:
         """
         Check that the task can be run by AIC.
         """
-
-        # fp8_static GEMM mode is currently TRTLLM-only.
-        def _validate_fp8_static(worker_cfg: DefaultMunch, target: str) -> None:
-            gemm_quant_mode = worker_cfg.get("gemm_quant_mode", None)
-            if gemm_quant_mode is None:
-                return
-            mode_name = gemm_quant_mode.name if hasattr(gemm_quant_mode, "name") else str(gemm_quant_mode)
-            if str(mode_name).lower() != common.GEMMQuantMode.fp8_static.name:
-                return
-
-            backend_name = worker_cfg.get("backend_name", None)
-            if str(backend_name).lower() != common.BackendName.trtllm.value:
-                raise ValueError(
-                    f"fp8_static is currently only supported in trtllm backend. we got backend='{backend_name}'."
-                )
-
-        if self.serving_mode == "agg":
-            _validate_fp8_static(self.config.worker_config, "worker_config")
-        elif self.serving_mode == "disagg":
-            _validate_fp8_static(self.config.prefill_worker_config, "prefill_worker_config")
-            _validate_fp8_static(self.config.decode_worker_config, "decode_worker_config")
 
         database_mode_for_validation = getattr(self.config, "database_mode", None)
         allow_missing_data = (

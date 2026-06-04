@@ -123,7 +123,7 @@ class MockModelRunner:
         self.attn_cp_size = 1  # Context parallelism size; required by FlashAttentionBackend in sglang >=0.5.10
         self.is_draft_worker = False
         self.model_is_mrope = False
-        self.sliding_window_size = None
+        self.sliding_window_size = 0
         self.attention_chunk_size = None
         # FlashInferIndicesUpdaterPrefill expects an allocator; keep None for mock.
         self.token_to_kv_pool_allocator = None
@@ -179,6 +179,7 @@ def get_context_attention_test_cases():
         query_head_counts = _int_list(shape_sweep["query_head_counts"])
         kv_head_options = shape_sweep["kv_head_options"]
         head_dims = _int_list(shape_sweep["head_dims"])
+        window_sizes = _int_list(shape_sweep.get("window_sizes", [0]))
         max_tokens_self_attention = int(shape_sweep["max_tokens_self_attention"])
         max_tokens_grouped_query_attention = int(shape_sweep["max_tokens_grouped_query_attention"])
         max_batch_size_self_attention = int(shape_sweep["max_batch_size_self_attention"])
@@ -207,23 +208,25 @@ def get_context_attention_test_cases():
                             if sm_version >= 120 and b * s * n * head_dim >= max_kv_elements:
                                 continue
 
-                            for precision_case in shape_sweep["precision_cases"]:
-                                use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
-                                use_fp8_context_fmha = bool(precision_case["fp8_context_fmha"])
-                                if skip_fp8 and use_fp8_kv_cache:
-                                    continue
-                                test_cases.append(
-                                    [
-                                        b,
-                                        s,
-                                        n,
-                                        num_kv_heads,
-                                        head_dim,
-                                        use_fp8_kv_cache,
-                                        use_fp8_context_fmha,
-                                        True,
-                                    ]
-                                )
+                            for window_size in window_sizes:
+                                for precision_case in shape_sweep["precision_cases"]:
+                                    use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                                    use_fp8_context_fmha = bool(precision_case["fp8_context_fmha"])
+                                    if skip_fp8 and use_fp8_kv_cache:
+                                        continue
+                                    test_cases.append(
+                                        [
+                                            b,
+                                            s,
+                                            n,
+                                            num_kv_heads,
+                                            head_dim,
+                                            use_fp8_kv_cache,
+                                            use_fp8_context_fmha,
+                                            True,
+                                            window_size,
+                                        ]
+                                    )
 
     return test_cases
 
@@ -261,6 +264,7 @@ def get_generation_attention_test_cases():
         batch_sizes = _int_list(shape_sweep["batch_sizes"])
         sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
         head_dims = _int_list(shape_sweep["head_dims"])
+        window_sizes = _int_list(shape_sweep.get("window_sizes", [0]))
         min_drop_batch = int(shape_sweep["drop_largest_sequence_for_batch_at_least"])
 
         for head_dim in head_dims:
@@ -279,11 +283,12 @@ def get_generation_attention_test_cases():
                     if b >= min_drop_batch:
                         target_s_list = target_s_list[:-1]
                     for s in target_s_list:
-                        for precision_case in shape_sweep["precision_cases"]:
-                            use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
-                            if skip_fp8 and use_fp8_kv_cache:
-                                continue
-                            test_cases.append([b, s, n, n, head_dim, use_fp8_kv_cache, False, False])
+                        for window_size in window_sizes:
+                            for precision_case in shape_sweep["precision_cases"]:
+                                use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                                if skip_fp8 and use_fp8_kv_cache:
+                                    continue
+                                test_cases.append([b, s, n, n, head_dim, use_fp8_kv_cache, False, False, window_size])
 
         for head_dim in head_dims:
             for n in sorted(_int_list(shape_sweep["xqa_query_head_counts"]), reverse=True):
@@ -304,11 +309,14 @@ def get_generation_attention_test_cases():
                         if n_kv >= n:
                             continue
                         for s in target_s_list:
-                            for precision_case in shape_sweep["precision_cases"]:
-                                use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
-                                if skip_fp8 and use_fp8_kv_cache:
-                                    continue
-                                test_cases.append([b, s, n, n_kv, head_dim, use_fp8_kv_cache, False, False])
+                            for window_size in window_sizes:
+                                for precision_case in shape_sweep["precision_cases"]:
+                                    use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                                    if skip_fp8 and use_fp8_kv_cache:
+                                        continue
+                                    test_cases.append(
+                                        [b, s, n, n_kv, head_dim, use_fp8_kv_cache, False, False, window_size]
+                                    )
     return test_cases
 
 
@@ -321,6 +329,7 @@ def run_attention_torch(
     use_fp8_kv_cache,
     use_fp8_context_fmha,
     is_context_phase,
+    window_size=0,
     *,
     perf_filename,
     device="cuda:0",
@@ -342,6 +351,7 @@ def run_attention_torch(
         head_dim=head_dim,
     )
     model_runner.kv_cache_dtype = kvtype
+    model_runner.sliding_window_size = window_size
 
     total_len = input_len if is_context_phase else input_len + 1
     req_to_token_pool, token_matrix = create_req_to_token_pool(
@@ -371,9 +381,11 @@ def run_attention_torch(
     model_runner.token_to_kv_pool = kv_pool
 
     sm_version = get_sm_version()
-    if sm_version >= 110:
+    use_triton_attention = sm_version >= 110 or (sm_version >= 100 and head_dim == 192)
+    if use_triton_attention:
         # SM120+ (workstation Blackwell): TRTLLM prefill (TllmGenFmhaRunner) is unsupported;
-        # FA3 is not compiled for SM120. Use Triton JIT-compiled backend instead.
+        # FA3 is not compiled for SM120. B200/SM100 TRTLLM also lacks head-dim 192
+        # kernels, which MiMo-style models need. Use Triton JIT-compiled backend instead.
         from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
 
         attn_backend = TritonAttnBackend(model_runner)
@@ -402,6 +414,7 @@ def run_attention_torch(
         num_kv_heads=num_key_value_heads,
         layer_id=0,
     ).to(torch_device)
+    layer.sliding_window_size = window_size
 
     seqlen_q = input_len if is_context_phase else 1
     q = torch.randn(
@@ -559,6 +572,7 @@ def run_attention_torch(
                 "attn_dtype": "fp8" if use_fp8_context_fmha else "bfloat16",
                 "kv_cache_dtype": "fp8" if use_fp8_kv_cache else "bfloat16",
                 "step": step,
+                "window_size": window_size,
                 "latency": latency,
             }
         ],

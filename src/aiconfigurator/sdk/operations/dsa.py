@@ -864,7 +864,63 @@ class GenerationDSAModule(Operation):
                 )
             try:
                 dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
-                result = interpolation.interp_3d(num_heads, b, s, dsa_dict, "cubic", database._extracted_metrics_cache)
+
+                def sequence_value(seq_dict):
+                    if s in seq_dict:
+                        return seq_dict[s]
+                    seq_keys = sorted(seq_dict)
+                    if len(seq_keys) < 2:
+                        return None
+                    left, right = interpolation.nearest_1d_point_helper(s, seq_keys, inner_only=False)
+
+                    def interp_sequence_metric(metric: str) -> float:
+                        return interpolation.interp_1d(
+                            [left, right],
+                            [
+                                interpolation.get_value(seq_dict[left], metric),
+                                interpolation.get_value(seq_dict[right], metric),
+                            ],
+                            s,
+                        )
+
+                    return {
+                        "latency": interp_sequence_metric("latency"),
+                        "power": interp_sequence_metric("power"),
+                        "energy": interp_sequence_metric("energy"),
+                    }
+
+                result = None
+                if num_heads in dsa_dict and b in dsa_dict[num_heads]:
+                    result = sequence_value(dsa_dict[num_heads][b])
+                if result is None and num_heads in dsa_dict:
+                    batch_dict = {}
+                    for batch_key, seq_dict in dsa_dict[num_heads].items():
+                        value = sequence_value(seq_dict)
+                        if value is not None:
+                            batch_dict[batch_key] = value
+                    batch_keys = sorted(batch_dict)
+                    if len(batch_keys) >= 2:
+                        left, right = interpolation.nearest_1d_point_helper(b, batch_keys, inner_only=False)
+
+                        def interp_batch_metric(metric: str) -> float:
+                            return interpolation.interp_1d(
+                                [left, right],
+                                [
+                                    interpolation.get_value(batch_dict[left], metric),
+                                    interpolation.get_value(batch_dict[right], metric),
+                                ],
+                                b,
+                            )
+
+                        result = {
+                            "latency": interp_batch_metric("latency"),
+                            "power": interp_batch_metric("power"),
+                            "energy": interp_batch_metric("energy"),
+                        }
+                if result is None:
+                    result = interpolation.interp_3d(
+                        num_heads, b, s, dsa_dict, "cubic", database._extracted_metrics_cache
+                    )
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
             except (KeyError, TypeError, ValueError, AssertionError) as exc:

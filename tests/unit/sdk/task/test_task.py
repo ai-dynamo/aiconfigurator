@@ -111,6 +111,64 @@ def test_taskconfig_agg_default():
     assert cfg.applied_layers == ["base-common", "agg-defaults"]
 
 
+@pytest.mark.parametrize("model_path", ["zai-org/GLM-5", "sgl-project/DeepSeek-V4-Pro-FP8"])
+@pytest.mark.parametrize(
+    "backend_name,backend_version",
+    [
+        ("sglang", "0.5.10"),
+        ("trtllm", "1.3.0rc10"),
+        ("vllm", "0.19.0"),
+    ],
+)
+def test_taskconfig_large_blackwell_moe_defaults_include_pipeline_parallel_worker(
+    model_path, backend_name, backend_version
+):
+    task = TaskConfig(
+        serving_mode="agg",
+        model_path=model_path,
+        system_name="b200_sxm",
+        backend_name=backend_name,
+        backend_version=backend_version,
+        total_gpus=128,
+    )
+
+    cfg = task.config.worker_config
+    assert cfg.num_gpu_per_worker == [1, 2, 4, 8, 16]
+    assert cfg.pp_list == [1, 2]
+    assert 8 in cfg.tp_list
+    assert 1 in cfg.dp_list
+
+
+def test_taskconfig_large_blackwell_moe_disagg_defaults_include_pipeline_parallel_worker():
+    task = TaskConfig(
+        serving_mode="disagg",
+        model_path="zai-org/GLM-5",
+        system_name="b200_sxm",
+        decode_system_name="b200_sxm",
+        backend_name="sglang",
+        backend_version="0.5.10",
+        total_gpus=128,
+    )
+
+    for cfg in (task.config.prefill_worker_config, task.config.decode_worker_config):
+        assert cfg.num_gpu_per_worker == [1, 2, 4, 8, 16]
+        assert cfg.pp_list == [1, 2]
+
+
+def test_taskconfig_large_pipeline_parallel_worker_defaults_are_large_budget_only():
+    task = TaskConfig(
+        serving_mode="agg",
+        model_path="zai-org/GLM-5",
+        system_name="b200_sxm",
+        backend_name="sglang",
+        backend_version="0.5.10",
+        total_gpus=8,
+    )
+
+    assert task.config.worker_config.num_gpu_per_worker == [1, 2, 4, 8]
+    assert task.config.worker_config.pp_list == [1]
+
+
 def test_taskrunner_no_feasible_config_logs_without_traceback(monkeypatch, caplog):
     """Expected strict-SLA no-match failures should not emit traceback records."""
 
@@ -192,22 +250,23 @@ def test_taskconfig_profile_application():
     assert any(layer.startswith("profile:fp8") for layer in cfg.applied_layers)
 
 
-def test_taskconfig_fp8_static_requires_trtllm_backend():
-    with pytest.raises(ValueError, match=r"fp8_static"):
-        TaskConfig(
-            serving_mode="agg",
-            model_path="Qwen/Qwen3-32B",
-            system_name="h200_sxm",
-            backend_name="sglang",
-            yaml_config={
-                "mode": "patch",
-                "config": {
-                    "worker_config": {
-                        "gemm_quant_mode": "fp8_static",
-                    }
-                },
+def test_taskconfig_fp8_static_allows_sglang_backend():
+    task = TaskConfig(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        yaml_config={
+            "mode": "patch",
+            "config": {
+                "worker_config": {
+                    "gemm_quant_mode": "fp8_static",
+                }
             },
-        )
+        },
+    )
+
+    assert _enum_name(task.config.worker_config.gemm_quant_mode) == "fp8_static"
 
 
 def test_taskconfig_total_gpus_limits_agg_workers():

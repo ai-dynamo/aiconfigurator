@@ -10,8 +10,25 @@ model_paths:
   - meta-llama/Llama-4-Maverick-17B-128E-Instruct
 include_base: true
 description: >
-  Llama 4 hybrid model-centric collection plan. Starts with shared base op cases;
-  hybrid-MoE-specific collectors can be added here when they land.
+  Llama 4 hybrid model-centric collection plan. Starts with shared base op cases
+  and includes the Scout/Maverick MoE shapes used by the support matrix.
+
+model_case_values:
+  moe:
+    - model_path: meta-llama/Llama-4-Scout-17B-16E-Instruct
+      hidden_size: 5120
+      inter_size: 8192
+      topk: 1
+      num_experts: 16
+    - model_path: meta-llama/Llama-4-Maverick-17B-128E-Instruct
+      hidden_size: 5120
+      inter_size: 8192
+      topk: 1
+      num_experts: 128
+
+all_frameworks_op_cases:
+  moe:
+    cases: all
 
 framework_specific_model_case_values:
   vllm_xpu:
