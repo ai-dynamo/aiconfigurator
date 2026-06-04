@@ -138,7 +138,7 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     moe_cases = get_common_moe_test_cases()
-    assert len(moe_cases) == 4548
+    assert len(moe_cases) == 4665
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -153,7 +153,7 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     )
     assert len(get_context_mla_case_specs()) == 550
     assert len(get_generation_mla_case_specs()) == 885
-    assert len(get_common_mamba2_test_cases()) == 8
+    assert len(get_common_mamba2_test_cases()) == 10
     assert len(get_common_gdn_test_cases()) == 16
     assert len(get_common_mhc_test_cases()) == 8
 
@@ -162,7 +162,7 @@ def test_dsa_module_prefix_context_sweeps_are_yaml_backed():
     from collector.case_generator import get_mla_module_sweep_spec
 
     assert 128 in get_mla_module_sweep_spec("sglang").context_prefix_lengths
-    assert get_mla_module_sweep_spec("trtllm").context_prefix_lengths == [0, 128]
+    assert get_mla_module_sweep_spec("trtllm").context_prefix_lengths == [0, 128, 256]
     assert get_mla_module_sweep_spec("vllm").context_prefix_lengths == [0, 128]
 
 
