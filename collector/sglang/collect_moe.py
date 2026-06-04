@@ -141,6 +141,10 @@ except ModuleNotFoundError:
 _is_hip = is_hip()
 _MOE_RUNNER_CONFIG_PARAMS = set(inspect.signature(MoeRunnerConfig).parameters)
 _NON_GATED_MOE_MODEL_PATTERNS = ("Nemotron-3", "nemotron-ultra", "Nemotron-H")
+_SM120_NEMOTRON_NVFP4_MODELS = {
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+    "nvidia/nemotron-ultra-rl-050826",
+}
 
 
 def _make_moe_runner_config(swiglu_limit: float | None = None) -> MoeRunnerConfig:
@@ -174,8 +178,9 @@ def get_moe_test_cases():
             "w4a8_mxfp4_mxfp8",
         ]
     else:
-        # SGLang 0.5.10 routes nvfp4 MoE through FlashInfer CuteDSL, whose
-        # runtime check only accepts sm_100/sm_103 and fails all sm_120 cases.
+        # SGLang 0.5.10 routes many nvfp4 MoE cases through FlashInfer paths
+        # that were not validated on SM120. Add back only live-smoked Nemotron
+        # NVFP4 model cases below instead of enabling the mode globally.
         moe_list = ["bfloat16", "fp8_block", "int4_wo"]
 
     test_cases = []
@@ -192,6 +197,8 @@ def get_moe_test_cases():
             model_moe_list = ["nvfp4"]
             if common_moe_testcase.ep != 1 or common_moe_testcase.tp >= 32:
                 continue
+        elif sm_version >= 120 and model_name in _SM120_NEMOTRON_NVFP4_MODELS:
+            model_moe_list = [*model_moe_list, "nvfp4"]
 
         num_tokens_list = [num_tokens for num_tokens in common_moe_testcase.num_tokens_list if num_tokens <= 20480]
 
@@ -209,6 +216,18 @@ def get_moe_test_cases():
                 # w4a8_mxfp4_mxfp8.  The SGLang kernel path is the same FP4
                 # FlashInfer/CuteDSL path, but the perf row must use the AIC
                 # quant-mode name so silicon lookup can find it.
+                continue
+            if (
+                sm_version >= 120
+                and moe_type == "nvfp4"
+                and model_name in _SM120_NEMOTRON_NVFP4_MODELS
+                and common_moe_testcase.ep == 1
+                and (common_moe_testcase.inter_size // common_moe_testcase.tp) % 32 != 0
+            ):
+                # The SGLang 0.5.10 EP=1 NVFP4 path uses FlashInfer's TRTLLM
+                # BF16xFP4 routed kernel, which requires the local intermediate
+                # size to be divisible by 32. Keep non-divisible Nemotron
+                # slices out of generated collection plans.
                 continue
             # fp8_block requires hidden_size divisible by block group_size (128)
             if moe_type == "fp8_block" and (
@@ -626,6 +645,7 @@ def benchmark_config(
     swiglu_limit: float | None = None,
     moe_tp_size: int = 1,
     moe_ep_size: int = 1,
+    model_name: str = "",
 ) -> float:
     device = torch.device("cuda")
     use_mxfp4_moe = use_mxfp4_w4a16 or use_mxfp4_w4a8
@@ -821,9 +841,7 @@ def benchmark_config(
         tune_max_num_tokens = max(1, 1 << (num_tokens - 1).bit_length())
         scale_ones = torch.ones(num_experts, dtype=torch.float32, device=device)
         input_scale_quant = torch.ones((), dtype=torch.float32, device=device)
-        activation_type = (
-            ActivationType.Relu2 if _uses_relu2_moe_activation(config.model_name) else ActivationType.Swiglu
-        )
+        activation_type = ActivationType.Relu2 if _uses_relu2_moe_activation(model_name) else ActivationType.Swiglu
         topk_config = TopKConfig(
             top_k=topk,
             renormalize=True,
@@ -1195,6 +1213,7 @@ def benchmark(
     swiglu_limit: float | None = None,
     moe_tp_size: int = 1,
     moe_ep_size: int = 1,
+    model_name: str = "",
 ) -> tuple[dict[str, int], float]:
     torch.cuda.manual_seed_all(0)
     benchmark_num_tokens = (
@@ -1228,6 +1247,7 @@ def benchmark(
             swiglu_limit=swiglu_limit,
             moe_tp_size=moe_tp_size,
             moe_ep_size=moe_ep_size,
+            model_name=model_name,
         )
         return kernel_time, power_stats
 
@@ -1278,6 +1298,7 @@ def benchmark(
         swiglu_limit=swiglu_limit,
         moe_tp_size=moe_tp_size,
         moe_ep_size=moe_ep_size,
+        model_name=model_name,
     )
     return kernel_time, power_stats
 
@@ -1431,6 +1452,7 @@ def run_moe_torch(
             swiglu_limit=swiglu_limit,
             moe_tp_size=moe_tp_size,
             moe_ep_size=moe_ep_size,
+            model_name=model_name,
         )
     else:
         latency, power_stats = benchmark(
@@ -1454,6 +1476,7 @@ def run_moe_torch(
             swiglu_limit=swiglu_limit,
             moe_tp_size=moe_tp_size,
             moe_ep_size=moe_ep_size,
+            model_name=model_name,
         )
 
     log_perf(
