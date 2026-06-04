@@ -92,6 +92,25 @@ def _combination_group_key(combo: tuple[str, str, str, str]) -> tuple[str, str, 
     return system, backend, version
 
 
+def _format_missing_database_error(*, system: str, backend: str, version: str) -> str:
+    supported = perf_database.get_supported_databases()
+    versions = supported.get(system, {}).get(backend, [])
+    systems_paths = perf_database.get_systems_paths()
+    systems_paths_display = ", ".join(systems_paths) if systems_paths else "<none>"
+
+    lines = [
+        f"No perf database for system={system} backend={backend} version={version}.",
+        f"Configured systems paths: {systems_paths_display}",
+    ]
+    if versions:
+        lines.append(f"Available versions: {', '.join(versions)}")
+        lines.append("Fix: switch --backend-version to one of the available versions, or collect this exact version.")
+    else:
+        lines.append("Available versions: none")
+        lines.append("Fix: collect this backend/version data or add a --systems-paths entry that contains it.")
+    return "\n".join(lines)
+
+
 @dataclass(frozen=True)
 class TestConstraints:
     total_gpus: int
@@ -678,6 +697,11 @@ class SupportMatrix:
             engine_step_backend=engine_step_backend,
         )
         result = TaskRunner().run(task_config)
+        if result is None:
+            database = perf_database.get_database(system, backend, version)
+            if database is None:
+                raise RuntimeError(_format_missing_database_error(system=system, backend=backend, version=version))
+            raise RuntimeError("TaskRunner returned no result")
         return result.get("pareto_df")
 
     @staticmethod

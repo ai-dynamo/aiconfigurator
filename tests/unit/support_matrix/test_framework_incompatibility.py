@@ -26,6 +26,42 @@ def _patch_large_constraints(monkeypatch) -> None:
     )
 
 
+def test_run_mode_reports_missing_exact_database(monkeypatch):
+    class FakeTaskRunner:
+        def run(self, _task_config):
+            return None
+
+    monkeypatch.setattr(SupportMatrix, "_create_task_config", staticmethod(lambda **_kwargs: object()))
+    monkeypatch.setattr(support_matrix_module, "TaskRunner", FakeTaskRunner)
+    monkeypatch.setattr(support_matrix_module.perf_database, "get_database", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        support_matrix_module.perf_database,
+        "get_supported_databases",
+        lambda: {"b200_sxm": {"sglang": ["0.5.10", "0.5.9"]}},
+    )
+    monkeypatch.setattr(
+        support_matrix_module.perf_database,
+        "get_systems_paths",
+        lambda: ["/repo/src/aiconfigurator/systems"],
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        SupportMatrix._run_mode(
+            mode="agg",
+            model="Qwen/Qwen3-0.6B",
+            system="b200_sxm",
+            backend="sglang",
+            version="0.5.12",
+            constraints=TestConstraints(total_gpus=4, isl=256, osl=256, prefix=128, ttft=1500.0, tpot=50.0),
+            engine_step_backend=None,
+        )
+
+    message = str(exc_info.value)
+    assert "No perf database for system=b200_sxm backend=sglang version=0.5.12." in message
+    assert "Available versions: 0.5.10, 0.5.9" in message
+    assert "collect this exact version" in message
+
+
 def test_dsv4_vllm_019_unsupported_mxfp8_quant_is_framework_incompatible(monkeypatch):
     def fake_run_mode(**_kwargs):
         raise ValueError(
