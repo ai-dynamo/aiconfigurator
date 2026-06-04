@@ -143,7 +143,7 @@ _MOE_RUNNER_CONFIG_PARAMS = set(inspect.signature(MoeRunnerConfig).parameters)
 _NON_GATED_MOE_MODEL_PATTERNS = ("Nemotron-3", "nemotron-ultra", "Nemotron-H")
 _SM120_NEMOTRON_NVFP4_MODELS = {
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
-    "nvidia/nemotron-ultra-rl-050826",
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
 }
 
 

@@ -146,7 +146,9 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
         for case in moe_cases
     )
     assert any(
-        case.model_name == "nvidia/nemotron-ultra-rl-050826" and case.hidden_size == 2048 and case.inter_size == 5120
+        case.model_name == "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+        and case.hidden_size == 2048
+        and case.inter_size == 5120
         for case in moe_cases
     )
     assert len(get_context_mla_case_specs()) == 550
@@ -643,7 +645,7 @@ def test_filter_test_cases_supports_not_in_structured_exception_rule():
                         "model_path": {
                             "not_in": [
                                 "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
-                                "nvidia/nemotron-ultra-rl-050826",
+                                "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
                             ]
                         },
                     },
