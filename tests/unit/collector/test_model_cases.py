@@ -709,7 +709,7 @@ def test_sm89_exception_marks_sglang_head_dim_256_context_attention_expected_fai
     )
     case = [1, 256, 2, 1, 256, False, False, True, 1024]
 
-    for version in ("0.5.9", "0.5.10"):
+    for version in ("0.5.9", "0.5.10", "0.5.12"):
         expected = expected_failure_for_test_case(
             case,
             plan=plan.op_cases["attention_context"],

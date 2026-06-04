@@ -398,6 +398,7 @@ def run_mla(
     # Must update config BEFORE creating attn_backend so it picks up the right v_head_dim
     model_runner.model_config.kv_lora_rank = kv_lora_rank
     model_runner.model_config.v_head_dim = v_head_dim
+    model_runner.model_config.swa_v_head_dim = v_head_dim
     model_runner.model_config.qk_nope_head_dim = qk_nope_head_dim
     model_runner.model_config.qk_rope_head_dim = qk_rope_head_dim
     model_runner.model_config.scaling = MLA_SCALING

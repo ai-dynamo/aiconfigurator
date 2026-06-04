@@ -3,6 +3,7 @@
 
 import pytest
 
+import tools.support_matrix.support_matrix as support_matrix_module
 from tools.support_matrix.support_matrix import (
     STATUS_FRAMEWORK_INCOMPATIBLE,
     STATUS_HW_INCOMPATIBLE,
@@ -124,6 +125,26 @@ def test_run_single_test_short_circuits_hardware_incompatible_model(monkeypatch)
     assert status_dict == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
     assert "does not support FP8" in error_dict["agg"]
     assert STATUS_PASS not in status_dict.values()
+
+
+def test_run_single_test_propagates_hardware_preflight_failures(monkeypatch):
+    def fail_get_model_info(_model):
+        raise RuntimeError("metadata unavailable")
+
+    def fail_run_mode(**_kwargs):
+        raise AssertionError("TaskRunner should not run after hardware-preflight failure")
+
+    monkeypatch.setattr(support_matrix_module, "_get_model_info", fail_get_model_info)
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
+
+    with pytest.raises(RuntimeError, match="metadata unavailable"):
+        SupportMatrix.run_single_test(
+            model="Qwen/Qwen3-32B",
+            system="l40s",
+            backend="sglang",
+            version="0.5.12",
+            system_spec=_system_spec(sm_version=89, fp8=True),
+        )
 
 
 @pytest.mark.parametrize(

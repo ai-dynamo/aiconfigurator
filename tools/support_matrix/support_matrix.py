@@ -801,7 +801,7 @@ class SupportMatrix:
                 )
             except Exception:
                 logger.exception("Hardware compatibility preflight failed for %s on %s/%s", model, system, backend)
-                incompatibility = None
+                raise
             if incompatibility is not None:
                 reason = _format_exception_for_csv(incompatibility.reason)
                 statuses = dict.fromkeys(modes_to_test, STATUS_HW_INCOMPATIBLE)
