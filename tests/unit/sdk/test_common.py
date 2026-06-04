@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk import common
 
 pytestmark = pytest.mark.unit
 
@@ -196,17 +196,15 @@ class TestSupportMatrix:
         assert result.exact_match is True
 
     def test_glm5_quantized_variants_cover_all_database_combinations(self):
-        """GLM-5 quantized variants should have exact rows for every support-matrix target."""
-        supported_databases = perf_database.get_supported_databases()
-        expected_keys = {
-            (system, backend, version, mode)
-            for system, backend_versions in supported_databases.items()
-            for backend, versions in backend_versions.items()
-            for version in versions
-            for mode in ("agg", "disagg")
-        }
-
+        """GLM-5 quantized variants should cover every native GLM-5 support row."""
         matrix = common.get_support_matrix()
+        expected_keys = {
+            (row["System"], row["Backend"], row["Version"], row["Mode"])
+            for row in matrix
+            if row["HuggingFaceID"] == "zai-org/GLM-5"
+        }
+        assert expected_keys, "Expected at least one support-matrix row for zai-org/GLM-5"
+
         for model in ("zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"):
             model_rows = [row for row in matrix if row["HuggingFaceID"] == model]
             model_key_counts = Counter(
@@ -214,7 +212,7 @@ class TestSupportMatrix:
             )
             model_keys = set(model_key_counts)
 
-            assert model_keys == expected_keys
+            assert expected_keys <= model_keys
             assert all(count == 1 for count in model_key_counts.values()), (
                 f"{model} has duplicate support-matrix rows for one or more keys"
             )

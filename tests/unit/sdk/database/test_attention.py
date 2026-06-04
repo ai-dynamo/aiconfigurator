@@ -6,6 +6,7 @@ import math
 import pytest
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
 pytestmark = pytest.mark.unit
 
@@ -90,6 +91,35 @@ class TestContextAttention:
             s
         ][b]
         assert math.isclose(result, expected, rel_tol=1e-6)
+        assert result.source == "silicon"
+
+    def test_query_context_attention_batch_interpolation_remains_silicon(self, comprehensive_perf_db):
+        result = comprehensive_perf_db.query_context_attention(
+            5,
+            32,
+            0,
+            16,
+            4,
+            common.KVCacheQuantMode.bfloat16,
+            common.FMHAQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        assert result > 0
+        assert result.source == "silicon"
+
+    def test_query_context_attention_refuses_nearest_batch_fallback(self, comprehensive_perf_db):
+        with pytest.raises(PerfDataNotAvailableError, match="refusing SOL-scaled nearest-batch fallback"):
+            comprehensive_perf_db.query_context_attention(
+                16,
+                32,
+                0,
+                16,
+                4,
+                common.KVCacheQuantMode.bfloat16,
+                common.FMHAQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.SILICON,
+            )
 
     def test_query_context_attention_non_sol_mode_small_s(self, comprehensive_perf_db):
         """
@@ -169,6 +199,19 @@ class TestGenerationAttention:
         # Should use interpolation from generation_attention_data
         assert isinstance(result, float)
         assert result > 0
+
+    def test_query_generation_attention_sequence_interpolation_remains_silicon(self, comprehensive_perf_db):
+        result = comprehensive_perf_db.query_generation_attention(
+            2,
+            65,
+            16,
+            8,
+            common.KVCacheQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        assert result > 0
+        assert result.source == "silicon"
 
     def test_query_generation_attention_non_database_mode_mha(self, comprehensive_perf_db):
         """Test SILICON mode with MHA (n_kv == n)."""

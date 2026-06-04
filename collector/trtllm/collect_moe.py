@@ -9,7 +9,7 @@ Shared MoE shapes come from YAML; this file owns TRT-LLM version quirks and
 kernel-specific filters.
 """
 
-__compat__ = "trtllm>=1.1.0,<=1.3.0rc10"
+__compat__ = "trtllm>=1.1.0,<=1.3.0rc15"
 
 import gc
 import glob

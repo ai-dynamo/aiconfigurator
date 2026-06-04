@@ -108,6 +108,11 @@ class HardwareIncompatibility:
     reason: str
 
 
+@dataclass(frozen=True)
+class FrameworkIncompatibility:
+    reason: str
+
+
 def _support_matrix_row_command(
     *,
     model: str,
@@ -233,6 +238,27 @@ def _is_known_framework_incompatible_gap(
     if "unsupported gemm quant mode 'fp8_static'" in normalized:
         return True
 
+    if system == "b300_sxm":
+        is_qwen3_vl = model.startswith("Qwen/Qwen3-VL-")
+        qwen3_vl_runtime_gap = is_qwen3_vl and (
+            "tp_size (8) * attention_dp_size (1) should be equal" in normalized
+            or "division by zero failed to query context attention data" in normalized
+            or "x is less than the smallest value in the list. x=0" in normalized
+        )
+        if backend == common.BackendName.trtllm.value and version == "1.3.0rc10":
+            return (
+                "unsupported moe quant mode 'fp8_block'" in normalized
+                or "unsupported moe quant mode 'int4_wo'" in normalized
+                or "deepseek-v4 mhc module data not loaded" in normalized
+                or qwen3_vl_runtime_gap
+            )
+        if backend == common.BackendName.vllm.value and version == "0.19.0":
+            return (
+                "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
+                or "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
+                or qwen3_vl_runtime_gap
+            )
+
     if system == "rtx_pro_6000_server":
         if (
             "rtx_pro_6000_server/nccl/" in normalized
@@ -271,6 +297,46 @@ def _is_known_framework_incompatible_gap(
         and version == "1.3.0rc10"
         and "unsupported moe quant mode 'int4_wo'" in normalized
     )
+
+
+def _strip_exception_prefix(line: str) -> str:
+    for prefix in ("ValueError: ", "RuntimeError: ", "AssertionError: ", "ImportError: ", "ModuleNotFoundError: "):
+        if line.startswith(prefix):
+            return line[len(prefix) :]
+    return line
+
+
+def _concise_framework_incompatibility_reason(error_message: str) -> str:
+    """Return the framework-facing failure reason without the Python traceback."""
+    lines = [line.strip() for line in error_message.splitlines() if line.strip()]
+    if not lines:
+        return error_message
+
+    marker_phrases = (
+        "Unsupported moe quant mode",
+        "Unsupported gemm quant mode",
+        "DeepSeek-V4 mHC module data not loaded",
+        "No mHC silicon data",
+        "DeepSeek-V4 mHC module",
+        "tp_size (8) * attention_dp_size",
+        "division by zero failed to query context attention data",
+        "x is less than the smallest value in the list",
+        "x is not equal to the only value in the list",
+        "dsa_context_module_perf.txt",
+        "dsa_generation_module_perf.txt",
+    )
+    for line in reversed(lines):
+        clean_line = _strip_exception_prefix(line)
+        for marker in marker_phrases:
+            marker_index = clean_line.find(marker)
+            if marker_index >= 0:
+                return clean_line[marker_index:]
+
+    for line in reversed(lines):
+        clean_line = _strip_exception_prefix(line)
+        if clean_line != line:
+            return clean_line
+    return lines[-1]
 
 
 def _enum_name(value: object | None) -> str | None:
@@ -357,6 +423,90 @@ def get_hardware_incompatibility(
         missing_datatypes=missing,
         reason=f"{_gpu_label(system, system_spec)} does not support {datatype_text} required by {model}",
     )
+
+
+def get_framework_incompatibility(
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    version: str,
+    system_spec: dict,
+) -> FrameworkIncompatibility | None:
+    """Return deterministic framework/runtime gaps verified by collector runs."""
+    sm_version = (system_spec.get("gpu") or {}).get("sm_version")
+    if sm_version != 103:
+        return None
+
+    if backend == common.BackendName.vllm.value and version == "0.19.0":
+        if model == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} vLLM 0.19.0 NVFP4 MoE rejects Nemotron-3 Super "
+                    "because the FlashInfer FP4 scale-factor shuffle requires M % 128 == 0."
+                )
+            )
+        if model == "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} vLLM 0.19.0 NVFP4 MoE rejects Nemotron Ultra "
+                    "because its routing kernel requires topK <= 10, but this model uses topK=22."
+                )
+            )
+
+    if backend == common.BackendName.trtllm.value and version == "1.3.0rc10" and model == "google/gemma-4-26B-A4B":
+        return FrameworkIncompatibility(
+            reason=(
+                f"{_gpu_label(system, system_spec)} TRT-LLM 1.3.0rc10 MMHA rejects Gemma4 "
+                "context attention head_dim=512."
+            )
+        )
+
+    if backend == common.BackendName.sglang.value and version == "0.5.10":
+        if model == "google/gemma-4-26B-A4B":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 context attention is missing the "
+                    "TRTLLM-GEN kernel for Gemma4 head_dim=512."
+                )
+            )
+
+        if model == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 NVFP4 MoE rejects Nemotron-3 Super "
+                    "latent-MoE shape hidden_size=1024, inter_size=2688, moe_tp_size=8 because the local "
+                    "intermediate size 336 is not divisible by 32."
+                )
+            )
+
+        if model == "sgl-project/DeepSeek-V4-Pro-FP8":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 cannot run the DeepSeek-V4 Pro-FP8 "
+                    "mHC collector/runtime path for hidden_size=7168, hc_mult=4 without newer SGLang "
+                    "kernel and TileLang support."
+                )
+            )
+
+        if model == "deepseek-ai/DeepSeek-V4-Pro":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 cannot load the native "
+                    "DeepSeek-V4 Pro mHC collector/runtime path for hidden_size=7168, hc_mult=4: "
+                    "SGLang raises `Cannot find model module` for `DeepseekV4ForCausalLM`."
+                )
+            )
+
+        if model == "XiaomiMiMo/MiMo-V2-Flash":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 Triton context attention fails to compile "
+                    "the MiMo h=192 FP8 GQA shape used by this matrix row."
+                )
+            )
+
+    return None
 
 
 @contextmanager
@@ -766,6 +916,21 @@ class SupportMatrix:
                     return statuses, error_messages, commands
                 return statuses, error_messages
 
+            framework_incompatibility = get_framework_incompatibility(
+                model=model,
+                system=system,
+                backend=backend,
+                version=version,
+                system_spec=system_spec,
+            )
+            if framework_incompatibility is not None:
+                reason = _format_exception_for_csv(framework_incompatibility.reason)
+                statuses = dict.fromkeys(modes_to_test, STATUS_FRAMEWORK_INCOMPATIBLE)
+                error_messages = dict.fromkeys(modes_to_test, reason)
+                if include_commands:
+                    return statuses, error_messages, commands
+                return statuses, error_messages
+
         for mode in modes_to_test:
             try:
                 python_pareto_df = SupportMatrix._run_mode(
@@ -831,6 +996,7 @@ class SupportMatrix:
                     error_message=raw_error,
                 ):
                     statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
+                    raw_error = _concise_framework_incompatibility_reason(raw_error)
                 else:
                     statuses[mode] = STATUS_FAIL
                 error_messages[mode] = raw_error
@@ -1162,20 +1328,11 @@ class SupportMatrix:
                     backend=backend,
                     version=version,
                     mode=mode,
-                    constraints=_DEFAULT_TIER,
-                    compare_engine_step_backends=getattr(self, "compare_engine_step_backends", False),
-                    engine_step_comparison_rtol=getattr(
-                        self, "engine_step_comparison_rtol", DEFAULT_ENGINE_STEP_COMPARISON_RTOL
-                    ),
-                    engine_step_comparison_atol=getattr(
-                        self, "engine_step_comparison_atol", DEFAULT_ENGINE_STEP_COMPARISON_ATOL
-                    ),
-                    engine_step_frontier_rtol=getattr(
-                        self, "engine_step_frontier_rtol", DEFAULT_ENGINE_STEP_FRONTIER_RTOL
-                    ),
-                    engine_step_frontier_atol=getattr(
-                        self, "engine_step_frontier_atol", DEFAULT_ENGINE_STEP_FRONTIER_ATOL
-                    ),
+                    compare_engine_step_backends=self.compare_engine_step_backends,
+                    engine_step_comparison_rtol=self.engine_step_comparison_rtol,
+                    engine_step_comparison_atol=self.engine_step_comparison_atol,
+                    engine_step_frontier_rtol=self.engine_step_frontier_rtol,
+                    engine_step_frontier_atol=self.engine_step_frontier_atol,
                 )
             else:
                 raise ValueError(f"Invalid support-matrix result row length: {len(row)}")

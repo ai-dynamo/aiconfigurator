@@ -89,6 +89,43 @@ framework_specific_op_cases:
     attention_generation:
       cases:
       - id: base_attention_generation_shape_sweep
+        mha_query_head_counts:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 8
+        - 10
+        - 12
+        - 16
+        - 20
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        - 96
+        xqa_query_head_counts:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 8
+        - 10
+        - 12
+        - 16
+        - 20
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        - 96
+        - 128
         head_dims:
         - 128
         - 192
@@ -96,6 +133,71 @@ framework_specific_op_cases:
         window_sizes:
         - 0
         - 1024
+      - id: sglang_mimo_v2_flash_head_dim_192_generation
+        batch_sizes:
+        - 1
+        sequence_lengths:
+        - 231
+        - 258
+        - 359
+        - 386
+        mha_query_head_counts:
+        - 8
+        - 16
+        - 32
+        - 64
+        xqa_query_head_counts:
+        - 8
+        - 16
+        - 32
+        - 64
+        kv_head_counts:
+        - 1
+        - 2
+        - 4
+        head_dims:
+        - 192
+        window_sizes:
+        - 0
+        - 128
+        max_mha_tokens_per_step: 8388608
+        max_xqa_tokens_per_step: 16777216
+        min_batch_options_per_sequence: 1
+        drop_largest_sequence_for_batch_at_least: 256
+        precision_cases:
+        - id: fp8_kv_cache
+          fp8_kv_cache: true
+      - id: sglang_gemma4_head_dim_512_generation
+        batch_sizes:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 16
+        sequence_lengths:
+        - 128
+        - 256
+        - 512
+        - 1024
+        - 2048
+        mha_query_head_counts:
+        - 2
+        xqa_query_head_counts:
+        - 2
+        kv_head_counts:
+        - 1
+        head_dims:
+        - 512
+        window_sizes:
+        - 0
+        - 1024
+        max_mha_tokens_per_step: 8388608
+        max_xqa_tokens_per_step: 16777216
+        min_batch_options_per_sequence: 1
+        drop_largest_sequence_for_batch_at_least: 256
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
   trtllm:
     attention_generation:
       cases:
