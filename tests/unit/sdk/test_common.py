@@ -203,6 +203,7 @@ class TestSupportMatrix:
             for row in matrix
             if row["HuggingFaceID"] == "zai-org/GLM-5"
         }
+        assert expected_keys, "Expected at least one support-matrix row for zai-org/GLM-5"
 
         for model in ("zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"):
             model_rows = [row for row in matrix if row["HuggingFaceID"] == model]

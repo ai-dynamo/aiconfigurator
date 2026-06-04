@@ -1238,6 +1238,7 @@ class TaskConfig:
                 generation_modes = supported.get(generation_attn_key, []) or []
                 if (
                     not explicit_kvcache_mode
+                    and not validate_context
                     and generation_attn_key == "dsa_generation_module"
                     and kvcache_mode == common.KVCacheQuantMode.fp8.name
                     and generation_modes

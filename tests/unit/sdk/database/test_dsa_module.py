@@ -88,7 +88,7 @@ class TestContextDSAModule:
                 num_heads=32,
                 kvcache_quant_mode=common.KVCacheQuantMode.fp8,
                 fmha_quant_mode=common.FMHAQuantMode.fp8,
-                gemm_quant_mode=common.GEMMQuantMode.fp8,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
                 database_mode=common.DatabaseMode.SILICON,
             )
 
@@ -589,7 +589,7 @@ class TestGenerationDSAModule:
                 s=256,
                 num_heads=32,
                 kv_cache_dtype=common.KVCacheQuantMode.fp8,
-                gemm_quant_mode=common.GEMMQuantMode.fp8,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
                 database_mode=common.DatabaseMode.SILICON,
             )
 

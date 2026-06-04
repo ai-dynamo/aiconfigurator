@@ -822,6 +822,51 @@ def test_taskconfig_quant_merge_deepseek_fmha_fallback(monkeypatch):
     assert _enum_name(task.config.worker_config.fmha_quant_mode) == "bfloat16"
 
 
+def test_taskconfig_dsa_generation_kv_fallback_is_decode_only(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 100}}
+            self.supported_quant_mode = {
+                "gemm": ["fp8"],
+                "moe": ["fp8"],
+                "dsa_context_module": ["bfloat16"],
+                "dsa_generation_module": ["bfloat16"],
+            }
+
+    def fake_get_database(system, backend, version, database_mode=None):
+        return FakeDatabase()
+
+    def fake_model_info(_path):
+        return {
+            "raw_config": {"quant_algo": "fp8", "quant_dynamic": True},
+            "architecture": "GlmMoeDsaForCausalLM",
+        }
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+    monkeypatch.setattr(task_module, "get_model_config_from_model_path", fake_model_info)
+
+    with pytest.raises(ValueError, match=r"Unsupported dsa_generation_module quant mode 'fp8'"):
+        TaskConfig(
+            serving_mode="agg",
+            model_path="zai-org/GLM-5-FP8",
+            system_name="b200_sxm",
+            backend_name="sglang",
+            backend_version="0.5.10",
+        )
+
+    task = TaskConfig(
+        serving_mode="disagg",
+        model_path="zai-org/GLM-5-FP8",
+        system_name="b200_sxm",
+        decode_system_name="b200_sxm",
+        backend_name="sglang",
+        backend_version="0.5.10",
+    )
+
+    assert _enum_name(task.config.prefill_worker_config.kvcache_quant_mode) == "fp8"
+    assert _enum_name(task.config.decode_worker_config.kvcache_quant_mode) == "bfloat16"
+
+
 def test_taskconfig_quant_merge_preserves_explicit_deepseek_fmha(monkeypatch):
     class FakeDatabase:
         def __init__(self):

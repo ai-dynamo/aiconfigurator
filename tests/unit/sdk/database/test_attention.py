@@ -111,7 +111,7 @@ class TestContextAttention:
     def test_query_context_attention_refuses_nearest_batch_fallback(self, comprehensive_perf_db):
         with pytest.raises(PerfDataNotAvailableError, match="refusing SOL-scaled nearest-batch fallback"):
             comprehensive_perf_db.query_context_attention(
-                4096,
+                16,
                 32,
                 0,
                 16,

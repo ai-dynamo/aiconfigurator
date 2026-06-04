@@ -132,6 +132,7 @@ known_exceptions:
   - framework: sglang
     op: moe
     reason_type: framework_version_unsupported
+    version_prefixes: ["0.5.10"]
     source: collector/sglang/collect_moe.py
     fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
     reason: >
@@ -150,6 +151,7 @@ known_exceptions:
   - framework: sglang
     op: mhc_module
     reason_type: framework_version_unsupported
+    version_prefixes: ["0.5.10"]
     source: collector/sglang/collect_mhc_module.py
     fields: [op, model_path]
     reason: >

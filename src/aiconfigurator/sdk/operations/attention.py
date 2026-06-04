@@ -20,6 +20,7 @@ enable_shared_layer)``, same as GEMM (and every other migrated op).
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
@@ -87,12 +88,15 @@ class ContextAttention(Operation):
     """
     Context (prefill) attention operation.
 
-    Owns ``_data_cache: {key: LoadedOpData}`` for the context attention CSV.
-    No SOL clamp on the loaded table (legacy ``_correct_data`` did not
-    correct context attention) — only grid extrapolation runs in ``load_data``.
+    Owns ``_data_cache`` for the extrapolated context attention CSV and
+    ``_raw_data_cache`` for a pre-extrapolation copy used by the measured-row
+    same-shape batch interpolation path. No SOL clamp on the loaded table
+    (legacy ``_correct_data`` did not correct context attention) — only grid
+    extrapolation runs in ``load_data``.
     """
 
     _data_cache: ClassVar[dict] = {}
+    _raw_data_cache: ClassVar[dict] = {}
 
     def __init__(
         self,
@@ -128,7 +132,9 @@ class ContextAttention(Operation):
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
         """Idempotent. Loads context_attention CSV into the class cache,
-        applies grid extrapolation, binds ``database._context_attention_data``.
+        deep-copies the raw rows before extrapolation, then binds
+        ``database._context_attention_data`` and
+        ``database._raw_context_attention_data``.
 
         Mirrors ``GEMM.load_data``: correction/extrapolation operate on the
         canonical class-cache value (passed explicitly), then the instance
@@ -147,16 +153,20 @@ class ContextAttention(Operation):
                 load_context_attention_data(sources), PerfDataFilename.context_attention, primary_path
             )
 
+            cls._raw_data_cache[key] = copy.deepcopy(cls._data_cache[key])
             cls._extrapolate(cls._data_cache[key])
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
         if "_context_attention_data" not in database.__dict__:
             database._context_attention_data = cls._data_cache[key]
+        if "_raw_context_attention_data" not in database.__dict__:
+            database._raw_context_attention_data = cls._raw_data_cache[key]
 
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
+        cls._raw_data_cache.clear()
 
     @classmethod
     def _extrapolate(cls, data_wrapper) -> None:
@@ -258,6 +268,7 @@ class ContextAttention(Operation):
 
         cls.load_data(database)
         data_wrapper = database._context_attention_data
+        raw_data_wrapper = getattr(database, "_raw_context_attention_data", None)
 
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
@@ -265,6 +276,14 @@ class ContextAttention(Operation):
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             n_kv_lookup = 0 if n == n_kv else n_kv
             attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
+            raw_attention_dict = None
+            if raw_data_wrapper is not None and getattr(raw_data_wrapper, "loaded", True):
+                try:
+                    raw_attention_dict = raw_data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][
+                        window_size
+                    ]
+                except (KeyError, TypeError):
+                    raw_attention_dict = None
 
             lookup_s = full_s
 
@@ -308,7 +327,7 @@ class ContextAttention(Operation):
                 )
 
             def get_same_shape_sample(s_i: int):
-                exact_n = attention_dict.get(n)
+                exact_n = raw_attention_dict.get(n) if isinstance(raw_attention_dict, dict) else None
                 if not exact_n:
                     return None
                 exact_s = exact_n.get(s_i)
