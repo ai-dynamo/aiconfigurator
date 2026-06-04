@@ -55,7 +55,7 @@ def get_gemm_test_cases():
 
     gemm_list = ["bfloat16"]
     if sm > 86:
-        gemm_list += ["fp8", "fp8_static"]
+        gemm_list += ["fp8"]
     # Blockwise FP8 kernels are available on Hopper/Blackwell+
     if sm >= 90:
         gemm_list += ["fp8_block"]
@@ -107,7 +107,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
 
     x = torch.randn((m, k), dtype=dtype, device=torch.device(device))
 
-    if gemm_type in ("fp8", "fp8_static"):
+    if gemm_type == "fp8":
         qc = Fp8Config(
             is_checkpoint_fp8_serialized=True,
             activation_scheme="dynamic",
@@ -154,7 +154,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
         # TODO, to evaluate random weights impact
         gemm.to(torch.device(device))
 
-        if gemm_type in ("fp8", "fp8_static") and hasattr(gemm, "weight"):
+        if gemm_type == "fp8" and hasattr(gemm, "weight"):
             new_weight = gemm.weight.data.t()
             # print("new_weight stride:", new_weight.stride())
             # mnk = 1,128,128 weight stride = (128,1)
