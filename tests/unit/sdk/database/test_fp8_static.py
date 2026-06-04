@@ -43,7 +43,7 @@ def _overhead_loaded_data(filename: common.PerfDataFilename) -> LoadedOpData:
 
 
 @pytest.mark.parametrize("backend", [common.BackendName.trtllm.value, common.BackendName.vllm.value])
-def test_supported_quant_modes_include_fp8_static_only_when_overhead_data_exists(
+def test_supported_quant_modes_include_fp8_static_only_when_base_and_overhead_data_exist(
     mutable_comprehensive_perf_db, backend
 ):
     db = mutable_comprehensive_perf_db
@@ -55,11 +55,12 @@ def test_supported_quant_modes_include_fp8_static_only_when_overhead_data_exists
     assert common.GEMMQuantMode.fp8.name in modes
     assert common.GEMMQuantMode.fp8_static.name not in modes
 
-    db._gemm_data = _gemm_loaded_data(common.GEMMQuantMode.fp8, common.GEMMQuantMode.fp8_static)
+    db._gemm_data = _gemm_loaded_data(common.GEMMQuantMode.fp8_static)
     db._update_support_matrix()
     modes = db.supported_quant_mode["gemm"]
     assert common.GEMMQuantMode.fp8_static.name not in modes
 
+    db._gemm_data = _gemm_loaded_data(common.GEMMQuantMode.fp8)
     db._compute_scale_data = _overhead_loaded_data(common.PerfDataFilename.compute_scale)
     db._scale_matrix_data = _overhead_loaded_data(common.PerfDataFilename.scale_matrix)
     db._update_support_matrix()
@@ -70,7 +71,7 @@ def test_supported_quant_modes_include_fp8_static_only_when_overhead_data_exists
     assert modes.count(common.GEMMQuantMode.fp8_static.name) == 1
 
 
-def test_sglang_supported_quant_modes_include_fp8_static_only_when_overhead_data_exists(
+def test_sglang_supported_quant_modes_include_fp8_static_only_when_base_and_overhead_data_exist(
     mutable_comprehensive_perf_db,
 ):
     db = mutable_comprehensive_perf_db
@@ -94,30 +95,12 @@ def test_sglang_supported_quant_modes_include_fp8_static_only_when_overhead_data
     assert common.GEMMQuantMode.fp8.name in modes
     assert common.GEMMQuantMode.fp8_static.name not in modes
 
-    db._gemm_data = LoadedOpData(
-        {
-            common.GEMMQuantMode.fp8: {
-                32: {
-                    256: {
-                        512: {"latency": 1.0, "energy": 10.0},
-                    }
-                }
-            },
-            common.GEMMQuantMode.fp8_static: {
-                32: {
-                    256: {
-                        512: {"latency": 2.0, "energy": 20.0},
-                    }
-                }
-            },
-        },
-        common.PerfDataFilename.gemm,
-        "dummy_path",
-    )
+    db._gemm_data = _gemm_loaded_data(common.GEMMQuantMode.fp8_static)
     db._update_support_matrix()
     modes = db.supported_quant_mode["gemm"]
     assert common.GEMMQuantMode.fp8_static.name not in modes
 
+    db._gemm_data = _gemm_loaded_data(common.GEMMQuantMode.fp8)
     db._compute_scale_data = _overhead_loaded_data(common.PerfDataFilename.compute_scale)
     db._scale_matrix_data = _overhead_loaded_data(common.PerfDataFilename.scale_matrix)
     db._update_support_matrix()
@@ -132,7 +115,7 @@ def test_sglang_supported_quant_modes_include_fp8_static_only_when_overhead_data
     "backend",
     [common.BackendName.trtllm.value, common.BackendName.vllm.value, common.BackendName.sglang.value],
 )
-def test_query_gemm_fp8_static_uses_static_table(mutable_comprehensive_perf_db, backend):
+def test_query_gemm_fp8_static_uses_dynamic_fp8_table(mutable_comprehensive_perf_db, backend):
     db = mutable_comprehensive_perf_db
     db.backend = backend
     db._gemm_data = LoadedOpData(
@@ -165,20 +148,20 @@ def test_query_gemm_fp8_static_uses_static_table(mutable_comprehensive_perf_db, 
         database_mode=common.DatabaseMode.SILICON,
     )
 
-    assert float(result) == pytest.approx(2.0)
-    assert result.energy == pytest.approx(20.0)
+    assert float(result) == pytest.approx(1.0)
+    assert result.energy == pytest.approx(10.0)
 
 
 @pytest.mark.parametrize(
     "backend",
     [common.BackendName.trtllm.value, common.BackendName.vllm.value, common.BackendName.sglang.value],
 )
-def test_query_gemm_fp8_static_requires_static_table(mutable_comprehensive_perf_db, backend):
+def test_query_gemm_fp8_static_requires_dynamic_fp8_table(mutable_comprehensive_perf_db, backend):
     db = mutable_comprehensive_perf_db
     db.backend = backend
     db._gemm_data = LoadedOpData(
         {
-            common.GEMMQuantMode.fp8: {
+            common.GEMMQuantMode.fp8_static: {
                 33: {
                     272: {
                         544: {"latency": 1.0, "energy": 10.0},
@@ -206,7 +189,7 @@ def test_query_gemm_fp8_static_sparse_shape_miss_is_structured(mutable_comprehen
     db.backend = common.BackendName.sglang.value
     db._gemm_data = LoadedOpData(
         {
-            common.GEMMQuantMode.fp8_static: {
+            common.GEMMQuantMode.fp8: {
                 1: {
                     4096: {
                         5120: {"latency": 1.0, "energy": 10.0},

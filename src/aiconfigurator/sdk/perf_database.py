@@ -1119,14 +1119,16 @@ def _contains_quant_mode(data, quant_mode: common.GEMMQuantMode) -> bool:
 
 
 def _gemm_key_names(database) -> list[str]:
-    """Return GEMM modes, requiring overhead tables for static FP8 support."""
+    """Return GEMM modes, deriving static FP8 from dynamic FP8 plus overheads."""
     names = set(_enum_key_names(getattr(database, "_gemm_data", None)))
     fp8_static_name = common.GEMMQuantMode.fp8_static.name
-    if fp8_static_name in names and not (
-        _contains_quant_mode(getattr(database, "_compute_scale_data", None), common.GEMMQuantMode.fp8)
+    names.discard(fp8_static_name)
+    if (
+        _contains_quant_mode(getattr(database, "_gemm_data", None), common.GEMMQuantMode.fp8)
+        and _contains_quant_mode(getattr(database, "_compute_scale_data", None), common.GEMMQuantMode.fp8)
         and _contains_quant_mode(getattr(database, "_scale_matrix_data", None), common.GEMMQuantMode.fp8)
     ):
-        names.remove(fp8_static_name)
+        names.add(fp8_static_name)
     return sorted(names)
 
 
