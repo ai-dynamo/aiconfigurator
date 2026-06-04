@@ -34,6 +34,35 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _raise_for_sglang_context_attention_head_size_limit(backend: str, version: str, head_size: int) -> None:
+    if backend != common.BackendName.sglang.value or head_size <= 256:
+        return
+    parsed_version = common.parse_support_matrix_version(version)
+    max_limited_version = common.parse_support_matrix_version("0.5.10")
+    if parsed_version is None or max_limited_version is None or parsed_version > max_limited_version:
+        return
+    raise RuntimeError(
+        "SGLang context attention does not support head_size="
+        f"{head_size} for backend version {version}; "
+        "flash_attn_with_kvcache reports: "
+        "FlashAttention forward only supports head dimension at most 256."
+    )
+
+
+def _raise_for_trtllm_attention_head_size_limit(backend: str, version: str, head_size: int) -> None:
+    if backend != common.BackendName.trtllm.value or head_size <= 256:
+        return
+    parsed_version = common.parse_support_matrix_version(version)
+    max_limited_version = common.parse_support_matrix_version("1.3.0rc10")
+    if parsed_version is None or max_limited_version is None or parsed_version > max_limited_version:
+        return
+    raise RuntimeError(
+        "TRT-LLM attention does not support head_size="
+        f"{head_size} for backend version {version}; "
+        "TRT-LLM MMHA reports: Head size 512 is not supported by MMHA."
+    )
+
+
 # Extrapolation target grids — lifted verbatim from the legacy blocks in
 # ``PerfDatabase.__init__`` so behavior stays bit-identical.
 
@@ -245,6 +274,8 @@ class ContextAttention(Operation):
 
         if database_mode is None:
             database_mode = database._default_database_mode
+        _raise_for_sglang_context_attention_head_size_limit(database.backend, database.version, head_size)
+        _raise_for_trtllm_attention_head_size_limit(database.backend, database.version, head_size)
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
@@ -272,10 +303,9 @@ class ContextAttention(Operation):
                 attention_dict,
                 "cubic",
                 database._extracted_metrics_cache,
-                allow_singleton_axes=True,
             )
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            latency = interpolation.get_value(result, "latency") * prefix_correction
+            energy = interpolation.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -547,6 +577,7 @@ class GenerationAttention(Operation):
 
         if database_mode is None:
             database_mode = database._default_database_mode
+        _raise_for_trtllm_attention_head_size_limit(database.backend, database.version, head_size)
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
@@ -573,8 +604,8 @@ class GenerationAttention(Operation):
             energy_sum = 0.0
             for s_i in s_samples:
                 r = interpolation.interp_3d(n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache)
-                latency_sum += float(r["latency"])
-                energy_sum += float(r.get("energy", 0.0))
+                latency_sum += float(interpolation.get_value(r, "latency"))
+                energy_sum += float(interpolation.get_value(r, "energy"))
 
             latency = latency_sum / sample_cnt
             energy = energy_sum / sample_cnt

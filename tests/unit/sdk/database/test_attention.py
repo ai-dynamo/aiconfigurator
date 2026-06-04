@@ -6,6 +6,10 @@ import math
 import pytest
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.operations.attention import (
+    _raise_for_sglang_context_attention_head_size_limit,
+    _raise_for_trtllm_attention_head_size_limit,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -119,6 +123,57 @@ class TestContextAttention:
                 common.FMHAQuantMode.bfloat16,
             )
 
+    def test_query_context_attention_sglang_head_size_limit(self):
+        """SGLang 0.5.10 cannot run context attention above head_size 256."""
+        with pytest.raises(RuntimeError, match="head_size=512"):
+            _raise_for_sglang_context_attention_head_size_limit(
+                common.BackendName.sglang.value,
+                "0.5.10",
+                512,
+            )
+
+    def test_query_context_attention_uses_3d_interpolation(self, mutable_comprehensive_perf_db, monkeypatch):
+        """Attention data should remain a 3D lookup instead of using sparse 1D/2D fallbacks."""
+        db = mutable_comprehensive_perf_db
+        db.query_context_attention.cache_clear()
+        original_interp_3d = interpolation.interp_3d
+        calls = []
+
+        def spy_interp_3d(x, y, z, data, method, extracted_metrics_cache=None):
+            calls.append((x, y, z, method))
+            return original_interp_3d(x, y, z, data, method, extracted_metrics_cache)
+
+        monkeypatch.setattr(interpolation, "interp_3d", spy_interp_3d)
+
+        result = db.query_context_attention(
+            2,
+            32,
+            0,
+            16,
+            4,
+            common.KVCacheQuantMode.bfloat16,
+            common.FMHAQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        assert result > 0
+        assert calls == [(16, 32, 2, "cubic")]
+
+    def test_trtllm_attention_head_size_limit_version_boundary(self):
+        """TRT-LLM 1.3.0rc10 has the 512-head-size limit; newer versions must prove it again."""
+        with pytest.raises(RuntimeError, match="head_size=512"):
+            _raise_for_trtllm_attention_head_size_limit(
+                common.BackendName.trtllm.value,
+                "1.3.0rc10",
+                512,
+            )
+
+        _raise_for_trtllm_attention_head_size_limit(
+            common.BackendName.trtllm.value,
+            "1.3.0rc11",
+            512,
+        )
+
 
 class TestGenerationAttention:
     """Test cases for query_generation_attention method."""
@@ -205,6 +260,37 @@ class TestGenerationAttention:
             1, 1, 8, 4, common.KVCacheQuantMode.bfloat16, database_mode=common.DatabaseMode.SOL
         )
         assert result > 0
+
+    def test_query_generation_attention_uses_3d_interpolation(self, mutable_comprehensive_perf_db, monkeypatch):
+        """Generation attention should use the full 3D table for every sampled sequence length."""
+        db = mutable_comprehensive_perf_db
+        db.query_generation_attention.cache_clear()
+        original_interp_3d = interpolation.interp_3d
+        calls = []
+
+        def spy_interp_3d(x, y, z, data, method, extracted_metrics_cache=None):
+            calls.append((x, y, z, method))
+            return original_interp_3d(x, y, z, data, method, extracted_metrics_cache)
+
+        monkeypatch.setattr(interpolation, "interp_3d", spy_interp_3d)
+
+        result = db.query_generation_attention(
+            2,
+            64,
+            16,
+            8,
+            common.KVCacheQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        assert result > 0
+        assert calls == [
+            (16, 2, 57, "bilinear"),
+            (16, 2, 60, "bilinear"),
+            (16, 2, 63, "bilinear"),
+            (16, 2, 66, "bilinear"),
+            (16, 2, 70, "bilinear"),
+        ]
 
 
 class TestContextMLA:

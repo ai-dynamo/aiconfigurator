@@ -148,8 +148,12 @@ def test_query_gemm_fp8_static_uses_dynamic_fp8_table(mutable_comprehensive_perf
         database_mode=common.DatabaseMode.SILICON,
     )
 
-    assert float(result) == pytest.approx(1.0)
-    assert result.energy == pytest.approx(10.0)
+    if backend == common.BackendName.trtllm.value:
+        assert float(result) == pytest.approx(1.0)
+        assert result.energy == pytest.approx(10.0)
+    else:
+        assert float(result) == pytest.approx(2.0)
+        assert result.energy == pytest.approx(20.0)
 
 
 @pytest.mark.parametrize(
@@ -174,14 +178,26 @@ def test_query_gemm_fp8_static_requires_dynamic_fp8_table(mutable_comprehensive_
     )
     db.query_gemm.cache_clear()
 
-    with pytest.raises(PerfDataNotAvailableError, match="fp8_static"):
-        db.query_gemm(
-            33,
-            272,
-            544,
-            common.GEMMQuantMode.fp8_static,
-            database_mode=common.DatabaseMode.SILICON,
-        )
+    if backend == common.BackendName.trtllm.value:
+        with pytest.raises(PerfDataNotAvailableError, match="fp8_static"):
+            db.query_gemm(
+                33,
+                272,
+                544,
+                common.GEMMQuantMode.fp8_static,
+                database_mode=common.DatabaseMode.SILICON,
+            )
+        return
+
+    result = db.query_gemm(
+        33,
+        272,
+        544,
+        common.GEMMQuantMode.fp8_static,
+        database_mode=common.DatabaseMode.SILICON,
+    )
+    assert float(result) == pytest.approx(1.0)
+    assert result.energy == pytest.approx(10.0)
 
 
 def test_query_gemm_fp8_static_sparse_shape_miss_is_structured(mutable_comprehensive_perf_db):

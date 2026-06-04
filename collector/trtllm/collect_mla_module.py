@@ -502,7 +502,7 @@ def create_kv_cache_and_metadata(
     qk_rope_head_dim = config.qk_rope_head_dim
     head_dim = kv_lora_rank + qk_rope_head_dim
 
-    prefix_len = int(prefix_len) if is_context else 0
+    prefix_len = max(0, int(prefix_len)) if is_context else 0
 
     if is_context:
         max_seq = prefix_len + seq_len + 1
@@ -624,7 +624,7 @@ def run_mla_module(
     use_fp8_kv_cache = kv_cache_dtype == "fp8"
 
     is_context = "context" in perf_filename
-    prefix_len = int(prefix_len) if is_context else 0
+    prefix_len = max(0, int(prefix_len)) if is_context else 0
     phase = "context" if is_context else "generation"
     variant = attn_type.upper()
     print(
@@ -832,6 +832,7 @@ def main():
     parser.add_argument("--num-heads", type=int, default=None, help="Filter by number of heads")
     parser.add_argument("--batch-size", type=int, default=None, help="Single batch size (for --quick)")
     parser.add_argument("--seq-len", type=int, default=None, help="Single seq len (for --quick)")
+    parser.add_argument("--prefix-len", type=int, default=0, help="Context cached-prefix length (for --quick)")
     parser.add_argument(
         "--kv-cache-dtype",
         type=str,
@@ -889,6 +890,7 @@ def main():
                 perf_filename=perf_filename,
                 model_path=model_path,
                 attn_type=attn_type,
+                prefix_len=args.prefix_len if args.mode == "context" else 0,
                 device=args.device,
             )
             continue
@@ -912,8 +914,13 @@ def main():
 
         print(f"Running {len(test_cases)} {args.mode} {attn_type.upper()} module test cases...")
 
-        for i, (s, b, h, kv_dtype, compute, gemm) in enumerate(test_cases):
+        for i, test_case in enumerate(test_cases):
             print(f"[{i + 1}/{len(test_cases)}]", end="")
+            if args.mode == "context":
+                s, b, h, kv_dtype, compute, gemm, prefix_len = test_case
+            else:
+                s, b, h, kv_dtype, compute, gemm = test_case
+                prefix_len = 0
             try:
                 run_mla_module(
                     seq_len=s,
@@ -925,14 +932,21 @@ def main():
                     perf_filename=perf_filename,
                     model_path=model_path,
                     attn_type=attn_type,
+                    prefix_len=prefix_len,
                     device=args.device,
                 )
             except torch.cuda.OutOfMemoryError:
-                print(f"  OOM: b={b}, s={s}, heads={h}, gemm={gemm}, compute={compute}, kv={kv_dtype}")
+                print(
+                    f"  OOM: b={b}, s={s}, prefix={prefix_len}, heads={h}, "
+                    f"gemm={gemm}, compute={compute}, kv={kv_dtype}"
+                )
                 torch.cuda.empty_cache()
                 gc.collect()
             except Exception as e:
-                print(f"  FAILED: b={b}, s={s}, heads={h}, gemm={gemm}, compute={compute}, kv={kv_dtype}: {e}")
+                print(
+                    f"  FAILED: b={b}, s={s}, prefix={prefix_len}, heads={h}, "
+                    f"gemm={gemm}, compute={compute}, kv={kv_dtype}: {e}"
+                )
                 traceback.print_exc()
                 torch.cuda.empty_cache()
                 gc.collect()

@@ -232,6 +232,36 @@ def _is_known_framework_incompatible_gap(
 
     if "unsupported gemm quant mode 'fp8_static'" in normalized:
         return True
+    if (
+        backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and "trt-llm attention does not support head_size=512" in normalized
+    ):
+        return True
+    if backend == common.BackendName.trtllm.value and version == "1.3.0rc10" and system == "h200_sxm":
+        return (
+            "unsupported dsa_generation_module quant mode 'fp8'" in normalized
+            or (model == "moonshotai/Kimi-K2.5" and "unsupported moe quant mode 'int4_wo'" in normalized)
+            or ("DeepSeek-V4" in model and "deepseek-v4 mhc module data not loaded" in normalized)
+        )
+    if (
+        backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and system == "h200_sxm"
+        and "DeepSeek-V4" in model
+        and "deepseekv4forcausallm" in normalized
+        and "not a registered model" in normalized
+        and "'automodel' is not present" in normalized
+    ):
+        return True
+    if (
+        backend == common.BackendName.sglang.value
+        and system == "h200_sxm"
+        and "DeepSeek-V4" in model
+        and "deep_gemm.fp8_einsum" in normalized
+        and "sf.size(-2) == ceil_div(mn, gran_mn)" in normalized
+    ):
+        return True
 
     if system == "rtx_pro_6000_server":
         if (

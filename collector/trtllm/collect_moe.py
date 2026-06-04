@@ -11,6 +11,7 @@ kernel-specific filters.
 
 __compat__ = "trtllm>=1.1.0,<=1.3.0rc10"
 
+import argparse
 import gc
 import glob
 import inspect
@@ -720,6 +721,59 @@ def run_moe_torch(
 if __name__ == "__main__":
     from collector.registry_types import PerfFile
 
-    test_cases = get_moe_test_cases()
-    for test_case in test_cases:
-        run_moe_torch(*test_case, perf_filename=PerfFile.MOE)
+    parser = argparse.ArgumentParser(description="Collect TRT-LLM MoE perf data.")
+    parser.add_argument(
+        "--moe-type",
+        choices=["bfloat16", "fp8", "fp8_block", "int4_wo", "nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"],
+    )
+    parser.add_argument("--num-tokens-list", help="Comma-separated token counts for one MoE case.")
+    parser.add_argument("--hidden-size", type=int)
+    parser.add_argument("--inter-size", type=int)
+    parser.add_argument("--topk", type=int)
+    parser.add_argument("--num-experts", type=int)
+    parser.add_argument("--moe-tp-size", type=int)
+    parser.add_argument("--moe-ep-size", type=int)
+    parser.add_argument("--min-latency-mode", action="store_true")
+    parser.add_argument("--model-name")
+    parser.add_argument("--distribution", default="power_law")
+    parser.add_argument("--power-law-alpha", type=float, default=0.0)
+    parser.add_argument("--perf-filename", default=PerfFile.MOE, help="Output perf file.")
+    args = parser.parse_args()
+
+    single_case_values = [
+        args.moe_type,
+        args.num_tokens_list,
+        args.hidden_size,
+        args.inter_size,
+        args.topk,
+        args.num_experts,
+        args.moe_tp_size,
+        args.moe_ep_size,
+        args.model_name,
+    ]
+    if any(value is not None for value in single_case_values):
+        if any(value is None for value in single_case_values):
+            parser.error(
+                "--moe-type, --num-tokens-list, --hidden-size, --inter-size, --topk, "
+                "--num-experts, --moe-tp-size, --moe-ep-size, and --model-name must be provided together."
+            )
+        num_tokens_list = [int(item) for item in args.num_tokens_list.split(",") if item.strip()]
+        run_moe_torch(
+            args.moe_type,
+            num_tokens_list,
+            args.hidden_size,
+            args.inter_size,
+            args.topk,
+            args.num_experts,
+            args.moe_tp_size,
+            args.moe_ep_size,
+            args.min_latency_mode,
+            args.model_name,
+            args.distribution,
+            args.power_law_alpha,
+            perf_filename=args.perf_filename,
+        )
+    else:
+        test_cases = get_moe_test_cases()
+        for test_case in test_cases:
+            run_moe_torch(*test_case, perf_filename=args.perf_filename)

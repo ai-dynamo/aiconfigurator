@@ -173,6 +173,7 @@ def _load_one_layer_runner(
 ):
     from sglang.srt.configs.model_config import ModelConfig
     from sglang.srt.entrypoints.engine import _set_envs_and_config
+    from sglang.srt.layers.attention.attention_registry import ATTENTION_BACKENDS
     from sglang.srt.model_executor.model_runner import ModelRunner
     from sglang.srt.server_args import ServerArgs
     from sglang.srt.utils import suppress_other_loggers
@@ -199,9 +200,12 @@ def _load_one_layer_runner(
         max_prefill_tokens=4096,
     )
     server_args.enable_piecewise_cuda_graph = False
-    server_args.attention_backend = "dsv4"
+    server_args.attention_backend = "compressed" if "compressed" in ATTENTION_BACKENDS else "dsv4"
 
-    print(f"[mhc-collector] model_path {model_path} -> {local_model_path}")
+    print(
+        f"[mhc-collector] model_path {model_path} -> {local_model_path}; "
+        f"attention_backend={server_args.attention_backend}"
+    )
 
     _set_envs_and_config(server_args)
     model_config = ModelConfig.from_server_args(server_args)

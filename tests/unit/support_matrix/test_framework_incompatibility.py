@@ -18,6 +18,10 @@ def _b200_system_spec() -> dict:
     return {"gpu": {"sm_version": 100, "fp8_tc_flops": 1, "fp4_tc_flops": 1}}
 
 
+def _h200_system_spec() -> dict:
+    return {"gpu": {"sm_version": 90, "fp8_tc_flops": 1}}
+
+
 def _patch_large_constraints(monkeypatch) -> None:
     monkeypatch.setattr(
         support_matrix_module,
@@ -125,3 +129,93 @@ def test_kimi_moonshot_trtllm_int4_wo_other_system_remains_fail(monkeypatch):
     )
 
     assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
+
+
+def test_deepseek_v32_h200_trtllm_fp8_dsa_is_framework_incompatible(monkeypatch):
+    def fake_run_mode(**_kwargs):
+        raise ValueError(
+            "Unsupported dsa_generation_module quant mode 'fp8' for system='h200_sxm', "
+            "backend='trtllm', version='1.3.0rc10'."
+        )
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="deepseek-ai/DeepSeek-V3.2",
+        system="h200_sxm",
+        backend="trtllm",
+        version="1.3.0rc10",
+        system_spec=_h200_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert "Unsupported dsa_generation_module quant mode 'fp8'" in errors["agg"]
+
+
+def test_dsv4_h200_trtllm_missing_mhc_data_is_framework_incompatible(monkeypatch):
+    def fake_run_mode(**_kwargs):
+        raise RuntimeError(
+            "No results found for any parallel configuration. Showing last exception: "
+            "DeepSeek-V4 mHC module data not loaded for system='h200_sxm', "
+            "backend='trtllm', version='1.3.0rc10'."
+        )
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="sgl-project/DeepSeek-V4-Pro-FP8",
+        system="h200_sxm",
+        backend="trtllm",
+        version="1.3.0rc10",
+        system_spec=_h200_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert "DeepSeek-V4 mHC module data not loaded" in errors["disagg"]
+
+
+def test_dsv4_h200_sglang_missing_model_module_is_framework_incompatible(monkeypatch):
+    def fake_run_mode(**_kwargs):
+        raise ValueError(
+            "Cannot find model module. 'DeepseekV4ForCausalLM' is not a registered model "
+            "in the Transformers library and 'AutoModel' is not present in the model "
+            "config's 'auto_map'."
+        )
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="sgl-project/DeepSeek-V4-Flash-FP8",
+        system="h200_sxm",
+        backend="sglang",
+        version="0.5.10",
+        system_spec=_h200_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert "DeepseekV4ForCausalLM" in errors["agg"]
+
+
+def test_dsv4_h200_sglang_deepgemm_layout_assertion_is_framework_incompatible(monkeypatch):
+    def fake_run_mode(**_kwargs):
+        raise RuntimeError(
+            "RuntimeError at sglang/srt/models/deepseek_v4.py deep_gemm.fp8_einsum: "
+            "Assertion error layout.hpp:97: sf.size(-2) == ceil_div(mn, gran_mn)"
+        )
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="sgl-project/DeepSeek-V4-Flash-FP8",
+        system="h200_sxm",
+        backend="sglang",
+        version="0.5.10",
+        system_spec=_h200_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert "deep_gemm.fp8_einsum" in errors["disagg"]
