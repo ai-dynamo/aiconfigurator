@@ -150,8 +150,10 @@ impl Engine {
     /// matching `PerfDatabase` from its identity, then [`Engine::build`].
     ///
     /// Runs the `Engine::from_spec_bytes(bytes) + PerfDatabase::load`
-    /// flow. `systems_root` points at `src/aiconfigurator/systems` (callers
-    /// that have a `systems_path` override on `spec.engine` should pass it).
+    /// flow. `systems_root` points at `src/aiconfigurator/systems` and is used
+    /// only as a fallback: when the decoded `spec.engine.systems_path` is
+    /// `Some`, that path is authoritative and overrides the `systems_root`
+    /// argument.
     pub fn from_spec_bytes(bytes: &[u8], systems_root: &std::path::Path) -> Result<Engine, AicError> {
         let spec = EngineSpec::from_bincode(bytes)?;
         let version = spec.engine.backend_version.as_deref().ok_or_else(|| {
@@ -159,6 +161,9 @@ impl Engine {
                 "backend_version is required to load the perf database".to_string(),
             )
         })?;
+        // The spec's own `systems_path` wins when present; otherwise fall back
+        // to the `systems_root` argument.
+        let systems_root = spec.engine.systems_path.as_deref().unwrap_or(systems_root);
         let db = PerfDatabase::load(
             systems_root,
             &spec.engine.system_name,
@@ -246,7 +251,7 @@ impl Engine {
     ///
     /// `osl <= 1` yields an empty loop and 0.0 (matches Python).
     fn run_generation_phase(&self, runtime: &RuntimeConfig, stride: u32) -> Result<f64, AicError> {
-        let bs = runtime.batch_size * (self.nextn + 1);
+        let bs = runtime.batch_size.saturating_mul(self.nextn.saturating_add(1));
         let stride = stride.max(1);
         let mut total = 0.0_f64;
         if runtime.osl <= 1 {
@@ -353,8 +358,9 @@ impl Engine {
 
         // ---- Decode FPM build with the (nextn + 1) MTP multiplier ----
         let (num_decode_requests, sum_decode_kv_tokens) = if gen_tokens > 0 {
-            let eff_gen = gen_tokens * (self.nextn + 1);
-            (eff_gen, eff_gen * (isl + osl / 2))
+            let eff_gen = gen_tokens.saturating_mul(self.nextn.saturating_add(1));
+            let kv_per_req = isl.saturating_add(osl / 2);
+            (eff_gen, eff_gen.saturating_mul(kv_per_req))
         } else {
             (0, 0)
         };
@@ -392,8 +398,8 @@ impl Engine {
         if gen_tokens == 0 {
             return Ok(0.0);
         }
-        let effective_batch = gen_tokens * (self.nextn + 1);
-        let context_length = isl.max(1) + osl.max(1) / 2;
+        let effective_batch = gen_tokens.saturating_mul(self.nextn.saturating_add(1));
+        let context_length = isl.max(1).saturating_add(osl.max(1) / 2);
         run_generation_ops_step(&self.generation_ops, &self.db, effective_batch, context_length)
     }
 

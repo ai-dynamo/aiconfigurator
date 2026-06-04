@@ -462,7 +462,17 @@ fn build_engine_via_python(
     let systems_path: Option<PathBuf> = systems_root
         .map(PathBuf::from)
         .or_else(|| config.systems_path.clone());
-    let systems_path_str = systems_path.as_ref().and_then(|p| p.to_str());
+    // A non-UTF-8 override path cannot be passed through the Python kwarg; fail
+    // loudly rather than silently dropping the override.
+    let systems_path_str = match systems_path.as_ref() {
+        Some(p) => Some(p.to_str().ok_or_else(|| {
+            AicError::InvalidEngineConfig(format!(
+                "systems_path is not valid UTF-8: {}",
+                p.display()
+            ))
+        })?),
+        None => None,
+    };
 
     crate::py::compile_engine_to_engine(config, systems_path_str)
 }

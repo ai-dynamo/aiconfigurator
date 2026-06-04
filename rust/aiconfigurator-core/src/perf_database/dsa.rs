@@ -3,8 +3,8 @@
 
 //! DSA (DeepSeek-V3.2 Dynamic Sparse Attention) module perf tables.
 //!
-//! Two CSVs: `dsa_context_module_perf.txt` and
-//! `dsa_generation_module_perf.txt`. Both share columns: model,
+//! Two parquet files: `dsa_context_module_perf.parquet` and
+//! `dsa_generation_module_perf.parquet`. Both share columns: model,
 //! architecture, mla_dtype, kv_cache_dtype, gemm_type, num_heads,
 //! batch_size, isl, tp_size, step, latency.
 //!

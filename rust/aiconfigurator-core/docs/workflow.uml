@@ -17,7 +17,7 @@ Mocker --> "AIC Rust Crate":
 "AIC Python Core" -> "AIC Python Core": decompose model \n& serialize
 "AIC Python Core" -> "AIC Rust Crate": PyO3:\nrun_static(engine_bytes,...) \n / run_agg(engine_bytes,...)
 "AIC Rust Crate" -> "AIC Python Core": analytical latency (no queue)
-"AIC Rust Crate" -> "AIC Rust Crate": Rayon data parallelsim \n(no GIL)
+"AIC Rust Crate" -> "AIC Rust Crate": Rayon data parallelism \n(no GIL)
 "AIC Rust Crate" -> "AIC Python Core": analytical latency for different configs
 "AIC Rust Crate" --> "AIC Python Core":
 "AIC Rust Crate" --> "AIC Python Core":

@@ -218,8 +218,8 @@ Three typed inputs cross the API:
 
 ### `EngineConfig`
 
-Modularised from today's flat `lib.rs:48-90` struct per the Issue
-#1159 discussion (lands as commit **E1.5**, before E2). Trivial
+Modularised from today's flat `lib.rs:48-90` struct per the Issue #1159
+discussion (lands as commit **E1.5**, before E2). Trivial
 1-2-field groupings stay flat; only fields that form a cohesive
 multi-field unit get a sub-struct:
 

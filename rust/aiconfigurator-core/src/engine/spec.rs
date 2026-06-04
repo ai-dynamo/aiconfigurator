@@ -101,6 +101,13 @@ impl EngineSpec {
     pub fn from_bincode(bytes: &[u8]) -> Result<Self, AicError> {
         let wire: BincodeWire = bincode::deserialize(bytes)
             .map_err(|e| AicError::EngineSpec(format!("bincode decode: {e}")))?;
+        if wire.schema_version != ENGINE_SPEC_SCHEMA_VERSION {
+            return Err(AicError::UnsupportedSchemaVersion {
+                kind: "EngineSpec",
+                got: wire.schema_version,
+                expected: ENGINE_SPEC_SCHEMA_VERSION,
+            });
+        }
         let engine: EngineConfig = serde_json::from_str(&wire.engine_json)
             .map_err(|e| AicError::EngineSpec(format!("engine JSON decode: {e}")))?;
         Ok(Self {

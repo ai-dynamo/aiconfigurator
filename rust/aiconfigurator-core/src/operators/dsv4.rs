@@ -66,7 +66,7 @@ impl Dsv4ModuleOp {
         isl: u32,
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
-        let full_s = isl + prefix;
+        let full_s = isl.saturating_add(prefix);
         let raw = db.dsv4.query_context(
             self.attn_kind,
             batch_size,

@@ -194,7 +194,7 @@ Python callers are deprecated or removed.
 | Operations | `operations/attention.py` | `src/operators/attention.rs`, `src/perf_database/attention.rs` | Context/generation attention ops and table queries. |
 | Operations | `operations/mla.py` | `src/operators/mla.rs`, `src/perf_database/mla.rs` | MLA, MLA module, MLA BMM tables. |
 | Operations | `operations/dsa.py` | `src/operators/dsa.rs`, `src/perf_database/dsa.rs` | DSA module tables. |
-| Operations | `operations/dsv4.py` | `src/operators/deepseek_v4.rs`, `src/perf_database/deepseek_v4.rs` | DeepSeek V4 module tables. |
+| Operations | `operations/dsv4.py` | `src/operators/dsv4.rs`, `src/perf_database/dsv4.rs` | DeepSeek V4 module tables. |
 | Operations | `operations/moe.py` (MoE compute + dispatch) | `src/operators/moe.rs`, `src/perf_database/moe.rs` | Standard MoE compute, MoE dispatch (DeepEP normal/low-latency, custom_allreduce). |
 | Operations | `operations/moe.py` (TRT-LLM WideEPMoE compute) | `src/operators/wideep_moe.rs`, `src/perf_database/wideep_moe.rs` | WideEPMoE compute op with 10-level key + `attention_dp_size` scaling. |
 | Operations | `operations/mla.py` (WideEP MLA) | `src/operators/wideep_mla.rs`, `src/perf_database/wideep_mla.rs` | SGLang WideEP MLA context + generation pair (kernel/fmha/kv/heads/s/b nesting). |
@@ -204,7 +204,7 @@ Python callers are deprecated or removed.
 | Operations | `operations/overlap.py` | `src/operators/overlap.rs` | Max-of-groups overlap composition. |
 | Operations | `operations/mamba.py` | `src/operators/mamba.rs`, `src/perf_database/mamba.rs` | Mamba/GDN tables and ops. |
 | Perf database | `perf_database.py` | `src/perf_database/mod.rs` | Database discovery, mode handling, CSV ownership, shared-layer behavior, interpolation helpers. |
-| Perf database | `interpolation.py` | `src/interpolation.rs` | 1D/2D/3D interpolation and extrapolation semantics. |
+| Perf database | `interpolation.py` | `src/perf_database/interpolation.rs` | 1D/2D/3D interpolation and extrapolation semantics. |
 | Shared types | `performance_result.py` | `src/result.rs` | Latency, energy, power/source attribution. |
 | Shared types | `system_spec.py` | `src/system_spec.rs` | YAML parsing and typed system hardware spec. |
 | Shared types | `common.py` | `src/enums.rs` | Backend, quant, database mode, model family enums. |

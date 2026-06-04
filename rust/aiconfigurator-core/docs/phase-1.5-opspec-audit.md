@@ -457,9 +457,16 @@ def compile_engine(
 
 # Private helper — the op-walk both directions converge on
 def _compile_from_model(model: BaseModel, runtime_config: RuntimeConfig) -> bytes:
-    ops = [_to_opspec(op) for op in model.context_ops] \
-        + [_to_opspec(op) for op in model.generation_ops]
-    return bincode_serialize(EngineSpec(ops=ops, ...))
+    # `encoder_ops` (vision encoder, already decomposed into Gemm /
+    # EncoderAttention / Elementwise child ops) is prepended to the context
+    # phase; it is empty for text-only models. So encoder/vision work IS
+    # represented on the wire, not dropped.
+    context_ops = [_to_opspec(op) for op in model.encoder_ops] \
+        + [_to_opspec(op) for op in model.context_ops]
+    generation_ops = [_to_opspec(op) for op in model.generation_ops]
+    return bincode_serialize(
+        EngineSpec(context_ops=context_ops, generation_ops=generation_ops, ...)
+    )
 ```
 
 **Justification.**

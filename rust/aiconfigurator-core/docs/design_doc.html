@@ -281,7 +281,7 @@ representation of the op list — that both languages share.</p>
    ↓
    produce list[OpSpec]
 
-   ─────── compile/build ─────────►   build Engine: Vec<OpSpec> + metadata
+   ─────── compile/build ─────────►   build Engine: Vec&lt;OpSpec&gt; + metadata
                                                     │
                                                     ↓
    for (batch, seq, mode) in sweep:       run_static_internal(engine, db, batch, seq, mode)

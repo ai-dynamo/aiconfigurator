@@ -83,7 +83,11 @@ _SUBSET_IDS_BY_BACKEND = {
 # Preserve the per-backend ordering (vllm, then sglang, then trtllm) so the
 # parametrize ids group readably and the determinism sweep covers vllm first.
 _SUBSET_BY_ID = {p.id: p for p in SMOKE_CASES}
-_SUBSET_CASES = [_SUBSET_BY_ID[cid] for ids in _SUBSET_IDS_BY_BACKEND.values() for cid in ids if cid in _SUBSET_BY_ID]
+_declared_ids = [cid for ids in _SUBSET_IDS_BY_BACKEND.values() for cid in ids]
+_missing_ids = [cid for cid in _declared_ids if cid not in _SUBSET_BY_ID]
+if _missing_ids:
+    raise AssertionError(f"subset declares case ids absent from SMOKE_CASES: {_missing_ids}")
+_SUBSET_CASES = [_SUBSET_BY_ID[cid] for cid in _declared_ids]
 
 
 # --------------------------------------------------------------------------- #
@@ -283,7 +287,12 @@ def _python_decode(case: EngineStepParityCase) -> float:
 def _assert_within(name: str, python_value: float, new_value: float, *, backend: str) -> None:
     allowed = max(abs(python_value) * PARITY_RTOL, 1e-9)
     delta = new_value - python_value
-    observed_rtol = (abs(delta) / abs(python_value)) if python_value else float("inf")
+    if python_value:
+        observed_rtol = abs(delta) / abs(python_value)
+    else:
+        # Both sides zero is exact parity; only a nonzero delta against a zero
+        # reference is undefined (treated as infinite drift).
+        observed_rtol = 0.0 if delta == 0 else float("inf")
     _record_rtol(backend, observed_rtol)
     pct = observed_rtol * 100
     assert abs(delta) <= allowed, (

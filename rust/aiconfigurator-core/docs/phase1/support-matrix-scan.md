@@ -293,7 +293,7 @@ Pass rate on entries that complete on both sides: **1906 / 1922 = 99.17%**.
 
 `(model | system | backend | version | mode)` — extracted from `scan.sqlite` 2026-06-01:
 
-```
+```text
 Qwen/Qwen3-1.7B                       | h100_sxm   | vllm   | 0.14.0    | disagg
 Qwen/Qwen3-30B-A3B                    | b60        | vllm   | 0.12.0    | disagg
 Qwen/Qwen3-30B-A3B                    | h200_sxm   | sglang | 0.5.9     | disagg
