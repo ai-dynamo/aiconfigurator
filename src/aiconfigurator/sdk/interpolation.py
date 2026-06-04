@@ -23,6 +23,7 @@ import math
 
 import numpy as np
 from scipy import interpolate
+from scipy.spatial import QhullError
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,16 @@ def nearest_1d_point_helper(x: int, values: list[int], inner_only: bool = True) 
     if start is None or end is None:
         raise ValueError(f"start or end is None. {x=}, {sorted_values=}, start={start=}, end={end=}")
     return start, end
+
+
+def nearest_1d_point_allow_singleton_axis(x: int, values: list[int]) -> tuple[int, int]:
+    """Return strict brackets, but allow sparse singleton axes to collapse."""
+    try:
+        return nearest_1d_point_helper(x, values)
+    except ValueError:
+        if len(values) == 1:
+            return values[0], values[0]
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -312,37 +323,87 @@ def interp_3d_linear(x: int, y: int, z: int, data: dict) -> float:
 # ---------------------------------------------------------------------------
 
 
-def interp_2d_1d(x: int, y: int, z: int, data: dict, method: str = "bilinear") -> float:
+def interp_2d_1d(
+    x: int,
+    y: int,
+    z: int,
+    data: dict,
+    method: str = "bilinear",
+    allow_singleton_axes: bool = False,
+) -> float:
     """3-D interpolation done as 2-D (over y, z) followed by 1-D (over x)."""
     x_values = []
-    x_left, x_right = nearest_1d_point_helper(x, list(data.keys()))
+    point_helper = nearest_1d_point_allow_singleton_axis if allow_singleton_axes else nearest_1d_point_helper
+    x_left, x_right = point_helper(x, list(data.keys()))
 
     for i in [x_left, x_right]:
         points_list = []
         values_list = []
-        y_left, y_right = nearest_1d_point_helper(y, list(data[i].keys()))
+        y_left, y_right = point_helper(y, list(data[i].keys()))
         for j in [y_left, y_right]:
-            z_left, z_right = nearest_1d_point_helper(z, list(data[i][j].keys()))
+            z_left, z_right = point_helper(z, list(data[i][j].keys()))
             points_list.append([j, z_left])
             points_list.append([j, z_right])
             values_list.append(data[i][j][z_left])
             values_list.append(data[i][j][z_right])
         if method == "cubic":
-            x_values.append(
-                validate_interpolation_result(
-                    interpolate.griddata(np.array(points_list), np.array(values_list), (y, z), method="cubic")
+            try:
+                value = interpolate.griddata(np.array(points_list), np.array(values_list), (y, z), method="cubic")
+                x_values.append(validate_interpolation_result(value))
+            except (QhullError, ValueError) as exc:
+                logger.debug("Falling back to linear 2D interpolation for degenerate cubic slice: %s", exc)
+                x_values.append(
+                    validate_interpolation_result(
+                        interp_2d_rectangular_slice(
+                            y_left,
+                            y_right,
+                            z_left,
+                            z_right,
+                            y,
+                            z,
+                            data[i],
+                        )
+                    )
                 )
-            )
         elif method == "bilinear":
             x_values.append(
                 validate_interpolation_result(
-                    bilinear_interpolation([y_left, y_right], [z_left, z_right], y, z, data[i])
+                    interp_2d_rectangular_slice(y_left, y_right, z_left, z_right, y, z, data[i])
                 )
             )
         else:
             raise NotImplementedError
 
+    if x_left == x_right:
+        return validate_interpolation_result(x_values[0])
     return validate_interpolation_result(interp_1d([x_left, x_right], x_values, x))
+
+
+def interp_2d_rectangular_slice(
+    x_left: int,
+    x_right: int,
+    y_left: int,
+    y_right: int,
+    x: int,
+    y: int,
+    data: dict,
+):
+    """Interpolate on a 2-D slice, handling collapsed axes exactly."""
+    if x_left == x_right and y_left == y_right:
+        return data[x_left][y_left]
+    if x_left == x_right:
+        return interp_1d(
+            [y_left, y_right],
+            [data[x_left][y_left], data[x_left][y_right]],
+            y,
+        )
+    if y_left == y_right:
+        return interp_1d(
+            [x_left, x_right],
+            [data[x_left][y_left], data[x_right][y_left]],
+            x,
+        )
+    return bilinear_interpolation([x_left, x_right], [y_left, y_right], x, y, data)
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +418,7 @@ def interp_3d(
     data: dict,
     method: str,
     extracted_metrics_cache: dict | None = None,
+    allow_singleton_axes: bool = False,
 ) -> dict:
     """3-D interpolation. Returns a metrics dict (latency/power/energy).
 
@@ -376,14 +438,14 @@ def interp_3d(
             latency = interp_3d_linear(x, y, z, latency_data)
             energy = interp_3d_linear(x, y, z, energy_data)
         else:
-            latency = interp_2d_1d(x, y, z, latency_data, method)
-            energy = interp_2d_1d(x, y, z, energy_data, method)
+            latency = interp_2d_1d(x, y, z, latency_data, method, allow_singleton_axes=allow_singleton_axes)
+            energy = interp_2d_1d(x, y, z, energy_data, method, allow_singleton_axes=allow_singleton_axes)
         return {"latency": latency, "power": 0.0, "energy": energy}
 
     if method == "linear":
         latency = interp_3d_linear(x, y, z, data)
     else:
-        latency = interp_2d_1d(x, y, z, data, method)
+        latency = interp_2d_1d(x, y, z, data, method, allow_singleton_axes=allow_singleton_axes)
     return {"latency": latency, "power": 0.0, "energy": 0.0}
 
 
