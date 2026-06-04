@@ -948,15 +948,7 @@ class _LazySupportMatrix:
             from aiconfigurator.sdk.operations.gemm import GEMM
 
             GEMM.load_data(db)
-            modes = _enum_key_names(getattr(db, "_gemm_data", None))
-            # ``fp8_static`` is a behavioral mode that reuses ``fp8`` GEMM perf tables.
-            if (
-                db.backend == "trtllm"
-                and common.GEMMQuantMode.fp8.name in modes
-                and common.GEMMQuantMode.fp8_static.name not in modes
-            ):
-                modes.append(common.GEMMQuantMode.fp8_static.name)
-            return modes
+            return _gemm_key_names(db)
 
         if key == "context_attention":
             from aiconfigurator.sdk.operations.attention import ContextAttention
@@ -1117,6 +1109,29 @@ def _merge_key_names(*sources) -> list[str]:
     return sorted(merged)
 
 
+def _contains_quant_mode(data, quant_mode: common.GEMMQuantMode) -> bool:
+    if not data:
+        return False
+    try:
+        return quant_mode in data
+    except PerfDataNotAvailableError:
+        return False
+
+
+def _gemm_key_names(database) -> list[str]:
+    """Return GEMM modes, deriving static FP8 from dynamic FP8 plus overheads."""
+    names = set(_enum_key_names(getattr(database, "_gemm_data", None)))
+    fp8_static_name = common.GEMMQuantMode.fp8_static.name
+    names.discard(fp8_static_name)
+    if (
+        _contains_quant_mode(getattr(database, "_gemm_data", None), common.GEMMQuantMode.fp8)
+        and _contains_quant_mode(getattr(database, "_compute_scale_data", None), common.GEMMQuantMode.fp8)
+        and _contains_quant_mode(getattr(database, "_scale_matrix_data", None), common.GEMMQuantMode.fp8)
+    ):
+        names.add(fp8_static_name)
+    return sorted(names)
+
+
 class PerfDatabase:
     """
     The perf database for a given system, backend and version
@@ -1274,17 +1289,19 @@ class PerfDatabase:
         # We need to collect quant_modes from the nested structure
         if self.backend == "sglang":
             wideep_context_mla_modes = set()
-            for kernel_source in self._wideep_context_mla_data or {}:
-                for quant_mode in (self._wideep_context_mla_data or {})[kernel_source]:
+            wideep_context_mla_data = getattr(self, "_wideep_context_mla_data", None) or {}
+            for kernel_source in wideep_context_mla_data:
+                for quant_mode in wideep_context_mla_data[kernel_source]:
                     wideep_context_mla_modes.add(quant_mode.name)
 
             wideep_generation_mla_modes = set()
-            for kernel_source in self._wideep_generation_mla_data or {}:
-                for kv_cache_dtype in (self._wideep_generation_mla_data or {})[kernel_source]:
+            wideep_generation_mla_data = getattr(self, "_wideep_generation_mla_data", None) or {}
+            for kernel_source in wideep_generation_mla_data:
+                for kv_cache_dtype in wideep_generation_mla_data[kernel_source]:
                     wideep_generation_mla_modes.add(kv_cache_dtype.name)
 
             self.supported_quant_mode = {
-                "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
+                "gemm": _gemm_key_names(self),
                 "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
                 "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
                 "context_mla": _merge_key_names(
@@ -1311,7 +1328,7 @@ class PerfDatabase:
             }
         elif self.backend == "trtllm":
             self.supported_quant_mode = {
-                "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
+                "gemm": _gemm_key_names(self),
                 "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
                 "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
                 "context_mla": _merge_key_names(
@@ -1331,13 +1348,9 @@ class PerfDatabase:
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
             }
-            # `fp8_static` is a behavioral mode that reuses `fp8` GEMM perf tables.
-            gemm_modes = self.supported_quant_mode.get("gemm", []) or []
-            if common.GEMMQuantMode.fp8.name in gemm_modes and common.GEMMQuantMode.fp8_static.name not in gemm_modes:
-                gemm_modes.append(common.GEMMQuantMode.fp8_static.name)
         elif self.backend == "vllm":
             self.supported_quant_mode = {
-                "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
+                "gemm": _gemm_key_names(self),
                 "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
                 "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
                 "context_mla": _merge_key_names(

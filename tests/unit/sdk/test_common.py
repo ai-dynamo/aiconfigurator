@@ -179,6 +179,7 @@ class TestSupportMatrix:
         "model,backend,version,expected_agg,expected_disagg",
         [
             ("zai-org/GLM-5-FP8", "sglang", "0.5.10", True, True),
+            ("zai-org/GLM-5-FP8", "sglang", "0.5.9", False, False),
             ("zai-org/GLM-5-FP8", "trtllm", "1.3.0rc10", False, False),
             ("nvidia/GLM-5-NVFP4", "sglang", "0.5.10", True, True),
             ("nvidia/GLM-5-NVFP4", "vllm", "0.19.0", True, True),
@@ -187,7 +188,7 @@ class TestSupportMatrix:
     def test_check_support_uses_exact_glm5_b200_variant_rows(
         self, model, backend, version, expected_agg, expected_disagg
     ):
-        """GLM-5 quantized variants should not inherit BF16 support results."""
+        """GLM-5 quantized variants should use their exact support rows."""
         result = common.check_support(model, "b200_sxm", backend, version, "GlmMoeDsaForCausalLM")
 
         assert result.agg_supported is expected_agg

@@ -15,7 +15,14 @@ import pytest
 
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config, models
-from aiconfigurator.sdk.models import LLAMAModel, Qwen3VLModel, check_is_moe, get_model, get_model_family
+from aiconfigurator.sdk.models import (
+    LLAMAModel,
+    Qwen3VLModel,
+    Qwen3VLMoEModel,
+    check_is_moe,
+    get_model,
+    get_model_family,
+)
 from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.task import TaskConfig
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
@@ -85,6 +92,9 @@ class TestSupportedModels:
             ("zai-org/GLM-5-FP8", True),
             ("nvidia/GLM-5-NVFP4", True),
             ("Qwen/Qwen3-30B-A3B", True),
+            ("Qwen/Qwen3-VL-32B-Instruct", False),
+            ("Qwen/Qwen3-VL-30B-A3B-Instruct", True),
+            ("Qwen/Qwen3-VL-235B-A22B-Instruct", True),
             # NemotronH: check hybrid_override_pattern for 'E' (MoE layers)
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' in pattern
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", True),  # Has 'E' in derived pattern
@@ -241,6 +251,9 @@ class TestHFModelSupport:
             ("zai-org/GLM-5-FP8", True),
             ("nvidia/GLM-5-NVFP4", True),
             ("Qwen/Qwen3-30B-A3B", True),
+            ("Qwen/Qwen3-VL-32B-Instruct", False),
+            ("Qwen/Qwen3-VL-30B-A3B-Instruct", True),
+            ("Qwen/Qwen3-VL-235B-A22B-Instruct", True),
             # NemotronH: is_moe depends on 'E' in hybrid_override_pattern
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' (MoE layers)
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", True),  # Has 'E' in derived pattern
@@ -1084,6 +1097,7 @@ class TestDeepSeekTPAllReduce:
 # ── Qwen3VL constants ──────────────────────────────────────────────────────────
 
 _QWEN3VL_ARCH = "Qwen3VLForConditionalGeneration"
+_QWEN3VL_MOE_ARCH = "Qwen3VLMoeForConditionalGeneration"
 _VL_MODELS = [
     "Qwen/Qwen3-VL-32B-Instruct",
     "Qwen/Qwen3-VL-32B-Thinking",
@@ -1098,6 +1112,13 @@ class TestQwen3VLRegistration:
 
     def test_architecture_maps_to_qwen3vl_family(self):
         assert common.ARCHITECTURE_TO_MODEL_FAMILY[_QWEN3VL_ARCH] == "QWEN3VL"
+
+    def test_moe_architecture_maps_to_qwen3vl_moe_family(self):
+        assert common.ARCHITECTURE_TO_MODEL_FAMILY[_QWEN3VL_MOE_ARCH] == "QWEN3VL_MOE"
+
+    def test_qwen3vl_families_are_registered(self):
+        assert "QWEN3VL" in common.ModelFamily
+        assert "QWEN3VL_MOE" in common.ModelFamily
 
     def test_architecture_in_multimodal_text_config_key(self):
         assert _QWEN3VL_ARCH in common.MULTIMODAL_TEXT_CONFIG_KEY
@@ -1178,6 +1199,11 @@ class TestQwen3VLModel:
 
     def test_get_model_returns_qwen3vl_instance(self, vl_model):
         assert isinstance(vl_model, Qwen3VLModel)
+
+    def test_get_model_returns_qwen3vl_moe_instance(self):
+        model_config = config.ModelConfig(moe_tp_size=1, moe_ep_size=1)
+        model = get_model("Qwen/Qwen3-VL-30B-A3B-Instruct", model_config, "trtllm")
+        assert isinstance(model, Qwen3VLMoEModel)
 
     def test_get_model_vl_is_subclass_of_llama(self, vl_model):
         assert isinstance(vl_model, LLAMAModel)

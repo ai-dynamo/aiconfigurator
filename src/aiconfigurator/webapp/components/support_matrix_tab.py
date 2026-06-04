@@ -3,6 +3,7 @@
 
 import html as html_module
 import re
+import shlex
 
 import gradio as gr
 import pandas as pd
@@ -32,18 +33,142 @@ SUPPORT_MATRIX_LEGEND = (
     f"<strong>Legend:</strong>"
     f'<span style="margin-left: 8px; margin-right: 24px;">'
     f'<span style="background: {COLOR_LATEST_PASS}; padding: 2px 10px; border-radius: 4px; margin-right: 8px;">Green</span>'
-    f"latest tested version passes</span>"
+    f"latest tested version passes (click cell for command)</span>"
     f'<span style="margin-right: 24px;">'
     f'<span style="background: {COLOR_OLDER_PASS}; padding: 2px 10px; border-radius: 4px; margin-right: 8px;">Light green</span>'
-    f"older tested version passes</span>"
+    f"older tested version passes (click cell for command)</span>"
     f'<span style="margin-right: 24px;">'
     f'<span style="background: {COLOR_FAIL_BG}; color: {COLOR_FAIL_TEXT}; padding: 2px 10px; border-radius: 4px; font-weight: bold;">FAIL</span>'
-    f" test failed (click cell to see error message)</span>"
+    f" test failed (click cell to see command and details)</span>"
     f'<span style="margin-right: 24px;">'
     f'<span style="background: {COLOR_HW_INCOMPATIBLE_BG}; color: {COLOR_HW_INCOMPATIBLE_TEXT}; padding: 2px 10px; border-radius: 4px; font-weight: bold;">HW</span>'
-    f" GPU does not support model datatype</span>"
+    f" GPU does not support model datatype (click cell for command)</span>"
     f"</div>"
 )
+
+
+def _clean_cell_value(value):
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _support_matrix_cli_constraints(model: str) -> dict[str, str]:
+    lower_model = model.lower()
+    large_model_markers = (
+        "deepseek",
+        "glm-5",
+        "kimi",
+        "llama-4-maverick",
+        "llama-4-scout",
+        "minimax",
+        "mimo-v2",
+        "nemotron-ultra",
+    )
+    sizes = [float(match) for match in re.findall(r"(\d+(?:\.\d+)?)b", lower_model)]
+    max_size = max(sizes, default=None)
+    if max_size is not None and max_size < 10:
+        return {"total_gpus": "4", "ttft": "1500.0", "tpot": "50.0"}
+    if max_size is not None and max_size < 100 and not any(marker in lower_model for marker in large_model_markers):
+        return {"total_gpus": "32", "ttft": "2000.0", "tpot": "50.0"}
+    return {"total_gpus": "128", "ttft": "2000000.0", "tpot": "50000.0"}
+
+
+def _support_matrix_command(model: str, system: str, backend: str, version: str, mode: str) -> str:
+    constraints = _support_matrix_cli_constraints(model)
+    parts = [
+        "uv",
+        "run",
+        "aiconfigurator",
+        "cli",
+        "default",
+        "--model-path",
+        model,
+        "--total-gpus",
+        constraints["total_gpus"],
+        "--system",
+        system,
+        "--backend",
+        backend,
+        "--backend-version",
+        version,
+        "--database-mode",
+        "SILICON",
+        "--isl",
+        "256",
+        "--osl",
+        "256",
+        "--prefix",
+        "128",
+        "--ttft",
+        constraints["ttft"],
+        "--tpot",
+        constraints["tpot"],
+        "--top-n",
+        "1",
+        "--no-color",
+    ]
+    _ = mode
+    return " ".join(shlex.quote(str(part)) for part in parts)
+
+
+def _fallback_support_matrix_command(row) -> str:
+    return _support_matrix_command(
+        str(row["HuggingFaceID"]),
+        str(row["System"]),
+        str(row["Backend"]),
+        str(row["Version"]),
+        str(row["Mode"]),
+    )
+
+
+def _format_row_details(row) -> str:
+    command = _clean_cell_value(row["Command"]) if "Command" in row.index else None
+    if (
+        command is None
+        or command.startswith("aiconfigurator cli default")
+        or "tools/support_matrix/generate_support_matrix.py" in command
+    ):
+        command = _fallback_support_matrix_command(row)
+    error_msg = _clean_cell_value(row["ErrMsg"]) if "ErrMsg" in row.index else None
+
+    lines = [
+        f"Mode: {row['Mode']}",
+        f"Status: {row['Status']}",
+        f"Version: {row['Version']}",
+        "",
+        "Command:",
+        command,
+    ]
+    if error_msg:
+        lines.extend(["", "Details:", error_msg])
+    return "\n".join(lines)
+
+
+def _format_missing_row_details(
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    version: str,
+    mode: str,
+) -> str:
+    command = _support_matrix_command(model, system, backend, version, mode)
+    return "\n".join(
+        [
+            f"Mode: {mode}",
+            "Status: FAIL",
+            f"Version: {version}",
+            "",
+            "Command:",
+            command,
+            "",
+            "Details:",
+            "No support-matrix row exists for this model/system/backend cell. "
+            "Run the command above to check or collect the latest backend version.",
+        ]
+    )
 
 
 def get_latest_supported_version(df, huggingface_id, system, backend):
@@ -53,12 +178,12 @@ def get_latest_supported_version(df, huggingface_id, system, backend):
     latest version fails for the model/system/backend combination, returns "FAIL".
 
     Returns:
-        tuple: (version, is_latest, error_msg) where:
+        tuple: (version, is_latest, detail_msg) where:
             - version: Latest version string if latest version passes, "FAIL" if latest version fails,
                        None if no data exists
             - is_latest: True if the returned version is the latest tested version (green),
                          False if an older passing version is shown (light green). Ignored when version is "FAIL".
-            - error_msg: Error message if version fails, None otherwise
+            - detail_msg: Command plus error details for the displayed cell
     """
     # Filter for this specific combination (both PASS and FAIL)
     subset = df[(df["HuggingFaceID"] == huggingface_id) & (df["System"] == system) & (df["Backend"] == backend)]
@@ -72,10 +197,18 @@ def get_latest_supported_version(df, huggingface_id, system, backend):
     version_has_pass = {}
     version_has_hw_incompatible = {}
     version_error_msgs = {}  # Store error messages for failed versions
+    version_details = {}
 
     for _, row in subset.iterrows():
         version = row["Version"]
         status = row["Status"]
+        detail_msg = _format_row_details(row)
+        if version in version_details:
+            existing = version_details[version]
+            if detail_msg and detail_msg not in existing:
+                version_details[version] = f"{existing}\n\n---\n\n{detail_msg}"
+        else:
+            version_details[version] = detail_msg
         # Get error message - check if ErrMsg column exists
         error_msg = None
         if "ErrMsg" in row.index:
@@ -118,36 +251,44 @@ def get_latest_supported_version(df, huggingface_id, system, backend):
     backend_versions = df[(df["System"] == system) & (df["Backend"] == backend)]["Version"].dropna().unique()
     latest_version = max((str(version) for version in backend_versions), key=parse_version, default=None)
     if latest_version in version_has_pass:
-        return (latest_version, True, None)
+        return (latest_version, True, version_details.get(latest_version))
     if latest_version in version_has_hw_incompatible and latest_version not in version_has_fail:
         error_msg = version_error_msgs.get(latest_version, "Hardware is incompatible with model datatype")
-        return ("HW_INCOMPATIBLE", False, error_msg)
+        return ("HW_INCOMPATIBLE", False, version_details.get(latest_version, error_msg))
     if latest_version in version_has_fail:
         error_msg = version_error_msgs.get(latest_version, "No error message available")
-        return ("FAIL", False, error_msg)
+        return ("FAIL", False, version_details.get(latest_version, error_msg))
 
     # Latest backend version is not tested for this model; show the newest passing version.
     passing_versions = sorted(version_has_pass.keys(), key=parse_version, reverse=True)
     if passing_versions:
         v = passing_versions[0]
-        return (v, False, None)
+        return (v, False, version_details.get(v))
     # No passing version exists - prefer real failures over hardware-incompatible rows.
     all_error_msgs = []
+    all_failure_details = []
     for version in sorted(version_has_fail.keys(), key=parse_version, reverse=True):
         if version in version_error_msgs:
             all_error_msgs.append(f"{version}: {version_error_msgs[version]}")
+        if version in version_details:
+            all_failure_details.append(version_details[version])
     if all_error_msgs or version_has_fail:
         error_msg = " | ".join(all_error_msgs) if all_error_msgs else "No error message available"
-        return ("FAIL", False, error_msg)
+        detail_msg = "\n\n---\n\n".join(all_failure_details) if all_failure_details else error_msg
+        return ("FAIL", False, detail_msg)
 
     hw_error_msgs = []
+    hw_details = []
     for version in sorted(version_has_hw_incompatible.keys(), key=parse_version, reverse=True):
         if version in version_error_msgs:
             error_msg = version_error_msgs[version]
             if error_msg not in hw_error_msgs:
                 hw_error_msgs.append(error_msg)
+        if version in version_details:
+            hw_details.append(version_details[version])
     error_msg = " | ".join(hw_error_msgs) if hw_error_msgs else "Hardware is incompatible with model datatype"
-    return ("HW_INCOMPATIBLE", False, error_msg)
+    detail_msg = "\n\n---\n\n".join(hw_details) if hw_details else error_msg
+    return ("HW_INCOMPATIBLE", False, detail_msg)
 
 
 def create_system_matrix(df, system_name, mode_filter="all"):
@@ -179,22 +320,35 @@ def create_system_matrix(df, system_name, mode_filter="all"):
     # Build the matrix
     matrix_data = []
     matrix_is_latest = {}  # Track if each cell is the latest version
-    matrix_error_msgs = {}  # Track error messages for FAIL cells - keyed by (row_idx, col_idx)
+    matrix_error_msgs = {}  # Track command/details messages keyed by (row_idx, col_idx)
     for row_idx, hf_id in enumerate(huggingface_ids):
         row = [hf_id]  # First column is HuggingFace ID
         for col_idx, backend in enumerate(backends):
-            latest_version, is_latest, error_msg = get_latest_supported_version(system_df, hf_id, system_name, backend)
+            latest_version, is_latest, detail_msg = get_latest_supported_version(system_df, hf_id, system_name, backend)
             if latest_version is None:
+                backend_versions = system_df[system_df["Backend"] == backend]["Version"].dropna().unique()
+                latest_backend_version = max(
+                    (str(version) for version in backend_versions),
+                    key=parse_version,
+                    default="unknown",
+                )
+                command_mode = mode_filter if mode_filter in {"agg", "disagg"} else "all"
                 row.append("FAIL")
                 matrix_is_latest[(row_idx, col_idx)] = False
-                matrix_error_msgs[(row_idx, col_idx)] = "No data available"
+                matrix_error_msgs[(row_idx, col_idx)] = _format_missing_row_details(
+                    model=hf_id,
+                    system=system_name,
+                    backend=backend,
+                    version=latest_backend_version,
+                    mode=command_mode,
+                )
             else:
                 row.append(latest_version)
                 matrix_is_latest[(row_idx, col_idx)] = is_latest
                 if latest_version in ("FAIL", "HW_INCOMPATIBLE"):
-                    matrix_error_msgs[(row_idx, col_idx)] = error_msg
+                    matrix_error_msgs[(row_idx, col_idx)] = detail_msg
                 else:
-                    matrix_error_msgs[(row_idx, col_idx)] = None
+                    matrix_error_msgs[(row_idx, col_idx)] = detail_msg
         matrix_data.append(row)
 
     # Create DataFrame with HuggingFace ID as first column, then backends
@@ -346,12 +500,12 @@ def create_support_matrix_tab(app_config):
                         elem_classes=["support-matrix-table"],
                     )
 
-                    # Function to show error when a cell is clicked
+                    # Function to show support details when a cell is clicked
                     def make_show_error(system_name):
                         """Create a closure to capture system_name and access stored data."""
 
                         def show_error(evt: gr.SelectData):
-                            """Show error message when a FAIL cell is clicked."""
+                            """Show the support-matrix command and status details when a cell is clicked."""
                             if not evt or not hasattr(evt, "index"):
                                 return
 
@@ -367,8 +521,8 @@ def create_support_matrix_tab(app_config):
                                 row_idx, col_idx = evt.index
                                 # col_idx 0 is "HuggingFace ID", so backend columns start at 1
                                 if col_idx > 0:
-                                    error_msg = error_msgs_dict.get((row_idx, col_idx - 1))
-                                    if error_msg and str(error_msg).strip() and str(error_msg).strip() != "None":
+                                    detail_msg = error_msgs_dict.get((row_idx, col_idx - 1))
+                                    if detail_msg and str(detail_msg).strip() and str(detail_msg).strip() != "None":
                                         # Get model from row value (first column)
                                         if hasattr(evt, "row_value") and evt.row_value and len(evt.row_value) > 0:
                                             model = str(evt.row_value[0])
@@ -385,8 +539,8 @@ def create_support_matrix_tab(app_config):
                                         if hasattr(evt, "row_value") and evt.row_value and len(evt.row_value) > col_idx:
                                             cell_value = str(evt.row_value[col_idx])
 
-                                        # Format error message - convert escaped newlines to actual newlines
-                                        formatted_msg = str(error_msg)
+                                        # Format details - convert escaped newlines to actual newlines
+                                        formatted_msg = str(detail_msg)
                                         # Replace double-escaped newlines first, then single-escaped
                                         formatted_msg = formatted_msg.replace("\\\\n", "\n").replace("\\n", "\n")
 
@@ -394,6 +548,8 @@ def create_support_matrix_tab(app_config):
                                             "Hardware Incompatibility"
                                             if cell_value == "HW_INCOMPATIBLE"
                                             else "Error Details"
+                                            if cell_value == "FAIL"
+                                            else "Support Details"
                                         )
                                         title = f"{title_prefix} - {model} / {backend}"
                                         # gr.Info renders HTML. Use scrollable container so long messages stay on screen.

@@ -215,9 +215,10 @@ class GEMM(Operation):
     def _normalize_gemm_quant_mode_for_table(
         quant_mode: common.GEMMQuantMode,
     ) -> common.GEMMQuantMode:
-        """Normalize GEMM quant modes for perf table lookup.
+        """Normalize modeled GEMM quant modes for perf table lookup.
 
-        ``fp8_static`` is a behavioral mode that reuses ``fp8`` perf tables.
+        ``fp8_static`` is modeled from the dynamic ``fp8`` GEMM row plus
+        separately collected activation-quantization overhead tables.
         """
         if quant_mode == common.GEMMQuantMode.fp8_static:
             return common.GEMMQuantMode.fp8
@@ -456,7 +457,16 @@ class GEMM(Operation):
                 )
                 return _to_performance_result(result)
 
-            result = interpolation.interp_3d(m, n, k, gemm_data, "cubic", database._extracted_metrics_cache)
+            try:
+                result = interpolation.interp_3d(m, n, k, gemm_data, "cubic", database._extracted_metrics_cache)
+            except ValueError as exc:
+                from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+                raise PerfDataNotAvailableError(
+                    "GEMM perf data not available for requested shape. "
+                    f"system='{database.system}', backend='{database.backend}', version='{database.version}', "
+                    f"quant_mode='{quant_mode.name}', m={m}, n={n}, k={k}."
+                ) from exc
             return _to_performance_result(result)
 
         return database._query_silicon_or_hybrid(
@@ -650,7 +660,9 @@ class GEMM(Operation):
         energy = result.energy
         source = getattr(result, "source", "silicon")
 
-        # Adjust for fp8_static: subtract compute_scale overhead, only fix for trtllm now
+        # Static-FP8 GEMM is modeled from the dynamic FP8 base measurement
+        # across backends; subtract the separately collected activation-
+        # quantization pieces for BF16-input and low-precision-input cases.
         if is_fp8_static:
             compute_scale_result = database.query_compute_scale(x, self._k, quant_mode)
             latency -= float(compute_scale_result)
@@ -665,6 +677,9 @@ class GEMM(Operation):
                 sub_src = getattr(scale_matrix_result, "source", "silicon")
                 if sub_src != source:
                     source = "mixed"
+            # fp8_static is modeled from dynamic FP8 plus overhead tables, so
+            # expose source="estimated" instead of measured silicon.
+            source = "estimated"
 
         # Ensure non-negative latency and energy
         latency_clamped = max(0.0, latency)

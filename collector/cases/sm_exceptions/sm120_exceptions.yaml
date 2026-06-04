@@ -25,10 +25,14 @@ framework_specific_op_exceptions:
       rules:
         - reason_type: framework_version_unsupported
           version_prefixes: ["0.5.10"]
-          reason: SGLang 0.5.10 routes NVFP4 MoE through FlashInfer CuteDSL, whose check only accepts sm_100/sm_103.
+          reason: SGLang 0.5.10 routes most NVFP4 MoE through FlashInfer paths that have not been validated on SM120; B200 live smokes allow the scoped Nemotron NVFP4 cases below.
           fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
           match:
             moe_type: nvfp4
+            model_path:
+              not_in:
+                - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+                - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
         - reason_type: framework_version_unsupported
           version_prefixes: ["0.5.10"]
           reason: SGLang 0.5.10 MoE collector does not support GPT-OSS MoE cases.

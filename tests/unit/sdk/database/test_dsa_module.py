@@ -9,7 +9,11 @@ import pyarrow.parquet as pq
 import pytest
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.dsa import DEFAULT_DSA_ARCHITECTURE, load_context_dsa_module_data
+from aiconfigurator.sdk.operations.dsa import (
+    DEFAULT_DSA_ARCHITECTURE,
+    load_context_dsa_module_data,
+    load_generation_dsa_module_data,
+)
 from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataNotAvailableError
 
 pytestmark = pytest.mark.unit
@@ -529,6 +533,31 @@ class TestGenerationDSAModule:
 
         assert any("Generation DSA module data not available" in record.getMessage() for record in caplog.records)
         assert all(record.exc_info is None for record in caplog.records)
+
+    def test_generation_loader_indexes_total_decode_length(self, tmp_path):
+        data_path = tmp_path / "dsa_generation_module_perf.parquet"
+        table = pa.table(
+            {
+                "architecture": [DEFAULT_DSA_ARCHITECTURE],
+                "gemm_type": ["bfloat16"],
+                "mla_dtype": ["bfloat16"],
+                "kv_cache_dtype": ["bfloat16"],
+                "num_heads": [32],
+                "batch_size": [1],
+                "isl": [1],
+                "tp_size": [1],
+                "step": [149],
+                "latency": [20.0],
+                "power": [10.0],
+            }
+        )
+        pq.write_table(table, data_path)
+
+        data = load_generation_dsa_module_data(str(data_path))
+
+        assert data[common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][DEFAULT_DSA_ARCHITECTURE][32][1][
+            150
+        ] == _dsa_value(20.0)
 
     def test_sol_returns_positive(self, comprehensive_perf_db):
         result = comprehensive_perf_db.query_generation_dsa_module(

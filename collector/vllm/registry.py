@@ -20,6 +20,13 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.GEMM,
     ),
     OpEntry(
+        op="compute_scale",
+        module="collector.vllm.collect_computescale",
+        get_func="get_computescale_test_cases",
+        run_func="run_computescale",
+        perf_filename=PerfFile.COMPUTESCALE,
+    ),
+    OpEntry(
         op="attention_context",
         module="collector.vllm.collect_attn",
         get_func="get_context_attention_test_cases",

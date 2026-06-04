@@ -55,6 +55,7 @@ const SUPPORT_MATRIX_PATH = 'src/aiconfigurator/systems/support_matrix';
 const SUPPORT_MATRIX_INDEX_PATH = `${SUPPORT_MATRIX_PATH}/index.json`;
 const LEGACY_CSV_PATH = 'src/aiconfigurator/systems/support_matrix.csv';
 const STATUS_HW_INCOMPATIBLE = 'HW_INCOMPATIBLE';
+const STATUS_FRAMEWORK_INCOMPATIBLE = 'FRAMEWORK_INCOMPATIBLE';
 const PREFERRED_DEFAULT_SYSTEM = 'b200_sxm';
 const SYSTEM_ORDER = [
   'b200',
@@ -91,7 +92,7 @@ function unsupportedStatusFromError(error) {
 
 function statusDisplayLabel(status) {
   if (status === 'hw_incompatible') return STATUS_HW_INCOMPATIBLE;
-  if (status === 'framework_unsupported') return 'FRAMEWORK_UNSUPPORTED';
+  if (status === 'framework_unsupported') return STATUS_FRAMEWORK_INCOMPATIBLE;
   return 'FAIL';
 }
 
@@ -171,6 +172,100 @@ function extractErrorSignature(errMsg) {
   return text.substring(0, 500);
 }
 
+function shellQuote(value) {
+  const text = String(value ?? '');
+  if (/^[A-Za-z0-9_./:=@+-]+$/.test(text)) return text;
+  return `'${text.replace(/'/g, `'\\''`)}'`;
+}
+
+function supportMatrixCliConstraints(model) {
+  const lowerModel = String(model || '').toLowerCase();
+  const largeModelMarkers = [
+    'deepseek',
+    'glm-5',
+    'kimi',
+    'llama-4-maverick',
+    'llama-4-scout',
+    'minimax',
+    'mimo-v2',
+    'nemotron-ultra',
+  ];
+  const sizes = Array.from(lowerModel.matchAll(/(\d+(?:\.\d+)?)b/g), match => Number(match[1]))
+    .filter(Number.isFinite);
+  const maxSize = sizes.length ? Math.max(...sizes) : null;
+  if (maxSize !== null && maxSize < 10) {
+    return { totalGpus: '4', ttft: '1500.0', tpot: '50.0' };
+  }
+  if (maxSize !== null && maxSize < 100 && !largeModelMarkers.some(marker => lowerModel.includes(marker))) {
+    return { totalGpus: '32', ttft: '2000.0', tpot: '50.0' };
+  }
+  return { totalGpus: '128', ttft: '2000000.0', tpot: '50000.0' };
+}
+
+function supportMatrixCommand(model, system, backend, version, mode) {
+  const constraints = supportMatrixCliConstraints(model);
+  return [
+    'uv',
+    'run',
+    'aiconfigurator',
+    'cli',
+    'default',
+    '--model-path', model,
+    '--total-gpus', constraints.totalGpus,
+    '--system', system,
+    '--backend', backend,
+    '--backend-version', version,
+    '--database-mode', 'SILICON',
+    '--isl', '256',
+    '--osl', '256',
+    '--prefix', '128',
+    '--ttft', constraints.ttft,
+    '--tpot', constraints.tpot,
+    '--top-n', '1',
+    '--no-color',
+  ].map(shellQuote).join(' ');
+}
+
+function rowCommand(row) {
+  const command = (row.Command || '').trim();
+  if (
+    command &&
+    !command.startsWith('aiconfigurator cli default') &&
+    !command.includes('tools/support_matrix/generate_support_matrix.py')
+  ) return command;
+  return supportMatrixCommand(row.HuggingFaceID, row.System, row.Backend, row.Version, row.Mode);
+}
+
+function rowDetails(row) {
+  const errorMsg = (row.ErrMsg || '').trim();
+  const lines = [
+    `Mode: ${row.Mode}`,
+    `Status: ${row.Status}`,
+    `Version: ${row.Version}`,
+    '',
+    'Command:',
+    rowCommand(row),
+  ];
+  if (errorMsg) lines.push('', 'Details:', errorMsg);
+  return lines.join('\n');
+}
+
+function missingRowDetails(model, system, backend, versions, modeFilter) {
+  const latestVersion = versions && versions.length ? versions[versions.length - 1] : 'unknown';
+  const mode = modeFilter === 'all' ? 'all' : modeFilter;
+  return [
+    `Mode: ${mode}`,
+    'Status: FAIL',
+    `Version: ${latestVersion}`,
+    '',
+    'Command:',
+    supportMatrixCommand(model, system, backend, latestVersion, mode),
+    '',
+    'Details:',
+    'No support-matrix row exists for this model/system/backend cell. Run the command above to check the latest backend version.',
+  ].join('\n');
+}
+
 // ── Matrix Building Logic ───────────────────────────────────────────
 function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
   const subset = rows.filter(r =>
@@ -181,12 +276,23 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
   const versionHasFail = {};
   const versionHasPass = {};
   const versionHasHwIncompatible = {};
+  const versionHasFrameworkIncompatible = {};
   const versionErrorMsgs = {};
+  const versionDetails = {};
 
   for (const row of subset) {
     const version = row.Version;
     const status = row.Status;
     const errorMsg = (row.ErrMsg || '').trim() || null;
+    const detailMsg = rowDetails(row);
+
+    if (version in versionDetails) {
+      if (detailMsg && !versionDetails[version].includes(detailMsg)) {
+        versionDetails[version] = `${versionDetails[version]}\n\n---\n\n${detailMsg}`;
+      }
+    } else {
+      versionDetails[version] = detailMsg;
+    }
 
     if (status === 'FAIL') {
       versionHasFail[version] = true;
@@ -214,10 +320,22 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
           versionErrorMsgs[version] = errorMsg;
         }
       }
+    } else if (status === STATUS_FRAMEWORK_INCOMPATIBLE) {
+      versionHasFrameworkIncompatible[version] = true;
+      if (errorMsg) {
+        if (version in versionErrorMsgs) {
+          const existing = versionErrorMsgs[version];
+          if (existing && existing !== errorMsg) {
+            versionErrorMsgs[version] = `${existing} | ${errorMsg}`;
+          }
+        } else {
+          versionErrorMsgs[version] = errorMsg;
+        }
+      }
     }
   }
 
-  if (!Object.keys(versionHasFail).length && !Object.keys(versionHasPass).length && !Object.keys(versionHasHwIncompatible).length) {
+  if (!Object.keys(versionHasFail).length && !Object.keys(versionHasPass).length && !Object.keys(versionHasHwIncompatible).length && !Object.keys(versionHasFrameworkIncompatible).length) {
     return { version: null, isLatest: false, error: null };
   }
 
@@ -227,38 +345,87 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
     .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
   const latestVersion = testedVersions[0] || null;
   if (latestVersion && versionHasPass[latestVersion]) {
-    return { version: latestVersion, isLatest: true, error: null };
+    return { version: latestVersion, isLatest: true, error: null, detail: versionDetails[latestVersion] || null };
   }
   if (latestVersion && versionHasHwIncompatible[latestVersion] && !versionHasFail[latestVersion]) {
-    return { version: STATUS_HW_INCOMPATIBLE, isLatest: false, error: versionErrorMsgs[latestVersion] || 'Hardware is incompatible with model datatype' };
+    return {
+      version: STATUS_HW_INCOMPATIBLE,
+      isLatest: false,
+      error: versionErrorMsgs[latestVersion] || 'Hardware is incompatible with model datatype',
+      detail: versionDetails[latestVersion] || null,
+    };
+  }
+  if (latestVersion && versionHasFrameworkIncompatible[latestVersion] && !versionHasFail[latestVersion]) {
+    return {
+      version: STATUS_FRAMEWORK_INCOMPATIBLE,
+      isLatest: false,
+      error: versionErrorMsgs[latestVersion] || 'Framework version does not support required model feature',
+      detail: versionDetails[latestVersion] || null,
+    };
   }
   if (latestVersion && versionHasFail[latestVersion]) {
-    return { version: 'FAIL', isLatest: false, error: versionErrorMsgs[latestVersion] || 'No error message available' };
+    return {
+      version: 'FAIL',
+      isLatest: false,
+      error: versionErrorMsgs[latestVersion] || 'No error message available',
+      detail: versionDetails[latestVersion] || null,
+    };
   }
 
   const passing = Object.keys(versionHasPass)
     .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
   if (passing.length) {
-    return { version: passing[0], isLatest: false, error: null };
+    return { version: passing[0], isLatest: false, error: null, detail: versionDetails[passing[0]] || null };
   }
 
   const allMsgs = [];
+  const allDetails = [];
   const failVersions = Object.keys(versionHasFail)
     .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
   for (const ver of failVersions) {
     if (versionErrorMsgs[ver]) allMsgs.push(`${ver}: ${versionErrorMsgs[ver]}`);
+    if (versionDetails[ver]) allDetails.push(versionDetails[ver]);
   }
   if (allMsgs.length || failVersions.length) {
-    return { version: 'FAIL', isLatest: false, error: allMsgs.length ? allMsgs.join(' | ') : 'No error message available' };
+    return {
+      version: 'FAIL',
+      isLatest: false,
+      error: allMsgs.length ? allMsgs.join(' | ') : 'No error message available',
+      detail: allDetails.length ? allDetails.join('\n\n---\n\n') : null,
+    };
   }
 
   const hwVersions = Object.keys(versionHasHwIncompatible)
     .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
+  const frameworkVersions = Object.keys(versionHasFrameworkIncompatible)
+    .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
+  const frameworkMsgs = [];
+  const frameworkDetails = [];
+  for (const ver of frameworkVersions) {
+    if (versionErrorMsgs[ver]) frameworkMsgs.push(`${ver}: ${versionErrorMsgs[ver]}`);
+    if (versionDetails[ver]) frameworkDetails.push(versionDetails[ver]);
+  }
+  if (frameworkMsgs.length || frameworkVersions.length) {
+    return {
+      version: STATUS_FRAMEWORK_INCOMPATIBLE,
+      isLatest: false,
+      error: frameworkMsgs.length ? frameworkMsgs.join(' | ') : 'Framework version does not support required model feature',
+      detail: frameworkDetails.length ? frameworkDetails.join('\n\n---\n\n') : null,
+    };
+  }
+
   const hwMsgs = [];
+  const hwDetails = [];
   for (const ver of hwVersions) {
     if (versionErrorMsgs[ver]) hwMsgs.push(`${ver}: ${versionErrorMsgs[ver]}`);
+    if (versionDetails[ver]) hwDetails.push(versionDetails[ver]);
   }
-  return { version: STATUS_HW_INCOMPATIBLE, isLatest: false, error: hwMsgs.length ? hwMsgs.join(' | ') : 'Hardware is incompatible with model datatype' };
+  return {
+    version: STATUS_HW_INCOMPATIBLE,
+    isLatest: false,
+    error: hwMsgs.length ? hwMsgs.join(' | ') : 'Hardware is incompatible with model datatype',
+    detail: hwDetails.length ? hwDetails.join('\n\n---\n\n') : null,
+  };
 }
 
 // Aggregate per-version statuses into a single (model, backend) cell. Each
@@ -280,12 +447,14 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
   const hwVersions = [];
   const frameworkUnsupportedVersions = [];
   const errorEntries = [];
+  const detailEntries = [];
 
   const statusFromResult = (result) => {
     if (result.version === null) return 'missing';
     if (result.version === 'FAIL') {
       return isFrameworkUnsupported(result.error) ? 'framework_unsupported' : 'fail';
     }
+    if (result.version === STATUS_FRAMEWORK_INCOMPATIBLE) return 'framework_unsupported';
     if (result.version === STATUS_HW_INCOMPATIBLE) return unsupportedStatusFromError(result.error);
     return 'pass';
   };
@@ -294,11 +463,12 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
   // `getLatestSupportedVersion`, restricted to one version at a time.
   for (const version of versions) {
     const verRows = rows.filter(r => r.Version === version);
-    const { version: v, error } = getLatestSupportedVersion(verRows, modelId, system, backend);
+    const { version: v, error, detail } = getLatestSupportedVersion(verRows, modelId, system, backend);
     if (v === null) continue; // missing for this version
 
     let verStatus = statusFromResult({ version: v, error });
     let verError = verStatus === 'pass' ? null : error;
+    let verDetail = detail;
 
     // Within-version agg/disagg split (only meaningful when viewing "all").
     if (modeFilter === 'all') {
@@ -325,21 +495,25 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
         } else {
           verError = `[disagg ${statusDisplayLabel(disaggStatus)}] ${disaggResult.error || 'No error message available'}`;
         }
+        verDetail = [aggResult.detail, disaggResult.detail].filter(Boolean).join('\n\n---\n\n') || verDetail;
       } else if (!hasPass && hasFail) {
         verStatus = 'fail';
         verError = aggStatus === 'fail'
           ? (aggResult.error || 'No error message available')
           : (disaggResult.error || 'No error message available');
+        verDetail = [aggResult.detail, disaggResult.detail].filter(Boolean).join('\n\n---\n\n') || verDetail;
       } else if (!hasPass && hasFrameworkUnsupported) {
         verStatus = 'framework_unsupported';
         verError = aggStatus === 'framework_unsupported'
           ? (aggResult.error || 'Framework version does not support required model feature')
           : (disaggResult.error || 'Framework version does not support required model feature');
+        verDetail = [aggResult.detail, disaggResult.detail].filter(Boolean).join('\n\n---\n\n') || verDetail;
       } else if (!hasPass && hasHw) {
         verStatus = 'hw_incompatible';
         verError = aggStatus === 'hw_incompatible'
           ? (aggResult.error || 'Hardware is incompatible with model datatype')
           : (disaggResult.error || 'Hardware is incompatible with model datatype');
+        verDetail = [aggResult.detail, disaggResult.detail].filter(Boolean).join('\n\n---\n\n') || verDetail;
       }
     }
 
@@ -352,9 +526,13 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
     if (verError) {
       errorEntries.push({ version, message: `[${version}] ${verError}` });
     }
+    if (verDetail) {
+      detailEntries.push({ version, message: `[${version}]\n${verDetail}` });
+    }
   }
 
   if (!passVersions.length && !partialVersions.length && !failVersions.length && !hwVersions.length && !frameworkUnsupportedVersions.length) {
+    const detail = missingRowDetails(modelId, system, backend, versions, modeFilter);
     return {
       status: 'missing',
       passVersions: [],
@@ -363,6 +541,7 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
       frameworkUnsupportedVersions: [],
       hwVersions: [],
       error: null,
+      detail,
     };
   }
 
@@ -411,6 +590,13 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
         .sort((a, b) => compareVersionTuples(versionSortKey(b.version), versionSortKey(a.version)))
         .map(e => e.message)
         .join('\n')
+      : null,
+    detail: detailEntries.length
+      ? detailEntries
+        .slice()
+        .sort((a, b) => compareVersionTuples(versionSortKey(b.version), versionSortKey(a.version)))
+        .map(e => e.message)
+        .join('\n\n---\n\n')
       : null,
   };
 }
@@ -804,7 +990,7 @@ function Legend() {
       <span className="font-semibold">Legend:</span>
       <div className="flex items-center gap-1.5">
         <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-green-300 dark:bg-green-900"></span>
-        All framework versions supported
+        All framework versions supported (click for command)
       </div>
       <div className="flex items-center gap-1.5">
         <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-green-200 dark:bg-green-950"></span>
@@ -820,7 +1006,7 @@ function Legend() {
       </div>
       <div className="flex items-center gap-1.5">
         <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-red-200 dark:bg-red-950"></span>
-        All versions fail (click for details)
+        All versions fail (click for command and details)
       </div>
       <div className="flex items-center gap-1.5">
         <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-violet-200 dark:bg-violet-950"></span>
@@ -951,7 +1137,7 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
 
   const cellClass = (status) => {
     switch (status) {
-      case 'pass': return 'bg-green-300 dark:bg-green-900 text-green-950 dark:text-white font-semibold';
+      case 'pass': return 'bg-green-300 dark:bg-green-900 text-green-950 dark:text-white font-semibold cursor-pointer hover:brightness-95 dark:hover:brightness-125';
       case 'latest_pass_with_older_issues': return 'bg-green-200 dark:bg-green-950 text-green-900 dark:text-green-300 font-medium cursor-pointer hover:brightness-95 dark:hover:brightness-125';
       case 'older_pass_only': return 'bg-sky-200 dark:bg-sky-950 text-sky-900 dark:text-sky-300 font-medium cursor-pointer hover:brightness-95 dark:hover:brightness-125';
       case 'partial': return 'bg-amber-200 dark:bg-amber-950 text-amber-900 dark:text-amber-300 font-medium cursor-pointer hover:brightness-95 dark:hover:brightness-125';
@@ -1078,21 +1264,32 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
               {columns.map(c => {
                 const cell = row.cells[c.key];
                 if (!cell || cell.status === 'missing') {
-                  const displayTooltip = `${c.backend}: not tested`;
+                  const detail = cell?.detail || `${c.backend}: not tested`;
+                  const displayTooltip = `${c.backend}: not tested\n\nClick to keep this open and copy it.`;
                   return (
                     <td key={c.key}
                         {...tooltipHandlers(displayTooltip, tipPlacement)}
+                        onClick={() => {
+                          hideTooltip();
+                          onCellClick(row.model, c.backend, detail);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            hideTooltip();
+                            onCellClick(row.model, c.backend, detail);
+                          }
+                        }}
+                        role="button"
+                        tabIndex={0}
                         aria-label={displayTooltip}
-                        className="px-3 py-2 border-b border-slate-200 dark:border-slate-700 text-slate-400">
+                        className="px-3 py-2 border-b border-slate-200 dark:border-slate-700 text-slate-400 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800">
                       &mdash;
                     </td>
                   );
                 }
-                const clickable = Boolean(cell.error) && (
-                  cell.status === 'fail' || cell.status === 'partial' ||
-                  cell.status === 'framework_unsupported' || cell.status === 'hw_incompatible' ||
-                  cell.status === 'latest_pass_with_older_issues' || cell.status === 'older_pass_only'
-                );
+                const detail = cell.detail || cell.error;
+                const clickable = Boolean(detail);
                 // Native browser tooltip with the full version breakdown so the
                 // user can always inspect all versions regardless of the
                 // "Show all versions" toggle.
@@ -1107,24 +1304,24 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
                   : cell.status === 'hw_incompatible'
                     ? (cell.error || 'Hardware is incompatible with model datatype')
                     : `${c.backend}\n${tooltipParts.join('\n')}`;
-                const displayTooltip = clickable ? `${tooltip}\n\nClick to keep this open and copy it.` : tooltip;
+                const displayTooltip = clickable ? `${tooltip}\n\nClick to keep this open and copy the command.` : tooltip;
                 return (
                   <td key={c.key}
                       {...tooltipHandlers(displayTooltip, tipPlacement)}
                       onClick={clickable ? () => {
                         hideTooltip();
-                        onCellClick(row.model, c.backend, cell.error);
+                        onCellClick(row.model, c.backend, detail);
                       } : undefined}
                       onKeyDown={clickable ? (e) => {
                         if (e.key === 'Enter' || e.key === ' ') {
                           e.preventDefault();
                           hideTooltip();
-                          onCellClick(row.model, c.backend, cell.error);
+                          onCellClick(row.model, c.backend, detail);
                         }
                       } : undefined}
                       role={clickable ? 'button' : undefined}
                       tabIndex={clickable ? 0 : undefined}
-                      aria-label={clickable ? `Open error details for ${row.model} on ${c.backend}` : undefined}
+                      aria-label={clickable ? `Open support details for ${row.model} on ${c.backend}` : undefined}
                       className={`px-3 py-2 border-b border-slate-200 dark:border-slate-700 ${cellClass(cell.status)}`}>
                     {renderChips(cell)}
                   </td>
@@ -1179,64 +1376,224 @@ function TopErrors({ errors }) {
   );
 }
 
+function parseSupportDetailSections(text) {
+  return text
+    .split(/\n\s*---\s*\n/)
+    .map(chunk => chunk.trim())
+    .filter(Boolean)
+    .map((raw, index) => {
+      const lines = raw.split('\n');
+      let headingVersion = null;
+      const firstLine = (lines[0] || '').trim();
+      if (/^\[[^\]]+\]$/.test(firstLine)) {
+        headingVersion = firstLine.slice(1, -1);
+        lines.shift();
+      }
+
+      const section = {
+        raw,
+        index,
+        headingVersion,
+        mode: null,
+        status: null,
+        version: null,
+        command: null,
+        details: null,
+      };
+      let block = null;
+      const commandLines = [];
+      const detailLines = [];
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed === 'Command:') {
+          block = 'command';
+          continue;
+        }
+        if (trimmed === 'Details:') {
+          block = 'details';
+          continue;
+        }
+
+        if (block === 'command') {
+          commandLines.push(line);
+          continue;
+        }
+        if (block === 'details') {
+          detailLines.push(line);
+          continue;
+        }
+
+        const fieldMatch = line.match(/^(Mode|Status|Version):\s*(.*)$/);
+        if (fieldMatch) {
+          section[fieldMatch[1].toLowerCase()] = fieldMatch[2].trim();
+        }
+      }
+
+      section.command = commandLines.join('\n').trim() || null;
+      section.details = detailLines.join('\n').trim() || null;
+      section.version = section.version || headingVersion;
+      return section;
+    });
+}
+
+function copyText(text, done) {
+  const copyWithTextarea = () => {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(done)
+      .catch(() => {
+        copyWithTextarea();
+        done();
+      });
+    return;
+  }
+  copyWithTextarea();
+  done();
+}
+
+function StatusBadge({ status }) {
+  const normalized = (status || 'UNKNOWN').toUpperCase();
+  const badgeClass = normalized === 'PASS'
+    ? 'bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300'
+    : normalized === 'HW_INCOMPATIBLE'
+      ? 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'
+      : normalized === 'FAIL'
+        ? 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300'
+        : 'bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300';
+  return (
+    <span className={`px-2 py-0.5 rounded text-[0.68rem] font-bold tracking-wide ${badgeClass}`}>
+      {normalized}
+    </span>
+  );
+}
+
+function CopyCommandButton({ command }) {
+  const [copied, setCopied] = useState(false);
+  if (!command) return null;
+  return (
+    <button
+      onClick={() => copyText(command, () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      })}
+      className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600
+                 text-slate-700 dark:text-slate-200 text-[0.68rem] font-semibold rounded transition-colors whitespace-nowrap"
+    >
+      {copied ? 'Copied' : 'Copy command'}
+    </button>
+  );
+}
+
+function SupportDetailCards({ formatted }) {
+  const sections = parseSupportDetailSections(formatted);
+  if (!sections.length) {
+    return (
+      <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-50 dark:bg-slate-900 p-4 rounded border border-slate-200 dark:border-slate-700">
+        {formatted}
+      </pre>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {sections.map(section => (
+        <section
+          key={section.index}
+          className="rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden"
+        >
+          <div className="px-4 py-3 bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 flex items-center gap-2 flex-wrap">
+            <StatusBadge status={section.status} />
+            <span className="font-semibold text-sm">{section.mode || 'mode unknown'}</span>
+            <span className="text-xs text-slate-500 dark:text-slate-400">version {section.version || 'unknown'}</span>
+            {section.headingVersion && section.headingVersion !== section.version && (
+              <span className="text-xs text-slate-400">group {section.headingVersion}</span>
+            )}
+            <span className="ml-auto"></span>
+            <CopyCommandButton command={section.command} />
+          </div>
+          <div className="px-4 py-3 space-y-3">
+            {section.command && (
+              <div>
+                <div className="text-[0.68rem] uppercase font-bold text-slate-500 dark:text-slate-400 mb-1">
+                  Reproduce Command
+                </div>
+                <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-950 text-slate-100 p-3 rounded">
+                  {section.command}
+                </pre>
+              </div>
+            )}
+            {section.details && (
+              <details open={section.status !== 'PASS'} className="group">
+                <summary className="cursor-pointer text-xs font-semibold text-slate-600 dark:text-slate-300 select-none">
+                  Details
+                </summary>
+                <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-50 dark:bg-slate-950 p-3 rounded border border-slate-200 dark:border-slate-700">
+                  {section.details}
+                </pre>
+              </details>
+            )}
+          </div>
+        </section>
+      ))}
+      <details className="text-xs text-slate-500 dark:text-slate-400">
+        <summary className="cursor-pointer font-semibold select-none">Raw text</summary>
+        <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-50 dark:bg-slate-900 p-3 rounded border border-slate-200 dark:border-slate-700">
+          {formatted}
+        </pre>
+      </details>
+    </div>
+  );
+}
+
 function ErrorModal({ model, system, backend, error, onClose }) {
   const [copied, setCopied] = useState(false);
   if (!error) return null;
   const formatted = error.replace(/\\\\n/g, '\n').replace(/\\n/g, '\n');
+  const showFixLink = /Status: (FAIL|HW_INCOMPATIBLE|FRAMEWORK_INCOMPATIBLE)/.test(formatted) || formatted.includes('No support-matrix row exists');
   const issueUrl = buildCallForFixUrl(model, system, backend, formatted);
   const copyError = () => {
-    const copyWithTextarea = () => {
-      const textarea = document.createElement('textarea');
-      textarea.value = formatted;
-      textarea.style.position = 'fixed';
-      textarea.style.left = '-9999px';
-      document.body.appendChild(textarea);
-      textarea.focus();
-      textarea.select();
-      document.execCommand('copy');
-      document.body.removeChild(textarea);
-    };
     const done = () => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1400);
     };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(formatted)
-        .then(done)
-        .catch(() => {
-          copyWithTextarea();
-          done();
-        });
-      return;
-    }
-    copyWithTextarea();
-    done();
+    copyText(formatted, done);
   };
   return (
     <div className="fixed inset-0 bg-black/50 z-[1000] flex items-center justify-center p-6" onClick={onClose}>
       <div className="bg-white dark:bg-slate-800 rounded-lg max-w-3xl w-full max-h-[85vh] flex flex-col shadow-2xl"
            onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-200 dark:border-slate-700 shrink-0">
-          <h3 className="flex-1 text-base font-bold">Error Details &mdash; {model} / {backend}</h3>
+          <h3 className="flex-1 text-base font-bold">Support Details &mdash; {model} / {backend}</h3>
           <button onClick={copyError}
             className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600
                        text-slate-700 dark:text-slate-200 text-xs font-semibold rounded transition-colors whitespace-nowrap">
             {copied ? 'Copied' : 'Copy'}
           </button>
-          <a href={issueUrl} target="_blank" rel="noopener"
-            className="px-3 py-1.5 bg-indigo-500 hover:bg-indigo-600 dark:bg-indigo-400 dark:hover:bg-indigo-500
-                       text-white text-xs font-semibold rounded transition-colors no-underline whitespace-nowrap">
-            Call for Fix
-          </a>
+          {showFixLink && (
+            <a href={issueUrl} target="_blank" rel="noopener"
+              className="px-3 py-1.5 bg-indigo-500 hover:bg-indigo-600 dark:bg-indigo-400 dark:hover:bg-indigo-500
+                         text-white text-xs font-semibold rounded transition-colors no-underline whitespace-nowrap">
+              Call for Fix
+            </a>
+          )}
           <button onClick={onClose}
             className="bg-transparent border-none text-xl cursor-pointer text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 px-1 rounded transition-colors">
             &times;
           </button>
         </div>
         <div className="px-5 py-4 overflow-y-auto flex-1">
-          <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-50 dark:bg-slate-900 p-4 rounded border border-slate-200 dark:border-slate-700">
-            {formatted}
-          </pre>
+          <SupportDetailCards formatted={formatted} />
         </div>
       </div>
     </div>

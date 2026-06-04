@@ -66,6 +66,11 @@ def get_gemm_test_cases():
         # SM120+ (RTX PRO 6000 Blackwell workstation): no DeepGEMM recipe for fp8_block
         gemm_list = ["bfloat16", "fp8", "nvfp4"]
 
+    requested_gemm_types = os.environ.get("AIC_COLLECT_GEMM_TYPES")
+    if requested_gemm_types:
+        requested = {item.strip() for item in requested_gemm_types.split(",") if item.strip()}
+        gemm_list = [gemm_type for gemm_type in gemm_list if gemm_type in requested]
+
     for gemm_common_testcase in get_gemm_case_specs():
         x = gemm_common_testcase.x
         n = gemm_common_testcase.n
