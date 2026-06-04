@@ -93,6 +93,7 @@ framework_specific_op_cases:
         - 128
         - 192
         - 256
+        - 512
         window_sizes:
         - 0
         - 1024

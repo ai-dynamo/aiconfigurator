@@ -225,6 +225,13 @@ def run_moe_torch(
     # INT4_WO path: W4A16 via vLLM's Marlin kernel using int4_w4a16_moe_quant_config.
     # Weights are packed uint8 (2 int4 per byte, shape K//2). Scales are per-group
     # along K (group_size=128). Zero-points are None (symmetric quantization).
+    supported_moe_types = {"bfloat16", "fp8", "fp8_block", "int4_wo", "nvfp4", "w4a16_mxfp4"}
+    if moe_type not in supported_moe_types:
+        raise ValueError(
+            f"Unsupported vLLM MoE quant mode {moe_type!r}. "
+            f"Supported modes: {sorted(supported_moe_types)}"
+        )
+
     use_int4_wo = moe_type == "int4_wo"
     if use_int4_wo:
         int4_group_size = 128
@@ -375,7 +382,6 @@ def run_moe_torch(
         a2_scale_nvfp4 = torch.ones(local_num_experts, dtype=torch.float32, device=device)
         w13_scale_2 = torch.ones(local_num_experts, dtype=torch.float32, device=device)
         w2_scale_2 = torch.ones(local_num_experts, dtype=torch.float32, device=device)
-
         nvfp4_data = dict(
             w1=w1_shuf,
             w1_scale=w1_scale_shuf,

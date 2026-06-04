@@ -378,9 +378,9 @@ class BaseBackend:
             the LLM context and generation phases.
 
             token count resolution order:
-                1. image_height + image_width (computed from VisionEncoderConfig patch/merge sizes)
+                1. image_height + image_width when both are set
                 2. num_image_tokens (explicit override, per image)
-                3. isl (fallback for text-only or unconfigured VL requests)
+                3. skip encoder modeling for text-only or unconfigured VL requests
 
             Returns:
                 tuple: (encoder_latency_dict, encoder_energy_wms_dict, img_ctx_tokens)
@@ -395,7 +395,7 @@ class BaseBackend:
             enc_cfg = getattr(model, "encoder_config", None)
             num_images = runtime_config.num_images_per_request
 
-            if runtime_config.num_images_per_request <= 0 or enc_cfg is None:
+            if num_images <= 0 or enc_cfg is None:
                 return encoder_latency_dict, encoder_energy_wms_dict, 0
 
             if runtime_config.image_height > 0 and runtime_config.image_width > 0:

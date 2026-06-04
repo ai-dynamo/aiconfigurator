@@ -259,10 +259,16 @@ def _is_known_framework_incompatible_gap(
                     and "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
                 )
                 or (model == "moonshotai/Kimi-K2.5" and "unsupported moe quant mode 'int4_wo'" in normalized)
-                or "dsa_context_module_perf.txt" in normalized
+                or "dsa_context_module_perf" in normalized
             )
         if backend == common.BackendName.vllm.value and version == "0.19.0":
-            return "unsupported moe quant mode 'nvfp4'" in normalized or "dsa_context_module_perf.txt" in normalized
+            return (
+                "unsupported moe quant mode 'nvfp4'" in normalized
+                or "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
+                or "dsa_context_module_perf" in normalized
+                or "dsa_generation_module_perf" in normalized
+                or "deepseek-v4 mhc module data not loaded" in normalized
+            )
 
     return (
         model == "moonshotai/Kimi-K2.5"
@@ -271,6 +277,248 @@ def _is_known_framework_incompatible_gap(
         and version == "1.3.0rc10"
         and "unsupported moe quant mode 'int4_wo'" in normalized
     )
+
+
+def _framework_incompatible_gap_evidence(
+    *,
+    system: str,
+    backend: str,
+    version: str,
+    error_message: str | None,
+) -> str | None:
+    """Return a concise, evidence-backed explanation for known framework gaps."""
+    if not error_message:
+        return None
+
+    normalized = error_message.lower()
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "unsupported moe quant mode 'nvfp4'" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: vLLM 0.19.0 NVFP4 MoE on RTX Pro 6000 "
+            "Server (SM120) fails inside the vLLM FlashInfer TRT-LLM FP4 MoE "
+            "path before a collectable perf row is produced. Forced validation "
+            "on an 8-GPU RTX Pro 6000 Server Brev node with "
+            "vllm/vllm-openai:v0.19.0-cu130 ran collector/vllm/collect_moe.py "
+            "for a representative NVFP4 expert shape and failed in "
+            "flashinfer/fused_moe/core.py while building the FP4 routed-MoE "
+            "module with RuntimeError: No supported CUDA architectures found "
+            "for major versions [10]."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: vLLM 0.19.0 does not expose a W4A8 "
+            "MXFP4/MXFP8 MoE runtime path for DeepSeek-V4 on RTX Pro 6000 "
+            "Server (SM120). Validation on an 8-GPU RTX Pro 6000 Server Brev "
+            "node with vllm/vllm-openai:v0.19.0-cu130 found vLLM's "
+            "Mxfp4Config only supports bfloat16 activations for FusedMoE "
+            "(W4A16), while AIC's DeepSeek-V4 models request "
+            "w4a8_mxfp4_mxfp8. Treating that row as W4A16 would collect the "
+            "wrong kernel, so the row is marked framework-incompatible."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "dsa_context_module_perf" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: vLLM 0.19.0 DSA context module on RTX Pro "
+            "6000 Server (SM120) fails in vLLM's sparse MLA backend selector "
+            "before a collectable perf row is produced. Forced validation on "
+            "an 8-GPU RTX Pro 6000 Server Brev node with "
+            "vllm/vllm-openai:v0.19.0-cu130 ran "
+            "collector/vllm/collect_mla_module.py for zai-org/GLM-5 DSA "
+            "context and failed with ValueError: No valid attention backend "
+            "found; FLASHMLA_SPARSE reports compute capability not supported."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "dsa_generation_module_perf" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: vLLM 0.19.0 DSA generation module on RTX "
+            "Pro 6000 Server (SM120) uses the same sparse MLA backend selector "
+            "that rejects this GPU for DSA context. The representative DSA "
+            "context validation on an 8-GPU RTX Pro 6000 Server Brev node with "
+            "vllm/vllm-openai:v0.19.0-cu130 failed with ValueError: No valid "
+            "attention backend found; FLASHMLA_SPARSE reports compute "
+            "capability not supported."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "deepseek-v4 mhc module data not loaded" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: vLLM 0.19.0 does not include the "
+            "DeepSeek-V4 mHC module needed for these rows. Forced validation "
+            "on an 8-GPU RTX Pro 6000 Server Brev node with "
+            "vllm/vllm-openai:v0.19.0-cu130 ran "
+            "collector/vllm/collect_mhc_module.py for the DeepSeek-V4 Flash "
+            "and Pro mHC shapes and both failed immediately with "
+            "ModuleNotFoundError: No module named 'vllm.model_executor.layers.mhc'."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and "unsupported gemm quant mode 'fp8_block'" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: RTX Pro 6000 Server uses SM120, and SGLang 0.5.10 "
+            "does not have a working DeepGEMM fp8_block GEMM recipe for this GPU. "
+            "This was verified on an 8-GPU RTX Pro 6000 Server Brev node with "
+            "lmsysorg/sglang:v0.5.10-cu130: the SGLang collector reported compute capability "
+            "12.0 and excluded fp8_block from get_gemm_test_cases(), and direct "
+            "run_gemm('fp8_block') probes for 128/256/512 square GEMMs all failed before "
+            "producing perf data with RuntimeError: Assertion error "
+            "(_deps/repo-deepgemm-src/csrc/apis/../jit_kernels/impls/../heuristics/"
+            "../../utils/layout.hpp:56): Unknown recipe."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and "unsupported moe quant mode 'nvfp4'" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: SGLang 0.5.10 NVFP4 MoE on RTX Pro 6000 Server "
+            "(SM120) fails inside the SGLang runtime before a collectable perf row is "
+            "produced. Forced validation on an 8-GPU RTX Pro 6000 Server Brev node with "
+            "lmsysorg/sglang:v0.5.10-cu130 ran the SGLang MoE collector path for this "
+            "model's nvfp4 expert shape and failed in collector/sglang/collect_moe.py -> "
+            "sglang.srt.layers.moe.moe_runner.flashinfer_trtllm with ImportError: cannot "
+            "import name 'get_activation_type'. This is a SGLang 0.5.10 runtime "
+            "incompatibility for the NVFP4 MoE path on this GPU, not an untested AIC "
+            "support-matrix parallelism shape."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and "unsupported moe quant mode 'fp8_block'" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: TensorRT-LLM 1.3.0rc10 block-FP8 MoE on RTX Pro "
+            "6000 Server (SM120) fails in the TRT-LLM DeepGEMM MoE path before a "
+            "collectable perf row is produced. Forced validation on an 8-GPU RTX Pro "
+            "6000 Server Brev node with nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10 "
+            "ran collector/trtllm/collect_moe.py for this model's fp8_block expert "
+            "shape and failed in tensorrt_llm/_torch/modules/fused_moe/"
+            "fused_moe_deepgemm.py with RuntimeError: Assertion error "
+            "(_deps/deepgemm-src/csrc/apis/../jit_kernels/impls/../heuristics/"
+            "../../utils/layout.hpp:57): Unknown recipe."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and (
+            "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
+            or "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
+        )
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: TensorRT-LLM 1.3.0rc10 MXFP4 MoE on RTX Pro "
+            "6000 Server (SM120) fails in the TRTLLMGenFusedMoE backend before a "
+            "collectable perf row is produced. Forced validation on an 8-GPU RTX Pro "
+            "6000 Server Brev node with nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10 "
+            "ran collector/trtllm/collect_moe.py for GPT-OSS w4a16_mxfp4 and "
+            "DeepSeek-V4 w4a8_mxfp4_mxfp8 shapes; both failed while creating "
+            "tensorrt_llm/_torch/modules/fused_moe/fused_moe_trtllm_gen.py with "
+            "NotImplementedError: TRTLLMGenFusedMoE does not support SM120 and above."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and "unsupported moe quant mode 'int4_wo'" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: TensorRT-LLM 1.3.0rc10 INT4/W4A16 MoE on RTX Pro "
+            "6000 Server (SM120) fails in the TRT-LLM CUTLASS MoE path before a "
+            "collectable perf row is produced. Forced validation on an 8-GPU RTX Pro "
+            "6000 Server Brev node with nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10 "
+            "ran collector/trtllm/collect_moe.py for the Kimi-K2.5 int4_wo expert "
+            "shape and failed in tensorrt_llm/_torch/modules/fused_moe/"
+            "fused_moe_cutlass.py with ValueError: Unsupported quantization mode: [1]."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and "dsa_context_module_perf" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: TensorRT-LLM 1.3.0rc10 DSA context module on RTX "
+            "Pro 6000 Server (SM120) fails inside the TRT-LLM attention backend before "
+            "a collectable perf row is produced. Forced validation on an 8-GPU RTX Pro "
+            "6000 Server Brev node with nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10 "
+            "ran collector/trtllm/collect_mla_module.py for zai-org/GLM-5 DSA context "
+            "and failed in tensorrt_llm/_torch/attention_backend/trtllm.py with "
+            "RuntimeError: Assertion failed: SEPARATE_Q_K_V requires valid K and V "
+            "pointers, followed by a CUDA illegal memory access during cleanup."
+        )
+
+    if (
+        system == "rtx_pro_6000_server"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.3.0rc10"
+        and "failed to query context attention data" in normalized
+        and "head_size=512" in normalized
+    ):
+        return (
+            "FRAMEWORK_INCOMPATIBLE: TensorRT-LLM 1.3.0rc10 context attention with "
+            "head_dim=512 on RTX Pro 6000 Server (SM120) fails inside the TRT-LLM "
+            "MMHA attention path before a collectable perf row is produced. Forced "
+            "validation on an 8-GPU RTX Pro 6000 Server Brev node with "
+            "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10 ran "
+            "collector/trtllm/collect_attn.py for the Gemma head_size=512 context "
+            "shape and aborted in tensorrt_llm/common/attentionOp.cpp with "
+            "TllmException: Assertion failed: Head size 512 is not supported by MMHA."
+        )
+
+    return None
+
+
+def _add_framework_incompatible_gap_evidence(
+    *,
+    system: str,
+    backend: str,
+    version: str,
+    error_message: str,
+) -> str:
+    evidence = _framework_incompatible_gap_evidence(
+        system=system,
+        backend=backend,
+        version=version,
+        error_message=error_message,
+    )
+    if evidence is None:
+        return error_message
+    return f"{evidence}\n\nOriginal traceback:\n{error_message}"
 
 
 def _enum_name(value: object | None) -> str | None:
@@ -831,6 +1079,12 @@ class SupportMatrix:
                     error_message=raw_error,
                 ):
                     statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
+                    raw_error = _add_framework_incompatible_gap_evidence(
+                        system=system,
+                        backend=backend,
+                        version=version,
+                        error_message=raw_error,
+                    )
                 else:
                     statuses[mode] = STATUS_FAIL
                 error_messages[mode] = raw_error

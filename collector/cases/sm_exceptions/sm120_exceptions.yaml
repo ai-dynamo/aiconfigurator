@@ -25,7 +25,7 @@ framework_specific_op_exceptions:
       rules:
         - reason_type: framework_version_unsupported
           version_prefixes: ["0.5.10"]
-          reason: SGLang 0.5.10 routes most NVFP4 MoE through FlashInfer paths that have not been validated on SM120; B200 live smokes allow the scoped Nemotron NVFP4 cases below.
+          reason: SGLang 0.5.10 NVFP4 MoE fails on SM120 in the flashinfer_trtllm runtime path with ImportError for get_activation_type before perf data is produced.
           fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
           match:
             moe_type: nvfp4
@@ -35,11 +35,14 @@ framework_specific_op_exceptions:
                 - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
         - reason_type: framework_version_unsupported
           version_prefixes: ["0.5.10"]
-          reason: SGLang 0.5.10 MoE collector does not support GPT-OSS MoE cases.
+          reason: SGLang 0.5.10 Triton MXFP4 MoE supports GPT-OSS W4A16 MXFP4 on SM120 only without expert parallelism; EP>1 asserts "Expert parallel is not supported when using triton kernels."
           fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
           match:
+            moe_type: w4a16_mxfp4
             model_path:
               in: [openai/gpt-oss-20b, openai/gpt-oss-120b]
+            expert_parallel_size:
+              gt: 1
     attention_context:
       rules:
         - reason_type: framework_version_unsupported

@@ -179,3 +179,26 @@ def test_run_single_test_marks_known_rtx_pro_sm120_framework_gaps(monkeypatch, m
 
     assert status_dict == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE}
     assert message in error_dict["agg"]
+
+
+def test_rtx_pro_sglang_fp8_block_gemm_reason_includes_runtime_probe(monkeypatch):
+    message = "Unsupported gemm quant mode 'fp8_block' for system='rtx_pro_6000_server'"
+
+    def fail_run_mode(**_kwargs):
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
+
+    status_dict, error_dict = SupportMatrix.run_single_test(
+        model="deepseek-ai/DeepSeek-R1",
+        system="rtx_pro_6000_server",
+        backend="sglang",
+        version="0.5.10",
+        system_spec=_system_spec(sm_version=120, fp8=True, fp4=True),
+        modes_to_test=("agg",),
+    )
+
+    assert status_dict == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert "SGLang 0.5.10 does not have a working DeepGEMM fp8_block GEMM recipe" in error_dict["agg"]
+    assert "Unknown recipe" in error_dict["agg"]
+    assert message in error_dict["agg"]
