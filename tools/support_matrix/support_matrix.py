@@ -273,6 +273,33 @@ def _is_known_framework_incompatible_gap(
     )
 
 
+def _is_known_hw_incompatible_gap(
+    *,
+    system: str,
+    error_message: str | None,
+) -> bool:
+    """Return True for deterministic runtime errors caused by GPU capability gaps."""
+    if not error_message:
+        return False
+
+    normalized = error_message.lower()
+    return system == "l40s" and (
+        "unsupported gemm quant mode 'fp8_block'" in normalized
+        or "unsupported moe quant mode 'fp8_block'" in normalized
+        or "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
+        or "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
+        or "unsupported context_attention quant mode 'fp8'" in normalized
+        or "unsupported generation_attention quant mode 'fp8'" in normalized
+        or "ampere/ada cards only supports fp16 and bf16 data type" in normalized
+        or "dsa_context_module_perf.parquet" in normalized
+        or "dsa_generation_module_perf.parquet" in normalized
+        or "quant_mode=<gemmquantmode.fp8_block" in normalized
+        or "quant_mode=<moequantmode.fp8_block" in normalized
+        or "quant_mode=<moequantmode.w4a16_mxfp4" in normalized
+        or "quant_mode=<moequantmode.w4a8_mxfp4_mxfp8" in normalized
+    )
+
+
 def _enum_name(value: object | None) -> str | None:
     if value is None:
         return None
@@ -347,6 +374,23 @@ def get_hardware_incompatibility(
     system_spec: dict,
 ) -> HardwareIncompatibility | None:
     """Return a deterministic hardware/model datatype incompatibility, if any."""
+    model_info = dict(_get_model_info(model))
+    gpu_spec = system_spec.get("gpu") or {}
+    sm_version = gpu_spec.get("sm_version")
+    if (
+        backend == common.BackendName.sglang.value
+        and model_info["architecture"] in {"DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"}
+        and sm_version is not None
+        and sm_version < 90
+    ):
+        return HardwareIncompatibility(
+            missing_datatypes=(),
+            reason=(
+                f"{_gpu_label(system, system_spec)} does not support SGLang DSA/NSA module collectors "
+                f"required by {model}; SGLang DSA/NSA module collectors require SM90+."
+            ),
+        )
+
     required_datatypes = _required_datatypes_for_model(model, backend)
     missing = tuple(dt for dt in required_datatypes if not _gpu_supports_datatype(system, system_spec, dt))
     if not missing:
@@ -757,7 +801,7 @@ class SupportMatrix:
                 )
             except Exception:
                 logger.exception("Hardware compatibility preflight failed for %s on %s/%s", model, system, backend)
-                incompatibility = None
+                raise
             if incompatibility is not None:
                 reason = _format_exception_for_csv(incompatibility.reason)
                 statuses = dict.fromkeys(modes_to_test, STATUS_HW_INCOMPATIBLE)
@@ -823,7 +867,12 @@ class SupportMatrix:
                     str(e),
                 )
 
-                if _is_known_framework_incompatible_gap(
+                if _is_known_hw_incompatible_gap(
+                    system=system,
+                    error_message=raw_error,
+                ):
+                    statuses[mode] = STATUS_HW_INCOMPATIBLE
+                elif _is_known_framework_incompatible_gap(
                     model=model,
                     system=system,
                     backend=backend,

@@ -25,12 +25,12 @@ class TestInterpolationMethods:
         # Test exact match
         left, right = interpolation.nearest_1d_point_helper(10, values, inner_only=True)
         assert left == 10
-        assert right == 20
+        assert right == 10
 
         # Test at boundaries
         left, right = interpolation.nearest_1d_point_helper(1, values, inner_only=True)
         assert left == 1
-        assert right == 5
+        assert right == 1
 
     def test_nearest_1d_point_helper_outer(self, comprehensive_perf_db):
         """Test _nearest_1d_point_helper with inner_only=False."""
@@ -156,6 +156,14 @@ class TestInterpolationMethods:
         result = interpolation.bilinear_interpolation([10, 30], [20, 40], 10, 30, data)
         assert result == 150.0  # Average of 100 and 200
 
+    def test_bilinear_interpolation_degenerate_axis(self, comprehensive_perf_db):
+        """Degenerate bilinear grids should fall back to exact or 1-D interpolation."""
+        data = {8: {1: 100, 2: 140}, 16: {1: 200, 2: 260}}
+
+        assert interpolation.bilinear_interpolation([16, 16], [1, 1], 16, 1, data) == 200
+        assert interpolation.bilinear_interpolation([16, 16], [1, 2], 16, 1.5, data) == 230
+        assert interpolation.bilinear_interpolation([8, 16], [1, 1], 12, 1, data) == 150
+
     def test_interp_3d_linear(self, comprehensive_perf_db):
         """Test 3D linear interpolation."""
         # Create a simple 3D data structure
@@ -174,6 +182,47 @@ class TestInterpolationMethods:
         # Test at corner point
         result = interpolation.interp_3d_linear(10, 30, 50, data)
         assert result == 90.0
+
+    def test_interp_3d_linear_degenerate_axis(self, comprehensive_perf_db):
+        """Non-exact 3D interpolation should not reduce to a lower-dimensional slice."""
+        data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        for x in [256, 512]:
+            for z in [0, 512]:
+                data[x][1][z] = x + z
+
+        with pytest.raises(ValueError, match="requires data that varies across all 3 dimensions"):
+            interpolation.interp_3d_linear(384, 1, 256, data)
+
+    def test_interp_3d_cubic_degenerate_axis(self, comprehensive_perf_db):
+        """Cubic 2D-then-1D interpolation should require true 3D coverage."""
+        data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        for x in [256, 512]:
+            for z in [0, 512]:
+                data[x][1][z] = x + z
+
+        with pytest.raises(ValueError, match="requires data that varies across all 3 dimensions"):
+            interpolation.interp_3d(384, 1, 256, data, "cubic", comprehensive_perf_db._extracted_metrics_cache)
+
+    def test_interp_3d_exact_sparse_point(self, comprehensive_perf_db):
+        """Exact data should be returned before building a broader stencil."""
+        data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        data[5][128][1] = 100.0
+        data[5][256][1] = 200.0
+        data[5][256][2] = 220.0
+
+        result = interpolation.interp_3d(5, 256, 2, data, "cubic", comprehensive_perf_db._extracted_metrics_cache)
+
+        assert result["latency"] == 220.0
+
+    def test_interp_3d_exact_axis_requires_full_3d_coverage(self, comprehensive_perf_db):
+        """Non-exact 3D interpolation should not use a lower-dimensional curve."""
+        data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        data[16][256][1] = 100.0
+        data[16][258][1] = 104.0
+        data[32][256][1] = 200.0
+
+        with pytest.raises(ValueError, match="requires data that varies across all 3 dimensions"):
+            interpolation.interp_3d(16, 257, 1, data, "cubic", comprehensive_perf_db._extracted_metrics_cache)
 
     def test_interp_2d_1d(self, comprehensive_perf_db):
         """Test 2D-1D interpolation methods."""

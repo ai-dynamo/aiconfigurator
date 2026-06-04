@@ -72,10 +72,20 @@ class MockModelConfig:
         self.is_local_attention_model = False
 
         class MockHFConfig:
-            def __init__(self):
+            def __init__(self, *, num_attention_heads, num_key_value_heads, head_dim):
                 self.architectures = ["LlamaForCausalLM"]
+                self.num_attention_heads = num_attention_heads
+                self.num_key_value_heads = num_key_value_heads
+                self.head_dim = head_dim
+                self.hidden_size = num_attention_heads * head_dim
+                self.attn_logit_softcapping = None
 
-        self.hf_config = MockHFConfig()
+        self.hf_config = MockHFConfig(
+            num_attention_heads=num_attention_heads,
+            num_key_value_heads=num_key_value_heads,
+            head_dim=head_dim,
+        )
+        self.hf_text_config = self.hf_config
         self.dtype = torch.bfloat16
 
     def get_num_kv_heads(self, tp_size):
@@ -96,6 +106,9 @@ class MockServerArgs:
         self.dllm_algorithm_config = None
         self.enable_piecewise_cuda_graph = False  # sglang <=0.5.9
         self.disable_piecewise_cuda_graph = True  # sglang >=0.5.10
+        self.is_embedding = False
+        self.disable_radix_cache = False
+        self.enable_dp_attention = False
         self.model_path = None
         self.revision = None
         # Required by TritonAttnBackend
@@ -130,6 +143,7 @@ class MockModelRunner:
         self.model_config = MockModelConfig(num_heads, num_kv_heads, head_dim)
         self.kv_cache_dtype = kv_cache_dtype  # Default
         self.page_size = page_size
+        self.tp_size = 1
         self.is_hybrid = False
         self.dtype = torch.bfloat16
         # Provide compatibility across sglang versions that expect this flag

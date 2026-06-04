@@ -9,7 +9,7 @@ Shared MoE shapes come from YAML; this file owns TRT-LLM version quirks and
 kernel-specific filters.
 """
 
-__compat__ = "trtllm>=1.1.0,<=1.3.0rc10"
+__compat__ = "trtllm>=1.0.0,<=1.3.0rc15"
 
 import gc
 import glob
@@ -27,9 +27,13 @@ from tensorrt_llm._torch.autotuner import AutoTuner, autotune
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV3Gate
 from tensorrt_llm._torch.modules.fused_moe import RenormalizeMoeRoutingMethod, create_moe
-from tensorrt_llm._torch.utils import ActivationType
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
+
+try:
+    from tensorrt_llm._torch.utils import ActivationType
+except ImportError:
+    ActivationType = None
 
 # Models that use non-gated MoE (Relu2 activation instead of SwiGLU)
 # These are substring patterns that will be matched against the full model name
@@ -166,6 +170,7 @@ def get_moe_test_cases():
         # SM90 (Hopper) and SM100 (Blackwell) both support fp8_block.
         # SM90 uses CUTLASS backend with FP32 scale.
         # SM100 uses DEEPGEMM/TRTLLM backend with UE8M0 scale (MXFP8 style).
+    if sm_version >= 90:
         moe_list += ["fp8_block"]
 
     # SM90 specific quant mode.
@@ -364,10 +369,15 @@ def run_moe_torch(
     # Nemotron-3 Nano uses non-gated MoE with Relu2 activation
     # Other models (DeepSeek, Qwen, Mixtral) use gated MoE with SwiGLU activation
     if any(pattern in model_name for pattern in NON_GATED_MOE_MODELS):
+        if ActivationType is None:
+            raise RuntimeError(
+                f"TensorRT-LLM {_TRTLLM_VERSION} does not expose ActivationType; "
+                f"cannot collect non-gated MoE model {model_name}"
+            )
         activation_type = ActivationType.Relu2
         is_gated = False
     else:
-        activation_type = ActivationType.Swiglu
+        activation_type = ActivationType.Swiglu if ActivationType is not None else None
         is_gated = True
 
     sm_version = get_sm_version()
@@ -427,21 +437,27 @@ def run_moe_torch(
         # for low latency mode in fp4, experts > 128 is not supported.
         routing_method = RenormalizeMoeRoutingMethod(topk)
 
-    moe = create_moe(
-        routing_method=routing_method,
-        num_experts=num_experts,
-        hidden_size=hidden_size,
-        intermediate_size=inter_size,
-        dtype=dtype,
+    create_moe_kwargs = {
+        "routing_method": routing_method,
+        "num_experts": num_experts,
+        "hidden_size": hidden_size,
+        "intermediate_size": inter_size,
+        "dtype": dtype,
         # In both low latency and attention dp scenarios, create_moe needs not to do allreduce
         # inside op.
-        reduce_results=False,
-        model_config=model_config,
-        swiglu_alpha=swiglu_alpha,
-        swiglu_beta=swiglu_beta,
-        swiglu_limit=swiglu_limit,
-        activation_type=activation_type,
-    )
+        "reduce_results": False,
+        "model_config": model_config,
+    }
+    create_moe_params = inspect.signature(create_moe).parameters
+    if "swiglu_alpha" in create_moe_params:
+        create_moe_kwargs["swiglu_alpha"] = swiglu_alpha
+    if "swiglu_beta" in create_moe_params:
+        create_moe_kwargs["swiglu_beta"] = swiglu_beta
+    if "swiglu_limit" in create_moe_params:
+        create_moe_kwargs["swiglu_limit"] = swiglu_limit
+    if "activation_type" in create_moe_params and activation_type is not None:
+        create_moe_kwargs["activation_type"] = activation_type
+    moe = create_moe(**create_moe_kwargs)
     moe.to(torch.device(device))
 
     # SM100 (Blackwell) DeepGEMM expects weight scales (SFB) in int32 UE8M0 format,
@@ -545,7 +561,8 @@ def run_moe_torch(
                 print(f"Successfully dry run for {max_tokens} tokens")
             break
         except Exception as e:
-            if isinstance(e, torch.AcceleratorError):
+            accelerator_error = getattr(torch, "AcceleratorError", None)
+            if accelerator_error is not None and isinstance(e, accelerator_error):
                 raise
             if i == len(num_tokens_lists) - 1:
                 raise RuntimeError(f"dry run failed for {max_tokens} tokens: {e}") from e
@@ -580,10 +597,13 @@ def run_moe_torch(
                     continue
                 else:
                     try:
-                        # Check if autotune() accepts "rank" kwarg.
-                        # It was removed in trtllm 1.2.0rc6.
-                        autotune_kwargs = {"cache_path": cache_path}
-                        if "rank" in inspect.signature(autotune).parameters:
+                        # Check which autotune() kwargs are accepted. These
+                        # moved across TRT-LLM torch-flow releases.
+                        autotune_params = inspect.signature(autotune).parameters
+                        autotune_kwargs = {}
+                        if "cache_path" in autotune_params:
+                            autotune_kwargs["cache_path"] = cache_path
+                        if "rank" in autotune_params:
                             autotune_kwargs["rank"] = torch.device(device).index
 
                         with torch.inference_mode(), autotune(**autotune_kwargs):

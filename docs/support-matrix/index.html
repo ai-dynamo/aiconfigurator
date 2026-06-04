@@ -79,14 +79,18 @@ function isFrameworkUnsupported(error) {
 function isHardwareUnsupported(error) {
   if (!error) return true;
   const text = String(error).toLowerCase();
-  if (text.includes('gpu does not support') || text.includes('hardware is incompatible')) return true;
+  if (
+    text.includes('gpu does not support') ||
+    text.includes('hardware is incompatible') ||
+    text.includes('hardware-incompatible')
+  ) return true;
   if (/\bdoes not support\b.*\brequired by\b/.test(text)) return true;
   return text.includes('does not support model datatype') || text.includes('does not support model dtype');
 }
 
 function unsupportedStatusFromError(error) {
-  if (isFrameworkUnsupported(error)) return 'framework_unsupported';
   if (isHardwareUnsupported(error)) return 'hw_incompatible';
+  if (isFrameworkUnsupported(error)) return 'framework_unsupported';
   return 'fail';
 }
 
@@ -455,7 +459,7 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
       return isFrameworkUnsupported(result.error) ? 'framework_unsupported' : 'fail';
     }
     if (result.version === STATUS_FRAMEWORK_INCOMPATIBLE) return 'framework_unsupported';
-    if (result.version === STATUS_HW_INCOMPATIBLE) return unsupportedStatusFromError(result.error);
+    if (result.version === STATUS_HW_INCOMPATIBLE) return 'hw_incompatible';
     return 'pass';
   };
 

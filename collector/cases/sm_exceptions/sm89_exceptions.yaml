@@ -42,6 +42,12 @@ framework_specific_op_exceptions:
           fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
           match:
             use_fp8_kv_cache: true
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.9", "0.5.10", "0.5.12"]
+          reason: SGLang FlashAttention context attention with head_dim=256 fails on SM89 with CUDA invalid argument.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase, window_size]
+          match:
+            head_dim: 256
     attention_generation:
       rules:
         - reason_type: hardware_unsupported
@@ -49,6 +55,12 @@ framework_specific_op_exceptions:
           fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
           match:
             use_fp8_kv_cache: true
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.12"]
+          reason: SGLang FlashAttention generation attention with head_dim=256 fails on SM89 with CUDA invalid argument.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase, window_size]
+          match:
+            head_dim: 256
     dsa_context_module:
       drop: true
       reason_type: hardware_unsupported
@@ -65,6 +77,16 @@ framework_specific_op_exceptions:
           fields: [gemm_type, token_count, output_features, input_features]
           match:
             gemm_type: nvfp4
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 FP8 torch-flow GEMM hits CUDA illegal memory access for small-token large-projection shapes on SM89.
+          fields: [gemm_type, token_count, output_features, input_features]
+          match:
+            gemm_type:
+              in: [fp8, fp8_static]
+            token_count_lte: 8
+            output_features_gte: 51200
+            input_features_gte: 51200
     moe:
       rules:
         - reason_type: hardware_unsupported
@@ -73,6 +95,196 @@ framework_specific_op_exceptions:
           match:
             moe_type:
               in: [nvfp4, w4a8_mxfp4_mxfp8]
+    attention_context:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 SM89 fused context attention hits CUDA illegal memory access for 96-head long-context GQA at 98304+ tokens.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 96
+            num_key_value_heads:
+              in: [1, 2, 4, 8]
+            head_dim_gte: 128
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 98304
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 SM89 fused context attention hits CUDA illegal memory access for 96-head long-context GQA with head_dim >= 192 at 65536+ tokens.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 96
+            num_key_value_heads:
+              in: [1, 2, 4, 8]
+            head_dim_gte: 192
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 65536
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 SM89 fused context attention hits CUDA illegal memory access for 96-head long-context GQA with head_dim >= 256 at 49152+ tokens.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 96
+            num_key_value_heads:
+              in: [1, 2, 4, 8]
+            head_dim_gte: 256
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 49152
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 SM89 fused context attention hits CUDA illegal memory access for 64-head long-context GQA with head_dim >= 192 at 98304+ tokens.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 64
+            num_key_value_heads:
+              in: [1, 2, 4, 8]
+            head_dim_gte: 192
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 98304
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 SM89 fused context attention hits CUDA illegal memory access for 64-head long-context GQA with head_dim >= 256 at 81920+ tokens.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 64
+            num_key_value_heads:
+              in: [1, 2, 4, 8]
+            head_dim_gte: 256
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 81920
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 SM89 fused context attention hits CUDA illegal memory access for 48-head long-context GQA with head_dim >= 192 at 131072+ tokens.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 48
+            num_key_value_heads:
+              in: [1, 2, 4, 8]
+            head_dim_gte: 192
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 131072
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 SM89 fused context attention hits CUDA illegal memory access for 48-head long-context GQA with head_dim >= 256 at 98304+ tokens.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 48
+            num_key_value_heads:
+              in: [1, 2, 4, 8]
+            head_dim_gte: 256
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 98304
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 SM89 fused context attention hits CUDA illegal memory access for 40-head long-context GQA with head_dim >= 256 at 131072+ tokens.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 40
+            num_key_value_heads:
+              in: [1, 2, 4, 8]
+            head_dim_gte: 256
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 131072
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 SM89 FP8 context FMHA hits CUDA illegal memory access for 96-head MHA at 65536+ tokens.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 96
+            num_key_value_heads: 96
+            head_dim: 128
+            use_fp8_kv_cache: true
+            use_fp8_context_fmha: true
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 65536
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 SM89 FP8 context FMHA hits CUDA illegal memory access for 96-head MHA with head_dim >= 192 at 40960+ tokens.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 96
+            num_key_value_heads: 96
+            head_dim_gte: 192
+            use_fp8_kv_cache: true
+            use_fp8_context_fmha: true
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 40960
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 SM89 FP8 context FMHA hits CUDA illegal memory access for 96-head MHA with head_dim >= 256 at 32768+ tokens.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 96
+            num_key_value_heads: 96
+            head_dim_gte: 256
+            use_fp8_kv_cache: true
+            use_fp8_context_fmha: true
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 32768
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 SM89 FP8 context FMHA hits CUDA illegal memory access for 64-head MHA with head_dim >= 192 at 65536+ tokens.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 64
+            num_key_value_heads: 64
+            head_dim_gte: 192
+            use_fp8_kv_cache: true
+            use_fp8_context_fmha: true
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 65536
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 SM89 FP8 context FMHA hits CUDA illegal memory access for 64-head MHA with head_dim >= 256 at 49152+ tokens.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 64
+            num_key_value_heads: 64
+            head_dim_gte: 256
+            use_fp8_kv_cache: true
+            use_fp8_context_fmha: true
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 49152
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 SM89 FP8 context FMHA hits CUDA illegal memory access for 48-head MHA with head_dim >= 256 at 65536+ tokens.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, window_size, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 48
+            num_key_value_heads: 48
+            head_dim_gte: 256
+            use_fp8_kv_cache: true
+            use_fp8_context_fmha: true
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 65536
     mla_context_module:
       rules:
         - reason_type: hardware_unsupported
@@ -87,6 +299,15 @@ framework_specific_op_exceptions:
           fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
           match:
             gemm_type: nvfp4
+    dsa_generation_module:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc15"]
+          reason: TRT-LLM 1.3.0rc15 DSA generation module path hits DeepGEMM Unsupported architecture on SM89 for BF16 and FP8-block cases.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            gemm_type:
+              in: [bfloat16, fp8_block]
   vllm:
     gemm:
       rules:
@@ -96,6 +317,13 @@ framework_specific_op_exceptions:
           match:
             gemm_type:
               in: [fp8_block, nvfp4]
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.22.0"]
+          reason: vLLM 0.22.0 Cutlass scaled-MM FP8 GEMM asserts output_size is not None on SM89 for dense collector RowParallelLinear probes.
+          fields: [gemm_type, token_count, output_features, input_features]
+          match:
+            gemm_type:
+              in: [fp8, fp8_static]
     moe:
       rules:
         - reason_type: hardware_unsupported
@@ -104,6 +332,34 @@ framework_specific_op_exceptions:
           match:
             moe_type:
               in: [fp8_block, nvfp4]
+    attention_context:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.22.0"]
+          reason: vLLM 0.22.0 FlashInfer dense attention on SM89 asserts KV-cache dtype must equal model dtype for FP8 KV-cache probes.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, is_context_phase, window_size]
+          match:
+            use_fp8_kv_cache: true
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.22.0"]
+          reason: vLLM 0.22.0 FlashInfer dense context attention fails on SM89 for head_dim=512 with invalid FlashInfer kernel configuration.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, is_context_phase, window_size]
+          match:
+            head_dim: 512
+    attention_generation:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.22.0"]
+          reason: vLLM 0.22.0 FlashInfer dense attention on SM89 asserts KV-cache dtype must equal model dtype for FP8 KV-cache probes.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, is_context_phase, window_size]
+          match:
+            use_fp8_kv_cache: true
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.22.0"]
+          reason: vLLM 0.22.0 FlashInfer dense generation attention fails on SM89 for head_dim=512 with Unsupported max_mma_kv.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, is_context_phase, window_size]
+          match:
+            head_dim: 512
     mla_context_module:
       rules:
         - reason_type: hardware_unsupported
