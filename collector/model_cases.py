@@ -623,6 +623,8 @@ def _comparison_matches(value: Any, op: str, expected: Any, fields: list[str], t
         return expected in value
     if op == "not_contains":
         return expected not in value
+    if op == "not_in":
+        return value not in _as_list(expected, field_name="not_in")
     if op == "prefix":
         return str(value).startswith(str(expected))
     if op == "suffix":

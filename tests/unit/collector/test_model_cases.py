@@ -625,6 +625,44 @@ def test_filter_test_cases_supports_structured_exception_rules():
     assert filtered == [cases[0], cases[2]]
 
 
+def test_filter_test_cases_supports_not_in_structured_exception_rule():
+    cases = [
+        ["nvfp4", "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"],
+        ["nvfp4", "Qwen/Qwen3-235B-A22B"],
+        ["bfloat16", "Qwen/Qwen3-235B-A22B"],
+    ]
+    plan = OpCasePlan(
+        exclude=CaseSelector(
+            rules=[
+                {
+                    "reason_type": "framework_version_unsupported",
+                    "version_prefixes": ["0.5.10"],
+                    "fields": ["moe_type", "model_path"],
+                    "match": {
+                        "moe_type": "nvfp4",
+                        "model_path": {
+                            "not_in": [
+                                "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+                                "nvidia/nemotron-ultra-rl-050826",
+                            ]
+                        },
+                    },
+                }
+            ]
+        )
+    )
+
+    filtered = filter_test_cases(
+        cases,
+        plan=plan,
+        full_module_name="sglang.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="0.5.10",
+    )
+
+    assert filtered == [cases[0], cases[2]]
+
+
 def test_filter_test_cases_reports_expected_sm_exception_reasons():
     cases = [
         ["bfloat16", 1, 65536, 65536],
