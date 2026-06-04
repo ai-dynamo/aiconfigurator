@@ -186,7 +186,7 @@ def get_context_test_cases(attn_type: str):
     """Context-phase test cases.
 
     Returns list of [seq_len, batch_size, num_heads, kv_cache_dtype,
-                     compute_dtype, gemm_type].
+                     compute_dtype, gemm_type, prefix_len].
     """
     cases = []
     sweep = get_mla_module_sweep_spec("trtllm")
@@ -202,7 +202,11 @@ def get_context_test_cases(attn_type: str):
                         and b > sweep.context_large_sequence_max_batch_size
                     ):
                         continue
-                    cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
+                    if attn_type == "dsa":
+                        for prefix_len in sweep.context_prefix_lengths:
+                            cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type, prefix_len])
+                    else:
+                        cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
 
 
@@ -241,8 +245,12 @@ def _build_module_test_cases(attn_type: str, mode: str):
     model_specs = get_mla_module_model_specs(attention_type=attn_type)
     cases = []
     for model_spec in model_specs:
-        for s, b, h, kv_dtype, compute_dtype, gemm_type in base_cases:
-            cases.append([s, b, h, kv_dtype, compute_dtype, gemm_type, model_spec.model_path, attn_type])
+        for base_case in base_cases:
+            s, b, h, kv_dtype, compute_dtype, gemm_type, *rest = base_case
+            case = [s, b, h, kv_dtype, compute_dtype, gemm_type, model_spec.model_path, attn_type]
+            if rest:
+                case.append(rest[0])
+            cases.append(case)
     return cases
 
 
@@ -475,8 +483,8 @@ def create_kv_cache_and_metadata(
     batch_size: int,
     seq_len: int,
     is_context: bool,
-    use_fp8_kv_cache: bool = False,
     prefix_len: int = 0,
+    use_fp8_kv_cache: bool = False,
     device: str = "cuda:0",
 ):
     """
@@ -494,8 +502,10 @@ def create_kv_cache_and_metadata(
     qk_rope_head_dim = config.qk_rope_head_dim
     head_dim = kv_lora_rank + qk_rope_head_dim
 
+    prefix_len = int(prefix_len) if is_context else 0
+
     if is_context:
-        max_seq = seq_len + prefix_len + 1
+        max_seq = prefix_len + seq_len + 1
         total_tokens = seq_len * batch_size
         seq_len_q = seq_len
         kv_cache_len = prefix_len
@@ -538,7 +548,7 @@ def create_kv_cache_and_metadata(
     )
 
     request_ids = list(range(batch_size))
-    token_nums = [max_seq] * batch_size
+    token_nums = [prefix_len + seq_len_q] * batch_size if is_context else [max_seq] * batch_size
     kv_cache_manager.add_dummy_requests(request_ids, token_nums)
 
     # --- Attention Metadata ---
@@ -567,7 +577,7 @@ def create_kv_cache_and_metadata(
         ),
         cross=None,
         request_ids=request_ids,
-        prompt_lens=[seq_len_q if is_context else kv_cache_len] * batch_size,
+        prompt_lens=[prefix_len + seq_len_q if is_context else kv_cache_len] * batch_size,
         runtime_features=AttentionRuntimeFeatures(
             chunked_prefill=False,
             cache_reuse=False,
@@ -599,13 +609,13 @@ def run_mla_module(
     compute_dtype: str,
     gemm_type: str,
     perf_filename: str,
+    prefix_len: int = 0,
     *,
     model_path: str,
     attn_type: str,
     device: str = "cuda:0",
     warming_up: int = 10,
     test_ite: int = 6,
-    prefix_len: int = 0,
 ):
     """Run a single MLA / DSA module-level benchmark point."""
     torch.cuda.set_device(device)
@@ -614,12 +624,13 @@ def run_mla_module(
     use_fp8_kv_cache = kv_cache_dtype == "fp8"
 
     is_context = "context" in perf_filename
+    prefix_len = int(prefix_len) if is_context else 0
     phase = "context" if is_context else "generation"
     variant = attn_type.upper()
     print(
         f"\n[{variant} module] {phase} b={batch_size}, s={seq_len}, "
-        f"prefix={prefix_len if is_context else 0}, heads={num_heads}, "
-        f"gemm={gemm_type}, compute={compute_dtype}, kv={kv_cache_dtype}, model={model_path}"
+        f"prefix={prefix_len}, heads={num_heads}, gemm={gemm_type}, "
+        f"compute={compute_dtype}, kv={kv_cache_dtype}, model={model_path}"
     )
 
     # 1. Create attention layer (from_pretrained reads config.json)
@@ -638,8 +649,8 @@ def run_mla_module(
         batch_size=batch_size,
         seq_len=seq_len,
         is_context=is_context,
+        prefix_len=prefix_len,
         use_fp8_kv_cache=use_fp8_kv_cache,
-        prefix_len=prefix_len if is_context else 0,
         device=device,
     )
 
@@ -742,7 +753,8 @@ def run_mla_module(
 
     print(
         f"  [{phase}] b={batch_size}, s={seq_len}, heads={num_heads}, "
-        f"gemm={gemm_type}, compute={compute_dtype}, kv={kv_cache_dtype}: {latency:.4f} ms"
+        f"prefix={prefix_len}, gemm={gemm_type}, compute={compute_dtype}, "
+        f"kv={kv_cache_dtype}: {latency:.4f} ms"
     )
 
     _cleanup(kv_cache_manager)
@@ -758,10 +770,10 @@ def run_mla_module_worker(
     gemm_type: str,
     model_path: str,
     attn_type: str,
+    prefix_len: int = 0,
     *,
     perf_filename: str,
     device: str = "cuda:0",
-    prefix_len: int = 0,
 ):
     """Worker-compatible positional wrapper used by collector/collect.py."""
     return run_mla_module(
@@ -771,11 +783,11 @@ def run_mla_module_worker(
         kv_cache_dtype=kv_cache_dtype,
         compute_dtype=compute_dtype,
         gemm_type=gemm_type,
+        prefix_len=prefix_len,
         perf_filename=perf_filename,
         model_path=model_path,
         attn_type=attn_type,
         device=device,
-        prefix_len=prefix_len,
     )
 
 
@@ -842,7 +854,6 @@ def main():
         help="GEMM quantisation type for linear layers (default: run all supported by GPU)",
     )
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--prefix-len", type=int, default=0, help="Prefix length for context-phase quick runs")
     parser.add_argument("--quick", action="store_true", help="Quick single-point test")
     args = parser.parse_args()
 
@@ -879,7 +890,6 @@ def main():
                 model_path=model_path,
                 attn_type=attn_type,
                 device=args.device,
-                prefix_len=args.prefix_len if args.mode == "context" else 0,
             )
             continue
 
