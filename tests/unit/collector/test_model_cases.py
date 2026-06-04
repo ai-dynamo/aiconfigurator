@@ -146,7 +146,9 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
         for case in moe_cases
     )
     assert any(
-        case.model_name == "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4" and case.hidden_size == 2048 and case.inter_size == 5120
+        case.model_name == "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+        and case.hidden_size == 2048
+        and case.inter_size == 5120
         for case in moe_cases
     )
     assert len(get_context_mla_case_specs()) == 550
