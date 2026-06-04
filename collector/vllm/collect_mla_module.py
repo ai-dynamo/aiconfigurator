@@ -175,7 +175,7 @@ def get_context_test_cases(attn_type: str):
     """Context-phase test cases.
 
     Returns list of [seq_len, batch_size, num_heads, kv_cache_dtype,
-                     compute_dtype, gemm_type].
+                     compute_dtype, gemm_type, prefix_len].
     """
     cases = []
     sweep = get_mla_module_sweep_spec("vllm")
@@ -189,7 +189,11 @@ def get_context_test_cases(attn_type: str):
                 for s in sweep.context_sequence_lengths:
                     if b * s > sweep.context_max_tokens:
                         continue
-                    cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
+                    if attn_type == "dsa":
+                        for prefix_len in sweep.context_prefix_lengths:
+                            cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type, prefix_len])
+                    else:
+                        cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
 
 
@@ -252,8 +256,12 @@ def _build_module_test_cases(attn_type: str, mode: str):
     base_cases = get_context_test_cases(attn_type) if mode == "context" else get_generation_test_cases(attn_type)
     cases = []
     for model_spec in get_mla_module_model_specs(attention_type=attn_type):
-        for s, b, h, kv_dtype, compute_dtype, gemm_type in base_cases:
-            cases.append([s, b, h, kv_dtype, compute_dtype, gemm_type, model_spec.model_path, attn_type])
+        for base_case in base_cases:
+            s, b, h, kv_dtype, compute_dtype, gemm_type, *rest = base_case
+            case = [s, b, h, kv_dtype, compute_dtype, gemm_type, model_spec.model_path, attn_type]
+            if rest:
+                case.append(rest[0])
+            cases.append(case)
     return cases
 
 
@@ -581,9 +589,11 @@ def _create_kv_cache_and_metadata(
     block_size = vllm_config.cache_config.block_size
     is_dsa = attn_type == "dsa"
 
+    prefix_len = int(prefix_len) if is_context else 0
+
     if is_context:
         batch_spec = BatchSpec(
-            seq_lens=[seq_len + prefix_len] * batch_size,
+            seq_lens=[prefix_len + seq_len] * batch_size,
             query_lens=[seq_len] * batch_size,
         )
     else:
@@ -593,7 +603,7 @@ def _create_kv_cache_and_metadata(
         )
 
     num_kv_cache_blocks = max(
-        1 + math.ceil((seq_len + prefix_len + 1) / block_size) * batch_size,
+        1 + math.ceil((prefix_len + seq_len + 1) / block_size) * batch_size,
         8192,
     )
 
@@ -670,7 +680,7 @@ def _create_kv_cache_and_metadata(
     layer_names = [attn_layer_name]
     builder = builder_cls(kv_cache_spec, layer_names, vllm_config, torch.device(device))
     attn_metadata = builder.build(
-        common_prefix_len=0,
+        common_prefix_len=prefix_len,
         common_attn_metadata=common_attn_metadata,
     )
 
@@ -703,7 +713,7 @@ def _create_kv_cache_and_metadata(
         indexer_builder_cls = DeepseekV32IndexerBackend.get_builder_cls()
         indexer_builder = indexer_builder_cls(indexer_spec, [indexer_layer_name], vllm_config, torch.device(device))
         indexer_metadata = indexer_builder.build(
-            common_prefix_len=0,
+            common_prefix_len=prefix_len,
             common_attn_metadata=common_attn_metadata,
         )
         _populate_indexer_kv_cache(
@@ -765,13 +775,13 @@ def run_mla_module(
     compute_dtype: str,
     gemm_type: str,
     perf_filename: str,
+    prefix_len: int = 0,
     *,
     model_path: str,
     attn_type: str,
     device: str = "cuda:0",
     warming_up: int = 10,
     test_ite: int = 6,
-    prefix_len: int = 0,
 ):
     """Run a single MLA / DSA module-level benchmark point."""
     setup_distributed(device)
@@ -788,12 +798,13 @@ def run_mla_module(
     use_fp8_kv_cache = kv_cache_dtype == "fp8"
     use_prefill_fp8 = compute_dtype == "fp8"
     is_context = "context" in perf_filename
+    prefix_len = int(prefix_len) if is_context else 0
     phase = "context" if is_context else "generation"
     variant = attn_type.upper()
     print(
         f"\n[{variant} module] {phase} b={batch_size}, s={seq_len}, "
-        f"prefix={prefix_len if is_context else 0}, heads={num_heads}, "
-        f"gemm={gemm_type}, compute={compute_dtype}, kv={kv_cache_dtype}, model={model_path}"
+        f"prefix={prefix_len}, heads={num_heads}, gemm={gemm_type}, "
+        f"compute={compute_dtype}, kv={kv_cache_dtype}, model={model_path}"
     )
 
     # 1. Create attention module
@@ -803,7 +814,7 @@ def run_mla_module(
         num_heads=num_heads,
         use_fp8_kv_cache=use_fp8_kv_cache,
         use_prefill_fp8=use_prefill_fp8,
-        max_seq_len=seq_len + (prefix_len if is_context else 0),
+        max_seq_len=prefix_len + seq_len,
         max_batch_size=batch_size,
         gemm_type=gemm_type,
         device=device,
@@ -823,7 +834,7 @@ def run_mla_module(
             num_heads=num_heads,
             is_context=is_context,
             use_fp8_kv_cache=use_fp8_kv_cache,
-            prefix_len=prefix_len if is_context else 0,
+            prefix_len=prefix_len,
             device=device,
         )
 
@@ -967,7 +978,8 @@ def run_mla_module(
 
     print(
         f"  [{phase}] b={batch_size}, s={seq_len}, heads={num_heads}, "
-        f"gemm={gemm_type}, compute={compute_dtype}, kv={kv_cache_dtype}: {latency:.4f} ms"
+        f"prefix={prefix_len}, gemm={gemm_type}, compute={compute_dtype}, "
+        f"kv={kv_cache_dtype}: {latency:.4f} ms"
     )
 
     _cleanup()
@@ -983,10 +995,10 @@ def run_mla_module_worker(
     gemm_type: str,
     model_path: str,
     attn_type: str,
+    prefix_len: int = 0,
     *,
     perf_filename: str,
     device: str = "cuda:0",
-    prefix_len: int = 0,
 ):
     """Worker-compatible positional wrapper used by collector/collect.py."""
     return run_mla_module(
@@ -996,11 +1008,11 @@ def run_mla_module_worker(
         kv_cache_dtype=kv_cache_dtype,
         compute_dtype=compute_dtype,
         gemm_type=gemm_type,
+        prefix_len=prefix_len,
         perf_filename=perf_filename,
         model_path=model_path,
         attn_type=attn_type,
         device=device,
-        prefix_len=prefix_len,
     )
 
 
@@ -1074,7 +1086,6 @@ def main():
         help="GEMM quantisation type for linear layers (default: run all supported by GPU)",
     )
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--prefix-len", type=int, default=0, help="Prefix length for context-phase quick runs")
     parser.add_argument("--quick", action="store_true", help="Quick single-point test")
     args = parser.parse_args()
 
@@ -1112,7 +1123,6 @@ def main():
                 model_path=model_path,
                 attn_type=attn_type,
                 device=args.device,
-                prefix_len=args.prefix_len if args.mode == "context" else 0,
             )
             continue
 
