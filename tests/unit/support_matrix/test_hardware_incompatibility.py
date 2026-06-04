@@ -72,7 +72,7 @@ def test_fp4_model_is_hardware_incompatible_without_fp4_support():
 
 
 @pytest.mark.parametrize("model", ["openai/gpt-oss-20b", "openai/gpt-oss-120b"])
-def test_mxfp4_model_is_not_native_fp4_hardware_incompatible_on_hopper(model):
+def test_mxfp4_model_is_hardware_incompatible_on_hopper(model):
     incompatibility = get_hardware_incompatibility(
         model=model,
         system="h100_sxm",
@@ -80,7 +80,9 @@ def test_mxfp4_model_is_not_native_fp4_hardware_incompatible_on_hopper(model):
         system_spec=_system_spec(sm_version=90, fp8=True),
     )
 
-    assert incompatibility is None
+    assert incompatibility is not None
+    assert incompatibility.missing_datatypes == ("FP4",)
+    assert "does not support FP4" in incompatibility.reason
 
 
 def test_run_single_test_short_circuits_hardware_incompatible_model(monkeypatch):

@@ -215,10 +215,12 @@ class GEMM(Operation):
     def _normalize_gemm_quant_mode_for_table(
         quant_mode: common.GEMMQuantMode,
     ) -> common.GEMMQuantMode:
-        """Normalize modeled GEMM quant modes for perf table lookup.
+        """Normalize GEMM overhead quant modes for perf table lookup.
 
-        ``fp8_static`` is modeled from the dynamic ``fp8`` GEMM row plus
-        separately collected activation-quantization overhead tables.
+        TRT-LLM treats ``fp8_static`` as a behavioral mode over its dynamic
+        ``fp8`` GEMM timing rows. The compute_scale and scale_matrix overhead
+        tables are also stored in the dynamic ``fp8`` table family because they
+        model the delta between dynamic and static FP8.
         """
         if quant_mode == common.GEMMQuantMode.fp8_static:
             return common.GEMMQuantMode.fp8
@@ -397,7 +399,11 @@ class GEMM(Operation):
         if database_mode is None:
             database_mode = database._default_database_mode
 
-        table_quant_mode = cls._normalize_gemm_quant_mode_for_table(quant_mode)
+        table_quant_mode = (
+            cls._normalize_gemm_quant_mode_for_table(quant_mode)
+            if database.backend == common.BackendName.trtllm.value
+            else quant_mode
+        )
 
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0, source="sol")
@@ -660,10 +666,10 @@ class GEMM(Operation):
         energy = result.energy
         source = getattr(result, "source", "silicon")
 
-        # Static-FP8 GEMM is modeled from the dynamic FP8 base measurement
-        # across backends; subtract the separately collected activation-
-        # quantization pieces for BF16-input and low-precision-input cases.
-        if is_fp8_static:
+        # TRT-LLM's static-FP8 GEMM timing includes quantization overhead that
+        # AIC tracks separately. SGLang/vLLM static-FP8 rows are already direct
+        # runtime measurements and should not subtract those overhead tables.
+        if is_fp8_static and getattr(database, "backend", None) == common.BackendName.trtllm.value:
             compute_scale_result = database.query_compute_scale(x, self._k, quant_mode)
             latency -= float(compute_scale_result)
             energy -= compute_scale_result.energy

@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+mode: patch
+config:
+  worker_config:
+    num_gpu_per_worker: [16]
+    tp_list: [8]
+    pp_list: [2]
+    dp_list: [1]
+    moe_tp_list: [1, 2, 4, 8]
+    moe_ep_list: [1, 2, 4, 8]
+  prefill_worker_config:
+    num_gpu_per_worker: [16]
+    tp_list: [8]
+    pp_list: [2]
+    dp_list: [1]
+    moe_tp_list: [1, 2, 4, 8]
+    moe_ep_list: [1, 2, 4, 8]
+  decode_worker_config:
+    num_gpu_per_worker: [16]
+    tp_list: [8]
+    pp_list: [2]
+    dp_list: [1]
+    moe_tp_list: [1, 2, 4, 8]
+    moe_ep_list: [1, 2, 4, 8]
+  replica_config:
+    max_gpu_per_replica: 128
+    num_gpu_per_replica: [32, 64, 128]

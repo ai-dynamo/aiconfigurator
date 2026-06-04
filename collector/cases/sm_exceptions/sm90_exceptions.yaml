@@ -75,15 +75,17 @@ framework_specific_op_exceptions:
             gemm_type: nvfp4
     dsa_context_module:
       rules:
-        - reason_type: hardware_unsupported
-          reason: TRT-LLM DSA FP8 KV-cache variants are Blackwell-only.
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc10"]
+          reason: TRT-LLM 1.3.0rc10 H100 sparse DSA kernels reject FP8 KV cache and require BF16 KV tensors.
           fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
           match:
             kv_cache_dtype: fp8
     dsa_generation_module:
       rules:
-        - reason_type: hardware_unsupported
-          reason: TRT-LLM DSA FP8 KV-cache variants are Blackwell-only.
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc10"]
+          reason: TRT-LLM 1.3.0rc10 H100 sparse DSA kernels reject FP8 KV cache and require BF16 KV tensors.
           fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
           match:
             kv_cache_dtype: fp8

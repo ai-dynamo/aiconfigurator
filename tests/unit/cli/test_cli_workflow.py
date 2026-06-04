@@ -278,6 +278,23 @@ class TestBuildDefaultTaskConfigs:
     """Tests for build_default_task_configs function."""
 
     @patch("aiconfigurator.cli.main.TaskConfig")
+    def test_default_config_yaml_is_applied_to_agg_and_disagg(self, mock_task_config):
+        """Default-mode config YAML patches should flow into generated TaskConfigs."""
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+        yaml_config = {"mode": "patch", "config": {"worker_config": {"pp_list": [2]}}}
+
+        build_default_task_configs(
+            model_path="zai-org/GLM-5",
+            total_gpus=128,
+            system="b200_sxm",
+            yaml_config=yaml_config,
+        )
+
+        assert mock_task_config.call_count == 2
+        for call in mock_task_config.call_args_list:
+            assert call.kwargs["yaml_config"] == yaml_config
+
+    @patch("aiconfigurator.cli.main.TaskConfig")
     def test_skips_disagg_when_total_gpus_less_than_2(self, mock_task_config):
         """Disagg config should be skipped when total_gpus < 2."""
         mock_task_config.return_value = MagicMock(name="MockTaskConfig")

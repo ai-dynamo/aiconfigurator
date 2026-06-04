@@ -130,12 +130,19 @@ def _parse_int_list(value: str | None) -> list[int] | None:
 
 
 def _filter_cases_from_env(test_cases, *, is_prefill: bool, attn_type: str):
-    if not (is_prefill and attn_type == "dsa"):
+    if attn_type != "dsa":
         return test_cases
 
-    seq_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_SEQ_LENS"))
-    prefix_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_PREFIX_LENS"))
-    batch_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_BATCH_SIZES"))
+    prefix_filter = None
+    if is_prefill:
+        seq_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_SEQ_LENS"))
+        prefix_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_PREFIX_LENS"))
+        batch_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_BATCH_SIZES"))
+        label = "context"
+    else:
+        seq_filter = _parse_int_list(os.environ.get("AIC_DSA_GENERATION_SEQ_LENS"))
+        batch_filter = _parse_int_list(os.environ.get("AIC_DSA_GENERATION_BATCH_SIZES"))
+        label = "generation"
 
     if seq_filter is None and prefix_filter is None and batch_filter is None:
         return test_cases
@@ -153,7 +160,7 @@ def _filter_cases_from_env(test_cases, *, is_prefill: bool, attn_type: str):
         if prefix_set is not None and prefix_len not in prefix_set:
             continue
         filtered.append((bs, seq_len, ip, prefix_len))
-    print(f"[DSA] Env-filtered context cases: {len(filtered)}/{len(test_cases)}")
+    print(f"[DSA] Env-filtered {label} cases: {len(filtered)}/{len(test_cases)}")
     return filtered
 
 
@@ -554,6 +561,27 @@ def _skip_sm120_deepgemm_attention_modules() -> bool:
     newer runtime.
     """
     return os.environ.get("COLLECTOR_FORCE_DEEPGEMM_ATTENTION_MODULES") != "1" and get_sm_version() >= 120
+
+
+def _skip_hopper_dsv32_reduced_head_fp8_decode(
+    *,
+    is_prefill: bool,
+    attn_type: str,
+    model_path: str,
+    head_num: int,
+    kv_cache_dtype: str,
+    gemm_type: str,
+) -> bool:
+    """Return True for the H100 SGLang v0.5.10 DSv3.2 decode shape that the runtime rejects."""
+    return (
+        not is_prefill
+        and attn_type == "dsa"
+        and model_path == "deepseek-ai/DeepSeek-V3.2"
+        and kv_cache_dtype == "fp8"
+        and gemm_type == "fp8_block"
+        and head_num <= 32
+        and get_sm_version() == 90
+    )
 
 
 def get_wideep_mla_context_test_cases():
@@ -1887,6 +1915,23 @@ def run_mla_module(
                 f"(heads={head_num}, kv={kv_cache_dtype}, gemm={gemm_type})"
             )
 
+    if _skip_hopper_dsv32_reduced_head_fp8_decode(
+        is_prefill=is_prefill,
+        attn_type=attn_type,
+        model_path=model_path,
+        head_num=head_num,
+        kv_cache_dtype=kv_cache_dtype,
+        gemm_type=gemm_type,
+    ):
+        skipped = len(cases)
+        cases = []
+        if skipped:
+            print(
+                f"[SKIP] H100 DSv3.2 DSA gen reduced-heads: dropping {skipped} "
+                f"(bs, kv_len) cases because SGLang v0.5.10 flash_mla_kvcache "
+                f"rejects h_q={head_num} (kv={kv_cache_dtype}, gemm={gemm_type})"
+            )
+
     print(f"\n{'=' * 60}")
     print(
         f"{attn_type.upper()} Module {phase_name}: model={model_path}, backend={attention_backend}, "
@@ -1909,6 +1954,10 @@ def run_mla_module(
         skipped = before - len(cases)
         if skipped:
             print(f"[DSA] Dropped {skipped} context cases beyond DSA indexer total KV token limit")
+
+    if not cases:
+        print(f"[DSA] No {phase_name.lower()} test cases remain after filters; skipping ModelRunner load")
+        return
 
     max_total_tokens = None
     if cases:

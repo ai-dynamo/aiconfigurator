@@ -115,6 +115,21 @@ common_case_values:
       - 32768
       - 65536
       - 131072
+    context_sequence_lengths:
+      - 1
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 2048
+      - 4096
+      - 8192
+      - 16384
     context:
       max_tokens: 131072
       large_sequence_min: 8192

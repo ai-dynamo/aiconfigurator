@@ -143,6 +143,52 @@ class TestGetGenerationTestCases:
                 assert case[0] * case[1] <= 256 * 1024
 
 
+class TestHopperDsaDecodeSkips:
+    def test_h100_dsv32_reduced_head_fp8_decode_is_skipped(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=90):
+            assert mod._skip_hopper_dsv32_reduced_head_fp8_decode(
+                is_prefill=False,
+                attn_type="dsa",
+                model_path="deepseek-ai/DeepSeek-V3.2",
+                head_num=16,
+                kv_cache_dtype="fp8",
+                gemm_type="fp8_block",
+            )
+            assert mod._skip_hopper_dsv32_reduced_head_fp8_decode(
+                is_prefill=False,
+                attn_type="dsa",
+                model_path="deepseek-ai/DeepSeek-V3.2",
+                head_num=32,
+                kv_cache_dtype="fp8",
+                gemm_type="fp8_block",
+            )
+
+    def test_h100_dsv32_full_head_fp8_decode_is_not_skipped(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=90):
+            assert not mod._skip_hopper_dsv32_reduced_head_fp8_decode(
+                is_prefill=False,
+                attn_type="dsa",
+                model_path="deepseek-ai/DeepSeek-V3.2",
+                head_num=64,
+                kv_cache_dtype="fp8",
+                gemm_type="fp8_block",
+            )
+
+    def test_blackwell_dsv32_reduced_head_fp8_decode_is_not_skipped(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=100):
+            assert not mod._skip_hopper_dsv32_reduced_head_fp8_decode(
+                is_prefill=False,
+                attn_type="dsa",
+                model_path="deepseek-ai/DeepSeek-V3.2",
+                head_num=16,
+                kv_cache_dtype="fp8",
+                gemm_type="fp8_block",
+            )
+
+
 class TestDsaContextPrefixShape:
     def test_rejects_single_token_prefill(self):
         mod = _import_module()
@@ -241,6 +287,8 @@ class TestBuildModuleTestCases:
             combos = mod._get_module_precision_combos()
         assert ("bfloat16", "bfloat16", "bfloat16") in combos
         assert ("bfloat16", "fp8", "bfloat16") in combos
+        assert ("bfloat16", "bfloat16", "fp8_block") in combos
+        assert ("bfloat16", "fp8", "fp8_block") in combos
 
     def test_dsa_includes_both_models(self):
         mod = _import_module()
@@ -294,6 +342,15 @@ class TestBuildModuleTestCases:
             cases = mod._build_module_test_cases("dsa", "context")
         assert any(
             c[6] == "nvidia/GLM-5-NVFP4" and c[3] == "fp8" and c[4] == "bfloat16" and c[5] == "bfloat16" for c in cases
+        )
+
+    def test_deepseek_v32_context_includes_fp8_block_module_case(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=90):
+            cases = mod._build_module_test_cases("dsa", "context")
+        assert any(
+            c[6] == "deepseek-ai/DeepSeek-V3.2" and c[3] == "fp8" and c[4] == "bfloat16" and c[5] == "fp8_block"
+            for c in cases
         )
 
     def test_placeholder_seq_batch(self):

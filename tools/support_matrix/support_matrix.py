@@ -54,6 +54,7 @@ DEFAULT_ENGINE_STEP_COMPARISON_RTOL = 0.05
 DEFAULT_ENGINE_STEP_COMPARISON_ATOL = 1e-3
 DEFAULT_ENGINE_STEP_FRONTIER_RTOL = 0.75
 DEFAULT_ENGINE_STEP_FRONTIER_ATOL = 1e-3
+LARGE_PIPELINE_CONFIG_PATH = "tools/support_matrix/configs/large_pipeline_parallel_worker.yaml"
 _RUST_CORE_AUTOBUILD_ENV = "AICONFIGURATOR_RUST_CORE_AUTOBUILD"
 _APPROXIMATE_ENGINE_STEP_COLUMNS = frozenset(
     {
@@ -78,8 +79,32 @@ _FRONTIER_ENVELOPE_COLUMNS = {
     "request_latency": "min",
 }
 _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
-_NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
+_NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
+_DEFAULT_IMAGE_SIZE = 448
+_H100_TRTLLM_130RC10_CONTEXT_ATTENTION_MODELS = frozenset(
+    {
+        "Qwen/Qwen3.5-27B",
+        "Qwen/Qwen3.5-397B-A17B",
+        "XiaomiMiMo/MiMo-V2-Flash",
+        "google/gemma-4-26B-A4B",
+    }
+)
+_H100_TRTLLM_130RC10_MOE_MODELS = frozenset(
+    {
+        "Qwen/Qwen3-VL-235B-A22B-Instruct",
+        "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        "Qwen/Qwen3.5-35B-A3B",
+        "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
+        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    }
+)
+_H100_TRTLLM_130RC10_MHC_MODELS = frozenset(
+    {
+        "sgl-project/DeepSeek-V4-Flash-FP8",
+        "sgl-project/DeepSeek-V4-Pro-FP8",
+    }
+)
 
 
 def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[tuple[int, str], str, str, str]:
@@ -108,6 +133,26 @@ class HardwareIncompatibility:
     reason: str
 
 
+@dataclass(frozen=True)
+class TaskAttempt:
+    name: str
+    yaml_config: dict | None = None
+
+
+def _default_image_kwargs_for_model(model: str) -> dict[str, int]:
+    try:
+        model_info = _get_model_info(model)
+    except Exception:
+        return {}
+    if isinstance(model_info.get("extra_params"), common.VisionEncoderConfig):
+        return {
+            "image_height": _DEFAULT_IMAGE_SIZE,
+            "image_width": _DEFAULT_IMAGE_SIZE,
+            "num_images_per_request": 1,
+        }
+    return {}
+
+
 def _support_matrix_row_command(
     *,
     model: str,
@@ -121,6 +166,7 @@ def _support_matrix_row_command(
     engine_step_comparison_atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
     engine_step_frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
     engine_step_frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
+    yaml_config_path: str | None = None,
 ) -> str:
     """Return the repo-local CLI command that checks this model/system/backend path."""
     if constraints is None:
@@ -157,6 +203,20 @@ def _support_matrix_row_command(
         "1",
         "--no-color",
     ]
+    image_kwargs = _default_image_kwargs_for_model(model)
+    if image_kwargs:
+        parts.extend(
+            [
+                "--image-height",
+                str(image_kwargs["image_height"]),
+                "--image-width",
+                str(image_kwargs["image_width"]),
+                "--num-images",
+                str(image_kwargs["num_images_per_request"]),
+            ]
+        )
+    if yaml_config_path is not None:
+        parts.extend(["--config-yaml", yaml_config_path])
     if compare_engine_step_backends:
         # ``cli default`` does not expose the support-matrix Python/Rust
         # comparator; use the default Python engine-step path for the public
@@ -206,6 +266,135 @@ def _get_test_constraints(model_path: str) -> TestConstraints:
     return _DEFAULT_TIER
 
 
+def _large_pipeline_parallel_attempt(
+    *,
+    mode: str,
+    backend: str,
+    constraints: TestConstraints,
+) -> TaskAttempt | None:
+    """Return a support-matrix retry that shards one large-model worker across nodes."""
+    if backend not in {
+        common.BackendName.sglang.value,
+        common.BackendName.trtllm.value,
+        common.BackendName.vllm.value,
+    }:
+        return None
+    if constraints.total_gpus < 16:
+        return None
+
+    # Some very large checkpoints are too large for the default one-node search.
+    # Keep attention TP at 8 and add PP=2 so a single serving worker can span 16
+    # GPUs. This also constrains MoE splits away from uncollected smaller shapes
+    # when the viable data was collected for larger model-parallel workers.
+    worker_config = {
+        "num_gpu_per_worker": [16],
+        "tp_list": [8],
+        "pp_list": [2],
+        "dp_list": [1],
+        "moe_tp_list": [1, 2, 4, 8],
+        "moe_ep_list": [1, 2, 4, 8],
+    }
+    config = {"worker_config": worker_config}
+    if mode == "disagg":
+        config = {
+            "prefill_worker_config": worker_config,
+            "decode_worker_config": worker_config,
+            "replica_config": {
+                "max_gpu_per_replica": 128,
+                "num_gpu_per_replica": [32, 64, 128],
+            },
+        }
+    return TaskAttempt(
+        name="large-pipeline-parallel-worker",
+        yaml_config={"mode": "patch", "config": config},
+    )
+
+
+def _should_retry_with_large_worker(error_message: str | None) -> bool:
+    if not error_message:
+        return False
+    normalized = error_message.lower()
+    return (
+        "does not fit in gpu memory" in normalized
+        or "try increasing --total-gpus" in normalized
+        or "try increasing total gpus" in normalized
+        or "failed to query moe data" in normalized
+        or "missing silicon data for the requested lookup" in normalized
+    )
+
+
+def _is_h100_trtllm_130rc10(system: str, backend: str, version: str) -> bool:
+    return system == "h100_sxm" and backend == common.BackendName.trtllm.value and version == "1.3.0rc10"
+
+
+def _h100_trtllm_130rc10_framework_reason(model: str, error_message: str | None) -> str | None:
+    if not error_message:
+        return None
+
+    normalized = error_message.lower()
+    if model in {"deepseek-ai/DeepSeek-V3.2", "zai-org/GLM-5-FP8"} and (
+        "unsupported dsa_generation_module quant mode 'fp8'" in normalized
+    ):
+        return (
+            "TRT-LLM 1.3.0rc10 H100 sparse DSA generation rejects fp8 KV cache at runtime: "
+            "flash_mla_sparse_fwd requires BF16 KV tensors. The collector intentionally keeps "
+            "H100 DSA module rows to BF16 KV for this TRT-LLM version."
+        )
+
+    if model == "zai-org/GLM-5" and "dsa_context_module_perf" in normalized:
+        return (
+            "TRT-LLM 1.3.0rc10 H100 has no DSA context-module data collected for GLM-5/DSA; "
+            "this is a framework collector coverage gap."
+        )
+
+    if model in _H100_TRTLLM_130RC10_MHC_MODELS and "deepseek-v4 mhc module data not loaded" in normalized:
+        return (
+            "TRT-LLM 1.3.0rc10 H100 DeepSeek-V4 mHC module data is not available; "
+            "mHC is required by the sgl-project DeepSeek-V4 FP8 checkpoints."
+        )
+
+    if model == "moonshotai/Kimi-K2.5" and "unsupported moe quant mode 'int4_wo'" in normalized:
+        return (
+            "TRT-LLM 1.3.0rc10 H100 does not expose the int4_wo MoE path required by "
+            "moonshotai/Kimi-K2.5; supported MoE modes are bfloat16, fp8, fp8_block, and w4a16_mxfp4."
+        )
+
+    if "failed to query context attention data" in normalized:
+        if model.startswith("Qwen/Qwen3-VL-") and ("head_size=72" in normalized or "keyerror: 72" in normalized):
+            return (
+                "TRT-LLM 1.3.0rc10 H100 context-attention data is missing for the Qwen3-VL vision "
+                "encoder shape head_dim=72, s=784, n_kv=2/4. Recollect TRT-LLM attention_context "
+                "cases with head_dim=72 before this cell can be supported."
+            )
+        if model == "XiaomiMiMo/MiMo-V2-Flash" and ("head_size=192" in normalized or "keyerror: 192" in normalized):
+            return (
+                "TRT-LLM 1.3.0rc10 H100 context-attention data is missing for MiMo head_dim=192 "
+                "with FP8 KV/context FMHA; the current H100 TRT-LLM parquet does not include that shape."
+            )
+        if model in {"Qwen/Qwen3.5-27B", "Qwen/Qwen3.5-397B-A17B"} and (
+            "head_size=256" in normalized or "keyerror: 256" in normalized
+        ):
+            return (
+                "TRT-LLM 1.3.0rc10 H100 context-attention data is missing for Qwen3.5 head_dim=256 "
+                "full-attention shapes; the current H100 TRT-LLM parquet does not include that shape."
+            )
+        if model == "google/gemma-4-26B-A4B" and (
+            ("head_size=256" in normalized or "keyerror: 256" in normalized) and "window_size=1024" in normalized
+        ):
+            return (
+                "TRT-LLM 1.3.0rc10 H100 context-attention data is missing for Gemma 4 sliding-window "
+                "head_dim=256/window_size=1024; the current H100 TRT-LLM parquet does not include that shape."
+            )
+
+    if "failed to query moe data" in normalized and model in _H100_TRTLLM_130RC10_MOE_MODELS:
+        return (
+            f"TRT-LLM 1.3.0rc10 H100 MoE data is missing for {model}'s required shape; "
+            "this is a framework collector coverage gap in the current H100 TRT-LLM parquet."
+        )
+
+    return None
+
+
 def _is_known_framework_incompatible_gap(
     *,
     model: str,
@@ -219,6 +408,11 @@ def _is_known_framework_incompatible_gap(
         return False
 
     normalized = error_message.lower()
+    if _is_h100_trtllm_130rc10(system, backend, version) and (
+        _h100_trtllm_130rc10_framework_reason(model, error_message) is not None
+    ):
+        return True
+
     if (
         backend == common.BackendName.vllm.value
         and version == "0.19.0"
@@ -230,7 +424,65 @@ def _is_known_framework_incompatible_gap(
     ):
         return True
 
+    if (
+        model == "deepseek-ai/DeepSeek-V3.2"
+        and system == "h100_sxm"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "dsa module data not available" in normalized
+        and "deepseekv32forcausallm" in normalized
+        and "kvcachequantmode.fp8" in normalized
+        and "gemmquantmode.fp8_block" in normalized
+    ):
+        return True
+
+    if (
+        model == "XiaomiMiMo/MiMo-V2-Flash"
+        and system == "h100_sxm"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "failed to query context attention data" in normalized
+        and ("head_size=192" in normalized or "keyerror: 192" in normalized)
+        and "kvcachequantmode.fp8" in normalized
+    ):
+        return True
+
     if "unsupported gemm quant mode 'fp8_static'" in normalized:
+        return True
+
+    if (
+        model == "deepseek-ai/DeepSeek-V3.2"
+        and system == "h100_sxm"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and "generation dsa module data not available" in normalized
+        and "kvcachequantmode.fp8" in normalized
+        and "gemmquantmode.fp8_block" in normalized
+        and ("num_heads=16" in normalized or "num_heads=32" in normalized)
+    ):
+        return True
+
+    if (
+        model == "zai-org/GLM-5-FP8"
+        and system == "h100_sxm"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and "dsa module data not available" in normalized
+        and "kvcachequantmode.fp8" in normalized
+        and "gemmquantmode.fp8_block" in normalized
+    ):
+        return True
+
+    if (
+        model == "google/gemma-4-26B-A4B"
+        and system == "h100_sxm"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and (
+            ("failed to query context attention data" in normalized and "head_size=512" in normalized)
+            or "keyerror: 512" in normalized
+        )
+    ):
         return True
 
     if system == "rtx_pro_6000_server":
@@ -271,6 +523,106 @@ def _is_known_framework_incompatible_gap(
         and version == "1.3.0rc10"
         and "unsupported moe quant mode 'int4_wo'" in normalized
     )
+
+
+def _known_framework_incompatible_reason(
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    version: str,
+    error_message: str | None,
+) -> str | None:
+    if not error_message:
+        return None
+
+    normalized = error_message.lower()
+    if _is_h100_trtllm_130rc10(system, backend, version):
+        reason = _h100_trtllm_130rc10_framework_reason(model, error_message)
+        if reason is not None:
+            return reason
+
+    if (
+        model == "deepseek-ai/DeepSeek-V3.2"
+        and system == "h100_sxm"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and "generation dsa module data not available" in normalized
+        and "kvcachequantmode.fp8" in normalized
+        and "gemmquantmode.fp8_block" in normalized
+        and ("num_heads=16" in normalized or "num_heads=32" in normalized)
+    ):
+        return (
+            "SGLang 0.5.10 DeepSeek-V3.2 DSA fp8 decode is framework-incompatible on H100: "
+            "flash MLA KV decode rejects reduced local heads with Unsupported h_q for h_q=16/32. "
+            "The missing DSA generation data is intentional because the collector cannot produce "
+            "valid rows for that SGLang kernel path."
+        )
+
+    if (
+        model == "deepseek-ai/DeepSeek-V3.2"
+        and system == "h100_sxm"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "dsa module data not available" in normalized
+        and "deepseekv32forcausallm" in normalized
+        and "kvcachequantmode.fp8" in normalized
+        and "gemmquantmode.fp8_block" in normalized
+    ):
+        return (
+            "vLLM 0.19.0 DeepSeek-V3.2 DSA fp8 path is framework-incompatible on H100: "
+            "the vLLM collector/runtime set does not provide context/generation DSA module "
+            "silicon rows for DeepseekV32ForCausalLM with FP8 KV cache and FP8-block GEMMs."
+        )
+
+    if (
+        model == "XiaomiMiMo/MiMo-V2-Flash"
+        and system == "h100_sxm"
+        and backend == common.BackendName.vllm.value
+        and version == "0.19.0"
+        and "failed to query context attention data" in normalized
+        and ("head_size=192" in normalized or "keyerror: 192" in normalized)
+        and "kvcachequantmode.fp8" in normalized
+    ):
+        return (
+            "vLLM 0.19.0 MiMo-V2-Flash FP8-KV attention is framework-incompatible on H100: "
+            "the collector reaches vllm_flash_attn for head_dim=192 with BF16 query and FP8 "
+            "KV cache, where vLLM raises RuntimeError: query and key must have the same dtype."
+        )
+
+    if (
+        model == "zai-org/GLM-5-FP8"
+        and system == "h100_sxm"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and "dsa module data not available" in normalized
+        and "kvcachequantmode.fp8" in normalized
+        and "gemmquantmode.fp8_block" in normalized
+    ):
+        return (
+            "SGLang 0.5.10 GLM-5-FP8 DSA fp8 path is framework-incompatible on H100: "
+            "piecewise CUDA graph/flash MLA rejects reduced local heads with Unsupported h_q and "
+            "the h_q=64 path fails MHA_ONE_SHOT dense multi-head validation. "
+            "dsa_generation_module exposes fp8; the blocker is the current SGLang GLM DSA graph path."
+        )
+
+    if (
+        model == "google/gemma-4-26B-A4B"
+        and system == "h100_sxm"
+        and backend == common.BackendName.sglang.value
+        and version == "0.5.10"
+        and (
+            ("failed to query context attention data" in normalized and "head_size=512" in normalized)
+            or "keyerror: 512" in normalized
+        )
+    ):
+        return (
+            "SGLang 0.5.10 FlashAttention on H100 supports head_dim <= 256; "
+            "google/gemma-4-26B-A4B global attention needs head_dim=512, "
+            "so the row is framework-incompatible rather than missing collector data."
+        )
+
+    return None
 
 
 def _enum_name(value: object | None) -> str | None:
@@ -327,7 +679,7 @@ def _required_datatypes_for_model(model: str, backend: str) -> tuple[str, ...]:
     expert_dtype = str(raw_config.get("expert_dtype") or "").lower()
 
     required: set[str] = set()
-    if quant_mode_names & _NATIVE_FP4_QUANT_MODE_NAMES or raw_quant_algo == "nvfp4" or expert_dtype == "fp4":
+    if quant_mode_names & _NATIVE_FP4_QUANT_MODE_NAMES or raw_quant_algo in {"nvfp4", "mxfp4"} or expert_dtype == "fp4":
         required.add("FP4")
     if quant_mode_names & _FP8_QUANT_MODE_NAMES or raw_quant_algo in {"fp8", "fp8_block"}:
         required.add("FP8")
@@ -638,6 +990,7 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         engine_step_backend: str | None,
+        yaml_config: dict | None = None,
     ) -> TaskConfig:
         task_config_kwargs = {
             "serving_mode": mode,
@@ -653,8 +1006,11 @@ class SupportMatrix:
             "tpot": constraints.tpot,
             "engine_step_backend": engine_step_backend,
         }
+        task_config_kwargs.update(_default_image_kwargs_for_model(model))
         if mode == "disagg":
             task_config_kwargs["decode_system_name"] = system
+        if yaml_config is not None:
+            task_config_kwargs["yaml_config"] = yaml_config
         return TaskConfig(**task_config_kwargs)
 
     @staticmethod
@@ -667,6 +1023,7 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         engine_step_backend: str | None,
+        yaml_config: dict | None = None,
     ) -> pd.DataFrame | None:
         task_config = SupportMatrix._create_task_config(
             mode=mode,
@@ -676,6 +1033,7 @@ class SupportMatrix:
             version=version,
             constraints=constraints,
             engine_step_backend=engine_step_backend,
+            yaml_config=yaml_config,
         )
         result = TaskRunner().run(task_config)
         return result.get("pareto_df")
@@ -767,76 +1125,128 @@ class SupportMatrix:
                 return statuses, error_messages
 
         for mode in modes_to_test:
-            try:
-                python_pareto_df = SupportMatrix._run_mode(
-                    mode=mode,
-                    model=model,
-                    system=system,
-                    backend=backend,
-                    version=version,
-                    constraints=constraints,
-                    engine_step_backend="python" if compare_engine_step_backends else None,
-                )
+            attempt_queue = [TaskAttempt("default")]
+            retry_attempt = _large_pipeline_parallel_attempt(
+                mode=mode,
+                backend=backend,
+                constraints=constraints,
+            )
 
-                # Note that we do not use pareto_frontier_df here because for the pareto_df
-                # if is not None and not empty, it means the pareto_frontier_df is also not None and not empty.
-                if python_pareto_df is None or python_pareto_df.empty:
-                    raise RuntimeError("Configuration returned no results, failed to catch traceback")
+            while attempt_queue:
+                attempt = attempt_queue.pop(0)
+                try:
+                    run_mode_kwargs = {
+                        "mode": mode,
+                        "model": model,
+                        "system": system,
+                        "backend": backend,
+                        "version": version,
+                        "constraints": constraints,
+                        "engine_step_backend": "python" if compare_engine_step_backends else None,
+                    }
+                    if attempt.yaml_config is not None:
+                        run_mode_kwargs["yaml_config"] = attempt.yaml_config
+                    python_pareto_df = SupportMatrix._run_mode(**run_mode_kwargs)
 
-                if compare_engine_step_backends:
-                    with _rust_core_autobuild_enabled():
-                        rust_pareto_df = SupportMatrix._run_mode(
-                            mode=mode,
+                    # Note that we do not use pareto_frontier_df here because for the pareto_df
+                    # if is not None and not empty, it means the pareto_frontier_df is also not None and not empty.
+                    if python_pareto_df is None or python_pareto_df.empty:
+                        raise RuntimeError("Configuration returned no results, failed to catch traceback")
+
+                    if compare_engine_step_backends:
+                        with _rust_core_autobuild_enabled():
+                            rust_run_mode_kwargs = dict(run_mode_kwargs)
+                            rust_run_mode_kwargs["engine_step_backend"] = "rust"
+                            rust_pareto_df = SupportMatrix._run_mode(**rust_run_mode_kwargs)
+                        if rust_pareto_df is None or rust_pareto_df.empty:
+                            raise RuntimeError("Rust engine-step backend returned no results")
+
+                        mismatch = _compare_pareto_dfs(
+                            python_pareto_df,
+                            rust_pareto_df,
+                            rtol=engine_step_comparison_rtol,
+                            atol=engine_step_comparison_atol,
+                            frontier_rtol=engine_step_frontier_rtol,
+                            frontier_atol=engine_step_frontier_atol,
+                        )
+                        if mismatch:
+                            raise RuntimeError(mismatch)
+
+                    statuses[mode] = STATUS_PASS
+                    error_messages[mode] = None
+                    if include_commands and attempt.yaml_config is not None:
+                        commands[mode] = _support_matrix_row_command(
                             model=model,
                             system=system,
                             backend=backend,
                             version=version,
+                            mode=mode,
                             constraints=constraints,
-                            engine_step_backend="rust",
+                            compare_engine_step_backends=compare_engine_step_backends,
+                            engine_step_comparison_rtol=engine_step_comparison_rtol,
+                            engine_step_comparison_atol=engine_step_comparison_atol,
+                            engine_step_frontier_rtol=engine_step_frontier_rtol,
+                            engine_step_frontier_atol=engine_step_frontier_atol,
+                            yaml_config_path=LARGE_PIPELINE_CONFIG_PATH,
                         )
-                    if rust_pareto_df is None or rust_pareto_df.empty:
-                        raise RuntimeError("Rust engine-step backend returned no results")
+                    break
 
-                    mismatch = _compare_pareto_dfs(
-                        python_pareto_df,
-                        rust_pareto_df,
-                        rtol=engine_step_comparison_rtol,
-                        atol=engine_step_comparison_atol,
-                        frontier_rtol=engine_step_frontier_rtol,
-                        frontier_atol=engine_step_frontier_atol,
+                except Exception as e:
+                    raw_error = traceback.format_exc()
+                    logger.warning(
+                        "Configuration failed: %s, %s, %s, %s, mode=%s, attempt=%s - Error: %s",
+                        model,
+                        system,
+                        backend,
+                        version,
+                        mode,
+                        attempt.name,
+                        str(e),
                     )
-                    if mismatch:
-                        raise RuntimeError(mismatch)
+                    framework_reason = _known_framework_incompatible_reason(
+                        model=model,
+                        system=system,
+                        backend=backend,
+                        version=version,
+                        error_message=raw_error,
+                    )
+                    if framework_reason is not None:
+                        statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
+                        error_messages[mode] = framework_reason
+                        break
 
-                statuses[mode] = STATUS_PASS
-                error_messages[mode] = None
+                    if (
+                        attempt.name == "default"
+                        and retry_attempt is not None
+                        and _should_retry_with_large_worker(raw_error)
+                    ):
+                        logger.info(
+                            "Retrying support-matrix check with %s: %s, %s, %s, %s, mode=%s",
+                            retry_attempt.name,
+                            model,
+                            system,
+                            backend,
+                            version,
+                            mode,
+                        )
+                        attempt_queue.append(retry_attempt)
+                        continue
 
-            except Exception as e:
-                raw_error = traceback.format_exc()
-                logger.warning(
-                    "Configuration failed: %s, %s, %s, %s, mode=%s - Error: %s",
-                    model,
-                    system,
-                    backend,
-                    version,
-                    mode,
-                    str(e),
-                )
+                    if _is_known_framework_incompatible_gap(
+                        model=model,
+                        system=system,
+                        backend=backend,
+                        version=version,
+                        error_message=raw_error,
+                    ):
+                        statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
+                    else:
+                        statuses[mode] = STATUS_FAIL
+                    error_messages[mode] = raw_error
+                    break
 
-                if _is_known_framework_incompatible_gap(
-                    model=model,
-                    system=system,
-                    backend=backend,
-                    version=version,
-                    error_message=raw_error,
-                ):
-                    statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
-                else:
-                    statuses[mode] = STATUS_FAIL
-                error_messages[mode] = raw_error
-
-            finally:
-                perf_database.clear_database_runtime_caches(system, backend, version)
+                finally:
+                    perf_database.clear_database_runtime_caches(system, backend, version)
 
             error_messages[mode] = _format_exception_for_csv(error_messages.get(mode))
         if include_commands:

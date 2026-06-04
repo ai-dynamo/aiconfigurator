@@ -1121,6 +1121,9 @@ def _contains_quant_mode(data, quant_mode: common.GEMMQuantMode) -> bool:
 def _gemm_key_names(database) -> list[str]:
     """Return GEMM modes, deriving static FP8 from dynamic FP8 plus overheads."""
     names = set(_enum_key_names(getattr(database, "_gemm_data", None)))
+    if getattr(database, "backend", None) != common.BackendName.trtllm.value:
+        return sorted(names)
+
     fp8_static_name = common.GEMMQuantMode.fp8_static.name
     names.discard(fp8_static_name)
     if (

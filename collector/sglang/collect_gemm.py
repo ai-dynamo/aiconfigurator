@@ -54,17 +54,22 @@ def get_gemm_test_cases():
         gemm_list = ["bfloat16"]
     elif sm_version < 90:
         # SM89 (L40S) and earlier don't have TMA - skip fp8_block
-        gemm_list = ["bfloat16", "fp8"]
+        gemm_list = ["bfloat16", "fp8", "fp8_static"]
     elif sm_version < 100:
         # Hopper supports fp8_block
         # fp8_block (DeepGEMM) requires SM90+ for TMA support
-        gemm_list = ["fp8_block", "bfloat16", "fp8"]
+        gemm_list = ["fp8_block", "bfloat16", "fp8", "fp8_static"]
     elif sm_version < 110:
         # SM100/SM103 (B100/B200 datacenter Blackwell): fp8_block + nvfp4
-        gemm_list = ["fp8_block", "bfloat16", "fp8", "nvfp4"]
+        gemm_list = ["fp8_block", "bfloat16", "fp8", "fp8_static", "nvfp4"]
     else:
         # SM120+ (RTX PRO 6000 Blackwell workstation): no DeepGEMM recipe for fp8_block
-        gemm_list = ["bfloat16", "fp8", "nvfp4"]
+        gemm_list = ["bfloat16", "fp8", "fp8_static", "nvfp4"]
+
+    requested_gemm_types = os.environ.get("AIC_COLLECT_GEMM_TYPES")
+    if requested_gemm_types:
+        requested = {item.strip() for item in requested_gemm_types.split(",") if item.strip()}
+        gemm_list = [gemm_type for gemm_type in gemm_list if gemm_type in requested]
 
     requested_gemm_types = os.environ.get("AIC_COLLECT_GEMM_TYPES")
     if requested_gemm_types:
@@ -138,6 +143,7 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
     assert gemm_type in [
         "fp8_block",
         "fp8",
+        "fp8_static",
         "bfloat16",
         "int8_wo",
         "nvfp4",
@@ -235,6 +241,22 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
 
             return gemm_op
 
+        elif gemm_type == "fp8_static":
+            fp8_info = torch.finfo(torch.float8_e4m3fn)
+            a_fp32 = (torch.rand(M, K, device=device) - 0.5) * 2 * fp8_info.max
+            a_fp8 = a_fp32.clamp(min=fp8_info.min, max=fp8_info.max).to(torch.float8_e4m3fn)
+            del a_fp32
+            b_fp32 = (torch.rand(N, K, device=device) - 0.5) * 2 * fp8_info.max
+            b_fp8 = b_fp32.clamp(min=fp8_info.min, max=fp8_info.max).to(torch.float8_e4m3fn).t()
+            del b_fp32
+            scale_a = torch.ones((M, 1), device=device, dtype=torch.float32)
+            scale_b = torch.ones((N,), device=device, dtype=torch.float32)
+
+            def gemm_op():
+                return fp8_scaled_mm(a_fp8, b_fp8, scale_a, scale_b, dtype)
+
+            return gemm_op
+
         elif gemm_type == "bfloat16":
             a_bfloat16 = torch.randn(M, K, dtype=torch.bfloat16, device=device)
             b_bfloat16 = torch.randn(N, K, dtype=torch.bfloat16, device=device)
@@ -247,7 +269,7 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
     # Scale loop count down for large matrices to avoid OOM.
     # Each iteration holds persistent tensors (~M*K*2 + N*K + M*N*2 bytes for fp8).
     # Cap at 6 for small shapes (L2 thrashing mitigation), reduce for large ones.
-    _bytes_per_elem = {"bfloat16": 2, "fp8": 1, "fp8_block": 1, "nvfp4": 0.5}
+    _bytes_per_elem = {"bfloat16": 2, "fp8": 1, "fp8_static": 1, "fp8_block": 1, "nvfp4": 0.5}
     _weight_bytes = int(N * K * _bytes_per_elem.get(gemm_type, 2))
     _gpu_mem = torch.cuda.get_device_properties(device).total_memory
     # Estimate per-iteration footprint: weight + activation + output
