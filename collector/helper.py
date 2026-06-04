@@ -12,6 +12,7 @@ case files; this file should stay focused on reusable execution mechanics.
 
 import csv
 import functools
+import hashlib
 import heapq
 import json
 import logging
@@ -453,6 +454,14 @@ _LOGGING_CONFIGURED = False
 _LOG_DIR = None
 
 
+def _collector_log_dir_name(scope: Iterable[object], time_stamp: str, *, max_scope_len: int = 120) -> str:
+    scope_name = "+".join(str(item) for item in scope) or "all"
+    if len(scope_name) > max_scope_len:
+        digest = hashlib.sha1(scope_name.encode("utf-8")).hexdigest()[:10]
+        scope_name = f"{scope_name[: max_scope_len - len(digest) - 1]}-{digest}"
+    return f"{scope_name}_{time_stamp}"
+
+
 def setup_logging(scope=["all"], debug=False, worker_id=None):
     """
     Setup structured logging - auto-configures based on process type
@@ -537,7 +546,7 @@ def setup_logging(scope=["all"], debug=False, worker_id=None):
 
     # Create log directory
     time_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    _LOG_DIR = Path(f"{'+'.join(scope)}_{time_stamp}")
+    _LOG_DIR = Path(_collector_log_dir_name(scope, time_stamp))
     if not _LOG_DIR.is_dir():
         _LOG_DIR.mkdir()
 

@@ -177,5 +177,6 @@ def test_run_single_test_marks_known_rtx_pro_sm120_framework_gaps(monkeypatch, m
         modes_to_test=("agg",),
     )
 
+    expected_error = "dsa_context_module_perf.txt" if "dsa_context_module_perf.txt" in message else message
     assert status_dict == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE}
-    assert message in error_dict["agg"]
+    assert expected_error in error_dict["agg"]

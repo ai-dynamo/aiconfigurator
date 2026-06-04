@@ -32,6 +32,7 @@ import sys
 import tempfile
 import traceback
 import types
+from contextlib import nullcontext
 from importlib.metadata import version as get_version
 
 import numpy as np
@@ -129,6 +130,27 @@ def _parse_int_list(value: str | None) -> list[int] | None:
     return [int(item) for item in value.split(",") if item]
 
 
+def _parse_dsa_context_extra_cases() -> list[list[int | str]]:
+    value = os.environ.get("AIC_DSA_CONTEXT_EXTRA_CASES")
+    if not value:
+        return []
+
+    cases: list[list[int | str]] = []
+    for item in value.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        parts = [part.strip() for part in item.split(",")]
+        if len(parts) != 6:
+            raise ValueError(
+                "AIC_DSA_CONTEXT_EXTRA_CASES entries must use "
+                "seq_len,batch_size,num_heads,kv_cache_dtype,compute_dtype,gemm_type"
+            )
+        seq_len, batch_size, num_heads = (int(part) for part in parts[:3])
+        cases.append([seq_len, batch_size, num_heads, parts[3], parts[4], parts[5]])
+    return cases
+
+
 def _filter_cases_from_env(test_cases, *, is_prefill: bool, attn_type: str):
     if not (is_prefill and attn_type == "dsa"):
         return test_cases
@@ -164,9 +186,15 @@ def _is_glm5_dsa_model(model_id: str) -> bool:
 def _enable_glm5_dsa_piecewise_graph(attn_type: str, model_id: str) -> bool:
     if _env_flag("AIC_DISABLE_PIECEWISE_CUDA_GRAPH"):
         return False
-    # SGLang 0.5.10 full-model piecewise capture rejects the GLM-5 DSA
-    # attention path; module-level piecewise replay remains enabled below.
-    return _env_flag("AIC_ENABLE_PIECEWISE_CUDA_GRAPH") and attn_type == "dsa" and _is_glm5_dsa_model(model_id)
+    if _env_flag("AIC_ENABLE_PIECEWISE_CUDA_GRAPH"):
+        return True
+    # SGLang 0.5.12's GLM-5 DSA path passes topk_indices to
+    # unified_attention_with_output during piecewise CUDA graph warmup, but the
+    # registered op schema does not accept that keyword. Keep the runtime path
+    # enabled while avoiding the broken graph-capture default.
+    if attn_type == "dsa" and _is_glm5_dsa_model(model_id):
+        return False
+    return False
 
 
 def _piecewise_cuda_graph_tokens_for_cases(test_cases, is_prefill: bool) -> list[int] | None:
@@ -376,8 +404,8 @@ def get_context_test_cases(attn_type: str):
     cases = []
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context"):
         for num_heads in sweep.inner_sweep_head_counts:
-            for batch_size in sweep.context_batch_sizes:
-                for seq_len in sweep.context_sequence_lengths:
+            for batch_size in sweep.batch_sizes:
+                for seq_len in sweep.sequence_lengths:
                     if batch_size * seq_len > sweep.context_max_tokens:
                         continue
                     if (
@@ -386,6 +414,11 @@ def get_context_test_cases(attn_type: str):
                     ):
                         continue
                     cases.append([seq_len, batch_size, num_heads, kv_dtype, compute_dtype, gemm_type])
+    if attn_type == "dsa":
+        extra_cases = _parse_dsa_context_extra_cases()
+        if extra_cases:
+            cases.extend(extra_cases)
+            print(f"[DSA] Added {len(extra_cases)} env-specified context case(s)")
     return cases
 
 
@@ -759,23 +792,6 @@ def _validate_dsa_tp_module_shapes(model_runner, local_num_heads: int, target_tp
         _expect_module_attr(o_proj, "output_size", int(attn.hidden_size), "o_proj")
 
 
-def _import_sglang_forward_context():
-    """Return SGLang's forward-context wrapper across runtime API versions."""
-    try:
-        from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
-    except ModuleNotFoundError:
-        from contextlib import nullcontext
-
-        class ForwardContext:
-            def __init__(self, *args, **kwargs):
-                pass
-
-        def forward_context(_context):
-            return nullcontext()
-
-    return ForwardContext, forward_context
-
-
 def load_model_runner(
     model_path: str,
     head_num: int,
@@ -1098,7 +1114,16 @@ def _run_prefill(
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
     from sglang.srt.utils import BumpAllocator
 
-    forward_context_type, forward_context = _import_sglang_forward_context()
+    try:
+        from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+
+        def _forward_context(attn_backend):
+            return forward_context(ForwardContext(attn_backend=attn_backend))
+
+    except ModuleNotFoundError:
+
+        def _forward_context(_attn_backend):
+            return nullcontext()
 
     print(f"\nPrefill: batch_size={batch_size}, seq_length={seq_length}, prefix_len={prefix_len}")
 
@@ -1337,7 +1362,7 @@ def _run_prefill(
                     )
                     set_is_extend_in_batch(False)
                     with (
-                        forward_context(forward_context_type(attn_backend=runner.model_runner.attn_backend)),
+                        _forward_context(runner.model_runner.attn_backend),
                         set_piecewise_forward_context(
                             static_forward_batch,
                             runner.attention_layers,
@@ -1408,7 +1433,7 @@ def _run_prefill(
                 print(f"  Module piecewise runner={model_runner.piecewise_cuda_graph_runner is not None}")
 
         def call_attention_module():
-            with forward_context(forward_context_type(attn_backend=model_runner.attn_backend)):
+            with _forward_context(model_runner.attn_backend):
                 if use_module_piecewise_context:
                     with (
                         enable_piecewise_cuda_graph(),
@@ -1601,7 +1626,16 @@ def _run_decode(
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
     from sglang.srt.utils import BumpAllocator
 
-    forward_context_type, forward_context = _import_sglang_forward_context()
+    try:
+        from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+
+        def _forward_context(attn_backend):
+            return forward_context(ForwardContext(attn_backend=attn_backend))
+
+    except ModuleNotFoundError:
+
+        def _forward_context(_attn_backend):
+            return nullcontext()
 
     print(f"\nDecode: batch_size={batch_size}, kv_cache_length={seq_length}")
 
@@ -1668,7 +1702,7 @@ def _run_decode(
             _patch_nsa_indexer_compile_for_module_cuda_graph(attention_module)
 
         def kernel_func():
-            with forward_context(forward_context_type(attn_backend=model_runner.attn_backend)):
+            with _forward_context(model_runner.attn_backend):
                 attention_module(
                     positions=decode_positions,
                     hidden_states=decode_hidden,
@@ -1711,7 +1745,7 @@ def _run_decode(
         power_stats = results["power_stats"]
 
         # Log perf — wideep MLA uses isl=seq_len, step=0 (old convention).
-        # DSA uses isl=1, step=seq_len, where seq_len is past-KV length.
+        # DSA uses isl=1, step=seq_len (matches vllm convention).
         # The wideep generation loader computes s = isl + step, so both
         # conventions yield the same effective key when step=0 → s=seq_len.
         try:

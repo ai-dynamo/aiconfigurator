@@ -74,6 +74,24 @@ class TestContextDSAModule:
                 architecture="GlmMoeDsaForCausalLM",
             )
 
+    def test_quant_mode_substitution_is_refused(self, stub_perf_db):
+        dsa_dict = {32: {0: {256: {1: _dsa_value(10.0)}}}}
+        stub_perf_db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data(dsa_dict), common.PerfDataFilename.dsa_context_module, "bf16-only"
+        )
+
+        with pytest.raises(PerfDataNotAvailableError, match="Context DSA module data not available"):
+            stub_perf_db.query_context_dsa_module(
+                b=1,
+                s=256,
+                prefix=0,
+                num_heads=32,
+                kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+                fmha_quant_mode=common.FMHAQuantMode.fp8,
+                gemm_quant_mode=common.GEMMQuantMode.fp8,
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
     def test_glm5_context_loader_requires_step_column(self, tmp_path):
         data_path = tmp_path / "dsa_context_module_perf.txt"
         data_path.write_text(
@@ -558,6 +576,22 @@ class TestGenerationDSAModule:
         assert data[common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][DEFAULT_DSA_ARCHITECTURE][32][1][
             150
         ] == _dsa_value(20.0)
+
+    def test_quant_mode_substitution_is_refused(self, stub_perf_db):
+        dsa_dict = {32: {1: {256: _dsa_value(10.0)}}}
+        stub_perf_db._generation_dsa_module_data = LoadedOpData(
+            _generation_dsa_data(dsa_dict), common.PerfDataFilename.dsa_generation_module, "bf16-only"
+        )
+
+        with pytest.raises(PerfDataNotAvailableError, match="Generation DSA module data not available"):
+            stub_perf_db.query_generation_dsa_module(
+                b=1,
+                s=256,
+                num_heads=32,
+                kv_cache_dtype=common.KVCacheQuantMode.fp8,
+                gemm_quant_mode=common.GEMMQuantMode.fp8,
+                database_mode=common.DatabaseMode.SILICON,
+            )
 
     def test_sol_returns_positive(self, comprehensive_perf_db):
         result = comprehensive_perf_db.query_generation_dsa_module(

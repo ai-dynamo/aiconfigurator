@@ -169,7 +169,7 @@ class TestDsaRuntimeLimits:
 
 
 class TestDsaPiecewiseCudaGraph:
-    def test_glm5_dsa_piecewise_graph_is_opt_in(self, monkeypatch):
+    def test_glm5_dsa_avoids_module_graph_by_default(self, monkeypatch):
         mod = _import_module()
         monkeypatch.delenv("AIC_ENABLE_PIECEWISE_CUDA_GRAPH", raising=False)
         monkeypatch.delenv("AIC_DISABLE_PIECEWISE_CUDA_GRAPH", raising=False)
@@ -179,14 +179,12 @@ class TestDsaPiecewiseCudaGraph:
         assert not mod._enable_glm5_dsa_piecewise_graph("mla", "nvidia/GLM-5-NVFP4")
         assert not mod._enable_glm5_dsa_piecewise_graph("dsa", "deepseek-ai/DeepSeek-V3.2")
 
-    def test_glm5_dsa_piecewise_graph_can_be_enabled(self, monkeypatch):
+    def test_piecewise_graph_can_be_enabled(self, monkeypatch):
         mod = _import_module()
         monkeypatch.setenv("AIC_ENABLE_PIECEWISE_CUDA_GRAPH", "1")
         monkeypatch.delenv("AIC_DISABLE_PIECEWISE_CUDA_GRAPH", raising=False)
 
         assert mod._enable_glm5_dsa_piecewise_graph("dsa", "nvidia/GLM-5-NVFP4")
-        assert mod._enable_glm5_dsa_piecewise_graph("dsa", "zai-org/GLM-5")
-        assert not mod._enable_glm5_dsa_piecewise_graph("mla", "nvidia/GLM-5-NVFP4")
 
     def test_piecewise_graph_can_be_disabled(self, monkeypatch):
         mod = _import_module()

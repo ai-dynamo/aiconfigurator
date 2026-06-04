@@ -11,13 +11,19 @@ logits, and perf logging.
 
 __compat__ = "vllm>=0.17.0"
 
+import inspect
 import os
+from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config, int4_w4a16_moe_quant_config
-from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
+
+try:
+    from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
+except ImportError:
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
 # Compatibility: block FP8 helpers may differ by version.
@@ -55,8 +61,6 @@ _scaled_fp4_quant_accepts_swizzled: bool = False
 # Probe once at import time to avoid TypeError at call time.
 _trtllm_moe_accepts_tile_tokens_dim: bool = False
 try:
-    import inspect
-
     from flashinfer import fp4_quantize as _flashinfer_fp4_quantize  # type: ignore[assignment]
     from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe  # type: ignore[assignment]
     from vllm import _custom_ops as _vllm_ops  # type: ignore[assignment]
@@ -81,9 +85,15 @@ except Exception:
 # This lets vLLM handle backend selection (FlashInfer/Triton/Marlin) and
 # weight swizzle internally, so one code path works on all GPUs.
 _mxfp4_available = False
+DeepseekV4FP8Config = None
 try:
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
+
+    try:
+        from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
+    except Exception:
+        DeepseekV4FP8Config = None
 
     _mxfp4_available = True
 except Exception:
@@ -264,17 +274,20 @@ def run_moe_torch(
     # looks up the module in static_forward_context.  FusedMoE registers
     # itself there during __init__, so we must pass the *same* config to
     # set_forward_context() at benchmark time.
-    use_mxfp4 = moe_type == "w4a16_mxfp4"
+    use_mxfp4 = moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
     moe_module = None
     mxfp4_vllm_cfg = None
 
     if use_mxfp4:
         if not _mxfp4_available:
             raise ImportError("MXFP4 MoE requires vllm >= 0.17.0 with Mxfp4Config support.")
+        use_dsv4_mxfp8 = moe_type == "w4a8_mxfp4_mxfp8"
+        if use_dsv4_mxfp8 and DeepseekV4FP8Config is None:
+            raise ImportError("DeepSeek-V4 W4A8 MXFP4/MXFP8 MoE requires vLLM DeepseekV4FP8Config support.")
 
         _ensure_workspace_manager(device)
 
-        mxfp4_quant_config = Mxfp4Config()
+        mxfp4_quant_config = DeepseekV4FP8Config() if use_dsv4_mxfp8 else Mxfp4Config()
         mxfp4_module_config = get_moe_quantization_module_config("vllm", moe_type, model_name=model_name)
 
         # pcp_size=1: vLLM 0.17.0 added prefill context parallel to FusedMoE
@@ -283,23 +296,39 @@ def run_moe_torch(
         # The collector benchmarks the already-sharded local expert weights on
         # one process, so keep FusedMoE's runtime parallel config single-process.
         mxfp4_vllm_cfg = VllmConfig()
+        if getattr(mxfp4_vllm_cfg, "model_config", None) is None:
+            if use_dsv4_mxfp8:
+                mxfp4_vllm_cfg.model_config = SimpleNamespace(
+                    dtype=torch.bfloat16,
+                    quantization_config={"quant_method": "fp8"},
+                    hf_config=SimpleNamespace(
+                        model_type="deepseek_v4",
+                        expert_dtype="fp4",
+                        moe_quant_algo="MXFP4",
+                        quantization_config={"quant_method": "fp8"},
+                    ),
+                )
+            else:
+                mxfp4_vllm_cfg.model_config = SimpleNamespace(dtype=torch.bfloat16, quantization_config=None)
         with set_current_vllm_config(mxfp4_vllm_cfg):
-            moe_module = FusedMoE(
-                num_experts=num_experts,
-                top_k=topk,
-                hidden_size=hidden_size,
-                intermediate_size=local_inter_size,
-                reduce_results=False,
-                renormalize=True,
-                quant_config=mxfp4_quant_config,
-                tp_size=1,
-                dp_size=1,
-                ep_size=moe_ep_size,
-                prefix="",
-                has_bias=bool(mxfp4_module_config.get("has_bias", False)),
-                activation=str(mxfp4_module_config.get("activation", "silu")),
-                pcp_size=1,
-            )
+            fused_moe_kwargs = {
+                "num_experts": num_experts,
+                "top_k": topk,
+                "hidden_size": hidden_size,
+                "intermediate_size": local_inter_size,
+                "reduce_results": False,
+                "renormalize": True,
+                "quant_config": mxfp4_quant_config,
+                "tp_size": 1,
+                "dp_size": 1,
+                "ep_size": moe_ep_size,
+                "prefix": "",
+                "has_bias": bool(mxfp4_module_config.get("has_bias", False)),
+                "activation": str(mxfp4_module_config.get("activation", "silu")),
+                "pcp_size": 1,
+            }
+            fused_moe_params = inspect.signature(FusedMoE).parameters
+            moe_module = FusedMoE(**{key: value for key, value in fused_moe_kwargs.items() if key in fused_moe_params})
             moe_module.to(device)
             moe_module.eval()
             moe_module.requires_grad_(False)
@@ -472,6 +501,8 @@ def run_moe_torch(
                 topk_weights = F.softmax(weights, dim=-1)
                 if use_int4_wo:
                     topk_weights = topk_weights.float()
+                else:
+                    topk_weights = topk_weights.to(torch.bfloat16)
                 topk_weights_list.append(topk_weights)
                 topk_ids_list.append(ids)
 
@@ -483,6 +514,8 @@ def run_moe_torch(
             topk_weights = F.softmax(topk_weights, dim=-1)
             if use_int4_wo:
                 topk_weights = topk_weights.float()
+            else:
+                topk_weights = topk_weights.to(torch.bfloat16)
 
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")

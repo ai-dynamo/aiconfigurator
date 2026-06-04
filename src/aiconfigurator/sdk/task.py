@@ -1185,6 +1185,7 @@ class TaskConfig:
             wc: object, *, validate_context: bool, validate_generation: bool, worker_name: str
         ) -> None:
             explicit_fmha_mode = _config_get(wc, "fmha_quant_mode") is not None
+            explicit_kvcache_mode = _config_get(wc, "kvcache_quant_mode") is not None
             _resolve_model_quant_modes(wc, worker_name)
             supported, system_name, backend_version = _load_worker_supported_quant_modes(wc)
             gemm_mode = _to_name(_config_get(wc, "gemm_quant_mode"))
@@ -1234,6 +1235,24 @@ class TaskConfig:
 
             if validate_generation:
                 kvcache_mode = _to_name(_config_get(wc, "kvcache_quant_mode"))
+                generation_modes = supported.get(generation_attn_key, []) or []
+                if (
+                    not explicit_kvcache_mode
+                    and generation_attn_key == "dsa_generation_module"
+                    and kvcache_mode == common.KVCacheQuantMode.fp8.name
+                    and generation_modes
+                    and common.KVCacheQuantMode.fp8.name not in generation_modes
+                    and common.KVCacheQuantMode.bfloat16.name in generation_modes
+                ):
+                    wc["kvcache_quant_mode"] = common.KVCacheQuantMode.bfloat16
+                    kvcache_mode = common.KVCacheQuantMode.bfloat16.name
+                    logger.info(
+                        "Using bfloat16 KV cache for %s because %s/%s %s data does not support fp8",
+                        worker_name,
+                        system_name,
+                        self.backend_name,
+                        generation_attn_key,
+                    )
                 _supported_or_raise(generation_attn_key, kvcache_mode, supported, system_name, backend_version)
 
         # agg/disagg worker configs use the same field names

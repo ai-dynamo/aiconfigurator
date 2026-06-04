@@ -10,9 +10,9 @@ from tools.support_matrix.support_matrix import STATUS_PASS, SupportMatrix
 pytestmark = pytest.mark.unit
 
 
-def _result(system: str) -> tuple[str, str, str, str, str, str, str, None]:
+def _result(system: str) -> tuple[str, str, str, str, str, str, str, None, str]:
     """Build a minimal passing support-matrix result row for a system."""
-    return ("test/model", "TestArchitecture", system, "trtllm", "1.0.0", "agg", STATUS_PASS, None)
+    return ("test/model", "TestArchitecture", system, "trtllm", "1.0.0", "agg", STATUS_PASS, None, "test-command")
 
 
 def test_save_results_to_csv_writes_manifest_in_display_order(tmp_path):

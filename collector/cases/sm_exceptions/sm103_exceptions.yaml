@@ -95,3 +95,66 @@ framework_specific_op_exceptions:
                 numerator: num_heads
                 denominator: num_key_value_heads
                 gt: 16
+
+known_exceptions:
+  - framework: sglang
+    op: attention_context
+    reason_type: framework_version_unsupported
+    version_prefixes: ["0.5.10"]
+    source: collector/sglang/collect_attn.py
+    fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase, window_size]
+    reason: >
+      On B300/SM103, SGLang 0.5.10 context attention is missing the
+      TRTLLM-GEN kernel for Gemma4 head_dim=512.
+    match:
+      num_heads: 2
+      num_key_value_heads: 1
+      head_dim: 512
+      use_fp8_kv_cache: false
+      use_fp8_context_fmha: false
+      is_context_phase: true
+  - framework: sglang
+    op: attention_context
+    reason_type: framework_version_unsupported
+    version_prefixes: ["0.5.10"]
+    source: collector/sglang/collect_attn.py
+    fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase, window_size]
+    reason: >
+      On B300/SM103, SGLang 0.5.10 Triton context attention fails to compile
+      the MiMo h=192 FP8 GQA shape used by the support matrix.
+    match:
+      num_heads: 8
+      num_key_value_heads: 1
+      head_dim: 192
+      use_fp8_kv_cache: true
+      use_fp8_context_fmha: true
+      is_context_phase: true
+  - framework: sglang
+    op: moe
+    reason_type: framework_version_unsupported
+    source: collector/sglang/collect_moe.py
+    fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
+    reason: >
+      On B300/SM103, SGLang 0.5.10 NVFP4 MoE rejects Nemotron-3 Super
+      latent-MoE because inter_size / tensor_parallel_size = 336 is not
+      divisible by 32.
+    match:
+      moe_type: nvfp4
+      hidden_size: 1024
+      inter_size: 2688
+      topk: 22
+      num_experts: 512
+      tensor_parallel_size: 8
+      expert_parallel_size: 1
+      model_path: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+  - framework: sglang
+    op: mhc_module
+    reason_type: framework_version_unsupported
+    source: collector/sglang/collect_mhc_module.py
+    fields: [op, model_path]
+    reason: >
+      On B300/SM103, SGLang 0.5.10 cannot run the DeepSeek-V4 Pro-FP8 mHC
+      collector/runtime path for hidden_size=7168, hc_mult=4 without newer
+      SGLang kernel and TileLang support.
+    match:
+      model_path: sgl-project/DeepSeek-V4-Pro-FP8

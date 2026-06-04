@@ -83,13 +83,56 @@ framework_specific_op_cases:
     attention_context:
       cases:
       - id: base_attention_context_shape_sweep
+        query_head_counts:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 8
+        - 10
+        - 12
+        - 16
+        - 20
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        - 96
         head_dims:
         - 128
         - 192
         - 256
         window_sizes:
         - 0
+        - 128
         - 1024
+      - id: sglang_gemma4_head_dim_512_context
+        batch_sizes:
+        - 1
+        sequence_lengths:
+        - 128
+        - 256
+        - 512
+        query_head_counts:
+        - 2
+        kv_head_options:
+        - 1
+        head_dims:
+        - 512
+        window_sizes:
+        - 0
+        - 1024
+        max_tokens_self_attention: 65536
+        max_tokens_grouped_query_attention: 131072
+        max_batch_size_self_attention: 128
+        max_kv_elements: 2147483647
+        precision_cases:
+        - id: bf16
+          fp8_kv_cache: false
+          fp8_context_fmha: false
   trtllm:
     attention_context:
       cases:

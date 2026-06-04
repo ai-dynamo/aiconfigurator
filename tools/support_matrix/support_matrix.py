@@ -54,6 +54,7 @@ DEFAULT_ENGINE_STEP_COMPARISON_RTOL = 0.05
 DEFAULT_ENGINE_STEP_COMPARISON_ATOL = 1e-3
 DEFAULT_ENGINE_STEP_FRONTIER_RTOL = 0.75
 DEFAULT_ENGINE_STEP_FRONTIER_ATOL = 1e-3
+LARGE_PIPELINE_CONFIG_PATH = "tools/support_matrix/configs/large_pipeline_parallel_worker.yaml"
 _RUST_CORE_AUTOBUILD_ENV = "AICONFIGURATOR_RUST_CORE_AUTOBUILD"
 _APPROXIMATE_ENGINE_STEP_COLUMNS = frozenset(
     {
@@ -108,6 +109,17 @@ class HardwareIncompatibility:
     reason: str
 
 
+@dataclass(frozen=True)
+class FrameworkIncompatibility:
+    reason: str
+
+
+@dataclass(frozen=True)
+class TaskAttempt:
+    name: str
+    yaml_config: dict | None = None
+
+
 def _support_matrix_row_command(
     *,
     model: str,
@@ -121,6 +133,7 @@ def _support_matrix_row_command(
     engine_step_comparison_atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
     engine_step_frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
     engine_step_frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
+    yaml_config_path: str | None = None,
 ) -> str:
     """Return the repo-local CLI command that checks this model/system/backend path."""
     if constraints is None:
@@ -157,6 +170,8 @@ def _support_matrix_row_command(
         "1",
         "--no-color",
     ]
+    if yaml_config_path is not None:
+        parts.extend(["--config-yaml", yaml_config_path])
     if compare_engine_step_backends:
         # ``cli default`` does not expose the support-matrix Python/Rust
         # comparator; use the default Python engine-step path for the public
@@ -206,6 +221,63 @@ def _get_test_constraints(model_path: str) -> TestConstraints:
     return _DEFAULT_TIER
 
 
+def _large_pipeline_parallel_attempt(
+    *,
+    mode: str,
+    backend: str,
+    constraints: TestConstraints,
+) -> TaskAttempt | None:
+    """Return a support-matrix retry that shards one large-model worker across nodes."""
+    if backend not in {
+        common.BackendName.sglang.value,
+        common.BackendName.trtllm.value,
+        common.BackendName.vllm.value,
+    }:
+        return None
+    if constraints.total_gpus < 16:
+        return None
+
+    # Some very large checkpoints are too large for the default one-node search.
+    # Keep attention TP at 8 and add PP=2 so a single serving worker can span 16
+    # GPUs. This also constrains MoE splits away from uncollected smaller shapes
+    # when the viable data was collected for larger model-parallel workers.
+    worker_config = {
+        "num_gpu_per_worker": [16],
+        "tp_list": [8],
+        "pp_list": [2],
+        "dp_list": [1],
+        "moe_tp_list": [1, 2, 4, 8],
+        "moe_ep_list": [1, 2, 4, 8],
+    }
+    config = {"worker_config": worker_config}
+    if mode == "disagg":
+        config = {
+            "prefill_worker_config": worker_config,
+            "decode_worker_config": worker_config,
+            "replica_config": {
+                "max_gpu_per_replica": 128,
+                "num_gpu_per_replica": [32, 64, 128],
+            },
+        }
+    return TaskAttempt(
+        name="large-pipeline-parallel-worker",
+        yaml_config={"mode": "patch", "config": config},
+    )
+
+
+def _should_retry_with_large_worker(error_message: str | None) -> bool:
+    if not error_message:
+        return False
+    normalized = error_message.lower()
+    return (
+        "does not fit in gpu memory" in normalized
+        or "try increasing --total-gpus" in normalized
+        or "try increasing total gpus" in normalized
+        or "failed to query moe data" in normalized
+        or "missing silicon data for the requested lookup" in normalized
+    )
+
+
 def _is_known_framework_incompatible_gap(
     *,
     model: str,
@@ -232,6 +304,27 @@ def _is_known_framework_incompatible_gap(
 
     if "unsupported gemm quant mode 'fp8_static'" in normalized:
         return True
+
+    if system == "b300_sxm":
+        is_qwen3_vl = model.startswith("Qwen/Qwen3-VL-")
+        qwen3_vl_runtime_gap = is_qwen3_vl and (
+            "tp_size (8) * attention_dp_size (1) should be equal" in normalized
+            or "division by zero failed to query context attention data" in normalized
+            or "x is less than the smallest value in the list. x=0" in normalized
+        )
+        if backend == common.BackendName.trtllm.value and version == "1.3.0rc10":
+            return (
+                "unsupported moe quant mode 'fp8_block'" in normalized
+                or "unsupported moe quant mode 'int4_wo'" in normalized
+                or "deepseek-v4 mhc module data not loaded" in normalized
+                or qwen3_vl_runtime_gap
+            )
+        if backend == common.BackendName.vllm.value and version == "0.19.0":
+            return (
+                "unsupported moe quant mode 'w4a16_mxfp4'" in normalized
+                or "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
+                or qwen3_vl_runtime_gap
+            )
 
     if system == "rtx_pro_6000_server":
         if (
@@ -271,6 +364,46 @@ def _is_known_framework_incompatible_gap(
         and version == "1.3.0rc10"
         and "unsupported moe quant mode 'int4_wo'" in normalized
     )
+
+
+def _strip_exception_prefix(line: str) -> str:
+    for prefix in ("ValueError: ", "RuntimeError: ", "AssertionError: ", "ImportError: ", "ModuleNotFoundError: "):
+        if line.startswith(prefix):
+            return line[len(prefix) :]
+    return line
+
+
+def _concise_framework_incompatibility_reason(error_message: str) -> str:
+    """Return the framework-facing failure reason without the Python traceback."""
+    lines = [line.strip() for line in error_message.splitlines() if line.strip()]
+    if not lines:
+        return error_message
+
+    marker_phrases = (
+        "Unsupported moe quant mode",
+        "Unsupported gemm quant mode",
+        "DeepSeek-V4 mHC module data not loaded",
+        "No mHC silicon data",
+        "DeepSeek-V4 mHC module",
+        "tp_size (8) * attention_dp_size",
+        "division by zero failed to query context attention data",
+        "x is less than the smallest value in the list",
+        "x is not equal to the only value in the list",
+        "dsa_context_module_perf.txt",
+        "dsa_generation_module_perf.txt",
+    )
+    for line in reversed(lines):
+        clean_line = _strip_exception_prefix(line)
+        for marker in marker_phrases:
+            marker_index = clean_line.find(marker)
+            if marker_index >= 0:
+                return clean_line[marker_index:]
+
+    for line in reversed(lines):
+        clean_line = _strip_exception_prefix(line)
+        if clean_line != line:
+            return clean_line
+    return lines[-1]
 
 
 def _enum_name(value: object | None) -> str | None:
@@ -357,6 +490,90 @@ def get_hardware_incompatibility(
         missing_datatypes=missing,
         reason=f"{_gpu_label(system, system_spec)} does not support {datatype_text} required by {model}",
     )
+
+
+def get_framework_incompatibility(
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    version: str,
+    system_spec: dict,
+) -> FrameworkIncompatibility | None:
+    """Return deterministic framework/runtime gaps verified by collector runs."""
+    sm_version = (system_spec.get("gpu") or {}).get("sm_version")
+    if sm_version != 103:
+        return None
+
+    if backend == common.BackendName.vllm.value and version == "0.19.0":
+        if model == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} vLLM 0.19.0 NVFP4 MoE rejects Nemotron-3 Super "
+                    "because the FlashInfer FP4 scale-factor shuffle requires M % 128 == 0."
+                )
+            )
+        if model == "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} vLLM 0.19.0 NVFP4 MoE rejects Nemotron Ultra "
+                    "because its routing kernel requires topK <= 10, but this model uses topK=22."
+                )
+            )
+
+    if backend == common.BackendName.trtllm.value and version == "1.3.0rc10" and model == "google/gemma-4-26B-A4B":
+        return FrameworkIncompatibility(
+            reason=(
+                f"{_gpu_label(system, system_spec)} TRT-LLM 1.3.0rc10 MMHA rejects Gemma4 "
+                "context attention head_dim=512."
+            )
+        )
+
+    if backend == common.BackendName.sglang.value and version == "0.5.10":
+        if model == "google/gemma-4-26B-A4B":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 context attention is missing the "
+                    "TRTLLM-GEN kernel for Gemma4 head_dim=512."
+                )
+            )
+
+        if model == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 NVFP4 MoE rejects Nemotron-3 Super "
+                    "latent-MoE shape hidden_size=1024, inter_size=2688, moe_tp_size=8 because the local "
+                    "intermediate size 336 is not divisible by 32."
+                )
+            )
+
+        if model == "sgl-project/DeepSeek-V4-Pro-FP8":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 cannot run the DeepSeek-V4 Pro-FP8 "
+                    "mHC collector/runtime path for hidden_size=7168, hc_mult=4 without newer SGLang "
+                    "kernel and TileLang support."
+                )
+            )
+
+        if model == "deepseek-ai/DeepSeek-V4-Pro":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 cannot load the native "
+                    "DeepSeek-V4 Pro mHC collector/runtime path for hidden_size=7168, hc_mult=4: "
+                    "SGLang raises `Cannot find model module` for `DeepseekV4ForCausalLM`."
+                )
+            )
+
+        if model == "XiaomiMiMo/MiMo-V2-Flash":
+            return FrameworkIncompatibility(
+                reason=(
+                    f"{_gpu_label(system, system_spec)} SGLang 0.5.10 Triton context attention fails to compile "
+                    "the MiMo h=192 FP8 GQA shape used by this matrix row."
+                )
+            )
+
+    return None
 
 
 @contextmanager
@@ -638,6 +855,7 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         engine_step_backend: str | None,
+        yaml_config: dict | None = None,
     ) -> TaskConfig:
         task_config_kwargs = {
             "serving_mode": mode,
@@ -655,6 +873,8 @@ class SupportMatrix:
         }
         if mode == "disagg":
             task_config_kwargs["decode_system_name"] = system
+        if yaml_config is not None:
+            task_config_kwargs["yaml_config"] = yaml_config
         return TaskConfig(**task_config_kwargs)
 
     @staticmethod
@@ -667,6 +887,7 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         engine_step_backend: str | None,
+        yaml_config: dict | None = None,
     ) -> pd.DataFrame | None:
         task_config = SupportMatrix._create_task_config(
             mode=mode,
@@ -676,6 +897,7 @@ class SupportMatrix:
             version=version,
             constraints=constraints,
             engine_step_backend=engine_step_backend,
+            yaml_config=yaml_config,
         )
         result = TaskRunner().run(task_config)
         return result.get("pareto_df")
@@ -766,77 +988,133 @@ class SupportMatrix:
                     return statuses, error_messages, commands
                 return statuses, error_messages
 
+            framework_incompatibility = get_framework_incompatibility(
+                model=model,
+                system=system,
+                backend=backend,
+                version=version,
+                system_spec=system_spec,
+            )
+            if framework_incompatibility is not None:
+                reason = _format_exception_for_csv(framework_incompatibility.reason)
+                statuses = dict.fromkeys(modes_to_test, STATUS_FRAMEWORK_INCOMPATIBLE)
+                error_messages = dict.fromkeys(modes_to_test, reason)
+                if include_commands:
+                    return statuses, error_messages, commands
+                return statuses, error_messages
+
         for mode in modes_to_test:
-            try:
-                python_pareto_df = SupportMatrix._run_mode(
-                    mode=mode,
-                    model=model,
-                    system=system,
-                    backend=backend,
-                    version=version,
-                    constraints=constraints,
-                    engine_step_backend="python" if compare_engine_step_backends else None,
-                )
+            attempt_queue = [TaskAttempt("default")]
+            retry_attempt = _large_pipeline_parallel_attempt(
+                mode=mode,
+                backend=backend,
+                constraints=constraints,
+            )
 
-                # Note that we do not use pareto_frontier_df here because for the pareto_df
-                # if is not None and not empty, it means the pareto_frontier_df is also not None and not empty.
-                if python_pareto_df is None or python_pareto_df.empty:
-                    raise RuntimeError("Configuration returned no results, failed to catch traceback")
+            while attempt_queue:
+                attempt = attempt_queue.pop(0)
+                run_mode_kwargs = {
+                    "mode": mode,
+                    "model": model,
+                    "system": system,
+                    "backend": backend,
+                    "version": version,
+                    "constraints": constraints,
+                    "engine_step_backend": "python" if compare_engine_step_backends else None,
+                }
+                if attempt.yaml_config is not None:
+                    run_mode_kwargs["yaml_config"] = attempt.yaml_config
+                try:
+                    python_pareto_df = SupportMatrix._run_mode(**run_mode_kwargs)
 
-                if compare_engine_step_backends:
-                    with _rust_core_autobuild_enabled():
-                        rust_pareto_df = SupportMatrix._run_mode(
-                            mode=mode,
+                    # Note that we do not use pareto_frontier_df here because for the pareto_df
+                    # if is not None and not empty, it means the pareto_frontier_df is also not None and not empty.
+                    if python_pareto_df is None or python_pareto_df.empty:
+                        raise RuntimeError("Configuration returned no results, failed to catch traceback")
+
+                    if compare_engine_step_backends:
+                        rust_run_mode_kwargs = dict(run_mode_kwargs)
+                        rust_run_mode_kwargs["engine_step_backend"] = "rust"
+                        with _rust_core_autobuild_enabled():
+                            rust_pareto_df = SupportMatrix._run_mode(**rust_run_mode_kwargs)
+                        if rust_pareto_df is None or rust_pareto_df.empty:
+                            raise RuntimeError("Rust engine-step backend returned no results")
+
+                        mismatch = _compare_pareto_dfs(
+                            python_pareto_df,
+                            rust_pareto_df,
+                            rtol=engine_step_comparison_rtol,
+                            atol=engine_step_comparison_atol,
+                            frontier_rtol=engine_step_frontier_rtol,
+                            frontier_atol=engine_step_frontier_atol,
+                        )
+                        if mismatch:
+                            raise RuntimeError(mismatch)
+
+                    statuses[mode] = STATUS_PASS
+                    error_messages[mode] = None
+                    if include_commands and attempt.yaml_config is not None:
+                        commands[mode] = _support_matrix_row_command(
                             model=model,
                             system=system,
                             backend=backend,
                             version=version,
+                            mode=mode,
                             constraints=constraints,
-                            engine_step_backend="rust",
+                            compare_engine_step_backends=compare_engine_step_backends,
+                            engine_step_comparison_rtol=engine_step_comparison_rtol,
+                            engine_step_comparison_atol=engine_step_comparison_atol,
+                            engine_step_frontier_rtol=engine_step_frontier_rtol,
+                            engine_step_frontier_atol=engine_step_frontier_atol,
+                            yaml_config_path=LARGE_PIPELINE_CONFIG_PATH,
                         )
-                    if rust_pareto_df is None or rust_pareto_df.empty:
-                        raise RuntimeError("Rust engine-step backend returned no results")
+                    break
 
-                    mismatch = _compare_pareto_dfs(
-                        python_pareto_df,
-                        rust_pareto_df,
-                        rtol=engine_step_comparison_rtol,
-                        atol=engine_step_comparison_atol,
-                        frontier_rtol=engine_step_frontier_rtol,
-                        frontier_atol=engine_step_frontier_atol,
+                except Exception as e:
+                    raw_error = traceback.format_exc()
+                    logger.warning(
+                        "Configuration failed: %s, %s, %s, %s, mode=%s, attempt=%s - Error: %s",
+                        model,
+                        system,
+                        backend,
+                        version,
+                        mode,
+                        attempt.name,
+                        str(e),
                     )
-                    if mismatch:
-                        raise RuntimeError(mismatch)
+                    if (
+                        attempt.name == "default"
+                        and retry_attempt is not None
+                        and _should_retry_with_large_worker(raw_error)
+                    ):
+                        logger.info(
+                            "Retrying support-matrix check with %s: %s, %s, %s, %s, mode=%s",
+                            retry_attempt.name,
+                            model,
+                            system,
+                            backend,
+                            version,
+                            mode,
+                        )
+                        attempt_queue.append(retry_attempt)
+                        continue
 
-                statuses[mode] = STATUS_PASS
-                error_messages[mode] = None
+                    if _is_known_framework_incompatible_gap(
+                        model=model,
+                        system=system,
+                        backend=backend,
+                        version=version,
+                        error_message=raw_error,
+                    ):
+                        statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
+                        raw_error = _concise_framework_incompatibility_reason(raw_error)
+                    else:
+                        statuses[mode] = STATUS_FAIL
+                    error_messages[mode] = raw_error
+                    break
 
-            except Exception as e:
-                raw_error = traceback.format_exc()
-                logger.warning(
-                    "Configuration failed: %s, %s, %s, %s, mode=%s - Error: %s",
-                    model,
-                    system,
-                    backend,
-                    version,
-                    mode,
-                    str(e),
-                )
-
-                if _is_known_framework_incompatible_gap(
-                    model=model,
-                    system=system,
-                    backend=backend,
-                    version=version,
-                    error_message=raw_error,
-                ):
-                    statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
-                else:
-                    statuses[mode] = STATUS_FAIL
-                error_messages[mode] = raw_error
-
-            finally:
-                perf_database.clear_database_runtime_caches(system, backend, version)
+                finally:
+                    perf_database.clear_database_runtime_caches(system, backend, version)
 
             error_messages[mode] = _format_exception_for_csv(error_messages.get(mode))
         if include_commands:
@@ -1162,20 +1440,11 @@ class SupportMatrix:
                     backend=backend,
                     version=version,
                     mode=mode,
-                    constraints=_DEFAULT_TIER,
-                    compare_engine_step_backends=getattr(self, "compare_engine_step_backends", False),
-                    engine_step_comparison_rtol=getattr(
-                        self, "engine_step_comparison_rtol", DEFAULT_ENGINE_STEP_COMPARISON_RTOL
-                    ),
-                    engine_step_comparison_atol=getattr(
-                        self, "engine_step_comparison_atol", DEFAULT_ENGINE_STEP_COMPARISON_ATOL
-                    ),
-                    engine_step_frontier_rtol=getattr(
-                        self, "engine_step_frontier_rtol", DEFAULT_ENGINE_STEP_FRONTIER_RTOL
-                    ),
-                    engine_step_frontier_atol=getattr(
-                        self, "engine_step_frontier_atol", DEFAULT_ENGINE_STEP_FRONTIER_ATOL
-                    ),
+                    compare_engine_step_backends=self.compare_engine_step_backends,
+                    engine_step_comparison_rtol=self.engine_step_comparison_rtol,
+                    engine_step_comparison_atol=self.engine_step_comparison_atol,
+                    engine_step_frontier_rtol=self.engine_step_frontier_rtol,
+                    engine_step_frontier_atol=self.engine_step_frontier_atol,
                 )
             else:
                 raise ValueError(f"Invalid support-matrix result row length: {len(row)}")

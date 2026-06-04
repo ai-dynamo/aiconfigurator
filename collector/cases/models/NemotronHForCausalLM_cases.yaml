@@ -21,7 +21,7 @@ model_case_values:
       topk: 6
       num_experts: 128
     - model_path: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
-      hidden_size: 4096
+      hidden_size: 1024
       inter_size: 2688
       topk: 22
       num_experts: 512
