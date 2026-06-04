@@ -941,6 +941,31 @@ class AFDInferenceSession:
             per_op[op._name] += float(result)
         return sum(per_op.values()), per_op
 
+    def _afd_batch_shape(self) -> tuple[int, int, int, int, int]:
+        """Return AFD total and per-microbatch batch sizes.
+
+        ``AFDConfig.a_batch_size`` is the total in-flight batch per
+        A-Worker.  The pipeline executes one microbatch at a time, so
+        latency and transfer queries use the derived per-microbatch
+        sizes while summary/concurrency fields report the total batch.
+        """
+        cfg = self._afd_config
+        num_microbatches = max(int(cfg.num_microbatches or 1), 1)
+        a_total_batch_size = max(int(cfg.a_batch_size), 1)
+        a_micro_batch_size = max(
+            (a_total_batch_size + num_microbatches - 1) // num_microbatches,
+            1,
+        )
+        b_total = cfg.n_a_workers * a_total_batch_size
+        b_micro_total = cfg.n_a_workers * a_micro_batch_size
+        return (
+            a_total_batch_size,
+            a_micro_batch_size,
+            b_total,
+            b_micro_total,
+            num_microbatches,
+        )
+
     def _build_afd_comm_ops(self, a_model, f_model, *, rank_mapping: str = "one_to_one") -> _AFDCommOps:
         """Construct the five comm-side ops modeling AFD per-layer traffic.
 
@@ -1028,9 +1053,7 @@ class AFDInferenceSession:
             ),
         )
 
-    def _pipeline_tcycle(
-        self, t_a: float, t_f: float, t_a2f: float, t_f2a: float
-    ) -> tuple[float, bool]:
+    def _pipeline_tcycle(self, t_a: float, t_f: float, t_a2f: float, t_f2a: float) -> tuple[float, bool]:
         """Compute per-layer cycle time and whether comm is hidden.
 
         Two pipeline regimes are supported:
@@ -1057,6 +1080,7 @@ class AFDInferenceSession:
             cycle.
         """
         cfg = self._afd_config
+        num_microbatches = max(int(cfg.num_microbatches or 1), 1)
         t_c = t_a2f + t_f2a
         if cfg.pipeline_model == "optimistic":
             # Need ≥ 2 + t_c / max(t_a, t_f) in-flight microbatches to
@@ -1064,11 +1088,11 @@ class AFDInferenceSession:
             # legacy ``2 * (1 + t_c_one_dir / max(...))`` under the
             # symmetric Phase-1 assumption (t_a2f == t_f2a).
             min_m = 2.0 + t_c / max(t_a, t_f, 1e-9)
-            if cfg.num_microbatches < min_m:
+            if num_microbatches < min_m:
                 logger.warning(
                     "AFD optimistic pipeline: num_microbatches (%d) < min required (%.1f) "
                     "to hide communication. Falling back to conservative model.",
-                    cfg.num_microbatches,
+                    num_microbatches,
                     min_m,
                 )
                 return max(t_a + t_a2f, t_f + t_f2a), False
@@ -1099,7 +1123,7 @@ class AFDInferenceSession:
         else:
             effective_max_seq_len = max_seq_len if max_seq_len is not None else isl + osl
             num_tokens = batch_size
-            kvcache_multiplier = max(cfg.num_microbatches, 1)
+            kvcache_multiplier = max(int(cfg.num_microbatches or 1), 1)
 
         return self._backend.get_partition_memory_usage(
             a_model,
@@ -1182,7 +1206,8 @@ class AFDInferenceSession:
         runtime_config: config.RuntimeConfig,
         isl: int,
         osl: int,
-        b_total: int,
+        a_batch_size: int,
+        b_batch_size: int,
         num_layers: int,
         brk_t_a_per_layer: float,
         brk_t_f_per_layer: float,
@@ -1209,7 +1234,6 @@ class AFDInferenceSession:
         evaluated on the full per-layer time, not on the compute-only
         time.
         """
-        cfg = self._afd_config
         stride = self._AFD_DECODE_STRIDE
 
         t_a_layer_sum = 0.0
@@ -1231,7 +1255,7 @@ class AFDInferenceSession:
 
             t_a_step_i, a_per_op_i = self._sum_latency(
                 a_partition.attn_ops,
-                batch_size=cfg.a_batch_size,
+                batch_size=a_batch_size,
                 seq_len=s_i,
                 model=a_model,
                 runtime_config=runtime_config,
@@ -1239,7 +1263,7 @@ class AFDInferenceSession:
             )
             t_f_step_i, f_per_op_i = self._sum_latency(
                 f_partition.ffn_ops,
-                batch_size=b_total,
+                batch_size=b_batch_size,
                 seq_len=s_i,
                 model=f_model,
                 runtime_config=runtime_config,
@@ -1252,9 +1276,7 @@ class AFDInferenceSession:
             # accumulation. ``sum_i max(...)`` ≠ ``max(sum_i ...)``;
             # the latter under-estimates the bottleneck whenever the
             # winning pool changes across the decode trace.
-            t_cycle_i, _ = self._pipeline_tcycle(
-                t_a_layer_i, t_f_layer_i, t_a2f_layer, t_f2a_layer
-            )
+            t_cycle_i, _ = self._pipeline_tcycle(t_a_layer_i, t_f_layer_i, t_a2f_layer, t_f2a_layer)
             t_step_i = num_layers * t_cycle_i
 
             t_a_layer_sum += t_a_layer_i * repeat
@@ -1315,21 +1337,21 @@ class AFDInferenceSession:
         # Boundary ops (``add_norm_2`` / ``logits_gemm``) default to the
         # A-Worker, but ``cfg.boundary_on_attn`` lets the user reassign
         # them to the F-Worker for sensitivity studies.
-        a_partition = build_afd_ops_partition(
-            a_model, phase=ops_phase, boundary_on_attn=cfg.boundary_on_attn
-        )
-        f_partition = build_afd_ops_partition(
-            f_model, phase=ops_phase, boundary_on_attn=cfg.boundary_on_attn
-        )
+        a_partition = build_afd_ops_partition(a_model, phase=ops_phase, boundary_on_attn=cfg.boundary_on_attn)
+        f_partition = build_afd_ops_partition(f_model, phase=ops_phase, boundary_on_attn=cfg.boundary_on_attn)
 
         isl = runtime_config.isl
         osl = runtime_config.osl or 1
         effective_prefill_len = max(isl - int(runtime_config.prefix or 0), 1)
         num_layers = max(int(getattr(a_model, "_num_layers", 1)), 1)
 
-        # A-Worker sees its local batch (a_batch_size); F-Worker sees the full
-        # combined batch post-AllGather.
-        b_total = cfg.n_a_workers * cfg.a_batch_size
+        (
+            _a_total_batch_size,
+            a_micro_batch_size,
+            _b_total,
+            b_micro_total,
+            _num_microbatches,
+        ) = self._afd_batch_shape()
 
         # AFD comm (A↔F cross-pool transfers, F-node AllGather /
         # ReduceScatter, A-side combine) bills by *token* volume per
@@ -1340,7 +1362,7 @@ class AFDInferenceSession:
         # held by a single A-rank; the op internally fans this out to the
         # global token count via ``n_a_workers``.
         tokens_per_req = effective_prefill_len if phase == "prefill" else 1
-        afd_a_batch_tokens = cfg.a_batch_size * tokens_per_req
+        afd_a_batch_tokens = a_micro_batch_size * tokens_per_req
 
         # Five comm-side ops model the per-layer AFD traffic:
         #   * a2f / f2a — cross-pool single-direction P2P transfers.
@@ -1398,7 +1420,8 @@ class AFDInferenceSession:
                 runtime_config=runtime_config,
                 isl=isl,
                 osl=osl,
-                b_total=b_total,
+                a_batch_size=a_micro_batch_size,
+                b_batch_size=b_micro_total,
                 num_layers=num_layers,
                 brk_t_a_per_layer=brk_t_a_per_layer,
                 brk_t_f_per_layer=brk_t_f_per_layer,
@@ -1410,16 +1433,14 @@ class AFDInferenceSession:
             # at the *average* operating point so it stays a single
             # stable scalar even though the per-step pipeline above
             # already accounts for s-dependent bottleneck shifts.
-            _, comm_hidden = self._pipeline_tcycle(
-                t_a_layer, t_f_layer, t_a2f_layer, t_f2a_layer
-            )
+            _, comm_hidden = self._pipeline_tcycle(t_a_layer, t_f_layer, t_a2f_layer, t_f2a_layer)
         else:
             # Prefill: single shot over the uncached input suffix; no
             # need to integrate, ``s == isl - prefix`` everywhere.
             seq_len_query = effective_prefill_len
             t_a_total, a_per_op = self._sum_latency(
                 a_partition.attn_ops,
-                batch_size=cfg.a_batch_size,
+                batch_size=a_micro_batch_size,
                 seq_len=seq_len_query,
                 model=a_model,
                 runtime_config=runtime_config,
@@ -1427,7 +1448,7 @@ class AFDInferenceSession:
             )
             t_f_total, f_per_op = self._sum_latency(
                 f_partition.ffn_ops,
-                batch_size=b_total,
+                batch_size=b_micro_total,
                 seq_len=seq_len_query,
                 model=f_model,
                 runtime_config=runtime_config,
@@ -1435,9 +1456,7 @@ class AFDInferenceSession:
             )
             t_a_layer = t_a_total / num_layers + brk_t_a_per_layer
             t_f_layer = t_f_total / num_layers + brk_t_f_per_layer
-            t_cycle, comm_hidden = self._pipeline_tcycle(
-                t_a_layer, t_f_layer, t_a2f_layer, t_f2a_layer
-            )
+            t_cycle, comm_hidden = self._pipeline_tcycle(t_a_layer, t_f_layer, t_a2f_layer, t_f2a_layer)
             t_step = num_layers * t_cycle
 
         # Per-op dicts are tracked in *per-step* units (matching
@@ -1455,7 +1474,7 @@ class AFDInferenceSession:
             a_model=a_model,
             a_partition=a_partition,
             phase=phase,
-            batch_size=cfg.a_batch_size,
+            batch_size=a_micro_batch_size,
             isl=isl,
             osl=osl,
             prefix=runtime_config.prefix,
@@ -1465,7 +1484,7 @@ class AFDInferenceSession:
             f_model=f_model,
             f_partition=f_partition,
             phase=phase,
-            batch_size=b_total,
+            batch_size=b_micro_total,
             isl=isl,
             osl=osl,
             prefix=runtime_config.prefix,
@@ -1661,7 +1680,13 @@ class AFDInferenceSession:
         cfg = self._afd_config
         isl = runtime_config.isl
         osl = runtime_config.osl or 1
-        b_total = cfg.n_a_workers * cfg.a_batch_size
+        (
+            _a_total_batch_size,
+            a_micro_batch_size,
+            b_total,
+            b_micro_total,
+            num_microbatches,
+        ) = self._afd_batch_shape()
 
         prefill_scalars = self._phase_scalars(prefill_metrics)
         decode_scalars = self._phase_scalars(decode_metrics)
@@ -1688,7 +1713,7 @@ class AFDInferenceSession:
 
         if decode_metrics is not None:
             tpot = decode_metrics["t_step"]
-            tokens_per_s = b_total / (tpot / 1000.0) if tpot > 0 else 0.0
+            tokens_per_s = b_total / (num_microbatches * (tpot / 1000.0)) if tpot > 0 else 0.0
         else:
             tpot = 0.0
             tokens_per_s = 0.0
@@ -1701,7 +1726,7 @@ class AFDInferenceSession:
         if phase == "prefill":
             request_latency = ttft
         elif phase == "decode":
-            request_latency = tpot * max(osl - 1, 1) if tpot > 0 else tpot
+            request_latency = tpot * max(osl - 1, 0)
         else:  # both
             request_latency = ttft + tpot * max(osl - 1, 0)
 
@@ -1747,6 +1772,7 @@ class AFDInferenceSession:
             "(a)nodes": cfg.n_a_nodes,
             "(a)tp": cfg.tp_a,
             "(a)bs": cfg.a_batch_size,
+            "(a)micro_bs": a_micro_batch_size,
             "(a)workers": cfg.n_a_workers,
             "(a)memory": round(a_memory_gb, 2),
             "(a)is_oom": bool(a_is_oom),
@@ -1789,19 +1815,17 @@ class AFDInferenceSession:
             "tpot": round(tpot, 3),
             "request_latency": round(request_latency, 3),
             "b_total": b_total,
+            "b_micro_total": b_micro_total,
             "tokens/s": round(tokens_per_s, 2),
             "tokens/s/gpu": round(tokens_per_s_per_gpu, 2),
             "tokens/s/user": round(tokens_per_s_per_user, 2),
             "seq/s": round(seq_per_s, 3),
-            # AFD runs ``num_microbatches`` activation sets in flight at any
-            # given time (each microbatch carries its own b_total requests),
-            # so the user-visible concurrency is the K-stage pipeline depth
-            # times ``b_total`` -- matches the "total in-flight" semantics used
-            # by the agg / disagg ``concurrency`` columns.  ``b_total`` is
-            # still reported separately above as the per-microbatch batch.
-            "concurrency": cfg.num_microbatches * b_total,
+            # ``a_batch_size`` is the total in-flight batch per A-Worker;
+            # latency is evaluated on the derived microbatch, while the
+            # user-visible concurrency remains the total in-flight batch.
+            "concurrency": b_total,
             "pipeline_model": cfg.pipeline_model,
-            "num_microbatches": cfg.num_microbatches,
+            "num_microbatches": num_microbatches,
             "combined_with_pd": bool(cfg.combined_with_pd),
             "boundary_on_attn": bool(cfg.boundary_on_attn),
             "num_total_gpus": total_gpus,

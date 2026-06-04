@@ -34,10 +34,14 @@ def _stub_latest_db_version(monkeypatch):
     monkeypatch.setattr(task_module, "get_latest_database_version", lambda **_: "test-version")
 
 
-def _make_ctx(serving_mode: str, system_name: str, *,
-              model_path: str = "openai/gpt-oss-120b",
-              backend_name: str = "trtllm",
-              decode_system_name: str | None = None) -> TaskContext:
+def _make_ctx(
+    serving_mode: str,
+    system_name: str,
+    *,
+    model_path: str = "openai/gpt-oss-120b",
+    backend_name: str = "trtllm",
+    decode_system_name: str | None = None,
+) -> TaskContext:
     return TaskContext(
         serving_mode=serving_mode,
         model_path=model_path,
@@ -55,7 +59,7 @@ def _make_ctx(serving_mode: str, system_name: str, *,
         enable_wideep=False,
         enable_chunked_prefill=False,
         moe_backend=None,
-        total_gpus=8,
+        total_gpus=16,
     )
 
 
@@ -99,7 +103,10 @@ def test_afd_gptoss_non_blackwell_no_promotion():
 
 
 def test_agg_gptoss_blackwell_back_compat():
-    """The agg branch keeps writing ``worker_config.moe_quant_mode`` and emitting the bare ``gptoss-blackwell-mxfp8`` label."""
+    """The agg branch keeps writing ``worker_config.moe_quant_mode``.
+
+    Emits the bare ``gptoss-blackwell-mxfp8`` label (no ``-afd`` suffix).
+    """
     ctx = _make_ctx("agg", "b200_sxm")
     config, applied = TaskConfigFactory.create(ctx)
 

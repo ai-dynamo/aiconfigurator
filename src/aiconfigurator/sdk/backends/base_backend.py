@@ -679,7 +679,7 @@ class BaseBackend:
             **kwargs,
         )
         memory = dict(memory)
-        memory["weights"] = sum(op.get_weights() for op in partition_ops) / (1 << 30)
+        memory["weights"] = sum(op.get_weights() for op in partition_ops) / max(model.config.pp_size, 1) / (1 << 30)
         if include_kvcache:
             memory["kvcache"] = memory.get("kvcache", 0.0) * max(kvcache_multiplier, 1)
         else:
@@ -689,11 +689,7 @@ class BaseBackend:
         memory.setdefault("nccl", 0.0)
         memory.setdefault("others", 0.0)
         memory["total"] = (
-            memory["weights"]
-            + memory["activations"]
-            + memory["kvcache"]
-            + memory["nccl"]
-            + memory["others"]
+            memory["weights"] + memory["activations"] + memory["kvcache"] + memory["nccl"] + memory["others"]
         )
         return memory
 

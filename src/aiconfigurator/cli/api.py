@@ -959,9 +959,7 @@ def cli_estimate(
             if val is None:
                 raise ValueError(f"{name} is required for afd mode.")
         if afd_phase not in ("prefill", "decode", "both"):
-            raise ValueError(
-                f"afd_phase must be 'prefill', 'decode', or 'both'; got {afd_phase!r}."
-            )
+            raise ValueError(f"afd_phase must be 'prefill', 'decode', or 'both'; got {afd_phase!r}.")
         # ``combined_with_pd`` only makes sense for single-phase AFD: when
         # AFD covers prefill+decode internally there is no separate static
         # pool to combine with. ``AFDConfig.__post_init__`` enforces the
@@ -1060,8 +1058,7 @@ def cli_estimate(
         )
     else:
         raise ValueError(
-            f"Unsupported estimate mode: {mode!r}. "
-            "Use 'agg', 'disagg', 'afd', 'static', 'static_ctx', or 'static_gen'."
+            f"Unsupported estimate mode: {mode!r}. Use 'agg', 'disagg', 'afd', 'static', 'static_ctx', or 'static_gen'."
         )
 
 
@@ -1508,11 +1505,7 @@ def _combine_afd_static_estimate_results(
     tokens_s = seq_s * afd_result.osl
     decode_time = tpot * max(afd_result.osl - 1, 0)
     request_latency = ttft + decode_time
-    power_w = (
-        (prefill_power * ttft + decode_power * decode_time) / request_latency
-        if request_latency > 0.0
-        else 0.0
-    )
+    power_w = (prefill_power * ttft + decode_power * decode_time) / request_latency if request_latency > 0.0 else 0.0
 
     result_dict = dict(afd_raw)
     result_dict.update(
@@ -1545,6 +1538,8 @@ def _combine_afd_static_estimate_results(
             if decode_gen_latency:
                 per_ops_data["decode"] = dict(decode_gen_latency)
 
+    per_ops_source = dict(afd_result.per_ops_source or {})
+
     return EstimateResult(
         ttft=result_dict.get("ttft", 0.0),
         tpot=result_dict.get("tpot", 0.0),
@@ -1562,6 +1557,7 @@ def _combine_afd_static_estimate_results(
         raw=result_dict,
         mode="afd",
         per_ops_data=per_ops_data,
+        per_ops_source=per_ops_source,
         kv_cache_warning=static_result.kv_cache_warning,
     )
 
@@ -1641,16 +1637,28 @@ def _run_afd_estimate(
     f_moe_tp_size = f_tp_size // f_moe_ep_size
 
     a_model_config = _build_model_config(
-        a_tp_size, 1, 1,
-        a_tp_size, 1,
-        gemm_quant_mode, kvcache_quant_mode, fmha_quant_mode,
-        moe_quant_mode, comm_quant_mode,
+        a_tp_size,
+        1,
+        1,
+        a_tp_size,
+        1,
+        gemm_quant_mode,
+        kvcache_quant_mode,
+        fmha_quant_mode,
+        moe_quant_mode,
+        comm_quant_mode,
     )
     f_model_config = _build_model_config(
-        f_tp_size, 1, 1,
-        f_moe_tp_size, f_moe_ep_size,
-        gemm_quant_mode, kvcache_quant_mode, fmha_quant_mode,
-        moe_quant_mode, comm_quant_mode,
+        f_tp_size,
+        1,
+        1,
+        f_moe_tp_size,
+        f_moe_ep_size,
+        gemm_quant_mode,
+        kvcache_quant_mode,
+        fmha_quant_mode,
+        moe_quant_mode,
+        comm_quant_mode,
     )
     # Pass speculative decode knobs through to A/F model configs. TODO:
     # AFDTransfer still models committed decode-token volume only; recalibrate
@@ -1729,6 +1737,7 @@ def _run_afd_estimate(
         raw=result_dict,
         mode="afd",
         per_ops_data=summary.get_per_ops_data(),
+        per_ops_source=summary.get_per_ops_source(),
     )
 
 

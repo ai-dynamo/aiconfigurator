@@ -5,6 +5,7 @@
 
 import math
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -17,9 +18,16 @@ from aiconfigurator.sdk.inference_summary import InferenceSummary
 pytestmark = pytest.mark.unit
 
 
-def _fake_phase_metrics(*, t_a_layer: float, t_f_layer: float, balance_ratio: float,
-                       t_a2f_layer: float = 0.1, t_f2a_layer: float = 0.1,
-                       t_step: float = 50.0, comm_hidden: bool = True) -> dict:
+def _fake_phase_metrics(
+    *,
+    t_a_layer: float,
+    t_f_layer: float,
+    balance_ratio: float,
+    t_a2f_layer: float = 0.1,
+    t_f2a_layer: float = 0.1,
+    t_step: float = 50.0,
+    comm_hidden: bool = True,
+) -> dict:
     """Build a minimal ``_simulate_phase``-style metrics dict for AFD tests.
 
     Only the per-phase layer scalars vary across cases; memory/per-op shape
@@ -36,10 +44,8 @@ def _fake_phase_metrics(*, t_a_layer: float, t_f_layer: float, balance_ratio: fl
         "balance_ratio": balance_ratio,
         "a_per_op": {},
         "f_per_op": {},
-        "a_memory": {"total": 1.0, "weights": 1.0, "activations": 0.0,
-                     "kvcache": 0.0, "nccl": 0.0, "others": 0.0},
-        "f_memory": {"total": 1.0, "weights": 1.0, "activations": 0.0,
-                     "kvcache": 0.0, "nccl": 0.0, "others": 0.0},
+        "a_memory": {"total": 1.0, "weights": 1.0, "activations": 0.0, "kvcache": 0.0, "nccl": 0.0, "others": 0.0},
+        "f_memory": {"total": 1.0, "weights": 1.0, "activations": 0.0, "kvcache": 0.0, "nccl": 0.0, "others": 0.0},
         "a_is_oom": False,
         "f_is_oom": False,
         "a_is_kv_cache_oom": False,
@@ -48,8 +54,9 @@ def _fake_phase_metrics(*, t_a_layer: float, t_f_layer: float, balance_ratio: fl
     }
 
 
-def _build_afd_session_with_phase_metrics(monkeypatch, *, prefill_metrics, decode_metrics,
-                                          combined_with_pd: bool = False) -> AFDInferenceSession:
+def _build_afd_session_with_phase_metrics(
+    monkeypatch, *, prefill_metrics, decode_metrics, combined_with_pd: bool = False
+) -> AFDInferenceSession:
     """Wire ``AFDInferenceSession`` so ``_simulate_phase`` returns the
     caller-supplied prefill / decode metrics dicts.
 
@@ -71,7 +78,7 @@ def _build_afd_session_with_phase_metrics(monkeypatch, *, prefill_metrics, decod
     class FakeDatabase:
         version = "test-version"
         system = "test-system"
-        system_spec = {"gpu": {"mem_capacity": 80 * (1 << 30)}}
+        system_spec: ClassVar[dict] = {"gpu": {"mem_capacity": 80 * (1 << 30)}}
 
     afd_config = AFDConfig(
         n_a_nodes=1,
@@ -214,7 +221,7 @@ def test_run_afd_estimate_passes_prefix_and_nextn(monkeypatch):
     captured = {}
 
     class FakeDatabase:
-        system_spec = {
+        system_spec: ClassVar[dict] = {
             "node": {"num_gpus_per_node": 8},
             "gpu": {"mem_capacity": 80 * (1 << 30)},
         }
@@ -348,6 +355,7 @@ def test_afd_prefill_uses_uncached_prefix_suffix_for_token_math(monkeypatch):
         gpus_per_node=8,
         tp_a=2,
         a_batch_size=3,
+        num_microbatches=1,
         f_moe_ep_size=1,
     )
     session = AFDInferenceSession(
@@ -380,19 +388,18 @@ def test_afd_prefill_uses_uncached_prefix_suffix_for_token_math(monkeypatch):
     assert captured["sum_latency_seq_lens"] == [80, 80]
 
 
-def test_afd_summary_concurrency_reflects_pipeline_in_flight(monkeypatch):
-    """``concurrency`` in the AFD summary must equal ``num_microbatches * b_total``.
+def test_afd_summary_concurrency_reflects_total_in_flight_batch(monkeypatch):
+    """``concurrency`` in the AFD summary equals the configured total batch.
 
-    The K-stage ping-pong pipeline keeps ``num_microbatches`` independent
-    activation sets in flight at any moment, so the "total in-flight"
-    semantics shared with the agg/disagg ``concurrency`` columns demand
-    that AFD report the pipeline-depth-scaled count -- not the
-    per-microbatch ``b_total``. Regressing this silently inflates apparent
-    AFD efficiency when users compare modes by ``concurrency``.
+    ``a_batch_size`` is the total in-flight batch per A-Worker.  The
+    pipeline executes derived microbatches internally, so summary
+    concurrency must not multiply the total batch by ``num_microbatches``.
     """
     metrics = _fake_phase_metrics(t_a_layer=1.0, t_f_layer=1.0, balance_ratio=1.0)
     session = _build_afd_session_with_phase_metrics(
-        monkeypatch, prefill_metrics=metrics, decode_metrics=metrics,
+        monkeypatch,
+        prefill_metrics=metrics,
+        decode_metrics=metrics,
     )
     expected_b_total = session._afd_config.n_a_workers * session._afd_config.a_batch_size
 
@@ -400,9 +407,8 @@ def test_afd_summary_concurrency_reflects_pipeline_in_flight(monkeypatch):
     result = summary.get_result_dict()
 
     assert result["b_total"] == expected_b_total
-    assert result["concurrency"] == session._afd_config.num_microbatches * expected_b_total
-    # Sanity check: not the old per-microbatch value, and not zero.
-    assert result["concurrency"] != expected_b_total
+    assert result["concurrency"] == expected_b_total
+    assert result["b_micro_total"] == session._afd_config.n_a_workers * 2
 
 
 def test_afd_summary_phase_both_paired_scalars_and_nan_unprefixed(monkeypatch):
@@ -415,15 +421,27 @@ def test_afd_summary_phase_both_paired_scalars_and_nan_unprefixed(monkeypatch):
     readable source of truth and prevents accidental misuse downstream.
     """
     prefill_metrics = _fake_phase_metrics(
-        t_a_layer=0.5, t_f_layer=0.7, balance_ratio=0.71,
-        t_a2f_layer=0.05, t_f2a_layer=0.05, t_step=12.5, comm_hidden=True,
+        t_a_layer=0.5,
+        t_f_layer=0.7,
+        balance_ratio=0.71,
+        t_a2f_layer=0.05,
+        t_f2a_layer=0.05,
+        t_step=12.5,
+        comm_hidden=True,
     )
     decode_metrics = _fake_phase_metrics(
-        t_a_layer=1.2, t_f_layer=0.9, balance_ratio=1.33,
-        t_a2f_layer=0.1, t_f2a_layer=0.1, t_step=50.0, comm_hidden=False,
+        t_a_layer=1.2,
+        t_f_layer=0.9,
+        balance_ratio=1.33,
+        t_a2f_layer=0.1,
+        t_f2a_layer=0.1,
+        t_step=50.0,
+        comm_hidden=False,
     )
     session = _build_afd_session_with_phase_metrics(
-        monkeypatch, prefill_metrics=prefill_metrics, decode_metrics=decode_metrics,
+        monkeypatch,
+        prefill_metrics=prefill_metrics,
+        decode_metrics=decode_metrics,
     )
 
     summary = session.run_afd(RuntimeConfig(isl=128, osl=10), phase="both")
@@ -445,8 +463,7 @@ def test_afd_summary_phase_both_paired_scalars_and_nan_unprefixed(monkeypatch):
 
     # Un-prefixed scalars are NaN (numeric) / None (bool) so consumers
     # cannot accidentally treat decode-only values as the both-phase answer.
-    for key in ("t_a_layer", "t_f_layer", "t_a2f_layer", "t_f2a_layer",
-                "t_c_layer", "t_step", "balance_ratio"):
+    for key in ("t_a_layer", "t_f_layer", "t_a2f_layer", "t_f2a_layer", "t_c_layer", "t_step", "balance_ratio"):
         assert math.isnan(result[key]), f"expected NaN un-prefixed {key} in phase=both, got {result[key]!r}"
     assert result["comm_hidden"] is None
 
@@ -460,11 +477,16 @@ def test_afd_summary_phase_prefill_mirrors_unprefixed_into_prefill_pair(monkeypa
     on a uniform schema.
     """
     prefill_metrics = _fake_phase_metrics(
-        t_a_layer=0.5, t_f_layer=0.7, balance_ratio=0.71,
-        t_step=12.5, comm_hidden=True,
+        t_a_layer=0.5,
+        t_f_layer=0.7,
+        balance_ratio=0.71,
+        t_step=12.5,
+        comm_hidden=True,
     )
     session = _build_afd_session_with_phase_metrics(
-        monkeypatch, prefill_metrics=prefill_metrics, decode_metrics=prefill_metrics,
+        monkeypatch,
+        prefill_metrics=prefill_metrics,
+        decode_metrics=prefill_metrics,
     )
 
     summary = session.run_afd(RuntimeConfig(isl=128, osl=10), phase="prefill")
@@ -482,9 +504,15 @@ def test_afd_summary_phase_prefill_mirrors_unprefixed_into_prefill_pair(monkeypa
     # Prefill-pair matches; decode-pair is NaN/None.
     assert result["prefill_t_a_layer"] == pytest.approx(0.5)
     assert result["prefill_comm_hidden"] is True
-    for key in ("decode_t_a_layer", "decode_t_f_layer", "decode_t_a2f_layer",
-                "decode_t_f2a_layer", "decode_t_c_layer", "decode_t_step",
-                "decode_balance_ratio"):
+    for key in (
+        "decode_t_a_layer",
+        "decode_t_f_layer",
+        "decode_t_a2f_layer",
+        "decode_t_f2a_layer",
+        "decode_t_c_layer",
+        "decode_t_step",
+        "decode_balance_ratio",
+    ):
         assert math.isnan(result[key]), f"expected NaN {key} in phase=prefill, got {result[key]!r}"
     assert result["decode_comm_hidden"] is None
 
@@ -494,11 +522,16 @@ def test_afd_summary_phase_decode_mirrors_unprefixed_into_decode_pair(monkeypatc
     and the un-prefixed form; ``prefill_*`` are NaN/None.
     """
     decode_metrics = _fake_phase_metrics(
-        t_a_layer=1.2, t_f_layer=0.9, balance_ratio=1.33,
-        t_step=50.0, comm_hidden=False,
+        t_a_layer=1.2,
+        t_f_layer=0.9,
+        balance_ratio=1.33,
+        t_step=50.0,
+        comm_hidden=False,
     )
     session = _build_afd_session_with_phase_metrics(
-        monkeypatch, prefill_metrics=decode_metrics, decode_metrics=decode_metrics,
+        monkeypatch,
+        prefill_metrics=decode_metrics,
+        decode_metrics=decode_metrics,
     )
 
     summary = session.run_afd(RuntimeConfig(isl=128, osl=10), phase="decode")
@@ -512,9 +545,15 @@ def test_afd_summary_phase_decode_mirrors_unprefixed_into_decode_pair(monkeypatc
 
     assert result["decode_t_a_layer"] == pytest.approx(1.2)
     assert result["decode_comm_hidden"] is False
-    for key in ("prefill_t_a_layer", "prefill_t_f_layer", "prefill_t_a2f_layer",
-                "prefill_t_f2a_layer", "prefill_t_c_layer", "prefill_t_step",
-                "prefill_balance_ratio"):
+    for key in (
+        "prefill_t_a_layer",
+        "prefill_t_f_layer",
+        "prefill_t_a2f_layer",
+        "prefill_t_f2a_layer",
+        "prefill_t_c_layer",
+        "prefill_t_step",
+        "prefill_balance_ratio",
+    ):
         assert math.isnan(result[key]), f"expected NaN {key} in phase=decode, got {result[key]!r}"
     assert result["prefill_comm_hidden"] is None
 
@@ -530,11 +569,16 @@ def test_combined_with_pd_keeps_afd_side_pair_and_marks_static_side_nan(monkeypa
     side stays NaN/None so readers do not mistake its rows for AFD output.
     """
     decode_metrics = _fake_phase_metrics(
-        t_a_layer=1.2, t_f_layer=0.9, balance_ratio=1.33,
-        t_step=50.0, comm_hidden=False,
+        t_a_layer=1.2,
+        t_f_layer=0.9,
+        balance_ratio=1.33,
+        t_step=50.0,
+        comm_hidden=False,
     )
     session = _build_afd_session_with_phase_metrics(
-        monkeypatch, prefill_metrics=decode_metrics, decode_metrics=decode_metrics,
+        monkeypatch,
+        prefill_metrics=decode_metrics,
+        decode_metrics=decode_metrics,
         combined_with_pd=True,
     )
 
@@ -546,15 +590,23 @@ def test_combined_with_pd_keeps_afd_side_pair_and_marks_static_side_nan(monkeypa
     # treats as the "other phase". Only the fields the combiner reads
     # (mode/raw/throughput numbers) need to be plausible.
     static_raw = {
-        "model": afd_raw["model"] if "model" in afd_raw else "test-model",
-        "(p)tp": 1, "(p)pp": 1, "(p)dp": 1, "(p)bs": 1, "(p)gpus": 1,
+        "model": afd_raw.get("model", "test-model"),
+        "(p)tp": 1,
+        "(p)pp": 1,
+        "(p)dp": 1,
+        "(p)bs": 1,
+        "(p)gpus": 1,
         "(p)impl": "trtllm",
-        "ttft": 25.0, "seq/s": 5.0, "tokens/s/user": 100.0,
+        "ttft": 25.0,
+        "seq/s": 5.0,
+        "tokens/s/user": 100.0,
     }
     static_result = _estimate_result(raw=static_raw, mode="static")
 
     merged = _combine_afd_static_estimate_results(
-        afd_result=afd_result, static_result=static_result, afd_phase="decode",
+        afd_result=afd_result,
+        static_result=static_result,
+        afd_phase="decode",
     )
 
     # Decode-side pair (AFD): real values.
@@ -564,11 +616,16 @@ def test_combined_with_pd_keeps_afd_side_pair_and_marks_static_side_nan(monkeypa
 
     # Prefill-side pair (static, not AFD): NaN/None marks "not estimated
     # under the AFD model".
-    for key in ("prefill_t_a_layer", "prefill_t_f_layer", "prefill_t_a2f_layer",
-                "prefill_t_f2a_layer", "prefill_t_c_layer", "prefill_t_step",
-                "prefill_balance_ratio"):
-        assert math.isnan(merged.raw[key]), \
-            f"expected NaN {key} on static prefill side, got {merged.raw[key]!r}"
+    for key in (
+        "prefill_t_a_layer",
+        "prefill_t_f_layer",
+        "prefill_t_a2f_layer",
+        "prefill_t_f2a_layer",
+        "prefill_t_c_layer",
+        "prefill_t_step",
+        "prefill_balance_ratio",
+    ):
+        assert math.isnan(merged.raw[key]), f"expected NaN {key} on static prefill side, got {merged.raw[key]!r}"
     assert merged.raw["prefill_comm_hidden"] is None
 
 
@@ -741,13 +798,9 @@ def test_cli_estimate_afd_phase_both_with_combined_with_pd_raises(monkeypatch):
     deep failure inside ``AFDConfig.__post_init__`` or the static estimator.
     """
     _install_estimate_perf_db_stubs(monkeypatch)
-    monkeypatch.setattr(
-        api, "_run_afd_estimate", lambda **_kwargs: _estimate_result(raw={})
-    )
+    monkeypatch.setattr(api, "_run_afd_estimate", lambda **_kwargs: _estimate_result(raw={}))
 
-    with pytest.raises(
-        ValueError, match="afd_combined_with_pd=True is incompatible with afd_phase='both'"
-    ):
+    with pytest.raises(ValueError, match="afd_combined_with_pd=True is incompatible with afd_phase='both'"):
         api.cli_estimate(
             **_afd_cli_estimate_kwargs(afd_phase="both", afd_combined_with_pd=True),
         )

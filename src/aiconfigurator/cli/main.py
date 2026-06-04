@@ -638,7 +638,7 @@ def _add_estimate_mode_arguments(parser):
         "--a-batch-size",
         type=int,
         default=128,
-        help="Per-A-Worker batch size (AFD mode). Default: 128.",
+        help=("Total in-flight batch size per A-Worker before microbatch splitting (AFD mode). Default: 128."),
     )
     parser.add_argument(
         "--f-moe-ep-size",
@@ -690,8 +690,7 @@ def _add_estimate_mode_arguments(parser):
         "--boundary-on-ffn",
         action="store_true",
         default=False,
-        help="Assign boundary ops (add_norm_2, logits_gemm) to F-Worker. "
-        "Default is A-Worker; pass this flag to flip.",
+        help="Assign boundary ops (add_norm_2, logits_gemm) to F-Worker. Default is A-Worker; pass this flag to flip.",
     )
 
     # Quantization
@@ -1925,10 +1924,7 @@ def _print_per_ops_latency(per_ops_data: dict) -> None:
 
     comm = per_ops_data.get("comm", {})
     if comm:
-        directional = {
-            k: v for k, v in comm.items()
-            if k.endswith("_a2f") or k.endswith("_f2a")
-        }
+        directional = {k: v for k, v in comm.items() if k.endswith("_a2f") or k.endswith("_f2a")}
         if directional:
             print()
             _print_per_ops_section("AFD Transfer (per layer, a2f + f2a)", directional)

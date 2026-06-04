@@ -504,7 +504,7 @@ class TaskConfigFactory:
                 # branch below does for prefill/decode, and promote
                 # ``worker_config.moe_quant_mode`` only when the F-pool
                 # (where the MoE GEMM actually runs) is on Blackwell.
-                if ctx.system_name in _blackwell_systems:
+                if _is_blackwell_system(ctx.system_name):
                     _deep_merge(config_dict, {"worker_config": quant_override})
                     applied_layers.append("gptoss-blackwell-mxfp8-afd")
             elif ctx.serving_mode == "disagg":
@@ -794,7 +794,6 @@ class TaskConfigFactory:
             decode_cfg.num_gpu_per_worker = [num for num in decode_cfg.num_gpu_per_worker if num <= ctx.total_gpus]
             logger.debug("Overwriting num gpu per decode worker to %s", decode_cfg.num_gpu_per_worker)
 
-
     @staticmethod
     def _afd_defaults_layer(ctx: TaskContext) -> dict:
         """Default configuration for AFD (Attention-FFN Disaggregation) mode.
@@ -881,19 +880,18 @@ class TaskConfigFactory:
             n_f_nodes = afd_cfg.get("n_f_nodes", 1)
             if spec_gpus_per_node is None:
                 logger.debug(
-                    "AFD total_gpus check skipped: could not resolve "
-                    "num_gpus_per_node for system '%s'.",
+                    "AFD total_gpus check skipped: could not resolve num_gpus_per_node for system '%s'.",
                     ctx.system_name,
                 )
                 return
             total_requested = (n_a_nodes + n_f_nodes) * spec_gpus_per_node
             if total_requested > ctx.total_gpus:
-                logger.warning(
-                    "AFD config requests %d GPUs "
-                    "(n_a_nodes=%d + n_f_nodes=%d) * gpus_per_node=%d "
-                    "but total_gpus=%d. Consider adjusting.",
-                    total_requested, n_a_nodes, n_f_nodes, spec_gpus_per_node,
-                    ctx.total_gpus,
+                raise ValueError(
+                    f"AFD config requests {total_requested} GPUs "
+                    f"((n_a_nodes={n_a_nodes} + n_f_nodes={n_f_nodes}) * "
+                    f"gpus_per_node={spec_gpus_per_node}), which exceeds "
+                    f"total_gpus={ctx.total_gpus}. Reduce n_a_nodes/n_f_nodes "
+                    f"or increase total_gpus."
                 )
 
 

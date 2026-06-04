@@ -102,7 +102,9 @@ class AFDTransfer(Operation):
         return max((self._n_f_workers + self._gpus_per_node - 1) // self._gpus_per_node, 1)
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        x = int(kwargs.get("x", 1) or 1)
+        x = int(kwargs.get("x", 0))
+        if x <= 0:
+            return PerformanceResult(0.0, 0.0, source="empirical")
         nf = self.num_f_nodes
         p_send = _afd_send_prob(self._num_experts, self._topk, nf)
         bpe = self._comm_quant_mode.value.memory
@@ -181,7 +183,9 @@ class AFDFAllGather(Operation):
         f_local = self.f_gpus_in_node
         if f_local <= 1 or self._rank_mapping != "one_to_one":
             return PerformanceResult(0.0, 0.0, source="empirical")
-        x = int(kwargs.get("x", 1) or 1)
+        x = int(kwargs.get("x", 0))
+        if x <= 0:
+            return PerformanceResult(0.0, 0.0, source="empirical")
         total = x * self._n_a_workers
         nf = self.num_f_nodes
         p_send = _afd_send_prob(self._num_experts, self._topk, nf)
@@ -259,7 +263,9 @@ class AFDFReduceScatter(Operation):
         f_local = self.f_gpus_in_node
         if f_local <= 1 or self._rank_mapping != "one_to_one":
             return PerformanceResult(0.0, 0.0, source="empirical")
-        x = int(kwargs.get("x", 1) or 1)
+        x = int(kwargs.get("x", 0))
+        if x <= 0:
+            return PerformanceResult(0.0, 0.0, source="empirical")
         total = x * self._n_a_workers
         nf = self.num_f_nodes
         p_send = _afd_send_prob(self._num_experts, self._topk, nf)
@@ -308,8 +314,10 @@ class AFDCombine(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         if self._f_moe_ep_size <= 1:  # no expert parallelism
             return PerformanceResult(0.0, 0.0, source="empirical")
-        x = int(kwargs.get("x", 1) or 1)
-        tokens_per_a_rank = max(1, x // self._tp_a)
+        x = int(kwargs.get("x", 0))
+        if x <= 0:
+            return PerformanceResult(0.0, 0.0, source="empirical")
+        tokens_per_a_rank = (x + self._tp_a - 1) // self._tp_a
         bpe = self._comm_quant_mode.value.memory
         total_bytes = int((self._f_moe_ep_size + 1) * tokens_per_a_rank * self._hidden_size * bpe)
         if total_bytes <= 0:

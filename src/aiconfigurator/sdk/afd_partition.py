@@ -132,9 +132,7 @@ def _classify_op(
 ) -> AFDSide:
     if isinstance(op, operations.OverlapOp):
         return _classify_overlap_op(op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
-    return _classify_by_markers(
-        op, _op_name(op), allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side
-    )
+    return _classify_by_markers(op, _op_name(op), allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
 
 
 def _classify_overlap_op(
@@ -158,9 +156,7 @@ def _classify_overlap_op(
 
         raise AFDPartitionError(f"OverlapOp '{name}' spans A/F boundaries and cannot be kept atomic.")
 
-    return _classify_by_markers(
-        op, name, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side
-    )
+    return _classify_by_markers(op, name, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
 
 
 def _classify_inner_overlap_op(
@@ -171,9 +167,7 @@ def _classify_inner_overlap_op(
 ) -> AFDSide:
     if isinstance(op, operations.OverlapOp):
         return _classify_overlap_op(op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
-    return _classify_by_markers(
-        op, _op_name(op), allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side
-    )
+    return _classify_by_markers(op, _op_name(op), allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
 
 
 def _validate_phase(phase: str) -> AFDPhase:
@@ -302,9 +296,7 @@ def _is_attention_side_op(name: str) -> bool:
     # when none of the FFN-style forms is present; the matching FFN
     # markers added to ``_is_ffn_side_op`` below pick up the excluded
     # names on the second-pass attn -> ffn check.
-    if "proj_gemm" in name and not any(ffn in name for ffn in _FFN_PROJ_GEMM_MARKERS):
-        return True
-    return False
+    return "proj_gemm" in name and not any(ffn in name for ffn in _FFN_PROJ_GEMM_MARKERS)
 
 
 def _is_ffn_side_op(name: str) -> bool:

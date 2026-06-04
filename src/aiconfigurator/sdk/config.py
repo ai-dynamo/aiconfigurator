@@ -121,7 +121,6 @@ class RuntimeConfig:
     num_image_tokens: int = 0  # override: ViT output tokens per image; ignored when image_height/width are set
 
 
-
 @dataclass
 class AFDConfig:
     """Configuration for Attention-FFN Disaggregated (AFD) serving mode.
@@ -180,6 +179,9 @@ class AFDConfig:
     f_moe_ep_size: int = 1
 
     # -- Batch and pipeline --
+    # Total in-flight batch size per A-Worker.  AFDInferenceSession
+    # derives the per-microbatch batch as ceil(a_batch_size / num_microbatches)
+    # for compute and transfer latency queries.
     a_batch_size: int = 128
     num_microbatches: int = 3
     pipeline_model: str = "optimistic"  # "optimistic" (K=3) or "conservative" (K=2)
@@ -230,6 +232,22 @@ class AFDConfig:
     n_f_workers: int = field(init=False)
 
     def __post_init__(self) -> None:
+        valid_phases = ("prefill", "decode", "both")
+        valid_pipeline_models = ("optimistic", "conservative", "serial")
+        if self.phase not in valid_phases:
+            raise ValueError(f"phase must be one of {valid_phases}, got {self.phase!r}.")
+        if self.pipeline_model not in valid_pipeline_models:
+            raise ValueError(f"pipeline_model must be one of {valid_pipeline_models}, got {self.pipeline_model!r}.")
+        if self.n_a_nodes < 1 or self.n_f_nodes < 1:
+            raise ValueError(f"n_a_nodes ({self.n_a_nodes}) and n_f_nodes ({self.n_f_nodes}) must both be >= 1.")
+        if self.a_batch_size < 1:
+            raise ValueError(f"a_batch_size ({self.a_batch_size}) must be >= 1.")
+        if self.num_microbatches is not None and self.num_microbatches < 1:
+            raise ValueError(f"num_microbatches ({self.num_microbatches}) must be >= 1.")
+        if self.comm_overhead_factor <= 0:
+            raise ValueError(f"comm_overhead_factor ({self.comm_overhead_factor}) must be > 0.")
+        if self.f_moe_ep_size < 1:
+            raise ValueError(f"f_moe_ep_size ({self.f_moe_ep_size}) must be >= 1.")
         if self.gpus_per_node < 1:
             raise ValueError(
                 f"gpus_per_node ({self.gpus_per_node}) must be >= 1. "
@@ -238,10 +256,7 @@ class AFDConfig:
                 "on the default sentinel."
             )
         if self.tp_a < 1 or self.gpus_per_node % self.tp_a != 0:
-            raise ValueError(
-                f"tp_a ({self.tp_a}) must be a positive divisor of "
-                f"gpus_per_node ({self.gpus_per_node})."
-            )
+            raise ValueError(f"tp_a ({self.tp_a}) must be a positive divisor of gpus_per_node ({self.gpus_per_node}).")
         if self.phase == "both" and self.combined_with_pd:
             raise ValueError(
                 "combined_with_pd=True is incompatible with phase='both': "

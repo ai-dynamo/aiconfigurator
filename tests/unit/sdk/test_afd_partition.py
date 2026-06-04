@@ -270,9 +270,7 @@ def test_build_afd_ops_partition_hf_style_ffn_proj_gemm_lands_on_ffn(ffn_proj_na
 
     partition = build_afd_ops_partition(model, phase="generation")
 
-    assert _names(partition.attn_ops) == [], (
-        f"{ffn_proj_name} must not classify as attn-side"
-    )
+    assert _names(partition.attn_ops) == [], f"{ffn_proj_name} must not classify as attn-side"
     assert _names(partition.ffn_ops) == [ffn_proj_name]
 
 
