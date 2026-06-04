@@ -306,6 +306,7 @@ def test_gemm_query_subtracts_overheads_for_fp8_static():
     result = op.query(db, x=64, model_name="Qwen/Qwen3-32B")
     assert float(result) == pytest.approx(7.0)
     assert result.energy == pytest.approx(70.0)
+    assert result.source == "estimated"
     assert db.calls == [
         ("gemm", common.GEMMQuantMode.fp8_static),
         ("compute_scale", common.GEMMQuantMode.fp8_static),
@@ -324,6 +325,7 @@ def test_gemm_query_subtracts_overheads_for_fp8_static():
     result2 = op2.query(db2, x=64, model_name="Qwen/Qwen3-32B")
     assert float(result2) == pytest.approx(9.0)
     assert result2.energy == pytest.approx(90.0)
+    assert result2.source == "estimated"
     assert ("scale_matrix", common.GEMMQuantMode.fp8_static) not in db2.calls
 
     # fp8 (non-static): no overhead subtraction
@@ -338,4 +340,5 @@ def test_gemm_query_subtracts_overheads_for_fp8_static():
     result3 = op3.query(db3, x=64, model_name="Qwen/Qwen3-32B")
     assert float(result3) == pytest.approx(10.0)
     assert result3.energy == pytest.approx(100.0)
+    assert result3.source == "silicon"
     assert db3.calls == [("gemm", common.GEMMQuantMode.fp8)]

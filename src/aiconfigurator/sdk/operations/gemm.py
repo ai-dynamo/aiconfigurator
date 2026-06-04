@@ -677,6 +677,9 @@ class GEMM(Operation):
                 sub_src = getattr(scale_matrix_result, "source", "silicon")
                 if sub_src != source:
                     source = "mixed"
+            # fp8_static is modeled from dynamic FP8 plus overhead tables, so
+            # expose source="estimated" instead of measured silicon.
+            source = "estimated"
 
         # Ensure non-negative latency and energy
         latency_clamped = max(0.0, latency)
