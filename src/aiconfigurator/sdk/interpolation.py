@@ -426,24 +426,48 @@ def interp_2d_1d(
     exact = _get_exact_3d(data, x, y, z)
     if exact is not _MISSING:
         return exact
-    _require_3d_axis_coverage(data, context=f"3-D {method} interpolation")
 
     x_values = []
     point_helper = nearest_1d_point_allow_singleton_axis if allow_singleton_axes else nearest_1d_point_helper
     x_left, x_right = point_helper(x, list(data.keys()))
+    slice_bounds = []
 
     for i in [x_left, x_right]:
-        points_list = []
-        values_list = []
         y_left, y_right = point_helper(y, list(data[i].keys()))
+        z_bounds = []
         for j in [y_left, y_right]:
             z_left, z_right = point_helper(z, list(data[i][j].keys()))
+            z_bounds.append((j, z_left, z_right))
+        slice_bounds.append((i, y_left, y_right, z_bounds))
+
+    if not allow_singleton_axes:
+        _require_3d_axis_coverage(data, context=f"3-D {method} interpolation")
+
+    for i, y_left, y_right, z_bounds in slice_bounds:
+        points_list = []
+        values_list = []
+        for j, z_left, z_right in z_bounds:
             points_list.append([j, z_left])
             points_list.append([j, z_right])
             values_list.append(data[i][j][z_left])
             values_list.append(data[i][j][z_right])
         if method == "cubic":
-            x_values.append(validate_interpolation_result(_reduced_griddata(points_list, values_list, (y, z), "cubic")))
+            try:
+                value = _reduced_griddata(points_list, values_list, (y, z), "cubic")
+            except ValueError as exc:
+                if not allow_singleton_axes:
+                    raise
+                logger.debug("Falling back to rectangular interpolation for degenerate cubic slice: %s", exc)
+                value = interp_2d_rectangular_slice(
+                    y_left,
+                    y_right,
+                    z_bounds[0][1],
+                    z_bounds[0][2],
+                    y,
+                    z,
+                    data[i],
+                )
+            x_values.append(validate_interpolation_result(value))
         elif method == "bilinear":
             x_values.append(
                 validate_interpolation_result(
