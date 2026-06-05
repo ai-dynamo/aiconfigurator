@@ -1881,6 +1881,21 @@ class PerfDatabase:
         return CustomAllReduce._query_custom_allreduce_table(self, quant_mode, tp_size, size, database_mode)
 
     @functools.lru_cache(maxsize=32768)
+    def query_layerwise(
+        self,
+        model: str,
+        phase: str,
+        tp_size: int,
+        batch_size: int,
+        seq_len: int,
+        seq_len_kv_cache: int = 0,
+    ) -> PerformanceResult:
+        """Query full transformer-layer latency. Delegates to ``Layerwise``."""
+        from aiconfigurator.sdk.operations.layerwise import Layerwise
+
+        return Layerwise._query_layerwise_table(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache)
+
+    @functools.lru_cache(maxsize=32768)
     def query_nccl(
         self,
         dtype: common.CommQuantMode,
