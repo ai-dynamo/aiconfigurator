@@ -1158,6 +1158,55 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
   //                              with leading `~`, fail with strikethrough.
   //   showAllVersions = false -> just the latest tested version, styled the
   //                              same way based on which bucket it came from.
+  const collapsedChipVersions = (cell) => {
+    if (
+      (cell.status === 'pass' || cell.status === 'latest_pass_with_older_issues' || cell.status === 'older_pass_only')
+      && cell.passVersions && cell.passVersions.length
+    ) {
+      return [cell.passVersions[0]];
+    }
+    if (cell.status === 'partial') {
+      const brokenVersions = [
+        ...(cell.partialVersions || []).map(v => ({ version: v, kind: 'partial' })),
+        ...(cell.failVersions || []).map(v => ({ version: v, kind: 'fail' })),
+      ].sort((a, b) => compareVersionTuples(versionSortKey(b.version), versionSortKey(a.version)));
+      const latestBroken = brokenVersions[0];
+      if (latestBroken) return [latestBroken.version];
+      if (cell.partialVersions && cell.partialVersions.length) return [cell.partialVersions[0]];
+    }
+    if (cell.status === 'fail') {
+      if (cell.failVersions && cell.failVersions.length) return [cell.failVersions[0]];
+      if (cell.partialVersions && cell.partialVersions.length) return [cell.partialVersions[0]];
+    }
+    if (cell.status === 'framework_unsupported' && cell.frameworkUnsupportedVersions && cell.frameworkUnsupportedVersions.length) {
+      return [cell.frameworkUnsupportedVersions[0]];
+    }
+    if (cell.status === 'hw_incompatible' && cell.hwVersions && cell.hwVersions.length) {
+      return [cell.hwVersions[0]];
+    }
+    return [];
+  };
+
+  const versionTooltipParts = (cell) => {
+    const hiddenVersions = showAllVersions ? new Set() : new Set(collapsedChipVersions(cell));
+    const visible = (versions) => (versions || []).filter(v => !hiddenVersions.has(v));
+    const parts = [];
+    const passVersions = visible(cell.passVersions);
+    const partialVersions = visible(cell.partialVersions);
+    const failVersions = visible(cell.failVersions);
+    const frameworkUnsupportedVersions = visible(cell.frameworkUnsupportedVersions);
+    const hwVersions = visible(cell.hwVersions);
+
+    if (passVersions.length) parts.push(`Pass: ${passVersions.join(', ')}`);
+    if (partialVersions.length) parts.push(`Partial: ${partialVersions.join(', ')}`);
+    if (failVersions.length) parts.push(`Fail: ${failVersions.join(', ')}`);
+    if (frameworkUnsupportedVersions.length) {
+      parts.push(`Framework unsupported: ${frameworkUnsupportedVersions.join(', ')}`);
+    }
+    if (hwVersions.length) parts.push(`Hardware incompatible: ${hwVersions.join(', ')}`);
+    return parts;
+  };
+
   const renderChips = (cell) => {
     const chips = [];
     const pushPass = (v) => chips.push(<span key={`p-${v}`}>{v}</span>);
@@ -1294,20 +1343,21 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
                 }
                 const detail = cell.detail || cell.error;
                 const clickable = Boolean(detail);
-                // Native browser tooltip with the full version breakdown so the
-                // user can always inspect all versions regardless of the
-                // "Show all versions" toggle.
-                const tooltipParts = [];
-                if (cell.passVersions && cell.passVersions.length) tooltipParts.push(`Pass: ${cell.passVersions.join(', ')}`);
-                if (cell.partialVersions && cell.partialVersions.length) tooltipParts.push(`Partial: ${cell.partialVersions.join(', ')}`);
-                if (cell.failVersions && cell.failVersions.length) tooltipParts.push(`Fail: ${cell.failVersions.join(', ')}`);
-                if (cell.frameworkUnsupportedVersions && cell.frameworkUnsupportedVersions.length) tooltipParts.push(`Framework unsupported: ${cell.frameworkUnsupportedVersions.join(', ')}`);
-                if (cell.hwVersions && cell.hwVersions.length) tooltipParts.push(`Hardware incompatible: ${cell.hwVersions.join(', ')}`);
+                // Collapsed cells show one representative version. Hover adds
+                // only the extra version buckets, keeping single-version cells quiet.
+                const tooltipParts = versionTooltipParts(cell);
+                const versionTooltip = tooltipParts.length
+                  ? `${showAllVersions ? 'Versions' : 'Other versions'}\n${tooltipParts.join('\n')}`
+                  : null;
                 const tooltip = cell.status === 'framework_unsupported'
-                  ? (cell.error || 'Framework version does not support required model feature')
+                  ? [cell.error || 'Framework version does not support required model feature', versionTooltip]
+                    .filter(Boolean)
+                    .join('\n\n')
                   : cell.status === 'hw_incompatible'
-                    ? (cell.error || 'Hardware is incompatible with model datatype')
-                    : `${c.backend}\n${tooltipParts.join('\n')}`;
+                    ? [cell.error || 'Hardware is incompatible with model datatype', versionTooltip]
+                      .filter(Boolean)
+                      .join('\n\n')
+                    : [c.backend, versionTooltip].filter(Boolean).join('\n');
                 const displayTooltip = clickable ? `${tooltip}\n\nClick to keep this open and copy the command.` : tooltip;
                 return (
                   <td key={c.key}
