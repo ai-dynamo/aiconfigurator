@@ -6,6 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # aiconfigurator
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/aiconfigurator)
+[![Discord](https://dcbadge.limes.pink/api/server/mRJ2KNzwYE?style=flat)](https://discord.gg/mRJ2KNzwYE)
+
 
 In disaggregated serving, configuring an effective deployment is challenging: you need to decide how many prefill and decode
 workers to run, and the parallelism for each worker. Combined with SLA targets for TTFT (Time to First Token) and
@@ -453,6 +455,7 @@ We welcome contributions from the community! Check out the below resources to ge
 
 - [DEVELOPMENT.md](DEVELOPMENT.md) - Set up your development environment, run tests, and follow our coding standards
 - [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines and requirements
+- [Discord](https://discord.gg/mRJ2KNzwYE) - Chat with team and community
 
 ### How To Add A New Model
 Adding a new model will require modifying the source code and perhaps collecting new data for the model. Please refer to [How to Add a New Model](docs/add_a_new_model.md).

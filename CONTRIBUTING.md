@@ -33,6 +33,11 @@ proposed change so that the Dynamo team can provide feedback.
 - If your enhancement provides a user visible feature then you need to
   provide documentation.
 
+
+# Join the Community
+
+Join the community on [Discord](https://discord.gg/mRJ2KNzwYE) to get help, share your ideas, and stay updated on the latest news and developments.
+
 # Contribution Rules
 
 - The code style convention is enforced by common formatting tools
