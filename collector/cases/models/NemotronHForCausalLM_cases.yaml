@@ -9,6 +9,7 @@ model_paths:
   - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
   - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
   - nvidia/Nemotron-H-56B-Base-8K
+  - nvidia/nemotron-ultra-rl-050826
 include_base: true
 description: >
   Nemotron-H hybrid Mamba/MoE model-centric collection plan.
