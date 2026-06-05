@@ -7,6 +7,8 @@ model_path: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 model_paths:
   - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
   - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+  - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
+  - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8
   - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
   - nvidia/Nemotron-H-56B-Base-8K
 include_base: true
