@@ -693,6 +693,14 @@ function readSearchQuery() {
   return new URLSearchParams(window.location.search).get('q') || '';
 }
 
+function readBranchQuery() {
+  return new URLSearchParams(window.location.search).get('branch') || 'main';
+}
+
+function readSystemQuery() {
+  return new URLSearchParams(window.location.search).get('system') || '';
+}
+
 function writeSearchQuery(query) {
   const params = new URLSearchParams(window.location.search);
   const normalized = query.trim();
@@ -1725,7 +1733,7 @@ function Footer() {
 // ── App ─────────────────────────────────────────────────────────────
 
 function App() {
-  const [branch, setBranch] = useState('main');
+  const [branch, setBranch] = useState(readBranchQuery);
   const [releaseBranches, setReleaseBranches] = useState([]);
   const [branchesLoading, setBranchesLoading] = useState(true);
   const [branchWarning, setBranchWarning] = useState(null);
@@ -1763,7 +1771,10 @@ function App() {
       .then(rows => {
         setCsvRows(rows);
         const systems = sortSystems([...new Set(rows.map(r => r.System))]);
-        if (systems.includes(PREFERRED_DEFAULT_SYSTEM)) {
+        const requestedSystem = readSystemQuery();
+        if (requestedSystem && systems.includes(requestedSystem)) {
+          setActiveSystem(requestedSystem);
+        } else if (systems.includes(PREFERRED_DEFAULT_SYSTEM)) {
           setActiveSystem(PREFERRED_DEFAULT_SYSTEM);
         } else {
           setActiveSystem(systems[0] || null);
@@ -1776,7 +1787,7 @@ function App() {
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => { loadCsv('main'); }, [loadCsv]);
+  useEffect(() => { loadCsv(readBranchQuery()); }, [loadCsv]);
 
   const systems = useMemo(() => sortSystems([...new Set(csvRows.map(r => r.System))]), [csvRows]);
   const totalPass = useMemo(() => csvRows.filter(r => r.Status === 'PASS').length, [csvRows]);
