@@ -1207,6 +1207,23 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
     return parts;
   };
 
+  const versionSummaryTooltip = (backend, cell) => {
+    const buckets = [
+      { label: 'PASS', versions: cell.passVersions || [] },
+      { label: 'PARTIAL', versions: cell.partialVersions || [] },
+      { label: 'FAIL', versions: cell.failVersions || [] },
+      { label: STATUS_FRAMEWORK_INCOMPATIBLE, versions: cell.frameworkUnsupportedVersions || [] },
+      { label: STATUS_HW_INCOMPATIBLE, versions: cell.hwVersions || [] },
+    ].filter(bucket => bucket.versions.length);
+    const total = buckets.reduce((count, bucket) => count + bucket.versions.length, 0);
+    if (total <= 1) return backend;
+
+    const summary = buckets
+      .map(bucket => `${bucket.versions.length} ${bucket.label}`)
+      .join(', ');
+    return `${backend} summary: ${total} versions tested; ${summary}`;
+  };
+
   const renderChips = (cell) => {
     const chips = [];
     const pushPass = (v) => chips.push(<span key={`p-${v}`}>{v}</span>);
@@ -1345,19 +1362,28 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
                 const clickable = Boolean(detail);
                 // Collapsed cells show one representative version. Hover adds
                 // only the extra version buckets, keeping single-version cells quiet.
+                const summaryTooltip = versionSummaryTooltip(c.backend, cell);
                 const tooltipParts = versionTooltipParts(cell);
                 const versionTooltip = tooltipParts.length
                   ? `${showAllVersions ? 'Versions' : 'Other versions'}\n${tooltipParts.join('\n')}`
                   : null;
                 const tooltip = cell.status === 'framework_unsupported'
-                  ? [cell.error || 'Framework version does not support required model feature', versionTooltip]
+                  ? [
+                    summaryTooltip,
+                    versionTooltip,
+                    cell.error || 'Framework version does not support required model feature',
+                  ]
                     .filter(Boolean)
                     .join('\n\n')
                   : cell.status === 'hw_incompatible'
-                    ? [cell.error || 'Hardware is incompatible with model datatype', versionTooltip]
+                    ? [
+                      summaryTooltip,
+                      versionTooltip,
+                      cell.error || 'Hardware is incompatible with model datatype',
+                    ]
                       .filter(Boolean)
                       .join('\n\n')
-                    : [c.backend, versionTooltip].filter(Boolean).join('\n');
+                    : [summaryTooltip, versionTooltip].filter(Boolean).join('\n\n');
                 const displayTooltip = clickable ? `${tooltip}\n\nClick to keep this open and copy the command.` : tooltip;
                 return (
                   <td key={c.key}
