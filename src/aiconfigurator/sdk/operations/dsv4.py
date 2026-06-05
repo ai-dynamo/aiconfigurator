@@ -32,8 +32,6 @@ Cache key matches every other migrated op:
 from __future__ import annotations
 
 import copy
-import csv
-import functools
 import logging
 import os
 from collections import defaultdict
@@ -787,6 +785,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             cls._sparse_kernel_cache[key] = {
                 "paged_mqa_logits": _load_sparse(PerfDataFilename.dsv4_paged_mqa_logits_module),
                 "hca_attn": _load_sparse(PerfDataFilename.dsv4_hca_attn_module),
+                "csa_attn": _load_sparse(PerfDataFilename.dsv4_csa_attn_module),
             }
 
             cls._record_load()
@@ -1636,92 +1635,37 @@ def _dsv4_normalize_dtype(name: str) -> str:
 # Gate: AIC_DSV4_TOPK_CORRECTION (default on; set "0" to disable).
 # ───────────────────────────────────────────────────────────────────────
 _TOPK_CORRECTION_ENABLED = os.environ.get("AIC_DSV4_TOPK_CORRECTION", "1") != "0"
-_TOPK_CALIB_BASENAME = "dsv4_csa_topk_calib_perf"
-# Back-compat alias (older code/tests referenced the .txt name directly).
-_TOPK_CALIB_FILENAME = _TOPK_CALIB_BASENAME + ".txt"
 
 
-def _read_topk_calib_rows(dirpath: str):
-    """Yield calib rows (as dicts) from the canonical ``.parquet`` the collector
-    finalizes, falling back to the legacy ``.txt``. Returns None if neither
-    exists. The collector v2 finalizes every ``*_perf.txt`` to ``*_perf.parquet``
-    (the ``.txt`` is staging-only and deleted), so reading parquet keeps the topK
-    calibration reproducible from a plain ``collect.py --ops dsv4_csa_topk_calib``
-    run with no manual ``.txt`` step."""
-    parquet_path = os.path.join(dirpath, _TOPK_CALIB_BASENAME + ".parquet")
-    txt_path = os.path.join(dirpath, _TOPK_CALIB_BASENAME + ".txt")
-    if os.path.isfile(parquet_path):
-        try:
-            import pandas as pd
+def _build_topk_calib_from_rows(by_mode):
+    """Pair the flat / top_last rows the sparse-op loader produced into the topK
+    DELTA table ``{'exact': {(step, isl, bs): delta_ms},
+                   'by_pi': {(step, isl): [(bs, delta_ms), ...]}}`` or ``None``.
 
-            return parquet_path, pd.read_parquet(parquet_path).to_dict("records")
-        except Exception as exc:  # pragma: no cover - corrupt/unreadable parquet
-            logger.warning(f"failed reading {parquet_path} ({exc}); trying .txt")
-    if os.path.isfile(txt_path):
-        with open(txt_path, newline="") as f:
-            return txt_path, list(csv.DictReader(f))
-    return None, None
-
-
-def _topk_row_value(row, key):
-    """Fetch a field from a parquet-record or csv-row dict, treating NaN/'' as missing."""
-    v = row.get(key)
-    if v is None or v == "":
-        return None
-    # pandas NaN (float != itself)
-    if isinstance(v, float) and v != v:
-        return None
-    return v
-
-
-@functools.lru_cache(maxsize=16)
-def _load_dsv4_topk_calib(dirpath: str):
-    """Return {'exact': {(prefix, isl, bs): delta_ms},
-              'by_pi': {(prefix, isl): [(bs, delta_ms), ...]}} or None.
-
-    DELTA = flat.latency - top_last.latency (degenerate vs representative topK),
-    measured standalone on B300 over the full (prefix, isl, batch_size) grid.
-    The collector emits the calibration as TWO rows per shape, each a member of
-    the sparse-op family with a single ``latency``: ``score_mode=flat`` (the
-    degenerate worst-case the module CSV captured) and ``score_mode=top_last``
-    (the representative distribution). We pair the two rows per
-    ``(step, isl, batch_size)`` and subtract. Reads the canonical parquet
-    (collector output) or legacy .txt.
+    ``by_mode`` is the ``_TOPK_CALIB_KEYS`` nesting
+    ``data[step][isl][bs][score_mode] = {"latency": ms}``. The calibration is
+    stored as two rows per shape — ``score_mode=flat`` is the degenerate
+    worst-case the module CSV captured, ``top_last`` the representative one —
+    and DELTA = flat.latency - top_last.latency.
     """
-    path, rows = _read_topk_calib_rows(dirpath)
-    if rows is None:
+    if not by_mode:
         return None
-    # Pair the flat / top_last rows per (prefix, isl, bs) shape.
-    flat: dict = {}
-    top_last: dict = {}
-    for row in rows:
-        try:
-            prefix = int(float(_topk_row_value(row, "step")))
-            isl = int(float(row["isl"]))
-            bs = int(float(_topk_row_value(row, "batch_size") or 1))
-            mode = _topk_row_value(row, "score_mode")
-            latency = float(_topk_row_value(row, "latency"))
-        except (KeyError, ValueError, TypeError):
-            continue
-        if mode == "flat":
-            flat[(prefix, isl, bs)] = latency
-        elif mode == "top_last":
-            top_last[(prefix, isl, bs)] = latency
     exact = {}
     by_pi = {}
-    for key, flat_latency in flat.items():
-        top_last_latency = top_last.get(key)
-        if top_last_latency is None:
-            continue
-        delta = max(0.0, flat_latency - top_last_latency)
-        prefix, isl, bs = key
-        exact[key] = delta
-        by_pi.setdefault((prefix, isl), []).append((bs, delta))
+    for step, isl_d in by_mode.items():
+        for isl, bs_d in isl_d.items():
+            for bs, mode_d in bs_d.items():
+                flat = mode_d.get("flat")
+                top_last = mode_d.get("top_last")
+                if not isinstance(flat, dict) or not isinstance(top_last, dict):
+                    continue
+                delta = max(0.0, float(flat["latency"]) - float(top_last["latency"]))
+                exact[(step, isl, bs)] = delta
+                by_pi.setdefault((step, isl), []).append((bs, delta))
     if not exact:
         return None
     for k in by_pi:
         by_pi[k].sort()
-    logger.debug(f"loaded DSV4 topk calib from {path}: {len(exact)} shapes")
     return {"exact": exact, "by_pi": by_pi}
 
 
@@ -1793,16 +1737,22 @@ def _dsv4_topk_delta_ms(calib, prefix, isl, bs):
 
 
 def _get_dsv4_topk_calib(database):
-    """Load (and cache on ``database``) the CSA topK DELTA calibration from the
-    same data dir the module CSVs are loaded from."""
+    """Load (and cache on ``database``) the CSA topK DELTA calibration through
+    the same sparse-op loader + source resolution the other DSV4 ops use."""
     cached = getattr(database, "_dsv4_csa_topk_calib", _MISSING)
     if cached is not _MISSING:
         return cached
     import os as _os
 
+    from aiconfigurator.sdk.perf_database import PerfDataFilename
+
     system_data_root = _os.path.join(database.systems_root, database.system_spec["data_dir"])
     data_dir = _os.path.join(system_data_root, database.backend, database.version)
-    calib = _load_dsv4_topk_calib(data_dir)
+    enum = PerfDataFilename.dsv4_csa_topk_calib
+    primary_path = _os.path.join(data_dir, enum.value)
+    sources = database._build_op_sources(enum, primary_path, system_data_root)
+    by_mode = load_dsv4_sparse_op_data(sources, _TOPK_CALIB_KEYS)
+    calib = _build_topk_calib_from_rows(by_mode)
     try:
         database._dsv4_csa_topk_calib = calib
     except Exception:
@@ -2045,35 +1995,65 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
     return dsv4_megamoe_data
 
 
-def load_dsv4_sparse_kernel_data(file_path: str):
-    """Load DeepSeek-V4 sparse-kernel CSV (paged_mqa_logits or hca_attn).
+# ───────────────────────────────────────────────────────────────────────
+# DSV4 sparse-op family loader (ONE engine for all four)
+# ───────────────────────────────────────────────────────────────────────
+# csa_attn / hca_attn / paged_mqa_logits (FMLA & indexer kernels) and the
+# csa_topk_calib DELTA rows share ONE column schema, so they all parse through
+# ``load_dsv4_sparse_op_data``; each consumer just supplies the key columns it
+# indexes on (declared here so callers stay in sync).
+_SPARSE_KERNEL_KEYS = ("num_heads", "tp_size", "step", "isl", "batch_size")
+_TOPK_CALIB_KEYS = ("step", "isl", "batch_size", "score_mode")
 
-    Emitted by ``collector.sglang.deepseekv4_sparse_modules``.  Used for
-    kernel-level past_kv Δ correction on top of the chunk-0 module baseline.
 
-    Dict structure:
-        data[native_heads][tp_size][past_kv][isl][bs] = {"latency": ms}
+def load_dsv4_sparse_op_data(file_or_sources, key_columns):
+    """Generic loader for the DeepSeek-V4 sparse-op family.
+
+    Reads the shared perf schema (parquet or txt, single path or override
+    ``(path, kernel_source_filter)`` sources — see ``_read_filtered_rows``) and
+    nests every row under ``key_columns`` in order, leaf == ``{"latency": ms}``.
+
+    Numeric key cells coerce to ``int``; non-numeric stay ``str`` (e.g.
+    ``score_mode``). Rows with a NaN/blank key are skipped. Returns ``None``
+    when no source file exists.
+
+    Consumers:
+      - sparse kernels: ``_SPARSE_KERNEL_KEYS`` -> data[heads][tp][past_kv][isl][bs]
+      - topk calib:     ``_TOPK_CALIB_KEYS``    -> data[step][isl][bs][score_mode]
     """
-    rows = _read_filtered_rows(file_path)
+    rows = _read_filtered_rows(file_or_sources)
     if rows is None:
-        logger.debug(f"DSV4 sparse-kernel data file {file_path} not found.")
         return None
 
-    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    def _coerce(value):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return value
 
+    root: dict = {}
     for row in rows:
-        # Skip duplicate header rows (file may be appended to across runs)
+        # Skip duplicate header rows (files may be appended to across runs).
         if row.get("batch_size") in (None, "", "batch_size"):
             continue
         try:
-            bs = int(row["batch_size"])
-            isl = int(row["isl"])
-            past_kv = int(row["step"])
-            tp_size = int(row.get("tp_size", 1))
+            keys = [_coerce(row[col]) for col in key_columns]
             latency = float(row["latency"])
-        except (TypeError, ValueError):
+        except (KeyError, TypeError, ValueError):
             continue
-        native_heads = int(row["num_heads"])
-        data[native_heads][tp_size][past_kv][isl][bs] = {"latency": latency}
+        if any(isinstance(k, float) and k != k for k in keys):  # NaN key cell
+            continue
+        node = root
+        for k in keys[:-1]:
+            node = node.setdefault(k, {})
+        node[keys[-1]] = {"latency": latency}
+    return root or None
 
-    return data
+
+def load_dsv4_sparse_kernel_data(file_or_sources):
+    """DSV4 sparse-kernel CSV (csa_attn / hca_attn / paged_mqa_logits).
+
+    Thin wrapper over ``load_dsv4_sparse_op_data`` with the kernel key columns,
+    yielding ``data[native_heads][tp_size][past_kv][isl][bs] = {"latency": ms}``.
+    """
+    return load_dsv4_sparse_op_data(file_or_sources, _SPARSE_KERNEL_KEYS)

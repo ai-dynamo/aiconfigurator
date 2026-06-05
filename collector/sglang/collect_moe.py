@@ -205,7 +205,10 @@ def get_moe_test_cases():
         for moe_type, num_tokens in itertools.product(model_moe_list, num_tokens_list):
             if not moe_model_allows_quantization("sglang", model_name, moe_type):
                 continue
-            is_native_dsv4 = model_name.startswith("deepseek-ai/DeepSeek-V4-")
+            # Native DeepSeek-V4 detection by config-derived architecture (not a
+            # model_name string pattern), so aliased/FP8 variants like
+            # sgl-project/DeepSeek-V4-Pro-FP8 are still recognized.
+            is_native_dsv4 = common_moe_testcase.architecture == "DeepseekV4ForCausalLM"
             if is_native_dsv4 and moe_type == "w4a8_mxfp4_mxfp8" and num_tokens > 8192:
                 # DeepSeek-V4 FP4 experts are only exercised up to the SGLang
                 # prefill chunk size. Larger synthetic masked-CuteDSL cases
@@ -1541,6 +1544,13 @@ def run_moe_torch(
         "int4_wo",
         "w4a16_mxfp4",
     ], "only support moe type = fp8_block, bfloat16, nvfp4, int4_wo, w4a16_mxfp4, or w4a8_mxfp4_mxfp8"
+    # Only w4a8_mxfp4_mxfp8 consumes the trtllm-gen backend; reject other combos
+    # up-front so we never benchmark one kernel while log_perf tags the row as
+    # kernel_source="sglang_mxfp4_flashinfer_trtllm_moe".
+    if moe_backend == "trtllm_mxfp4" and moe_type != "w4a8_mxfp4_mxfp8":
+        raise ValueError(
+            f"moe_backend='trtllm_mxfp4' is only valid with moe_type='w4a8_mxfp4_mxfp8', got moe_type={moe_type!r}"
+        )
     assert inter_size % moe_tp_size == 0, "inter_size % moe_tp_size must be 0"
     assert num_experts % moe_ep_size == 0, "num_experts must be divisible by moe_ep_size"
 

@@ -827,11 +827,17 @@ class PerfDataFilename(Enum):
     dsv4_hca_context_module = "dsv4_hca_context_module_perf.parquet"
     dsv4_csa_generation_module = "dsv4_csa_generation_module_perf.parquet"
     dsv4_hca_generation_module = "dsv4_hca_generation_module_perf.parquet"
-    # DeepSeek-V4 sparse-kernel data (kernel-level past_kv Δ correction).
-    # Indexed by ``arch -> tp -> past_kv -> isl -> bs``.
-    # topk_512 and csa_attn are modeled analytically — no CSV needed.
+    # DeepSeek-V4 sparse-op family — all share one column schema and load
+    # through ``operations.dsv4.load_dsv4_sparse_op_data``:
+    #   csa_attn / hca_attn / paged_mqa_logits : FMLA & indexer kernel latency,
+    #     keyed ``num_heads -> tp -> past_kv -> isl -> bs`` (kernel-level Δ data,
+    #     queried by ``_lookup_sparse_kernel``).
+    #   csa_topk_calib : two rows/shape (score_mode=flat|top_last); the topK
+    #     DELTA (flat-top_last) correction applied to CSA module latency.
     dsv4_paged_mqa_logits_module = "dsv4_paged_mqa_logits_module_perf.parquet"
     dsv4_hca_attn_module = "dsv4_hca_attn_module_perf.parquet"
+    dsv4_csa_attn_module = "dsv4_csa_attn_module_perf.parquet"
+    dsv4_csa_topk_calib = "dsv4_csa_topk_calib_perf.parquet"
     dsv4_megamoe_module = "dsv4_megamoe_module_perf.parquet"
 
 

@@ -521,7 +521,14 @@ class TaskConfigFactory:
         # (AIC's w4a16_mxfp4 was GPT-OSS's triton kernel, a different backend than
         # DSV4's cutlass-sm90), so Hopper modeling is roofline/SOL until DSV4 Hopper
         # data is collected; the Hopper path may move to w4fp8 later.
-        if ctx.backend_name == "sglang" and ctx.model_path == "deepseek-ai/DeepSeek-V4-Pro":
+        # Skip when moe_backend == "megamoe": the fused MegaMoE path keys its perf
+        # table on its own quant (w4a8_mxfp4_mxfp8, not the trtllm-gen variant), so
+        # forcing w4a8_mxfp4_mxfp8_trtllm here would miss the megamoe data table.
+        if (
+            ctx.backend_name == "sglang"
+            and ctx.model_path == "deepseek-ai/DeepSeek-V4-Pro"
+            and ctx.moe_backend != "megamoe"
+        ):
 
             def _dsv4_moe_mode(system_name):
                 if _is_blackwell_system(system_name):

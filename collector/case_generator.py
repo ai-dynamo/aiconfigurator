@@ -164,16 +164,26 @@ def _expand_model_case_entry(raw_value: object, *, field_name: str) -> list[dict
 def _model_case_values(op_name: str, *, apply_model_filter: bool = True) -> list[dict]:
     values = []
     for data in _load_model_cases_data():
+        # Carry the model file's architecture onto every expanded case dict so
+        # downstream model-family checks use config-derived metadata (the
+        # architecture in the cases YAML mirrors config.json's
+        # ``architectures[0]``) rather than fragile model_name string patterns.
+        arch = data.get("architecture")
         op_values = data.get("model_case_values", {}).get(op_name, [])
         if op_values is None:
             continue
         if isinstance(op_values, dict):
-            values.extend(_expand_model_case_entry(op_values, field_name=f"model_case_values.{op_name}"))
-            continue
-        if not isinstance(op_values, list):
+            expanded = _expand_model_case_entry(op_values, field_name=f"model_case_values.{op_name}")
+        elif isinstance(op_values, list):
+            expanded = []
+            for index, item in enumerate(op_values):
+                expanded.extend(_expand_model_case_entry(item, field_name=f"model_case_values.{op_name}[{index}]"))
+        else:
             raise TypeError(f"model_case_values.{op_name} must be a list or mapping")
-        for index, item in enumerate(op_values):
-            values.extend(_expand_model_case_entry(item, field_name=f"model_case_values.{op_name}[{index}]"))
+        for value in expanded:
+            if arch is not None:
+                value.setdefault("architecture", arch)
+            values.append(value)
 
     model_path = _get_model_path_filter() if apply_model_filter else None
     if model_path:
@@ -525,6 +535,7 @@ class MoeCommonTestCase:
     model_name: str
     token_expert_distribution: str
     power_law_alpha: Optional[float]
+    architecture: str = ""  # config-derived (cases-YAML architecture); for model-family checks
 
 
 @dataclasses.dataclass(frozen=True)
@@ -892,6 +903,7 @@ def get_moe_backend_test_cases(backend: str) -> list[MoeCommonTestCase]:
                     model_name=model_name,
                     token_expert_distribution=token_distribution,
                     power_law_alpha=power_law_alpha,
+                    architecture=str(model_config.get("architecture") or ""),
                 )
             )
     return test_cases
@@ -954,6 +966,7 @@ def get_common_moe_test_cases():
                 model_name=model_name,
                 token_expert_distribution=token_distribution,
                 power_law_alpha=power_law_alpha,
+                architecture=str(model_config.get("architecture") or ""),
             )
         )
 

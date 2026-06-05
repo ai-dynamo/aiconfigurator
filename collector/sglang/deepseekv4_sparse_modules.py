@@ -523,8 +523,12 @@ def _build_flash_mla_inputs(
 
     Layout = MODEL1_FP8Sparse (DSV4 NSA): d_qk=512 with 584-byte fp8 cache.
     """
-    full_s = M + past_kv
     M_per_req = M // batch_size if batch_size > 1 else M  # noqa: N806
+    # Per-request sequence length: each of the ``batch_size`` requests has
+    # ``M_per_req`` new query tokens over ``past_kv`` prefix (NOT the flattened
+    # total M), so cache_seqlens / indices mirror the owning module
+    # (prefix, isl, bs) row 1:1 instead of one giant bs*isl request.
+    full_s = M_per_req + past_kv
     K_per_query = max(min(K_per_query, full_s), 1)  # noqa: N806
 
     # Q: (batch, M_per_req, n_local_heads, FMLA_D_QK=512) bf16
@@ -585,8 +589,8 @@ def _bench_flash_mla_sparse(
 
     # rank-local head count (what the upstream projection actually produces)
     n_local_heads = max(1, native_heads // tp_size)
-    _full_s = M + past_kv
     M_per_req = M // batch_size if batch_size > 1 else M  # noqa: N806
+    _full_s = M_per_req + past_kv  # per-request sequence length (bs requests, M_per_req new tokens each)
 
     # Build main K cache + ``q_local`` (per-rank Q at n_local_heads)
     q_local, k_cache_main, _, _, cache_seqlens = _build_flash_mla_inputs(
@@ -766,12 +770,18 @@ def _bench_sparse_kernel_shape(kernel, prefix, isl, bs, sc, device):
     perf_database consumes (flat.latency - top_last.latency)."""
     M = bs * isl  # noqa: N806
     if kernel in _FMLA_K_PER_QUERY:
+        # FMLA mirrors the module row 1:1: bs requests, each isl new query tokens
+        # over `prefix` past_kv. Pass batch_size=bs (so M_per_req=isl) and base
+        # K_per_query on the PER-REQUEST sequence length (isl+prefix), not the
+        # flattened total (bs*isl+prefix).
+        full_s = isl + prefix
         lat = _bench_flash_mla_sparse(
             M,
             prefix,
-            K_per_query=_FMLA_K_PER_QUERY[kernel](M + prefix, sc),
+            K_per_query=_FMLA_K_PER_QUERY[kernel](full_s, sc),
             native_heads=sc.num_attention_heads,
             sliding_window=sc.sliding_window,
+            batch_size=bs,
             device=device,
         )["latency_ms"]
         return [(None, lat)]
@@ -812,8 +822,10 @@ def run_dsv4_sparse_kernel_worker(
 
     csv_files = KERNEL_TO_MODULE_CSVS[kernel]
     # TP-independent: dedup to unique (prefix, isl, bs) — one bench, one row per
-    # shape (tp-agnostic), no per-tp expansion.
-    shapes = _read_module_shapes(output_dir, csv_files)
+    # shape (tp-agnostic), no per-tp expansion. Filter to THIS model: the module
+    # CSV is consolidated across every model collected to this (system, backend,
+    # version), so unioning all rows would mirror other models' shapes.
+    shapes = _read_module_shapes(output_dir, csv_files, model_path)
     if not shapes:
         print(
             f"[dsv4-sparse {kernel}] no module CSV ({'/'.join(csv_files)}) in {output_dir}; "
@@ -932,15 +944,23 @@ def get_dsv4_topk_calib_test_cases():
     return _impl()
 
 
-def _read_module_shapes(data_dir: str, csv_files) -> list[tuple[int, int, int]]:
+def _read_module_shapes(data_dir: str, csv_files, model_path: str | None = None) -> list[tuple[int, int, int]]:
     """Unique ``(prefix, isl, bs)`` shape keys from the already-collected module
     CSVs (the SINGLE input source: every sparse sub-kernel derives its shapes
     from the module it belongs to). ``step`` is the prefix/past_kv length; the
     sparse kernels are TP-independent so ``tp_size`` is dropped (one shape per
     unique prefix/isl/bs). Order preserved, deduped.
+
+    ``collect_dsv4_attn`` writes ONE consolidated ``*_module_perf`` file per
+    (system, backend, version) holding rows for every model collected there, so
+    rows are filtered to ``model_path`` before deduping — otherwise a sparse
+    worker would mirror another model's shapes and break the same-source 1:1
+    contract (writing those shapes under the wrong model). ``model_path=None``
+    keeps every row (no filter).
     """
     import csv
 
+    want_model = None if not model_path else str(model_path).rstrip("/")
     shapes: list[tuple[int, int, int]] = []
     seen: set[tuple[int, int, int]] = set()
     for fname in csv_files:
@@ -949,6 +969,8 @@ def _read_module_shapes(data_dir: str, csv_files) -> list[tuple[int, int, int]]:
             continue
         with open(path, newline="") as f:
             for row in csv.DictReader(f):
+                if want_model is not None and str(row.get("model", "")).rstrip("/") != want_model:
+                    continue
                 try:
                     key = (int(float(row.get("step", 0) or 0)), int(row["isl"]), int(row["batch_size"]))
                 except (KeyError, ValueError, TypeError):
