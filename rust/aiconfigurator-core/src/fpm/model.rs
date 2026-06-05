@@ -656,11 +656,14 @@ impl<T> WorkloadStores<T> {
 
 /// Decide whether `best_available` should fall back to regression instead of
 /// propagating `err`. Covers the unsupported-model / data-availability errors
-/// that mean "this model can't be served natively". Native construction now
-/// crosses into Python (`compile_engine`), and that path surfaces failures as
-/// [`AicError::InvalidEngineConfig`]; include it so `best_available` falls back
-/// when a model cannot be compiled (matching the old `UnsupportedModel`
-/// fallback semantics).
+/// that mean "this model can't be served natively". A failed native build via
+/// Python `compile_engine` surfaces as [`AicError::UnsupportedModel`] (see
+/// `py::compile_engine_from_flat`), which is covered here.
+///
+/// [`AicError::InvalidEngineConfig`] is deliberately NOT fallback-safe: it is
+/// used for hard caller/config errors (e.g. a non-UTF-8 `systems_path`, invalid
+/// FPM options, a malformed spec). Those must surface rather than silently
+/// degrade `best_available` to regression mode.
 fn can_fallback_to_regression(err: &AicError) -> bool {
     matches!(
         err,
@@ -668,7 +671,6 @@ fn can_fallback_to_regression(err: &AicError) -> bool {
             | AicError::DataRoot(_)
             | AicError::ModelConfig(_)
             | AicError::PerfDatabase(_)
-            | AicError::InvalidEngineConfig(_)
             | AicError::Io { .. }
             | AicError::Parquet { .. }
     )

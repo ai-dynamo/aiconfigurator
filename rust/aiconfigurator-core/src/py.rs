@@ -376,8 +376,12 @@ fn compile_engine_from_flat(
             .call_method("compile_engine", (model_path, system, backend), Some(&kwargs))?
             .extract::<Vec<u8>>()
     })
-    // PyErr → AicError inline (keeps error.rs pyo3-free).
-    .map_err(|e| AicError::InvalidEngineConfig(format!("compile_engine: {e}")))?;
+    // PyErr → AicError inline (keeps error.rs pyo3-free). A `compile_engine`
+    // failure means the model cannot be built natively, so it maps to
+    // `UnsupportedModel` — the variant `best_available` treats as
+    // fallback-safe. Hard caller/config errors use `InvalidEngineConfig` (which
+    // is NOT fallback-safe) so they surface instead of silently degrading.
+    .map_err(|e| AicError::UnsupportedModel(format!("compile_engine: {e}")))?;
 
     let systems_root: PathBuf = match systems_path {
         Some(p) => PathBuf::from(p),
