@@ -870,6 +870,18 @@ class MoEQuantMode(Enum):
     w4a16_mxfp4 = QuantMapping(0.5, 1, "w4a16_mxfp4")  # native data format for gpt oss
     w4a8_mxfp4_mxfp8 = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8")
     # mxfp4 weights, mxfp8 activations (recommended for Blackwell)
+    w4a8_mxfp4_mxfp8_trtllm = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8_trtllm")
+    # Blackwell trtllm-gen fused MoE: MXFP4 (E2M1, block-32) weights x MXFP8 (E4M3)
+    # activations -- the kernel DeepSeek-V4-Pro actually runs in prefill on sm100
+    # (bmm_MxE4m3_MxE2m1MxE4m3 ... sm100f, flashinfer trtllm_fp4_block_scale_moe).
+    # Distinct backend from w4a8_mxfp4_mxfp8 above (flashinfer cutedsl). DSV4 MoE
+    # weights are stored MXFP4 (I8-packed E2M1 + E8M0 scales), so sglang dispatches
+    # by GPU: sm100 -> this (trtllm-gen); sm90 -> w4a16_mxfp4_cutlass below.
+    w4a16_mxfp4_cutlass = QuantMapping(0.5, 1, "w4a16_mxfp4_cutlass")
+    # Hopper (sm90) DeepSeek-V4-Pro MoE: flashinfer cutlass SM90 mixed GEMM
+    # (cutlass_fused_moe(use_w4_group_scaling=True)) -- MXFP4 weights x BF16
+    # activations (weight-only). Distinct backend from w4a16_mxfp4 above, which is
+    # GPT-OSS's triton_kernels mxfp4 path. (DSV4 Hopper silicon data pending.)
 
 
 class FMHAQuantMode(Enum):

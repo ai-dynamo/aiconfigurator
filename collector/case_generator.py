@@ -14,7 +14,6 @@ import dataclasses
 import functools
 import itertools
 import os
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -1683,6 +1682,18 @@ def get_dsv4_hca_generation_test_cases():
     return _build_dsv4_module_test_cases("generation", ("hca",))
 
 
+def get_dsv4_topk_calib_test_cases():
+    """One case per model (the topk DELTA calibration is just another member of
+    the sparse-op family — same ``[model_path, kernel]`` shape as paged_mqa /
+    csa_attn / hca_attn, dispatched through ``run_dsv4_sparse_kernel_worker``).
+
+    The grid matches the CSA module data 1:1: the worker reads the
+    already-collected ``dsv4_csa_*_module_perf.txt`` and benches exactly those
+    ``(prefix, isl, batch_size)`` shapes — no separate grid is generated here.
+    """
+    return [[model_path, "topk"] for model_path in _selected_dsv4_models()]
+
+
 DSV4_SPARSE_KERNELS = ("paged_mqa_logits", "hca_attn")
 
 
@@ -1736,20 +1747,24 @@ def _build_dsv4_sparse_test_cases(
     return cases
 
 
-def _dsv4_sparse_smoke_or_full(kernel: str):
-    if "--smoke" in sys.argv:
-        return [[1, 1024, 8192, 1, kernel, model_path] for model_path in _selected_dsv4_models()]
-    return _build_dsv4_sparse_test_cases(kernels=(kernel,))
-
-
 def get_dsv4_paged_mqa_logits_test_cases():
-    """paged_mqa_logits sparse-kernel sweep (CSA indexer scoring)."""
-    return _dsv4_sparse_smoke_or_full("paged_mqa_logits")
+    """One case per model. The worker derives shapes from the CSA module CSV
+    (paged_mqa_logits is the CSA indexer scoring sub-kernel), 1:1 with the
+    csa-module rows — no separate sparse sweep grid."""
+    return [[model_path, "paged_mqa_logits"] for model_path in _selected_dsv4_models()]
 
 
 def get_dsv4_hca_attn_test_cases():
-    """hca_attn sparse-kernel sweep (HCA c128 sparse FMLA)."""
-    return _dsv4_sparse_smoke_or_full("hca_attn")
+    """One case per model. The worker derives shapes from the HCA module CSV
+    (hca_attn is the HCA c128 FMLA sub-kernel), 1:1 with the hca-module rows."""
+    return [[model_path, "hca_attn"] for model_path in _selected_dsv4_models()]
+
+
+def get_dsv4_csa_attn_test_cases():
+    """One case per model. The worker derives shapes from the CSA module CSV
+    (csa_attn is the CSA sparse FMLA over the topk-selected c4 positions),
+    1:1 with the csa-module rows — same source as paged_mqa_logits/topk."""
+    return [[model_path, "csa_attn"] for model_path in _selected_dsv4_models()]
 
 
 # Backward-compatible names for older PR comments/tests while the registry and
@@ -1784,7 +1799,6 @@ _dsv4_flash_module_precision_combos = _dsv4_module_precision_combos
 _dsv4_flash_module_filter_pairs = _dsv4_module_filter_pairs
 _build_dsv4_flash_module_test_cases = _build_dsv4_module_test_cases
 _build_dsv4_flash_sparse_test_cases = _build_dsv4_sparse_test_cases
-_dsv4_flash_sparse_smoke_or_full = _dsv4_sparse_smoke_or_full
 get_dsv4_flash_csa_context_test_cases = get_dsv4_csa_context_test_cases
 get_dsv4_flash_hca_context_test_cases = get_dsv4_hca_context_test_cases
 get_dsv4_flash_csa_generation_test_cases = get_dsv4_csa_generation_test_cases

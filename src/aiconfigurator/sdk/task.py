@@ -512,6 +512,43 @@ class TaskConfigFactory:
                     _deep_merge(config_dict, promoted)
                     applied_layers.append("gptoss-blackwell-mxfp8")
 
+        # DeepSeek-V4-Pro ships MXFP4 MoE expert weights (I8-packed E2M1 + E8M0
+        # block scales). The fused-MoE kernel sglang runs is hardware-specific:
+        #   - Blackwell (sm100): trtllm-gen MXFP4xMXFP8 -> w4a8_mxfp4_mxfp8_trtllm
+        #   - Hopper    (sm90) : flashinfer cutlass SM90 mixed GEMM, MXFP4 weight x
+        #                        BF16 act -> w4a16_mxfp4_cutlass (weight-only).
+        # NOTE: w4a16_mxfp4 currently has no DSV4 sglang silicon data in the DB
+        # (AIC's w4a16_mxfp4 was GPT-OSS's triton kernel, a different backend than
+        # DSV4's cutlass-sm90), so Hopper modeling is roofline/SOL until DSV4 Hopper
+        # data is collected; the Hopper path may move to w4fp8 later.
+        if ctx.backend_name == "sglang" and ctx.model_path == "deepseek-ai/DeepSeek-V4-Pro":
+
+            def _dsv4_moe_mode(system_name):
+                if _is_blackwell_system(system_name):
+                    return "w4a8_mxfp4_mxfp8_trtllm"
+                if _is_hopper_system(system_name):
+                    return "w4a16_mxfp4_cutlass"
+                return None
+
+            if ctx.serving_mode == "agg":
+                mode = _dsv4_moe_mode(ctx.system_name)
+                if mode:
+                    _deep_merge(config_dict, {"worker_config": {"moe_quant_mode": mode}})
+                    applied_layers.append(f"dsv4pro-moe-{mode}")
+            else:
+                prefill_system = ctx.system_name
+                decode_system = ctx.decode_system_name or ctx.system_name
+                promoted = {}
+                pm = _dsv4_moe_mode(prefill_system)
+                dm = _dsv4_moe_mode(decode_system)
+                if pm:
+                    promoted["prefill_worker_config"] = {"moe_quant_mode": pm}
+                if dm:
+                    promoted["decode_worker_config"] = {"moe_quant_mode": dm}
+                if promoted:
+                    _deep_merge(config_dict, promoted)
+                    applied_layers.append("dsv4pro-moe-arch")
+
         for profile in ctx.profiles:
             layers = cls.PROFILE_REGISTRY.get(profile)
             if not layers:

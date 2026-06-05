@@ -72,6 +72,10 @@ try:
         kv_pool_capacity_tokens as _kv_pool_capacity_tokens,
     )
     from collector.sglang.runtime_limits import (
+        kv_pool_page_size as _kv_pool_page_size,
+    )
+    from collector.sglang.runtime_limits import (
+        required_kv_alloc_tokens,
         required_kv_tokens,
         required_prefill_extend_tokens,
     )
@@ -89,6 +93,10 @@ except ModuleNotFoundError:
         kv_pool_capacity_tokens as _kv_pool_capacity_tokens,
     )
     from runtime_limits import (
+        kv_pool_page_size as _kv_pool_page_size,
+    )
+    from runtime_limits import (
+        required_kv_alloc_tokens,
         required_kv_tokens,
         required_prefill_extend_tokens,
     )
@@ -217,6 +225,16 @@ _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
 
 _PORTS_PER_GPU = 1000
 _DSV4_PORT_RETRIES = 5
+
+
+def _canonical_dsv4_model_id(model_path: str) -> str:
+    normalized = str(model_path).rstrip("/")
+    basename = normalized.rsplit("/", 1)[-1]
+    if basename == "DeepSeek-V4-Pro":
+        return "deepseek-ai/DeepSeek-V4-Pro"
+    if basename == "DeepSeek-V4-Flash":
+        return "deepseek-ai/DeepSeek-V4-Flash"
+    return str(model_path)
 
 
 def _port_is_available(port: int) -> bool:
@@ -514,12 +532,11 @@ def _load_model_runner(
     num_layers: int,
     kv_cache_dtype: str,
     device: str,
-    mem_fraction_static: float,
-    max_total_tokens: int | None,
     shrink_unused_moe: bool,
     disable_weight_quant: bool,
     gemm_type: str = "bfloat16",
     tp_size: int = 1,
+    max_total_tokens: int | None = None,
 ):
     from sglang.srt.configs.model_config import ModelConfig
     from sglang.srt.entrypoints.engine import _set_envs_and_config
@@ -543,6 +560,21 @@ def _load_model_runner(
     # id for NCCL port sharding so parallel workers do not collide.
     port_shard = int(os.environ.get("AIC_DSV4_PORT_SHARD", gpu_id))
     nccl_port = int(os.environ.get("AIC_DSV4_NCCL_PORT") or _pick_free_port(port_shard))
+    # Mirror collect_mla_module.py's "grab sglang's own defaults, only override
+    # what is strictly needed" approach: construct ServerArgs and let its
+    # ``__post_init__`` derive the runtime-sizing knobs from sglang's own logic.
+    # Do NOT pass collector-derived values for mem_fraction_static,
+    # chunked_prefill_size, or max_prefill_tokens -- leaving them unset means:
+    #   * mem_fraction_static=None -> derived from GPU memory in __post_init__
+    #   * chunked_prefill_size=None -> derived from GPU memory
+    #   * max_prefill_tokens         -> sglang default (16384)
+    # The ONE sizing knob we DO pass is ``max_total_tokens``, computed by the
+    # caller from the actual swept (bs, sl, prefix) cases via required_kv_tokens
+    # (+~5% headroom).  This caps the KV pool to what the sweep needs instead of
+    # letting sglang fill all of GPU memory, exactly like collect_mla_module.py.
+    # The derived KV pool is still honored downstream by the
+    # ``_kv_pool_capacity_tokens`` SKIP path, so over-large shapes are skipped
+    # rather than hardcoded around.
 
     server_args = ServerArgs(
         model_path=local_model_path,
@@ -551,23 +583,26 @@ def _load_model_runner(
         load_format=os.environ.get("SGLANG_LOAD_FORMAT", "dummy"),
         tp_size=1,
         trust_remote_code=True,
-        mem_fraction_static=mem_fraction_static,
         disable_radix_cache=True,
         # The module benchmark below captures its own CUDA Graph and fails if
         # capture is not possible.  Keep SGLang's serving-level graph runner off
         # so it does not add unrelated full-model graph state to this collector.
         disable_cuda_graph=True,
         kv_cache_dtype=kv_cache_dtype,
-        max_total_tokens=max_total_tokens,
         # The bench sweep includes batch_size up to 1024 (collector's
         # ``_BATCH_SIZES``).  sglang's ``alloc_req_slots`` exposes
         # ``available_size = max_running_requests - 1`` (one slot is
         # reserved internally), so a bs=1024 cell with
         # ``max_running_requests=1024`` raises
         # ``alloc_req_slots runs out of memory: available=1023, num_reqs=1024``.
-        # Bump to 1100 for headroom over the largest tested bs.
+        # Bump to 1100 for headroom over the largest tested bs.  This is the
+        # only sizing knob the collector must override (per-cell request slots
+        # for the bs sweep); all memory/token knobs come from sglang.
         max_running_requests=1100,
-        max_prefill_tokens=max(max_total_tokens or 4096, 2048),
+        # Case-sized KV pool cap from the caller (None -> sglang default sizing).
+        # mem_fraction_static / chunked_prefill_size stay unset -> derived by
+        # ServerArgs.__post_init__ from sglang.
+        max_total_tokens=max_total_tokens,
     )
     # gemm_type controls projection GEMM dispatch.  "fp8_block" → DeepGEMM
     # (matches production V4-Flash-FP8); anything else → cuBLASLt bf16.
@@ -578,7 +613,11 @@ def _load_model_runner(
     print(
         f"[dsv4-collector] model_path {model_path} -> {local_model_path}; "
         f"attn_kind={attn_kind}, backend=dsv4, kv_cache_dtype={kv_cache_dtype}, "
-        f"max_total_tokens={max_total_tokens}, shrink_unused_moe={shrink_unused_moe}, "
+        f"mem_fraction_static={server_args.mem_fraction_static} (sglang-derived), "
+        f"chunked_prefill_size={server_args.chunked_prefill_size} (sglang-derived), "
+        f"max_prefill_tokens={server_args.max_prefill_tokens} (sglang-derived), "
+        f"max_total_tokens={server_args.max_total_tokens} (case-sized), "
+        f"shrink_unused_moe={shrink_unused_moe}, "
         f"disable_weight_quant={disable_weight_quant}, gemm_type={gemm_type}, "
         f"quantization={server_args.quantization}, tp_size={tp_size}, nccl_port={nccl_port}"
     )
@@ -588,7 +627,8 @@ def _load_model_runner(
     with _tp_load_model_patch(tp_size):
         model_runner = ModelRunner(
             model_config=model_config,
-            mem_fraction_static=mem_fraction_static,
+            # Use sglang's own __post_init__-derived value, not a collector knob.
+            mem_fraction_static=server_args.mem_fraction_static,
             gpu_id=gpu_id,
             tp_rank=0,
             tp_size=1,
@@ -599,6 +639,47 @@ def _load_model_runner(
             nccl_port=nccl_port,
             server_args=server_args,
         )
+    # --- AIC proper init (env-gated) -------------------------------------
+    # Dummy load uses uniform(-1e-3, 1e-3) (sglang initialize_dummy_weights).
+    # Those tiny weights make the C4 indexer's q.k logits land in the fp16
+    # subnormal range (<6.1e-5). extract_coarse_bin casts scores to fp16
+    # first, so subnormal logits collapse into very few coarse bins -> the
+    # topK threshold bin holds hundreds of ties (num_equal >> 64) -> Small
+    # path takes its O(n^2) block tie-break -> topk_short_transform is huge
+    # and non-representative vs a trained checkpoint.
+    # Re-init projection weights with a normal of larger scale so logits keep
+    # full fp16 precision (spread). norm/scale params are forced to 1.0 to
+    # avoid scaling activations back down (norm) or producing inf on fp8
+    # dequant (scale). Only safe because the collector runs num_layers==1.
+    _proper = os.environ.get("AIC_DSV4_PROPER_INIT", "")
+    if _proper and _proper != "0":
+        _std = float(os.environ.get("AIC_DSV4_PROPER_INIT_STD", "0.05"))
+        torch.manual_seed(1234)
+        _n_normal = _n_norm = _n_scale = 0
+        with torch.no_grad():
+            for _name, _p in model_runner.model.state_dict().items():
+                if not torch.is_floating_point(_p):
+                    continue
+                _lname = _name.lower()
+                if "scale" in _lname:
+                    _p.fill_(1.0)
+                    _n_scale += 1
+                elif "norm" in _lname:
+                    _p.fill_(1.0)
+                    _n_norm += 1
+                elif torch.finfo(_p.dtype).bits < 16:
+                    _tmp = torch.empty_like(_p, dtype=torch.float16).normal_(0.0, _std)
+                    _p.copy_(_tmp.to(_p.dtype))
+                    _n_normal += 1
+                else:
+                    _p.normal_(0.0, _std)
+                    _n_normal += 1
+        print(
+            f"[dsv4-collector] AIC_DSV4_PROPER_INIT std={_std}: "
+            f"normal={_n_normal} norm->1={_n_norm} scale->1={_n_scale}",
+            flush=True,
+        )
+
     allocator = model_runner.token_to_kv_pool_allocator
     pool_parts = []
     for name in (
@@ -826,6 +907,7 @@ def _log_result(
     gemm_type: str = "bfloat16",
     tp_size: int = 1,
     step: int | None = None,
+    num_heads: int | None = None,
 ) -> None:
     # V4-Flash output layout: ONE CSV per (attn_kind, mode) — 3 kinds x 2
     # modes = 6 files total, regardless of how many (tp_size, gemm_type)
@@ -845,12 +927,12 @@ def _log_result(
     log_perf(
         item_list=[
             {
-                "model": model_path,
+                "model": _canonical_dsv4_model_id(model_path),
                 "architecture": "DeepseekV4ForCausalLM",
                 "mla_dtype": "bfloat16",
                 "kv_cache_dtype": kv_cache_dtype,
                 "gemm_type": gemm_type,
-                "num_heads": max(1, NATIVE_HEADS // tp_size),
+                "num_heads": num_heads if num_heads is not None else max(1, NATIVE_HEADS // tp_size),
                 "batch_size": batch_size,
                 "isl": seq_len if is_prefill else 1,
                 "tp_size": tp_size,
@@ -886,8 +968,6 @@ def run_dsv4_mla_module(
     graph_repeat: int = 1,
     device: str = "cuda:0",
     output_path: str | None = None,
-    mem_fraction_static: float = 0.5,
-    max_total_tokens: int | None = 4096,
     shrink_unused_moe: bool = True,
     disable_weight_quant: bool = True,
     perf_filename_prefix: str = "dsv4",
@@ -896,6 +976,7 @@ def run_dsv4_mla_module(
     prefix_len: int = 0,
     prefix_lens: Iterable[int] | None = None,
     seq_lens_by_prefix: dict[int, list[int]] | None = None,
+    max_total_tokens: int | None = None,
 ) -> list[dict[str, float]]:
     is_prefill = mode == "context"
     if prefix_lens is None:
@@ -916,18 +997,19 @@ def run_dsv4_mla_module(
         num_layers=max(num_layers, layer_id + 1),
         kv_cache_dtype=kv_cache_dtype,
         device=device,
-        mem_fraction_static=mem_fraction_static,
-        max_total_tokens=max_total_tokens,
         shrink_unused_moe=shrink_unused_moe,
         disable_weight_quant=disable_weight_quant,
         gemm_type=gemm_type,
         tp_size=tp_size,
+        max_total_tokens=max_total_tokens,
     )
 
     attention_module = model_runner.model.model.layers[layer_id].self_attn
     actual_ratio = getattr(attention_module, "compress_ratio", None)
     if actual_ratio != compress_ratio:
         raise RuntimeError(f"target layer compress_ratio mismatch: expected {compress_ratio}, got {actual_ratio}")
+    native_attention_heads = int(getattr(attention_module, "n_heads", NATIVE_HEADS))
+    local_attention_heads = max(1, native_attention_heads // tp_size)
 
     print(
         f"[dsv4-collector] layer={layer_id}, attn_kind={attn_kind}, "
@@ -942,7 +1024,22 @@ def run_dsv4_mla_module(
     try:
         default_seq_lens = list(seq_lens)
         kv_capacity = _kv_pool_capacity_tokens(model_runner)
+        kv_page_size = _kv_pool_page_size(model_runner)
         runtime_chunk = _runtime_chunk_size(model_runner) if is_prefill else None
+        if is_prefill and runtime_chunk is not None:
+            # FlashMLA's get_decoding_sched_meta kernel allocates dynamic shared
+            # memory proportional to the forward's query-token count b (it does
+            # cudaFuncSetAttribute(MaxDynamicSharedMemorySize, 4*(b*5+1))). For a
+            # DSV4 context module forward, b == fresh_tokens (bs*seq_len). SGLang's
+            # derived chunked_prefill_size can exceed what the device's per-block
+            # shared memory can hold (e.g. 16384 > the ~11.6k that a 227KB optin
+            # cap allows), so cudaFuncSetAttribute returns invalid argument and the
+            # subprocess crashes. Cap the effective prefill chunk to the smaller of
+            # SGLang's chunk and the sched-meta shared-memory limit (read from the
+            # device, not hardcoded).
+            _smem_optin = torch.cuda.get_device_properties(torch.cuda.current_device()).shared_memory_per_block_optin
+            _sched_meta_max_b = (_smem_optin // 4 - 1) // 5
+            runtime_chunk = min(runtime_chunk, _sched_meta_max_b)
         for cur_prefix in prefix_values:
             seq_lens_for_prefix = (
                 seq_lens_by_prefix.get(cur_prefix, default_seq_lens)
@@ -974,6 +1071,27 @@ def run_dsv4_mla_module(
                         )
                         skipped_shapes.append((batch_size, seq_len, cur_prefix, "KVPoolCapacity"))
                         continue
+                    # Paged alloc_extend over-estimate: each request rounds its KV
+                    # span up to a page and reserves one extra page (bs*page_size),
+                    # so large-bs cases pass the naive capacity check above yet still
+                    # fail alloc_extend with "Prefill out of memory". Skip them here
+                    # instead of letting the forward raise (read page_size at runtime;
+                    # this is a no-op for page_size==1 token allocators).
+                    alloc_tokens = required_kv_alloc_tokens(
+                        batch_size,
+                        seq_len,
+                        cur_prefix,
+                        kv_page_size,
+                        is_prefill=is_prefill,
+                    )
+                    if kv_capacity is not None and alloc_tokens > kv_capacity:
+                        print(
+                            f"[SKIP] dsv4-flash {sweep_label} bs={batch_size} sl={seq_len} "
+                            f"prefix={cur_prefix}: alloc_tokens={alloc_tokens} (page_size="
+                            f"{kv_page_size}) exceeds KV pool capacity={kv_capacity}"
+                        )
+                        skipped_shapes.append((batch_size, seq_len, cur_prefix, "KVPoolAllocPaged"))
+                        continue
                     print(f"\n{mode}: batch_size={batch_size}, seq_len={seq_len}, prefix_len={cur_prefix}")
                     try:
                         forward_batch = _build_forward_batch(
@@ -992,12 +1110,23 @@ def run_dsv4_mla_module(
                             prefix_len=cur_prefix,
                         )
 
-                        def kernel_func():
-                            return attention_module(
-                                x=hidden_states,
-                                positions=positions,
-                                forward_batch=forward_batch,
+                        def kernel_func(model_runner=model_runner):
+                            # e958 sglang DeepSeek-V4 forward reads the attn backend
+                            # from the global forward context (get_attn_backend), so
+                            # enter sglang's default forward_context around the call.
+                            # (model_runner bound as a default arg to make the closure
+                            # explicit for static analysis.)
+                            from sglang.srt.model_executor.forward_context import (
+                                ForwardContext,
+                                forward_context,
                             )
+
+                            with forward_context(ForwardContext(attn_backend=model_runner.attn_backend)):
+                                return attention_module(
+                                    x=hidden_states,
+                                    positions=positions,
+                                    forward_batch=forward_batch,
+                                )
 
                         stats = _bench_cuda_events(
                             kernel_func,
@@ -1029,6 +1158,7 @@ def run_dsv4_mla_module(
                             gemm_type=gemm_type,
                             tp_size=tp_size,
                             step=cur_prefix if is_prefill else None,
+                            num_heads=local_attention_heads,
                         )
                         stats.update(
                             {
@@ -1086,6 +1216,21 @@ def run_dsv4_mla_module(
             f"{len(skipped_shapes) + len(results)} shapes failed: {skipped_str}"
         )
     if not results:
+        # Distinguish "nothing fits on this GPU/TP config" (every shape pre-skipped
+        # for a known capacity limit) from a genuine all-crash. The former is a
+        # legitimate empty result — the parent must NOT count it as an op error
+        # (otherwise large-bs sweeps where every shape exceeds KV capacity, e.g.
+        # bs512/1024 generation, are reported as failures even though they were
+        # cleanly skipped). Only raise when a real runtime failure occurred.
+        _capacity_skip_reasons = {"ChunkedPrefillSize", "KVPoolCapacity", "KVPoolAllocPaged"}
+        _reasons = {r for _, _, _, r in skipped_shapes}
+        if skipped_shapes and _reasons <= _capacity_skip_reasons:
+            print(
+                f"[WARN] dsv4-flash {sweep_label}: all {len(skipped_shapes)} shapes "
+                f"skipped for capacity reasons {sorted(_reasons)}; no rows collected "
+                "(clean skip, not a failure)"
+            )
+            return results
         raise RuntimeError(f"dsv4-flash {sweep_label}: all shapes failed")
     return results
 
@@ -1249,10 +1394,24 @@ def _subprocess_entry(
         print(f"[dsv4-flash] no valid prefix/sl values for mode={mode}, bs={batch_size}")
         return
 
-    # The shape filter caps bs * (sl + prefix) at 1M.  Allocate 16x because
-    # DSV4 compressed/SWA sub-pools are carved from the full KV pool.
-    GLOBAL_MAX_PAIR = 1024 * 1024  # noqa: N806
-    max_total_tokens = GLOBAL_MAX_PAIR * 16
+    # mem_fraction_static stays sglang-derived (see _load_model_runner).  Size
+    # max_total_tokens to THIS worker's actual swept (bs, sl, prefix) set rather
+    # than leaving it None (sglang would then size the KV pool to fill all GPU
+    # memory) or hardcoding a global cap.  Mirrors collect_mla_module.py: take
+    # max(required_kv_tokens(...)) over the cases this subprocess will run and
+    # add ~5% headroom (>=1024).  Shapes still exceeding the resulting pool are
+    # skipped via the ``_kv_pool_capacity_tokens`` SKIP path.
+    is_prefill = mode == "context"
+    swept_kv = [
+        required_kv_tokens(batch_size, sl, cur_prefix, is_prefill=is_prefill)
+        for cur_prefix, sls in seq_lens_by_prefix.items()
+        for sl in sls
+    ]
+    max_total_tokens = None
+    if swept_kv:
+        max_total_tokens = max(swept_kv)
+        if max_total_tokens > 0:
+            max_total_tokens += max(1024, max_total_tokens // 20)
 
     run_dsv4_mla_module(
         model_path=model_path,
@@ -1263,13 +1422,12 @@ def _subprocess_entry(
         kv_cache_dtype=kv_cache_dtype,
         device="cuda:0",
         output_path=output_path,
-        mem_fraction_static=0.7,
-        max_total_tokens=max_total_tokens,
         perf_filename_prefix="dsv4",
         gemm_type=gemm_type,
         tp_size=tp_size,
         prefix_lens=seq_lens_by_prefix.keys(),
         seq_lens_by_prefix=seq_lens_by_prefix,
+        max_total_tokens=max_total_tokens,
     )
 
 

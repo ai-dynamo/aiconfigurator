@@ -143,6 +143,22 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.DSV4_HCA_ATTN_MODULE,
     ),
     OpEntry(
+        op="dsv4_csa_attn_module",
+        module="collector.sglang.deepseekv4_sparse_modules",
+        get_func="get_dsv4_csa_attn_test_cases",
+        run_func="run_dsv4_sparse_kernel_worker",
+        perf_filename=PerfFile.DSV4_CSA_ATTN_MODULE,
+    ),
+    # CSA topk_512 DELTA calibration (flat vs top_last) — feeds the
+    # degenerate->representative topK correction in perf_database.
+    OpEntry(
+        op="dsv4_csa_topk_calib",
+        module="collector.sglang.deepseekv4_sparse_modules",
+        get_func="get_dsv4_topk_calib_test_cases",
+        run_func="run_dsv4_sparse_kernel_worker",
+        perf_filename=PerfFile.DSV4_CSA_TOPK_CALIB,
+    ),
+    OpEntry(
         op="gdn",
         module="collector.sglang.collect_gdn",
         get_func="get_gdn_test_cases",
