@@ -463,8 +463,16 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
     if (result.version === STATUS_HW_INCOMPATIBLE) return 'hw_incompatible';
     return 'pass';
   };
-  const labelFromStatus = (status) => status === 'missing' ? 'NOT_TESTED' : statusDisplayLabel(status);
-  const summaryLabelFromStatus = (status) => status === 'partial' ? 'PARTIAL' : labelFromStatus(status);
+  // statusDisplayLabel() only knows the "problem" statuses (it returns FAIL for
+  // anything else), so map the passing/partial/missing states explicitly here —
+  // otherwise a passing version would be mislabeled "FAIL" in the summary.
+  const labelFromStatus = (status) => {
+    if (status === 'missing') return 'NOT_TESTED';
+    if (status === 'pass') return 'PASS';
+    if (status === 'partial') return 'PARTIAL';
+    return statusDisplayLabel(status);
+  };
+  const summaryLabelFromStatus = labelFromStatus;
 
   // Per-version status uses the existing agg-vs-disagg split inside
   // `getLatestSupportedVersion`, restricted to one version at a time.
@@ -1091,7 +1099,11 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
     const maxHeight = Math.max(96, Math.min(420, useAbove ? availableAbove : availableBelow));
     const style = {
       left: `${left}px`,
-      width: `${width}px`,
+      // Cap the width but let the box shrink to its content so the summary
+      // table is never clipped behind a horizontal scrollbar. `width` is still
+      // the worst-case footprint used for the centering/clamp math above, so the
+      // tooltip always stays within the viewport.
+      maxWidth: `${width}px`,
       maxHeight: `${maxHeight}px`,
     };
     if (useAbove) style.bottom = `${Math.max(margin, viewportHeight - rect.top + gap)}px`;
@@ -1497,14 +1509,16 @@ function StatusBadge({ status }) {
 
 function VersionSummaryTable({ backend, summaries, compact = false, showHint = false }) {
   if (!summaries || summaries.length === 0) return null;
-  const showModeColumns = summaries.some(row => row.agg || row.disagg);
+  // Keep the hover (compact) view to a single status column so it stays narrow
+  // and never clips; the full agg/disagg breakdown lives in the click-through modal.
+  const showModeColumns = !compact && summaries.some(row => row.agg || row.disagg);
   const borderClass = compact ? 'border-slate-700/80' : 'border-slate-200 dark:border-slate-700';
   const headClass = compact
     ? 'text-slate-300 bg-slate-800/70'
     : 'text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800';
 
   return (
-    <div className={compact ? 'min-w-[360px] font-sans' : 'mb-4'}>
+    <div className={compact ? 'min-w-[180px] font-sans whitespace-normal' : 'mb-4'}>
       <div className={compact
         ? 'mb-2 text-[0.7rem] font-bold uppercase tracking-wide text-slate-300'
         : 'mb-2 text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400'}
