@@ -369,7 +369,6 @@ def _run_attn_for_backend(
         dtype=kv_cache_dtype,
     )
 
-    ctx_len = context_sequence_lengths[-1]
     request_ids = list(range(len(context_sequence_lengths)))
     if hasattr(kv_cache_manager.impl, "add_sequence"):
         for req_id, ctx_len in enumerate(context_sequence_lengths):

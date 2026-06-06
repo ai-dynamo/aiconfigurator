@@ -234,29 +234,32 @@ def test_run_single_test_short_circuits_sglang_framework_incompatible_model(monk
     assert STATUS_PASS not in status_dict.values()
 
 
-def test_run_single_test_short_circuits_trtllm_framework_incompatible_model(monkeypatch):
+@pytest.mark.parametrize(
+    "model",
+    [
+        "google/gemma-4-26B-A4B",
+        "moonshotai/Kimi-K2.5",
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "zai-org/GLM-5",
+    ],
+)
+def test_run_single_test_short_circuits_trtllm_framework_incompatible_model(monkeypatch, model):
     def fail_run_mode(**_kwargs):
         raise AssertionError("TaskRunner should not run for framework-incompatible combinations")
 
     monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
 
-    for model in (
-        "google/gemma-4-26B-A4B",
-        "moonshotai/Kimi-K2.5",
-        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-        "zai-org/GLM-5",
-    ):
-        status_dict, error_dict = SupportMatrix.run_single_test(
-            model=model,
-            system="a100_sxm",
-            backend="trtllm",
-            version="1.0.0",
-            system_spec=_system_spec(sm_version=80),
-            modes_to_test=("agg",),
-        )
+    status_dict, error_dict = SupportMatrix.run_single_test(
+        model=model,
+        system="a100_sxm",
+        backend="trtllm",
+        version="1.0.0",
+        system_spec=_system_spec(sm_version=80),
+        modes_to_test=("agg",),
+    )
 
-        assert status_dict == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE}
-        assert error_dict["agg"]
+    assert status_dict == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert error_dict["agg"]
 
 
 @pytest.mark.parametrize(
