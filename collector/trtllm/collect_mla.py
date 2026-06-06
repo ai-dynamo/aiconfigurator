@@ -342,6 +342,7 @@ def _run_attn_for_backend(
     # NOTE: set up metadata, refer to tensorrt_llm/_torch/pyexecutor/model_engine.py
     # all layers share the same metadata
     mapping = Mapping(world_size=world_size, tp_size=tp_size, rank=0)
+    num_context_tokens = sum(context_sequence_lengths)
     max_tokens = (
         (
             max_context_sequence_length
@@ -430,26 +431,26 @@ def _run_attn_for_backend(
 
     if is_context_phase:
         ctx_compressed_kv = torch.randn(
-            [ctx_len * len(context_sequence_lengths), kv_lora_rank],
+            [num_context_tokens, kv_lora_rank],
             dtype=dtype,
             device=device,
         )
 
         ctx_k_pe = torch.randn(
-            [ctx_len * len(context_sequence_lengths), qk_rope_head_dim],
+            [num_context_tokens, qk_rope_head_dim],
             dtype=dtype,
             device=device,
         )
 
         ctx_q = torch.randn(
-            [ctx_len * len(context_sequence_lengths), num_heads * qk_head_dim],
+            [num_context_tokens, num_heads * qk_head_dim],
             dtype=dtype,
             device=device,
         )
 
         ctx_kv = torch.randn(
             [
-                ctx_len * len(context_sequence_lengths),
+                num_context_tokens,
                 num_kv_heads * (qk_nope_head_dim + v_head_dim),
             ],
             dtype=dtype,
