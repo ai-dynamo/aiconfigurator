@@ -38,13 +38,13 @@ Feel free to propose sub-issues or new tickets if needed, but do not create them
 
 Current flow:
 
-```
+```text
 Python frontend -> Python SDK -> perf DB CSV files
 ```
 
 Target flow:
 
-```
+```text
 Python frontend -> Rust SDK/core through ABI/bindings -> perf DB CSV files
 ```
 
@@ -78,7 +78,7 @@ https://linear.app/nvidia/issue/AIC-533/phase-45-remove-deprecated-perfdatabaseq
 
 Core rule:
 
-```
+```text
 Match Python SDK observable behavior, not its internal structure.
 ```
 
@@ -110,7 +110,7 @@ Add pytest parity smoke tests comparing the existing Python SDK against the curr
 
 The tests should use:
 
-```
+```text
 src/aiconfigurator/sdk/rust_engine_step.py
 ```
 
@@ -134,7 +134,7 @@ Do not let expected current failures hide unrelated regressions.
 
 Example parity case:
 
-```
+```text
 MiniMaxAI/MiniMax-M2.5
 System: b200_sxm
 Backend: vLLM 0.19.0
@@ -146,7 +146,7 @@ Forward pass:
 
 Python AIC:
 
-```
+```text
 run_static(mode="static_ctx") = 41.879 ms
 run_static(mode="static_gen") = 5.808 ms
 total = 47.687 ms
@@ -154,7 +154,7 @@ total = 47.687 ms
 
 Rust AIC FPM:
 
-```
+```text
 ForwardPassMetrics:
 - prefill_reqs = 1
 - prefill_tokens = 1024
@@ -167,7 +167,7 @@ forward_pass_time_ms = 30.050 ms
 
 End-state parity target:
 
-```
+```text
 Rust and Python metrics differ by <1% on the agreed parity suite.
 ```
 
@@ -192,7 +192,7 @@ Benchmark requirements:
 
 End-state performance target:
 
-```
+```text
 Rust hot-path engine-step calls are at least 3x faster than the Python SDK hot path.
 ```
 

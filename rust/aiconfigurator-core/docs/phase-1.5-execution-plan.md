@@ -88,7 +88,7 @@ What this requires (the work lives inside E1):
 
 - `pyproject.toml`: switch `build-backend` from
   `setuptools.build_meta` to `maturin`. Add `[tool.maturin]` with
-  `module-name = "aiconfigurator_core"`, `abi3 = true`,
+  `module-name = "aiconfigurator_core._aiconfigurator_core"`, `abi3 = true`,
   `python-source = "src"`.
 - `AICONFIGURATOR_RUST_CORE_AUTOBUILD` becomes a no-op with a
   deprecation warning, kept one release cycle so existing
@@ -199,8 +199,8 @@ pub fn build_aic_engine(
 
 The inverse direction (Python → Rust) uses `#[pyfunction]`-decorated
 entry points exported via maturin into the
-`aiconfigurator_core.cpython-*.so` extension. One PyO3 dependency,
-two call directions, no extra libraries.
+`aiconfigurator_core._aiconfigurator_core` extension submodule. One PyO3
+dependency, two call directions, no extra libraries.
 
 ## Data classes
 
@@ -649,7 +649,7 @@ audit table that gates E1.
 | **E1.5** | EngineConfig modularisation | Refactor today's flat `EngineConfig` in `lib.rs:48-90`: extract `ParallelMapping`, `QuantizationConfig`, and `SpeculativeConfig` as sub-structs (multi-field cohesive groupings); leave model/system/backend/KV-block fields flat. Add serde aliases so today's flat-JSON inputs (ctypes FFI) keep parsing through one release cycle. Pure rename + restructure; no behaviour change. Unblocks both E2 (OpSpec types consume the new `EngineConfig`) and K1 (`estimate_kv_cache` takes it as input). | n/a |
 | **E2** | OpSpec types | Public `OpSpec` enum + `EngineSpec` struct in `src/engine/spec.rs`. Mirror the `Op` enum 1:1 with `serde::{Serialize, Deserialize}`. Bincode round-trip unit tests for every variant. | n/a |
 | **E3** | `Engine::build` + `Engine::run_static_internal` | New `src/engine/mod.rs` constructs `Engine` from an `EngineSpec` and exposes `run_static_internal(&db, point)`. **Reuses** existing `operators::*` and `perf_database::*` underneath. Initial implementation may shim through `session.rs`. | unit |
-| **E4** | PyO3 bindings | `src/py.rs`: `#[pyfunction]` exports for `compile_engine` (Python-side build) and `build_aic_engine` (Rust-side use); `#[pymethods]` for `AicEngine::run_static`, `run_agg`, `predict_prefill_latency`, `predict_decode_latency`, plus a `from_spec(bytes)` constructor. `py.allow_threads` wraps each method's execution body. | unit |
+| **E4** | PyO3 bindings | `src/py.rs`: `#[pyfunction]` exports (registered in `#[pymodule]`) for the op-transfer `engine_spec_bincode_from_json` plus `_build_smoke`; `#[pymethods]` on the `AicEngine` `#[pyclass]` (`from_spec`, `run_static`, `predict_prefill_latency`, `predict_decode_latency`, ...). `compile_engine` is Python-side (`sdk/engine.py`), and `build_aic_engine` is a Rust-only `pub fn` for embedded callers — NOT a `#[pyfunction]`. | unit |
 | **E5** | Python builder | `src/aiconfigurator/sdk/engine.py`: `compile_engine(model, runtime_config) -> bytes`. Walks `model.context_ops` + `model.generation_ops`, converts each `Operation` to an OpSpec, bincodes. Python `EngineHandle` wraps the bytes and exposes `run_static` / `run_agg` / `predict_*_latency` that shell through the PyO3 surface from E4. **Reuses** existing Python `sdk/models/*.py` unmodified. | integration |
 | **E6** | Parity flip | Switch `sdk/rust_engine_step.py` from the ctypes JSON path to `compile_engine` + `EngineHandle.run_static` / `run_agg`. Re-run the 164-surface smoke harness; all assertions must hold bit-identical (or within Phase 1's 1% tolerance). | **GATE** |
 | **E7** | Delete Rust model layer | Remove `src/models/`, `src/backends/`, the `factory.rs` / `registry.rs` / `config_loader.rs` files. Remove the `EngineStepEstimator` ctypes path and the JSON FFI in `src/ffi.rs`. Net delta: ~7.5 kLoC removed, ~2 kLoC added. Round-trip verification (`build_aic_engine` → `predict_*_latency` → no re-entry into Python) lands as a `tests/embedded_round_trip.rs` integration test rather than a standalone binary. | parity re-run |
