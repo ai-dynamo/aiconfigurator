@@ -30,6 +30,7 @@ def mock_stdout_isatty(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _reset_logging_after_test(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
     yield
     setup_logging(no_color=False)
     monkeypatch.delenv("NO_COLOR", raising=False)
@@ -51,7 +52,7 @@ def test_cli_parser_accepts_no_color(cli_parser):
 @pytest.mark.parametrize("isatty", [True, False])
 def test_use_plain_when_stdout_not_a_tty(mock_stdout_isatty, isatty):
     mock_stdout_isatty.return_value = isatty
-    assert use_plain_cli_output() is not isatty
+    assert use_plain_cli_output() is (not isatty)
 
 
 @pytest.mark.parametrize("nocolor_env_set", [True, False])
