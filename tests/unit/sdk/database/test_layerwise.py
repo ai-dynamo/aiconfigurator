@@ -27,10 +27,11 @@ misc:
     (data_dir / "layerwise_perf.csv").write_text(
         "\n".join(
             [
-                "framework,framework_version,system,model,phase,tp_size,batch_size,seq_len_q,seq_len_kv_cache,latency_ms",
+                "framework,framework_version,system,model,phase,tp_size,batch_size,seq_len_q,seq_len_kv_cache,"
+                "latency_ms,rms_latency_ms,rms_kernel_count",
                 "vLLM,0.20.1,test,Qwen/Qwen3-32B,CTX,1,1,8192,0,7.00",
                 "vLLM,0.20.1,test,Qwen/Qwen3-32B,CTX,1,1,8192,8192,9.00",
-                "vLLM,0.20.1,test,Qwen/Qwen3-32B,GEN,1,4,1,1024,0.25",
+                "vLLM,0.20.1,test,Qwen/Qwen3-32B,GEN,1,4,1,1024,0.25,0.03,3",
                 "",
             ]
         )
@@ -41,3 +42,7 @@ misc:
     assert float(db.query_layerwise("qwen/qwen3-32b", "GEN", 1, 4, 1024)) == pytest.approx(0.25)
     assert float(db.query_layerwise("qwen/qwen3-32b", "CTX", 1, 1, 8192)) == pytest.approx(7.00)
     assert float(db.query_layerwise("qwen/qwen3-32b", "CTX", 1, 1, 8192, seq_len_kv_cache=8192)) == pytest.approx(9.00)
+    detail = db.query_layerwise_detail("qwen/qwen3-32b", "GEN", 1, 4, 1024)
+    assert detail["latency"] == pytest.approx(0.25)
+    assert detail["rms_latency"] == pytest.approx(0.03)
+    assert detail["rms_kernel_count"] == pytest.approx(3)

@@ -13,7 +13,7 @@ from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.models import BaseModel
-from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError, PerfDatabase
+from aiconfigurator.sdk.perf_database import PerfDatabase, PerfDataNotAvailableError
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ class VLLMBackend(BaseBackend):
                 past_kv += chunk_tokens
                 remaining -= chunk_tokens
             return sum(chunk_latencies)
-        except PerfDataNotAvailableError:
+        except (PerfDataNotAvailableError, ValueError):
             # Older layerwise datasets have a direct 16k CTX row but no
             # nonzero-context-KV chunk rows. Use that row until chunked data
             # exists for the requested TP.
@@ -152,6 +152,53 @@ class VLLMBackend(BaseBackend):
         if hidden_size <= 0:
             return 0.0
         return float(database.query_custom_allreduce(common.CommQuantMode.half, tp_size, token_count * hidden_size))
+
+    def _query_layerwise_detail(
+        self,
+        database: PerfDatabase,
+        model_name: str,
+        phase: str,
+        tp_size: int,
+        batch_size: int,
+        seq_len: int,
+        seq_len_kv_cache: int = 0,
+    ) -> dict[str, float]:
+        if hasattr(database, "query_layerwise_detail"):
+            return database.query_layerwise_detail(
+                model_name,
+                phase,
+                tp_size,
+                batch_size,
+                seq_len,
+                seq_len_kv_cache,
+            )
+        latency = database.query_layerwise(model_name, phase, tp_size, batch_size, seq_len, seq_len_kv_cache)
+        return {
+            "latency": float(latency),
+            "energy": 0.0,
+            "rms_latency": 0.0,
+        }
+
+    def _layerwise_tp_allreduce_rms_ms(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        tp_size: int,
+        token_count: int,
+    ) -> float:
+        if tp_size <= 1 or token_count <= 0:
+            return 0.0
+        hidden_size = int(getattr(model, "_hidden_size", 0))
+        if hidden_size <= 0:
+            return 0.0
+        return float(
+            database.query_allreduce_rms(
+                common.CommQuantMode.half,
+                tp_size,
+                token_count * hidden_size,
+                hidden_size,
+            )
+        )
 
     def _run_context_phase(
         self,
@@ -207,25 +254,50 @@ class VLLMBackend(BaseBackend):
         effective_bs = batch_size * beam_width * (model._nextn + 1)
 
         layer_ms_total = 0.0
+        fused_allreduce_rms_total = 0.0
         for i in range(0, osl - 1, stride):
-            kv_len = isl + i + 1
-            layer_step_ms = (
-                float(database.query_layerwise(model_name, "GEN", tp_size, effective_bs, kv_len)) * num_layers
+            kv_len = isl + i
+            layer_detail = self._query_layerwise_detail(
+                database,
+                model_name,
+                "GEN",
+                tp_size,
+                effective_bs,
+                kv_len,
             )
-            allreduce_step_ms = (
-                self._layerwise_tp_allreduce_ms(model, database, tp_size, effective_bs) * 2 * num_layers
-            )
+            layer_step_ms = float(layer_detail["latency"]) * num_layers
+            rms_step_ms = float(layer_detail.get("rms_latency", 0.0)) * num_layers
+            allreduce_rms_step_ms = 0.0
+            if tp_size > 1 and rms_step_ms > 0.0:
+                try:
+                    allreduce_rms_step_ms = (
+                        self._layerwise_tp_allreduce_rms_ms(model, database, tp_size, effective_bs) * 2 * num_layers
+                    )
+                    if allreduce_rms_step_ms <= 0.0:
+                        rms_step_ms = 0.0
+                except (PerfDataNotAvailableError, ValueError):
+                    logger.debug(
+                        "Falling back to unadjusted vLLM GEN layerwise row for model=%s, tp_size=%s, "
+                        "batch_size=%s, kv_len=%s because allreduce_rms data is unavailable",
+                        model_name,
+                        tp_size,
+                        effective_bs,
+                        kv_len,
+                    )
+                    rms_step_ms = 0.0
+            else:
+                rms_step_ms = 0.0
             repeat_count = min(stride, osl - 1 - i)
-            layer_ms_total += (layer_step_ms + allreduce_step_ms) * repeat_count
+            layer_ms_total += max(0.0, layer_step_ms - rms_step_ms) * repeat_count
+            fused_allreduce_rms_total += allreduce_rms_step_ms * repeat_count
 
-        latency_dict = defaultdict(
-            float,
-            {
-                "generation_layerwise": layer_ms_total,
-            },
-        )
+        latency_dict = defaultdict(float, {"generation_layerwise": layer_ms_total})
         energy_dict = defaultdict(float, {"generation_layerwise": 0.0})
         source_dict = {"generation_layerwise": "silicon"}
+        if fused_allreduce_rms_total > 0.0:
+            latency_dict["generation_tp_allreduce_rms"] = fused_allreduce_rms_total
+            energy_dict["generation_tp_allreduce_rms"] = 0.0
+            source_dict["generation_tp_allreduce_rms"] = "silicon"
         return latency_dict, energy_dict, source_dict
 
     def _get_mix_step_latency(
@@ -268,13 +340,24 @@ class VLLMBackend(BaseBackend):
         decode_delta_ms = 0.0
         if gen_tokens > 0:
             avg_decode_kv = isl + osl // 2
-            gen_step_ms = (
-                float(database.query_layerwise(model_name, "GEN", tp_size, gen_tokens, avg_decode_kv)) * num_layers
-            )
-            gen_as_ctx_ms = (
-                self._layerwise_context_layer_ms(database, model_name, tp_size, 1, gen_tokens) * num_layers
-            )
-            decode_delta_ms = max(0.0, gen_step_ms - gen_as_ctx_ms)
+            try:
+                gen_step_ms = (
+                    float(database.query_layerwise(model_name, "GEN", tp_size, gen_tokens, avg_decode_kv))
+                    * num_layers
+                )
+                gen_as_ctx_ms = (
+                    self._layerwise_context_layer_ms(database, model_name, tp_size, 1, gen_tokens) * num_layers
+                )
+                decode_delta_ms = max(0.0, gen_step_ms - gen_as_ctx_ms)
+            except (PerfDataNotAvailableError, ValueError):
+                logger.debug(
+                    "Falling back to context-only vLLM mixed-step layerwise estimate for model=%s, "
+                    "tp_size=%s, gen_tokens=%s, avg_decode_kv=%s",
+                    model_name,
+                    tp_size,
+                    gen_tokens,
+                    avg_decode_kv,
+                )
 
         latency_ms = combined_ctx_ms + combined_allreduce_ms + decode_delta_ms
         per_ops = {

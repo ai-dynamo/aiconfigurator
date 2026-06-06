@@ -157,6 +157,8 @@ def _install():
         forced_bs = _FORCED_STEP_META["bs"]
         forced_past = _FORCED_STEP_META["past"]
         forced_run = _FORCED_STEP_META["run"]
+        if forced_run is None and os.environ.get("LAYERWISE_MEASURE_RUN") is not None:
+            forced_run = int(os.environ["LAYERWISE_MEASURE_RUN"])
         label_step = n if forced_step is None else int(forced_step)
         label_bs = num_reqs if forced_bs is None else int(forced_bs)
         label_past = past_kv if forced_past is None else int(forced_past)

@@ -38,7 +38,7 @@ docker run --rm --network none \
 
 ## TP=2 Decode
 
-Collect batch sizes `1,2,4,8,16,32,64` at KV 1024:
+Collect batch sizes `1,2,4,8,16,32,64` at KV 1024. Use deployment parity/default compile for FPM comparisons:
 
 ```bash
 python3 collector/layerwise/vllm/collect_layerwise.py \
@@ -53,6 +53,8 @@ python3 collector/layerwise/vllm/collect_layerwise.py \
   --gen-batch-sizes 1,2,4,8,16,32,64 \
   --gen-past-kv 1024 \
   --target-layer-count 1 \
+  --measurement-mode deployment-parity \
+  --compilation-config-json default \
   --rank-reduce max \
   --latency-source span \
   --min-max-num-batched-tokens 64 \
@@ -62,7 +64,7 @@ python3 collector/layerwise/vllm/collect_layerwise.py \
 
 ## TP=2 Context
 
-Use 16 layers for the production AIC context table:
+Use 16 layers for the production AIC context table. Collect both axes and let the collector skip points beyond model max length:
 
 ```bash
 python3 collector/layerwise/vllm/collect_layerwise.py \
@@ -75,8 +77,10 @@ python3 collector/layerwise/vllm/collect_layerwise.py \
   --tp-sizes 2 \
   --phases ctx \
   --ctx-new-tokens 1,64,256,1024,2048,4096,8192 \
-  --ctx-past-kv 0 \
+  --ctx-past-kv 0,1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536 \
   --target-layer-count 16 \
+  --measurement-mode deployment-parity \
+  --compilation-config-json default \
   --rank-reduce max \
   --latency-source gpu_capped \
   --ctx-warmup-runs 2 \
@@ -87,7 +91,7 @@ python3 collector/layerwise/vllm/collect_layerwise.py \
   --max-workers 1
 ```
 
-Collect chunked-prefill 16k second chunk separately:
+If running a small sanity check instead of the full grid, include at least `8192,0` and `8192,8192`:
 
 ```bash
 python3 collector/layerwise/vllm/collect_layerwise.py \
@@ -102,6 +106,8 @@ python3 collector/layerwise/vllm/collect_layerwise.py \
   --ctx-new-tokens 8192 \
   --ctx-past-kv 8192 \
   --target-layer-count 16 \
+  --measurement-mode deployment-parity \
+  --compilation-config-json default \
   --rank-reduce max \
   --latency-source gpu_capped \
   --ctx-warmup-runs 2 \
@@ -117,4 +123,6 @@ python3 collector/layerwise/vllm/collect_layerwise.py \
 - The collector output is per simulated rank. For TP>1, AIC must add TP allreduce separately.
 - The AIC layerwise backend should use CTX lookup with `(seq_len_q, seq_len_kv_cache)`, so `8192,8192` is distinct from `8192,0`.
 - For Qwen3/LLAMA-style dense models, add two custom allreduces per transformer layer for TP>1.
+- For decode TP>1, do not add generic allreduce on top of deployment-parity GEN rows. Use `rms_latency_ms` plus `allreduce_rms_perf.parquet` for fused allreduce+rms attribution.
+- The vLLM layerwise GEN lookup should use the KV length at the start of the decode iteration. For FPM `past_kv=1024`, compare with AIC `isl=1024, osl=2`, not an off-by-one workaround.
 - Clear caches after editing data or lookup code if comparing in the same Python process.

@@ -51,6 +51,10 @@ _DEFAULT_KERNEL_DROP = re.compile(
     r"^dispatch$|^combine$)",
     re.IGNORECASE,
 )
+_FUSABLE_RMS_KERNEL_RE = re.compile(
+    r"(rms_norm|add_mean_mul_pow_rsqrt)",
+    re.IGNORECASE,
+)
 
 
 def _extract_module(text):
@@ -288,9 +292,11 @@ def _sum_kernels(cur, kernel_drop_re):
         kern_best_mod[key] = mod_start_name
 
     gpu_ns = defaultdict(int)
+    rms_ns = defaultdict(int)
     span_start_ns = {}
     span_end_ns = {}
     n_k = defaultdict(int)
+    n_rms_k = defaultdict(int)
     unmatched_step = 0
     unmatched_module = 0
     dropped_comm = 0
@@ -309,11 +315,15 @@ def _sum_kernels(cur, kernel_drop_re):
         _, mod = mod_entry
         out_key = (step, mod, tid)
         gpu_ns[out_key] += ke - ks
+        name = sid.get(short_id, "")
+        if _FUSABLE_RMS_KERNEL_RE.search(name):
+            rms_ns[out_key] += ke - ks
+            n_rms_k[out_key] += 1
         span_start_ns[out_key] = min(span_start_ns.get(out_key, ks), ks)
         span_end_ns[out_key] = max(span_end_ns.get(out_key, ke), ke)
         n_k[out_key] += 1
 
-    return gpu_ns, span_start_ns, span_end_ns, n_k, (
+    return gpu_ns, rms_ns, span_start_ns, span_end_ns, n_k, n_rms_k, (
         unmatched_step,
         unmatched_module,
         dropped_comm,
@@ -338,9 +348,11 @@ def _innermost_module_at_with_start(mod_ivs_for_tid, capture_start, capture_end)
 
 def _rollup_rows(
     gpu_ns,
+    rms_ns,
     span_start_ns,
     span_end_ns,
     n_k,
+    n_rms_k,
     rollup,
     layer,
     per_rank,
@@ -352,9 +364,11 @@ def _rollup_rows(
 
     rollup_re = re.compile(rollup)
     per_rank_ns = defaultdict(int)
+    per_rank_rms_ns = defaultdict(int)
     per_rank_start_ns = {}
     per_rank_end_ns = {}
     per_rank_k = defaultdict(int)
+    per_rank_rms_k = defaultdict(int)
     for (step_meta, mod, tid), ns in gpu_ns.items():
         m = rollup_re.search(mod or "")
         if not m:
@@ -365,22 +379,28 @@ def _rollup_rows(
         rank = tid_to_rank[tid]
         key = (step_meta, roll_key, rank)
         per_rank_ns[key] += ns
+        per_rank_rms_ns[key] += rms_ns.get((step_meta, mod, tid), 0)
         raw_key = (step_meta, mod, tid)
         s = span_start_ns[raw_key]
         e = span_end_ns[raw_key]
         per_rank_start_ns[key] = min(per_rank_start_ns.get(key, s), s)
         per_rank_end_ns[key] = max(per_rank_end_ns.get(key, e), e)
         per_rank_k[key] += n_k[(step_meta, mod, tid)]
+        per_rank_rms_k[key] += n_rms_k.get((step_meta, mod, tid), 0)
 
     rolled_ns = defaultdict(int)
+    rolled_rms_ns = defaultdict(int)
     rolled_start_ns = {}
     rolled_end_ns = {}
     rolled_k = defaultdict(int)
+    rolled_rms_k = defaultdict(int)
     if per_rank:
         rolled_ns.update(per_rank_ns)
+        rolled_rms_ns.update(per_rank_rms_ns)
         rolled_start_ns.update(per_rank_start_ns)
         rolled_end_ns.update(per_rank_end_ns)
         rolled_k.update(per_rank_k)
+        rolled_rms_k.update(per_rank_rms_k)
     else:
         for (step_meta, roll_key, rank), ns in per_rank_ns.items():
             out_key = (step_meta, roll_key, None)
@@ -390,10 +410,14 @@ def _rollup_rows(
             rolled_end_ns[out_key] = max(rolled_end_ns.get(out_key, e), e)
             if rank_reduce == "sum":
                 rolled_ns[out_key] += ns
+                rolled_rms_ns[out_key] += per_rank_rms_ns[(step_meta, roll_key, rank)]
                 rolled_k[out_key] += per_rank_k[(step_meta, roll_key, rank)]
+                rolled_rms_k[out_key] += per_rank_rms_k[(step_meta, roll_key, rank)]
             elif ns > rolled_ns[out_key]:
                 rolled_ns[out_key] = ns
+                rolled_rms_ns[out_key] = per_rank_rms_ns[(step_meta, roll_key, rank)]
                 rolled_k[out_key] = per_rank_k[(step_meta, roll_key, rank)]
+                rolled_rms_k[out_key] = per_rank_rms_k[(step_meta, roll_key, rank)]
 
     rows = []
     for (step_meta, roll_key, rank), ns in rolled_ns.items():
@@ -407,11 +431,13 @@ def _rollup_rows(
             "rollup_key": "|".join(map(str, roll_key)),
             "rollup_parts": roll_key,
             "gpu_us": ns / 1000.0,
+            "rms_us": rolled_rms_ns.get((step_meta, roll_key, rank), 0) / 1000.0,
             "span_us": (rolled_end_ns[(step_meta, roll_key, rank)] -
                         rolled_start_ns[(step_meta, roll_key, rank)]) / 1000.0,
             "start_ns": rolled_start_ns[(step_meta, roll_key, rank)],
             "end_ns": rolled_end_ns[(step_meta, roll_key, rank)],
             "kernel_count": rolled_k[(step_meta, roll_key, rank)],
+            "rms_kernel_count": rolled_rms_k.get((step_meta, roll_key, rank), 0),
         })
     rows.sort(key=lambda r: (
         r["step"], r["measure_run"], -1 if r["rank"] is None else r["rank"], r["rollup_key"]
@@ -451,15 +477,17 @@ def parse_step_sweep(
     nvtx_step_ranges, nvtx_module_ranges = _count_nvtx_ranges(cur)
     (
         gpu_ns,
+        rms_ns,
         span_start_ns,
         span_end_ns,
         n_k,
+        n_rms_k,
         (miss_step, miss_mod, dropped, step_pid_fallback, step_global_fallback),
     ) = _sum_kernels(cur, kernel_drop_re)
     con.close()
 
     rows, n_ranks = _rollup_rows(
-        gpu_ns, span_start_ns, span_end_ns, n_k, rollup, layer, per_rank,
+        gpu_ns, rms_ns, span_start_ns, span_end_ns, n_k, n_rms_k, rollup, layer, per_rank,
         rank_reduce
     )
     metadata = {

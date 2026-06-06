@@ -28,6 +28,7 @@ from aiconfigurator.sdk.perf_database import (
     get_all_databases,
     get_database,
     get_systems_paths,
+    load_allreduce_rms_data,
     load_context_attention_data,
     load_context_mla_data,
     load_context_mla_module_data,
@@ -299,6 +300,28 @@ def test_load_custom_allreduce_data_basic(tmp_path):
     assert "AUTO" in data[key_dtype][2]
     assert data[key_dtype][2]["AUTO"][128]["latency"] == pytest.approx(0.0038)
     assert data[key_dtype][2]["AUTO"][8192]["latency"] == pytest.approx(0.0045)
+
+
+def test_load_allreduce_rms_data_basic(tmp_path):
+    csv_file = tmp_path / "allreduce_rms.csv"
+    csv_file.write_text(
+        "\n".join(
+            [
+                "framework,version,device,op_name,kernel_source,allreduce_dtype,num_gpus,hidden_size,"
+                "message_size,num_tokens,latency,fusion_pattern,shape_policy,backend",
+                "vLLM,0.20.1,NVIDIA B300,allreduce_rms,vLLM_allreduce_rms_graph,bfloat16,8,4096,"
+                "327680,80,0.0125,allreduce_residual_rms,hidden_size_4096_approx,vllm_graph",
+                "",
+            ]
+        )
+    )
+
+    data = load_allreduce_rms_data(str(csv_file))
+
+    row = data[CommQuantMode.half][8]["allreduce_residual_rms"][4096][327680]
+    assert row["latency"] == pytest.approx(0.0125)
+    assert row["num_tokens"] == 80
+    assert row["shape_policy"] == "hidden_size_4096_approx"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

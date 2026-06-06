@@ -41,11 +41,39 @@ from parse_nsys_step_sweep import parse_step_sweep
 from random_prompt_tokens import (
     RandomPromptTokenConfig,
     load_random_prompt_token_config,
+    make_prompt_token_ids,
     sample_prompt_token_ids,
+)
+from vllm_deployment import (
+    VllmDeploymentConfig,
+    build_engine_args,
+    find_runtime_vllm_config,
+    make_metadata,
+    summarize_vllm_config,
+    write_metadata,
 )
 
 CTX_NEW_TOKENS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
-CTX_PAST_KV = [0]
+CTX_PAST_KV = [
+    0,
+    1,
+    2,
+    4,
+    8,
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048,
+    4096,
+    8192,
+    16384,
+    32768,
+    65536,
+]
 GEN_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 GEN_PAST_KV = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
 
@@ -67,7 +95,15 @@ CSV_COLUMNS = [
     "new_tokens",
     "past_kv",
     "latency_ms",
+    "rms_latency_ms",
+    "rms_kernel_count",
+    "measurement_mode",
+    "attribution_target",
+    "vllm_config_hash",
 ]
+
+DEFAULT_ATTRIBUTION_ROLLUP = r"layers\.(\d+)\.(self_attn|mlp|input_layernorm|post_attention_layernorm)"
+DEFAULT_PARITY_ROLLUP = r"^(CUDAGraphWrapper)$"
 
 TERMINAL_EVENTS = {
     "success",
@@ -474,7 +510,16 @@ def _max_num_batched_tokens_for_datapoints(
     )
 
 
-def _validate_ctx_past_kv(datapoints: list[DataPoint], max_num_batched_tokens: int) -> None:
+def _validate_ctx_past_kv(
+    datapoints: list[DataPoint],
+    max_num_batched_tokens: int,
+    *,
+    ctx_driver: str,
+) -> None:
+    if ctx_driver not in {"chunked", "prefix_cache"}:
+        raise ValueError(f"unsupported ctx driver: {ctx_driver}")
+    if ctx_driver == "prefix_cache":
+        return
     for dp in datapoints:
         if dp.phase != "ctx" or dp.past_kv == 0:
             continue
@@ -483,6 +528,45 @@ def _validate_ctx_past_kv(datapoints: list[DataPoint], max_num_batched_tokens: i
                 "ctx past_kv measurements must start on a chunk boundary: "
                 f"past_kv={dp.past_kv}, max_num_batched_tokens={max_num_batched_tokens}"
             )
+
+
+def _model_max_position_embeddings(config: dict[str, Any]) -> int | None:
+    for key in ("max_position_embeddings", "model_max_length", "seq_length", "n_positions"):
+        raw = config.get(key)
+        if isinstance(raw, bool) or raw is None:
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        # Some tokenizer/model configs use a huge sentinel for "unbounded".
+        if 0 < value < 1_000_000_000:
+            return value
+    return None
+
+
+def _filter_datapoints_for_model_max_len(
+    datapoints: list[DataPoint],
+    max_model_len: int | None,
+) -> tuple[list[DataPoint], int]:
+    if max_model_len is None:
+        return datapoints, 0
+
+    filtered: list[DataPoint] = []
+    skipped = 0
+    for dp in datapoints:
+        if dp.phase == "ctx":
+            # The ctx driver uses max_tokens=1 to force vLLM to execute the
+            # measured prefill, so max_model_len must fit the prompt plus that
+            # generated token.
+            required_len = dp.past_kv + dp.new_tokens + 1
+        else:
+            required_len = dp.past_kv + 2
+        if required_len > max_model_len:
+            skipped += 1
+            continue
+        filtered.append(dp)
+    return filtered, skipped
 
 
 def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
@@ -515,9 +599,20 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
         gen_batch_sizes=gen_batch_sizes,
         gen_past_kv=gen_past_kv,
     )
+    if not getattr(args, "no_filter_model_max_len", False):
+        model_max_len = _model_max_position_embeddings(orig_config)
+        datapoints, skipped = _filter_datapoints_for_model_max_len(datapoints, model_max_len)
+        if skipped:
+            print(
+                f"[skip] {skipped} datapoints require more than "
+                f"model_max_len={model_max_len} tokens"
+            )
+        if not datapoints:
+            raise ValueError("all datapoints exceed the model's configured max length")
     _validate_ctx_past_kv(
         datapoints,
         _max_num_batched_tokens_for_datapoints(datapoints, args.min_max_num_batched_tokens),
+        ctx_driver=getattr(args, "ctx_driver", "prefix_cache"),
     )
 
     work_units: list[WorkUnit] = []
@@ -628,12 +723,15 @@ def _aggregate_step_rows(rows: list[dict[str, Any]]) -> dict[tuple[int, int, int
         )
         agg = out.setdefault(key, {
             "gpu_us": 0.0,
+            "rms_us": 0.0,
             "span_us": 0.0,
             "start_ns": None,
             "end_ns": None,
             "kernel_count": 0,
+            "rms_kernel_count": 0,
         })
         agg["gpu_us"] += row["gpu_us"]
+        agg["rms_us"] += row.get("rms_us", 0.0)
         if "start_ns" in row and "end_ns" in row:
             start_ns = int(row["start_ns"])
             end_ns = int(row["end_ns"])
@@ -646,6 +744,7 @@ def _aggregate_step_rows(rows: list[dict[str, Any]]) -> dict[tuple[int, int, int
             # Backward-compatible path for older parser rows.
             agg["span_us"] += row.get("span_us", row["gpu_us"])
         agg["kernel_count"] += row["kernel_count"]
+        agg["rms_kernel_count"] += row.get("rms_kernel_count", 0)
     return out
 
 
@@ -686,24 +785,32 @@ def _reduce_agg_latency(
     *,
     latency_source: str,
     aggregation: str,
-) -> tuple[float, int, int]:
+) -> tuple[float, float, int, int, int]:
     if not aggs:
         raise ValueError("cannot reduce empty aggregate list")
     values = [_latency_us_from_agg(agg, latency_source) for agg in aggs]
+    rms_values = [float(agg.get("rms_us", 0.0)) for agg in aggs]
     if aggregation == "median":
         latency_us = float(statistics.median(values))
+        rms_us = float(statistics.median(rms_values))
     elif aggregation == "mean":
         latency_us = float(statistics.fmean(values))
+        rms_us = float(statistics.fmean(rms_values))
     elif aggregation == "trimmed_mean":
         if len(values) < 3:
-            raise ValueError("trimmed_mean requires at least 3 measured runs")
-        latency_us = float(statistics.fmean(sorted(values)[1:-1]))
+            latency_us = float(statistics.fmean(values))
+            rms_us = float(statistics.fmean(rms_values))
+        else:
+            latency_us = float(statistics.fmean(sorted(values)[1:-1]))
+            rms_us = float(statistics.fmean(sorted(rms_values)[1:-1]))
     elif aggregation == "min":
         latency_us = float(min(values))
+        rms_us = float(min(rms_values))
     else:
         raise ValueError(f"unsupported repeat aggregation: {aggregation}")
     kernel_count = int(statistics.median([int(agg["kernel_count"]) for agg in aggs]))
-    return latency_us, kernel_count, len(aggs)
+    rms_kernel_count = int(statistics.median([int(agg.get("rms_kernel_count", 0)) for agg in aggs]))
+    return latency_us, rms_us, kernel_count, rms_kernel_count, len(aggs)
 
 
 def _write_csv_header_if_needed(path: Path) -> None:
@@ -722,6 +829,38 @@ def _append_success_row(path: Path, row: dict[str, Any]) -> None:
         f.flush()
         os.fsync(f.fileno())
         fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _effective_rollup(args: argparse.Namespace) -> str:
+    if args.rollup:
+        return str(args.rollup)
+    if args.measurement_mode == "deployment-parity":
+        return DEFAULT_PARITY_ROLLUP
+    return DEFAULT_ATTRIBUTION_ROLLUP
+
+
+def _should_filter_target_layers(args: argparse.Namespace) -> bool:
+    if args.no_filter_target_layers:
+        return False
+    return args.measurement_mode != "deployment-parity"
+
+
+def _attribution_target(args: argparse.Namespace) -> str:
+    if args.measurement_mode == "deployment-parity":
+        return "cudagraph_wrapper"
+    return "module_nvtx"
+
+
+def _attempt_config_hash(attempt: Attempt, store: StatusStore) -> str:
+    for event in reversed(store.index().events):
+        if event.get("event") != "engine_metadata_written":
+            continue
+        if event.get("work_unit_id") != attempt.work_unit.work_unit_id:
+            continue
+        if event.get("attempt_id") != attempt.attempt_id:
+            continue
+        return str(event.get("vllm_config_hash") or "")
+    return ""
 
 
 class Scheduler:
@@ -789,9 +928,11 @@ class Scheduler:
             "report": self.work_dir / "nsys" / f"{unit.work_unit_id}_a{attempt_id}",
             "stdout": self.work_dir / "logs" / f"{unit.work_unit_id}_a{attempt_id}.out",
             "stderr": self.work_dir / "logs" / f"{unit.work_unit_id}_a{attempt_id}.err",
+            "metadata": self.work_dir / "metadata" / f"{unit.work_unit_id}_a{attempt_id}.json",
         }
         paths["report"].parent.mkdir(parents=True, exist_ok=True)
         spec = self._make_spec(unit, pending, attempt_id)
+        spec["metadata_path"] = str(paths["metadata"])
         _json_dump(paths["spec"], spec)
         paths["stdout"].parent.mkdir(parents=True, exist_ok=True)
         stdout_handle = paths["stdout"].open("w")
@@ -851,8 +992,14 @@ class Scheduler:
             "restrict_cudagraph_sizes": not self.args.no_restrict_cudagraph_sizes,
             "extra_vllm_args": extra_vllm_args,
             "min_max_num_batched_tokens": self.args.min_max_num_batched_tokens,
+            "measurement_mode": self.args.measurement_mode,
+            "compilation_config_json": self.args.compilation_config_json,
+            "ctx_driver": self.args.ctx_driver,
             "ctx_warmup_runs": self.args.ctx_warmup_runs,
             "ctx_measured_runs": self.args.ctx_measured_runs,
+            "gen_driver": self.args.gen_driver,
+            "gen_warmup_runs": self.args.gen_warmup_runs,
+            "gen_measured_runs": self.args.gen_measured_runs,
         }
 
     def _worker_cmd(self, spec_path: Path, report_base: Path) -> list[str]:
@@ -942,11 +1089,12 @@ class Scheduler:
         try:
             rows, meta = parse_step_sweep(
                 str(sqlite_path),
-                rollup=self.args.rollup,
+                rollup=_effective_rollup(self.args),
                 layer=None,
                 rank_reduce=self.args.rank_reduce,
             )
-            rows = _filter_rows_to_target_layers(rows, attempt.work_unit.target_layers)
+            if _should_filter_target_layers(self.args):
+                rows = _filter_rows_to_target_layers(rows, attempt.work_unit.target_layers)
         except Exception as exc:
             self.store.append_event(
                 "nsys_parse_failed",
@@ -975,10 +1123,10 @@ class Scheduler:
             aggs = _lookup_aggs(parsed, dp.parse_key())
             if not aggs:
                 continue
-            latency_us, kernel_count, measure_count = _reduce_agg_latency(
+            latency_us, rms_us, kernel_count, rms_kernel_count, measure_count = _reduce_agg_latency(
                 aggs,
                 latency_source=self.args.latency_source,
-                aggregation=self.args.ctx_repeat_aggregation if dp.phase == "ctx" else "median",
+                aggregation=self.args.ctx_repeat_aggregation if dp.phase == "ctx" else self.args.gen_repeat_aggregation,
             )
             row = {
                 **attempt.work_unit.row_base,
@@ -987,6 +1135,11 @@ class Scheduler:
                 "new_tokens": dp.new_tokens,
                 "past_kv": dp.past_kv,
                 "latency_ms": latency_us / 1000.0,
+                "rms_latency_ms": rms_us / 1000.0,
+                "rms_kernel_count": rms_kernel_count,
+                "measurement_mode": self.args.measurement_mode,
+                "attribution_target": _attribution_target(self.args),
+                "vllm_config_hash": _attempt_config_hash(attempt, self.store),
             }
             _append_success_row(self.output_path, row)
             self.store.append_event(
@@ -996,9 +1149,13 @@ class Scheduler:
                 attempt_id=attempt.attempt_id,
                 latency_ms=row["latency_ms"],
                 latency_source=self.args.latency_source,
-                repeat_aggregation=self.args.ctx_repeat_aggregation if dp.phase == "ctx" else "median",
+                repeat_aggregation=(
+                    self.args.ctx_repeat_aggregation if dp.phase == "ctx" else self.args.gen_repeat_aggregation
+                ),
                 measure_count=measure_count,
                 kernel_count=kernel_count,
+                rms_latency_ms=row["rms_latency_ms"],
+                rms_kernel_count=rms_kernel_count,
                 sqlite=str(sqlite_path),
             )
             successes += 1
@@ -1145,6 +1302,30 @@ def _dummy_prompts(
     ]
 
 
+def _deterministic_token_prompts(
+    batch_size: int,
+    input_len: int,
+    token_config: RandomPromptTokenConfig,
+    *,
+    request_index_offset: int,
+    cache_salt_prefix: str | None = None,
+) -> list[dict[str, Any]]:
+    prompts: list[dict[str, Any]] = []
+    for request_idx in range(batch_size):
+        prompt: dict[str, Any] = {
+            "prompt_token_ids": make_prompt_token_ids(
+                prompt_token_seed=0,
+                token_count=input_len,
+                request_index=request_index_offset + request_idx,
+                token_config=token_config,
+            )
+        }
+        if cache_salt_prefix is not None:
+            prompt["cache_salt"] = f"{cache_salt_prefix}:req{request_idx}"
+        prompts.append(prompt)
+    return prompts
+
+
 def _run_generate(
     llm,
     sampling_params,
@@ -1152,9 +1333,21 @@ def _run_generate(
     batch_size: int,
     input_len: int,
     token_config: RandomPromptTokenConfig,
+    request_index_offset: int | None = None,
+    cache_salt_prefix: str | None = None,
 ) -> None:
+    if request_index_offset is None and cache_salt_prefix is None:
+        prompts = _dummy_prompts(batch_size, input_len, token_config)
+    else:
+        prompts = _deterministic_token_prompts(
+            batch_size,
+            input_len,
+            token_config,
+            request_index_offset=0 if request_index_offset is None else request_index_offset,
+            cache_salt_prefix=cache_salt_prefix,
+        )
     llm.generate(
-        _dummy_prompts(batch_size, input_len, token_config),
+        prompts,
         sampling_params=sampling_params,
         use_tqdm=False,
     )
@@ -1167,10 +1360,11 @@ def _engine_tokens(
     restrict_cudagraph_sizes: bool,
     extra_vllm_args: list[str],
     min_max_num_batched_tokens: int = 1,
+    measurement_mode: str = "deployment-parity",
+    compilation_config_json: str | None = None,
 ) -> list[str]:
     ctx_points = [dp for dp in datapoints if dp.phase == "ctx"]
     gen_points = [dp for dp in datapoints if dp.phase == "gen"]
-    ctx_max_new = max((dp.new_tokens for dp in ctx_points), default=0)
     ctx_max_total = max((dp.new_tokens + dp.past_kv for dp in ctx_points), default=0)
     gen_max_past = max((dp.past_kv for dp in gen_points), default=0)
     gen_batch_sizes = sorted({dp.batch_size for dp in gen_points})
@@ -1184,18 +1378,22 @@ def _engine_tokens(
         min_max_num_batched_tokens,
     )
 
-    tokens = [
-        "--model",
-        model_dir,
-        "--no-async-scheduling",
-        "--max-model-len",
-        str(max_seq_len),
-        "--max-num-batched-tokens",
-        str(max_num_batched_tokens),
-    ]
+    tokens = build_engine_args(
+        VllmDeploymentConfig(
+            model=model_dir,
+            max_model_len=max_seq_len,
+            max_num_seqs=max(gen_batch_sizes) if gen_batch_sizes else None,
+            max_num_batched_tokens=max_num_batched_tokens,
+        )
+    )
 
-    if gen_batch_sizes:
-        tokens.extend(["--max-num-seqs", str(max(gen_batch_sizes))])
+    if compilation_config_json == "default":
+        compilation_config = None
+    elif compilation_config_json is not None:
+        compilation_config = json.loads(compilation_config_json)
+    elif measurement_mode == "deployment-parity":
+        compilation_config = None
+    elif measurement_mode == "attribution" and gen_batch_sizes:
         # Match real vLLM deployment shape: one engine.  FULL_DECODE_ONLY lets
         # vLLM use full CUDA graphs for uniform decode batches while running
         # prefill/mixed batches through its normal non-full-graph path.
@@ -1208,10 +1406,13 @@ def _engine_tokens(
                 "cudagraph_capture_sizes": gen_batch_sizes,
                 "max_cudagraph_capture_size": max(gen_batch_sizes),
             })
-    else:
+    elif measurement_mode == "attribution":
         compilation_config = {"mode": 0, "cudagraph_mode": "NONE"}
+    else:
+        raise ValueError(f"unsupported measurement mode: {measurement_mode}")
 
-    tokens.extend(["--compilation-config", json.dumps(compilation_config)])
+    if compilation_config is not None:
+        tokens.extend(["--compilation-config", json.dumps(compilation_config)])
     tokens.extend(extra_vllm_args)
     return tokens
 
@@ -1226,7 +1427,6 @@ def _create_llm(engine_tokens: list[str]):
         trust_remote_code=True,
         enable_layerwise_nvtx_tracing=True,
         skip_tokenizer_init=True,
-        enable_prefix_caching=False,
     )
     args = parser.parse_args(engine_tokens)
     engine_args = EngineArgs.from_cli_args(args)
@@ -1248,9 +1448,18 @@ def _worker_datapoint_id(work_unit_id: str, dp: DataPoint) -> str:
     return dp.datapoint_id(work_unit_id)
 
 
-def _ctx_marker_milestone(dp: DataPoint, max_num_batched_tokens: int) -> int:
+def _ctx_marker_milestone(
+    dp: DataPoint,
+    max_num_batched_tokens: int,
+    *,
+    ctx_driver: str = "chunked",
+) -> int:
+    if ctx_driver not in {"chunked", "prefix_cache"}:
+        raise ValueError(f"unsupported ctx driver: {ctx_driver}")
     if max_num_batched_tokens < 1:
         raise ValueError(f"max_num_batched_tokens must be >= 1, got {max_num_batched_tokens}")
+    if ctx_driver == "prefix_cache":
+        return 1
     if dp.past_kv == 0:
         return 1
     return int(dp.past_kv // max_num_batched_tokens) + 1
@@ -1270,9 +1479,10 @@ def run_worker(spec_path: Path) -> None:
         datapoints,
         int(spec.get("min_max_num_batched_tokens", 1)),
     )
+    ctx_driver = str(spec.get("ctx_driver", "chunked"))
     milestones = {1}
     milestones.update(
-        _ctx_marker_milestone(dp, max_num_batched_tokens)
+        _ctx_marker_milestone(dp, max_num_batched_tokens, ctx_driver=ctx_driver)
         for dp in datapoints
         if dp.phase == "ctx"
     )
@@ -1301,13 +1511,50 @@ def run_worker(spec_path: Path) -> None:
     _worker_append_event(status_path, "work_unit_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
     _worker_append_event(status_path, "engine_started", work_unit_id=work_unit_id)
     prompt_token_config = load_random_prompt_token_config(spec["model_dir"])
-    llm = _create_llm(_engine_tokens(
+    engine_tokens = _engine_tokens(
         model_dir=spec["model_dir"],
         datapoints=datapoints,
         restrict_cudagraph_sizes=spec["restrict_cudagraph_sizes"],
         extra_vllm_args=spec["extra_vllm_args"],
         min_max_num_batched_tokens=spec.get("min_max_num_batched_tokens", 1),
-    ))
+        measurement_mode=str(spec.get("measurement_mode", "deployment-parity")),
+        compilation_config_json=spec.get("compilation_config_json"),
+    )
+    llm = _create_llm(engine_tokens)
+    effective_config = None
+    runtime_vllm_config = find_runtime_vllm_config(llm)
+    if ctx_driver == "prefix_cache" and runtime_vllm_config is not None:
+        cache_config = getattr(runtime_vllm_config, "cache_config", None)
+        if getattr(cache_config, "enable_prefix_caching", None) is False:
+            raise RuntimeError("ctx_driver=prefix_cache requires vLLM prefix caching")
+    if runtime_vllm_config is not None:
+        effective_config = summarize_vllm_config(runtime_vllm_config)
+    metadata = make_metadata(
+        artifact_kind="layerwise",
+        measurement_mode=str(spec.get("measurement_mode", "deployment-parity")),
+        engine_args=engine_tokens,
+        effective_config=effective_config,
+        extra={
+            "work_unit_id": work_unit_id,
+            "attempt_id": spec["attempt_id"],
+            "target_layers": spec["target_layers"],
+            "attribution_target": (
+                "cudagraph_wrapper"
+                if str(spec.get("measurement_mode", "deployment-parity")) == "deployment-parity"
+                else "module_nvtx"
+            ),
+        },
+    )
+    if spec.get("metadata_path"):
+        write_metadata(spec["metadata_path"], metadata)
+    _worker_append_event(
+        status_path,
+        "engine_metadata_written",
+        work_unit_id=work_unit_id,
+        attempt_id=spec["attempt_id"],
+        metadata_path=spec.get("metadata_path"),
+        vllm_config_hash=metadata["vllm_config_hash"],
+    )
     _worker_append_event(status_path, "engine_ready", work_unit_id=work_unit_id)
     try:
         ctx_points = [dp for dp in datapoints if dp.phase == "ctx"]
@@ -1325,6 +1572,7 @@ def run_worker(spec_path: Path) -> None:
                 warmup_runs=int(spec.get("ctx_warmup_runs", 0)),
                 measured_runs=int(spec.get("ctx_measured_runs", 1)),
                 max_num_batched_tokens=max_num_batched_tokens,
+                driver=ctx_driver,
             )
 
         gen_points = [dp for dp in datapoints if dp.phase == "gen"]
@@ -1337,8 +1585,12 @@ def run_worker(spec_path: Path) -> None:
                 work_unit_id,
                 llm,
                 SamplingParams,
+                vllm_step_marker,
                 gen_points,
                 prompt_token_config=prompt_token_config,
+                driver=str(spec.get("gen_driver", "decode_sweep")),
+                warmup_runs=int(spec.get("gen_warmup_runs", 0)),
+                measured_runs=int(spec.get("gen_measured_runs", 1)),
             )
     finally:
         del llm
@@ -1367,11 +1619,14 @@ def _worker_run_ctx(
     warmup_runs: int = 0,
     measured_runs: int = 1,
     max_num_batched_tokens: int = 1,
+    driver: str = "chunked",
 ) -> None:
     if warmup_runs < 0:
         raise ValueError(f"warmup_runs must be >= 0, got {warmup_runs}")
     if measured_runs < 1:
         raise ValueError(f"measured_runs must be >= 1, got {measured_runs}")
+    if driver not in {"chunked", "prefix_cache"}:
+        raise ValueError(f"unsupported ctx driver: {driver}")
     sampling_params = sampling_cls(
         temperature=1.0,
         top_p=1.0,
@@ -1385,33 +1640,67 @@ def _worker_run_ctx(
         if dpid in pruned:
             continue
         input_len = dp.past_kv + dp.new_tokens
-        marker_milestone = _ctx_marker_milestone(dp, max_num_batched_tokens)
+        marker_milestone = _ctx_marker_milestone(
+            dp,
+            max_num_batched_tokens,
+            ctx_driver=driver,
+        )
         marker_mod.set_forced_step_meta(step=dp.new_tokens, bs=dp.batch_size, past=dp.past_kv)
         try:
-            os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ""
-            for _ in range(warmup_runs):
-                _run_generate(
-                    llm,
-                    sampling_params,
-                    batch_size=dp.batch_size,
-                    input_len=input_len,
-                    token_config=prompt_token_config,
-                )
-            os.environ["LAYERWISE_ACTIVE_MILESTONES"] = str(marker_milestone)
-            for run_idx in range(measured_runs):
-                marker_mod.set_forced_step_meta(
-                    step=dp.new_tokens,
-                    bs=dp.batch_size,
-                    past=dp.past_kv,
-                    run=run_idx,
-                )
-                _run_generate(
-                    llm,
-                    sampling_params,
-                    batch_size=dp.batch_size,
-                    input_len=input_len,
-                    token_config=prompt_token_config,
-                )
+            if driver == "prefix_cache":
+                for run_idx in range(warmup_runs):
+                    _run_prefix_cached_ctx_iteration(
+                        llm,
+                        sampling_params,
+                        dp,
+                        work_unit_id=work_unit_id,
+                        run_idx=run_idx,
+                        warmup=True,
+                        token_config=prompt_token_config,
+                        active_milestone="",
+                    )
+                for run_idx in range(measured_runs):
+                    marker_mod.set_forced_step_meta(
+                        step=dp.new_tokens,
+                        bs=dp.batch_size,
+                        past=dp.past_kv,
+                        run=run_idx,
+                    )
+                    _run_prefix_cached_ctx_iteration(
+                        llm,
+                        sampling_params,
+                        dp,
+                        work_unit_id=work_unit_id,
+                        run_idx=run_idx,
+                        warmup=False,
+                        token_config=prompt_token_config,
+                        active_milestone=str(marker_milestone),
+                    )
+            else:
+                os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ""
+                for _ in range(warmup_runs):
+                    _run_generate(
+                        llm,
+                        sampling_params,
+                        batch_size=dp.batch_size,
+                        input_len=input_len,
+                        token_config=prompt_token_config,
+                    )
+                os.environ["LAYERWISE_ACTIVE_MILESTONES"] = str(marker_milestone)
+                for run_idx in range(measured_runs):
+                    marker_mod.set_forced_step_meta(
+                        step=dp.new_tokens,
+                        bs=dp.batch_size,
+                        past=dp.past_kv,
+                        run=run_idx,
+                    )
+                    _run_generate(
+                        llm,
+                        sampling_params,
+                        batch_size=dp.batch_size,
+                        input_len=input_len,
+                        token_config=prompt_token_config,
+                    )
         except Exception as exc:
             kind = _classify_exception(exc)
             if kind == "oom":
@@ -1457,15 +1746,84 @@ def _worker_run_ctx(
             marker_mod.clear_forced_step_meta()
 
 
+def _ctx_prompt_request_index_offset(dp: DataPoint, run_idx: int, *, warmup: bool) -> int:
+    phase_offset = 0 if warmup else 100_000_000
+    return (
+        phase_offset
+        + int(dp.past_kv) * 1_000_003
+        + int(dp.new_tokens) * 10_007
+        + int(dp.batch_size) * 101
+        + int(run_idx) * 10_000
+    )
+
+
+def _ctx_cache_salt_prefix(
+    work_unit_id: str,
+    dp: DataPoint,
+    run_idx: int,
+    *,
+    warmup: bool,
+) -> str:
+    phase = "warmup" if warmup else "measure"
+    return (
+        f"layerwise-ctx:{work_unit_id}:new{dp.new_tokens}:past{dp.past_kv}:"
+        f"{phase}{run_idx}"
+    )
+
+
+def _run_prefix_cached_ctx_iteration(
+    llm,
+    sampling_params,
+    dp: DataPoint,
+    *,
+    work_unit_id: str,
+    run_idx: int,
+    warmup: bool,
+    token_config: RandomPromptTokenConfig,
+    active_milestone: str,
+) -> None:
+    request_index_offset = _ctx_prompt_request_index_offset(dp, run_idx, warmup=warmup)
+    cache_salt_prefix = _ctx_cache_salt_prefix(work_unit_id, dp, run_idx, warmup=warmup)
+    if dp.past_kv > 0:
+        os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ""
+        _run_generate(
+            llm,
+            sampling_params,
+            batch_size=dp.batch_size,
+            input_len=dp.past_kv,
+            token_config=token_config,
+            request_index_offset=request_index_offset,
+            cache_salt_prefix=cache_salt_prefix,
+        )
+    os.environ["LAYERWISE_ACTIVE_MILESTONES"] = active_milestone
+    _run_generate(
+        llm,
+        sampling_params,
+        batch_size=dp.batch_size,
+        input_len=dp.past_kv + dp.new_tokens,
+        token_config=token_config,
+        request_index_offset=request_index_offset,
+        cache_salt_prefix=cache_salt_prefix,
+    )
+
+
 def _worker_run_gen(
     status_path: Path,
     work_unit_id: str,
     llm,
     sampling_cls,
+    marker_mod,
     datapoints: list[DataPoint],
     *,
     prompt_token_config: RandomPromptTokenConfig,
+    driver: str = "decode_sweep",
+    warmup_runs: int = 0,
+    measured_runs: int = 1,
 ) -> None:
+    if warmup_runs < 0:
+        raise ValueError(f"warmup_runs must be >= 0, got {warmup_runs}")
+    if measured_runs < 1:
+        raise ValueError(f"measured_runs must be >= 1, got {measured_runs}")
     by_batch: dict[int, list[DataPoint]] = {}
     for dp in datapoints:
         by_batch.setdefault(dp.batch_size, []).append(dp)
@@ -1474,9 +1832,11 @@ def _worker_run_gen(
         temperature=1.0,
         top_p=1.0,
         ignore_eos=True,
-        max_tokens=max_past + 1,
+        max_tokens=2 if driver == "prefill" else max_past + 1,
         detokenize=False,
     )
+    if driver not in {"decode_sweep", "prefill"}:
+        raise ValueError(f"unsupported gen driver: {driver}")
     for batch_size in sorted(by_batch):
         os.environ["LAYERWISE_PROGRESS_PHASE"] = "gen"
         _worker_append_event(
@@ -1486,16 +1846,67 @@ def _worker_run_gen(
             batch_size=batch_size,
             max_past_kv=max_past,
         )
+        if driver == "prefill":
+            try:
+                for dp in sorted(by_batch[batch_size], key=lambda item: item.past_kv):
+                    os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ""
+                    marker_mod.clear_forced_step_meta()
+                    for _ in range(warmup_runs):
+                        _run_generate(
+                            llm,
+                            sampling_params,
+                            batch_size=batch_size,
+                            input_len=dp.past_kv,
+                            token_config=prompt_token_config,
+                        )
+                    for run_idx in range(measured_runs):
+                        marker_mod.set_forced_step_meta(
+                            step=dp.past_kv + 1,
+                            bs=batch_size,
+                            past=dp.past_kv,
+                            run=run_idx,
+                        )
+                        os.environ["LAYERWISE_ACTIVE_MILESTONES"] = "2"
+                        _run_generate(
+                            llm,
+                            sampling_params,
+                            batch_size=batch_size,
+                            input_len=dp.past_kv,
+                            token_config=prompt_token_config,
+                        )
+            finally:
+                os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ""
+                marker_mod.clear_forced_step_meta()
+            _worker_append_event(status_path, "batch_finished", work_unit_id=work_unit_id, batch_size=batch_size)
+            continue
         # Gen datapoint starts/completions are emitted by vllm_step_marker at
         # each milestone.  One generate call intentionally covers many past_kv
         # datapoints for the same batch size.
-        _run_generate(
-            llm,
-            sampling_params,
-            batch_size=batch_size,
-            input_len=1,
-            token_config=prompt_token_config,
-        )
+        os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ""
+        try:
+            for _ in range(warmup_runs):
+                _run_generate(
+                    llm,
+                    sampling_params,
+                    batch_size=batch_size,
+                    input_len=1,
+                    token_config=prompt_token_config,
+                )
+            for run_idx in range(measured_runs):
+                os.environ["LAYERWISE_MEASURE_RUN"] = str(run_idx)
+                os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ",".join(
+                    str(x) for x in sorted({dp.past_kv + 1 for dp in by_batch[batch_size]})
+                )
+                _run_generate(
+                    llm,
+                    sampling_params,
+                    batch_size=batch_size,
+                    input_len=1,
+                    token_config=prompt_token_config,
+                )
+        finally:
+            os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ""
+            os.environ.pop("LAYERWISE_MEASURE_RUN", None)
         _worker_append_event(status_path, "batch_finished", work_unit_id=work_unit_id, batch_size=batch_size)
 
 
@@ -1548,6 +1959,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phases", choices=("ctx", "gen", "both"), default="both")
     parser.add_argument("--ctx-new-tokens", default=",".join(map(str, CTX_NEW_TOKENS)))
     parser.add_argument("--ctx-past-kv", default=",".join(map(str, CTX_PAST_KV)))
+    parser.add_argument(
+        "--ctx-driver",
+        choices=("chunked", "prefix_cache"),
+        default="prefix_cache",
+        help=(
+            "Context measurement driver. chunked marks later chunks in one long prefill and "
+            "requires past_kv to be a max_num_batched_tokens boundary; prefix_cache replays "
+            "a cached prefix so arbitrary past_kv grid points can be requested."
+        ),
+    )
+    parser.add_argument(
+        "--no-filter-model-max-len",
+        action="store_true",
+        help="Do not skip datapoints that exceed the model config's max sequence length.",
+    )
     parser.add_argument("--gen-batch-sizes", default=",".join(map(str, GEN_BATCH_SIZES)))
     parser.add_argument("--gen-past-kv", default=",".join(map(str, GEN_PAST_KV)))
     parser.add_argument("--gemm-quant", default="bf16")
@@ -1555,8 +1981,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--attn-quant", default="bf16")
     parser.add_argument("--kv-quant", default="bf16")
     parser.add_argument(
+        "--measurement-mode",
+        choices=("deployment-parity", "attribution"),
+        default="deployment-parity",
+        help=(
+            "deployment-parity omits vLLM compile/CUDA graph overrides and is comparable to default FPM; "
+            "attribution forces the old compile-off/module-NVTX path and is for decomposition only."
+        ),
+    )
+    parser.add_argument(
         "--rollup",
-        default=r"layers\.(\d+)\.(self_attn|mlp|input_layernorm|post_attention_layernorm)",
+        default=None,
+        help=(
+            "Module rollup regex. Defaults to CUDAGraphWrapper in deployment-parity mode "
+            "and layer module groups in attribution mode."
+        ),
     )
     parser.add_argument("--rank-reduce", choices=("sum", "max"), default="sum")
     parser.add_argument(
@@ -1595,10 +2034,54 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="median",
         help="Aggregation for repeated context measurements.",
     )
+    parser.add_argument(
+        "--gen-warmup-runs",
+        type=int,
+        default=0,
+        help="Unmarked generation runs to execute per batch before measurement.",
+    )
+    parser.add_argument(
+        "--gen-driver",
+        choices=("decode_sweep", "prefill"),
+        default="decode_sweep",
+        help=(
+            "Generation driver. decode_sweep reaches past_kv by generating from a 1-token prompt; "
+            "prefill measures the first decode after a prompt of length past_kv."
+        ),
+    )
+    parser.add_argument(
+        "--gen-measured-runs",
+        type=int,
+        default=1,
+        help="Marked generation runs to execute per batch and aggregate.",
+    )
+    parser.add_argument(
+        "--gen-repeat-aggregation",
+        choices=("median", "mean", "trimmed_mean", "min"),
+        default="median",
+        help="Aggregation for repeated generation measurements.",
+    )
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--gpus", default=None, help="Comma-separated physical GPU IDs. Defaults to visible GPUs.")
     parser.add_argument("--max-workers", type=int, default=None, help="Limit concurrent one-GPU workers.")
     parser.add_argument("--no-restrict-cudagraph-sizes", action="store_true")
+    parser.add_argument(
+        "--no-filter-target-layers",
+        action="store_true",
+        help=(
+            "Do not filter parsed rows by target layer index. Useful for default-compile runs "
+            "where layer modules collapse into CUDAGraphWrapper."
+        ),
+    )
+    parser.add_argument(
+        "--compilation-config-json",
+        default=None,
+        help=(
+            "Override the collector's vLLM compilation config JSON. Use 'default' to omit "
+            "the flag and request vLLM's default compilation behavior; '{}' is equivalent "
+            "for vLLM 0.20.1."
+        ),
+    )
     parser.add_argument("--extra-vllm-arg", action="append", default=[])
     parser.add_argument("--extra-vllm-args", default="")
     return parser

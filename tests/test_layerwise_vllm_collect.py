@@ -50,11 +50,14 @@ def _args(tmp_path):
         extra_vllm_arg=[],
         latency_source="span",
         min_max_num_batched_tokens=1,
+        ctx_driver="prefix_cache",
         ctx_warmup_runs=0,
         ctx_measured_runs=1,
         ctx_repeat_aggregation="median",
         rollup=r"layers\.(\d+)\.(self_attn|mlp)",
         rank_reduce="sum",
+        measurement_mode="attribution",
+        no_filter_target_layers=False,
     )
 
 
@@ -76,6 +79,8 @@ def _build_args(tmp_path, **overrides):
         phases="both",
         ctx_new_tokens="1",
         ctx_past_kv="0",
+        ctx_driver="prefix_cache",
+        no_filter_model_max_len=False,
         gen_batch_sizes="1",
         gen_past_kv="1",
         gemm_quant="bf16",
@@ -83,6 +88,7 @@ def _build_args(tmp_path, **overrides):
         attn_quant="bf16",
         kv_quant="bf16",
         min_max_num_batched_tokens=1,
+        measurement_mode="deployment-parity",
     )
     for key, value in overrides.items():
         setattr(args, key, value)
@@ -121,9 +127,11 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "past_kv": 16,
                 "measure_run": 0,
                 "gpu_us": 100.0,
+                "rms_us": 5.0,
                 "start_ns": 1_000,
                 "end_ns": 101_000,
                 "kernel_count": 2,
+                "rms_kernel_count": 1,
             },
             {
                 "step": 17,
@@ -131,16 +139,20 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "past_kv": 16,
                 "measure_run": 0,
                 "gpu_us": 50.0,
+                "rms_us": 3.0,
                 "start_ns": 80_000,
                 "end_ns": 130_000,
                 "kernel_count": 1,
+                "rms_kernel_count": 1,
             },
         ])
 
         agg = parsed[(17, 4, 16, 0)]
         self.assertEqual(agg["gpu_us"], 150.0)
+        self.assertEqual(agg["rms_us"], 8.0)
         self.assertEqual(agg["span_us"], 129.0)
         self.assertEqual(agg["kernel_count"], 3)
+        self.assertEqual(agg["rms_kernel_count"], 2)
 
     def test_latency_source_can_select_span_or_gpu_sum(self):
         agg = {"gpu_us": 150.0, "span_us": 129.0}
@@ -199,14 +211,16 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         ])
 
         aggs = cl._lookup_aggs(parsed, (64, 1, 0))
-        latency_us, kernel_count, measure_count = cl._reduce_agg_latency(
+        latency_us, rms_us, kernel_count, rms_kernel_count, measure_count = cl._reduce_agg_latency(
             aggs,
             latency_source="span",
             aggregation="median",
         )
 
         self.assertEqual(latency_us, 200.0)
+        self.assertEqual(rms_us, 0.0)
         self.assertEqual(kernel_count, 2)
+        self.assertEqual(rms_kernel_count, 0)
         self.assertEqual(measure_count, 3)
 
     def test_repeat_aggregation_can_drop_min_and_max_then_average(self):
@@ -215,15 +229,33 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             for value in [10.0, 20.0, 30.0, 40.0, 50.0, 1000.0]
         ]
 
-        latency_us, kernel_count, measure_count = cl._reduce_agg_latency(
+        latency_us, rms_us, kernel_count, rms_kernel_count, measure_count = cl._reduce_agg_latency(
             aggs,
             latency_source="gpu_capped",
             aggregation="trimmed_mean",
         )
 
         self.assertEqual(latency_us, 35.0)
+        self.assertEqual(rms_us, 0.0)
         self.assertEqual(kernel_count, 1)
+        self.assertEqual(rms_kernel_count, 0)
         self.assertEqual(measure_count, 6)
+
+    def test_trimmed_mean_falls_back_to_mean_for_partial_parse(self):
+        aggs = [
+            {"gpu_us": 10.0, "span_us": 10.0, "rms_us": 1.0, "kernel_count": 1},
+            {"gpu_us": 30.0, "span_us": 30.0, "rms_us": 3.0, "kernel_count": 1},
+        ]
+
+        latency_us, rms_us, _kernel_count, _rms_kernel_count, measure_count = cl._reduce_agg_latency(
+            aggs,
+            latency_source="gpu_capped",
+            aggregation="trimmed_mean",
+        )
+
+        self.assertEqual(latency_us, 20.0)
+        self.assertEqual(rms_us, 2.0)
+        self.assertEqual(measure_count, 2)
 
     def test_dummy_prompts_are_random_token_ids(self):
         token_config = cl.RandomPromptTokenConfig(
@@ -310,7 +342,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertNotIn(failed_id, pending_ids)
             self.assertNotIn(dps[2].datapoint_id(unit.work_unit_id), pending_ids)
 
-    def test_engine_tokens_use_one_decode_graph_engine_for_mixed_points(self):
+    def test_engine_tokens_default_to_vllm_deployment_parity(self):
         tokens = cl._engine_tokens(
             model_dir="/model",
             datapoints=[
@@ -322,6 +354,24 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             extra_vllm_args=[],
         )
 
+        self.assertNotIn("--compilation-config", tokens)
+        self.assertEqual(tokens[tokens.index("--max-model-len") + 1], "129")
+        self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "128")
+        self.assertEqual(tokens[tokens.index("--max-num-seqs") + 1], "4")
+
+    def test_engine_tokens_use_one_decode_graph_engine_for_attribution_mode(self):
+        tokens = cl._engine_tokens(
+            model_dir="/model",
+            datapoints=[
+                cl.DataPoint("ctx", 1, 128, 0),
+                cl.DataPoint("gen", 4, 1, 16),
+                cl.DataPoint("gen", 2, 1, 32),
+            ],
+            restrict_cudagraph_sizes=True,
+            extra_vllm_args=[],
+            measurement_mode="attribution",
+        )
+
         config = json.loads(tokens[tokens.index("--compilation-config") + 1])
         self.assertEqual(config["mode"], 0)
         self.assertEqual(config["cudagraph_mode"], "FULL_DECODE_ONLY")
@@ -329,6 +379,35 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(tokens[tokens.index("--max-model-len") + 1], "129")
         self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "128")
         self.assertEqual(tokens[tokens.index("--max-num-seqs") + 1], "4")
+
+    def test_engine_tokens_can_omit_compilation_config_for_vllm_defaults(self):
+        tokens = cl._engine_tokens(
+            model_dir="/model",
+            datapoints=[cl.DataPoint("gen", 4, 1, 1024)],
+            restrict_cudagraph_sizes=True,
+            extra_vllm_args=[],
+            compilation_config_json="default",
+        )
+
+        self.assertNotIn("--compilation-config", tokens)
+        self.assertEqual(tokens[tokens.index("--max-num-seqs") + 1], "4")
+
+    def test_measurement_mode_selects_default_rollup_and_filtering(self):
+        parity_args = argparse.Namespace(
+            measurement_mode="deployment-parity",
+            rollup=None,
+            no_filter_target_layers=False,
+        )
+        attribution_args = argparse.Namespace(
+            measurement_mode="attribution",
+            rollup=None,
+            no_filter_target_layers=False,
+        )
+
+        self.assertEqual(cl._effective_rollup(parity_args), cl.DEFAULT_PARITY_ROLLUP)
+        self.assertEqual(cl._effective_rollup(attribution_args), cl.DEFAULT_ATTRIBUTION_ROLLUP)
+        self.assertFalse(cl._should_filter_target_layers(parity_args))
+        self.assertTrue(cl._should_filter_target_layers(attribution_args))
 
     def test_engine_tokens_can_floor_max_num_batched_tokens(self):
         tokens = cl._engine_tokens(
@@ -354,12 +433,93 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "8192")
 
     def test_context_marker_milestone_selects_later_prefill_chunk(self):
-        self.assertEqual(cl._ctx_marker_milestone(cl.DataPoint("ctx", 1, 8192, 0), 8192), 1)
-        self.assertEqual(cl._ctx_marker_milestone(cl.DataPoint("ctx", 1, 8192, 8192), 8192), 2)
+        self.assertEqual(
+            cl._ctx_marker_milestone(
+                cl.DataPoint("ctx", 1, 8192, 0),
+                8192,
+                ctx_driver="chunked",
+            ),
+            1,
+        )
+        self.assertEqual(
+            cl._ctx_marker_milestone(
+                cl.DataPoint("ctx", 1, 8192, 8192),
+                8192,
+                ctx_driver="chunked",
+            ),
+            2,
+        )
+        self.assertEqual(
+            cl._ctx_marker_milestone(
+                cl.DataPoint("ctx", 1, 8192, 8192),
+                8192,
+                ctx_driver="prefix_cache",
+            ),
+            1,
+        )
 
     def test_context_past_kv_must_start_on_chunk_boundary(self):
         with self.assertRaisesRegex(ValueError, "chunk boundary"):
-            cl._validate_ctx_past_kv([cl.DataPoint("ctx", 1, 512, 1024)], 8192)
+            cl._validate_ctx_past_kv(
+                [cl.DataPoint("ctx", 1, 512, 1024)],
+                8192,
+                ctx_driver="chunked",
+            )
+
+        cl._validate_ctx_past_kv(
+            [cl.DataPoint("ctx", 1, 512, 1024)],
+            8192,
+            ctx_driver="prefix_cache",
+        )
+
+    def test_model_max_len_filter_accounts_for_generated_token(self):
+        datapoints = [
+            cl.DataPoint("ctx", 1, 8, 31),
+            cl.DataPoint("ctx", 1, 8, 32),
+            cl.DataPoint("gen", 1, 1, 38),
+            cl.DataPoint("gen", 1, 1, 39),
+        ]
+
+        filtered, skipped = cl._filter_datapoints_for_model_max_len(datapoints, 40)
+
+        self.assertEqual(skipped, 2)
+        self.assertEqual(
+            [dp.shape_key for dp in filtered],
+            ["ctx:bs1:new8:past31", "gen:bs1:new1:past38"],
+        )
+
+    def test_build_work_units_filters_context_grid_by_model_max_len(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            dense_config = {
+                "num_attention_heads": 8,
+                "num_key_value_heads": 8,
+                "intermediate_size": 1024,
+                "max_position_embeddings": 10,
+            }
+            args = _build_args(
+                tmp_path,
+                phases="ctx",
+                tp_sizes="1",
+                ctx_new_tokens="1,2,8",
+                ctx_past_kv="0,8",
+            )
+
+            with (
+                mock.patch.object(cl, "_load_original_config", return_value=dense_config),
+                mock.patch.object(cl, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
+            ):
+                units = cl.build_work_units(args)
+
+            self.assertEqual(
+                [dp.shape_key for dp in units[0].datapoints],
+                [
+                    "ctx:bs1:new1:past0",
+                    "ctx:bs1:new2:past0",
+                    "ctx:bs1:new8:past0",
+                    "ctx:bs1:new1:past8",
+                ],
+            )
 
     def test_dense_build_work_units_do_not_emit_moe_ep_metadata(self):
         with tempfile.TemporaryDirectory() as td:

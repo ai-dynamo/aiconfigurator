@@ -82,6 +82,14 @@ OSL_MAX="${OSL_MAX:-1024}"
 ISL_VALUES="${ISL_VALUES:-}"
 OSL_VALUES="${OSL_VALUES:-}"
 IGNORE_EOS="${IGNORE_EOS:-1}"
+MEASUREMENT_MODE="${MEASUREMENT_MODE:-deployment-parity}"
+NSYS_PROFILE_WORKER="${NSYS_PROFILE_WORKER:-0}"
+NSYS_BIN="${NSYS_BIN:-nsys}"
+NSYS_HOST_DIR="${NSYS_HOST_DIR:-}"
+NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx}"
+NSYS_CUDA_GRAPH_TRACE="${NSYS_CUDA_GRAPH_TRACE:-node}"
+NSYS_PROFILE_TRAFFIC_ONLY="${NSYS_PROFILE_TRAFFIC_ONLY:-1}"
+NSYS_SESSION_NAME="${NSYS_SESSION_NAME:-fpm_worker}"
 
 RUN_ID="${RUN_ID:-dynamo-fpm-$(date +%Y%m%d-%H%M%S)-$$}"
 NAME_PREFIX="${NAME_PREFIX:-${RUN_ID}}"
@@ -91,6 +99,8 @@ DETAIL_OUTPUT_CSV="${DETAIL_OUTPUT_CSV:-}"
 PHASE_OUTPUT_CSV="${PHASE_OUTPUT_CSV:-}"
 WORKLOAD_OUTPUT_CSV="${WORKLOAD_OUTPUT_CSV:-}"
 WARMUP_WORKLOAD_OUTPUT_CSV="${WARMUP_WORKLOAD_OUTPUT_CSV:-}"
+METADATA_OUTPUT_JSON="${METADATA_OUTPUT_JSON:-}"
+EFFECTIVE_CONFIG_OUTPUT_JSON="${EFFECTIVE_CONFIG_OUTPUT_JSON:-}"
 KEEP_RUNNING="${KEEP_RUNNING:-0}"
 SKIP_REQUESTS="${SKIP_REQUESTS:-0}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -153,6 +163,13 @@ Options:
   --isl-values CSV              Explicit target ISL list, e.g. 1,64,256,1024,4096
   --osl-values CSV              Explicit target OSL list, e.g. 1,16,64,256,1024
   --disable-ignore-eos          Do not request ignore_eos=true; OSL becomes a cap
+  --measurement-mode MODE       Metadata tag; FPM should normally use deployment-parity (default: ${MEASUREMENT_MODE})
+  --nsys-profile-worker         Wrap the vLLM worker in nsys profile and write reports under RUN_DIR/nsys
+  --nsys-bin PATH               nsys binary path inside the worker container (default: ${NSYS_BIN})
+  --nsys-host-dir DIR           Optional host directory to mount read-only at the same path for --nsys-bin
+  --nsys-trace CSV              nsys --trace value when profiling worker (default: ${NSYS_TRACE})
+  --nsys-cuda-graph-trace MODE  nsys --cuda-graph-trace value when profiling worker (default: ${NSYS_CUDA_GRAPH_TRACE})
+  --nsys-full-worker            Profile from worker start instead of only measured traffic
   --max-tokens N                Fixed-workload max_tokens (default: ${MAX_TOKENS})
   --prompt-token-seed N         Seed for deterministic random prompt token IDs (default: ${PROMPT_TOKEN_SEED})
   --request-retries N           Retries per request for transient HTTP errors (default: ${REQUEST_RETRIES})
@@ -163,6 +180,9 @@ Options:
   --phase-output PATH           Classified step CSV path (default: OUTPUT_phase.csv)
   --workload-output PATH        Request workload CSV path (default: OUTPUT_workload.csv)
   --warmup-workload-output PATH Warmup workload CSV path (default: OUTPUT_warmup_workload.csv)
+  --metadata-output PATH        Requested/effective vLLM metadata JSON (default: OUTPUT_metadata.json)
+  --effective-config-output PATH
+                                Effective vLLM config JSON (default: OUTPUT_effective_vllm_config.json)
   --run-dir DIR                 Shared host run dir (default: ${RUN_DIR})
   --name-prefix NAME            Docker container name prefix (default: ${NAME_PREFIX})
   --skip-requests               Start stack and collector, but do not send sample requests
@@ -346,6 +366,13 @@ while [[ $# -gt 0 ]]; do
         --isl-values) ISL_VALUES="$2"; shift 2 ;;
         --osl-values) OSL_VALUES="$2"; shift 2 ;;
         --disable-ignore-eos) IGNORE_EOS=0; shift ;;
+        --measurement-mode) MEASUREMENT_MODE="$2"; shift 2 ;;
+        --nsys-profile-worker) NSYS_PROFILE_WORKER=1; shift ;;
+        --nsys-bin) NSYS_BIN="$2"; shift 2 ;;
+        --nsys-host-dir) NSYS_HOST_DIR="$2"; shift 2 ;;
+        --nsys-trace) NSYS_TRACE="$2"; shift 2 ;;
+        --nsys-cuda-graph-trace) NSYS_CUDA_GRAPH_TRACE="$2"; shift 2 ;;
+        --nsys-full-worker) NSYS_PROFILE_TRAFFIC_ONLY=0; shift ;;
         --max-tokens) MAX_TOKENS="$2"; shift 2 ;;
         --prompt-token-seed) PROMPT_TOKEN_SEED="$2"; shift 2 ;;
         --request-retries) REQUEST_RETRIES="$2"; shift 2 ;;
@@ -356,6 +383,8 @@ while [[ $# -gt 0 ]]; do
         --phase-output) PHASE_OUTPUT_CSV="$2"; shift 2 ;;
         --workload-output) WORKLOAD_OUTPUT_CSV="$2"; shift 2 ;;
         --warmup-workload-output) WARMUP_WORKLOAD_OUTPUT_CSV="$2"; shift 2 ;;
+        --metadata-output) METADATA_OUTPUT_JSON="$2"; shift 2 ;;
+        --effective-config-output) EFFECTIVE_CONFIG_OUTPUT_JSON="$2"; shift 2 ;;
         --run-dir) RUN_DIR="$2"; shift 2 ;;
         --name-prefix) NAME_PREFIX="$2"; shift 2 ;;
         --skip-requests) SKIP_REQUESTS=1; shift ;;
@@ -412,6 +441,24 @@ if [[ -z "${WARMUP_WORKLOAD_OUTPUT_CSV}" ]]; then
 elif [[ "${WARMUP_WORKLOAD_OUTPUT_CSV}" != /* ]]; then
     WARMUP_WORKLOAD_OUTPUT_CSV="${PWD}/${WARMUP_WORKLOAD_OUTPUT_CSV}"
 fi
+if [[ -z "${METADATA_OUTPUT_JSON}" ]]; then
+    if [[ "${OUTPUT_CSV}" == *.csv ]]; then
+        METADATA_OUTPUT_JSON="${OUTPUT_CSV%.csv}_metadata.json"
+    else
+        METADATA_OUTPUT_JSON="${OUTPUT_CSV}.metadata.json"
+    fi
+elif [[ "${METADATA_OUTPUT_JSON}" != /* ]]; then
+    METADATA_OUTPUT_JSON="${PWD}/${METADATA_OUTPUT_JSON}"
+fi
+if [[ -z "${EFFECTIVE_CONFIG_OUTPUT_JSON}" ]]; then
+    if [[ "${OUTPUT_CSV}" == *.csv ]]; then
+        EFFECTIVE_CONFIG_OUTPUT_JSON="${OUTPUT_CSV%.csv}_effective_vllm_config.json"
+    else
+        EFFECTIVE_CONFIG_OUTPUT_JSON="${OUTPUT_CSV}.effective_vllm_config.json"
+    fi
+elif [[ "${EFFECTIVE_CONFIG_OUTPUT_JSON}" != /* ]]; then
+    EFFECTIVE_CONFIG_OUTPUT_JSON="${PWD}/${EFFECTIVE_CONFIG_OUTPUT_JSON}"
+fi
 if [[ "${RUN_DIR}" != /* ]]; then
     RUN_DIR="${PWD}/${RUN_DIR}"
 fi
@@ -426,6 +473,8 @@ DETAIL_OUTPUT_DIR="$(dirname "${DETAIL_OUTPUT_CSV}")"
 PHASE_OUTPUT_DIR="$(dirname "${PHASE_OUTPUT_CSV}")"
 WORKLOAD_OUTPUT_DIR="$(dirname "${WORKLOAD_OUTPUT_CSV}")"
 WARMUP_WORKLOAD_OUTPUT_DIR="$(dirname "${WARMUP_WORKLOAD_OUTPUT_CSV}")"
+METADATA_OUTPUT_DIR="$(dirname "${METADATA_OUTPUT_JSON}")"
+EFFECTIVE_CONFIG_OUTPUT_DIR="$(dirname "${EFFECTIVE_CONFIG_OUTPUT_JSON}")"
 COLLECTOR_OUTPUT_CSV="${RUN_DIR}/fpm_metrics.csv"
 COLLECTOR_OUTPUT_IN_CONTAINER="/work/fpm_metrics.csv"
 COLLECTOR_DETAIL_CSV="${RUN_DIR}/fpm_metrics_detail.csv"
@@ -435,6 +484,11 @@ REQUEST_WORKLOAD_CSV="${RUN_DIR}/request_workload.csv"
 REQUEST_WORKLOAD_IN_CONTAINER="/work/request_workload.csv"
 WARMUP_WORKLOAD_CSV="${RUN_DIR}/warmup_workload.csv"
 WARMUP_WORKLOAD_IN_CONTAINER="/work/warmup_workload.csv"
+RUN_METADATA_JSON="${RUN_DIR}/vllm_metadata.json"
+RUN_EFFECTIVE_CONFIG_JSON="${RUN_DIR}/effective_vllm_config.json"
+RUN_EFFECTIVE_CONFIG_IN_CONTAINER="/work/effective_vllm_config.json"
+NSYS_WORKER_OUTPUT_BASE="${RUN_DIR}/nsys/fpm_worker"
+NSYS_WORKER_OUTPUT_IN_CONTAINER="/work/nsys/fpm_worker"
 
 FRONTEND_NAME="${NAME_PREFIX}-frontend"
 WORKER_NAME="${NAME_PREFIX}-worker"
@@ -447,6 +501,7 @@ DOCKER_ENV=(
     -e "DYN_FILE_KV=/work/discovery"
     -e "DYN_NAMESPACE=dynamo"
 )
+NSYS_DOCKER_MOUNTS=()
 
 mkdir -p \
     "${RUN_DIR}/discovery" \
@@ -455,8 +510,21 @@ mkdir -p \
     "${PHASE_OUTPUT_DIR}" \
     "${WORKLOAD_OUTPUT_DIR}" \
     "${WARMUP_WORKLOAD_OUTPUT_DIR}" \
+    "${METADATA_OUTPUT_DIR}" \
+    "${EFFECTIVE_CONFIG_OUTPUT_DIR}" \
+    "${RUN_DIR}/nsys" \
     "${HF_HOME_HOST}"
 chmod a+rwx "${RUN_DIR}" "${RUN_DIR}/discovery" "${HF_HOME_HOST}"
+
+if [[ "${NSYS_PROFILE_WORKER}" == "1" ]]; then
+    if [[ -z "${NSYS_HOST_DIR}" && "${NSYS_BIN}" == /* && -x "${NSYS_BIN}" ]]; then
+        NSYS_HOST_DIR="$(dirname "${NSYS_BIN}")"
+    fi
+    if [[ -n "${NSYS_HOST_DIR}" ]]; then
+        [[ -d "${NSYS_HOST_DIR}" ]] || die "--nsys-host-dir does not exist: ${NSYS_HOST_DIR}"
+        NSYS_DOCKER_MOUNTS=(-v "${NSYS_HOST_DIR}:${NSYS_HOST_DIR}:ro")
+    fi
+fi
 
 case "${REQUEST_ENDPOINT}" in
     completions) ;;
@@ -596,7 +664,9 @@ stage_helper_scripts() {
     done
     mkdir -p "${RUN_DIR}/common"
     cp "${COMMON_DIR}/random_prompt_tokens.py" "${RUN_DIR}/common/random_prompt_tokens.py"
+    cp "${COMMON_DIR}/vllm_deployment.py" "${RUN_DIR}/vllm_deployment.py"
     chmod a+r "${RUN_DIR}/common/random_prompt_tokens.py"
+    chmod a+r "${RUN_DIR}/vllm_deployment.py"
 }
 
 stage_helper_scripts
@@ -617,6 +687,76 @@ start_file_discovery_touch_loop() {
     ) &
     DISCOVERY_TOUCH_PID=$!
     log "Refreshing local file-discovery mtimes every ${FILE_DISCOVERY_TOUCH_SECONDS}s (pid ${DISCOVERY_TOUCH_PID})"
+}
+
+deployment_helper_args() {
+    local args=(
+        --model "${MODEL}"
+        --max-model-len "${MAX_MODEL_LEN}"
+        --max-num-seqs "${MAX_NUM_SEQS}"
+        --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
+    )
+    if [[ "${ENFORCE_EAGER}" == "1" ]]; then
+        args+=(--enforce-eager)
+    fi
+    if [[ "${DISABLE_PREFIX_CACHING}" == "1" ]]; then
+        args+=(--disable-prefix-caching)
+    fi
+    local extra
+    for extra in "${WORKER_EXTRA_ARGS[@]}"; do
+        args+=("--extra-arg=${extra}")
+    done
+    printf '%s\n' "${args[@]}"
+}
+
+build_vllm_deployment_args() {
+    local helper_args=()
+    mapfile -t helper_args < <(deployment_helper_args)
+    mapfile -t VLLM_DEPLOYMENT_ARGS < <(
+        python3 "${COMMON_DIR}/vllm_deployment.py" build-args "${helper_args[@]}" --format lines
+    )
+    VLLM_DEPLOYMENT_ARGS_JSON="$(
+        python3 "${COMMON_DIR}/vllm_deployment.py" build-args "${helper_args[@]}" --format json
+    )"
+}
+
+write_vllm_run_metadata() {
+    local helper_args=()
+    mapfile -t helper_args < <(deployment_helper_args)
+    local metadata_args=(
+        "${COMMON_DIR}/vllm_deployment.py"
+        write-metadata
+        "${helper_args[@]}"
+        --artifact-kind fpm
+        --measurement-mode "${MEASUREMENT_MODE}"
+        --output "${RUN_METADATA_JSON}"
+    )
+    if [[ -f "${RUN_EFFECTIVE_CONFIG_JSON}" ]]; then
+        metadata_args+=(--effective-config "${RUN_EFFECTIVE_CONFIG_JSON}")
+    fi
+    python3 "${metadata_args[@]}"
+}
+
+snapshot_effective_vllm_config() {
+    if [[ "${DRY_RUN}" == "1" ]]; then
+        return
+    fi
+    local snapshot_rc=0
+    run docker run --rm \
+        --network host \
+        -v "${RUN_DIR}:/work" \
+        -v "${HF_HOME_HOST}:/work/hf-home" \
+        -e "HF_HOME=/work/hf-home" \
+        -e "HF_HUB_CACHE=/work/hf-home/hub" \
+        -e "TRANSFORMERS_CACHE=/work/hf-home/transformers" \
+        -e "HF_TOKEN=${HF_TOKEN:-}" \
+        "${IMAGE}" \
+        python3 /work/vllm_deployment.py snapshot-effective \
+            --args-json "${VLLM_DEPLOYMENT_ARGS_JSON}" \
+            --output "${RUN_EFFECTIVE_CONFIG_IN_CONTAINER}" || snapshot_rc=$?
+    if [[ "${snapshot_rc}" != "0" ]]; then
+        log "WARNING: failed to snapshot effective vLLM config; metadata will contain requested args only"
+    fi
 }
 
 send_request_workload() {
@@ -684,11 +824,34 @@ send_request_workload() {
     return "${request_rc}"
 }
 
+start_nsys_worker_collection() {
+    if [[ "${NSYS_PROFILE_WORKER}" != "1" || "${NSYS_PROFILE_TRAFFIC_ONLY}" != "1" ]]; then
+        return
+    fi
+    log "Starting Nsight worker collection session ${NSYS_SESSION_NAME}"
+    run docker exec "${WORKER_NAME}" "${NSYS_BIN}" start --session "${NSYS_SESSION_NAME}" || \
+        log "WARNING: failed to start Nsight session ${NSYS_SESSION_NAME}"
+}
+
+stop_nsys_worker_collection() {
+    if [[ "${NSYS_PROFILE_WORKER}" != "1" || "${NSYS_PROFILE_TRAFFIC_ONLY}" != "1" ]]; then
+        return
+    fi
+    log "Stopping Nsight worker collection session ${NSYS_SESSION_NAME}"
+    run docker exec "${WORKER_NAME}" "${NSYS_BIN}" stop --session "${NSYS_SESSION_NAME}" || \
+        log "WARNING: failed to stop Nsight session ${NSYS_SESSION_NAME}"
+}
+
 log "Run directory: ${RUN_DIR}"
 log "CSV output: ${OUTPUT_CSV}"
 log "FPM detail CSV: ${DETAIL_OUTPUT_CSV}"
 log "FPM phase CSV: ${PHASE_OUTPUT_CSV}"
 log "Request workload CSV: ${WORKLOAD_OUTPUT_CSV}"
+log "vLLM metadata JSON: ${METADATA_OUTPUT_JSON}"
+log "vLLM effective config JSON: ${EFFECTIVE_CONFIG_OUTPUT_JSON}"
+if [[ "${NSYS_PROFILE_WORKER}" == "1" ]]; then
+    log "Nsight worker profile: ${NSYS_WORKER_OUTPUT_BASE}.nsys-rep"
+fi
 log "Workload plan: ${WORKLOAD_PLAN} (${MEASURED_PHASES})"
 if [[ "${WARMUP_REQUESTS}" != "0" ]]; then
     log "Warmup workload CSV: ${WARMUP_WORKLOAD_OUTPUT_CSV}"
@@ -696,6 +859,9 @@ fi
 
 CLEANUP_ENABLED=1
 start_file_discovery_touch_loop
+build_vllm_deployment_args
+snapshot_effective_vllm_config
+write_vllm_run_metadata
 
 log "Starting frontend container ${FRONTEND_NAME}"
 run docker run -d \
@@ -713,22 +879,32 @@ run docker run -d \
 
 WORKER_CMD=(
     python3 -m dynamo.vllm
-    --model "${MODEL}"
+    "${VLLM_DEPLOYMENT_ARGS[@]}"
     --discovery-backend file
     --request-plane tcp
     --event-plane zmq
     --kv-events-config '{"enable_kv_cache_events": false}'
-    --max-model-len "${MAX_MODEL_LEN}"
-    --max-num-seqs "${MAX_NUM_SEQS}"
-    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
 )
-if [[ "${ENFORCE_EAGER}" == "1" ]]; then
-    WORKER_CMD+=(--enforce-eager)
+WORKER_CONTAINER_CMD=("${WORKER_CMD[@]}")
+if [[ "${NSYS_PROFILE_WORKER}" == "1" ]]; then
+    WORKER_CONTAINER_CMD=(
+        "${NSYS_BIN}" profile
+        "--trace=${NSYS_TRACE}"
+        "--cuda-graph-trace=${NSYS_CUDA_GRAPH_TRACE}"
+        --trace-fork-before-exec=false
+        --sample=none
+        --cpuctxsw=none
+        --force-overwrite=true
+        --output "${NSYS_WORKER_OUTPUT_IN_CONTAINER}"
+    )
+    if [[ "${NSYS_PROFILE_TRAFFIC_ONLY}" == "1" ]]; then
+        WORKER_CONTAINER_CMD+=(
+            --session-new "${NSYS_SESSION_NAME}"
+            --start-later=true
+        )
+    fi
+    WORKER_CONTAINER_CMD+=("${WORKER_CMD[@]}")
 fi
-if [[ "${DISABLE_PREFIX_CACHING}" == "1" ]]; then
-    WORKER_CMD+=(--no-enable-prefix-caching)
-fi
-WORKER_CMD+=("${WORKER_EXTRA_ARGS[@]}")
 
 log "Starting vLLM worker container ${WORKER_NAME}"
 run docker run -d \
@@ -737,6 +913,7 @@ run docker run -d \
     --gpus "${GPUS}" \
     -v "${RUN_DIR}:/work" \
     -v "${HF_HOME_HOST}:/work/hf-home" \
+    "${NSYS_DOCKER_MOUNTS[@]}" \
     "${DOCKER_ENV[@]}" \
     -e "DYN_FORWARDPASS_METRIC_PORT=${FPM_PORT}" \
     -e "DYN_SYSTEM_PORT=${SYSTEM_PORT}" \
@@ -745,7 +922,7 @@ run docker run -d \
     -e "TRANSFORMERS_CACHE=/work/hf-home/transformers" \
     -e "HF_TOKEN=${HF_TOKEN:-}" \
     "${IMAGE}" \
-    "${WORKER_CMD[@]}"
+    "${WORKER_CONTAINER_CMD[@]}"
 
 if [[ "${DRY_RUN}" != "1" ]]; then
     log "Waiting for frontend health"
@@ -794,6 +971,8 @@ if [[ "${DRY_RUN}" != "1" ]]; then
     # Avoid ZMQ slow-joiner loss on the first prefill iteration.
     sleep 1
 fi
+
+start_nsys_worker_collection
 
 send_sweep_workloads() {
     local context_count context_requests
@@ -870,6 +1049,8 @@ else
         0 || REQUEST_SEND_RC=$?
 fi
 
+stop_nsys_worker_collection
+
 if [[ "${REQUEST_SEND_RC}" != "0" ]]; then
     log "Request driver exited with ${REQUEST_SEND_RC}; preserving collector output before exiting."
 fi
@@ -880,6 +1061,16 @@ if [[ "${DRY_RUN}" != "1" ]]; then
 
     if [[ "${KEEP_RUNNING}" != "1" ]] && container_exists "${COLLECTOR_NAME}"; then
         docker stop -t 2 "${COLLECTOR_NAME}" >/dev/null || true
+    fi
+    if [[ "${NSYS_PROFILE_WORKER}" == "1" && "${KEEP_RUNNING}" != "1" ]] && container_exists "${WORKER_NAME}"; then
+        log "Stopping profiled worker container to flush Nsight report"
+        docker stop -t 60 "${WORKER_NAME}" >/dev/null || true
+        if compgen -G "${RUN_DIR}/nsys/fpm_worker*.nsys-rep" >/dev/null; then
+            log "Nsight worker report(s):"
+            find "${RUN_DIR}/nsys" -maxdepth 1 -type f -name 'fpm_worker*.nsys-rep' -print >&2
+        else
+            log "WARNING: no Nsight worker report found under ${RUN_DIR}/nsys"
+        fi
     fi
 
     if [[ -f "${COLLECTOR_OUTPUT_CSV}" ]]; then
@@ -906,6 +1097,14 @@ if [[ "${DRY_RUN}" != "1" ]]; then
         if [[ -f "${WARMUP_WORKLOAD_CSV}" && "${WARMUP_WORKLOAD_CSV}" != "${WARMUP_WORKLOAD_OUTPUT_CSV}" ]]; then
             cp "${WARMUP_WORKLOAD_CSV}" "${WARMUP_WORKLOAD_OUTPUT_CSV}"
             log "Warmup workload written to ${WARMUP_WORKLOAD_OUTPUT_CSV}"
+        fi
+        if [[ -f "${RUN_METADATA_JSON}" && "${RUN_METADATA_JSON}" != "${METADATA_OUTPUT_JSON}" ]]; then
+            cp "${RUN_METADATA_JSON}" "${METADATA_OUTPUT_JSON}"
+            log "vLLM metadata written to ${METADATA_OUTPUT_JSON}"
+        fi
+        if [[ -f "${RUN_EFFECTIVE_CONFIG_JSON}" && "${RUN_EFFECTIVE_CONFIG_JSON}" != "${EFFECTIVE_CONFIG_OUTPUT_JSON}" ]]; then
+            cp "${RUN_EFFECTIVE_CONFIG_JSON}" "${EFFECTIVE_CONFIG_OUTPUT_JSON}"
+            log "vLLM effective config written to ${EFFECTIVE_CONFIG_OUTPUT_JSON}"
         fi
         rows=$(tail -n +2 "${OUTPUT_CSV}" | wc -l | tr -d ' ')
         log "Collected ${rows} FPM rows at ${OUTPUT_CSV}"

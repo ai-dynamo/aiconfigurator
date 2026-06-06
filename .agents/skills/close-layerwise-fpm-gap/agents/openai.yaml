@@ -1,0 +1,4 @@
+interface:
+  display_name: "Close Layerwise-FPM Gap"
+  short_description: "Diagnose AIC layerwise vs FPM gaps"
+  default_prompt: "Use $close-layerwise-fpm-gap to compare AIC layerwise predictions against FPM and identify the likely source of any latency gap."

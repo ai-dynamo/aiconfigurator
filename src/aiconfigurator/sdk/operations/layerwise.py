@@ -48,12 +48,32 @@ def load_layerwise_data(layerwise_file):
             latency_ms = float(row["total_time_us"]) / 1000.0
 
         entry = {"latency": latency_ms, "energy": 0.0}
+        if row.get("rms_latency_ms") not in (None, ""):
+            entry["rms_latency"] = float(row["rms_latency_ms"])
+        if row.get("rms_kernel_count") not in (None, ""):
+            entry["rms_kernel_count"] = int(float(row["rms_kernel_count"]))
         if phase == "CTX":
             data[model][phase][tp_size][seq_len_q][seq_len_kv_cache] = entry
         else:
             data[model][phase][tp_size][batch_size][seq_len_kv_cache] = entry
 
     return data
+
+
+def _interpolate_metric_2d(x: int, y: int, data: dict, metric: str, extracted_metrics_cache: dict) -> float:
+    metric_data = {}
+    has_metric = False
+    for x_key, y_data in data.items():
+        metric_data[x_key] = {}
+        for y_key, value in y_data.items():
+            if isinstance(value, dict) and metric in value:
+                has_metric = True
+                metric_data[x_key][y_key] = float(value[metric])
+            else:
+                metric_data[x_key][y_key] = 0.0
+    if not has_metric:
+        return 0.0
+    return float(interpolation.interp_2d_linear(x, y, metric_data, extracted_metrics_cache)["latency"])
 
 
 class Layerwise(Operation):
@@ -84,7 +104,7 @@ class Layerwise(Operation):
         cls._data_cache.clear()
 
     @classmethod
-    def _query_layerwise_table(
+    def _query_layerwise_detail_table(
         cls,
         database: PerfDatabase,
         model: str,
@@ -93,7 +113,7 @@ class Layerwise(Operation):
         batch_size: int,
         seq_len: int,
         seq_len_kv_cache: int = 0,
-    ) -> PerformanceResult:
+    ) -> dict[str, float]:
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
         model = model.lower()
@@ -124,14 +144,56 @@ class Layerwise(Operation):
                     tp_data,
                     database._extracted_metrics_cache,
                 )
+                result["rms_latency"] = _interpolate_metric_2d(
+                    seq_len,
+                    seq_len_kv_cache,
+                    tp_data,
+                    "rms_latency",
+                    database._extracted_metrics_cache,
+                )
         elif batch_size in tp_data and seq_len in tp_data[batch_size]:
             result = tp_data[batch_size][seq_len]
         else:
             result = interpolation.interp_2d_linear(batch_size, seq_len, tp_data, database._extracted_metrics_cache)
+            result["rms_latency"] = _interpolate_metric_2d(
+                batch_size,
+                seq_len,
+                tp_data,
+                "rms_latency",
+                database._extracted_metrics_cache,
+            )
 
-        latency = result["latency"] if isinstance(result, dict) else float(result)
-        energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
-        return PerformanceResult(latency, energy=energy, source="silicon")
+        if not isinstance(result, dict):
+            result = {"latency": float(result), "energy": 0.0}
+        return {
+            "latency": float(result["latency"]),
+            "energy": float(result.get("energy", 0.0)),
+            "rms_latency": float(result.get("rms_latency", 0.0)),
+            "rms_kernel_count": float(result.get("rms_kernel_count", 0.0)),
+        }
+
+    @classmethod
+    def _query_layerwise_table(
+        cls,
+        database: PerfDatabase,
+        model: str,
+        phase: str,
+        tp_size: int,
+        batch_size: int,
+        seq_len: int,
+        seq_len_kv_cache: int = 0,
+    ) -> PerformanceResult:
+        result = cls._query_layerwise_detail_table(
+            database,
+            model,
+            phase,
+            tp_size,
+            batch_size,
+            seq_len,
+            seq_len_kv_cache,
+        )
+
+        return PerformanceResult(result["latency"], energy=result["energy"], source="silicon")
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         return self._query_layerwise_table(

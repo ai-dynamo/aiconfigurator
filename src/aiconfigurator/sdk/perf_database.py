@@ -717,6 +717,7 @@ from aiconfigurator.sdk.operations.attention import (  # noqa: F401
     load_generation_attention_data,
 )
 from aiconfigurator.sdk.operations.communication import (  # noqa: F401
+    load_allreduce_rms_data,
     load_custom_allreduce_data,
     load_nccl_data,
 )
@@ -1881,6 +1882,35 @@ class PerfDatabase:
         return CustomAllReduce._query_custom_allreduce_table(self, quant_mode, tp_size, size, database_mode)
 
     @functools.lru_cache(maxsize=32768)
+    def query_allreduce_rms(
+        self,
+        quant_mode: common.CommQuantMode,
+        tp_size: int,
+        size: int,
+        hidden_size: int,
+        fusion_pattern: str = "allreduce_residual_rms",
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult | tuple[float, float, float]:
+        """Query fused allreduce + RMSNorm latency.
+
+        Hidden size is part of the table schema. Querying selects the nearest
+        available hidden size before interpolating by message size, so the
+        initial hidden_size=4096 approximation can be extended later by adding
+        more rows without changing this API.
+        """
+        from aiconfigurator.sdk.operations.communication import AllReduceRMS
+
+        return AllReduceRMS._query_allreduce_rms_table(
+            self,
+            quant_mode,
+            tp_size,
+            size,
+            hidden_size,
+            fusion_pattern,
+            database_mode,
+        )
+
+    @functools.lru_cache(maxsize=32768)
     def query_layerwise(
         self,
         model: str,
@@ -1894,6 +1924,29 @@ class PerfDatabase:
         from aiconfigurator.sdk.operations.layerwise import Layerwise
 
         return Layerwise._query_layerwise_table(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache)
+
+    @functools.lru_cache(maxsize=32768)
+    def query_layerwise_detail(
+        self,
+        model: str,
+        phase: str,
+        tp_size: int,
+        batch_size: int,
+        seq_len: int,
+        seq_len_kv_cache: int = 0,
+    ) -> dict[str, float]:
+        """Query layerwise latency plus optional sideband metrics."""
+        from aiconfigurator.sdk.operations.layerwise import Layerwise
+
+        return Layerwise._query_layerwise_detail_table(
+            self,
+            model,
+            phase,
+            tp_size,
+            batch_size,
+            seq_len,
+            seq_len_kv_cache,
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_nccl(

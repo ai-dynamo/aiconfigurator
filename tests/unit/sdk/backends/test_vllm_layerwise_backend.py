@@ -6,6 +6,7 @@ import pytest
 from aiconfigurator.sdk.backends import base_backend
 from aiconfigurator.sdk.backends.vllm_backend import VLLMBackend
 from aiconfigurator.sdk.config import RuntimeConfig
+from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
 pytestmark = pytest.mark.unit
 
@@ -123,6 +124,163 @@ def test_vllm_layerwise_mixed_step_uses_whole_layer_tables(monkeypatch) -> None:
     assert set(sources) == set(per_ops)
 
 
+def test_vllm_layerwise_generation_does_not_add_generic_allreduce(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 8
+        pp_size = 1
+
+    class _Model:
+        model_path = "Qwen/Qwen3-32B"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 5120
+        _nextn = 0
+
+    class _Database:
+        def query_layerwise(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0):
+            assert model == "Qwen/Qwen3-32B"
+            assert phase == "GEN"
+            assert tp_size == 8
+            assert batch_size == 16
+            assert seq_len_kv_cache == 0
+            if seq_len == 1024:
+                return 1.0
+            if seq_len == 1056:
+                return 1.5
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, quant_mode, tp_size, size):
+            raise AssertionError((quant_mode, tp_size, size))
+
+    latency_ms, energy_wms, sources = VLLMBackend()._run_generation_phase(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        batch_size=16,
+        beam_width=1,
+        isl=1024,
+        osl=65,
+        stride=32,
+    )
+
+    assert latency_ms["generation_layerwise"] == pytest.approx((1.0 * 4 * 32) + (1.5 * 4 * 32))
+    assert energy_wms["generation_layerwise"] == 0.0
+    assert sources == {"generation_layerwise": "silicon"}
+
+
+def test_vllm_layerwise_generation_uses_fused_allreduce_rms(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 8
+        pp_size = 1
+
+    class _Model:
+        model_path = "Qwen/Qwen3-32B"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 5120
+        _nextn = 0
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0):
+            assert model == "Qwen/Qwen3-32B"
+            assert phase == "GEN"
+            assert tp_size == 8
+            assert batch_size == 16
+            assert seq_len_kv_cache == 0
+            assert seq_len == 1024
+            return {"latency": 1.0, "energy": 0.0, "rms_latency": 0.1}
+
+        def query_allreduce_rms(self, quant_mode, tp_size, size, hidden_size):
+            del quant_mode
+            assert tp_size == 8
+            assert size == 16 * 5120
+            assert hidden_size == 5120
+            return 0.2
+
+        def query_custom_allreduce(self, quant_mode, tp_size, size):
+            raise AssertionError((quant_mode, tp_size, size))
+
+    latency_ms, energy_wms, sources = VLLMBackend()._run_generation_phase(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        batch_size=16,
+        beam_width=1,
+        isl=1024,
+        osl=2,
+        stride=32,
+    )
+
+    assert latency_ms["generation_layerwise"] == pytest.approx((1.0 - 0.1) * 4)
+    assert latency_ms["generation_tp_allreduce_rms"] == pytest.approx(0.2 * 2 * 4)
+    assert sum(latency_ms.values()) == pytest.approx(5.2)
+    assert energy_wms["generation_layerwise"] == 0.0
+    assert energy_wms["generation_tp_allreduce_rms"] == 0.0
+    assert sources == {
+        "generation_layerwise": "silicon",
+        "generation_tp_allreduce_rms": "silicon",
+    }
+
+
+@pytest.mark.parametrize("gen_error", [PerfDataNotAvailableError("missing GEN KV row"), ValueError("sparse GEN KV")])
+def test_vllm_layerwise_mixed_step_falls_back_when_gen_kv_missing(monkeypatch, gen_error) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+
+    class _Model:
+        model_path = "Qwen/Qwen3-32B"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 5120
+
+    class _Database:
+        def query_layerwise(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0):
+            assert model == "Qwen/Qwen3-32B"
+            assert tp_size == 2
+            if phase == "CTX" and batch_size == 1 and seq_len == 10 and seq_len_kv_cache == 0:
+                return 1.0
+            if phase == "GEN":
+                raise gen_error
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, quant_mode, tp_size, size):
+            del quant_mode
+            assert tp_size == 2
+            assert size == 10 * 5120
+            return 0.1
+
+    latency_ms, _energy_wms, per_ops, _sources = VLLMBackend()._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        ctx_tokens=8,
+        gen_tokens=2,
+        isl=2048,
+        osl=16,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx((1.0 * 4) + (0.1 * 2 * 4))
+    assert per_ops == {
+        "mixed_layerwise_context_combined": 4.0,
+        "mixed_layerwise_context_tp_allreduce": pytest.approx(0.8),
+        "mixed_layerwise_decode_delta": 0.0,
+    }
+
+
 def test_vllm_layerwise_context_uses_chunked_prefill_kv(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 
@@ -159,3 +317,43 @@ def test_vllm_layerwise_context_uses_chunked_prefill_kv(monkeypatch) -> None:
     )
 
     assert latency["context_layerwise"] == pytest.approx((1.0 + 1.5) * 4)
+
+
+def test_vllm_layerwise_context_falls_back_to_direct_long_row(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+
+    class _Model:
+        model_path = "Qwen/Qwen3-32B"
+        config = _Config()
+        _num_layers = 4
+
+    class _Database:
+        def query_layerwise(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0):
+            assert model == "Qwen/Qwen3-32B"
+            assert phase == "CTX"
+            assert tp_size == 1
+            assert batch_size == 1
+            if seq_len == 8192 and seq_len_kv_cache == 0:
+                return 1.0
+            if seq_len == 8192 and seq_len_kv_cache == 8192:
+                raise ValueError("sparse CTX KV grid")
+            if seq_len == 16384 and seq_len_kv_cache == 0:
+                return 2.25
+            raise AssertionError((seq_len, seq_len_kv_cache))
+
+    latency, _energy, _sources = VLLMBackend()._run_context_phase(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        batch_size=1,
+        isl=16384,
+        prefix=0,
+    )
+
+    assert latency["context_layerwise"] == pytest.approx(2.25 * 4)
