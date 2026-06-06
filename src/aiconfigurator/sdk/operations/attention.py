@@ -15,7 +15,7 @@ deciding a long-term home for the analytical mem-op formula is deferred
 to the post-refactor cleanup.
 
 Cache key is ``(systems_root, system, backend, version,
-enable_shared_layer)``, same as GEMM (and every other migrated op).
+shared_layer_policy)``, same as GEMM (and every other migrated op).
 """
 
 from __future__ import annotations
@@ -25,7 +25,13 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.operations.base import (
+    Operation,
+    _perf_source_from_result,
+    _perf_source_from_row,
+    _read_filtered_rows,
+    _shared_cache_key,
+)
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -74,13 +80,7 @@ def _cache_key(database: PerfDatabase) -> tuple:
     NCCL / MLA / Mamba) lands and needs the same key shape — preferring
     duplication over premature abstraction with only two callers.
     """
-    return (
-        database.systems_root,
-        database.system,
-        database.backend,
-        database.version,
-        database.enable_shared_layer,
-    )
+    return _shared_cache_key(database)
 
 
 class ContextAttention(Operation):
@@ -333,7 +333,7 @@ class ContextAttention(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -622,7 +622,7 @@ class GenerationAttention(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -819,7 +819,7 @@ class EncoderAttention(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -906,6 +906,7 @@ def load_context_attention_data(context_attention_file):
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
+                "source": _perf_source_from_row(row),
             }
 
     return context_attention_data
@@ -984,6 +985,7 @@ def load_generation_attention_data(generation_attention_file):
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
+                "source": _perf_source_from_row(row),
             }
 
     return generation_attention_data
@@ -1041,6 +1043,7 @@ def load_encoder_attention_data(encoder_attention_file):
                 "latency": latency,
                 "power": power,
                 "energy": energy,
+                "source": _perf_source_from_row(row),
             }
 
     return encoder_attention_data

@@ -74,12 +74,12 @@ special — pass whatever your `load_data` classmethod receives from
 
 ```python
 from typing import ClassVar
-from aiconfigurator.sdk.operations.base import Operation
+from aiconfigurator.sdk.operations.base import Operation, _shared_cache_key
 
 class MyOp(Operation):
     # Override the base Operation._data_cache with your own dict — the
     # cache is class-level, keyed by (systems_root, system, backend,
-    # version, enable_shared_layer), and shared across all instances
+    # version, shared_layer_policy), and shared across all instances
     # of the same op class.
     _data_cache: ClassVar[dict] = {}
 
@@ -94,13 +94,7 @@ Most op modules define a module-level `_cache_key(database)`. Use it:
 
 ```python
 def _cache_key(database):
-    return (
-        database.systems_root,
-        database.system,
-        database.backend,
-        database.version,
-        database.enable_shared_layer,
-    )
+    return _shared_cache_key(database)
 
 class MyOp(Operation):
     ...
@@ -238,7 +232,7 @@ Three layers, in roughly this order:
 
 `load_data` must be safe to call repeatedly. The cache-key check at the
 top is the contract: same `(systems_root, system, backend, version,
-enable_shared_layer)` → same result, regardless of how many times it
+shared_layer_policy)` → same result, regardless of how many times it
 fires.
 
 ### Instance attribute bind gating

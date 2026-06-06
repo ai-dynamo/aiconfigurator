@@ -26,7 +26,7 @@ SOL formula runs inside the query path). No grid extrapolation either —
 ``_dsv4_robust_3d_lookup`` handles interpolation/fallback at query time.
 
 Cache key matches every other migrated op:
-``(systems_root, system, backend, version, enable_shared_layer)``.
+``(systems_root, system, backend, version, shared_layer_policy)``.
 """
 
 from __future__ import annotations
@@ -40,7 +40,13 @@ from typing import TYPE_CHECKING, ClassVar, Optional
 import numpy as np
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.operations.base import (
+    Operation,
+    _perf_source_from_result,
+    _perf_source_from_row,
+    _read_filtered_rows,
+    _shared_cache_key,
+)
 
 logger = logging.getLogger(__name__)
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -51,13 +57,7 @@ if TYPE_CHECKING:
 
 def _cache_key(database: PerfDatabase) -> tuple:
     """Shared cache key — same shape as every other migrated op family."""
-    return (
-        database.systems_root,
-        database.system,
-        database.backend,
-        database.version,
-        database.enable_shared_layer,
-    )
+    return _shared_cache_key(database)
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -532,7 +532,7 @@ class DeepSeekV4MHCModule(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -1088,7 +1088,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
 
@@ -1279,7 +1279,7 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
 
@@ -1488,7 +1488,7 @@ class DeepSeekV4MegaMoEModule(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -1565,6 +1565,7 @@ def load_mhc_module_data(mhc_file: str):
             "latency": latency,
             "power": power,
             "energy": energy,
+            "source": _perf_source_from_row(row),
         }
 
     return mhc_data
@@ -1630,6 +1631,7 @@ def load_context_dsv4_kind_module_data(file_path: str):
             "latency": latency,
             "power": power,
             "energy": power * latency,
+            "source": _perf_source_from_row(row),
         }
     return data
 
@@ -1683,6 +1685,7 @@ def load_generation_dsv4_kind_module_data(file_path: str):
             "latency": latency,
             "power": power,
             "energy": power * latency,
+            "source": _perf_source_from_row(row),
         }
     return data
 
@@ -1773,6 +1776,7 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
             "latency": latency,
             "power": power,
             "energy": energy,
+            "source": _perf_source_from_row(row),
             "global_num_tokens": int(row.get("global_num_tokens") or num_tokens * moe_ep_size),
             "num_max_tokens_per_rank": num_max_tokens_per_rank,
             "effective_num_max_tokens_per_rank": effective_num_max_tokens_per_rank,
@@ -1840,6 +1844,9 @@ def load_dsv4_sparse_kernel_data(file_path: str):
         except (TypeError, ValueError):
             continue
         native_heads = int(row["num_heads"])
-        data[native_heads][tp_size][past_kv][isl][bs] = {"latency": latency}
+        data[native_heads][tp_size][past_kv][isl][bs] = {
+            "latency": latency,
+            "source": _perf_source_from_row(row),
+        }
 
     return data

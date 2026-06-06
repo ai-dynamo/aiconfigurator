@@ -32,7 +32,7 @@ Op classes migrated from ``_legacy.py``:
   normalization helper onto the class alongside the data.
 
 Cache key matches every other migrated op:
-``(systems_root, system, backend, version, enable_shared_layer)``. The
+``(systems_root, system, backend, version, shared_layer_policy)``. The
 WideEP tables are loaded only when ``database.backend == "sglang"`` (MoE /
 MoEDispatch SGLang-only WideEP slots) or ``database.backend == "trtllm"``
 (``TrtLLMWideEPMoE`` / ``TrtLLMWideEPMoEDispatch``); on other backends the
@@ -46,7 +46,13 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.operations.base import (
+    Operation,
+    _perf_source_from_result,
+    _perf_source_from_row,
+    _read_filtered_rows,
+    _shared_cache_key,
+)
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -58,13 +64,7 @@ logger = logging.getLogger(__name__)
 
 def _cache_key(database: PerfDatabase) -> tuple:
     """Shared cache key — same shape as every other migrated op family."""
-    return (
-        database.systems_root,
-        database.system,
-        database.backend,
-        database.version,
-        database.enable_shared_layer,
-    )
+    return _shared_cache_key(database)
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -647,7 +647,7 @@ class MoE(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -1103,7 +1103,7 @@ class MoEDispatch(Operation):
         return PerformanceResult(
             float(scaled),
             energy=getattr(scaled, "energy", 0.0),
-            source=getattr(scaled, "source", "empirical"),
+            source=_perf_source_from_result(scaled, default="empirical"),
         )
 
     def get_weights(self, **kwargs):
@@ -1533,7 +1533,7 @@ class TrtLLMWideEPMoE(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -1944,7 +1944,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
             if not isinstance(energy, int | float):
                 energy = 0.0
 
-            source = getattr(result, "source", "silicon")
+            source = _perf_source_from_result(result)
             if not isinstance(source, str):
                 source = "silicon"
 
@@ -1993,7 +1993,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
         return PerformanceResult(
             float(scaled),
             energy=getattr(scaled, "energy", 0.0),
-            source=getattr(scaled, "source", "empirical"),
+            source=_perf_source_from_result(scaled, default="empirical"),
         )
 
     def get_weights(self, **kwargs):
@@ -2111,6 +2111,7 @@ def load_moe_data(moe_file):
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
+                "source": _perf_source_from_row(row),
             }
 
     return moe_default_data, moe_low_latency_data
@@ -2174,6 +2175,7 @@ def load_wideep_context_moe_data(wideep_context_moe_file):
             "latency": latency,
             "power": power,
             "energy": energy,  # NEW: precomputed energy
+            "source": _perf_source_from_row(row),
         }
         logger.debug(
             f"Loaded SGLang wideep context MoE data: {quant_mode}, {distribution}, {topk}, "
@@ -2242,6 +2244,7 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
             "latency": latency,
             "power": power,
             "energy": energy,  # NEW: precomputed energy
+            "source": _perf_source_from_row(row),
         }
         logger.debug(
             f"Loaded SGLang wideep generation MoE data: {quant_mode}, {distribution}, {topk}, "
@@ -2301,6 +2304,7 @@ def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
                 "latency": lat,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
+                "source": _perf_source_from_row(row),
             }
 
     return wideep_deepep_ll_data
@@ -2359,6 +2363,7 @@ def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
                 "latency": lat,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
+                "source": _perf_source_from_row(row),
             }
 
     return wideep_deepep_normal_data
@@ -2440,6 +2445,7 @@ def load_wideep_moe_compute_data(wideep_moe_compute_file):
             "latency": latency,
             "power": power,
             "energy": energy,
+            "source": _perf_source_from_row(row),
         }
         # logger.debug(
         #     f"Loaded TensorRT-LLM wideep MoE compute data: kernel={kernel_source}, {quant_mode}, "
@@ -2542,6 +2548,7 @@ def load_trtllm_alltoall_data(trtllm_alltoall_file):
             "latency": latency,
             "power": power,
             "energy": energy,
+            "source": _perf_source_from_row(row),
         }
         # logger.debug(
         #     f"Loaded TensorRT-LLM wideep All2All data: kernel={kernel_source}, {op_name}, {quant_mode}, "

@@ -25,18 +25,18 @@ class TestGEMMCacheStructure:
         assert isinstance(GEMM._compute_scale_cache, dict)
         assert isinstance(GEMM._scale_matrix_cache, dict)
 
-    def test_cache_key_includes_systems_root_and_shared_layer(self, stub_perf_db):
-        """Cache key components must include systems_root + enable_shared_layer
+    def test_cache_key_includes_systems_root_and_shared_policy(self, stub_perf_db):
+        """Cache key components must include systems_root + shared_layer_policy
         so test fixtures with separate tmp_paths and HYBRID/SILICON loads
         get distinct entries."""
         key = GEMM._cache_key(stub_perf_db)
-        # Order: (systems_root, system, backend, version, enable_shared_layer)
+        # Order: (systems_root, system, backend, version, shared_layer_policy)
         assert len(key) == 5
         assert key[0] == stub_perf_db.systems_root
         assert key[1] == stub_perf_db.system
         assert key[2] == stub_perf_db.backend
         assert key[3] == stub_perf_db.version
-        assert key[4] == stub_perf_db.enable_shared_layer
+        assert key[4] == stub_perf_db.shared_layer_policy
 
 
 class TestStaticHelpers:

@@ -299,6 +299,10 @@ def interp_1d(x: list[int], y: list, value: int):
             v1 = y1[key]
             if isinstance(v0, (int, float)) and isinstance(v1, (int, float)):
                 result[key] = _interp_scalar(v0, v1)
+        source0 = y0.get("source", "silicon")
+        source1 = y1.get("source", "silicon")
+        if isinstance(source0, str) and isinstance(source1, str):
+            result["source"] = source0 if source0 == source1 else "mixed"
         return result
 
     return _interp_scalar(y0, y1)
@@ -718,7 +722,9 @@ def extrapolate_data_grid(
                         def _sqrt_leaf(v):
                             if isinstance(v, dict):
                                 return {
-                                    key: (math.sqrt(metric) if isinstance(metric, (int, float)) and metric > 0 else 0.0)
+                                    key: (
+                                        math.sqrt(metric) if isinstance(metric, (int, float)) and metric > 0 else metric
+                                    )
                                     for key, metric in v.items()
                                 }
                             return math.sqrt(v) if v > 0 else 0.0
@@ -728,7 +734,10 @@ def extrapolate_data_grid(
                     value = interp_1d([y_left, y_right], [y_left_value, y_right_value], y)
                     if sqrt_y_value:
                         if isinstance(value, dict):
-                            value = {key: metric * metric for key, metric in value.items()}
+                            value = {
+                                key: metric * metric if isinstance(metric, (int, float)) else metric
+                                for key, metric in value.items()
+                            }
                         else:
                             value = value * value
 
