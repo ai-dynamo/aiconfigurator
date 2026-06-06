@@ -22,6 +22,7 @@ from itertools import groupby
 from pathlib import Path
 
 import pandas as pd
+import yaml
 from tqdm import tqdm
 
 from aiconfigurator.generator.naive import _estimate_model_weight_bytes
@@ -576,6 +577,23 @@ def _shorten_error(error_message: str, max_chars: int = 600) -> str:
     return error_message[: max_chars - 3] + "..."
 
 
+def _load_system_spec(system: str) -> dict | None:
+    """Load system hardware metadata without requiring backend/version perf data."""
+    for systems_root in perf_database.get_systems_paths():
+        system_yaml_path = Path(systems_root) / f"{system}.yaml"
+        if not system_yaml_path.is_file():
+            continue
+        try:
+            with system_yaml_path.open() as f:
+                system_spec = yaml.safe_load(f) or {}
+        except Exception:
+            logger.warning("Failed to read system spec at %s", system_yaml_path, exc_info=True)
+            continue
+        if isinstance(system_spec, dict):
+            return system_spec
+    return None
+
+
 def _normalize_pareto_df_for_comparison(df: pd.DataFrame, sort_columns: list[str]) -> pd.DataFrame:
     normalized = df.copy().reset_index(drop=True)
     if not sort_columns:
@@ -869,6 +887,11 @@ class SupportMatrix:
             engine_step_backend=engine_step_backend,
         )
         result = TaskRunner().run(task_config)
+        if result is None:
+            raise RuntimeError(
+                "TaskRunner returned no result for "
+                f"system={system!r}, backend={backend!r}, version={version!r}, mode={mode!r}"
+            )
         return result.get("pareto_df")
 
     @staticmethod
@@ -934,9 +957,14 @@ class SupportMatrix:
             for mode in modes_to_test
         }
 
+        exact_database_missing = False
         if system_spec is None:
             database = perf_database.get_database(system, backend, version)
-            system_spec = database.system_spec if database is not None else None
+            if database is not None:
+                system_spec = database.system_spec
+            else:
+                exact_database_missing = True
+                system_spec = _load_system_spec(system)
 
         if system_spec is not None:
             try:
@@ -975,6 +1003,18 @@ class SupportMatrix:
                 if include_commands:
                     return statuses, error_messages, commands
                 return statuses, error_messages
+
+        if exact_database_missing:
+            reason = _format_exception_for_csv(
+                "Exact-version SILICON perf database missing for "
+                f"{system}/{backend}/{version}; collect backend/version perf data before support-matrix PASS "
+                "can be evaluated."
+            )
+            statuses = dict.fromkeys(modes_to_test, STATUS_FAIL)
+            error_messages = dict.fromkeys(modes_to_test, reason)
+            if include_commands:
+                return statuses, error_messages, commands
+            return statuses, error_messages
 
         for mode in modes_to_test:
             try:

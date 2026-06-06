@@ -5,6 +5,7 @@ import pytest
 
 import tools.support_matrix.support_matrix as support_matrix_module
 from tools.support_matrix.support_matrix import (
+    STATUS_FAIL,
     STATUS_FRAMEWORK_INCOMPATIBLE,
     STATUS_HW_INCOMPATIBLE,
     STATUS_PASS,
@@ -193,6 +194,89 @@ def test_run_single_test_short_circuits_hardware_incompatible_model(monkeypatch)
     assert status_dict == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
     assert "does not support FP8" in error_dict["agg"]
     assert STATUS_PASS not in status_dict.values()
+
+
+def test_run_single_test_uses_system_yaml_for_hardware_preflight_without_perf_database(monkeypatch, tmp_path):
+    systems_root = tmp_path / "systems"
+    systems_root.mkdir()
+    (systems_root / "a100_sxm.yaml").write_text(
+        """
+data_dir: data/a100_sxm
+gpu:
+  sm_version: 80
+node:
+  num_gpus_per_node: 8
+""".strip()
+    )
+
+    def fail_run_mode(**_kwargs):
+        raise AssertionError("TaskRunner should not run for hardware-incompatible combinations")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
+    monkeypatch.setattr(support_matrix_module.perf_database, "get_database", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(support_matrix_module.perf_database, "get_systems_paths", lambda: [str(systems_root)])
+
+    status_dict, error_dict = SupportMatrix.run_single_test(
+        model="Qwen/Qwen3-32B-FP8",
+        system="a100_sxm",
+        backend="vllm",
+        version="0.22.0",
+    )
+
+    assert status_dict == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
+    assert error_dict["agg"] == "a100_sxm (SM80) does not support FP8 required by Qwen/Qwen3-32B-FP8"
+
+
+def test_run_single_test_reports_missing_exact_database_after_preflight(monkeypatch, tmp_path):
+    systems_root = tmp_path / "systems"
+    systems_root.mkdir()
+    (systems_root / "a100_sxm.yaml").write_text(
+        """
+data_dir: data/a100_sxm
+gpu:
+  sm_version: 80
+node:
+  num_gpus_per_node: 8
+""".strip()
+    )
+
+    def fail_run_mode(**_kwargs):
+        raise AssertionError("TaskRunner should not run when exact-version perf data is missing")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
+    monkeypatch.setattr(support_matrix_module.perf_database, "get_database", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(support_matrix_module.perf_database, "get_systems_paths", lambda: [str(systems_root)])
+
+    status_dict, error_dict = SupportMatrix.run_single_test(
+        model="Qwen/Qwen3-8B",
+        system="a100_sxm",
+        backend="sglang",
+        version="0.5.12",
+        modes_to_test=("agg",),
+    )
+
+    assert status_dict == {"agg": STATUS_FAIL}
+    assert "Exact-version SILICON perf database missing for a100_sxm/sglang/0.5.12" in error_dict["agg"]
+
+
+def test_run_mode_reports_taskrunner_none_result(monkeypatch):
+    class FakeTaskRunner:
+        def run(self, _task_config):
+            return None
+
+    monkeypatch.setattr(SupportMatrix, "_create_task_config", staticmethod(lambda **_kwargs: object()))
+    monkeypatch.setattr(support_matrix_module, "TaskRunner", FakeTaskRunner)
+
+    with pytest.raises(RuntimeError, match="TaskRunner returned no result"):
+        SupportMatrix._run_mode(
+            mode="agg",
+            model="Qwen/Qwen3-8B",
+            system="a100_sxm",
+            backend="vllm",
+            version="0.22.0",
+            constraints=_system_spec(sm_version=80),
+            engine_step_backend=None,
+        )
 
 
 def test_run_single_test_propagates_hardware_preflight_failures(monkeypatch):

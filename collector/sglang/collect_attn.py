@@ -63,6 +63,8 @@ class MockModelConfig:
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
         self.head_dim = head_dim
+        self.v_head_dim = head_dim
+        self.swa_v_head_dim = head_dim
         # Align with newer sglang ModelConfig while remaining harmless on older versions
         self.is_hybrid_swa = False
         self.swa_attention_layer_ids = []
@@ -155,6 +157,7 @@ class MockModelRunner:
         self.gpu_id = 0
         self.hybrid_gdn_config = None
         self.kimi_linear_config = None
+        self.linear_attn_model_spec = None
 
 
 def create_req_to_token_pool(batch_size, total_len, page_size, torch_device, device_str):
