@@ -19,7 +19,7 @@
   parity with the other ops.
 
 Cache key matches every other migrated op: ``(systems_root, system,
-backend, version, enable_shared_layer)``. ``_build_op_sources`` early-
+backend, version, shared_layer_policy)``. ``_build_op_sources`` early-
 exits for ``nccl`` / ``oneccl`` (framework-agnostic dirs, no shared-layer
 inheritance), so HYBRID mode doesn't union sibling rows for those.
 """
@@ -31,7 +31,13 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.operations.base import (
+    Operation,
+    _perf_source_from_result,
+    _perf_source_from_row,
+    _read_filtered_rows,
+    _shared_cache_key,
+)
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -48,13 +54,7 @@ def _cache_key(database: PerfDatabase) -> tuple:
     Attention) was below the abstraction threshold; with Communication
     + DSA + MLA + Mamba + DSV4 coming, the threshold is now crossed.
     """
-    return (
-        database.systems_root,
-        database.system,
-        database.backend,
-        database.version,
-        database.enable_shared_layer,
-    )
+    return _shared_cache_key(database)
 
 
 class CustomAllReduce(Operation):
@@ -232,7 +232,7 @@ class CustomAllReduce(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -427,7 +427,7 @@ class NCCL(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -504,7 +504,7 @@ class P2P(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -544,7 +544,7 @@ def load_custom_allreduce_data(custom_allreduce_file):
     if isinstance(custom_allreduce_file, str):
         is_b60 = "b60" in custom_allreduce_file
     else:
-        is_b60 = any("b60" in path for path, _ in custom_allreduce_file)
+        is_b60 = any("b60" in source[0] for source in custom_allreduce_file)
 
     for row in rows:
         # Check kernel_source to filter graph vs eager mode (for vLLM/SGLang)
@@ -587,6 +587,7 @@ def load_custom_allreduce_data(custom_allreduce_file):
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
+                "source": _perf_source_from_row(row),
             }
 
     return custom_allreduce_data
@@ -639,6 +640,7 @@ def load_nccl_data(nccl_file):
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
+                "source": _perf_source_from_row(row),
             }
 
     return nccl_data

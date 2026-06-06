@@ -40,6 +40,33 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+SILICON_PERF_SOURCE = "silicon"
+INHERITED_SILICON_PERF_SOURCE = "inherited_silicon"
+ROW_PERF_SOURCE_KEY = "_aic_perf_source"
+
+
+def _perf_source_from_row(row: dict[str, object]) -> str:
+    source = row.get(ROW_PERF_SOURCE_KEY, SILICON_PERF_SOURCE)
+    return source if isinstance(source, str) else SILICON_PERF_SOURCE
+
+
+def _perf_source_from_result(result, default: str = SILICON_PERF_SOURCE) -> str:
+    if isinstance(result, dict):
+        source = result.get("source", default)
+    else:
+        source = getattr(result, "source", default)
+    return source if isinstance(source, str) else default
+
+
+def _shared_cache_key(database: PerfDatabase) -> tuple:
+    return (
+        database.systems_root,
+        database.system,
+        database.backend,
+        database.version,
+        getattr(database, "shared_layer_policy", "off"),
+    )
+
 
 def _read_perf_rows(perf_file: str) -> list[dict[str, object]]:
     if perf_file.lower().endswith(".parquet"):
@@ -78,10 +105,11 @@ def _read_filtered_rows(file_or_sources):
       - A single path string: yields all rows. Returns ``None`` if the file is
         missing, an empty list if it exists but has no rows. Preserves the
         legacy distinction the per-op ``load_*`` functions rely on.
-      - An iterable of ``(path, kernel_source_filter)`` tuples: yields rows
-        from each source in order; missing files are skipped; rows are
-        filtered by ``kernel_source`` when a filter is provided. Returns
-        ``None`` only if **every** path is missing.
+      - An iterable of ``(path, kernel_source_filter[, perf_source])`` tuples:
+        yields rows from each source in order; missing files are skipped; rows
+        are filtered by ``kernel_source`` when a filter is provided and tagged
+        with provenance when ``perf_source`` is provided. Returns ``None`` only
+        if **every** path is missing.
 
     The order of the returned list mirrors the order of the input sources, so
     when the per-row loaders skip on key conflict, the earliest source wins on
@@ -100,13 +128,19 @@ def _read_filtered_rows(file_or_sources):
 
     rows: list[dict] = []
     any_exists = False
-    for path, ks_filter in file_or_sources:
+    for source in file_or_sources:
+        if len(source) == 2:
+            path, ks_filter = source
+            perf_source = SILICON_PERF_SOURCE
+        else:
+            path, ks_filter, perf_source = source
         path = _resolve_perf_data_path(path)
         if not os.path.exists(path):
             continue
         any_exists = True
         for row in _read_perf_rows(path):
             if ks_filter is None or row.get("kernel_source") in ks_filter:
+                row[ROW_PERF_SOURCE_KEY] = perf_source
                 rows.append(row)
     return rows if any_exists else None
 

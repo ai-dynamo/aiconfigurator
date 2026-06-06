@@ -11,9 +11,10 @@ unrelated to the loader's tier-merge behavior.
 
 The loader inherits rows from sibling `<sys>/<framework>/<version>/<op_file>`
 directories (cross-version and cross-backend) when the database is loaded in
-HYBRID mode. Both `tier=shared` (named) and `tier=shared_fallback`
-(`kernel_source=default`, framework-implicit, low-fidelity) rows are inherited;
-HYBRID already accepts coarser fallbacks, so they're not gated separately.
+SILICON or HYBRID mode. SILICON inherits only exact `tier=shared` named-kernel
+rows; HYBRID also admits `tier=shared_fallback` (`kernel_source=default`,
+framework-implicit, low-fidelity) rows because HYBRID already accepts coarser
+fallbacks.
 """
 
 from __future__ import annotations
@@ -24,7 +25,12 @@ from pathlib import Path
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.perf_database import PerfDatabase, _load_op_kernel_source_manifest_entries
+from aiconfigurator.sdk.perf_database import (
+    SHARED_LAYER_EXACT,
+    SHARED_LAYER_HYBRID,
+    PerfDatabase,
+    _load_op_kernel_source_manifest_entries,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -135,18 +141,20 @@ def _build_db(systems_root: Path, *, database_mode: str | None = "HYBRID") -> Pe
 
 def _gemm_lookup(db: PerfDatabase, m: int, n: int, k: int) -> float | None:
     """Read latency for a single (m, n, k) triple from the loaded gemm dict."""
+    entry = _gemm_entry(db, m, n, k)
+    return None if entry is None else entry["latency"]
+
+
+def _gemm_entry(db: PerfDatabase, m: int, n: int, k: int) -> dict | None:
+    """Read the loaded GEMM leaf for a single (m, n, k) triple."""
     from aiconfigurator.sdk.operations.gemm import GEMM
 
-    # Under lazy per-op data ownership ``PerfDatabase()`` no longer
-    # opens any CSV, so we explicitly trigger ``GEMM.load_data``
-    # (idempotent) before reading the gemm dict. These tests assert on
-    # the loader's tier-merge behavior, not on the lazy contract.
     GEMM.load_data(db)
     qmode = common.GEMMQuantMode["bfloat16"]
     table = db._gemm_data.data
     if qmode not in table or m not in table[qmode] or n not in table[qmode][m] or k not in table[qmode][m][n]:
         return None
-    return table[qmode][m][n][k]["latency"]
+    return table[qmode][m][n][k]
 
 
 # ---------------------------------------------------------------------------
@@ -163,10 +171,12 @@ def test_backend_only(env: Path) -> None:
     assert _gemm_lookup(db, 1024, 4096, 4096) == 0.5
 
 
-def test_shared_layer_off_in_silicon_mode(env: Path) -> None:
-    """In any non-HYBRID database_mode (here: unset, which defaults to SILICON
-    semantics), the shared layer is OFF and sibling rows are not consulted —
-    preserves bit-for-bit compatibility with `main`.
+def test_shared_layer_off_when_database_mode_unset(env: Path) -> None:
+    """When database_mode is unset, keep the shared layer OFF.
+
+    Product paths should pass the explicit mode they will query under. This
+    conservative default preserves compatibility for lower-level construction
+    sites that instantiate PerfDatabase directly.
     """
     active_csv = _backend_csv(env)
     active_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -178,6 +188,50 @@ def test_shared_layer_off_in_silicon_mode(env: Path) -> None:
     db = _build_db(env, database_mode=None)
     assert db.enable_shared_layer is False
     assert _gemm_lookup(db, 1024, 4096, 4096) is None
+
+
+def test_shared_layer_exact_on_in_silicon_mode(env: Path) -> None:
+    """`database_mode='SILICON'` inherits named shared rows, but not fallback
+    `kernel_source=default` rows.
+    """
+    active_csv = _backend_csv(env)
+    active_csv.parent.mkdir(parents=True, exist_ok=True)
+    active_csv.write_text(_GEMM_HEADER)
+
+    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
+    _write_gemm_csv(_backend_csv(env, version="0.8"), [("trtllm", "default", 2048, 4096, 4096, 0.3)])
+    _make_manifest(
+        env,
+        [
+            ("gemm_perf.txt", "torch_flow", "shared", ["trtllm"]),
+            ("gemm_perf.txt", "default", "shared_fallback", ["trtllm"]),
+        ],
+    )
+
+    db = _build_db(env, database_mode="SILICON")
+    assert db.enable_shared_layer is True
+    assert db.shared_layer_policy == SHARED_LAYER_EXACT
+    assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
+    assert _gemm_lookup(db, 2048, 4096, 4096) is None
+
+
+def test_inherited_shared_row_source_tag_in_silicon_mode(env: Path) -> None:
+    """Exact inherited named-kernel rows remain usable in SILICON mode but are
+    distinguishable from active-version silicon rows.
+    """
+    active_csv = _backend_csv(env)
+    active_csv.parent.mkdir(parents=True, exist_ok=True)
+    active_csv.write_text(_GEMM_HEADER)
+
+    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+
+    db = _build_db(env, database_mode="SILICON")
+    entry = _gemm_entry(db, 1024, 4096, 4096)
+    assert entry is not None
+    assert entry["source"] == "inherited_silicon"
+    result = db.query_gemm(1024, 4096, 4096, common.GEMMQuantMode.bfloat16)
+    assert result.source == "inherited_silicon"
 
 
 def test_shared_layer_on_in_hybrid_mode_with_fallback(env: Path) -> None:
@@ -201,6 +255,7 @@ def test_shared_layer_on_in_hybrid_mode_with_fallback(env: Path) -> None:
 
     db = _build_db(env)  # database_mode=HYBRID by helper default
     assert db.enable_shared_layer is True
+    assert db.shared_layer_policy == SHARED_LAYER_HYBRID
     assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7  # shared
     assert _gemm_lookup(db, 2048, 4096, 4096) == 0.3  # shared_fallback
 

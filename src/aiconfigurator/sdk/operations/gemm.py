@@ -10,7 +10,7 @@ query_compute_scale / query_scale_matrix`` delegate here.
 Lazy-load Pattern A: ``query()`` (and the delegating ``_query_*_table``
 classmethods) trigger ``load_data`` on cache miss. ``_data_cache`` /
 ``_compute_scale_cache`` / ``_scale_matrix_cache`` are keyed by
-``(systems_root, system, backend, version, enable_shared_layer)`` so the
+``(systems_root, system, backend, version, shared_layer_policy)`` so the
 same op class serves multiple databases in one process. ``systems_root``
 is part of the key because test fixtures swap to a fresh ``tmp_path``
 between tests and must get distinct cache entries.
@@ -23,7 +23,13 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.operations.base import (
+    Operation,
+    _perf_source_from_result,
+    _perf_source_from_row,
+    _read_filtered_rows,
+    _shared_cache_key,
+)
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -42,11 +48,11 @@ class GEMM(Operation):
     - ``_scale_matrix_cache``: scale_matrix latency/energy keyed by ``quant_mode -> m -> k``
 
     All three are class-level dicts keyed by
-    ``(systems_root, system, backend, version, enable_shared_layer)``.
+    ``(systems_root, system, backend, version, shared_layer_policy)``.
     """
 
     # Per-op subclass overrides of Operation._data_cache. Keyed by
-    # (systems_root, system, backend, version, enable_shared_layer).
+    # (systems_root, system, backend, version, shared_layer_policy).
     _data_cache: ClassVar[dict] = {}
     _compute_scale_cache: ClassVar[dict] = {}
     _scale_matrix_cache: ClassVar[dict] = {}
@@ -78,17 +84,11 @@ class GEMM(Operation):
 
         ``systems_root`` is included so test fixtures that swap to a fresh
         ``tmp_path`` between tests get distinct entries (otherwise the
-        shared-layer test suite collides). ``enable_shared_layer`` is also
+        shared-layer test suite collides). ``shared_layer_policy`` is also
         part of the key because HYBRID unions sibling-row inheritance, so
         a SILICON-only load and a HYBRID load produce different dicts.
         """
-        return (
-            database.systems_root,
-            database.system,
-            database.backend,
-            database.version,
-            database.enable_shared_layer,
-        )
+        return _shared_cache_key(database)
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
@@ -428,7 +428,11 @@ class GEMM(Operation):
                 if isinstance(result, PerformanceResult):
                     return result
                 if isinstance(result, dict):
-                    return PerformanceResult(result["latency"], energy=result.get("energy", 0.0), source=source)
+                    return PerformanceResult(
+                        result["latency"],
+                        energy=result.get("energy", 0.0),
+                        source=_perf_source_from_result(result, default=source),
+                    )
                 return PerformanceResult(result, energy=0.0, source=source)
 
             gemm_data_wrapper.raise_if_not_loaded()
@@ -658,7 +662,7 @@ class GEMM(Operation):
         result = database.query_gemm(x, self._n, self._k, quant_mode)
         latency = float(result)
         energy = result.energy
-        source = getattr(result, "source", "silicon")
+        source = _perf_source_from_result(result)
 
         # Static-FP8 GEMM is modeled from the dynamic FP8 base measurement
         # across backends; subtract the separately collected activation-
@@ -667,14 +671,14 @@ class GEMM(Operation):
             compute_scale_result = database.query_compute_scale(x, self._k, quant_mode)
             latency -= float(compute_scale_result)
             energy -= compute_scale_result.energy
-            sub_src = getattr(compute_scale_result, "source", "silicon")
+            sub_src = _perf_source_from_result(compute_scale_result)
             if sub_src != source:
                 source = "mixed"
             if self._low_precision_input:
                 scale_matrix_result = database.query_scale_matrix(x, self._k, quant_mode)
                 latency -= float(scale_matrix_result)
                 energy -= scale_matrix_result.energy
-                sub_src = getattr(scale_matrix_result, "source", "silicon")
+                sub_src = _perf_source_from_result(scale_matrix_result)
                 if sub_src != source:
                     source = "mixed"
             # fp8_static is modeled from dynamic FP8 plus overhead tables, so
@@ -767,6 +771,7 @@ def load_gemm_data(gemm_file):
                 "latency": latency,
                 "power": power,  # Keep for reference
                 "energy": energy,  # NEW: precomputed energy
+                "source": _perf_source_from_row(row),
             }
 
     return gemm_data
@@ -820,6 +825,7 @@ def load_compute_scale_data(compute_scale_file):
                 "latency": latency,
                 "power": power,
                 "energy": energy,
+                "source": _perf_source_from_row(row),
             }
 
     return compute_scale_data
@@ -873,6 +879,7 @@ def load_scale_matrix_data(scale_matrix_file):
                 "latency": latency,
                 "power": power,
                 "energy": energy,
+                "source": _perf_source_from_row(row),
             }
 
     return scale_matrix_data

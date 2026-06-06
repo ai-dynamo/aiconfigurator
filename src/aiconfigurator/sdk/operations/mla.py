@@ -25,7 +25,7 @@ variants (the WideEP variants extrapolate only when their data was
 loaded — SGLang-only).
 
 Cache key matches every other migrated op:
-``(systems_root, system, backend, version, enable_shared_layer)``. For
+``(systems_root, system, backend, version, shared_layer_policy)``. For
 WideEP variants, ``backend`` in the key naturally encodes the SGLang
 constraint (cache misses on non-SGLang backends).
 """
@@ -37,7 +37,13 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.operations.base import (
+    Operation,
+    _perf_source_from_result,
+    _perf_source_from_row,
+    _read_filtered_rows,
+    _shared_cache_key,
+)
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -52,13 +58,7 @@ def _cache_key(database: PerfDatabase) -> tuple:
     TODO: hoist to ``operations/base.py`` once Phase 3 settles (7 op
     families duplicating this helper now).
     """
-    return (
-        database.systems_root,
-        database.system,
-        database.backend,
-        database.version,
-        database.enable_shared_layer,
-    )
+    return _shared_cache_key(database)
 
 
 # Shared extrapolation target lists — lifted verbatim from the legacy
@@ -286,7 +286,7 @@ class ContextMLA(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -447,7 +447,7 @@ class GenerationMLA(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -603,7 +603,7 @@ class MLABmm(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -928,7 +928,7 @@ class MLAModule(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -1182,7 +1182,7 @@ class WideEPGenerationMLA(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -1439,7 +1439,7 @@ class WideEPContextMLA(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -1507,6 +1507,7 @@ def load_context_mla_data(context_mla_file):
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
+                "source": _perf_source_from_row(row),
             }
 
     return context_mla_data
@@ -1571,6 +1572,7 @@ def load_generation_mla_data(generation_mla_file):
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
+                "source": _perf_source_from_row(row),
             }
 
     return generation_mla_data
@@ -1624,6 +1626,7 @@ def load_mla_bmm_data(mla_bmm_file):
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
+                "source": _perf_source_from_row(row),
             }
 
     return mla_bmm_data
@@ -1692,6 +1695,7 @@ def load_wideep_context_mla_data(wideep_context_mla_file):
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
+                "source": _perf_source_from_row(row),
             }
 
     return wideep_context_mla_data
@@ -1762,6 +1766,7 @@ def load_wideep_generation_mla_data(wideep_generation_mla_file):
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
+                "source": _perf_source_from_row(row),
             }
 
     return wideep_generation_mla_data
@@ -1805,6 +1810,7 @@ def load_context_mla_module_data(mla_module_file: str):
             "latency": latency,
             "power": power,
             "energy": energy,
+            "source": _perf_source_from_row(row),
         }
 
     return mla_data
@@ -1848,6 +1854,7 @@ def load_generation_mla_module_data(mla_module_file: str):
             "latency": latency,
             "power": power,
             "energy": energy,
+            "source": _perf_source_from_row(row),
         }
 
     return mla_data

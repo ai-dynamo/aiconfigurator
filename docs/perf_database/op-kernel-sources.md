@@ -2,8 +2,8 @@
 
 Classifies every `(system, op_file, kernel_source)` triple in the perf database into one of two tiers:
 
-- **`shared`** — named kernel_source. The SDK loader inherits these rows from sibling backend/version directories (cross-version and cross-backend) when the database is loaded in HYBRID mode.
-- **`shared_fallback`** — `kernel_source = default`. Framework-implicit, low-fidelity. Inherited alongside `shared` rows in HYBRID mode (HYBRID already accepts coarser fallbacks).
+- **`shared`** — named kernel_source. The SDK loader inherits these rows from sibling backend/version directories (cross-version and cross-backend) when the database is loaded in SILICON or HYBRID mode.
+- **`shared_fallback`** — `kernel_source = default`. Framework-implicit, low-fidelity. Inherited only in HYBRID mode (HYBRID already accepts coarser fallbacks).
 
 Rows with a blank/`<unknown>` kernel_source are skipped during audit (the current corpus has none).
 

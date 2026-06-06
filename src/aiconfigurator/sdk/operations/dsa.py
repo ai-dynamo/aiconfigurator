@@ -34,7 +34,13 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.operations.base import (
+    Operation,
+    _perf_source_from_result,
+    _perf_source_from_row,
+    _read_filtered_rows,
+    _shared_cache_key,
+)
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -103,13 +109,7 @@ def _cache_key(database: PerfDatabase) -> tuple:
     so far); the cleanup PR hoists this to ``operations/base.py`` once
     Phase 3 settles.
     """
-    return (
-        database.systems_root,
-        database.system,
-        database.backend,
-        database.version,
-        database.enable_shared_layer,
-    )
+    return _shared_cache_key(database)
 
 
 def _is_dsa_interpolation_miss(error: Exception) -> bool:
@@ -637,7 +637,7 @@ class ContextDSAModule(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -982,7 +982,7 @@ class GenerationDSAModule(Operation):
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -1048,6 +1048,7 @@ def load_context_dsa_module_data(dsa_file: str):
             "latency": latency,
             "power": power,
             "energy": energy,
+            "source": _perf_source_from_row(row),
         }
 
     return dsa_data
@@ -1094,6 +1095,7 @@ def load_generation_dsa_module_data(dsa_file: str):
             "latency": latency,
             "power": power,
             "energy": energy,
+            "source": _perf_source_from_row(row),
         }
 
     return dsa_data

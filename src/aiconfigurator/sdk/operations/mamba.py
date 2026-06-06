@@ -32,7 +32,13 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.operations.base import (
+    Operation,
+    _perf_source_from_result,
+    _perf_source_from_row,
+    _read_filtered_rows,
+    _shared_cache_key,
+)
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -47,13 +53,7 @@ def _cache_key(database: PerfDatabase) -> tuple:
     TODO: hoist to ``operations/base.py`` once Phase 3 settles (6 op
     families duplicating this helper now).
     """
-    return (
-        database.systems_root,
-        database.system,
-        database.backend,
-        database.version,
-        database.enable_shared_layer,
-    )
+    return _shared_cache_key(database)
 
 
 class Mamba2Kernel(Operation):
@@ -268,7 +268,7 @@ class Mamba2Kernel(Operation):
         return PerformanceResult(
             latency=float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -501,7 +501,7 @@ class GDNKernel(Operation):
         return PerformanceResult(
             latency=float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            source=_perf_source_from_result(result),
         )
 
     def get_weights(self, **kwargs):
@@ -714,7 +714,12 @@ def load_mamba2_data(mamba2_file: str):
         energy = power * latency
 
         model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
-        entry = {"latency": latency, "power": power, "energy": energy}
+        entry = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+            "source": _perf_source_from_row(row),
+        }
 
         try:
             if phase == "context":
@@ -786,7 +791,12 @@ def load_gdn_data(gdn_file: str):
         energy = power * latency
 
         model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
-        entry = {"latency": latency, "power": power, "energy": energy}
+        entry = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+            "source": _perf_source_from_row(row),
+        }
 
         by_model = data[kernel_source][phase][model_key]
         if phase == "context":

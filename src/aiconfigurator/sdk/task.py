@@ -1387,9 +1387,9 @@ class TaskRunner:
         cached instance directly.
 
         `database_mode` is also passed through to `get_database` so the loader
-        can resolve shared-layer defaults — HYBRID mode auto-enables sibling-row
-        inheritance, which means HYBRID and SILICON queries cache as separate
-        PerfDatabase instances.
+        can resolve shared-layer defaults — SILICON enables exact named-kernel
+        inheritance, while HYBRID also admits fallback/default rows. Each policy
+        gets a separate cached PerfDatabase instance.
         """
         allow_missing_data = database_mode is not None and database_mode != common.DatabaseMode.SILICON.name
         db = _get_database_with_optional_missing_data(

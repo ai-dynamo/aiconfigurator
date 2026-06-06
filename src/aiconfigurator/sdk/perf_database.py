@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
 _MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError)
+SHARED_LAYER_OFF = "off"
+SHARED_LAYER_EXACT = "exact"
+SHARED_LAYER_HYBRID = "hybrid"
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
@@ -169,10 +172,30 @@ def _load_op_kernel_source_manifest_entries(systems_root: str) -> dict[str, tupl
 # at module load time. Re-exported here for any external callers that may
 # still import it via ``aiconfigurator.sdk.perf_database._read_filtered_rows``.
 from aiconfigurator.sdk.operations.base import (  # noqa: F401
+    INHERITED_SILICON_PERF_SOURCE,
+    SILICON_PERF_SOURCE,
     _read_filtered_rows,
     _read_perf_rows,
     _resolve_perf_data_path,
 )
+
+
+def _database_mode_name(database_mode: str | common.DatabaseMode | None) -> str:
+    if database_mode is None:
+        return ""
+    name = getattr(database_mode, "name", None)
+    if isinstance(name, str):
+        return name.upper()
+    return str(database_mode).upper()
+
+
+def _shared_layer_policy(database_mode: str | common.DatabaseMode | None) -> str:
+    mode_name = _database_mode_name(database_mode)
+    if mode_name == common.DatabaseMode.SILICON.name:
+        return SHARED_LAYER_EXACT
+    if mode_name == common.DatabaseMode.HYBRID.name:
+        return SHARED_LAYER_HYBRID
+    return SHARED_LAYER_OFF
 
 
 def get_supported_databases(
@@ -343,9 +366,9 @@ def get_database(
             backend/version data files are absent. This is intended for SOL/EMPIRICAL
             estimate-only modes, not SILICON mode.
         database_mode: the mode the caller will query under (`SILICON` / `HYBRID` /
-            `EMPIRICAL` / `SOL`). HYBRID auto-enables the shared layer (sibling-row
-            inheritance, including `kernel_source=default` fallback rows); other
-            modes keep it off so predictions stay bit-identical to main.
+            `EMPIRICAL` / `SOL`). SILICON auto-enables exact named-kernel
+            sibling-row inheritance; HYBRID also admits `kernel_source=default`
+            fallback rows; other modes keep the shared layer off.
 
     Returns:
         PerfDatabase for the given system, backend, version.
@@ -359,13 +382,13 @@ def get_database(
         logger.error(f"No database version available for {system=}, {backend=}")
         return None
 
-    shared_flag = (database_mode or "").upper() == "HYBRID"
+    shared_policy = _shared_layer_policy(database_mode)
     missing_data_candidate = None
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
         if not os.path.isfile(system_yaml_path):
             continue
-        cache_key = (systems_root, system, shared_flag)
+        cache_key = (systems_root, system, shared_policy)
         try:
             with open(system_yaml_path) as f:
                 system_spec = yaml.load(f, Loader=yaml.SafeLoader)
@@ -1189,16 +1212,18 @@ class PerfDatabase:
 
         Args:
             database_mode: drives the shared-layer load behavior. `"HYBRID"` enables
-                sibling-row inheritance (including `kernel_source=default` fallback
-                rows); other modes keep it off so predictions stay bit-identical to
-                main. Doesn't change which rows are interpolated at query time;
-                that's controlled by `set_default_database_mode`.
+                sibling-row inheritance including `kernel_source=default`
+                fallback rows. `"SILICON"` enables exact named-kernel inheritance
+                only. Other modes keep it off. Doesn't change which rows are
+                interpolated at query time; that's controlled by
+                `set_default_database_mode`.
         """
         self.system = system
         self.backend = backend
         self.version = version
         self.systems_root = systems_root
-        self.enable_shared_layer = (database_mode or "").upper() == "HYBRID"
+        self.shared_layer_policy = _shared_layer_policy(database_mode)
+        self.enable_shared_layer = self.shared_layer_policy != SHARED_LAYER_OFF
         with open(os.path.join(systems_root, system + ".yaml")) as f:
             self.system_spec = SystemSpec(yaml.load(f, Loader=yaml.SafeLoader))
         self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
@@ -1378,11 +1403,11 @@ class PerfDatabase:
         op_filename_enum: PerfDataFilename,
         primary_path: str,
         system_data_root: str,
-    ) -> list[tuple[str, Optional[set[str]]]]:
+    ) -> list[tuple[str, Optional[set[str]], str]]:
         """Build the priority-ordered list of source files for one op.
 
-        Returns a list of `(file_path, kernel_source_filter)` tuples to be
-        loaded in order. The first source whose file actually contains rows
+        Returns a list of `(file_path, kernel_source_filter, perf_source)` tuples
+        to be loaded in order. The first source whose file actually contains rows
         for a shape becomes the source of truth for that shape — later sources
         only fill in shapes the earlier ones lacked. Ordering, in priority:
 
@@ -1399,7 +1424,7 @@ class PerfDatabase:
         `kernel_source` from dict keys, so unfiltered sibling rows would
         silently clobber active-backend rows on key conflict.
         """
-        sources: list[tuple[str, Optional[set[str]]]] = [(primary_path, None)]
+        sources: list[tuple[str, Optional[set[str]], str]] = [(primary_path, None, SILICON_PERF_SOURCE)]
         if not self.enable_shared_layer:
             return sources
         if op_filename_enum in (PerfDataFilename.nccl, PerfDataFilename.oneccl):
@@ -1409,9 +1434,13 @@ class PerfDatabase:
         backend_lower = self.backend.lower()
 
         # `framework -> set of kernel_sources` that the active backend may inherit
-        # from sibling dirs of that framework. Both `shared` and `shared_fallback`
-        # rows are admitted in HYBRID mode; the fallback set is tracked separately
-        # only so we can emit a single warning per fallback source.
+        # from sibling dirs of that framework. SILICON admits only exact named
+        # `tier=shared` rows; HYBRID also admits `tier=shared_fallback` rows.
+        # The fallback set is tracked separately so we can emit a single warning
+        # per fallback source when HYBRID broadens the source set.
+        allowed_tiers = {"shared"}
+        if self.shared_layer_policy == SHARED_LAYER_HYBRID:
+            allowed_tiers.add("shared_fallback")
         per_framework_filter: dict[str, set[str]] = defaultdict(set)
         per_framework_fallback: dict[str, set[str]] = defaultdict(set)
         for entry in self._op_kernel_source_manifest_entries.get(op_file_basename, ()):
@@ -1422,7 +1451,7 @@ class PerfDatabase:
             if not ks:
                 continue
             tier = entry.get("tier")
-            if tier in ("shared", "shared_fallback"):
+            if tier in allowed_tiers:
                 for fw in frameworks_lower:
                     per_framework_filter[fw].add(ks)
                 if tier == "shared_fallback":
@@ -1464,7 +1493,7 @@ class PerfDatabase:
                 sibling_path = _resolve_perf_data_path(os.path.join(fw_dir, sibling_version, op_file_basename))
                 if not os.path.isfile(sibling_path):
                     continue
-                sources.append((sibling_path, ks_filter))
+                sources.append((sibling_path, ks_filter, INHERITED_SILICON_PERF_SOURCE))
                 if fallback_only & ks_filter:
                     logger.warning(
                         "Loading low-fidelity fallback rows for %s from %s. Queries "
