@@ -369,17 +369,28 @@ def _run_attn_for_backend(
         dtype=kv_cache_dtype,
     )
 
-    for req_id, ctx_len in enumerate(context_sequence_lengths):
-        req = LlmRequest(
-            request_id=req_id,
-            max_new_tokens=num_generation_steps + 1,
-            input_tokens=[1] * ctx_len,
-            sampling_config=SamplingConfig(SamplingParams()._get_sampling_config()),
-            is_streaming=False,
+    ctx_len = context_sequence_lengths[-1]
+    request_ids = list(range(len(context_sequence_lengths)))
+    if hasattr(kv_cache_manager.impl, "add_sequence"):
+        for req_id, ctx_len in enumerate(context_sequence_lengths):
+            req = LlmRequest(
+                request_id=req_id,
+                max_new_tokens=num_generation_steps + 1,
+                input_tokens=[1] * ctx_len,
+                sampling_config=SamplingConfig(SamplingParams()._get_sampling_config()),
+                is_streaming=False,
+            )
+            req.paged_kv_block_ids = []
+            beam_width = 1
+            kv_cache_manager.impl.add_sequence(req_id, ctx_len, beam_width, req)
+    else:
+        kv_cache_manager.add_dummy_requests(
+            request_ids,
+            token_nums=context_sequence_lengths,
+            is_gen=False,
+            prepare_resource=True,
+            max_beam_width=1,
         )
-        req.paged_kv_block_ids = []
-        beam_width = 1
-        kv_cache_manager.impl.add_sequence(req_id, ctx_len, beam_width, req)
 
     attn_metadata = attention_cls.Metadata(
         seq_lens=torch.tensor(context_sequence_lengths, dtype=torch.int),
