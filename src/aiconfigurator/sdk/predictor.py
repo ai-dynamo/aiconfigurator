@@ -15,10 +15,13 @@ Future implementations may swap in different prediction strategies:
 - ``DynamicPredictor`` -- models dynamic-traffic effects (queueing under
   concurrency) beyond the steady-state assumption baked into the analytic
   predictor.
-- ``MockerPredictor`` -- delegates to Dynamo Mocker for request-level
-  discrete-event simulation; useful when the user has a real Mooncake-
-  style trace and wants per-request metrics rather than aggregate
-  latency / throughput numbers.
+- ``MockerPredictor`` -- a seam for Dynamo Mocker's request-level
+  discrete-event simulation, useful for per-request metrics (e.g. from a
+  Mooncake-style trace) rather than aggregate latency / throughput.
+  Note the integration is inverted relative to the analytic path: Dynamo
+  Mocker imports AIC and drives its ``run_static`` / ``run_agg``, so a
+  Mocker-backed predictor wraps that path rather than AIC delegating out
+  to Mocker.
 
 Callers (``predict.predict_*``, ``sweep.sweep_*``, ``task.Task.run``)
 accept an optional ``predictor`` argument that defaults to
@@ -65,7 +68,7 @@ class Predictor(Protocol):
         """Predict perf for an aggregated IFB worker at a single (parallel, batch, ctx_tokens) point."""
         ...
 
-    def predict_disagg_phase(
+    def predict_disagg_worker(
         self,
         *,
         model: BaseModel,
@@ -85,7 +88,7 @@ class AnalyticPredictor:
 
     ``predict_agg_worker`` wraps ``backend.run_agg`` (which contains the
     embedded num_mix_steps / num_genonly_steps analytic IFB scheduler).
-    ``predict_disagg_phase`` wraps ``backend.run_static`` with the
+    ``predict_disagg_worker`` wraps ``backend.run_static`` with the
     appropriate mode for prefill / decode.
 
     The output assumes ideal zero-queue arrival -- it does not model
@@ -119,7 +122,7 @@ class AnalyticPredictor:
             **backend_kwargs,
         )
 
-    def predict_disagg_phase(
+    def predict_disagg_worker(
         self,
         *,
         model: BaseModel,

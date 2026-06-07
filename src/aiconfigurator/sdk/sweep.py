@@ -44,7 +44,7 @@ from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
-from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_phase
+from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
 logger = logging.getLogger(__name__)
@@ -575,7 +575,7 @@ def _get_disagg_worker_candidates(
             for b in b_list:
                 point_rt = copy.deepcopy(runtime_config)
                 point_rt.batch_size = b
-                summary = predict_disagg_phase(
+                summary = predict_disagg_worker(
                     model=model,
                     backend=backend,
                     database=database,

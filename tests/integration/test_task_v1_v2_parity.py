@@ -20,7 +20,7 @@ access to fetch HuggingFace model configs.  Marked pytest.mark.integration
 so it does not run in the default unit-test pass.
 
 Run with:
-    pytest tests/integration/test_old_vs_new_parity.py -m integration
+    pytest tests/integration/test_task_v1_v2_parity.py -m integration
 """
 
 from __future__ import annotations

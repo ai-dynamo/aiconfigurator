@@ -4,7 +4,7 @@
 """Unit tests for sweep.py helpers and sweep_disagg placeholder.
 
 sweep_agg end-to-end correctness is validated by the integration
-parity test (tests/integration/test_old_vs_new_parity.py) against the
+parity test (tests/integration/test_task_v1_v2_parity.py) against the
 legacy CLI path; mocking it at unit level provides little signal.
 """
 

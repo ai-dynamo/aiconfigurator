@@ -6,9 +6,9 @@ Worker-level performance prediction primitives.
 
 Two functions, one per worker shape:
 
-- :func:`predict_disagg_phase` — one phase of a disaggregated worker
+- :func:`predict_disagg_worker` — one phase of a disaggregated worker
   (prefill-only or decode-only).  Delegates to the predictor's
-  ``predict_disagg_phase`` (default: wraps
+  ``predict_disagg_worker`` (default: wraps
   ``backend.run_static(mode=static_ctx|static_gen)``).
 
 - :func:`predict_agg_worker` — an aggregated IFB worker.  Delegates to
@@ -42,7 +42,7 @@ from aiconfigurator.sdk.predictor import DEFAULT_PREDICTOR, Predictor
 DisaggRole = Literal["prefill", "decode"]
 
 
-def predict_disagg_phase(
+def predict_disagg_worker(
     *,
     model: BaseModel,
     backend: BaseBackend,
@@ -80,7 +80,7 @@ def predict_disagg_phase(
         workers, the predictor interface (and the call site) can be
         extended without touching every caller.
     """
-    return (predictor or DEFAULT_PREDICTOR).predict_disagg_phase(
+    return (predictor or DEFAULT_PREDICTOR).predict_disagg_worker(
         model=model,
         backend=backend,
         database=database,

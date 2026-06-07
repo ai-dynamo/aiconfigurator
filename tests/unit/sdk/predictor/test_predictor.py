@@ -78,10 +78,10 @@ def test_analytic_predictor_predict_agg_forwards_backend_kwargs():
     )
 
 
-def test_analytic_predictor_predict_disagg_phase_prefill_uses_static_ctx():
+def test_analytic_predictor_predict_disagg_worker_prefill_uses_static_ctx():
     model, backend, database, rt = _make_mocks()
 
-    AnalyticPredictor().predict_disagg_phase(
+    AnalyticPredictor().predict_disagg_worker(
         model=model,
         backend=backend,
         database=database,
@@ -93,10 +93,10 @@ def test_analytic_predictor_predict_disagg_phase_prefill_uses_static_ctx():
     backend.run_agg.assert_not_called()
 
 
-def test_analytic_predictor_predict_disagg_phase_decode_uses_static_gen():
+def test_analytic_predictor_predict_disagg_worker_decode_uses_static_gen():
     model, backend, database, rt = _make_mocks()
 
-    AnalyticPredictor().predict_disagg_phase(
+    AnalyticPredictor().predict_disagg_worker(
         model=model,
         backend=backend,
         database=database,
@@ -113,25 +113,25 @@ def test_predict_functions_default_to_analytic_predictor():
     """When no predictor is passed, predict_* uses DEFAULT_PREDICTOR -- which
     means backend.run_agg / run_static is called directly (same as before
     the Predictor abstraction was introduced)."""
-    from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_phase
+    from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
 
     model, backend, database, rt = _make_mocks()
 
     predict_agg_worker(model=model, backend=backend, database=database, runtime_config=rt, ctx_tokens=1024)
     backend.run_agg.assert_called_once()
 
-    predict_disagg_phase(model=model, backend=backend, database=database, runtime_config=rt, role="prefill")
+    predict_disagg_worker(model=model, backend=backend, database=database, runtime_config=rt, role="prefill")
     backend.run_static.assert_called_once()
 
 
 def test_predict_functions_route_through_explicit_predictor():
     """When a custom predictor is passed, predict_* delegates to it (not the default)."""
-    from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_phase
+    from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
 
     model, backend, database, rt = _make_mocks()
     custom = MagicMock(spec=Predictor, name="custom_predictor")
     custom.predict_agg_worker.return_value = "custom-agg-result"
-    custom.predict_disagg_phase.return_value = "custom-phase-result"
+    custom.predict_disagg_worker.return_value = "custom-phase-result"
 
     result_agg = predict_agg_worker(
         model=model,
@@ -145,7 +145,7 @@ def test_predict_functions_route_through_explicit_predictor():
     custom.predict_agg_worker.assert_called_once()
     backend.run_agg.assert_not_called()  # default predictor bypassed
 
-    result_phase = predict_disagg_phase(
+    result_phase = predict_disagg_worker(
         model=model,
         backend=backend,
         database=database,
@@ -154,5 +154,5 @@ def test_predict_functions_route_through_explicit_predictor():
         predictor=custom,
     )
     assert result_phase == "custom-phase-result"
-    custom.predict_disagg_phase.assert_called_once()
+    custom.predict_disagg_worker.assert_called_once()
     backend.run_static.assert_not_called()

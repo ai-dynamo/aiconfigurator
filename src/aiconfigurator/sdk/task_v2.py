@@ -1218,7 +1218,7 @@ class Task:
         from aiconfigurator.sdk.backends.factory import get_backend
         from aiconfigurator.sdk.models import get_model
         from aiconfigurator.sdk.perf_database import get_database
-        from aiconfigurator.sdk.predict import predict_disagg_phase
+        from aiconfigurator.sdk.predict import predict_disagg_worker
         from aiconfigurator.sdk.sweep import _rate_match_dict
 
         # --- Prefill phase ---
@@ -1234,7 +1234,7 @@ class Task:
         p_backend = get_backend(self.prefill_backend_name)
         p_model = get_model(self.prefill_model_path, p_mc, self.prefill_backend_name)
 
-        p_summary = predict_disagg_phase(
+        p_summary = predict_disagg_worker(
             model=p_model,
             backend=p_backend,
             database=p_db,
@@ -1262,7 +1262,7 @@ class Task:
         d_backend = get_backend(self.decode_backend_name)
         d_model = get_model(self.decode_model_path, d_mc, self.decode_backend_name)
 
-        d_summary = predict_disagg_phase(
+        d_summary = predict_disagg_worker(
             model=d_model,
             backend=d_backend,
             database=d_db,

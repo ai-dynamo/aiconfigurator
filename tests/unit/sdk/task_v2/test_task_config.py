@@ -665,7 +665,7 @@ def test_run_single_agg_raises_on_oom(monkeypatch):
 
 
 def test_run_single_disagg_invokes_both_phases_and_rate_matches(monkeypatch):
-    """run_single_disagg calls predict_disagg_phase twice (prefill + decode)
+    """run_single_disagg calls predict_disagg_worker twice (prefill + decode)
     then rate-matches the pair into one ColumnsDisagg row."""
     from aiconfigurator.sdk import predict
 
@@ -717,14 +717,14 @@ def test_run_single_disagg_invokes_both_phases_and_rate_matches(monkeypatch):
         }
         return _build_fake_summary(result_dict=base)
 
-    def fake_predict_disagg_phase(**kwargs):
+    def fake_predict_disagg_worker(**kwargs):
         call_roles.append(kwargs["role"])
         return _phase_summary(kwargs["role"])
 
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
     monkeypatch.setattr("aiconfigurator.sdk.backends.factory.get_backend", fake_get_backend)
     monkeypatch.setattr("aiconfigurator.sdk.models.get_model", fake_get_model)
-    monkeypatch.setattr(predict, "predict_disagg_phase", fake_predict_disagg_phase)
+    monkeypatch.setattr(predict, "predict_disagg_worker", fake_predict_disagg_worker)
 
     t = Task(
         serving_mode="disagg",

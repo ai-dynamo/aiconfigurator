@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for predict_disagg_phase and predict_agg_worker.
+"""Unit tests for predict_disagg_worker and predict_agg_worker.
 
 These verify the wrappers forward arguments correctly and return whatever
 the backend returns.  Real-database parity is covered by the integration
-test against the old CLI (tests/integration/test_old_vs_new_parity.py).
+test against the old CLI (tests/integration/test_task_v1_v2_parity.py).
 """
 
 from unittest.mock import MagicMock
@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from aiconfigurator.sdk.config import RuntimeConfig
-from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_phase
+from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
 
 pytestmark = pytest.mark.unit
 
@@ -28,10 +28,10 @@ def _make_mocks(return_value: str = "sentinel-summary"):
     return model, backend, database, runtime_config
 
 
-def test_predict_disagg_phase_prefill_calls_run_static_ctx():
+def test_predict_disagg_worker_prefill_calls_run_static_ctx():
     model, backend, database, rt = _make_mocks()
 
-    result = predict_disagg_phase(
+    result = predict_disagg_worker(
         model=model,
         backend=backend,
         database=database,
@@ -44,10 +44,10 @@ def test_predict_disagg_phase_prefill_calls_run_static_ctx():
     backend.run_agg.assert_not_called()
 
 
-def test_predict_disagg_phase_decode_calls_run_static_gen():
+def test_predict_disagg_worker_decode_calls_run_static_gen():
     model, backend, database, rt = _make_mocks()
 
-    predict_disagg_phase(
+    predict_disagg_worker(
         model=model,
         backend=backend,
         database=database,
@@ -58,10 +58,10 @@ def test_predict_disagg_phase_decode_calls_run_static_gen():
     backend.run_static.assert_called_once_with(model, database, rt, "static_gen", 32, 1.0)
 
 
-def test_predict_disagg_phase_passes_latency_correction_and_stride():
+def test_predict_disagg_worker_passes_latency_correction_and_stride():
     model, backend, database, rt = _make_mocks()
 
-    predict_disagg_phase(
+    predict_disagg_worker(
         model=model,
         backend=backend,
         database=database,
@@ -74,11 +74,11 @@ def test_predict_disagg_phase_passes_latency_correction_and_stride():
     backend.run_static.assert_called_once_with(model, database, rt, "static_ctx", 64, 1.25)
 
 
-def test_predict_disagg_phase_rejects_unknown_role():
+def test_predict_disagg_worker_rejects_unknown_role():
     model, backend, database, rt = _make_mocks()
 
     with pytest.raises(KeyError):
-        predict_disagg_phase(
+        predict_disagg_worker(
             model=model,
             backend=backend,
             database=database,
