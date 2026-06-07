@@ -30,13 +30,14 @@ def _static_row(
     dp: int = 1,
     moe_tp: int = 1,
     moe_ep: int = 1,
+    cp: int = 1,
     bs: int = 1,
     mode: str = "static_ctx",
     isl: int = 4000,
     osl: int = 500,
 ) -> dict:
     """Return one row dict that conforms to ``common.ColumnsStatic``."""
-    num_gpus = tp * pp * dp
+    num_gpus = tp * pp * dp * cp
     # Make ttft small enough (< ttft constraint / 1.8 correction) so prefill
     # candidates are not filtered out.  tpot must be < constraint.
     ttft = 50.0 / tp if mode == "static_ctx" else 0.0
@@ -65,6 +66,7 @@ def _static_row(
         "tp": tp,
         "pp": pp,
         "dp": dp,
+        "cp": cp,
         "moe_tp": moe_tp,
         "moe_ep": moe_ep,
         "parallel": f"tp{tp}_pp{pp}_dp{dp}",
@@ -166,8 +168,8 @@ def _run(
     sess: DisaggInferenceSession,
     runtime_config: RuntimeConfig,
     model_config: ModelConfig,
-    prefill_cfgs: list[tuple[int, int, int, int, int]],
-    decode_cfgs: list[tuple[int, int, int, int, int]],
+    prefill_cfgs: list[tuple[int, int, int, int, int, int]],
+    decode_cfgs: list[tuple[int, int, int, int, int, int]],
     require_same_tp: bool,
 ) -> InferenceSummary | None:
     return sess.find_best_disagg_result_under_constraints(
@@ -196,8 +198,8 @@ class TestRequireSameTPFiltering:
             disagg_session,
             runtime_config,
             model_config,
-            prefill_cfgs=[(2, 1, 1, 1, 1)],
-            decode_cfgs=[(2, 1, 1, 1, 1), (4, 1, 1, 1, 1)],
+            prefill_cfgs=[(2, 1, 1, 1, 1, 1)],
+            decode_cfgs=[(2, 1, 1, 1, 1, 1), (4, 1, 1, 1, 1, 1)],
             require_same_tp=True,
         )
         assert result is not None
@@ -231,8 +233,8 @@ class TestRequireSameTPFiltering:
             disagg_session,
             runtime_config,
             model_config,
-            prefill_cfgs=[(2, 1, 1, 1, 1)],
-            decode_cfgs=[(2, 1, 1, 1, 1), (4, 1, 1, 1, 1)],
+            prefill_cfgs=[(2, 1, 1, 1, 1, 1)],
+            decode_cfgs=[(2, 1, 1, 1, 1, 1), (4, 1, 1, 1, 1, 1)],
             require_same_tp=False,
         )
         assert result is not None
@@ -246,8 +248,8 @@ class TestRequireSameTPFiltering:
             disagg_session,
             runtime_config,
             model_config,
-            prefill_cfgs=[(2, 1, 1, 1, 1)],
-            decode_cfgs=[(4, 1, 1, 1, 1)],
+            prefill_cfgs=[(2, 1, 1, 1, 1, 1)],
+            decode_cfgs=[(4, 1, 1, 1, 1, 1)],
             require_same_tp=True,
         )
         assert result is not None
@@ -261,8 +263,8 @@ class TestRequireSameTPFiltering:
             disagg_session,
             runtime_config,
             model_config,
-            prefill_cfgs=[(1, 1, 1, 1, 1), (2, 1, 1, 1, 1)],
-            decode_cfgs=[(1, 1, 1, 1, 1), (2, 1, 1, 1, 1)],
+            prefill_cfgs=[(1, 1, 1, 1, 1, 1), (2, 1, 1, 1, 1, 1)],
+            decode_cfgs=[(1, 1, 1, 1, 1, 1), (2, 1, 1, 1, 1, 1)],
             require_same_tp=True,
         )
         assert result is not None
@@ -305,8 +307,8 @@ class TestRateMatchingDegradationFactors:
             disagg_session,
             runtime_config,
             model_config,
-            prefill_cfgs=[(1, 1, 1, 1, 1)],
-            decode_cfgs=[(1, 1, 1, 1, 1)],
+            prefill_cfgs=[(1, 1, 1, 1, 1, 1)],
+            decode_cfgs=[(1, 1, 1, 1, 1, 1)],
             require_same_tp=False,
         )
 
@@ -315,8 +317,8 @@ class TestRateMatchingDegradationFactors:
             disagg_session,
             runtime_config,
             model_config,
-            prefill_cfgs=[(1, 1, 1, 1, 1)],
-            decode_cfgs=[(1, 1, 1, 1, 1)],
+            prefill_cfgs=[(1, 1, 1, 1, 1, 1)],
+            decode_cfgs=[(1, 1, 1, 1, 1, 1)],
             require_same_tp=False,
         )
 
@@ -333,8 +335,8 @@ def _run_hetero(
     sess: DisaggInferenceSession,
     runtime_config: RuntimeConfig,
     model_config: ModelConfig,
-    prefill_cfgs: list[tuple[int, int, int, int, int]],
-    decode_cfgs: list[tuple[int, int, int, int, int]],
+    prefill_cfgs: list[tuple[int, int, int, int, int, int]],
+    decode_cfgs: list[tuple[int, int, int, int, int, int]],
     max_prefill_gpus: int | None = None,
     max_decode_gpus: int | None = None,
 ) -> InferenceSummary | None:
@@ -366,8 +368,8 @@ class TestHeteroDisaggGPUBudget:
             disagg_session,
             runtime_config,
             model_config,
-            prefill_cfgs=[(2, 1, 1, 1, 1)],
-            decode_cfgs=[(2, 1, 1, 1, 1)],
+            prefill_cfgs=[(2, 1, 1, 1, 1, 1)],
+            decode_cfgs=[(2, 1, 1, 1, 1, 1)],
             max_prefill_gpus=None,
             max_decode_gpus=None,
         )
@@ -382,8 +384,8 @@ class TestHeteroDisaggGPUBudget:
             disagg_session,
             runtime_config,
             model_config,
-            prefill_cfgs=[(2, 1, 1, 1, 1)],
-            decode_cfgs=[(2, 1, 1, 1, 1)],
+            prefill_cfgs=[(2, 1, 1, 1, 1, 1)],
+            decode_cfgs=[(2, 1, 1, 1, 1, 1)],
             max_prefill_gpus=8,
             max_decode_gpus=8,
         )
@@ -398,8 +400,8 @@ class TestHeteroDisaggGPUBudget:
             disagg_session,
             runtime_config,
             model_config,
-            prefill_cfgs=[(2, 1, 1, 1, 1)],
-            decode_cfgs=[(2, 1, 1, 1, 1)],
+            prefill_cfgs=[(2, 1, 1, 1, 1, 1)],
+            decode_cfgs=[(2, 1, 1, 1, 1, 1)],
             max_prefill_gpus=2,
             max_decode_gpus=8,
         )
@@ -420,8 +422,8 @@ class TestHeteroDisaggGPUBudget:
             disagg_session,
             runtime_config,
             model_config,
-            prefill_cfgs=[(2, 1, 1, 1, 1)],
-            decode_cfgs=[(2, 1, 1, 1, 1)],
+            prefill_cfgs=[(2, 1, 1, 1, 1, 1)],
+            decode_cfgs=[(2, 1, 1, 1, 1, 1)],
             max_prefill_gpus=8,
             max_decode_gpus=2,
         )
@@ -441,8 +443,8 @@ class TestHeteroDisaggGPUBudget:
             disagg_session,
             runtime_config,
             model_config,
-            prefill_cfgs=[(2, 1, 1, 1, 1)],
-            decode_cfgs=[(2, 1, 1, 1, 1)],
+            prefill_cfgs=[(2, 1, 1, 1, 1, 1)],
+            decode_cfgs=[(2, 1, 1, 1, 1, 1)],
             max_prefill_gpus=1,
             max_decode_gpus=1,
         )
@@ -457,8 +459,8 @@ class TestHeteroDisaggGPUBudget:
             disagg_session,
             runtime_config,
             model_config,
-            prefill_cfgs=[(4, 1, 1, 1, 1)],
-            decode_cfgs=[(4, 1, 1, 1, 1)],
+            prefill_cfgs=[(4, 1, 1, 1, 1, 1)],
+            decode_cfgs=[(4, 1, 1, 1, 1, 1)],
             max_prefill_gpus=4,
             max_decode_gpus=12,
         )
@@ -485,8 +487,12 @@ class TestHeteroDisaggGPUBudget:
                 disagg_session,
                 runtime_config,
                 model_config,
-                prefill_cfgs=[(2, 1, 1, 1, 1)],
-                decode_cfgs=[(2, 1, 1, 1, 1)],
+                prefill_cfgs=[(2, 1, 1, 1, 1, 1)],
+                decode_cfgs=[(2, 1, 1, 1, 1, 1)],
                 max_prefill_gpus=prefill_budget,
                 max_decode_gpus=decode_budget,
             )
+
+
+# Decode CP=1 is now enforced upstream at TaskConfigFactory._finalize_disagg
+# (see tests/unit/sdk/task/test_task.py). Session layer trusts the contract.

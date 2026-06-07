@@ -20,6 +20,7 @@ from aiconfigurator.sdk.perf_database import (
     PerfDataNotAvailableError,
     load_mhc_module_data,
 )
+from aiconfigurator.sdk.performance_result import PerformanceResult
 
 pytestmark = pytest.mark.unit
 
@@ -240,6 +241,54 @@ class TestDeepSeekV4MHCModule:
 
 
 class TestDeepSeekV4AttentionModule:
+    def test_cp_all_gather_uses_nccl_all_gather_volume(self):
+        """NCCL op with both per-token and per-seq terms covers DSV4 CP gather.
+
+        DSV4 ratio=4 layer payload per seq is ``window*cache + (seq/4)*cache
+        + (seq/4)*indexer``. The first term is per-seq; the rest is per-token.
+        NCCL op combines them as
+        ``message = tokens * num_elements_per_token + seqs * num_elements_per_seq``.
+        """
+
+        class DummyDatabase:
+            def __init__(self):
+                self.calls = []
+
+            def query_nccl(self, dtype, num_gpus, operation, message_size):
+                self.calls.append((dtype, num_gpus, operation, message_size))
+                return PerformanceResult(1.25, energy=3.0, source="silicon")
+
+        head_dim = 512
+        index_head_dim = 128
+        window_size = 128
+        ratio = 4
+        kvcache_bytes = common.KVCacheQuantMode.fp8.value.memory  # 1
+        comm_bytes = common.CommQuantMode.half.value.memory  # 2
+        cache_entry_bytes = head_dim * kvcache_bytes
+        indexer_bytes = common.deepseek_v4_indexer_cache_entry_bytes(index_head_dim)
+
+        per_token_elements = (cache_entry_bytes + indexer_bytes) / ratio / comm_bytes
+        per_seq_elements = window_size * cache_entry_bytes / comm_bytes
+
+        db = DummyDatabase()
+        op = ops.NCCL(
+            "context_cp_all_gather_r4",
+            2.0,
+            "all_gather",
+            num_elements_per_token=per_token_elements,
+            num_gpus=4,
+            comm_quant_mode=common.CommQuantMode.half,
+            num_elements_per_seq=per_seq_elements,
+        )
+
+        batch, s = 2, 256
+        result = op.query(db, x=batch * s, s=s, batch_size=batch)
+
+        expected_msg = batch * s * per_token_elements + batch * per_seq_elements
+        assert db.calls == [(common.CommQuantMode.half, 4, "all_gather", expected_msg)]
+        assert float(result) == pytest.approx(2.5)
+        assert result.energy == pytest.approx(6.0)
+
     def test_generation_uses_pre_decode_kv_length(self, comprehensive_perf_db):
         base = _deepseek_v4_attn_kwargs(4)
         base.pop("prefix")
@@ -671,7 +720,11 @@ def test_sglang_deepseek_v4_pro_moe_workspace_uses_residual_hidden_size(mutable_
     assert attention_width > residual_width
 
     tp_activation_factor = 28
-    attention_workspace = 2 * num_tokens * attention_width * tp_activation_factor
+    # Both the base activation budget AND the MoE block-scale workspace must
+    # use the residual hidden size (7168) rather than DSV4's mHC-inflated
+    # ``num_heads * head_size`` (65536). Mixing the two widths was the
+    # pre-existing bug that drove DSV4's activation estimate ~9x too large.
+    attention_workspace = 2 * num_tokens * residual_width * tp_activation_factor
     moe_scale_workspace = (
         num_tokens
         * residual_width
@@ -686,15 +739,8 @@ def test_sglang_deepseek_v4_pro_moe_workspace_uses_residual_hidden_size(mutable_
 
     assert memory["activations"] == pytest.approx(expected_activation_gib)
 
-    old_moe_scale_workspace = (
-        num_tokens
-        * attention_width
-        * model.config.attention_dp_size
-        * model._num_experts
-        * model._topk
-        / model.config.moe_ep_size
-        / 128
-        * 4
-    )
-    old_activation_gib = (attention_workspace + old_moe_scale_workspace) * 1.15 / (1 << 30)
+    # Regression sanity: the old "attention uses raw num_heads*head_size" formula
+    # would have produced a much larger number. Ensure we no longer hit that.
+    old_attention_workspace = 2 * num_tokens * attention_width * tp_activation_factor
+    old_activation_gib = (old_attention_workspace + moe_scale_workspace) * 1.15 / (1 << 30)
     assert memory["activations"] < old_activation_gib

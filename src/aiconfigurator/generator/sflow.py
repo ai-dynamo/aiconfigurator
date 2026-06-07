@@ -718,6 +718,7 @@ def _total_gpus(wp: dict[str, Any], wc: dict[str, Any], mode: str) -> int:
             _int(rp.get("tensor_parallel_size"), 1)
             * _int(rp.get("pipeline_parallel_size"), 1)
             * _int(rp.get("data_parallel_size"), 1)
+            * _int(rp.get("context_parallel_size"), 1)
         )
 
     if mode == "agg":

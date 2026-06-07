@@ -204,6 +204,23 @@ def test_taskconfig_disagg_default():
     assert "disagg-defaults" in cfg.applied_layers
 
 
+def test_taskconfig_disagg_rejects_decode_cp_in_yaml():
+    """User overriding decode_worker_config.cp_list to >1 in YAML must fail
+    at TaskConfig construction time, not later inside the session."""
+    with pytest.raises(ValueError, match=r"decode_worker_config\.cp_list must be"):
+        TaskConfig(
+            serving_mode="disagg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            yaml_config={
+                "mode": "patch",
+                "config": {
+                    "decode_worker_config": {"cp_list": [4]},
+                },
+            },
+        )
+
+
 def test_taskconfig_disagg_validation_uses_worker_backend_versions(monkeypatch):
     calls = []
 

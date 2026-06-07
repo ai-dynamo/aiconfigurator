@@ -73,6 +73,8 @@ def _cache_key(database: PerfDatabase) -> tuple:
 
 
 class MoE(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # deliberately ignores seq_split: post-A2A globalises tokens
+
     """MoE operation with power tracking."""
 
     _data_cache: ClassVar[dict] = {}
@@ -95,9 +97,11 @@ class MoE(Operation):
         attention_dp_size: int,
         is_context: bool = True,
         is_gated: bool = True,
+        *,
+        seq_split: int = 1,
         **kwargs,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._hidden_size = hidden_size
         self._inter_size = inter_size
         self._quant_mode = quant_mode
@@ -622,8 +626,38 @@ class MoE(Operation):
     # ------------------------------------------------------------------
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """Query MoE latency with energy data."""
-        # attention dp size will scale up the total input tokens.
+        """Query MoE latency with energy data.
+
+        Token-count semantics (read this before adjusting the formula):
+
+        - ``num_tokens`` we pass to ``database.query_moe`` is the **global**
+          per-step token count entering the MoE block. The DB then computes
+          per-rank workload internally using ``moe_tp_size`` and ``moe_ep_size``
+          -- it knows each ``moe_ep`` rank receives
+          ``num_tokens * topk / moe_ep`` tokens after dispatch, and that
+          ``moe_tp`` ranks within a group share each expert's FFN width.
+
+        - ``x = kwargs["x"] * attention_dp_size`` recovers global tokens from
+          per-rank ``x``. DP ranks each hold a distinct batch shard, so total
+          tokens at expert dispatch = per-rank * dp.
+
+        - **``self._seq_split`` is deliberately ignored here.** Unlike the
+          surrounding GEMM / norm / MoEDispatch ops, expert compute is
+          *cp-invariant* by design: the A2A dispatch reshuffles tokens across
+          all (cp x ep) ranks regardless of which CP rank they originated
+          from, so each ``moe_ep`` rank ends up with the same workload it
+          would have without CP. Multiplying by ``cp_size`` would double-
+          count -- CP ranks *share* one sequence, they don't multiply it
+          the way DP does.
+
+        - ETP (``moe_tp > 1``) doesn't change token count -- it only TP-shards
+          each expert's FFN weights. The DB query handles ETP internally via
+          the ``moe_tp_size`` arg.
+
+        The ``_CP_AWARE = True`` class-var marks this op as audited;
+        ``Operation.__init__`` will not raise even though the op doesn't
+        respond to ``seq_split``.
+        """
         x = kwargs.get("x") * self._attention_dp_size
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
@@ -661,6 +695,8 @@ class MoE(Operation):
 
 # a comm op to deduce the communication cost of MoE
 class MoEDispatch(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # divides num_tokens by self._seq_split (per-rank A2A payload)
+
     """MoE dispatch operation. For fine-grained MoE dispatch.
 
     Owns the SGLang DeepEP tables. On non-SGLang backends, both caches are
@@ -685,9 +721,11 @@ class MoEDispatch(Operation):
         attention_dp_size: int,
         pre_dispatch: bool,
         enable_fp4_all2all: bool = True,
+        *,
+        seq_split: int = 1,
         **kwargs,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._hidden_size = hidden_size
         self._topk = topk
         self._num_experts = num_experts
@@ -862,7 +900,14 @@ class MoEDispatch(Operation):
     # ------------------------------------------------------------------
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        num_tokens = kwargs.get("x")
+        # Per-rank A2A payload: each source rank emits/receives its own
+        # ``num_tokens * hidden`` worth of data. Under CP each rank holds
+        # ``1/cp`` of its sequence's tokens, so the per-rank payload
+        # shrinks accordingly -- this is the source-side view, the
+        # opposite of how ``MoE`` (expert compute) handles it. CP doesn't
+        # change A2A total volume (cp ranks share one sequence), just how
+        # it's distributed among source ranks.
+        num_tokens = kwargs.get("x") // self._seq_split
         volume = num_tokens * self._hidden_size
         _sm_version = database.system_spec["gpu"].get("sm_version", -1)
         _num_gpus_per_node = database.system_spec["node"]["num_gpus_per_node"]
@@ -1113,7 +1158,7 @@ class MoEDispatch(Operation):
         """
         Ideal communication cost for MoE dispatch. For reference only.
         """
-        num_tokens = kwargs.get("x")
+        num_tokens = kwargs.get("x") // self._seq_split
         volume = num_tokens * self._hidden_size
 
         if self._pre_dispatch:
@@ -1166,6 +1211,8 @@ class MoEDispatch(Operation):
 
 
 class TrtLLMWideEPMoE(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # deliberately ignores seq_split: post-A2A globalises tokens
+
     """TensorRT-LLM WideEP MoE compute op (excludes All2All — see
     ``TrtLLMWideEPMoEDispatch``).
 
@@ -1200,9 +1247,11 @@ class TrtLLMWideEPMoE(Operation):
         attention_dp_size: int,
         num_slots: int | None = None,  # EPLB slots, defaults to num_experts
         is_gated: bool = True,
+        *,
+        seq_split: int = 1,
         **kwargs,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._hidden_size = hidden_size
         self._inter_size = inter_size
         self._quant_mode = quant_mode
@@ -1509,8 +1558,17 @@ class TrtLLMWideEPMoE(Operation):
     # ------------------------------------------------------------------
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """Query TrtLLM WideEP MoE compute latency with energy data."""
-        # Scale input tokens by attention_dp_size
+        """Query TrtLLM WideEP MoE compute latency with energy data.
+
+        Token semantics mirror ``MoE.query`` (see that docstring for the
+        full rationale): ``num_tokens`` passed to the DB is the **global**
+        per-step token count (``x * attention_dp_size``); the DB derives
+        per-rank workload internally via ``moe_tp_size`` / ``moe_ep_size``.
+        ``self._seq_split`` is deliberately ignored because expert compute
+        is cp-invariant -- the dispatch A2A reshuffles tokens across all
+        (cp x ep) ranks and the per-rank workload depends only on global
+        token count and ep, not on which CP rank a token came from.
+        """
         x = kwargs.get("x") * self._attention_dp_size
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
@@ -1547,6 +1605,8 @@ class TrtLLMWideEPMoE(Operation):
 
 
 class TrtLLMWideEPMoEDispatch(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # divides num_tokens by self._seq_split (per-rank A2A payload)
+
     """TensorRT-LLM WideEP MoE dispatch op using NVLink Two-Sided All2All.
 
     Owns ``_trtllm_alltoall_data`` (loaded only on
@@ -1575,9 +1635,11 @@ class TrtLLMWideEPMoEDispatch(Operation):
         quant_mode: common.MoEQuantMode,
         use_low_precision_combine: bool = False,
         node_num: int | None = None,
+        *,
+        seq_split: int = 1,
         **kwargs,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._hidden_size = hidden_size
         self._topk = topk
         self._num_experts = num_experts
@@ -1926,7 +1988,8 @@ class TrtLLMWideEPMoEDispatch(Operation):
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query TrtLLM WideEP All2All communication latency."""
-        num_tokens = kwargs.get("x")
+        # A2A dispatch sees per-rank tokens; ``_seq_split`` shrinks under CP.
+        num_tokens = kwargs.get("x") // self._seq_split
 
         phase = "Pre-dispatch" if self._pre_dispatch else "Post-dispatch"
         precision = (

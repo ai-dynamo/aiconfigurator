@@ -24,7 +24,30 @@ from aiconfigurator.sdk.perf_database import (
     has_perf_data_not_available_cause,
     load_system_spec,
 )
-from aiconfigurator.sdk.utils import ListFlowDumper, enumerate_parallel_config, get_model_config_from_model_path
+from aiconfigurator.sdk.utils import (
+    ListFlowDumper,
+    enumerate_parallel_config,
+    get_model_config_from_model_path,
+)
+
+_SGLANG_CP_SWEEP_FAMILIES = frozenset({"DEEPSEEK", "KIMIK25", "DEEPSEEKV32", "DEEPSEEKV4"})
+
+
+def _default_cp_list_for(model_family: str, backend_name: str) -> list[int]:
+    """Default ``cp_list`` for the auto-sweep in CLI default mode.
+
+    Sweep policy (where the auto-sizer asks "which CP values to try"),
+    not capability (whether a model can run CP). Capability is owned by
+    ``BaseModel.supports_cp`` and gated in ``get_model``. Only used by the
+    defaults layer in ``TaskConfigFactory`` -- private to ``task.py``.
+
+    Extend ``_SGLANG_CP_SWEEP_FAMILIES`` when new (model_family, backend)
+    combos add CP-aware perf modeling.
+    """
+    if backend_name == "sglang" and model_family in _SGLANG_CP_SWEEP_FAMILIES:
+        return [1, 2, 4, 8]
+    return [1]
+
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +272,7 @@ def _deep_merge(target: dict, source: Mapping, *, allow_new: bool = True) -> dic
 
 
 def _ensure_munch(obj: dict | DefaultMunch | Munch) -> DefaultMunch:
-    if isinstance(obj, (DefaultMunch, Munch)):
+    if isinstance(obj, DefaultMunch | Munch):
         return DefaultMunch.fromDict(obj.toDict(), DefaultMunch)
     return DefaultMunch.fromDict(obj, DefaultMunch)
 
@@ -340,11 +363,18 @@ def build_disagg_parallel_lists(
     _prefill_wideep = prefill_enable_wideep if prefill_enable_wideep is not None else enable_wideep
     _decode_wideep = decode_enable_wideep if decode_enable_wideep is not None else enable_wideep
 
+    # cp_list = [1] is the conservative default. The factory path
+    # (``_disagg_defaults_layer``) overrides prefill with the per-model
+    # auto-sweep via ``_default_cp_list_for``; the generator path (which
+    # calls this directly without going through the factory) keeps the [1]
+    # baseline since generator CP rendering is not wired yet. Decode stays
+    # at [1] in both paths -- CP is modeled for context/prefill only.
     prefill_worker_config: dict = {
         "num_gpu_per_worker": [1, 2, 4, 8],
         "tp_list": [1, 2, 4, 8],
         "pp_list": [1, 2, 4, 8] if should_enable_pp else [1],
         "dp_list": [1],
+        "cp_list": [1],
         "moe_tp_list": [1],
         "moe_ep_list": [1, 2, 4, 8] if is_moe else [1],
     }
@@ -354,6 +384,7 @@ def build_disagg_parallel_lists(
         "tp_list": [1, 2, 4, 8],
         "pp_list": [1, 2, 4, 8] if should_enable_pp else [1],
         "dp_list": [1, 2, 4, 8] if is_moe else [1],
+        "cp_list": [1],
         "moe_tp_list": [1],
         "moe_ep_list": [1, 2, 4, 8] if is_moe else [1],
     }
@@ -599,6 +630,7 @@ class TaskConfigFactory:
             "tp_list": [1, 2, 4, 8],
             "pp_list": [1, 2, 4, 8] if should_enable_pp else [1],
             "dp_list": [1, 2, 4, 8] if ctx.is_moe else [1],
+            "cp_list": _default_cp_list_for(ctx.model_family, ctx.backend_name),
             "moe_tp_list": [1],
             "moe_ep_list": [1, 2, 4, 8] if ctx.is_moe else [1],
         }
@@ -688,10 +720,12 @@ class TaskConfigFactory:
         prefill_worker_config["system_name"] = ctx.system_name
         prefill_worker_config["backend_name"] = ctx.backend_name
         prefill_worker_config["backend_version"] = ctx.resolved_backend_version_for(ctx.system_name)
+        prefill_worker_config["cp_list"] = _default_cp_list_for(ctx.model_family, ctx.backend_name)
 
         decode_worker_config["system_name"] = decode_system
         decode_worker_config["backend_name"] = ctx.backend_name
         decode_worker_config["backend_version"] = ctx.resolved_backend_version_for(decode_system)
+        decode_worker_config.setdefault("cp_list", [1])
 
         for wc in (prefill_worker_config, decode_worker_config):
             wc.setdefault("enable_wideep", ctx.enable_wideep)
@@ -770,6 +804,19 @@ class TaskConfigFactory:
         prefill_cfg = config.prefill_worker_config
         decode_cfg = config.decode_worker_config
         replica_cfg = config.replica_config
+
+        # Decode CP must be 1 -- CP is modeled for context/prefill only.
+        # Validated after all layers (defaults + YAML overrides) applied so a
+        # ``decode_worker_config.cp_list: [4]`` in YAML fails here, not in the
+        # session later. SDK direct callers of DisaggInferenceSession that
+        # bypass TaskConfig are on their own (same contract as other params
+        # like max_prefill_gpus).
+        decode_cp_list = list(decode_cfg.cp_list)
+        if any(cp != 1 for cp in decode_cp_list):
+            raise ValueError(
+                "decode_worker_config.cp_list must be [1] (CP is modeled for context/prefill "
+                f"only). Got {decode_cp_list}. To enable CP, override prefill_worker_config.cp_list."
+            )
 
         # if replica_cfg.max_gpu_per_replica is overwritten by patch, extend the num_gpu_per_replica
         # if needed
@@ -1016,6 +1063,11 @@ class TaskConfig:
         self.yaml_patch = yaml_patch
         self.profiles = list(effective_profiles)
 
+        # CP geometry / capability are validated at model construction (see
+        # ``get_model`` + ``BaseModel.supports_cp``). Decode CP=1 is enforced in
+        # ``DisaggInferenceSession``. The CLI default-mode sweep populates
+        # ``worker_config.cp_list`` via ``_default_cp_list_for``; users pin a
+        # specific value by overriding ``worker_config.cp_list`` in YAML.
         if engine_step_backend not in {None, "python", "rust"}:
             raise ValueError(f"Invalid engine_step_backend: {engine_step_backend!r}. Use 'python' or 'rust'.")
 
@@ -1467,6 +1519,7 @@ class TaskRunner:
                 dp_list=task_config.worker_config.dp_list,
                 moe_tp_list=task_config.worker_config.moe_tp_list,
                 moe_ep_list=task_config.worker_config.moe_ep_list,
+                cp_list=task_config.worker_config.cp_list,
                 is_moe=check_is_moe(task_config.model_path),
                 backend=common.BackendName(task_config.worker_config.backend_name),
                 enable_wideep=task_config.enable_wideep,
@@ -1483,8 +1536,8 @@ class TaskRunner:
 
         logger.info("Task %s: Listing parallelism configs to evaluate: ", task_config.task_name)
         for i, parallel_config in enumerate(parallel_config_list):
-            tp, pp, dp, moe_tp, moe_ep = parallel_config
-            logger.info(f"{i + 1}) tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
+            tp, pp, dp, moe_tp, moe_ep, cp = parallel_config
+            logger.info(f"{i + 1}) tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}, cp={cp}")
 
         logger.info("Task %s: Running agg pareto", task_config.task_name)
         enable_chunked_prefill = getattr(task_config, "enable_chunked_prefill", False)
@@ -1581,6 +1634,7 @@ class TaskRunner:
                 dp_list=task_config.prefill_worker_config.dp_list,
                 moe_tp_list=task_config.prefill_worker_config.moe_tp_list,
                 moe_ep_list=task_config.prefill_worker_config.moe_ep_list,
+                cp_list=task_config.prefill_worker_config.cp_list,
                 is_moe=check_is_moe(task_config.model_path),
                 backend=common.BackendName(task_config.prefill_worker_config.backend_name),
                 enable_wideep=prefill_enable_wideep,
@@ -1597,8 +1651,8 @@ class TaskRunner:
 
         logger.info("Task %s: Listing prefill parallelism configs to evaluate: ", task_config.task_name)
         for i, parallel_config in enumerate(prefill_parallel_config_list):
-            tp, pp, dp, moe_tp, moe_ep = parallel_config
-            logger.info(f"{i + 1}) tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
+            tp, pp, dp, moe_tp, moe_ep, cp = parallel_config
+            logger.info(f"{i + 1}) tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}, cp={cp}")
 
         logger.debug("Task %s: Setting up decode database", task_config.task_name)
         try:
@@ -1644,6 +1698,7 @@ class TaskRunner:
                 dp_list=task_config.decode_worker_config.dp_list,
                 moe_tp_list=task_config.decode_worker_config.moe_tp_list,
                 moe_ep_list=task_config.decode_worker_config.moe_ep_list,
+                cp_list=task_config.decode_worker_config.cp_list,
                 is_moe=check_is_moe(task_config.model_path),
                 backend=common.BackendName(task_config.decode_worker_config.backend_name),
                 enable_wideep=decode_enable_wideep,
@@ -1660,8 +1715,8 @@ class TaskRunner:
 
         logger.info("Task %s: Listing decode parallelism configs to evaluate: ", task_config.task_name)
         for i, parallel_config in enumerate(decode_parallel_config_list):
-            tp, pp, dp, moe_tp, moe_ep = parallel_config
-            logger.info(f"{i + 1}) tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
+            tp, pp, dp, moe_tp, moe_ep, cp = parallel_config
+            logger.info(f"{i + 1}) tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}, cp={cp}")
 
         # For SGLang non-wideep disaggregated serving
         # See: https://github.com/ai-dynamo/dynamo/issues/5870

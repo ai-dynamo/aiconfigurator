@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import logging
 import math
 from typing import Any
 
@@ -12,6 +13,8 @@ from aiconfigurator.sdk.task import TaskConfig
 
 from .aggregators import collect_generator_params
 from .rendering import apply_defaults
+
+logger = logging.getLogger(__name__)
 
 
 def _deep_merge(target: dict, extra: dict | None) -> dict:
@@ -98,6 +101,20 @@ def task_config_to_generator_config(
         tp = _safe_int(_series_val(result_df, f"{prefix}tp", 1), 1)
         pp = _safe_int(_series_val(result_df, f"{prefix}pp", 1), 1)
         dp = _safe_int(_series_val(result_df, f"{prefix}dp", 1), 1)
+        cp = _safe_int(_series_val(result_df, f"{prefix}cp", 1), 1)
+        if cp > 1:
+            # CP rendering is intentionally not plumbed yet (see
+            # backend_config_mapping.yaml note on context_parallel_size).
+            # The SDK perf estimate uses cp_size correctly; the deployable
+            # CLI args / k8s yaml will NOT carry the --*-context-parallel
+            # flag until we add ``cp_flavor()`` capability to model classes.
+            logger.warning(
+                "Worker prefix=%r selected cp_size=%d but generator output will not include "
+                "the SGLang --enable-*-prefill-context-parallel flags. Patch the rendered "
+                "artifacts manually until model-class cp_flavor() lands.",
+                prefix or "agg",
+                cp,
+            )
         moe_tp = _safe_int(_series_val(result_df, f"{prefix}moe_tp", 1), 1)
         moe_ep = _safe_int(_series_val(result_df, f"{prefix}moe_ep", 1), 1)
         bs = _safe_int(_series_val(result_df, f"{prefix}bs", 1), 1)
@@ -115,7 +132,8 @@ def task_config_to_generator_config(
             "tensor_parallel_size": tp,
             "pipeline_parallel_size": pp,
             "data_parallel_size": dp,
-            "gpus_per_worker": tp * pp * dp,
+            "context_parallel_size": cp,
+            "gpus_per_worker": tp * pp * dp * cp,
             "moe_tensor_parallel_size": moe_tp,
             "moe_expert_parallel_size": moe_ep,
             "max_batch_size": bs,
@@ -196,7 +214,8 @@ def task_config_to_generator_config(
             tp = agg_params.get("tensor_parallel_size", 1)
             pp = agg_params.get("pipeline_parallel_size", 1)
             dp = agg_params.get("data_parallel_size", 1)
-            gpus_per_replica = tp * pp * dp
+            cp = agg_params.get("context_parallel_size", 1)
+            gpus_per_replica = tp * pp * dp * cp
             agg_workers = task_config.total_gpus // gpus_per_replica
         prefill_params, prefill_workers = None, 0
         decode_params, decode_workers = None, 0
@@ -210,11 +229,13 @@ def task_config_to_generator_config(
             p_tp = prefill_params.get("tensor_parallel_size", 1)
             p_pp = prefill_params.get("pipeline_parallel_size", 1)
             p_dp = prefill_params.get("data_parallel_size", 1)
-            prefill_gpus_per_worker = p_tp * p_pp * p_dp
+            p_cp = prefill_params.get("context_parallel_size", 1)
+            prefill_gpus_per_worker = p_tp * p_pp * p_dp * p_cp
 
             d_tp = decode_params.get("tensor_parallel_size", 1)
             d_pp = decode_params.get("pipeline_parallel_size", 1)
             d_dp = decode_params.get("data_parallel_size", 1)
+            # decode CP is always 1 (enforced by DisaggInferenceSession)
             decode_gpus_per_worker = d_tp * d_pp * d_dp
 
             # Each replica uses prefill_workers_per_replica prefill workers + decode_workers_per_replica decode workers

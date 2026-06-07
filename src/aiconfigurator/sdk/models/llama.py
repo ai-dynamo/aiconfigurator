@@ -21,6 +21,13 @@ class LLAMAModel(BaseModel):
     """
 
     @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # SGLang AllGather only. vLLM CP is DCP (decode-time, seq-sharded
+        # KV + Q AllGather + LSE combine) which this framework's
+        # prefill-CP model doesn't capture -- intentionally excluded.
+        return backend_name == "sglang"
+
+    @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
         return cls(
             model_info["model_path"],
@@ -59,27 +66,41 @@ class LLAMAModel(BaseModel):
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
 
+        # CP (sequence parallelism). cp_style is set by get_model when cp>1;
+        # "none" otherwise. Token-major ops divide x by cp at query time via
+        # seq_split. Attention shape is computed inline: AllGather/Ring scale
+        # the op count by 1/cp (= scale_factor /= cp); Ulysses shrinks
+        # local_heads by cp instead.
+        cp = self.config.cp_size
+        cp_style = self.config.cp_style
+        attn_count_div = cp if cp_style in ("allgather", "ring") else 1
+        attn_head_div = cp if cp_style == "ulysses" else 1
+        attn_local_heads = (self._num_heads // tp_size) // attn_head_div
+        attn_local_kv = num_kv_heads_per_gpu // attn_head_div
+
         self.context_ops.extend(
             [
-                ops.Embedding("context_embedding", 1, self._vocab_size // tp_size, h, 0.3),
-                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.Embedding("context_embedding", 1, self._vocab_size // tp_size, h, 0.3, seq_split=cp),
+                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
                 ops.GEMM(
                     "context_qkv_gemm",
                     self._num_layers,
                     self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.ContextAttention(
                     "context_attention",
-                    self._num_layers,
-                    self._num_heads // tp_size,
-                    num_kv_heads_per_gpu,
+                    self._num_layers / attn_count_div,
+                    attn_local_heads,
+                    attn_local_kv,
                     kvcache_quant_mode,
                     fmha_quant_mode,
                     head_size=self._head_size,
                     use_qk_norm=self._use_qk_norm,
                 ),
+                *self._cp_attn_comm_ops(),
                 ops.GEMM(
                     "context_proj_gemm",
                     self._num_layers,
@@ -87,14 +108,16 @@ class LLAMAModel(BaseModel):
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
                     low_precision_input=True,
+                    seq_split=cp,
                 ),
-                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
                 ops.GEMM(
                     "context_gate_ffn1_gemm",
                     self._num_layers,
                     2 * self._inter_size // tp_size,
                     h,
                     gemm_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.ElementWise(
                     "context_act_gate",
@@ -102,6 +125,7 @@ class LLAMAModel(BaseModel):
                     2 * self._inter_size // tp_size,
                     self._inter_size // tp_size,
                     0.8,
+                    seq_split=cp,
                 ),
                 ops.GEMM(
                     "context_ffn2_gemm",
@@ -110,6 +134,7 @@ class LLAMAModel(BaseModel):
                     self._inter_size // tp_size,
                     gemm_quant_mode,
                     low_precision_input=True,
+                    seq_split=cp,
                 ),
                 ops.GEMM(
                     "context_logits_gemm",
@@ -117,6 +142,7 @@ class LLAMAModel(BaseModel):
                     self._vocab_size // tp_size,
                     h,
                     common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
                 ),
             ]
         )
@@ -183,9 +209,9 @@ class LLAMAModel(BaseModel):
         )
 
         # when tp_message_size=0, the comm part will be 0
-        self.context_ops.append(ops.CustomAllReduce("context_embedding_ar", 1, h, tp_size))
-        self.context_ops.append(ops.CustomAllReduce("context_ar_1", self._num_layers, h, tp_size))
-        self.context_ops.append(ops.CustomAllReduce("context_ar_2", self._num_layers, h, tp_size))
+        self.context_ops.append(ops.CustomAllReduce("context_embedding_ar", 1, h, tp_size, seq_split=cp))
+        self.context_ops.append(ops.CustomAllReduce("context_ar_1", self._num_layers, h, tp_size, seq_split=cp))
+        self.context_ops.append(ops.CustomAllReduce("context_ar_2", self._num_layers, h, tp_size, seq_split=cp))
 
         self.generation_ops.append(
             ops.CustomAllReduce("generation_embedding_ar", 1 * self._mtp_scale_factor, h, tp_size)
@@ -199,5 +225,15 @@ class LLAMAModel(BaseModel):
 
         # pp
         pp_scale_factor = pp_size - 1
-        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
+        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size, seq_split=cp))
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
+
+    # ----- KV bytes API: required override per BaseModel contract --------
+
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        """Per-GPU GQA: ``num_kv_heads_per_gpu * head_size * 2`` per layer per token."""
+        seq_len = max(0, seq_len)
+        per_layer_per_token = (
+            self._num_kv_heads_per_gpu * self._head_size * 2 * self.config.kvcache_quant_mode.value.memory
+        )
+        return seq_len * self._num_layers * per_layer_per_token

@@ -149,6 +149,8 @@ def _format_dsa_unavailable_message(
 
 
 class ContextDSAModule(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # CP handled at model construction (count divisor)
+
     """
     Context phase DSA (DeepSeek Sparse Attention) module-level operation.
 
@@ -177,8 +179,10 @@ class ContextDSAModule(Operation):
         fmha_quant_mode: common.FMHAQuantMode,
         gemm_quant_mode: common.GEMMQuantMode,
         architecture: str = "DeepseekV32ForCausalLM",
+        *,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._num_heads = num_heads
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
@@ -645,6 +649,8 @@ class ContextDSAModule(Operation):
 
 
 class GenerationDSAModule(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # CP is prefill-only; decode unaffected
+
     """
     Generation phase DSA (DeepSeek Sparse Attention) module-level operation.
 
@@ -668,8 +674,10 @@ class GenerationDSAModule(Operation):
         kv_cache_dtype: common.KVCacheQuantMode,
         gemm_quant_mode: common.GEMMQuantMode,
         architecture: str = "DeepseekV32ForCausalLM",
+        *,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._num_heads = num_heads
         self._kv_cache_dtype = kv_cache_dtype
         self._gemm_quant_mode = gemm_quant_mode

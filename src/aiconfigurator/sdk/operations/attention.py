@@ -84,6 +84,8 @@ def _cache_key(database: PerfDatabase) -> tuple:
 
 
 class ContextAttention(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # CP handled at model construction (count / local_heads)
+
     """
     Context (prefill) attention operation.
 
@@ -105,9 +107,11 @@ class ContextAttention(Operation):
         window_size: int = 0,
         head_size: int = 128,
         use_qk_norm: bool = False,
+        *,
+        seq_split: int = 1,
     ) -> None:
         """Initialize context attention query parameters."""
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._n = n
         self._weights = 0.0
         self._n_kv = n_kv
@@ -341,6 +345,8 @@ class ContextAttention(Operation):
 
 
 class GenerationAttention(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # CP is prefill-only; decode unaffected, attribute carried for API uniformity
+
     """
     Generation (decode) attention operation.
 
@@ -361,9 +367,11 @@ class GenerationAttention(Operation):
         window_size: int = 0,
         head_size: int = 128,
         use_qk_norm: bool = False,
+        *,
+        seq_split: int = 1,
     ) -> None:
         """Initialize generation attention query parameters."""
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._n = n
         self._weights = 0.0
         self._n_kv = n_kv

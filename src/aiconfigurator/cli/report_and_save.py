@@ -147,48 +147,54 @@ def _plot_worker_setup_table(
             field_names.append("power_w")
         table.field_names = field_names
         for i, row in enumerate(top_configs.to_dict("records")):
+            p_cp = row.get("(p)cp", 1)
+            d_cp = row.get("(d)cp", 1)
+            p_cp_suffix = f"cp{p_cp}" if p_cp != 1 else ""
+            d_cp_suffix = f"cp{d_cp}" if d_cp != 1 else ""
             if is_moe:
                 p_parallel = (
                     f"tp{_cli_underline(str(row['(p)tp']))}"
                     f"pp{_cli_underline(str(row['(p)pp']))}"
                     f"dp{_cli_underline(str(row['(p)dp']))}"
                     f"etp{row['(p)moe_tp']}ep{row['(p)moe_ep']}"
+                    f"{p_cp_suffix}"
                 )
                 d_parallel = (
                     f"tp{_cli_underline(str(row['(d)tp']))}"
                     f"pp{_cli_underline(str(row['(d)pp']))}"
                     f"dp{_cli_underline(str(row['(d)dp']))}"
                     f"etp{row['(d)moe_tp']}ep{row['(d)moe_ep']}"
+                    f"{d_cp_suffix}"
                 )
                 p_gpus_worker = (
-                    f"{row['(p)pp'] * row['(p)tp'] * row['(p)dp']} "
+                    f"{row['(p)pp'] * row['(p)tp'] * row['(p)dp'] * p_cp} "
                     f"(={_cli_underline(str(row['(p)tp']))}x"
                     f"{_cli_underline(str(row['(p)pp']))}x"
-                    f"{_cli_underline(str(row['(p)dp']))})"
+                    f"{_cli_underline(str(row['(p)dp']))}x{p_cp})"
                 )
                 d_gpus_worker = (
-                    f"{row['(d)pp'] * row['(d)tp'] * row['(d)dp']} "
+                    f"{row['(d)pp'] * row['(d)tp'] * row['(d)dp'] * d_cp} "
                     f"(={_cli_underline(str(row['(d)tp']))}x"
                     f"{_cli_underline(str(row['(d)pp']))}x"
-                    f"{_cli_underline(str(row['(d)dp']))})"
+                    f"{_cli_underline(str(row['(d)dp']))}x{d_cp})"
                 )
             else:
-                p_parallel = f"tp{_cli_underline(str(row['(p)tp']))}pp{_cli_underline(str(row['(p)pp']))}"
-                d_parallel = f"tp{_cli_underline(str(row['(d)tp']))}pp{_cli_underline(str(row['(d)pp']))}"
+                p_parallel = f"tp{_cli_underline(str(row['(p)tp']))}pp{_cli_underline(str(row['(p)pp']))}{p_cp_suffix}"
+                d_parallel = f"tp{_cli_underline(str(row['(d)tp']))}pp{_cli_underline(str(row['(d)pp']))}{d_cp_suffix}"
                 p_gpus_worker = (
-                    f"{row['(p)pp'] * row['(p)tp']} "
+                    f"{row['(p)pp'] * row['(p)tp'] * p_cp} "
                     f"(={_cli_underline(str(row['(p)tp']))}x"
-                    f"{_cli_underline(str(row['(p)pp']))})"
+                    f"{_cli_underline(str(row['(p)pp']))}x{p_cp})"
                 )
                 d_gpus_worker = (
-                    f"{row['(d)pp'] * row['(d)tp']} "
+                    f"{row['(d)pp'] * row['(d)tp'] * d_cp} "
                     f"(={_cli_underline(str(row['(d)tp']))}x"
-                    f"{_cli_underline(str(row['(d)pp']))})"
+                    f"{_cli_underline(str(row['(d)pp']))}x{d_cp})"
                 )
             gpus_replica_str = (
                 f"{row['num_total_gpus']} "
-                f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
-                f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
+                f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp'] * p_cp}"
+                f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp'] * d_cp})"
             )
             row_data = [
                 i + 1,
@@ -239,23 +245,27 @@ def _plot_worker_setup_table(
             field_names.append("power_w")
         table.field_names = field_names
         for i, row in enumerate(top_configs.to_dict("records")):
+            cp = row.get("cp", 1)
+            cp_suffix = f"cp{cp}" if cp != 1 else ""
             if is_moe:
                 parallel = (
                     f"tp{_cli_underline(str(row['tp']))}"
                     f"pp{_cli_underline(str(row['pp']))}"
                     f"dp{_cli_underline(str(row['dp']))}"
                     f"etp{row['moe_tp']}ep{row['moe_ep']}"
+                    f"{cp_suffix}"
                 )
                 gpus_worker = (
-                    f"{row['pp'] * row['tp'] * row['dp']} "
+                    f"{row['pp'] * row['tp'] * row['dp'] * cp} "
                     f"(={_cli_underline(str(row['tp']))}x"
                     f"{_cli_underline(str(row['pp']))}x"
-                    f"{_cli_underline(str(row['dp']))})"
+                    f"{_cli_underline(str(row['dp']))}x{cp})"
                 )
             else:
-                parallel = f"tp{_cli_underline(str(row['tp']))}pp{_cli_underline(str(row['pp']))}"
+                parallel = f"tp{_cli_underline(str(row['tp']))}pp{_cli_underline(str(row['pp']))}{cp_suffix}"
                 gpus_worker = (
-                    f"{row['pp'] * row['tp']} (={_cli_underline(str(row['tp']))}x{_cli_underline(str(row['pp']))}"
+                    f"{row['pp'] * row['tp'] * cp} "
+                    f"(={_cli_underline(str(row['tp']))}x{_cli_underline(str(row['pp']))}x{cp})"
                 )
             row_data = [
                 i + 1,
@@ -440,8 +450,9 @@ def log_final_summary(
         "for Agg, gpus/replica = gpus/worker"
     )
     summary_box.append(
-        "               gpus/worker = tp * pp * dp = etp * ep * pp for MoE models; "
-        f"tp * pp for dense models (underlined {_cli_underline('numbers')} are the actual values in math)"
+        "               gpus/worker = tp * pp * dp * cp = etp * ep * pp for MoE models "
+        "(since tp * cp * dp == etp * ep); "
+        f"tp * pp * cp for dense models (underlined {_cli_underline('numbers')} are the actual values in math)"
     )
 
     # Check if power data is available before plotting tables

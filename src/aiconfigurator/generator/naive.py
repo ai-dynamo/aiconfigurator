@@ -54,19 +54,23 @@ def _resolve_parallelization(
 
     The returned dict is suitable for merging into a worker params dict
     and contains the keys consumed by the generator (``tensor_parallel_size``,
-    ``pipeline_parallel_size``, ``data_parallel_size``,
+    ``pipeline_parallel_size``, ``data_parallel_size``, ``context_parallel_size``,
     ``moe_tensor_parallel_size``, ``moe_expert_parallel_size``).
 
     Rules (same for agg and disagg):
     - **Dense**: TP = num_gpus
     - **MLA + MoE + throughput** (DeepSeek-V3): DEP = num_gpus
     - **All other sparse**: TEP = num_gpus
+
+    CP is always 1 in naive mode -- enabling CP requires the sweep path
+    (default mode) so the right cp_list gets picked per (model, backend).
     """
     if not is_moe:
         return {
             "tensor_parallel_size": num_gpus,
             "pipeline_parallel_size": 1,
             "data_parallel_size": 1,
+            "context_parallel_size": 1,
             "moe_tensor_parallel_size": 1,
             "moe_expert_parallel_size": 1,
         }
@@ -77,6 +81,7 @@ def _resolve_parallelization(
             "tensor_parallel_size": 1,
             "pipeline_parallel_size": 1,
             "data_parallel_size": num_gpus,
+            "context_parallel_size": 1,
             "moe_tensor_parallel_size": 1,
             "moe_expert_parallel_size": num_gpus,
         }
@@ -86,6 +91,7 @@ def _resolve_parallelization(
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
         "data_parallel_size": 1,
+        "context_parallel_size": 1,
         "moe_tensor_parallel_size": num_gpus,
         "moe_expert_parallel_size": 1,
     }

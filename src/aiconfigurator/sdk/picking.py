@@ -74,8 +74,15 @@ def _build_disagg_summary_dict(
         prefill_summary_dict["seq/s"] * prefill_num_worker * prefill_degradation_factor,
         decode_summary_dict["seq/s"] * decode_num_worker * decode_degradation_factor,
     )
-    prefill_gpus = prefill_summary_dict["pp"] * prefill_summary_dict["tp"] * prefill_summary_dict["dp"]
-    decode_gpus = decode_summary_dict["pp"] * decode_summary_dict["tp"] * decode_summary_dict["dp"]
+    prefill_gpus = (
+        prefill_summary_dict["pp"]
+        * prefill_summary_dict["tp"]
+        * prefill_summary_dict["dp"]
+        * prefill_summary_dict["cp"]
+    )
+    decode_gpus = (
+        decode_summary_dict["pp"] * decode_summary_dict["tp"] * decode_summary_dict["dp"] * decode_summary_dict["cp"]
+    )
     num_total_gpus = prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker
     seq_s_gpu = seq_s / num_total_gpus if num_total_gpus > 0 else 0.0
 
@@ -120,6 +127,7 @@ def _build_disagg_summary_dict(
         "(p)tp": prefill_summary_dict["tp"],
         "(p)pp": prefill_summary_dict["pp"],
         "(p)dp": prefill_summary_dict["dp"],
+        "(p)cp": prefill_summary_dict["cp"],
         "(p)moe_tp": prefill_summary_dict["moe_tp"],
         "(p)moe_ep": prefill_summary_dict["moe_ep"],
         "(p)parallel": prefill_summary_dict["parallel"],
@@ -135,6 +143,7 @@ def _build_disagg_summary_dict(
         "(d)tp": decode_summary_dict["tp"],
         "(d)pp": decode_summary_dict["pp"],
         "(d)dp": decode_summary_dict["dp"],
+        "(d)cp": decode_summary_dict["cp"],
         "(d)moe_tp": decode_summary_dict["moe_tp"],
         "(d)moe_ep": decode_summary_dict["moe_ep"],
         "(d)parallel": decode_summary_dict["parallel"],

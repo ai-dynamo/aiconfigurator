@@ -23,6 +23,12 @@ class ModelConfig:
     moe_tp_size: int = None
     moe_ep_size: int = None
     attention_dp_size: int = 1
+    cp_size: int = 1
+    # CP variant ("none" / "allgather" / "ulysses" / "ring"). Set by
+    # ``get_model`` from backend_name when cp_size>1; default "none". Models
+    # that build CP-aware op pipelines branch on this. Models can also
+    # override via ``BaseModel._resolve_cp_style``.
+    cp_style: str = "none"
     workload_distribution: str = "power_law"
     # quantization options
     nextn: int = 0  # at most mtp5
@@ -36,11 +42,26 @@ class ModelConfig:
     enable_eplb: bool = False  # Expert Parallel Load Balancing
     wideep_num_slots: int = None  # EPLB num_slots, defaults to num_experts if None
 
+    @property
+    def total_gpus_per_worker(self) -> int:
+        """GPUs occupied by a single worker = tp * pp * dp * cp."""
+        return self.tp_size * self.pp_size * self.attention_dp_size * self.cp_size
+
+    @property
+    def attn_width(self) -> int:
+        """Attention/context parallelism width = tp * cp * dp.
+
+        Used both for MoE width matching (must equal moe_tp * moe_ep) and for
+        throughput-per-GPU normalization within a single attention-side worker.
+        """
+        return self.tp_size * self.cp_size * self.attention_dp_size
+
     def resolve_moe_parallelism(self) -> tuple[int, int]:
         """Resolve and validate MoE parallelism dimensions in-place.
 
-        For MoE models, the attention width must match the expert width:
-        ``tp_size * attention_dp_size == moe_tp_size * moe_ep_size``. If one
+        For MoE models, the attention/context/data-parallel width must match
+        the expert width:
+        ``tp_size * cp_size * attention_dp_size == moe_tp_size * moe_ep_size``. If one
         MoE dimension is missing, infer it from the other. If both are missing,
         raise an error so callers do not silently get an MoE layout they did
         not request.
@@ -52,8 +73,9 @@ class ModelConfig:
 
         _validate_positive("tp_size", self.tp_size)
         _validate_positive("attention_dp_size", self.attention_dp_size)
+        _validate_positive("cp_size", self.cp_size)
 
-        attn_width = self.tp_size * self.attention_dp_size
+        attn_width = self.attn_width
         moe_tp_size = self.moe_tp_size
         moe_ep_size = self.moe_ep_size
         if moe_tp_size is None and moe_ep_size is None:
@@ -62,7 +84,7 @@ class ModelConfig:
             _validate_positive("moe_ep_size", moe_ep_size)
             if attn_width % moe_ep_size != 0:
                 raise ValueError(
-                    f"Cannot infer moe_tp_size: tp_size({self.tp_size}) * "
+                    f"Cannot infer moe_tp_size: tp_size({self.tp_size}) * cp_size({self.cp_size}) * "
                     f"attention_dp_size({self.attention_dp_size}) = {attn_width} is not "
                     f"divisible by moe_ep_size({moe_ep_size})."
                 )
@@ -71,7 +93,7 @@ class ModelConfig:
             _validate_positive("moe_tp_size", moe_tp_size)
             if attn_width % moe_tp_size != 0:
                 raise ValueError(
-                    f"Cannot infer moe_ep_size: tp_size({self.tp_size}) * "
+                    f"Cannot infer moe_ep_size: tp_size({self.tp_size}) * cp_size({self.cp_size}) * "
                     f"attention_dp_size({self.attention_dp_size}) = {attn_width} is not "
                     f"divisible by moe_tp_size({moe_tp_size})."
                 )
@@ -84,7 +106,7 @@ class ModelConfig:
         moe_width = moe_tp_size * moe_ep_size
         if attn_width != moe_width:
             raise ValueError(
-                f"Parallelism width mismatch: tp_size({self.tp_size}) * "
+                f"Parallelism width mismatch: tp_size({self.tp_size}) * cp_size({self.cp_size}) * "
                 f"attention_dp_size({self.attention_dp_size}) = {attn_width}, but "
                 f"moe_tp_size({moe_tp_size}) * moe_ep_size({moe_ep_size}) = "
                 f"{moe_width}. These must be equal."

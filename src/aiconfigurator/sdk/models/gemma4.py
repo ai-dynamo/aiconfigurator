@@ -36,6 +36,10 @@ class Gemma4MixModel(BaseModel):
     """
 
     @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        return backend_name == "sglang"
+
+    @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
         model = cls(
             model_info["topk"],
@@ -66,12 +70,9 @@ class Gemma4MixModel(BaseModel):
         # routed-MoE block, so MoE-related parallelism constraints don't apply.
         self._is_dense = not topk or not num_experts
         if not self._is_dense:
-            assert (
-                self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
-            ), (
-                f"tp_size ({self.config.tp_size}) * attention_dp_size "
-                f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-                f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+            assert self.config.attn_width == self.config.moe_tp_size * self.config.moe_ep_size, (
+                f"attn_width tp*cp*dp ({self.config.attn_width}) must equal moe_tp_size * moe_ep_size "
+                f"({self.config.moe_tp_size * self.config.moe_ep_size})"
             )
             assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
         else:
@@ -302,6 +303,49 @@ class Gemma4MixModel(BaseModel):
             ]
         )
 
+        # cp (SGLang prefill CP). Gemma4 has heterogeneous KV per layer-type
+        # (SWA vs global). Emit one NCCL op per type, weighted by its layer
+        # count, so total comm volume matches what the runtime would actually
+        # gather. TODO(cp-impl-assumption): SGLang AllGather-of-KV variant.
+        if self.config.cp_size > 1:
+            kvcache_bytes = self.config.kvcache_quant_mode.value.memory
+            cp = self.config.cp_size
+            comm_bytes = self.config.comm_quant_mode.value.memory
+
+            # CP shards tokens across cp ranks. Token-major ops shrink the
+            # M-axis via ``_seq_split`` (queries DB at per-rank M directly,
+            # more accurate than scaling full-M latency by 1/cp). Attention
+            # ops (DB has full-s/full-head measures only) use the
+            # ``_scale_factor /= cp`` proportional approximation.
+            for op in self.context_ops:
+                if isinstance(op, (ops.ContextAttention, ops.GenerationAttention)):
+                    op._scale_factor = op._scale_factor / cp
+                else:
+                    op._seq_split = cp
+
+            # Per-layer-type KV gather: SWA KV vs global KV have different shapes.
+            # TODO(cp-window-cap): the SWA all_gather sizes linearly in seq_len,
+            # but actual SWA KV caps at ``min(seq_len, sliding_window_size)``. For
+            # long-context prompts the overstatement grows with seq_len/window;
+            # tightening requires extending the NCCL op to expose a per-seq cap.
+            for ctx_key, n_kv_per_gpu, head_dim in (
+                ("swa", d["swa_n_kv_per_gpu"], d["swa_hd"]),
+                ("global", d["global_n_kv_per_gpu"], d["global_hd"]),
+            ):
+                if counts[ctx_key] <= 0:
+                    continue
+                kv_bytes_per_token = n_kv_per_gpu * head_dim * 2 * kvcache_bytes
+                self.context_ops.append(
+                    ops.NCCL(
+                        f"context_cp_all_gather_{ctx_key}",
+                        counts[ctx_key],
+                        "all_gather",
+                        num_elements_per_token=kv_bytes_per_token / comm_bytes,
+                        num_gpus=cp,
+                        comm_quant_mode=self.config.comm_quant_mode,
+                    )
+                )
+
     def _build_generation_ops(self) -> None:
         if not self._gemma4_config:
             return
@@ -382,26 +426,6 @@ class Gemma4MixModel(BaseModel):
             ]
         )
 
-    def get_kvcache_elements_per_token(self) -> int:
-        """Per-token KV-cache element count (per GPU), summed over all layers.
-
-        Both K and V tensors are stored even on global layers where K=V at the
-        projection — by the time the cache is written, K has had RoPE applied and V
-        has not, so they are distinct tensors.
-
-        This count does NOT account for the SWA window cap; callers that need a
-        sequence-length-aware byte count should use ``get_kvcache_bytes_per_sequence``.
-        """
-        if not self._gemma4_config:
-            return super().get_kvcache_elements_per_token()
-        cfg = self._gemma4_config
-        tp = self.config.tp_size
-        swa_kv_per_gpu = (cfg.swa_num_kv_heads + tp - 1) // tp
-        global_kv_per_gpu = (cfg.global_num_kv_heads + tp - 1) // tp
-        num_swa = cfg.layer_types.count("sliding_attention")
-        num_global = cfg.layer_types.count("full_attention")
-        return 2 * (num_swa * swa_kv_per_gpu * cfg.swa_head_dim + num_global * global_kv_per_gpu * cfg.global_head_dim)
-
     def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
         """KV-cache bytes for one sequence on one GPU.
 
@@ -410,7 +434,7 @@ class Gemma4MixModel(BaseModel):
         memory footprint tractable.
         """
         if not self._gemma4_config:
-            return super().get_kvcache_bytes_per_sequence(seq_len)
+            raise NotImplementedError("Gemma4MoEModel requires _gemma4_config to compute KV bytes")
         seq_len = max(0, seq_len)
         cfg = self._gemma4_config
         bytes_per_elem = self.config.kvcache_quant_mode.value.memory

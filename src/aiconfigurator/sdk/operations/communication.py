@@ -58,6 +58,8 @@ def _cache_key(database: PerfDatabase) -> tuple:
 
 
 class CustomAllReduce(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # divides x by self._seq_split (smaller per-rank AR payload)
+
     """
     Custom AllReduce operation with power tracking.
 
@@ -66,8 +68,8 @@ class CustomAllReduce(Operation):
 
     _data_cache: ClassVar[dict] = {}
 
-    def __init__(self, name: str, scale_factor: float, h: int, tp_size: int) -> None:
-        super().__init__(name, scale_factor)
+    def __init__(self, name: str, scale_factor: float, h: int, tp_size: int, *, seq_split: int = 1) -> None:
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._h = h
         self._tp_size = tp_size
         self._weights = 0.0
@@ -225,8 +227,8 @@ class CustomAllReduce(Operation):
             # ``silicon`` so EMPIRICAL/SOL modes don't get a spurious
             # silicon leakage in the breakdown report.
             return PerformanceResult(0.0, 0.0, source="empirical")
-        # count, not size in bytes
-        size = kwargs.get("x") * self._h
+        # count, not size in bytes. ``_seq_split`` shrinks the M-axis under CP.
+        size = (kwargs.get("x") // self._seq_split) * self._h
 
         result = database.query_custom_allreduce(common.CommQuantMode.half, self._tp_size, size)
         return PerformanceResult(
@@ -240,8 +242,28 @@ class CustomAllReduce(Operation):
 
 
 class NCCL(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # divides x by self._seq_split (smaller per-rank payload)
+
     """
     NCCL collective communication operation with power tracking.
+
+    Total message size is decomposed into a per-token term and a per-seq term::
+
+        message_size = tokens * num_elements_per_token + seqs * num_elements_per_seq
+
+    where ``tokens = batch_size * seq_len`` (the ``x`` runtime kwarg) and
+    ``seqs = batch_size``. The two parameters share the ``num_elements_per_*``
+    naming so the formula reads symmetrically.
+
+    - **Per-token term**: payloads that scale linearly with the number of
+      tokens processed (typical TP all-gather of hidden states, MoE dispatch,
+      DSV4's compressed sparse KV at ``seq/R`` entries per token, etc.).
+    - **Per-seq term**: payloads that are fixed per sequence regardless of
+      seq_len -- e.g. DeepSeek-V4 HCA's windowed dense KV chunk
+      (``window_size`` entries per seq, capped at the window).
+
+    Default ``num_elements_per_seq = 0`` keeps every existing call site
+    behaving as before (linear-only).
 
     Owns ``_data_cache`` for the NCCL CSV table plus ``_oneccl_data_cache``
     for the optional oneCCL fallback (loaded together because
@@ -257,15 +279,19 @@ class NCCL(Operation):
         name: str,
         scale_factor: float,
         nccl_op: str,
-        num_elements_per_token: int,
+        num_elements_per_token: float,
         num_gpus: int,
         comm_quant_mode: common.CommQuantMode,
+        num_elements_per_seq: float = 0.0,
+        *,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._nccl_op = nccl_op
         self._num_elements_per_token = num_elements_per_token
         self._num_gpus = num_gpus
         self._comm_quant_mode = comm_quant_mode
+        self._num_elements_per_seq = num_elements_per_seq
         self._weights = 0.0
 
     # ------------------------------------------------------------------
@@ -420,8 +446,28 @@ class NCCL(Operation):
     # ------------------------------------------------------------------
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """Query NCCL latency with power data."""
-        message_size = kwargs.get("x") * self._num_elements_per_token
+        """Query NCCL latency with power data.
+
+        message_size = tokens * num_elements_per_token + seqs * num_elements_per_seq
+                       (tokens = x = batch_size * seq_len; seqs = batch_size)
+        """
+        x = kwargs.get("x", 0)
+        x //= self._seq_split  # CP / seq-shard: smaller per-rank payload
+        message_size = x * self._num_elements_per_token
+        if self._num_elements_per_seq:
+            # Runtime passes batch_size explicitly (see base_backend.py). For
+            # logits-style ops where x == batch_size, the per-seq term would
+            # be meaningless -- callers should leave num_elements_per_seq=0
+            # in those constructions. Fail fast when batch_size is missing so
+            # we don't silently drop the per-seq term.
+            if "batch_size" not in kwargs:
+                raise ValueError(
+                    f"NCCL op '{self._name}' has num_elements_per_seq > 0 but query() "
+                    "was called without batch_size; pass batch_size explicitly to size "
+                    "the fixed-per-sequence message component."
+                )
+            batch_size = kwargs["batch_size"]
+            message_size += batch_size * self._num_elements_per_seq
 
         result = database.query_nccl(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size)
         return PerformanceResult(
@@ -435,6 +481,8 @@ class NCCL(Operation):
 
 
 class P2P(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # divides x by self._seq_split (smaller per-rank payload)
+
     """
     P2P (point-to-point) communication operation with power tracking.
 
@@ -443,8 +491,8 @@ class P2P(Operation):
     out only for parity with the other migrated ops.
     """
 
-    def __init__(self, name: str, scale_factor: float, h: int, pp_size: int) -> None:
-        super().__init__(name, scale_factor)
+    def __init__(self, name: str, scale_factor: float, h: int, pp_size: int, *, seq_split: int = 1) -> None:
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._h = h
         self._pp_size = pp_size
         self._bytes_per_element = 2
@@ -497,7 +545,8 @@ class P2P(Operation):
             # CustomAllReduce.query for source-tag rationale.
             return PerformanceResult(0.0, 0.0, source="empirical")
 
-        size = kwargs.get("x") * self._h
+        # ``_seq_split`` shrinks the per-rank P2P payload under CP.
+        size = (kwargs.get("x") // self._seq_split) * self._h
         p2p_bytes = size * 2
 
         result = database.query_p2p(p2p_bytes)

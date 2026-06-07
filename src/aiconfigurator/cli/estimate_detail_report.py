@@ -50,7 +50,7 @@ def format_summary_detail_report(
     *,
     detail: DetailSelector = "summary",
     width: int = 80,
-    top_n_ops: int = 12,
+    top_n_ops: int = 0,
 ) -> str:
     """Format detail sections from an InferenceSummary as CLI post-processing."""
     sections = parse_detail_sections(detail)
@@ -79,7 +79,7 @@ def format_estimate_detail_report(
     *,
     detail: DetailSelector = "summary",
     width: int = 80,
-    top_n_ops: int = 12,
+    top_n_ops: int = 0,
 ) -> str:
     """Format detail sections for any estimate mode, with optional SOL comparison."""
     sections = parse_detail_sections(detail)
@@ -153,8 +153,15 @@ def _format_op_bars(
     if total <= 0.0:
         return ["  <no measurable per-op data>"]
 
-    shown = items[:top_n]
-    rest = items[top_n:]
+    # Preserve pipeline insertion order so the breakdown reflects the
+    # actual op execution sequence. ``top_n <= 0`` prints everything; a
+    # positive value truncates the tail into the "others" bundle.
+    if top_n <= 0:
+        shown = items
+        rest = []
+    else:
+        shown = items[:top_n]
+        rest = items[top_n:]
     name_w = min(32, max(len(op) for op, _ in shown))
     lines: list[str] = []
     for op, lat in shown:
@@ -541,8 +548,13 @@ def _format_op_rows(
     if total <= 0.0:
         return ["  <no measurable per-op data>"]
 
-    shown = items[:top_n]
-    rest = items[top_n:]
+    # Preserve pipeline insertion order. ``top_n <= 0`` prints all rows.
+    if top_n <= 0:
+        shown = items
+        rest = []
+    else:
+        shown = items[:top_n]
+        rest = items[top_n:]
     name_w = min(32, max(len(op) for op, _ in shown))
     show_source = source_dict is not None
 

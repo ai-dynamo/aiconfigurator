@@ -26,6 +26,12 @@ class MOEModel(BaseModel):
     """
 
     @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # SGLang AllGather only. See LLAMAModel.supports_cp for the
+        # vLLM DCP exclusion rationale.
+        return backend_name == "sglang"
+
+    @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
         moe_args = (model_info["topk"], model_info["num_experts"], model_info["moe_inter_size"])
         base_args = (
@@ -66,12 +72,10 @@ class MOEModel(BaseModel):
         )
 
         # make sure the paralel width is same
-        assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
-        ), (
-            f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+        # Attention/expert width matching: tp * cp * dp == moe_tp * moe_ep.
+        assert self.config.attn_width == self.config.moe_tp_size * self.config.moe_ep_size, (
+            f"attn_width tp*cp*dp ({self.config.attn_width}) must equal moe_tp_size * moe_ep_size "
+            f"({self.config.moe_tp_size * self.config.moe_ep_size})"
         )
 
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
@@ -103,15 +107,23 @@ class MOEModel(BaseModel):
             else self.config.workload_distribution
         )
 
+        # CP (sequence parallelism). See Llama for the rationale.
+        cp = self.config.cp_size
+        cp_style = self.config.cp_style
+        attn_count_div = cp if cp_style in ("allgather", "ring") else 1
+        attn_head_div = cp if cp_style == "ulysses" else 1
+        attn_local_heads = (self._num_heads // tp_size) // attn_head_div
+        attn_local_kv = num_kv_heads_per_gpu // attn_head_div
+
         if self.architecture == "GptOssForCausalLM":
             attn_scale_factor = 2
             window_size = 128
             self.context_ops.append(
                 ops.ContextAttention(
                     "context_attention",
-                    self._num_layers / attn_scale_factor,
-                    self._num_heads // tp_size,
-                    num_kv_heads_per_gpu,
+                    self._num_layers / attn_scale_factor / attn_count_div,
+                    attn_local_heads,
+                    attn_local_kv,
                     kvcache_quant_mode,
                     fmha_quant_mode,
                     window_size=window_size,
@@ -136,25 +148,27 @@ class MOEModel(BaseModel):
 
         self.context_ops.extend(
             [
-                ops.Embedding("context_embedding", 1, self._vocab_size // tp_size, h, 0.3),
-                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.Embedding("context_embedding", 1, self._vocab_size // tp_size, h, 0.3, seq_split=cp),
+                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
                 ops.GEMM(
                     "context_qkv_gemm",
                     self._num_layers,
                     self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.ContextAttention(
                     "context_attention",
-                    self._num_layers / attn_scale_factor,
-                    self._num_heads // tp_size,
-                    num_kv_heads_per_gpu,
+                    self._num_layers / attn_scale_factor / attn_count_div,
+                    attn_local_heads,
+                    attn_local_kv,
                     kvcache_quant_mode,
                     fmha_quant_mode,
                     head_size=self._head_size,
                     use_qk_norm=self._use_qk_norm,
                 ),
+                *self._cp_attn_comm_ops(),
                 ops.GEMM(
                     "context_proj_gemm",
                     self._num_layers,
@@ -162,8 +176,9 @@ class MOEModel(BaseModel):
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
                     low_precision_input=True,
+                    seq_split=cp,
                 ),
-                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
             ]
         )
 
@@ -176,11 +191,16 @@ class MOEModel(BaseModel):
                     self._num_experts,
                     h,
                     common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
                 )
             ]
         )
 
-        # dispatch tokens to experts, moe calc and get tokens back
+        # dispatch tokens to experts, moe calc and get tokens back.
+        # MoEDispatch responds to seq_split (per-rank A2A payload).
+        # MoE expert compute deliberately doesn't -- the dispatch A2A
+        # globalises tokens across CP ranks, so expert workload is
+        # cp-invariant; only attention_dp_size matters for global recovery.
         self.context_ops.extend(
             [
                 ops.MoEDispatch(
@@ -194,6 +214,7 @@ class MOEModel(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.MoE(
                     "context_moe",
@@ -219,6 +240,7 @@ class MOEModel(BaseModel):
                     attention_dp_size,
                     False,
                     quant_mode=moe_quant_mode,
+                    seq_split=cp,
                 ),
             ]
         )
@@ -325,15 +347,25 @@ class MOEModel(BaseModel):
 
         # All-reduce after embedding: needed when tp > 1
         # Embedding shards vocab across TP ranks and all-reduces
-        self.context_ops.append(ops.CustomAllReduce("context_embedding_ar", 1, h, tp_size))
+        self.context_ops.append(ops.CustomAllReduce("context_embedding_ar", 1, h, tp_size, seq_split=cp))
         self.generation_ops.append(
             ops.CustomAllReduce("generation_embedding_ar", 1 * self._mtp_scale_factor, h, tp_size)
         )
 
         # pp
         pp_scale_factor = pp_size - 1
-        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
+        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size, seq_split=cp))
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
+
+    # ----- KV bytes API: required override per BaseModel contract --------
+
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        """Per-GPU GQA: ``num_kv_heads_per_gpu * head_size * 2`` per layer per token."""
+        seq_len = max(0, seq_len)
+        per_layer_per_token = (
+            self._num_kv_heads_per_gpu * self._head_size * 2 * self.config.kvcache_quant_mode.value.memory
+        )
+        return seq_len * self._num_layers * per_layer_per_token
 
     def _validate_fp8_block_quantized_moe_config(self) -> None:
         """
@@ -373,6 +405,10 @@ class SGLangEPMOEModel(BaseModel):
     Uses wideep/deepep perf tables for MoE kernel latency.
     """
 
+    @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        return backend_name == "sglang"
+
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
 
@@ -387,18 +423,15 @@ class SGLangEPMOEModel(BaseModel):
         )
 
         # make sure the parallel width is same
-        assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
-        ), (
-            f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+        # Attention/expert width matching: tp * cp * dp == moe_tp * moe_ep.
+        assert self.config.attn_width == self.config.moe_tp_size * self.config.moe_ep_size, (
+            f"attn_width tp*cp*dp ({self.config.attn_width}) must equal moe_tp_size * moe_ep_size "
+            f"({self.config.moe_tp_size * self.config.moe_ep_size})"
         )
 
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
-        assert self.config.tp_size * self.config.attention_dp_size <= 256, (
-            f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} "
-            f"should not be larger than 256"
+        assert self.config.attn_width <= 256, (
+            f"attn_width tp*cp*dp ({self.config.attn_width}) should not be larger than 256"
         )
 
         self._topk = topk
@@ -437,15 +470,23 @@ class SGLangEPMOEModel(BaseModel):
 
         sms = self.config.sms
 
+        # CP (sequence parallelism). See Llama for the rationale.
+        cp = self.config.cp_size
+        cp_style = self.config.cp_style
+        attn_count_div = cp if cp_style in ("allgather", "ring") else 1
+        attn_head_div = cp if cp_style == "ulysses" else 1
+        attn_local_heads = (self._num_heads // tp_size) // attn_head_div
+        attn_local_kv = num_kv_heads_per_gpu // attn_head_div
+
         if self.architecture == "GptOssForCausalLM":
             attn_scale_factor = 2
             window_size = 128
             self.context_ops.append(
                 ops.ContextAttention(
                     "context_attention",
-                    self._num_layers / attn_scale_factor,
-                    self._num_heads // tp_size,
-                    num_kv_heads_per_gpu,
+                    self._num_layers / attn_scale_factor / attn_count_div,
+                    attn_local_heads,
+                    attn_local_kv,
                     kvcache_quant_mode,
                     fmha_quant_mode,
                     window_size=window_size,
@@ -471,25 +512,27 @@ class SGLangEPMOEModel(BaseModel):
         # === CONTEXT OPS ===
         self.context_ops.extend(
             [
-                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
-                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3, seq_split=cp),
+                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
                 ops.GEMM(
                     "context_qkv_gemm",
                     self._num_layers,
                     self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.ContextAttention(
                     "context_attention",
-                    self._num_layers / attn_scale_factor,
-                    self._num_heads // tp_size,
-                    num_kv_heads_per_gpu,
+                    self._num_layers / attn_scale_factor / attn_count_div,
+                    attn_local_heads,
+                    attn_local_kv,
                     kvcache_quant_mode,
                     fmha_quant_mode,
                     head_size=self._head_size,
                     use_qk_norm=self._use_qk_norm,
                 ),
+                *self._cp_attn_comm_ops(),
                 ops.GEMM(
                     "context_proj_gemm",
                     self._num_layers,
@@ -497,8 +540,9 @@ class SGLangEPMOEModel(BaseModel):
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
                     low_precision_input=True,
+                    seq_split=cp,
                 ),
-                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
             ]
         )
 
@@ -512,11 +556,14 @@ class SGLangEPMOEModel(BaseModel):
                         self._num_experts,
                         h,
                         common.GEMMQuantMode.bfloat16,
+                        seq_split=cp,
                     )
                 ]
             )
 
-        # dispatch tokens to experts
+        # dispatch tokens to experts. MoEDispatch responds to seq_split
+        # (per-rank A2A payload); MoE expert compute below deliberately
+        # does not (post-A2A globalises tokens; expert workload cp-invariant).
         self.context_ops.extend(
             [
                 ops.MoEDispatch(
@@ -534,6 +581,7 @@ class SGLangEPMOEModel(BaseModel):
                     moe_backend=moe_backend,
                     is_context=True,
                     scale_num_tokens=tp_size,
+                    seq_split=cp,
                 ),
             ]
         )
@@ -662,6 +710,16 @@ class SGLangEPMOEModel(BaseModel):
                 )
             ]
         )
+
+    # ----- KV bytes API: required override per BaseModel contract --------
+
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        """Per-GPU GQA: ``num_kv_heads_per_gpu * head_size * 2`` per layer per token."""
+        seq_len = max(0, seq_len)
+        per_layer_per_token = (
+            self._num_kv_heads_per_gpu * self._head_size * 2 * self.config.kvcache_quant_mode.value.memory
+        )
+        return seq_len * self._num_layers * per_layer_per_token
 
     def _validate_fp8_block_quantized_moe_config(self) -> None:
         """Validate fp8_block MoE alignment: (moe_inter_size / moe_tp_size) % block_size == 0."""

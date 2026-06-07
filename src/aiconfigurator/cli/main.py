@@ -482,6 +482,14 @@ def _add_estimate_mode_arguments(parser):
         help="Attention data parallelism size. Default: 1. Alias: --dp.",
     )
     parser.add_argument(
+        "--cp-size",
+        "--cp",
+        dest="cp_size",
+        type=int,
+        default=1,
+        help="Context parallelism size. Default: 1. Alias: --cp.",
+    )
+    parser.add_argument(
         "--moe-tp-size",
         "--etp",
         dest="moe_tp_size",
@@ -522,6 +530,14 @@ def _add_estimate_mode_arguments(parser):
         type=int,
         default=None,
         help="Prefill attention DP size (disagg). Defaults to --attention-dp-size. Alias: --p-dp.",
+    )
+    parser.add_argument(
+        "--prefill-cp-size",
+        "--p-cp",
+        dest="prefill_cp_size",
+        type=int,
+        default=None,
+        help="Prefill CP size (disagg). Defaults to --cp-size. Alias: --p-cp.",
     )
     parser.add_argument(
         "--prefill-moe-tp-size",
@@ -670,6 +686,14 @@ def _add_estimate_mode_arguments(parser):
         "Choices: summary, memory, time, energy, source, all. "
         "Example: --detail memory,time. Default: no extra detail. "
         "Use 'all' to print every section.",
+    )
+    parser.add_argument(
+        "--detail-top-n",
+        type=int,
+        default=0,
+        help="Cap the number of per-op rows shown in --detail time/energy sections; "
+        "remaining ops collapse into one 'others' row, preserving pipeline order. "
+        "Default: 0 (no cap, print all rows).",
     )
     # Common workload extras — apply to agg / disagg / static / static_ctx / static_gen.
     parser.add_argument(
@@ -1829,6 +1853,7 @@ def _run_estimate_mode(args):
         tp_size=args.tp_size,
         pp_size=args.pp_size,
         attention_dp_size=args.attention_dp_size,
+        cp_size=args.cp_size,
         moe_tp_size=args.moe_tp_size,
         moe_ep_size=args.moe_ep_size,
         gemm_quant_mode=args.gemm_quant_mode,
@@ -1851,6 +1876,7 @@ def _run_estimate_mode(args):
             prefill_tp_size=args.prefill_tp_size,
             prefill_pp_size=args.prefill_pp_size,
             prefill_attention_dp_size=args.prefill_attention_dp_size,
+            prefill_cp_size=args.prefill_cp_size,
             prefill_moe_tp_size=args.prefill_moe_tp_size,
             prefill_moe_ep_size=args.prefill_moe_ep_size,
             prefill_batch_size=args.prefill_batch_size,
@@ -1896,10 +1922,12 @@ def _run_estimate_mode(args):
         raw = result.raw
         print(f"  (p) TP:           {raw.get('(p)tp', 'N/A')}")
         print(f"  (p) PP:           {raw.get('(p)pp', 'N/A')}")
+        print(f"  (p) CP:           {raw.get('(p)cp', 'N/A')}")
         print(f"  (p) BS:           {raw.get('(p)bs', 'N/A')}")
         print(f"  (p) Workers:      {raw.get('(p)workers', 'N/A')}")
         print(f"  (d) TP:           {raw.get('(d)tp', 'N/A')}")
         print(f"  (d) PP:           {raw.get('(d)pp', 'N/A')}")
+        print(f"  (d) CP:           {raw.get('(d)cp', 'N/A')}")
         print(f"  (d) BS:           {raw.get('(d)bs', 'N/A')}")
         print(f"  (d) Workers:      {raw.get('(d)workers', 'N/A')}")
         print(f"  Total GPUs:       {raw.get('num_total_gpus', 'N/A')}")
@@ -1910,6 +1938,8 @@ def _run_estimate_mode(args):
             print(f"  Context Tokens:   {result.ctx_tokens}")
         print(f"  TP Size:          {result.tp_size}")
         print(f"  PP Size:          {result.pp_size}")
+        if result.cp_size != 1:
+            print(f"  CP Size:          {result.cp_size}")
         if args.attention_dp_size and args.attention_dp_size != 1:
             print(f"  Attention DP:     {args.attention_dp_size}")
 
@@ -1945,7 +1975,7 @@ def _run_estimate_mode(args):
 
     if detail_arg:
         try:
-            report = format_estimate_detail_report(result, sol_result, detail=detail_arg)
+            report = format_estimate_detail_report(result, sol_result, detail=detail_arg, top_n_ops=args.detail_top_n)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
         if report:

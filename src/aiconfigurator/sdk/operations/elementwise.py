@@ -12,7 +12,7 @@ formula is deferred to the post-refactor cleanup.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk.operations.base import Operation
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 
 
 class ElementWise(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # divides x by self._seq_split in query()
+
     """
     Element-wise operation.
     """
@@ -33,9 +35,11 @@ class ElementWise(Operation):
         dim_in: int,
         dim_out: int,
         empirical_bw_scaling_factor: float = 0.8,
+        *,
+        seq_split: int = 1,
         **kwargs,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._weights = 0.0
         self._empirical_bw_scaling_factor = empirical_bw_scaling_factor
         self._constant_latency = 5e-6  # 5us
@@ -52,6 +56,7 @@ class ElementWise(Operation):
         if self._scale_num_tokens <= 0:
             raise ValueError(f"ElementWise.query: scale_num_tokens must be > 0, got {self._scale_num_tokens}.")
         x //= self._scale_num_tokens
+        x //= self._seq_split  # CP / seq-shard
         read_bytes = x * self._dim_in * 2  # bfloat16 for act
         write_bytes = x * self._dim_out * 2
 

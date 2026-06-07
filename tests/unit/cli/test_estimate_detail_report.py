@@ -29,6 +29,7 @@ def _estimate_result(
         ctx_tokens=128,
         tp_size=1,
         pp_size=1,
+        cp_size=1,
         model_path="test-model",
         system_name="test-system",
         backend_name="test-backend",

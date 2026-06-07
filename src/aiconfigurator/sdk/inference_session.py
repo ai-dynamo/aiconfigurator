@@ -23,6 +23,12 @@ from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+# Decode CP=1 is enforced upstream at TaskConfigFactory._finalize_disagg.
+# Sessions here trust the contract -- the per-tuple cp slot on
+# decode_parallel_config_list is always 1 because enumerate_parallel_config
+# is called with decode_worker_config.cp_list=[1]. SDK-direct callers that
+# bypass TaskConfig are responsible for honoring that themselves.
+
 
 class InferenceSession:
     """
@@ -363,7 +369,7 @@ class DisaggInferenceSession:
         Args:
             model_path: HuggingFace model ID or local path.
             model_config: Model configuration (quant modes etc.).
-            parallel_config_list: List of (tp, pp, dp, moe_tp, moe_ep) tuples.
+            parallel_config_list: List of (tp, pp, dp, moe_tp, moe_ep, cp) tuples.
             b_list: Batch sizes to sweep.
             runtime_config: Runtime config (isl, osl, etc.).
             mode: ``"static_ctx"`` for prefill or ``"static_gen"`` for decode.
@@ -382,14 +388,15 @@ class DisaggInferenceSession:
         all_configs_oom = True
 
         for parallel_config in parallel_config_list:
-            tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
+            tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, cp_size = parallel_config
             logger.debug(
-                "Getting candidate workers with parallel config: tp=%d, pp=%d, dp=%d, moe_tp=%d, moe_ep=%d",
+                "Getting candidate workers with parallel config: tp=%d, pp=%d, dp=%d, moe_tp=%d, moe_ep=%d, cp=%d",
                 tp_size,
                 pp_size,
                 dp_size,
                 moe_tp_size,
                 moe_ep_size,
+                cp_size,
             )
 
             try:
@@ -399,6 +406,7 @@ class DisaggInferenceSession:
                 overwritten_model_config.moe_tp_size = moe_tp_size
                 overwritten_model_config.moe_ep_size = moe_ep_size
                 overwritten_model_config.attention_dp_size = dp_size
+                overwritten_model_config.cp_size = cp_size
                 model = models.get_model(
                     model_path=model_path,
                     model_config=overwritten_model_config,

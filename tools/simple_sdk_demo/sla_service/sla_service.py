@@ -120,7 +120,7 @@ def post_sla(
         cc_list = [cc for cc in concurrency_list_default if cc >= min_cc]
         results_df = pd.DataFrame(columns=common.ColumnsAgg)
         for parallel_config in agg_parallel_config_list:
-            tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
+            tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, _cp_size = parallel_config
             overwritten_model_config = copy.deepcopy(model_config)
             overwritten_model_config.pp_size = pp_size
             overwritten_model_config.tp_size = tp_size

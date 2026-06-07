@@ -428,6 +428,9 @@ class EstimateResult:
     pp_size: int
     """Pipeline parallelism degree."""
 
+    cp_size: int
+    """Context parallelism degree."""
+
     model_path: str
     """Model path used."""
 
@@ -560,6 +563,7 @@ class EstimateResult:
 def _resolve_moe_parallelism(
     tp_size: int,
     attention_dp_size: int,
+    cp_size: int,
     moe_tp_size: int | None,
     moe_ep_size: int | None,
     model_path: str | None = None,
@@ -574,6 +578,7 @@ def _resolve_moe_parallelism(
 
     cfg = ModelConfig(
         tp_size=tp_size,
+        cp_size=cp_size,
         attention_dp_size=attention_dp_size,
         moe_tp_size=moe_tp_size,
         moe_ep_size=moe_ep_size,
@@ -585,6 +590,7 @@ def _build_model_config(
     tp_size: int,
     pp_size: int,
     attention_dp_size: int,
+    cp_size: int,
     moe_tp_size: int,
     moe_ep_size: int,
     gemm_quant_mode: str | None = None,
@@ -607,6 +613,7 @@ def _build_model_config(
         tp_size=tp_size,
         pp_size=pp_size,
         attention_dp_size=attention_dp_size,
+        cp_size=cp_size,
         moe_tp_size=moe_tp_size,
         moe_ep_size=moe_ep_size,
         gemm_quant_mode=GEMMQuantMode[gemm_quant_mode] if gemm_quant_mode else None,
@@ -632,6 +639,7 @@ def cli_estimate(
     tp_size: int = 1,
     pp_size: int = 1,
     attention_dp_size: int = 1,
+    cp_size: int = 1,
     moe_tp_size: int | None = None,
     moe_ep_size: int | None = None,
     gemm_quant_mode: str | None = None,
@@ -644,6 +652,7 @@ def cli_estimate(
     prefill_tp_size: int | None = None,
     prefill_pp_size: int | None = None,
     prefill_attention_dp_size: int | None = None,
+    prefill_cp_size: int | None = None,
     prefill_moe_tp_size: int | None = None,
     prefill_moe_ep_size: int | None = None,
     prefill_batch_size: int | None = None,
@@ -694,6 +703,8 @@ def cli_estimate(
             prefill/decode TP when their specific args are omitted.
         pp_size: Pipeline parallelism size. Default is 1.
         attention_dp_size: Attention data parallelism size. Default is 1.
+        cp_size: Context parallelism size. Currently modeled for SGLang DeepSeek-V4
+            context/prefill attention compute and NCCL all-gather communication. Default is 1.
         moe_tp_size: MoE tensor parallelism size. At least one of ``moe_tp_size``
             or ``moe_ep_size`` is required for MoE models; the missing dimension
             is inferred when possible.
@@ -709,6 +720,7 @@ def cli_estimate(
         prefill_tp_size: Prefill TP size (disagg). Defaults to ``tp_size``.
         prefill_pp_size: Prefill PP size (disagg). Defaults to ``pp_size``.
         prefill_attention_dp_size: Prefill attention DP size (disagg). Defaults to ``attention_dp_size``.
+        prefill_cp_size: Prefill CP size (disagg). Defaults to ``cp_size``.
         prefill_moe_tp_size: Prefill MoE TP size (disagg). Defaults to ``moe_tp_size``.
         prefill_moe_ep_size: Prefill MoE EP size (disagg). Defaults to ``moe_ep_size``.
         prefill_batch_size: Prefill batch size (disagg). Required when mode='disagg'.
@@ -831,6 +843,7 @@ def cli_estimate(
             tp_size=tp_size,
             pp_size=pp_size,
             attention_dp_size=attention_dp_size,
+            cp_size=cp_size,
             moe_tp_size=moe_tp_size,
             moe_ep_size=moe_ep_size,
             gemm_quant_mode=gemm_quant_mode,
@@ -861,6 +874,7 @@ def cli_estimate(
             tp_size=tp_size,
             pp_size=pp_size,
             attention_dp_size=attention_dp_size,
+            cp_size=cp_size,
             moe_tp_size=moe_tp_size,
             moe_ep_size=moe_ep_size,
             gemm_quant_mode=gemm_quant_mode,
@@ -911,6 +925,7 @@ def cli_estimate(
             prefill_attention_dp_size=prefill_attention_dp_size
             if prefill_attention_dp_size is not None
             else attention_dp_size,
+            prefill_cp_size=prefill_cp_size if prefill_cp_size is not None else cp_size,
             prefill_moe_tp_size=prefill_moe_tp_size if prefill_moe_tp_size is not None else moe_tp_size,
             prefill_moe_ep_size=prefill_moe_ep_size if prefill_moe_ep_size is not None else moe_ep_size,
             prefill_batch_size=prefill_batch_size,
@@ -977,6 +992,7 @@ def _run_agg_estimate(
     tp_size,
     pp_size,
     attention_dp_size,
+    cp_size,
     moe_tp_size,
     moe_ep_size,
     gemm_quant_mode,
@@ -1000,13 +1016,14 @@ def _run_agg_estimate(
     from aiconfigurator.sdk.inference_session import InferenceSession
 
     moe_tp_size, moe_ep_size = _resolve_moe_parallelism(
-        tp_size, attention_dp_size, moe_tp_size, moe_ep_size, model_path=model_path
+        tp_size, attention_dp_size, cp_size, moe_tp_size, moe_ep_size, model_path=model_path
     )
 
     model_config = _build_model_config(
         tp_size,
         pp_size,
         attention_dp_size,
+        cp_size,
         moe_tp_size,
         moe_ep_size,
         gemm_quant_mode,
@@ -1038,7 +1055,7 @@ def _run_agg_estimate(
     if summary.check_oom():
         raise RuntimeError(
             f"OOM: the model '{model_path}' does not fit in GPU memory on system '{system_name}' "
-            f"with the given parallelism (tp={tp_size}, pp={pp_size}, dp={attention_dp_size}). "
+            f"with the given parallelism (tp={tp_size}, pp={pp_size}, dp={attention_dp_size}, cp={cp_size}). "
             "Try increasing tp_size/pp_size, using a quantized model, or "
             "using a system with more VRAM per GPU."
         )
@@ -1066,6 +1083,7 @@ def _run_agg_estimate(
         ctx_tokens=ctx_tokens,
         tp_size=tp_size,
         pp_size=pp_size,
+        cp_size=cp_size,
         model_path=model_path,
         system_name=system_name,
         backend_name=backend_name,
@@ -1093,6 +1111,7 @@ def _run_static_estimate(
     tp_size,
     pp_size,
     attention_dp_size,
+    cp_size,
     moe_tp_size,
     moe_ep_size,
     gemm_quant_mode,
@@ -1122,13 +1141,14 @@ def _run_static_estimate(
         )
 
     moe_tp_size, moe_ep_size = _resolve_moe_parallelism(
-        tp_size, attention_dp_size, moe_tp_size, moe_ep_size, model_path=model_path
+        tp_size, attention_dp_size, cp_size, moe_tp_size, moe_ep_size, model_path=model_path
     )
 
     model_config = _build_model_config(
         tp_size,
         pp_size,
         attention_dp_size,
+        cp_size,
         moe_tp_size,
         moe_ep_size,
         gemm_quant_mode,
@@ -1162,7 +1182,7 @@ def _run_static_estimate(
         static_warning = (
             f"OOM: the model '{model_path}' does not fit in GPU memory on system "
             f"'{system_name}' with the given parallelism (tp={tp_size}, pp={pp_size}, "
-            f"dp={attention_dp_size}) and batch_size={batch_size}. Reduce batch_size, "
+            f"dp={attention_dp_size}, cp={cp_size}) and batch_size={batch_size}. Reduce batch_size, "
             "increase tp/pp, use quantization, or pick a system with more VRAM per GPU."
         )
 
@@ -1180,6 +1200,7 @@ def _run_static_estimate(
         ctx_tokens=isl,  # static has no IFB budget; expose isl for convenience.
         tp_size=tp_size,
         pp_size=pp_size,
+        cp_size=cp_size,
         model_path=model_path,
         system_name=system_name,
         backend_name=backend_name,
@@ -1205,6 +1226,7 @@ def _run_disagg_estimate(
     prefill_tp_size,
     prefill_pp_size,
     prefill_attention_dp_size,
+    prefill_cp_size,
     prefill_moe_tp_size,
     prefill_moe_ep_size,
     prefill_batch_size,
@@ -1234,10 +1256,12 @@ def _run_disagg_estimate(
     from aiconfigurator.sdk.config import RuntimeConfig
     from aiconfigurator.sdk.inference_session import DisaggInferenceSession
 
-    # Resolve MoE parallelism for prefill and decode separately
+    # Resolve MoE parallelism for prefill and decode separately. Decode CP is
+    # always 1 here -- DisaggInferenceSession enforces it.
     p_moe_tp, p_moe_ep = _resolve_moe_parallelism(
         prefill_tp_size,
         prefill_attention_dp_size,
+        prefill_cp_size,
         prefill_moe_tp_size,
         prefill_moe_ep_size,
         model_path=model_path,
@@ -1245,6 +1269,7 @@ def _run_disagg_estimate(
     d_moe_tp, d_moe_ep = _resolve_moe_parallelism(
         decode_tp_size,
         decode_attention_dp_size,
+        1,
         decode_moe_tp_size,
         decode_moe_ep_size,
         model_path=model_path,
@@ -1254,6 +1279,7 @@ def _run_disagg_estimate(
         prefill_tp_size,
         prefill_pp_size,
         prefill_attention_dp_size,
+        prefill_cp_size,
         p_moe_tp,
         p_moe_ep,
         gemm_quant_mode,
@@ -1266,6 +1292,7 @@ def _run_disagg_estimate(
         decode_tp_size,
         decode_pp_size,
         decode_attention_dp_size,
+        1,  # decode CP is always 1; enforced by DisaggInferenceSession
         d_moe_tp,
         d_moe_ep,
         gemm_quant_mode,
@@ -1335,6 +1362,7 @@ def _run_disagg_estimate(
         ctx_tokens=0,
         tp_size=prefill_tp_size,
         pp_size=prefill_pp_size,
+        cp_size=prefill_cp_size,
         model_path=model_path,
         system_name=system_name,
         backend_name=backend_name,

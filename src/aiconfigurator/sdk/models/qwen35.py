@@ -18,6 +18,10 @@ class Qwen35Model(BaseModel):
       - "linear_attention": Gated DeltaNet (GDN) layers using chunk_gated_delta_rule
       - "full_attention":   Standard GQA transformer layers
 
+    CP not supported: GDN layers carry sequential state across tokens; splitting
+    the sequence across CP ranks breaks state propagation. ``supports_cp``
+    inherits BaseModel default (False) -- ``get_model`` will raise if cp_size>1.
+
     All layers share the same FFN:
       - Dense models (27B):          SwiGLU dense FFN
       - MoE models (35B-A3B, 397B): All-MoE FFN (num_experts > 0)
@@ -469,3 +473,16 @@ class Qwen35Model(BaseModel):
                 ]
             )
         return ops_list
+
+    # ----- KV bytes API: required override per BaseModel contract --------
+    # Qwen3.5 is hybrid GDN + full_attention. GDN layers carry SSM state, not
+    # KV cache, so only full_attention layers contribute to KV memory.
+
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        """Per-GPU KV bytes across full_attention layers only. GDN state cost
+        is modelled separately by the GDN kernel ops and not counted here."""
+        seq_len = max(0, seq_len)
+        counts = self._count_layer_types()
+        bytes_per_elem = self.config.kvcache_quant_mode.value.memory
+        full_kv_per_layer = self._num_kv_heads_per_gpu * self._head_size * 2 * bytes_per_elem
+        return counts["full"] * full_kv_per_layer * seq_len

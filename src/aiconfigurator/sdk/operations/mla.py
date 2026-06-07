@@ -109,8 +109,26 @@ _CONTEXT_MLA_MODULE_TARGET_Z: list[int] = [
 
 
 class ContextMLA(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # CP handled at model construction (count divisor)
+
     """
     Context MLA operation. Owns ``_context_mla_data``.
+
+    CP note (also applies to GenerationMLA / MLAModule / MLABmm /
+    WideEP*MLA / ContextDSAModule / GenerationDSAModule / DSV4 attention
+    modules): MLA bundles QKV/down-proj GEMM-like sub-computations and the
+    attention-proper QK^T x V into one DB entry queried by ``(batch_size, s)``.
+    Under CP AllGather/Ring the model construction site applies
+    ``_scale_factor /= cp`` -- a proportional approximation: GEMM-like
+    sub-parts scale linearly in seq, attention-proper scales as
+    (s/cp) x s (Q sharded, K full after gather), both ending at 1/cp
+    asymptotically.
+
+    TODO(cp-module-sol): for finer accuracy we'd surgically apply
+    ``seq_split`` to the M-axis-scaled SOL terms inside the module and
+    keep ``_scale_factor /= cp`` only for the attention-quadratic part.
+    Deferred until DB exposes CP-aware module measurements; the current
+    approximation has been validated as within DB extrapolation error.
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -122,8 +140,10 @@ class ContextMLA(Operation):
         num_heads: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
+        *,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._num_heads = num_heads
         self._weights = 0.0
         self._kvcache_quant_mode = kvcache_quant_mode
@@ -294,6 +314,8 @@ class ContextMLA(Operation):
 
 
 class GenerationMLA(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # CP is prefill-only; decode unaffected
+
     """
     Generation MLA operation (MQA part). Owns ``_generation_mla_data``.
     """
@@ -306,8 +328,10 @@ class GenerationMLA(Operation):
         scale_factor: float,
         num_heads: int,
         kv_cache_dtype: common.KVCacheQuantMode,
+        *,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._num_heads = num_heads
         self._weights = 0.0
         self._kv_cache_dtype = kv_cache_dtype
@@ -455,6 +479,8 @@ class GenerationMLA(Operation):
 
 
 class MLABmm(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # CP handled at model construction (count divisor)
+
     """
     MLABmm operation — pre/post BMM for MLA decoding. Owns ``_mla_bmm_data``.
     No extrapolation in the legacy ``__init__`` path; data is 1D-keyed by
@@ -470,8 +496,10 @@ class MLABmm(Operation):
         num_heads: int,
         quant_mode: common.GEMMQuantMode,
         if_pre: bool = True,
+        *,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._num_heads = num_heads
         self._weights = 0.0
         self._quant_mode = quant_mode
@@ -611,6 +639,8 @@ class MLABmm(Operation):
 
 
 class MLAModule(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # CP handled at model construction (count divisor)
+
     """
     Module-level MLA op for both context and generation phases.
 
@@ -636,8 +666,10 @@ class MLAModule(Operation):
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         gemm_quant_mode: common.GEMMQuantMode,
+        *,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._is_context = is_context
         self._num_heads = num_heads
         self._kvcache_quant_mode = kvcache_quant_mode
@@ -936,6 +968,8 @@ class MLAModule(Operation):
 
 
 class WideEPGenerationMLA(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # CP is prefill-only; decode unaffected
+
     """
     WideEP Generation MLA operation (SGLang-only). Owns
     ``_wideep_generation_mla_data``. Loaded only when ``backend == "sglang"``.
@@ -951,8 +985,10 @@ class WideEPGenerationMLA(Operation):
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         attn_backend: str = "flashinfer",
+        *,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._tp_size = tp_size
         self._weights = 0.0
         self._kvcache_quant_mode = kvcache_quant_mode
@@ -1190,6 +1226,8 @@ class WideEPGenerationMLA(Operation):
 
 
 class WideEPContextMLA(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # CP handled at model construction (count divisor)
+
     """
     WideEP Context MLA operation (SGLang-only). Owns
     ``_wideep_context_mla_data``. Loaded only when ``backend == "sglang"``.
@@ -1205,8 +1243,10 @@ class WideEPContextMLA(Operation):
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         attn_backend: str = "flashinfer",
+        *,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._tp_size = tp_size
         self._weights = 0.0
         self._kvcache_quant_mode = kvcache_quant_mode

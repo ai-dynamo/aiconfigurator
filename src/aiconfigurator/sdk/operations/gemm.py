@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 class GEMM(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # divides x by self._seq_split in query()
     """
     GEMM operation with power tracking.
 
@@ -58,9 +59,11 @@ class GEMM(Operation):
         n: int,
         k: int,
         quant_mode: common.GEMMQuantMode,
+        *,
+        seq_split: int = 1,
         **kwargs,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._n = n
         self._k = k
         self._quant_mode = quant_mode
@@ -650,6 +653,9 @@ class GEMM(Operation):
         """
         x = kwargs.get("x")
         x //= self._scale_num_tokens
+        # CP / sequence-shard: shrink the M-axis by self._seq_split so the
+        # database is queried at the per-rank token count (default 1 = no shard).
+        x //= self._seq_split
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
         is_fp8_static = quant_mode == common.GEMMQuantMode.fp8_static

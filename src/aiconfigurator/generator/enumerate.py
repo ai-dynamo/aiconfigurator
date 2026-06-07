@@ -591,7 +591,7 @@ def enumerate_profiling_configs(
             )
             # Only keep pure TP configs (avoid duplicating DEP/TEP from wideep pass)
             for cfg in tp_configs:
-                _tp, _pp, _dp, _moe_tp, _moe_ep = cfg
+                _tp, _pp, _dp, _moe_tp, _moe_ep, _cp = cfg
                 if _moe_tp > 1 and _moe_ep == 1 and cfg not in config_list:
                     config_list.append(cfg)
 
@@ -622,7 +622,7 @@ def enumerate_profiling_configs(
     # ------------------------------------------------------------------
     prefill_candidates: list[EnumeratedCandidate] = []
     for cfg in prefill_parallel_configs:
-        tp, pp, dp, moe_tp, moe_ep = cfg
+        tp, pp, dp, moe_tp, moe_ep, _cp = cfg
         logger.info(
             "Building prefill DGD: tp=%d pp=%d dp=%d moe_tp=%d moe_ep=%d",
             tp,
@@ -666,7 +666,7 @@ def enumerate_profiling_configs(
 
     decode_candidates: list[EnumeratedCandidate] = []
     for cfg in decode_parallel_configs:
-        tp, pp, dp, moe_tp, moe_ep = cfg
+        tp, pp, dp, moe_tp, moe_ep, _cp = cfg
         logger.info(
             "Building decode DGD: tp=%d pp=%d dp=%d moe_tp=%d moe_ep=%d",
             tp,

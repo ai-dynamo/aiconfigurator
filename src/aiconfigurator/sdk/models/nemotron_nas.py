@@ -21,6 +21,10 @@ class NemotronNas(BaseModel):
     different configurations for attention and feed-forward network components.
     The model does not support multi-token prediction (mtp).
 
+    CP not supported: NAS-searched topologies may include non-standard layer
+    types whose CP semantics are not characterized. ``supports_cp`` inherits
+    BaseModel default (False) -- ``get_model`` will raise if cp_size>1.
+
     refer to "PUZZLE: DISTILLATION-BASED NAS FOR INFERENCE-OPTIMIZED LLMS"(
     https://arxiv.org/pdf/2411.19146) for the details of creaing this type of
     models
@@ -84,6 +88,7 @@ class NemotronNas(BaseModel):
         super().__init__(*args)
 
         assert self._nextn == 0, "Only DS V3 supports mtp"
+        self._puzzle_block_configs: list[common.BlockConfig] = []
 
     @property
     def context_ops(self):
@@ -126,6 +131,7 @@ class NemotronNas(BaseModel):
         """
         self._context_ops = []
         if puzzle_block_configs:
+            self._puzzle_block_configs = list(puzzle_block_configs)
             h = self._hidden_size
             tp_size = self.config.tp_size
             pp_size = self.config.pp_size
@@ -326,6 +332,26 @@ class NemotronNas(BaseModel):
                     common.GEMMQuantMode.bfloat16,
                 )
             )
+
+    # ----- KV bytes API: required override per BaseModel contract --------
+    # NemotronNAS uses heterogeneous puzzle blocks: each block may set
+    # ``attn_no_op=True`` (no KV at all) or have its own ``num_kv_heads``
+    # via ``num_kv_heads = num_heads // attn_n_heads_in_group``. CP is not
+    # supported for this family (see class docstring), so this method is
+    # only used for capacity-planning accounting.
+    def _attn_block_kv_bytes_per_token(self, block: common.BlockConfig) -> float:
+        if block.attn_no_op:
+            return 0.0
+        tp = self.config.tp_size
+        num_kv_heads = self._num_heads // block.attn_n_heads_in_group
+        num_kv_heads_per_gpu = (num_kv_heads + tp - 1) // tp
+        return num_kv_heads_per_gpu * self._head_size * 2 * self.config.kvcache_quant_mode.value.memory
+
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        """Per-GPU KV bytes across all attention-bearing puzzle blocks. Blocks
+        with ``attn_no_op`` contribute nothing."""
+        seq_len = max(0, seq_len)
+        return seq_len * sum(b.num_inst * self._attn_block_kv_bytes_per_token(b) for b in self._puzzle_block_configs)
 
     def _ffn_mult_to_intermediate_size(self, ffn_mult: float) -> int:
         """

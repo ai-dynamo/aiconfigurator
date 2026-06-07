@@ -21,6 +21,12 @@ class DeepSeekModel(BaseModel):
     """
 
     @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # SGLang AllGather only. See LLAMAModel.supports_cp for the
+        # vLLM DCP exclusion rationale.
+        return backend_name == "sglang"
+
+    @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
         moe_args = (model_info["topk"], model_info["num_experts"], model_info["moe_inter_size"])
         base_args = (
@@ -79,13 +85,12 @@ class DeepSeekModel(BaseModel):
 
         self._backend_name = backend_name
 
-        # make sure the paralel width is same
-        assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
-        ), (
-            f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+        # Attention/expert width matching: tp * cp * dp == moe_tp * moe_ep.
+        # ``resolve_moe_parallelism`` enforces this earlier for the standard
+        # path; this assert guards direct constructor callers.
+        assert self.config.attn_width == self.config.moe_tp_size * self.config.moe_ep_size, (
+            f"attn_width tp*cp*dp ({self.config.attn_width}) must equal moe_tp_size * moe_ep_size "
+            f"({self.config.moe_tp_size * self.config.moe_ep_size})"
         )
 
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
@@ -134,29 +139,38 @@ class DeepSeekModel(BaseModel):
             else self.config.workload_distribution
         )
 
+        # CP (sequence parallelism). See Llama for the rationale. DSV3
+        # only supports sglang AllGather here. ``attn_head_div`` is
+        # computed for uniformity but collapses to 1 under "allgather".
+        cp = self.config.cp_size
+        cp_style = self.config.cp_style
+        attn_count_div = cp if cp_style in ("allgather", "ring") else 1
+        attn_head_div = cp if cp_style == "ulysses" else 1
+
         self.context_ops.extend(
             [
-                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
-                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3, seq_split=cp),
+                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
                 ops.FallbackOp(
                     "context_mla_block",
                     primary=ops.MLAModule(
                         "context_mla_module",
-                        self._num_layers,
+                        self._num_layers / attn_count_div,
                         True,
-                        128 // tp_size,
+                        (128 // tp_size) // attn_head_div,
                         kvcache_quant_mode,
                         fmha_quant_mode,
                         gemm_quant_mode,
                     ),
                     fallback=[
-                        ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),
+                        ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode, seq_split=cp),
                         ops.GEMM(
                             "context_q_b_proj_gemm",
                             self._num_layers,
                             24576 // tp_size,
                             1536,
                             gemm_quant_mode,
+                            seq_split=cp,
                         ),
                         ops.GEMM(
                             "context_kv_b_proj_gemm",
@@ -164,12 +178,13 @@ class DeepSeekModel(BaseModel):
                             32768 // tp_size,
                             512,
                             gemm_quant_mode,
+                            seq_split=cp,
                         ),
                         ops.ContextAttention(
                             "context_attention",
-                            self._num_layers,
-                            self._num_heads // tp_size,
-                            self._num_kv_heads // tp_size,
+                            self._num_layers / attn_count_div,
+                            (self._num_heads // tp_size) // attn_head_div,
+                            (self._num_kv_heads // tp_size) // attn_head_div,
                             kvcache_quant_mode,
                             fmha_quant_mode,
                             head_size=self._vllm_head_size,
@@ -177,15 +192,23 @@ class DeepSeekModel(BaseModel):
                         if self._backend_name == "vllm"
                         else ops.ContextMLA(
                             "context_attention",
-                            self._num_layers,
-                            128 // tp_size,
+                            self._num_layers / attn_count_div,
+                            (128 // tp_size) // attn_head_div,
                             kvcache_quant_mode,
                             fmha_quant_mode,
                         ),
-                        ops.GEMM("context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, gemm_quant_mode),
+                        ops.GEMM(
+                            "context_proj_gemm",
+                            self._num_layers,
+                            h,
+                            128 * 128 // tp_size,
+                            gemm_quant_mode,
+                            seq_split=cp,
+                        ),
                     ],
                 ),
-                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                *self._cp_attn_comm_ops(),
+                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
             ]
         )
 
@@ -200,6 +223,7 @@ class DeepSeekModel(BaseModel):
                     2 * self._moe_inter_size // tp_size,
                     h,
                     gemm_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.ElementWise(
                     "context_shared_act_gate",
@@ -207,6 +231,7 @@ class DeepSeekModel(BaseModel):
                     2 * self._moe_inter_size // tp_size,
                     self._moe_inter_size // tp_size,
                     0.8,
+                    seq_split=cp,
                 ),
                 ops.GEMM(
                     "context_shared_ffn2_gemm",
@@ -214,6 +239,7 @@ class DeepSeekModel(BaseModel):
                     h,
                     self._moe_inter_size // tp_size,
                     gemm_quant_mode,
+                    seq_split=cp,
                 ),
             ]
         )
@@ -227,11 +253,14 @@ class DeepSeekModel(BaseModel):
                     self._num_experts,
                     h,
                     common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
                 )
             ]
         )
 
-        # dispatch tokens to experts, pre-dispatch
+        # dispatch tokens to experts. MoEDispatch responds to seq_split (per-rank
+        # A2A payload). MoE expert compute deliberately doesn't -- A2A globalises
+        # tokens across cp ranks; expert workload is cp-invariant.
         self.context_ops.extend(
             [
                 ops.MoEDispatch(
@@ -245,6 +274,7 @@ class DeepSeekModel(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
+                    seq_split=cp,
                 )
             ]
         )
@@ -282,6 +312,7 @@ class DeepSeekModel(BaseModel):
                     attention_dp_size,
                     False,
                     quant_mode=moe_quant_mode,
+                    seq_split=cp,
                 )
             ]
         )
@@ -294,6 +325,7 @@ class DeepSeekModel(BaseModel):
                     self._vocab_size // tp_size,
                     h,
                     common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
                 )
             ]
         )
@@ -309,6 +341,7 @@ class DeepSeekModel(BaseModel):
                     2 * self._num_layers,
                     h,
                     tp_size,
+                    seq_split=cp,
                 )
             )
         #####generation part, only generation part is scaled by mtp_scale_factor
@@ -518,8 +551,31 @@ class DeepSeekModel(BaseModel):
 
         # pp
         pp_scale_factor = pp_size - 1
-        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
+        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size, seq_split=cp))
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
+
+    # ----- KV bytes API: required override per BaseModel contract --------
+
+    @staticmethod
+    def _mla_dims(extra_params) -> tuple[int, int]:
+        """Pull MLA latent dims with DeepSeek-V3 / Kimi K2 fallbacks."""
+        kv_lora_rank = 0
+        qk_rope_head_dim = 0
+        if isinstance(extra_params, dict):
+            kv_lora_rank = extra_params.get("kv_lora_rank") or 0
+            qk_rope_head_dim = extra_params.get("qk_rope_head_dim") or 0
+        if kv_lora_rank == 0:
+            kv_lora_rank = 512
+        if qk_rope_head_dim == 0:
+            qk_rope_head_dim = 64
+        return kv_lora_rank, qk_rope_head_dim
+
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        """MLA layout: single latent KV (kv_lora_rank + qk_rope_head_dim) per layer per token."""
+        seq_len = max(0, seq_len)
+        kv_lora_rank, qk_rope_head_dim = self._mla_dims(self.extra_params)
+        per_layer_per_token = (kv_lora_rank + qk_rope_head_dim) * self.config.kvcache_quant_mode.value.memory
+        return seq_len * self._num_layers * per_layer_per_token
 
 
 class TrtllmWideEPDeepSeekModel(BaseModel):
@@ -539,16 +595,27 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
     - All2All kernel: NVLinkTwoSided (SM>=100), DeepEP/DeepEPLowLatency (SM>=90), NCCL (fallback)
     """
 
+    @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # TRT-LLM Ring CP isn't wired up yet (perf data + ``_cp_attn_comm_ops``
+        # ``"ring"`` branch both pending). Explicit False so the contract is
+        # documented at the class instead of relying on the BaseModel default.
+        return False
+
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        """MLA layout: kv_lora_rank + qk_rope_head_dim per layer per token."""
+        seq_len = max(0, seq_len)
+        kv_lora_rank, qk_rope_head_dim = DeepSeekModel._mla_dims(self.extra_params)
+        per_layer_per_token = (kv_lora_rank + qk_rope_head_dim) * self.config.kvcache_quant_mode.value.memory
+        return seq_len * self._num_layers * per_layer_per_token
+
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
 
-        # make sure the parallel width is same
-        assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
-        ), (
-            f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+        # Attention/expert width matching: tp * cp * dp == moe_tp * moe_ep.
+        assert self.config.attn_width == self.config.moe_tp_size * self.config.moe_ep_size, (
+            f"attn_width tp*cp*dp ({self.config.attn_width}) must equal moe_tp_size * moe_ep_size "
+            f"({self.config.moe_tp_size * self.config.moe_ep_size})"
         )
 
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
@@ -1017,6 +1084,10 @@ class WideEPDeepSeekModel(BaseModel):
     DeepSeek V3/R1 disaggregated model for SGLang backend.
     """
 
+    @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        return backend_name == "sglang"
+
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
 
@@ -1061,6 +1132,14 @@ class WideEPDeepSeekModel(BaseModel):
 
         sms = self.config.sms
 
+        # CP (sequence parallelism). See DeepSeekModel for the rationale.
+        # WideEP variant only supports SGLang AllGather as well; ``WideEPContextMLA``
+        # takes ``tp_size`` rather than ``local_heads``, so no head-divisor is
+        # needed here (Ulysses isn't a target).
+        cp = self.config.cp_size
+        cp_style = self.config.cp_style
+        attn_count_div = cp if cp_style in ("allgather", "ring") else 1
+
         # qkv_a projection (fused q_a + kv_a + rope): hidden_size -> q_lora_rank + kv_lora_rank + qk_rope_head_dim
         # This is replicated on every GPU (not TP-sharded), matching narrow EP's context_downscale_gemm.
         # In sglang >=0.5.6, qkv_a_proj is computed outside the MLA attention forward via communicator,
@@ -1074,6 +1153,7 @@ class WideEPDeepSeekModel(BaseModel):
                     h,
                     gemm_quant_mode,
                     scale_num_tokens=tp_size,
+                    seq_split=cp,
                 ),
             ]
         )
@@ -1090,22 +1170,31 @@ class WideEPDeepSeekModel(BaseModel):
                             h,
                             tp_size,
                             common.CommQuantMode.half,
+                            seq_split=cp,
                         )
                     ]
                     if tp_size > 1
                     else []
                 ),
-                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
-                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
-                ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),  # on every gpu, fused_a
+                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3, seq_split=cp),
+                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
+                ops.GEMM(
+                    "context_downscale_gemm",
+                    self._num_layers,
+                    2112,
+                    h,
+                    gemm_quant_mode,
+                    seq_split=cp,
+                ),  # on every gpu, fused_a
                 ops.WideEPContextMLA(
                     "context_attention",
-                    self._num_layers,
+                    self._num_layers / attn_count_div,
                     tp_size,
                     kvcache_quant_mode,
                     fmha_quant_mode,
                     attn_backend,
                 ),
+                *self._cp_attn_comm_ops(),
                 *(
                     [
                         ops.NCCL(
@@ -1115,6 +1204,7 @@ class WideEPDeepSeekModel(BaseModel):
                             h,
                             tp_size,
                             common.CommQuantMode.half,
+                            seq_split=cp,
                         )
                     ]
                     if tp_size > 1
@@ -1134,6 +1224,7 @@ class WideEPDeepSeekModel(BaseModel):
                     h,
                     gemm_quant_mode,
                     scale_num_tokens=tp_size,
+                    seq_split=cp,
                 ),
                 ops.ElementWise(
                     "context_act_gate",
@@ -1142,6 +1233,7 @@ class WideEPDeepSeekModel(BaseModel):
                     self._moe_inter_size,
                     0.8,
                     scale_num_tokens=tp_size,
+                    seq_split=cp,
                 ),
                 ops.GEMM(
                     "context_ffn2_gemm",
@@ -1150,11 +1242,13 @@ class WideEPDeepSeekModel(BaseModel):
                     self._moe_inter_size,
                     gemm_quant_mode,
                     scale_num_tokens=tp_size,
+                    seq_split=cp,
                 ),
             ]
         )
 
-        # dispatch tokens to experts
+        # dispatch tokens to experts. MoEDispatch responds to seq_split (per-rank
+        # A2A payload). MoE expert compute below deliberately doesn't.
         self.context_ops.extend(
             [
                 ops.MoEDispatch(
@@ -1172,6 +1266,7 @@ class WideEPDeepSeekModel(BaseModel):
                     moe_backend=moe_backend,
                     is_context=True,
                     scale_num_tokens=tp_size,
+                    seq_split=cp,
                 )
             ]
         )
@@ -1309,3 +1404,15 @@ class WideEPDeepSeekModel(BaseModel):
                 )
             ]
         )
+
+    # ----- KV bytes API: required override per BaseModel contract --------
+
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        """MLA layout. ``WideEPContextMLA`` hardcodes DSV3 defaults
+        (kv_lora_rank=512 + qk_rope_head_dim=64 = 576), but we still derive
+        from extra_params so a config override flows through.
+        """
+        seq_len = max(0, seq_len)
+        kv_lora_rank, qk_rope_head_dim = DeepSeekModel._mla_dims(self.extra_params)
+        per_layer_per_token = (kv_lora_rank + qk_rope_head_dim) * self.config.kvcache_quant_mode.value.memory
+        return seq_len * self._num_layers * per_layer_per_token

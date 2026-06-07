@@ -332,6 +332,8 @@ def _deepseek_v4_attention_sol(
 
 
 class DeepSeekV4MHCModule(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # divides num_tokens by self._seq_split in query()
+
     """DeepSeek-V4 manifold-constrained hyper-connection pre/post module."""
 
     _data_cache: ClassVar[dict] = {}
@@ -345,8 +347,10 @@ class DeepSeekV4MHCModule(Operation):
         hc_mult: int,
         sinkhorn_iters: int,
         quant_mode: common.GEMMQuantMode,
+        *,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         if op not in {"pre", "post", "both"}:
             raise ValueError(f"Unsupported DeepSeek-V4 mHC op: {op}")
         self._op = op
@@ -521,8 +525,10 @@ class DeepSeekV4MHCModule(Operation):
     # ------------------------------------------------------------------
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        # ``_seq_split`` shrinks num_tokens (M-axis) under CP.
+        num_tokens = kwargs.get("x") // self._seq_split
         result = database.query_mhc_module(
-            num_tokens=kwargs.get("x"),
+            num_tokens=num_tokens,
             hidden_size=self._hidden_size,
             hc_mult=self._hc_mult,
             sinkhorn_iters=self._sinkhorn_iters,
@@ -545,6 +551,8 @@ class DeepSeekV4MHCModule(Operation):
 
 
 class _BaseDeepSeekV4AttentionModule(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # CP handled at model construction (count divisor); decode unaffected
+
     """Common DeepSeek-V4 compressed attention module metadata.
 
     Not instantiated directly. Subclassed by ``ContextDeepSeekV4AttentionModule``
@@ -573,8 +581,10 @@ class _BaseDeepSeekV4AttentionModule(Operation):
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         gemm_quant_mode: common.GEMMQuantMode,
+        *,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._num_heads = num_heads
         self._native_heads = native_heads
         self._tp_size = tp_size
@@ -1295,6 +1305,7 @@ class DeepSeekV4MegaMoEModule(Operation):
     """
 
     _data_cache: ClassVar[dict] = {}
+    _CP_AWARE: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -1314,8 +1325,9 @@ class DeepSeekV4MegaMoEModule(Operation):
         num_fused_shared_experts: int = 0,
         kernel_source: str = "deepgemm_megamoe",
         kernel_dtype: str = "fp8_fp4",
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._hidden_size = hidden_size
         self._inter_size = inter_size
         self._topk = topk
@@ -1463,7 +1475,7 @@ class DeepSeekV4MegaMoEModule(Operation):
         # DSv4 MegaMoE perf rows are indexed by local-rank tokens. Do not
         # multiply by attention_dp_size here; the old decomposed MoE table is
         # indexed differently.
-        x = int(kwargs.get("x"))
+        x = int(kwargs.get("x")) // self._seq_split
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
 

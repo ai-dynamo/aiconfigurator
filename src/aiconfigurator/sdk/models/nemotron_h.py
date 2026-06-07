@@ -20,6 +20,10 @@ class NemotronHModel(BaseModel):
     - '-': MLP layer (dense feed-forward)
 
     The layer sequence is defined by the `hybrid_override_pattern` string in NemotronHConfig.
+
+    CP not supported: Mamba layers carry sequential state across tokens; splitting
+    the sequence across CP ranks breaks state propagation. ``supports_cp``
+    inherits BaseModel default (False) -- ``get_model`` will raise if cp_size>1.
     """
 
     @classmethod
@@ -655,3 +659,22 @@ class NemotronHModel(BaseModel):
                 common.GEMMQuantMode.bfloat16,
             )
         )
+
+    # ----- KV bytes API: required override per BaseModel contract --------
+    # NemotronH is Mamba + MoE + Transformer hybrid. Only the '*' (transformer
+    # attention) layers carry standard KV cache; 'M' (Mamba) layers carry SSM
+    # state that's modelled by the Mamba kernel ops separately.
+
+    def _count_attention_layers(self) -> int:
+        if not self._hybrid_config:
+            return 0
+        return self._hybrid_config.hybrid_override_pattern.count("*")
+
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        """Per-GPU KV bytes; counts only transformer-attention ('*') layers.
+        Mamba/MoE/MLP layers have no KV cache; Mamba state is modelled
+        separately."""
+        seq_len = max(0, seq_len)
+        bytes_per_elem = self.config.kvcache_quant_mode.value.memory
+        attn_kv_per_layer = self._num_kv_heads_per_gpu * self._head_size * 2 * bytes_per_elem
+        return self._count_attention_layers() * attn_kv_per_layer * seq_len

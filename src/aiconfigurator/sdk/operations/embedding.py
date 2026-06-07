@@ -12,7 +12,7 @@ formula is deferred to the post-refactor cleanup.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk.operations.base import Operation
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 
 
 class Embedding(Operation):
+    _CP_AWARE: ClassVar[bool] = True  # divides x by self._seq_split in query()
+
     """
     Embedding operation.
     """
@@ -33,8 +35,10 @@ class Embedding(Operation):
         row_size: int,
         column_size: int,
         empirical_bw_scaling_factor: float = 0.3,
+        *,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._row_size = row_size
         self._column_size = column_size
         self._weights = row_size * column_size * 2
@@ -47,6 +51,7 @@ class Embedding(Operation):
         x = kwargs.get("x")
         if x is None:
             raise ValueError("Embedding.query requires 'x' (num tokens).")
+        x //= self._seq_split  # CP / seq-shard
         d2d_bytes = x * self._column_size * 2
 
         result = database.query_mem_op(d2d_bytes)

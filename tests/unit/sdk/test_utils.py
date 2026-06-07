@@ -1188,6 +1188,38 @@ class TestParseCompressedTensorsQuant:
 class TestEnumerateParallelConfigSGLangMoE:
     """Test enumerate_parallel_config for SGLang MoE scenarios."""
 
+    def test_sglang_cp_size_counts_toward_worker_gpu_width(self):
+        configs = enumerate_parallel_config(
+            num_gpu_list=[2],
+            tp_list=[1, 2, 4],
+            pp_list=[1],
+            dp_list=[1],
+            moe_tp_list=[1],
+            moe_ep_list=[1],
+            cp_list=[2],
+            is_moe=False,
+            backend=common.BackendName.sglang,
+        )
+
+        assert configs == [[1, 1, 1, 1, 1, 2]]
+
+    def test_sglang_cp_moe_requires_cp_width_to_match_expert_width(self):
+        configs = enumerate_parallel_config(
+            num_gpu_list=[4],
+            tp_list=[1, 2, 4],
+            pp_list=[1],
+            dp_list=[1, 2, 4],
+            moe_tp_list=[1, 2, 4],
+            moe_ep_list=[1, 2, 4],
+            cp_list=[4],
+            is_moe=True,
+            backend=common.BackendName.sglang,
+        )
+
+        assert configs
+        assert all(c[0] == 1 and c[2] == 1 for c in configs)
+        assert all(c[0] * c[2] * c[5] == c[3] * c[4] for c in configs)
+
     def test_sglang_non_wideep_moe_includes_moe_ep_gt_1(self):
         """Test that SGLang + enable_wideep=False includes configs with moe_ep > 1."""
         configs = enumerate_parallel_config(
@@ -1287,7 +1319,7 @@ class TestEnumerateParallelConfigVLLMMoE:
         )
         assert len(configs) > 0, "Should generate at least one config"
         for c in configs:
-            tp, pp, dp, moe_tp, moe_ep = c
+            tp, pp, dp, moe_tp, moe_ep, _cp = c
             assert not (moe_tp > 1 and moe_ep > 1), f"vLLM should not have both moe_tp > 1 and moe_ep > 1, got {c}"
 
     def test_vllm_allows_pure_moe_tp(self):

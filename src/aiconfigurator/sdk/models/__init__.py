@@ -84,6 +84,35 @@ def get_model(
         raise ValueError(
             f"Unknown model family: {model_family}. Registered families: {', '.join(sorted(_MODEL_REGISTRY.keys()))}"
         )
+
+    # Gate CP at construction time. ``BaseModel.supports_cp`` defaults to
+    # False; each CP-capable model class overrides to declare which backends
+    # it supports. Geometry checks (positivity, MoE width) live in
+    # ``ModelConfig.resolve_moe_parallelism``.
+    if model_config.cp_size > 1:
+        if not cls.supports_cp(backend_name):
+            raise ValueError(
+                f"Context parallelism (cp_size={model_config.cp_size}) is not supported for "
+                f"model_family={model_family!r} on backend={backend_name!r}. "
+                f"The model class must override ``supports_cp`` and implement CP ops in __init__."
+            )
+        # Backend-level constraint: SGLang's CP requires the attention-side
+        # width to be CP=world_size (no concurrent attention TP/DP).
+        if backend_name == "sglang" and (model_config.tp_size != 1 or model_config.attention_dp_size != 1):
+            raise ValueError(
+                f"sglang CP requires tp_size=1 and attention_dp_size=1 when cp_size>1 "
+                f"(CP and attention TP/DP are mutually exclusive on sglang). "
+                f"Got tp_size={model_config.tp_size}, "
+                f"attention_dp_size={model_config.attention_dp_size}, "
+                f"cp_size={model_config.cp_size}."
+            )
+        # Resolve which CP variant this (backend, model) uses. Stored on
+        # ``model_config.cp_style`` so model ``__init__`` code can branch
+        # on it. Models may override via ``BaseModel._resolve_cp_style``.
+        model_config.cp_style = cls._resolve_cp_style(backend_name)
+    else:
+        model_config.cp_style = "none"
+
     return cls.create(model_info, model_config, backend_name)
 
 

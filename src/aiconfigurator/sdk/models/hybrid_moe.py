@@ -26,6 +26,10 @@ class HybridMoEModel(BaseModel):
     """
 
     @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        return backend_name == "sglang"
+
+    @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
         model = cls(
             model_info["topk"],
@@ -49,12 +53,10 @@ class HybridMoEModel(BaseModel):
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
-        assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
-        ), (
-            f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+        # Attention/expert width matching: tp * cp * dp == moe_tp * moe_ep.
+        assert self.config.attn_width == self.config.moe_tp_size * self.config.moe_ep_size, (
+            f"attn_width tp*cp*dp ({self.config.attn_width}) must equal moe_tp_size * moe_ep_size "
+            f"({self.config.moe_tp_size * self.config.moe_ep_size})"
         )
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
         self._topk = topk
@@ -147,7 +149,9 @@ class HybridMoEModel(BaseModel):
             "swa_proj_in": self._num_heads * swa_v_hd // tp_size,
             "global_proj_in": self._num_heads * global_v_hd // tp_size,
             "swa_hd": swa_hd,
+            "swa_v_hd": swa_v_hd,
             "global_hd": self._head_size,
+            "global_v_hd": global_v_hd,
             "dense_inter_per_tp": dense_inter // tp_size,
         }
 
@@ -327,6 +331,58 @@ class HybridMoEModel(BaseModel):
             ]
         )
 
+        # cp (SGLang prefill CP). Hybrid model has heterogeneous KV per
+        # layer-type (SWA n_kv * swa_hd vs global n_kv * global_hd).
+        # Scale all context_attention ops by 1/cp and emit two NCCL ops
+        # weighted by their layer counts so total comm matches reality.
+        # NOTE: bypasses the BaseModel CP helper (which assumes one
+        # uniform per-token KV size) -- per-type NCCL ops need per-type values.
+        # TODO(cp-impl-assumption): SGLang AllGather-of-KV variant.
+        if self.config.cp_size > 1:
+            cp = self.config.cp_size
+            kvcache_bytes = self.config.kvcache_quant_mode.value.memory
+            comm_bytes = self.config.comm_quant_mode.value.memory
+
+            # CP shards tokens across cp ranks. Token-major ops shrink the
+            # M-axis via ``_seq_split`` (DB lookup at per-rank M); attention
+            # ops use the proportional ``_scale_factor /= cp`` because the
+            # DB only has full-s measurements.
+            for op in self.context_ops:
+                if isinstance(op, (ops.ContextAttention, ops.GenerationAttention)):
+                    op._scale_factor = op._scale_factor / cp
+                else:
+                    op._seq_split = cp
+
+            global_layers = counts.get("global_moe", 0) + counts.get("global_dense", 0)
+            swa_layers = counts.get("swa_moe", 0) + counts.get("swa_dense", 0)
+            # K head dim and V head dim can differ for Hybrid configs (e.g.
+            # MiMo-V2-Flash). Per-layer KV bytes = n_kv * (k_hd + v_hd) * bytes,
+            # not the n_kv * 2 * head_dim shortcut.
+            if global_layers > 0:
+                kv_bytes_per_token = d["global_n_kv_per_gpu"] * (d["global_hd"] + d["global_v_hd"]) * kvcache_bytes
+                self.context_ops.append(
+                    ops.NCCL(
+                        "context_cp_all_gather_global",
+                        global_layers,
+                        "all_gather",
+                        num_elements_per_token=kv_bytes_per_token / comm_bytes,
+                        num_gpus=cp,
+                        comm_quant_mode=self.config.comm_quant_mode,
+                    )
+                )
+            if swa_layers > 0:
+                kv_bytes_per_token = d["swa_n_kv_per_gpu"] * (d["swa_hd"] + d["swa_v_hd"]) * kvcache_bytes
+                self.context_ops.append(
+                    ops.NCCL(
+                        "context_cp_all_gather_swa",
+                        swa_layers,
+                        "all_gather",
+                        num_elements_per_token=kv_bytes_per_token / comm_bytes,
+                        num_gpus=cp,
+                        comm_quant_mode=self.config.comm_quant_mode,
+                    )
+                )
+
     def _build_generation_ops(self) -> None:
         """Build the generation (decoding) operations for all four layer types.
 
@@ -462,3 +518,31 @@ class HybridMoEModel(BaseModel):
                 ops.P2P("generation_p2p", (pp - 1) * sf, h, pp),
             ]
         )
+
+    # ----- KV bytes API: required overrides per BaseModel contract --------
+
+    def _kv_bytes_by_type(self) -> tuple[float, float, int, int]:
+        """(swa_per_layer, global_per_layer, swa_layers, global_layers).
+
+        K and V head dims can differ per layer-type (e.g. MiMo-V2-Flash sets
+        swa_v_head_dim), so per-layer bytes = n_kv * (k_hd + v_hd) * bytes.
+        """
+        counts = self._count_layer_types()
+        tp = self.config.tp_size
+        d = self._resolve_dims(tp)
+        bytes_per_elem = self.config.kvcache_quant_mode.value.memory
+        swa_per_layer = d["swa_n_kv_per_gpu"] * (d["swa_hd"] + d["swa_v_hd"]) * bytes_per_elem
+        global_per_layer = d["global_n_kv_per_gpu"] * (d["global_hd"] + d["global_v_hd"]) * bytes_per_elem
+        global_layers = counts.get("global_moe", 0) + counts.get("global_dense", 0)
+        swa_layers = counts.get("swa_moe", 0) + counts.get("swa_dense", 0)
+        return swa_per_layer, global_per_layer, swa_layers, global_layers
+
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        """Sum across layer types; SWA caps at sliding_window_size."""
+        if not self._hybrid_config:
+            raise NotImplementedError("HybridMoEModel requires _hybrid_config to compute KV bytes")
+        seq_len = max(0, seq_len)
+        swa_per_layer, global_per_layer, swa_layers, global_layers = self._kv_bytes_by_type()
+        cfg = self._hybrid_config
+        swa_seq = min(seq_len, cfg.sliding_window_size) if cfg.sliding_window_size > 0 else seq_len
+        return float(swa_layers * swa_per_layer * swa_seq + global_layers * global_per_layer * seq_len)

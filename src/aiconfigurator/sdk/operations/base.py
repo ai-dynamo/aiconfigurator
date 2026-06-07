@@ -127,9 +127,47 @@ class Operation:
     # Operation._record_load(cls) after a successful parse (NOT on cache hit).
     _load_data_call_count: ClassVar[dict[type, int]] = defaultdict(int)
 
-    def __init__(self, name: str, scale_factor: float) -> None:
+    # Opt-in flag: subclasses set True after auditing their CP behavior.
+    # Constructing an op with ``seq_split > 1`` and ``_CP_AWARE = False``
+    # raises NotImplementedError -- protects against new ops silently
+    # mis-modeling CP. Three legitimate ways to opt in:
+    #   - Token-major ops divide ``x`` by ``self._seq_split`` in query().
+    #   - Attention / expert-compute ops carry the attribute but rely on
+    #     model-side shaping (count / local_heads) for CP scaling.
+    #   - Wrapper ops (FallbackOp, OverlapOp) delegate to inner ops which
+    #     carry their own seq_split; the wrapper itself is a pass-through.
+    _CP_AWARE: ClassVar[bool] = False
+
+    def __init__(self, name: str, scale_factor: float, *, seq_split: int = 1) -> None:
+        if seq_split > 1 and not self._CP_AWARE:
+            raise NotImplementedError(
+                f"{type(self).__name__} has not been audited for context parallelism "
+                f"(seq_split={seq_split}). Set ``_CP_AWARE = True`` on the class after "
+                f"verifying that query() either (a) divides its token-count input by "
+                f"self._seq_split, (b) is handled CP-style-specifically at the model "
+                f"construction site, or (c) is a wrapper that delegates to inner ops."
+            )
         self._name = name
         self._scale_factor = scale_factor
+        # Sequence-axis shard factor. CP variants (SGLang AllGather,
+        # DeepSpeed-Ulysses, Ring Attention) all split the sequence across N
+        # ranks. Every op carries the attribute -- ``seq_split=cp_size`` is
+        # passed from the model constructor alongside ``tp_size`` -- and each
+        # op decides individually how to respond:
+        #
+        # - Token-major ops (GEMM / Embedding / ElementWise / NCCL non-gather
+        #   / AR / P2P / MoE dispatch / DSV4 MHC / Mamba) divide their
+        #   per-query ``x`` (token-count) by ``self._seq_split`` so the
+        #   database is queried at the per-rank token count.
+        # - Attention ops carry the attribute for API uniformity but do not
+        #   act on it -- the CP-style-specific shaping (AllGather: scale by
+        #   1/cp via ``count``; Ulysses: shrink heads via ``local_heads``;
+        #   Ring: ditto + P2P chain) is done at the model construction site.
+        # - MoE expert compute deliberately ignores it: the dispatch A2A
+        #   globalises tokens across CP ranks before expert compute.
+        #
+        # Default 1 means "no shard".
+        self._seq_split: int = seq_split
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Return latency (scaled by ``scale_factor``) plus energy/source data."""

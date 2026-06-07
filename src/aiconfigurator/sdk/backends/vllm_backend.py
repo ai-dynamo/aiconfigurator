@@ -17,11 +17,10 @@ class VLLMBackend(BaseBackend):
 
     Currently mirrors TRT-LLM's activation-memory model (the pre-refactor
     implementation literally delegated ``_get_memory_usage`` to TRTLLMBackend),
-    with no KV-cache-aware OOM accounting yet. We reuse both TRT-LLM's
-    per-family coefficient table and its ``_moe_workspace_width`` hook so
-    estimates stay byte-identical with the old delegation; the agg-pipeline
-    hooks (``_resolve_agg_kwargs``, ``_oom_check_kwargs``, ...) remain at
-    BaseBackend defaults — vLLM does not yet do KV-cache OOM probing.
+    with no KV-cache-aware OOM accounting yet. We reuse TRT-LLM's per-family
+    coefficient table so estimates stay byte-identical with the old delegation;
+    the agg-pipeline hooks (``_resolve_agg_kwargs``, ``_oom_check_kwargs``, ...)
+    remain at BaseBackend defaults — vLLM does not yet do KV-cache OOM probing.
     """
 
     # Reuse TRT-LLM's per-family activation coefficients until a vLLM-specific

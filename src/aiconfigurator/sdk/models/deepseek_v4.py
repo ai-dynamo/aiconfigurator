@@ -19,6 +19,14 @@ class DeepSeekV4Model(BaseModel):
     _SUPPORTED_COMPRESS_RATIOS: ClassVar[set[int]] = {0, 4, 128}
 
     @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # DSV4 builds its own per-compress-ratio CP ops in ``__init__``
+        # (windowed dense + sparse compressed KV gather, ratio-aware
+        # attention scaling). SGLang AllGather only -- see
+        # LLAMAModel.supports_cp for the vLLM DCP exclusion rationale.
+        return backend_name == "sglang"
+
+    @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
         return cls(
             model_info["topk"],
@@ -56,14 +64,15 @@ class DeepSeekV4Model(BaseModel):
         if unknown_ratios:
             raise ValueError(f"Unsupported DeepSeek-V4 compress_ratios: {sorted(unknown_ratios)}")
 
-        assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
-        ), (
-            f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+        assert self.config.attn_width == self.config.moe_tp_size * self.config.moe_ep_size, (
+            f"attn_width tp*cp*dp ({self.config.attn_width}) must equal moe_tp_size * moe_ep_size "
+            f"({self.config.moe_tp_size * self.config.moe_ep_size})"
         )
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
+
+        # The "cp>1 requires tp=1 and dp=1" rule is a SGLang backend constraint
+        # (not DSV4-specific) and is enforced in ``get_model`` for any model on
+        # SGLang. No DSV4-side guard needed.
 
         self._topk = topk
         self._num_experts = num_experts
@@ -91,6 +100,9 @@ class DeepSeekV4Model(BaseModel):
                 raise ValueError(f"DeepSeek-V4 MegaMoE requires moe_tp_size=1, got {moe_tp_size}.")
             if moe_ep_size <= 1:
                 raise ValueError(f"DeepSeek-V4 MegaMoE requires moe_ep_size > 1, got {moe_ep_size}.")
+        # CP is gated by ``supports_cp`` in ``get_model`` -- by the time we reach
+        # __init__, cp_size > 1 implies a backend that has CP perf data.
+        context_cp_size = self.config.cp_size
 
         gemm_quant_mode = self.config.gemm_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
@@ -104,6 +116,19 @@ class DeepSeekV4Model(BaseModel):
         local_heads = self._num_heads // tp_size
         local_o_groups = max(1, deepseek_v4_cfg.o_groups // tp_size)
         local_moe_inter_size = self._moe_inter_size // tp_size
+
+        # CP (sequence parallelism). DSV4 sglang AllGather only. The
+        # ``_attention_ops`` helper below multiplies its returned count by
+        # ``scale_factor / attn_count_div`` so the SWA/CSA/HCA modules get
+        # ``count /= cp`` directly at construction (mirrors the
+        # ``self._num_layers / attn_count_div`` pattern used by other models).
+        # Token-major ops get ``seq_split=cp`` inline at construction; the
+        # per-ratio CP NCCL gather ops produced by ``_context_cp_all_gather_ops``
+        # carry no ``seq_split`` because their cross-rank fan-out is already
+        # encoded in ``num_gpus=cp_size``.
+        cp_style = self.config.cp_style
+        attn_count_div = context_cp_size if cp_style in ("allgather", "ring") else 1
+        cp = context_cp_size  # short alias for ``seq_split=cp`` below
 
         def _attention_ops(is_context: bool, scale_factor: float):
             ratio_counts = Counter(self._compress_ratios)
@@ -141,7 +166,7 @@ class DeepSeekV4Model(BaseModel):
                 if count > 0
             ]
 
-        def _moe_ops(phase: str, num_layers: float, is_context: bool):
+        def _moe_ops(phase: str, num_layers: float, is_context: bool, seq_split: int = 1):
             if use_megamoe:
                 return [
                     ops.DeepSeekV4MegaMoEModule(
@@ -156,6 +181,7 @@ class DeepSeekV4Model(BaseModel):
                         moe_quant_mode,
                         workload_distribution,
                         is_context=is_context,
+                        seq_split=seq_split,
                     )
                 ]
             return [
@@ -170,6 +196,7 @@ class DeepSeekV4Model(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
+                    seq_split=seq_split,
                 ),
                 ops.MoE(
                     f"{phase}_moe",
@@ -195,13 +222,90 @@ class DeepSeekV4Model(BaseModel):
                     attention_dp_size,
                     False,
                     quant_mode=moe_quant_mode,
+                    seq_split=seq_split,
                 ),
             ]
 
-        context_moe_ops = _moe_ops("context", self._num_layers, is_context=True)
+        def _context_cp_all_gather_ops(scale_factor: float):
+            """NCCL all-gather ops per distinct DSV4 compress ratio.
+
+            DSV4 KV layout per layer is "windowed dense recent + sparse old":
+              bytes_per_seq = window * cache_entry_bytes           (constant)
+                            + (seq_len / ratio) * cache_entry_bytes (linear)
+                            + (seq_len / ratio) * indexer_bytes     (linear, ratio=4 only)
+
+            Per ratio:
+              - r=0   (SWA, dense windowed): 1 op, per-token=0 + window_constant per-seq.
+              - r=4   (DSA, NSA-style): TWO ops -- the SGLang CP path issues
+                separate AllGathers for the indexer key and the latent cache
+                (mirrors ``DeepSeekV32Model._cp_attn_comm_ops``). The
+                window_constant per-seq term lives on the cache op.
+              - r=128 (CSA, compressed): 1 op, cache-only per-token + window_constant per-seq.
+
+            TODO(cp-window-cap): the windowed-dense term is treated as the full
+            ``sliding_window * cache_entry_bytes`` constant per seq, which over-
+            states traffic when ``seq_len < sliding_window`` (rare under CP, which
+            is typically only enabled for long-context prompts). Tightening this
+            requires extending the NCCL op to expose a per-seq cap; deferred.
+            """
+            if context_cp_size <= 1:
+                return []
+            cache_entry_bytes = deepseek_v4_cfg.head_dim * kvcache_quant_mode.value.memory
+            indexer_bytes = common.deepseek_v4_indexer_cache_entry_bytes(deepseek_v4_cfg.index_head_dim)
+            comm_bytes = self.config.comm_quant_mode.value.memory
+            window_constant_elements = deepseek_v4_cfg.sliding_window * cache_entry_bytes / comm_bytes
+
+            ratio_counts = Counter(self._compress_ratios)
+            cp_ops = []
+            for ratio, count in ratio_counts.items():
+                if count <= 0:
+                    continue
+                if ratio == 0:
+                    # SWA: only the window_constant per-seq term.
+                    cp_ops.append(
+                        ops.NCCL(
+                            f"context_cp_all_gather_r{ratio}",
+                            count * scale_factor,
+                            "all_gather",
+                            num_elements_per_token=0.0,
+                            num_gpus=context_cp_size,
+                            comm_quant_mode=self.config.comm_quant_mode,
+                            num_elements_per_seq=window_constant_elements,
+                        )
+                    )
+                    continue
+                cache_per_token_elements = (cache_entry_bytes / ratio) / comm_bytes
+                cp_ops.append(
+                    ops.NCCL(
+                        f"context_cp_all_gather_r{ratio}_cache",
+                        count * scale_factor,
+                        "all_gather",
+                        num_elements_per_token=cache_per_token_elements,
+                        num_gpus=context_cp_size,
+                        comm_quant_mode=self.config.comm_quant_mode,
+                        num_elements_per_seq=window_constant_elements,
+                    )
+                )
+                if ratio == 4:
+                    # DSA (NSA): separate indexer-key gather, mirrors DSV3.2.
+                    indexer_per_token_elements = (indexer_bytes / ratio) / comm_bytes
+                    cp_ops.append(
+                        ops.NCCL(
+                            f"context_cp_all_gather_r{ratio}_indexer",
+                            count * scale_factor,
+                            "all_gather",
+                            num_elements_per_token=indexer_per_token_elements,
+                            num_gpus=context_cp_size,
+                            comm_quant_mode=self.config.comm_quant_mode,
+                        )
+                    )
+            return cp_ops
+
+        context_moe_ops = _moe_ops("context", self._num_layers, is_context=True, seq_split=cp)
+
         self.context_ops.extend(
             [
-                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
+                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3, seq_split=cp),
                 ops.DeepSeekV4MHCModule(
                     "context_mhc_pre",
                     self._num_layers,
@@ -210,9 +314,11 @@ class DeepSeekV4Model(BaseModel):
                     deepseek_v4_cfg.hc_mult,
                     deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
                 ),
-                ops.ElementWise("context_attn_norm", self._num_layers, h, h, 0.8),
-                *_attention_ops(is_context=True, scale_factor=1.0),
+                ops.ElementWise("context_attn_norm", self._num_layers, h, h, 0.8, seq_split=cp),
+                *_attention_ops(is_context=True, scale_factor=1.0 / attn_count_div),
+                *_context_cp_all_gather_ops(scale_factor=1.0),
                 ops.DeepSeekV4MHCModule(
                     "context_mhc_post",
                     self._num_layers,
@@ -221,14 +327,16 @@ class DeepSeekV4Model(BaseModel):
                     deepseek_v4_cfg.hc_mult,
                     deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
                 ),
-                ops.ElementWise("context_ffn_norm", self._num_layers, h, h, 0.8),
+                ops.ElementWise("context_ffn_norm", self._num_layers, h, h, 0.8, seq_split=cp),
                 ops.GEMM(
                     "context_shared_gate_up_gemm",
                     self._num_layers,
                     2 * local_moe_inter_size,
                     h,
                     gemm_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.ElementWise(
                     "context_shared_act_gate",
@@ -236,11 +344,33 @@ class DeepSeekV4Model(BaseModel):
                     2 * local_moe_inter_size,
                     local_moe_inter_size,
                     0.8,
+                    seq_split=cp,
                 ),
-                ops.GEMM("context_shared_ffn2_gemm", self._num_layers, h, local_moe_inter_size, gemm_quant_mode),
-                ops.GEMM("context_router_gemm", self._num_layers, self._num_experts, h, common.GEMMQuantMode.bfloat16),
+                ops.GEMM(
+                    "context_shared_ffn2_gemm",
+                    self._num_layers,
+                    h,
+                    local_moe_inter_size,
+                    gemm_quant_mode,
+                    seq_split=cp,
+                ),
+                ops.GEMM(
+                    "context_router_gemm",
+                    self._num_layers,
+                    self._num_experts,
+                    h,
+                    common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
+                ),
                 *context_moe_ops,
-                ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp_size, h, common.GEMMQuantMode.bfloat16),
+                ops.GEMM(
+                    "context_logits_gemm",
+                    1,
+                    self._vocab_size // tp_size,
+                    h,
+                    common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
+                ),
             ]
         )
 
@@ -323,8 +453,10 @@ class DeepSeekV4Model(BaseModel):
         )
 
         pp_scale_factor = pp_size - 1
-        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
+        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size, seq_split=cp))
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
+
+    # ----- KV bytes API: per-ratio sparse layout (windowed + compressed) -----
 
     def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
         deepseek_v4_cfg = self.extra_params

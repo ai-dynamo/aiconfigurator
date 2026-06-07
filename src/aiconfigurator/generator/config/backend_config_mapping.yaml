@@ -23,6 +23,24 @@ parameters:
   sglang: data-parallel-size
   trtllm: null
 
+- param_key: context_parallel_size
+  # CP plumbing through the generator is intentionally NOT wired yet. SGLang
+  # has two distinct enable flags (``--enable-dsa-prefill-context-parallel``
+  # for DSA-class models like DSV4, ``--enable-prefill-context-parallel`` for
+  # vanilla Ulysses-style) and the SDK currently has no way to express which
+  # flavor a given (model, backend) needs. Routing those flags by hardcoded
+  # model_family in this yaml or in the bridge would leak model knowledge
+  # into the rendering layer.
+  #
+  # The proper fix is a ``cp_flavor()`` capability hook on the model class,
+  # which is scheduled for the upcoming model-building refactor. Until then,
+  # ``module_bridge.py`` emits a warning when ``cp_size > 1`` so users know
+  # the rendered artifacts won't carry CP. The perf estimate itself is still
+  # valid -- only the deployable artifacts skip the flag.
+  vllm: null
+  sglang: null
+  trtllm: null
+
 - param_key: enable_expert_parallel
   vllm: enable-expert-parallel
   sglang: null

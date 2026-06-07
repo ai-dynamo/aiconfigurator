@@ -56,6 +56,12 @@ class DeepSeekV32Model(BaseModel):
     """
 
     @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # SGLang AllGather only. See LLAMAModel.supports_cp for the
+        # vLLM DCP exclusion rationale.
+        return backend_name == "sglang"
+
+    @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
         moe_args = (model_info["topk"], model_info["num_experts"], model_info["moe_inter_size"])
         base_args = (
@@ -90,15 +96,54 @@ class DeepSeekV32Model(BaseModel):
             return TrtllmWideEPDeepSeekV32Model(*moe_args, *base_args, extra_params)
         return cls(*moe_args, *base_args, extra_params)
 
+    def _cp_attn_comm_ops(self) -> list:
+        """DSV3.2 emits TWO per-layer AllGathers under sglang NSA prefill-CP:
+
+        1. **Indexer key gather** -- so each rank's local Q rows can do
+           topk selection against the full-sequence indexer keys.
+        2. **MLA latent KV gather** ([k_nope, k_pe]) -- so each rank's
+           local Q can do final attention against the full latent KV.
+
+        BaseModel emits ONE combined gather sized for the sum -- the total
+        bytes is correct but NCCL is alpha + beta*size, so the combined
+        op undercounts launch overhead by one alpha per layer. Override
+        here to emit two correctly-sized ops.
+        """
+        from aiconfigurator.sdk import operations as ops
+
+        cp_size = self.config.cp_size
+        if cp_size <= 1 or self.config.cp_style != "allgather":
+            return super()._cp_attn_comm_ops()
+        comm_bytes = self.config.comm_quant_mode.value.memory
+        indexer_bytes, latent_bytes = self._dsa_indexer_and_latent_bytes(
+            self.extra_params, self.config.kvcache_quant_mode
+        )
+        return [
+            ops.NCCL(
+                "context_cp_indexer_all_gather",
+                self._num_layers,
+                "all_gather",
+                num_elements_per_token=indexer_bytes / comm_bytes,
+                num_gpus=cp_size,
+                comm_quant_mode=self.config.comm_quant_mode,
+            ),
+            ops.NCCL(
+                "context_cp_latent_all_gather",
+                self._num_layers,
+                "all_gather",
+                num_elements_per_token=latent_bytes / comm_bytes,
+                num_gpus=cp_size,
+                comm_quant_mode=self.config.comm_quant_mode,
+            ),
+        ]
+
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
 
-        assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
-        ), (
-            f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+        # Attention/expert width matching: tp * cp * dp == moe_tp * moe_ep.
+        assert self.config.attn_width == self.config.moe_tp_size * self.config.moe_ep_size, (
+            f"attn_width tp*cp*dp ({self.config.attn_width}) must equal moe_tp_size * moe_ep_size "
+            f"({self.config.moe_tp_size * self.config.moe_ep_size})"
         )
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
 
@@ -132,26 +177,36 @@ class DeepSeekV32Model(BaseModel):
         )
         local_heads = self._num_heads // tp_size
 
+        # CP (sequence parallelism). See Llama for the rationale. DSV3.2
+        # only supports sglang AllGather here. ``attn_head_div`` is
+        # computed for uniformity but collapses to 1 under "allgather".
+        cp = self.config.cp_size
+        cp_style = self.config.cp_style
+        attn_count_div = cp if cp_style in ("allgather", "ring") else 1
+        attn_head_div = cp if cp_style == "ulysses" else 1
+
         self.context_ops.extend(
             [
-                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
-                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3, seq_split=cp),
+                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
                 ops.ContextDSAModule(
                     "context_attention",
-                    self._num_layers,
-                    local_heads,
+                    self._num_layers / attn_count_div,
+                    local_heads // attn_head_div,
                     kvcache_quant_mode,
                     fmha_quant_mode,
                     dsa_gemm_quant_mode,
                     architecture=self.architecture,
                 ),
-                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                *self._cp_attn_comm_ops(),
+                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
                 ops.GEMM(
                     "context_shared_gate_up_gemm",
                     self._num_layers,
                     2 * self._moe_inter_size // tp_size,
                     h,
                     gemm_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.ElementWise(
                     "context_shared_act_gate",
@@ -159,6 +214,7 @@ class DeepSeekV32Model(BaseModel):
                     2 * self._moe_inter_size // tp_size,
                     self._moe_inter_size // tp_size,
                     0.8,
+                    seq_split=cp,
                 ),
                 ops.GEMM(
                     "context_shared_ffn2_gemm",
@@ -166,6 +222,7 @@ class DeepSeekV32Model(BaseModel):
                     h,
                     self._moe_inter_size // tp_size,
                     gemm_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.GEMM(
                     "context_router_gemm",
@@ -173,6 +230,7 @@ class DeepSeekV32Model(BaseModel):
                     self._num_experts,
                     h,
                     common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
                 ),
                 ops.MoEDispatch(
                     "context_moe_pre_dispatch",
@@ -185,6 +243,7 @@ class DeepSeekV32Model(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.MoE(
                     "context_moe",
@@ -210,6 +269,7 @@ class DeepSeekV32Model(BaseModel):
                     attention_dp_size,
                     False,
                     quant_mode=moe_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.GEMM(
                     "context_logits_gemm",
@@ -217,6 +277,7 @@ class DeepSeekV32Model(BaseModel):
                     self._vocab_size // tp_size,
                     h,
                     common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
                 ),
             ]
         )
@@ -333,38 +394,76 @@ class DeepSeekV32Model(BaseModel):
         )
 
         pp_scale_factor = pp_size - 1
-        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
+        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size, seq_split=cp))
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
+
+    # ----- KV bytes API: required override per BaseModel contract --------
+
+    @staticmethod
+    def _dsa_dims(extra_params) -> tuple[int, int, int]:
+        """Pull DSA latent + indexer dims with DSV3.2 defaults."""
+        extra = extra_params if isinstance(extra_params, dict) else {}
+        return (
+            extra.get("kv_lora_rank", 512),
+            extra.get("qk_rope_head_dim", 64),
+            extra.get("index_head_dim", 128),
+        )
+
+    @staticmethod
+    def _dsa_bytes_per_layer_per_token(extra_params, kvcache_quant_mode) -> float:
+        """DSA layout: kv_lora at kvcache dtype + qk_rope at BF16 + indexer cache."""
+        kv_lora_rank, qk_rope_head_dim, index_head_dim = DeepSeekV32Model._dsa_dims(extra_params)
+        return (
+            kv_lora_rank * kvcache_quant_mode.value.memory
+            + qk_rope_head_dim * common.GEMMQuantMode.bfloat16.value.memory
+            + common.indexer_cache_entry_bytes(index_head_dim)
+        )
+
+    @staticmethod
+    def _dsa_indexer_and_latent_bytes(extra_params, kvcache_quant_mode) -> tuple[float, float]:
+        """Split per-layer per-token bytes into (indexer, latent) for CP gather sizing.
+
+        SGLang's NSA prefill-CP path issues TWO separate AllGathers per layer
+        (indexer key + MLA latent KV) -- see ``_cp_attn_comm_ops`` override.
+        Sum equals ``_dsa_bytes_per_layer_per_token``.
+        """
+        kv_lora_rank, qk_rope_head_dim, index_head_dim = DeepSeekV32Model._dsa_dims(extra_params)
+        indexer_bytes = float(common.indexer_cache_entry_bytes(index_head_dim))
+        latent_bytes = (
+            kv_lora_rank * kvcache_quant_mode.value.memory
+            + qk_rope_head_dim * common.GEMMQuantMode.bfloat16.value.memory
+        )
+        return indexer_bytes, latent_bytes
 
     def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
         seq_len = max(0, seq_len)
-        extra = self.extra_params if isinstance(self.extra_params, dict) else {}
-        kv_lora_rank = extra.get("kv_lora_rank", 512)
-        qk_rope_head_dim = extra.get("qk_rope_head_dim", 64)
-        index_head_dim = extra.get("index_head_dim", 128)
-        return (
-            self._num_layers
-            * seq_len
-            * (
-                kv_lora_rank * self.config.kvcache_quant_mode.value.memory
-                + qk_rope_head_dim * common.GEMMQuantMode.bfloat16.value.memory
-                + common.indexer_cache_entry_bytes(index_head_dim)
-            )
-        )
+        per_layer_per_token = self._dsa_bytes_per_layer_per_token(self.extra_params, self.config.kvcache_quant_mode)
+        return seq_len * self._num_layers * per_layer_per_token
 
 
 class TrtllmWideEPDeepSeekV32Model(BaseModel):
     """TensorRT-LLM WideEP variant for DeepSeekV32-family models such as DeepSeek-V3.2 and GLM-5."""
 
+    @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # TRT-LLM Ring CP isn't wired up yet. See TrtllmWideEPDeepSeekModel.
+        return False
+
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        """DSA layout (mirrors ``DeepSeekV32Model``)."""
+        seq_len = max(0, seq_len)
+        per_layer_per_token = DeepSeekV32Model._dsa_bytes_per_layer_per_token(
+            self.extra_params, self.config.kvcache_quant_mode
+        )
+        return seq_len * self._num_layers * per_layer_per_token
+
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
 
-        assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
-        ), (
-            f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+        # Attention/expert width matching: tp * cp * dp == moe_tp * moe_ep.
+        assert self.config.attn_width == self.config.moe_tp_size * self.config.moe_ep_size, (
+            f"attn_width tp*cp*dp ({self.config.attn_width}) must equal moe_tp_size * moe_ep_size "
+            f"({self.config.moe_tp_size * self.config.moe_ep_size})"
         )
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
 
@@ -613,6 +712,40 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
 class WideEPDeepSeekV32Model(BaseModel):
     """SGLang WideEP variant for DeepSeekV32-family models such as DeepSeek-V3.2 and GLM-5."""
 
+    @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        return backend_name == "sglang"
+
+    def _cp_attn_comm_ops(self) -> list:
+        """Same indexer + latent split as ``DeepSeekV32Model._cp_attn_comm_ops``."""
+        from aiconfigurator.sdk import operations as ops
+
+        cp_size = self.config.cp_size
+        if cp_size <= 1 or self.config.cp_style != "allgather":
+            return super()._cp_attn_comm_ops()
+        comm_bytes = self.config.comm_quant_mode.value.memory
+        indexer_bytes, latent_bytes = DeepSeekV32Model._dsa_indexer_and_latent_bytes(
+            self.extra_params, self.config.kvcache_quant_mode
+        )
+        return [
+            ops.NCCL(
+                "context_cp_indexer_all_gather",
+                self._num_layers,
+                "all_gather",
+                num_elements_per_token=indexer_bytes / comm_bytes,
+                num_gpus=cp_size,
+                comm_quant_mode=self.config.comm_quant_mode,
+            ),
+            ops.NCCL(
+                "context_cp_latent_all_gather",
+                self._num_layers,
+                "all_gather",
+                num_elements_per_token=latent_bytes / comm_bytes,
+                num_gpus=cp_size,
+                comm_quant_mode=self.config.comm_quant_mode,
+            ),
+        ]
+
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
 
@@ -656,6 +789,13 @@ class WideEPDeepSeekV32Model(BaseModel):
         )
         local_heads = self._num_heads // tp_size
 
+        # CP (sequence parallelism). DSV3.2 WideEP only supports SGLang
+        # AllGather. ``attn_head_div`` unused here since ContextDSAModule
+        # takes ``num_heads`` and DSA latent isn't head-shard-friendly.
+        cp = self.config.cp_size
+        cp_style = self.config.cp_style
+        attn_count_div = cp if cp_style in ("allgather", "ring") else 1
+
         self.context_ops.extend(
             [
                 *(
@@ -667,6 +807,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                             h,
                             tp_size,
                             common.CommQuantMode.half,
+                            seq_split=cp,
                         )
                     ]
                     if tp_size > 1
@@ -674,13 +815,14 @@ class WideEPDeepSeekV32Model(BaseModel):
                 ),
                 ops.ContextDSAModule(
                     "context_attention",
-                    self._num_layers,
+                    self._num_layers / attn_count_div,
                     local_heads,
                     kvcache_quant_mode,
                     fmha_quant_mode,
                     dsa_gemm_quant_mode,
                     architecture=self.architecture,
                 ),
+                *self._cp_attn_comm_ops(),
                 *(
                     [
                         ops.NCCL(
@@ -690,6 +832,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                             h,
                             tp_size,
                             common.CommQuantMode.half,
+                            seq_split=cp,
                         )
                     ]
                     if tp_size > 1
@@ -702,6 +845,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     h,
                     gemm_quant_mode,
                     scale_num_tokens=tp_size,
+                    seq_split=cp,
                 ),
                 ops.ElementWise(
                     "context_act_gate",
@@ -710,6 +854,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     self._moe_inter_size,
                     0.8,
                     scale_num_tokens=tp_size,
+                    seq_split=cp,
                 ),
                 ops.GEMM(
                     "context_ffn2_gemm",
@@ -718,6 +863,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     self._moe_inter_size,
                     gemm_quant_mode,
                     scale_num_tokens=tp_size,
+                    seq_split=cp,
                 ),
                 ops.MoEDispatch(
                     "context_moe_pre_dispatch",
@@ -734,6 +880,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     moe_backend=moe_backend,
                     is_context=True,
                     scale_num_tokens=tp_size,
+                    seq_split=cp,
                 ),
                 ops.MoE(
                     "context_moe",
@@ -819,3 +966,13 @@ class WideEPDeepSeekV32Model(BaseModel):
                 ),
             ]
         )
+
+    # ----- KV bytes API: required override per BaseModel contract --------
+
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        """DSA layout (mirrors ``DeepSeekV32Model``)."""
+        seq_len = max(0, seq_len)
+        per_layer_per_token = DeepSeekV32Model._dsa_bytes_per_layer_per_token(
+            self.extra_params, self.config.kvcache_quant_mode
+        )
+        return seq_len * self._num_layers * per_layer_per_token

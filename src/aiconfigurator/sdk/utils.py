@@ -92,7 +92,7 @@ def filter_real_silicon_configs(
     TEP, pure DEP, and optionally pure TP patterns.
 
     Args:
-        parallel_config_list: List of ``[tp, pp, dp, moe_tp, moe_ep]`` configs.
+        parallel_config_list: List of ``[tp, pp, dp, moe_tp, moe_ep, cp]`` configs.
         is_moe: Whether the model is MoE.
         min_num_gpus: Minimum total GPUs per config (inclusive).
         max_num_gpus: Maximum total GPUs per config (inclusive).
@@ -105,8 +105,8 @@ def filter_real_silicon_configs(
     """
     filtered = []
     for cfg in parallel_config_list:
-        tp, pp, dp, _moe_tp, _moe_ep = cfg
-        total_gpus = tp * pp * dp
+        tp, pp, dp, _moe_tp, _moe_ep, cp = cfg
+        total_gpus = tp * pp * dp * cp
 
         # GPU count bounds
         if min_num_gpus is not None and total_gpus < min_num_gpus:
@@ -115,15 +115,17 @@ def filter_real_silicon_configs(
             continue
 
         # For MoE: only allow pure TEP, pure DEP, and optionally pure TP.
-        # - Pure TEP: tp > 1, dp == 1, moe_tp == 1, moe_ep > 1
-        # - Pure DEP: tp == 1, dp > 1, moe_tp == 1, moe_ep > 1
-        # - Pure TP:  tp > 1, dp == 1, moe_tp > 1, moe_ep == 1
+        # CP folds into the attention-side width (``tp * cp``), so "pure TEP"
+        # means the entire attention width comes from TP+CP, not DP.
+        # - Pure TEP: tp * cp > 1, dp == 1, moe_tp == 1, moe_ep > 1
+        # - Pure DEP: tp * cp == 1, dp > 1, moe_tp == 1, moe_ep > 1
+        # - Pure TP:  tp * cp > 1, dp == 1, moe_tp > 1, moe_ep == 1
         #   (only for GQA+MoE; disabled for MLA+MoE via allow_moe_pure_tp=False)
-        # Reject any config that doesn't match one of these patterns.
         if is_moe:
-            is_pure_tep = tp > 1 and dp == 1 and _moe_tp == 1 and _moe_ep > 1
-            is_pure_dep = tp == 1 and dp > 1 and _moe_tp == 1 and _moe_ep > 1
-            is_pure_tp = tp > 1 and dp == 1 and _moe_tp > 1 and _moe_ep == 1
+            attn_tp_width = tp * cp
+            is_pure_tep = attn_tp_width > 1 and dp == 1 and _moe_tp == 1 and _moe_ep > 1
+            is_pure_dep = attn_tp_width == 1 and dp > 1 and _moe_tp == 1 and _moe_ep > 1
+            is_pure_tp = attn_tp_width > 1 and dp == 1 and _moe_tp > 1 and _moe_ep == 1
             if not allow_moe_pure_tp:
                 is_pure_tp = False
             if not (is_pure_tep or is_pure_dep or is_pure_tp):
@@ -140,6 +142,7 @@ def enumerate_parallel_config(
     dp_list: list[int] = [1],
     moe_tp_list: list[int] = [1],
     moe_ep_list: list[int] = [1],
+    cp_list: list[int] = [1],
     is_moe: bool = False,
     backend: common.BackendName = common.BackendName.trtllm,
     enable_wideep: bool = False,
@@ -161,6 +164,9 @@ def enumerate_parallel_config(
         dp_list: list of data parallel sizes
         moe_tp_list: list of moe tensor parallel sizes
         moe_ep_list: list of moe expert parallel sizes
+        cp_list: list of context-parallel sizes. CP is an independent sequence
+            dimension, so total GPUs per worker is ``tp * pp * dp * cp`` and
+            MoE width is matched by ``tp * cp * dp == moe_tp * moe_ep``.
         is_moe: whether to use moe
         backend: backend name enum. Important for moe parallel enumeration as different backends
             have different moe parallel support.
@@ -179,30 +185,49 @@ def enumerate_parallel_config(
         pp_list = [1]
 
     parallel_config_list = []
+
+    # Only SGLang has CP-aware perf modeling today (DSV4 via DSA prefill CP).
+    # If a caller explicitly asks for cp > 1 on a non-SGLang backend, raise
+    # so they don't silently get a deployment plan for cp=1 geometry while
+    # thinking they ran a CP sweep. Lift this guard when vLLM / TRT-LLM gain
+    # CP support.
+    if backend != common.BackendName.sglang:
+        unsupported_cp = sorted({cp for cp in cp_list if cp != 1})
+        if unsupported_cp:
+            raise ValueError(
+                f"CP is only supported on sglang; got cp_list={unsupported_cp} for backend={backend.value}."
+            )
+        cp_list = [1]
+
     for tp in tp_list:
         for pp in pp_list:
             if is_moe:
                 for dp in dp_list:
-                    for moe_tp in moe_tp_list:
-                        for moe_ep in moe_ep_list:
-                            if dp * tp * pp in num_gpu_list and dp * tp == moe_tp * moe_ep:  # check num gpu and width
-                                # backend specific filters
-                                # trtllm
-                                if (
-                                    backend == common.BackendName.trtllm and dp > 1 and tp > 1
-                                ):  # trtllm as trtllm don't supports attn tp > 1
+                    for cp in cp_list:
+                        for moe_tp in moe_tp_list:
+                            for moe_ep in moe_ep_list:
+                                # Total GPUs and MoE width must match (cp folds
+                                # into the attention-side width).
+                                if dp * tp * pp * cp not in num_gpu_list:
                                     continue
-                                # sglang
-                                elif backend == common.BackendName.sglang:
-                                    if (enable_wideep or moe_backend in {"deepep_moe", "megamoe"}) and moe_tp > 1:
-                                        continue  # SGLang EP-only MoE backends require moe_tp=1.
-                                elif backend == common.BackendName.vllm:  # noqa: SIM102
-                                    if moe_tp > 1 and moe_ep > 1:
-                                        continue  # vllm does not support MoE TP and MoE EP simultaneously
-                                parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
+                                if dp * tp * cp != moe_tp * moe_ep:
+                                    continue
+                                # Backend-specific filters
+                                if backend == common.BackendName.trtllm and dp > 1 and tp > 1:
+                                    continue  # TRT-LLM doesn't support attn tp > 1
+                                if (
+                                    backend == common.BackendName.sglang
+                                    and (enable_wideep or moe_backend in {"deepep_moe", "megamoe"})
+                                    and moe_tp > 1
+                                ):
+                                    continue  # SGLang EP-only MoE backends require moe_tp=1.
+                                if backend == common.BackendName.vllm and moe_tp > 1 and moe_ep > 1:
+                                    continue  # vLLM does not support MoE TP and MoE EP simultaneously
+                                parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep, cp])
             else:
-                if tp * pp in num_gpu_list:
-                    parallel_config_list.append([tp, pp, 1, 1, 1])
+                for cp in cp_list:
+                    if tp * pp * cp in num_gpu_list:
+                        parallel_config_list.append([tp, pp, 1, 1, 1, cp])
 
     # Apply real silicon sweep filters to reduce sweep time on real silicon
     if real_silicon_sweep:
