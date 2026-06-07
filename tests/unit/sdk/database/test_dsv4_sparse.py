@@ -67,7 +67,7 @@ def _ctx_row(
 ) -> str:
     # SCHEME A: the collector writes the rank-LOCAL head count (native // tp);
     # callers may override it to simulate different shardings on one model.
-    heads = _native_heads_for_model(model) if num_heads is None else num_heads
+    heads = _native_heads_for_model(model) // tp if num_heads is None else num_heads
     return (
         f"SGLang,test,NVIDIA H20-3e,dsv4_{attn_kind}_context_module,"
         f"compressed_flashmla,{model},DeepseekV4ForCausalLM,"

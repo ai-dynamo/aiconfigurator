@@ -2014,8 +2014,8 @@ def load_dsv4_sparse_op_data(file_or_sources, key_columns):
     nests every row under ``key_columns`` in order, leaf == ``{"latency": ms}``.
 
     Numeric key cells coerce to ``int``; non-numeric stay ``str`` (e.g.
-    ``score_mode``). Rows with a NaN/blank key are skipped. Returns ``None``
-    when no source file exists.
+    ``score_mode``). Rows with a blank or NaN/inf key cell are skipped.
+    Returns ``None`` when no source file exists.
 
     Consumers:
       - sparse kernels: ``_SPARSE_KERNEL_KEYS`` -> data[heads][tp][past_kv][isl][bs]
@@ -2028,8 +2028,28 @@ def load_dsv4_sparse_op_data(file_or_sources, key_columns):
     def _coerce(value):
         try:
             return int(float(value))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return value
+
+    def _is_bad_key(k):
+        # A key cell that is blank or a NaN/inf sentinel must not become a dict
+        # key: such rows are malformed and would misbucket (or KeyError) the
+        # downstream calibration lookup. Legitimate non-numeric keys (e.g.
+        # ``score_mode`` values like ``"default"``) are kept.
+        if k is None:
+            return True
+        if isinstance(k, float):  # uncoerced float NaN/inf
+            return k != k or k in (float("inf"), float("-inf"))
+        if isinstance(k, str):
+            return k.strip() == "" or k.strip().lower() in (
+                "nan",
+                "inf",
+                "-inf",
+                "+inf",
+                "infinity",
+                "-infinity",
+            )
+        return False
 
     root: dict = {}
     for row in rows:
@@ -2041,7 +2061,7 @@ def load_dsv4_sparse_op_data(file_or_sources, key_columns):
             latency = float(row["latency"])
         except (KeyError, TypeError, ValueError):
             continue
-        if any(isinstance(k, float) and k != k for k in keys):  # NaN key cell
+        if any(_is_bad_key(k) for k in keys):  # blank / NaN / inf key cell
             continue
         node = root
         for k in keys[:-1]:
