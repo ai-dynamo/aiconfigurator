@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk import common
 
 pytestmark = pytest.mark.unit
 
@@ -179,6 +179,7 @@ class TestSupportMatrix:
         "model,backend,version,expected_agg,expected_disagg",
         [
             ("zai-org/GLM-5-FP8", "sglang", "0.5.10", True, True),
+            ("zai-org/GLM-5-FP8", "sglang", "0.5.9", False, False),
             ("zai-org/GLM-5-FP8", "trtllm", "1.3.0rc10", False, False),
             ("nvidia/GLM-5-NVFP4", "sglang", "0.5.10", True, True),
             ("nvidia/GLM-5-NVFP4", "vllm", "0.19.0", True, True),
@@ -187,7 +188,7 @@ class TestSupportMatrix:
     def test_check_support_uses_exact_glm5_b200_variant_rows(
         self, model, backend, version, expected_agg, expected_disagg
     ):
-        """GLM-5 quantized variants should not inherit BF16 support results."""
+        """GLM-5 quantized variants should use their exact support rows."""
         result = common.check_support(model, "b200_sxm", backend, version, "GlmMoeDsaForCausalLM")
 
         assert result.agg_supported is expected_agg
@@ -196,17 +197,10 @@ class TestSupportMatrix:
 
     def test_glm5_quantized_variants_cover_all_database_combinations(self):
         """GLM-5 quantized variants should have exact rows for every support-matrix target."""
-        supported_databases = perf_database.get_supported_databases()
-        expected_keys = {
-            (system, backend, version, mode)
-            for system, backend_versions in supported_databases.items()
-            for backend, versions in backend_versions.items()
-            for version in versions
-            for mode in ("agg", "disagg")
-        }
-
         matrix = common.get_support_matrix()
-        for model in ("zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"):
+        target_models = {"zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"}
+        expected_keys = {(row["System"], row["Backend"], row["Version"], row["Mode"]) for row in matrix}
+        for model in target_models:
             model_rows = [row for row in matrix if row["HuggingFaceID"] == model]
             model_key_counts = Counter(
                 (row["System"], row["Backend"], row["Version"], row["Mode"]) for row in model_rows

@@ -79,14 +79,63 @@ all_frameworks_op_cases:
         fp8_kv_cache: true
         fp8_context_fmha: true
 framework_specific_op_cases:
+  sglang:
+    attention_context:
+      cases:
+      - id: base_attention_context_shape_sweep
+        query_head_counts:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 8
+        - 12
+        - 16
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        - 96
+        head_dims:
+        - 64
+        - 128
+        - 192
+        - 256
+        window_sizes:
+        - 0
+        - 128
+        - 1024
   trtllm:
     attention_context:
       cases:
       - id: base_attention_context_shape_sweep
+        query_head_counts:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 8
+        - 10
+        - 12
+        - 16
+        - 20
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        - 96
         head_dims:
         - 64
         - 128
+        - 192
         - 256
+        window_sizes:
+        - 0
+        - 1024
   vllm:
     attention_context:
       cases:
@@ -94,6 +143,7 @@ framework_specific_op_cases:
         query_head_counts:
         - 1
         - 2
+        - 3
         - 4
         - 8
         - 12
@@ -104,11 +154,16 @@ framework_specific_op_cases:
         - 48
         - 64
         head_dims:
-        - 128
         - 64
+        - 128
+        - 192
+        - 256
+        - 512
         window_sizes:
         - 0
         - 128
+        - 1024
+        - 8192
   vllm_xpu:
     attention_context:
       cases:

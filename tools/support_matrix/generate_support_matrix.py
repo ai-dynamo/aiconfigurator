@@ -53,6 +53,29 @@ def main():
         default=None,
         help="Maximum number of processes for parallel execution (default: auto)",
     )
+    parser.add_argument("--model", "--model-path", dest="model", type=str, default=None, help="Only test this model.")
+    parser.add_argument("--system", type=str, default=None, help="Only test this system.")
+    parser.add_argument("--backend", type=str, default=None, help="Only test this backend.")
+    parser.add_argument(
+        "--backend-version",
+        "--version",
+        dest="backend_version",
+        type=str,
+        default=None,
+        help="Only test this backend database version.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["agg", "disagg", "all"],
+        default="all",
+        help="Only test one serving mode. Default: all.",
+    )
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        default=False,
+        help="Run checks and print the summary without writing support-matrix CSV files.",
+    )
     parser.add_argument(
         "--compare-engine-step-backends",
         action="store_true",
@@ -86,7 +109,17 @@ def main():
 
     args = parser.parse_args()
 
-    print(f"Saving results to {args.output}")
+    has_filters = (
+        any(arg is not None for arg in (args.model, args.system, args.backend, args.backend_version))
+        or args.mode != "all"
+    )
+    if has_filters and not args.no_save and args.output == default_output:
+        parser.error("filtered support-matrix runs require --no-save or an explicit --output path")
+
+    if args.no_save:
+        print("Running support-matrix checks without writing CSV output")
+    else:
+        print(f"Saving results to {args.output}")
 
     # Setup logging
     logging.basicConfig(
@@ -101,9 +134,27 @@ def main():
         engine_step_frontier_rtol=args.engine_step_frontier_rtol,
         engine_step_frontier_atol=args.engine_step_frontier_atol,
     )
-    results = support_matrix.test_support_matrix(max_workers=args.max_workers)
+    combinations = support_matrix.generate_combinations()
+    if args.model is not None:
+        combinations = [combo for combo in combinations if combo[0] == args.model]
+    if args.system is not None:
+        combinations = [combo for combo in combinations if combo[1] == args.system]
+    if args.backend is not None:
+        combinations = [combo for combo in combinations if combo[2] == args.backend]
+    if args.backend_version is not None:
+        combinations = [combo for combo in combinations if combo[3] == args.backend_version]
+    if not combinations:
+        parser.error("No support-matrix combinations matched the provided filters.")
 
-    # Always save results (now has a default output location)
+    modes_to_test = None if args.mode == "all" else (args.mode,)
+    results = support_matrix.test_support_matrix(
+        max_workers=args.max_workers,
+        combinations=combinations,
+        modes_to_test=modes_to_test,
+    )
+
+    if args.no_save:
+        return
     support_matrix.save_results_to_csv(results, args.output)
 
 

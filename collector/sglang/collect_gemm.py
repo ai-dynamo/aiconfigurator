@@ -66,6 +66,11 @@ def get_gemm_test_cases():
         # SM120+ (RTX PRO 6000 Blackwell workstation): no DeepGEMM recipe for fp8_block
         gemm_list = ["bfloat16", "fp8", "nvfp4"]
 
+    requested_gemm_types = os.environ.get("AIC_COLLECT_GEMM_TYPES")
+    if requested_gemm_types:
+        requested = {item.strip() for item in requested_gemm_types.split(",") if item.strip()}
+        gemm_list = [gemm_type for gemm_type in gemm_list if gemm_type in requested]
+
     for gemm_common_testcase in get_gemm_case_specs():
         x = gemm_common_testcase.x
         n = gemm_common_testcase.n
@@ -239,51 +244,76 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
 
             return gemm_op
 
-    # Scale loop count down for large matrices to avoid OOM.
-    # Each iteration holds persistent tensors (~M*K*2 + N*K + M*N*2 bytes for fp8).
-    # Cap at 6 for small shapes (L2 thrashing mitigation), reduce for large ones.
-    _bytes_per_elem = {"bfloat16": 2, "fp8": 1, "fp8_block": 1, "nvfp4": 0.5}
-    _weight_bytes = int(N * K * _bytes_per_elem.get(gemm_type, 2))
-    _gpu_mem = torch.cuda.get_device_properties(device).total_memory
-    # Estimate per-iteration footprint: weight + activation + output
-    _iter_bytes = _weight_bytes + M * K * 2 + M * N * 2
-    outside_loop_count = max(1, min(6, int(_gpu_mem * 0.7 / _iter_bytes)))
     op_list = []
-    for _ in range(outside_loop_count):
-        op = create_gemm()
-        if op is not None:
-            op_list.append(op)
+    try:
+        # Scale loop count down for large matrices to avoid OOM. FP8 setup briefly
+        # materializes FP32 tensors before retaining quantized weights, so account
+        # for both persistent and transient pressure instead of only steady state.
+        _gpu_mem = torch.cuda.get_device_properties(device).total_memory
+        _persistent_bytes = M * K * 2 + M * N * 2
+        _transient_bytes = 0
+        if gemm_type == "bfloat16":
+            _persistent_bytes += N * K * 2
+        elif gemm_type == "fp8":
+            _persistent_bytes += N * K + M * K + N * 4 + M * 4
+            _transient_bytes = N * K * 4
+        elif gemm_type == "fp8_static":
+            _persistent_bytes += M * K + N * K + M * 4 + N * 4
+            _transient_bytes = (M * K + N * K) * 4
+        elif gemm_type == "fp8_block":
+            _persistent_bytes += N * K + cdiv(N, 128) * cdiv(K, 128) * 4
+            _transient_bytes = N * K * 4
+        elif gemm_type == "nvfp4":
+            _persistent_bytes += int(N * K * 0.75)
+            _transient_bytes = N * K * 2
 
-    if not op_list:
-        print(f"No ops created for {gemm_type}, skipping.")
-        return
+        _budget = int(_gpu_mem * 0.45)
+        if _persistent_bytes + _transient_bytes >= _budget:
+            outside_loop_count = 1
+        else:
+            outside_loop_count = max(1, min(6, (_budget - _transient_bytes) // max(_persistent_bytes, 1)))
 
-    def kernel_func():
-        for op in op_list:
-            op()
+        for _ in range(outside_loop_count):
+            op = create_gemm()
+            if op is not None:
+                op_list.append(op)
 
-    # Use benchmark_with_power context manager
-    nvtx_tag = f"{gemm_type}_m{M}_n{N}_k{K}"
-    torch.cuda.nvtx.range_push(nvtx_tag)
+        if not op_list:
+            print(f"No ops created for {gemm_type}, skipping.")
+            return
 
-    with benchmark_with_power(
-        device=device,
-        kernel_func=kernel_func,
-        num_warmups=3,
-        num_runs=6,
-        repeat_n=1,
-    ) as results:
-        pass
+        def kernel_func():
+            for op in op_list:
+                op()
 
-    torch.cuda.nvtx.range_pop()
+        # Use benchmark_with_power context manager
+        nvtx_tag = f"{gemm_type}_m{M}_n{N}_k{K}"
+        torch.cuda.nvtx.range_push(nvtx_tag)
 
-    log_perf(
-        item_list=[{"gemm_dtype": gemm_type, "m": M, "n": N, "k": K, "latency": results["latency_ms"] / len(op_list)}],
-        framework="SGLang",
-        version=pkg_resources.get_distribution("sglang").version,
-        device_name=torch.cuda.get_device_name(device),
-        op_name="gemm",
-        kernel_source="sglang",
-        perf_filename=perf_filename,
-        power_stats=results["power_stats"],
-    )
+        try:
+            with benchmark_with_power(
+                device=device,
+                kernel_func=kernel_func,
+                num_warmups=3,
+                num_runs=6,
+                repeat_n=1,
+            ) as results:
+                pass
+        finally:
+            torch.cuda.nvtx.range_pop()
+
+        log_perf(
+            item_list=[
+                {"gemm_dtype": gemm_type, "m": M, "n": N, "k": K, "latency": results["latency_ms"] / len(op_list)}
+            ],
+            framework="SGLang",
+            version=pkg_resources.get_distribution("sglang").version,
+            device_name=torch.cuda.get_device_name(device),
+            op_name="gemm",
+            kernel_source="sglang",
+            perf_filename=perf_filename,
+            power_stats=results["power_stats"],
+        )
+    finally:
+        op_list.clear()
+        torch.cuda.empty_cache()

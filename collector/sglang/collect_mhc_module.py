@@ -4,9 +4,8 @@
 """DeepSeek-V4 mHC pre/post module collector for SGLang."""
 
 # Requires an SGLang build with DeepSeek-V4 support. Stock lmsysorg/sglang:v*
-# images may not include the required deepseek_v4 modules; use a
-# deepseek-v4-blackwell/deepseek-v4-grace-blackwell image or matching Dynamo
-# sglang-runtime:*deepseek-v4* image.
+# images may not include the required deepseek_v4 modules; use a DeepSeek-V4
+# capable image or put a matching SGLang source tree on PYTHONPATH.
 from __future__ import annotations
 
 import argparse
@@ -23,6 +22,7 @@ from importlib.metadata import version as get_version
 import torch
 
 os.environ.setdefault("SGLANG_APPLY_CONFIG_BACKUP", "none")
+os.environ.setdefault("SGLANG_OPT_DEEPGEMM_HC_PRENORM", "0")
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if THIS_DIR not in sys.path:
@@ -267,7 +267,7 @@ def _make_kernel(layer, op: str, residual: torch.Tensor):
         torch.cuda.synchronize()
 
         def kernel():
-            return [layer.hc_post(x, residual, post, comb) for x, post, comb in post_inputs]
+            return [layer.hc_post(x, residual, post, comb) for x, post, comb, *_ in post_inputs]
 
         return kernel
 

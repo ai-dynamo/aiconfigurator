@@ -9,7 +9,7 @@ Shared MoE shapes come from YAML; this file owns TRT-LLM version quirks and
 kernel-specific filters.
 """
 
-__compat__ = "trtllm>=1.1.0,<=1.3.0rc10"
+__compat__ = "trtllm>=1.0.0,<=1.3.0rc15"
 
 import gc
 import glob
@@ -27,16 +27,21 @@ from tensorrt_llm._torch.autotuner import AutoTuner, autotune
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV3Gate
 from tensorrt_llm._torch.modules.fused_moe import RenormalizeMoeRoutingMethod, create_moe
-from tensorrt_llm._torch.utils import ActivationType
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
+
+try:
+    from tensorrt_llm._torch.utils import ActivationType
+except ImportError:
+    ActivationType = None
 
 # Models that use non-gated MoE (Relu2 activation instead of SwiGLU)
 # These are substring patterns that will be matched against the full model name
 # supported in trtllm 1.3.0rc1, please expect failures for these models if using trtllm < 1.3.0rc1
 NON_GATED_MOE_MODELS = ["Nemotron-3"]
+_MXFP4_MOE_TYPES = {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
 
-from collector.case_generator import get_common_moe_test_cases
+from collector.case_generator import get_common_moe_test_cases, moe_model_allows_quantization
 from collector.helper import (
     EXIT_CODE_RESTART,
     balanced_logits,
@@ -165,6 +170,7 @@ def get_moe_test_cases():
         # SM90 (Hopper) and SM100 (Blackwell) both support fp8_block.
         # SM90 uses CUTLASS backend with FP32 scale.
         # SM100 uses DEEPGEMM/TRTLLM backend with UE8M0 scale (MXFP8 style).
+    if sm_version >= 90:
         moe_list += ["fp8_block"]
 
     # SM90 specific quant mode.
@@ -172,9 +178,9 @@ def get_moe_test_cases():
         moe_list += ["w4a16_mxfp4"]
 
     if sm_version >= 100:
-        moe_list += ["nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"]
-
-    _GPTOSS_MOE_TYPES = {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}  # noqa: N806
+        # Keep plain INT4/W4A16 in the collector sweep so unsupported model rows
+        # can fail in TensorRT-LLM itself instead of stopping at AIC validation.
+        moe_list += ["int4_wo", "nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"]
 
     test_cases = []
 
@@ -184,15 +190,8 @@ def get_moe_test_cases():
         moe_tp = common_moe_testcase.tp
 
         for moe_type in moe_list:
-            if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
-                if moe_type not in _GPTOSS_MOE_TYPES:
-                    continue
-                if sm_version >= 120 and _is_trtllm_130rc5_or_rc10_runtime():
-                    # TRTLLMGenFusedMoE in 1.3.0rc5/1.3.0rc10 rejects SM120+.
-                    continue
-            else:
-                if moe_type in _GPTOSS_MOE_TYPES:
-                    continue
+            if not moe_model_allows_quantization("trtllm", model_name, moe_type):
+                continue
 
             # w4afp8 requires k shape to be multiple of 128
             if moe_type == "w4afp8" and inter_s // moe_tp % 128 != 0:
@@ -220,6 +219,7 @@ def get_moe_test_cases():
                 "bfloat16": 16,
                 "fp8": 8,
                 "fp8_block": 8,
+                "int4_wo": 4,
                 "w4a16_mxfp4": 4,
                 "w4a8_mxfp4_mxfp8": 4,
                 "w4afp8": 4,
@@ -316,6 +316,8 @@ def run_moe_torch(
     elif moe_type == "fp8":
         quant_algo = QuantAlgo.FP8
         dtype = torch.float8_e4m3fn
+    elif moe_type == "int4_wo":
+        quant_algo = QuantAlgo.W4A16
     elif moe_type == "nvfp4":
         quant_algo = QuantAlgo.NVFP4
         quant_group_size = 16
@@ -367,10 +369,15 @@ def run_moe_torch(
     # Nemotron-3 Nano uses non-gated MoE with Relu2 activation
     # Other models (DeepSeek, Qwen, Mixtral) use gated MoE with SwiGLU activation
     if any(pattern in model_name for pattern in NON_GATED_MOE_MODELS):
+        if ActivationType is None:
+            raise RuntimeError(
+                f"TensorRT-LLM {_TRTLLM_VERSION} does not expose ActivationType; "
+                f"cannot collect non-gated MoE model {model_name}"
+            )
         activation_type = ActivationType.Relu2
         is_gated = False
     else:
-        activation_type = ActivationType.Swiglu
+        activation_type = ActivationType.Swiglu if ActivationType is not None else None
         is_gated = True
 
     sm_version = get_sm_version()
@@ -392,6 +399,10 @@ def run_moe_torch(
     else:
         # Select backend based on platform and quant mode.
         if min_latency_mode:
+            model_config.moe_backend = "trtllm"
+        elif moe_type in _MXFP4_MOE_TYPES and sm_version >= 100:
+            # Blackwell MXFP4 MoE is implemented by TRTLLMGenFusedMoE; CUTLASS
+            # rejects WFP4A16 on SM100.
             model_config.moe_backend = "trtllm"
         elif moe_type == "fp8_block":
             if sm_version >= 100:
@@ -426,21 +437,27 @@ def run_moe_torch(
         # for low latency mode in fp4, experts > 128 is not supported.
         routing_method = RenormalizeMoeRoutingMethod(topk)
 
-    moe = create_moe(
-        routing_method=routing_method,
-        num_experts=num_experts,
-        hidden_size=hidden_size,
-        intermediate_size=inter_size,
-        dtype=dtype,
+    create_moe_kwargs = {
+        "routing_method": routing_method,
+        "num_experts": num_experts,
+        "hidden_size": hidden_size,
+        "intermediate_size": inter_size,
+        "dtype": dtype,
         # In both low latency and attention dp scenarios, create_moe needs not to do allreduce
         # inside op.
-        reduce_results=False,
-        model_config=model_config,
-        swiglu_alpha=swiglu_alpha,
-        swiglu_beta=swiglu_beta,
-        swiglu_limit=swiglu_limit,
-        activation_type=activation_type,
-    )
+        "reduce_results": False,
+        "model_config": model_config,
+    }
+    create_moe_params = inspect.signature(create_moe).parameters
+    if "swiglu_alpha" in create_moe_params:
+        create_moe_kwargs["swiglu_alpha"] = swiglu_alpha
+    if "swiglu_beta" in create_moe_params:
+        create_moe_kwargs["swiglu_beta"] = swiglu_beta
+    if "swiglu_limit" in create_moe_params:
+        create_moe_kwargs["swiglu_limit"] = swiglu_limit
+    if "activation_type" in create_moe_params and activation_type is not None:
+        create_moe_kwargs["activation_type"] = activation_type
+    moe = create_moe(**create_moe_kwargs)
     moe.to(torch.device(device))
 
     # SM100 (Blackwell) DeepGEMM expects weight scales (SFB) in int32 UE8M0 format,
@@ -487,9 +504,10 @@ def run_moe_torch(
     # the proper shuffle/permutation (torch.ops.trtllm.shuffle_matrix) is applied,
     # which the kernel expects for correct memory access patterns.
     if moe_type in ("w4a16_mxfp4", "w4a8_mxfp4_mxfp8"):
-        w1_bias = torch.randn((num_experts, inter_size), dtype=dtype, device=device)
-        w2_bias = torch.randn((num_experts, hidden_size), dtype=dtype, device=device)
-        w3_bias = torch.randn((num_experts, inter_size), dtype=dtype, device=device)
+        local_num_experts = num_experts // moe_ep_size
+        w1_bias = torch.randn((local_num_experts, inter_size), dtype=dtype, device=device)
+        w2_bias = torch.randn((local_num_experts, hidden_size), dtype=dtype, device=device)
+        w3_bias = torch.randn((local_num_experts, inter_size), dtype=dtype, device=device)
 
         from triton_kernels.numerics_details.mxfp import downcast_to_mxfp_torch
 
@@ -501,23 +519,23 @@ def run_moe_torch(
             return tensor_fp4, tensor_scales
 
         # Convert one weight tensor at a time to lower peak memory.
-        w1_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype, device=device)
+        w1_weight = torch.randn((local_num_experts, inter_size, hidden_size), dtype=dtype, device=device)
         w1_weight_fp4, w1_weight_scale = fp32_to_mxfp4(w1_weight)
         del w1_weight
         torch.cuda.empty_cache()
 
-        w2_weight = torch.randn((num_experts, hidden_size, inter_size), dtype=dtype, device=device)
+        w2_weight = torch.randn((local_num_experts, hidden_size, inter_size), dtype=dtype, device=device)
         w2_weight_fp4, w2_weight_scale = fp32_to_mxfp4(w2_weight)
         del w2_weight
         torch.cuda.empty_cache()
 
-        w3_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype, device=device)
+        w3_weight = torch.randn((local_num_experts, inter_size, hidden_size), dtype=dtype, device=device)
         w3_weight_fp4, w3_weight_scale = fp32_to_mxfp4(w3_weight)
         del w3_weight
         torch.cuda.empty_cache()
 
         weights = {}
-        for expert_id in range(num_experts):
+        for expert_id in range(local_num_experts):
             weights[f"{expert_id}.w1.weight"] = w1_weight_fp4[expert_id]
             weights[f"{expert_id}.w2.weight"] = w2_weight_fp4[expert_id]
             weights[f"{expert_id}.w3.weight"] = w3_weight_fp4[expert_id]
@@ -543,7 +561,8 @@ def run_moe_torch(
                 print(f"Successfully dry run for {max_tokens} tokens")
             break
         except Exception as e:
-            if isinstance(e, torch.AcceleratorError):
+            accelerator_error = getattr(torch, "AcceleratorError", None)
+            if accelerator_error is not None and isinstance(e, accelerator_error):
                 raise
             if i == len(num_tokens_lists) - 1:
                 raise RuntimeError(f"dry run failed for {max_tokens} tokens: {e}") from e
@@ -578,10 +597,13 @@ def run_moe_torch(
                     continue
                 else:
                     try:
-                        # Check if autotune() accepts "rank" kwarg.
-                        # It was removed in trtllm 1.2.0rc6.
-                        autotune_kwargs = {"cache_path": cache_path}
-                        if "rank" in inspect.signature(autotune).parameters:
+                        # Check which autotune() kwargs are accepted. These
+                        # moved across TRT-LLM torch-flow releases.
+                        autotune_params = inspect.signature(autotune).parameters
+                        autotune_kwargs = {}
+                        if "cache_path" in autotune_params:
+                            autotune_kwargs["cache_path"] = cache_path
+                        if "rank" in autotune_params:
                             autotune_kwargs["rank"] = torch.device(device).index
 
                         with torch.inference_mode(), autotune(**autotune_kwargs):

@@ -11,6 +11,7 @@ legacy tuple/dataclass shapes consumed by collector modules.
 
 import copy
 import dataclasses
+import functools
 import itertools
 import os
 import sys
@@ -43,6 +44,7 @@ def _merge_base_case_data(target: dict, source: dict) -> None:
         target_framework_cases.setdefault(backend, {}).update(backend_cases or {})
 
 
+@functools.lru_cache(maxsize=1)
 def _load_base_cases_data() -> dict:
     merged: dict = {}
     if not BASE_OP_CASES_DIR.exists():
@@ -133,7 +135,8 @@ def _get_model_path_filter() -> str | None:
     return val if val else None
 
 
-def _load_model_cases_data() -> list[dict]:
+@functools.lru_cache(maxsize=1)
+def _load_model_cases_data() -> tuple[dict, ...]:
     data = []
     for path in sorted(MODEL_CASES_DIR.glob("*_cases.yaml")):
         with open(path, encoding="utf-8") as f:
@@ -141,7 +144,7 @@ def _load_model_cases_data() -> list[dict]:
         if not isinstance(raw, dict):
             raise TypeError(f"{path}: top-level YAML value must be a mapping")
         data.append(raw)
-    return data
+    return tuple(data)
 
 
 def _expand_model_case_entry(raw_value: object, *, field_name: str) -> list[dict]:

@@ -19,6 +19,13 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.GEMM,
     ),
     OpEntry(
+        op="compute_scale",
+        module="collector.sglang.collect_computescale",
+        get_func="get_computescale_test_cases",
+        run_func="run_computescale",
+        perf_filename=PerfFile.COMPUTESCALE,
+    ),
+    OpEntry(
         op="mla_context",
         module="collector.sglang.collect_mla",
         get_func="get_context_mla_test_cases",

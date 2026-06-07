@@ -15,7 +15,14 @@ import pytest
 
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config, models
-from aiconfigurator.sdk.models import LLAMAModel, Qwen3VLModel, check_is_moe, get_model, get_model_family
+from aiconfigurator.sdk.models import (
+    LLAMAModel,
+    Qwen3VLModel,
+    Qwen3VLMoEModel,
+    check_is_moe,
+    get_model,
+    get_model_family,
+)
 from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.task import TaskConfig
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
@@ -45,7 +52,9 @@ class TestSupportedModels:
             "sgl-project/DeepSeek-V4-Pro-FP8",
             "zai-org/GLM-5-FP8",
             "nvidia/GLM-5-NVFP4",
-            "nvidia/nemotron-ultra-rl-050826",
+            "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+            "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
+            "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
         ],
     )
     def test_specific_models_are_in_default_list(self, hf_id):
@@ -83,9 +92,14 @@ class TestSupportedModels:
             ("zai-org/GLM-5-FP8", True),
             ("nvidia/GLM-5-NVFP4", True),
             ("Qwen/Qwen3-30B-A3B", True),
+            ("Qwen/Qwen3-VL-32B-Instruct", False),
+            ("Qwen/Qwen3-VL-30B-A3B-Instruct", True),
+            ("Qwen/Qwen3-VL-235B-A22B-Instruct", True),
             # NemotronH: check hybrid_override_pattern for 'E' (MoE layers)
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' in pattern
-            ("nvidia/nemotron-ultra-rl-050826", True),  # Has 'E' in derived pattern
+            ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", True),  # Has 'E' in derived pattern
+            ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", True),  # Has 'E' in derived pattern
+            ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4", True),  # Has 'E' in derived pattern
             ("nvidia/Nemotron-H-56B-Base-8K", False),  # No 'E' in pattern (only M, *, -)
         ],
     )
@@ -211,7 +225,9 @@ class TestHFModelSupport:
             ("nvidia/GLM-5-NVFP4", "DEEPSEEKV32"),
             ("Qwen/Qwen3-30B-A3B", "MOE"),
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "NEMOTRONH"),
-            ("nvidia/nemotron-ultra-rl-050826", "NEMOTRONH"),
+            ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "NEMOTRONH"),
+            ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", "NEMOTRONH"),
+            ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4", "NEMOTRONH"),
             ("nvidia/Nemotron-H-56B-Base-8K", "NEMOTRONH"),
         ],
     )
@@ -235,9 +251,14 @@ class TestHFModelSupport:
             ("zai-org/GLM-5-FP8", True),
             ("nvidia/GLM-5-NVFP4", True),
             ("Qwen/Qwen3-30B-A3B", True),
+            ("Qwen/Qwen3-VL-32B-Instruct", False),
+            ("Qwen/Qwen3-VL-30B-A3B-Instruct", True),
+            ("Qwen/Qwen3-VL-235B-A22B-Instruct", True),
             # NemotronH: is_moe depends on 'E' in hybrid_override_pattern
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' (MoE layers)
-            ("nvidia/nemotron-ultra-rl-050826", True),  # Has 'E' in derived pattern
+            ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", True),  # Has 'E' in derived pattern
+            ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", True),  # Has 'E' in derived pattern
+            ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4", True),  # Has 'E' in derived pattern
             ("nvidia/Nemotron-H-56B-Base-8K", False),  # No 'E' (Mamba + Attention + MLP only)
         ],
     )
@@ -246,9 +267,16 @@ class TestHFModelSupport:
         is_moe = check_is_moe(hf_id)
         assert is_moe == is_moe_expected
 
-    def test_nemotron_ultra_config_shape_and_quant(self):
-        """Test Nemotron 3 Ultra layer-block config parsing and quant defaults."""
-        hf_id = "nvidia/nemotron-ultra-rl-050826"
+    @pytest.mark.parametrize(
+        "hf_id",
+        [
+            "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+            "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
+            "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        ],
+    )
+    def test_nemotron_ultra_config_shape(self, hf_id):
+        """Test Nemotron 3 Ultra layer-block config parsing."""
         model_info = get_model_config_from_model_path(hf_id)
 
         assert model_info["architecture"] == "NemotronHForCausalLM"
@@ -265,6 +293,41 @@ class TestHFModelSupport:
         assert extra.mamba_head_dim == 64
         assert extra.moe_shared_expert_intermediate_size == 10240
 
+    @pytest.mark.parametrize(
+        "hf_id,expected_gemm_quant,expected_moe_quant,expected_kvcache_quant,expected_fmha_quant",
+        [
+            (
+                "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+                common.GEMMQuantMode.bfloat16,
+                common.MoEQuantMode.bfloat16,
+                common.KVCacheQuantMode.bfloat16,
+                common.FMHAQuantMode.bfloat16,
+            ),
+            (
+                "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
+                common.GEMMQuantMode.fp8,
+                common.MoEQuantMode.fp8,
+                common.KVCacheQuantMode.fp8,
+                common.FMHAQuantMode.fp8,
+            ),
+            (
+                "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+                common.GEMMQuantMode.nvfp4,
+                common.MoEQuantMode.nvfp4,
+                common.KVCacheQuantMode.fp8,
+                common.FMHAQuantMode.fp8,
+            ),
+        ],
+    )
+    def test_nemotron_ultra_quant_defaults(
+        self,
+        hf_id,
+        expected_gemm_quant,
+        expected_moe_quant,
+        expected_kvcache_quant,
+        expected_fmha_quant,
+    ):
+        """Test official Nemotron 3 Ultra precision-specific quant defaults."""
         model_config = config.ModelConfig(
             tp_size=8,
             pp_size=1,
@@ -275,10 +338,10 @@ class TestHFModelSupport:
         model = get_model(hf_id, model_config, backend_name="trtllm")
 
         assert model.model_family == "NEMOTRONH"
-        assert model_config.gemm_quant_mode == common.GEMMQuantMode.nvfp4
-        assert model_config.moe_quant_mode == common.MoEQuantMode.nvfp4
-        assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
-        assert model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
+        assert model_config.gemm_quant_mode == expected_gemm_quant
+        assert model_config.moe_quant_mode == expected_moe_quant
+        assert model_config.kvcache_quant_mode == expected_kvcache_quant
+        assert model_config.fmha_quant_mode == expected_fmha_quant
         assert sum(op._scale_factor for op in model.context_ops if op._name == "context_mamba_norm") == 48
         assert sum(op._scale_factor for op in model.context_ops if op._name == "context_moe_norm") == 48
         assert sum(op._scale_factor for op in model.context_ops if op._name == "context_attn_norm") == 12
@@ -1034,6 +1097,7 @@ class TestDeepSeekTPAllReduce:
 # ── Qwen3VL constants ──────────────────────────────────────────────────────────
 
 _QWEN3VL_ARCH = "Qwen3VLForConditionalGeneration"
+_QWEN3VL_MOE_ARCH = "Qwen3VLMoeForConditionalGeneration"
 _VL_MODELS = [
     "Qwen/Qwen3-VL-32B-Instruct",
     "Qwen/Qwen3-VL-32B-Thinking",
@@ -1048,6 +1112,13 @@ class TestQwen3VLRegistration:
 
     def test_architecture_maps_to_qwen3vl_family(self):
         assert common.ARCHITECTURE_TO_MODEL_FAMILY[_QWEN3VL_ARCH] == "QWEN3VL"
+
+    def test_moe_architecture_maps_to_qwen3vl_moe_family(self):
+        assert common.ARCHITECTURE_TO_MODEL_FAMILY[_QWEN3VL_MOE_ARCH] == "QWEN3VL_MOE"
+
+    def test_qwen3vl_families_are_registered(self):
+        assert "QWEN3VL" in common.ModelFamily
+        assert "QWEN3VL_MOE" in common.ModelFamily
 
     def test_architecture_in_multimodal_text_config_key(self):
         assert _QWEN3VL_ARCH in common.MULTIMODAL_TEXT_CONFIG_KEY
@@ -1128,6 +1199,11 @@ class TestQwen3VLModel:
 
     def test_get_model_returns_qwen3vl_instance(self, vl_model):
         assert isinstance(vl_model, Qwen3VLModel)
+
+    def test_get_model_returns_qwen3vl_moe_instance(self):
+        model_config = config.ModelConfig(moe_tp_size=1, moe_ep_size=1)
+        model = get_model("Qwen/Qwen3-VL-30B-A3B-Instruct", model_config, "trtllm")
+        assert isinstance(model, Qwen3VLMoEModel)
 
     def test_get_model_vl_is_subclass_of_llama(self, vl_model):
         assert isinstance(vl_model, LLAMAModel)

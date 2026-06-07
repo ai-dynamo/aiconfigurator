@@ -50,6 +50,10 @@ _NVFP4_QUANT_ARGS = {
 }
 
 
+def _skip_vllm_sm89_022_fp8_gemm(gemm_type: str) -> bool:
+    return vllm_version.startswith("0.22.0") and get_sm_version() == 89 and gemm_type in {"fp8", "fp8_static"}
+
+
 def get_gemm_test_cases():
     sm = get_sm_version()
 
@@ -63,6 +67,11 @@ def get_gemm_test_cases():
     if sm >= 100 and _nvfp4_gemm_available:
         gemm_list += ["nvfp4"]
 
+    requested_gemm_types = os.environ.get("AIC_COLLECT_GEMM_TYPES")
+    if requested_gemm_types:
+        requested = {item.strip() for item in requested_gemm_types.split(",") if item.strip()}
+        gemm_list = [gemm_type for gemm_type in gemm_list if gemm_type in requested]
+
     test_cases = []
 
     for gemm_common_testcase in get_gemm_case_specs():
@@ -70,6 +79,8 @@ def get_gemm_test_cases():
         n = gemm_common_testcase.n
         k = gemm_common_testcase.k
         for gemm_type in gemm_list:
+            if _skip_vllm_sm89_022_fp8_gemm(gemm_type):
+                continue
             if gemm_type in ("nvfp4", "fp8_block") and (n < 128 or k < 128):
                 continue
             if gemm_type == "nvfp4" and ((n % 16) != 0 or (k % 16) != 0):
@@ -105,7 +116,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
     if gemm_type == "fp8":
         qc = Fp8Config(
             is_checkpoint_fp8_serialized=True,
-            activation_scheme="static",
+            activation_scheme="dynamic",
             ignored_layers=None,
             weight_block_size=None,
         )

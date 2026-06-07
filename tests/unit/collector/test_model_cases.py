@@ -5,6 +5,7 @@ import csv
 from itertools import pairwise
 from pathlib import Path
 
+from collector.case_generator import moe_model_allows_quantization
 from collector.helper import create_test_case_id
 from collector.model_cases import (
     CaseSelector,
@@ -60,6 +61,20 @@ def test_base_gemm_cases_are_readable_shape_specs():
     assert filtered == ["case0", "case1"]
 
 
+def test_moe_model_quantization_policy_is_yaml_backed():
+    assert moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "w4a8_mxfp4_mxfp8")
+    assert moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "bfloat16")
+    assert not moe_model_allows_quantization("sglang", "Qwen/Qwen3-235B-A22B", "w4a8_mxfp4_mxfp8")
+
+    assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a16_mxfp4")
+    assert not moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "bfloat16")
+
+    assert moe_model_allows_quantization("trtllm", "moonshotai/Kimi-K2.5", "w4a16_mxfp4")
+    assert moe_model_allows_quantization("trtllm", "moonshotai/Kimi-K2.5", "bfloat16")
+    assert not moe_model_allows_quantization("trtllm", "Qwen/Qwen3-235B-A22B", "w4a16_mxfp4")
+    assert not moe_model_allows_quantization("trtllm", "openai/gpt-oss-20b", "fp8")
+
+
 def test_attention_shape_specs_are_yaml_backed_with_backend_overrides():
     from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
 
@@ -69,11 +84,13 @@ def test_attention_shape_specs_are_yaml_backed_with_backend_overrides():
     vllm_xpu_context = get_attention_context_shape_sweeps("vllm_xpu")[0]
     vllm_generation = get_attention_generation_shape_sweeps("vllm")[0]
 
-    assert sglang_context["head_dims"] == [128, 256]
-    assert trtllm_context["head_dims"] == [64, 128, 256]
-    assert vllm_context["head_dims"] == [128, 64]
+    assert sglang_context["head_dims"] == [64, 128, 192, 256]
+    assert trtllm_context["head_dims"] == [64, 128, 192, 256]
+    assert trtllm_context["query_head_counts"][:6] == [1, 2, 3, 4, 5, 6]
+    assert vllm_context["head_dims"] == [64, 128, 192, 256, 512]
     assert vllm_context["query_head_counts"][-1] == 64
-    assert vllm_context["window_sizes"] == [0, 128]
+    assert trtllm_context["window_sizes"] == [0, 1024]
+    assert vllm_context["window_sizes"] == [0, 128, 1024, 8192]
     assert vllm_xpu_context["batch_sizes"] == [1, 2, 4, 8, 16, 32]
     assert vllm_xpu_context["kv_head_options"] == [1, 2, 4, 8]
     assert vllm_generation["mha_query_head_counts"][-1] == 64
@@ -120,12 +137,33 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
 
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
-    assert len(get_common_moe_test_cases()) == 3654
+    moe_cases = get_common_moe_test_cases()
+    assert len(moe_cases) == 4548
+    assert any(
+        case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
+        and case.hidden_size == 1024
+        and case.inter_size == 2688
+        for case in moe_cases
+    )
+    assert any(
+        case.model_name == "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+        and case.hidden_size == 2048
+        and case.inter_size == 5120
+        for case in moe_cases
+    )
     assert len(get_context_mla_case_specs()) == 550
     assert len(get_generation_mla_case_specs()) == 885
     assert len(get_common_mamba2_test_cases()) == 8
     assert len(get_common_gdn_test_cases()) == 16
     assert len(get_common_mhc_test_cases()) == 8
+
+
+def test_dsa_module_prefix_context_sweeps_are_yaml_backed():
+    from collector.case_generator import get_mla_module_sweep_spec
+
+    assert 128 in get_mla_module_sweep_spec("sglang").context_prefix_lengths
+    assert get_mla_module_sweep_spec("trtllm").context_prefix_lengths == [0, 128]
+    assert get_mla_module_sweep_spec("vllm").context_prefix_lengths == [0, 128]
 
 
 def test_vllm_moe_quantization_metadata_is_yaml_backed():
@@ -299,7 +337,7 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
     assert sweep.batch_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     assert sweep.sequence_lengths[-2:] == [8192, 16384]
     assert sweep.inner_sweep_head_counts == [128, 64, 32, 16, 8]
-    assert sweep.top_level_head_counts == [128, 64]
+    assert sweep.top_level_head_counts == [128, 64, 32, 16, 8]
     assert sweep.module_precision_combos == [("bfloat16", "bfloat16", "bfloat16")]
 
     trtllm_sweep = get_mla_module_sweep_spec("trtllm")
@@ -308,6 +346,17 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
     assert trtllm_sweep.generation_sequence_lengths[-1] == 131072
     assert trtllm_sweep.inner_sweep_head_counts == [128, 64, 32, 16, 8, 4, 2, 1]
     assert trtllm_sweep.generation_max_tokens == 33554432
+
+    assert [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("sglang", phase="context", sm_version=90)
+    ] == [
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+    ]
+    assert get_mla_module_sweep_spec("sglang").context_sequence_lengths[-2:] == [8192, 16384]
 
     vllm_sweep = get_mla_module_sweep_spec("vllm")
     assert vllm_sweep.context_sequence_lengths[-1] == 32768
@@ -578,6 +627,44 @@ def test_filter_test_cases_supports_structured_exception_rules():
     assert filtered == [cases[0], cases[2]]
 
 
+def test_filter_test_cases_supports_not_in_structured_exception_rule():
+    cases = [
+        ["nvfp4", "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"],
+        ["nvfp4", "Qwen/Qwen3-235B-A22B"],
+        ["bfloat16", "Qwen/Qwen3-235B-A22B"],
+    ]
+    plan = OpCasePlan(
+        exclude=CaseSelector(
+            rules=[
+                {
+                    "reason_type": "framework_version_unsupported",
+                    "version_prefixes": ["0.5.10"],
+                    "fields": ["moe_type", "model_path"],
+                    "match": {
+                        "moe_type": "nvfp4",
+                        "model_path": {
+                            "not_in": [
+                                "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+                                "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+                            ]
+                        },
+                    },
+                }
+            ]
+        )
+    )
+
+    filtered = filter_test_cases(
+        cases,
+        plan=plan,
+        full_module_name="sglang.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="0.5.10",
+    )
+
+    assert filtered == [cases[0], cases[2]]
+
+
 def test_filter_test_cases_reports_expected_sm_exception_reasons():
     cases = [
         ["bfloat16", 1, 65536, 65536],
@@ -614,6 +701,138 @@ def test_filter_test_cases_reports_expected_sm_exception_reasons():
             "reason": "tiny-M FP8 large GEMM crashes on this framework build",
         }
     ]
+
+
+def test_sm89_exception_marks_sglang_head_dim_256_context_attention_expected_failure():
+    plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="google/gemma-4-26B-A4B",
+        gpu_type="l40s",
+    )
+    case = [1, 256, 2, 1, 256, False, False, True, 1024]
+
+    for version in ("0.5.9", "0.5.10", "0.5.12"):
+        expected = expected_failure_for_test_case(
+            case,
+            plan=plan.op_cases["attention_context"],
+            full_module_name="sglang.attention_context",
+            run_func_name="run_attention_torch",
+            runtime_version=version,
+        )
+
+        assert expected is not None
+        assert expected["reason_type"] == "framework_version_unsupported"
+        assert "head_dim=256" in expected["reason"]
+
+    assert (
+        expected_failure_for_test_case(
+            case,
+            plan=plan.op_cases["attention_context"],
+            full_module_name="sglang.attention_context",
+            run_func_name="run_attention_torch",
+            runtime_version="0.5.8",
+        )
+        is None
+    )
+
+
+def test_sm120_exception_filters_trtllm_gptoss_mxfp4():
+    plan = build_collection_case_plan(
+        backend="trtllm",
+        model_path="openai/gpt-oss-120b",
+        gpu_type="rtx_pro_6000_server",
+    )
+    case = [
+        "w4a16_mxfp4",
+        [1, 2, 4],
+        2880,
+        2880,
+        4,
+        128,
+        1,
+        1,
+        False,
+        "openai/gpt-oss-120b",
+        "power_law",
+        1.01,
+    ]
+
+    expected = expected_failure_for_test_case(
+        case,
+        plan=plan.op_cases["moe"],
+        full_module_name="trtllm.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert expected == {
+        "case_id": create_test_case_id(case, "run_moe_torch", "trtllm.moe"),
+        "source": "sm_exception",
+        "selector": "rule",
+        "reason_type": "framework_version_unsupported",
+        "reason": "TRT-LLM 1.3.0rc5/rc10 TRTLLMGenFusedMoE rejects GPT-OSS MXFP4 paths on SM120.",
+    }
+    assert (
+        expected_failure_for_test_case(
+            case,
+            plan=plan.op_cases["moe"],
+            full_module_name="trtllm.moe",
+            run_func_name="run_moe_torch",
+            runtime_version="1.3.0rc4",
+        )
+        is None
+    )
+
+
+def test_sm100_exception_filters_trtllm_int4_wo():
+    plan = build_collection_case_plan(
+        backend="trtllm",
+        model_path="moonshotai/Kimi-K2.5",
+        gpu_type="b200_sxm",
+    )
+    case = [
+        "int4_wo",
+        [1],
+        7168,
+        2048,
+        8,
+        384,
+        8,
+        1,
+        False,
+        "moonshotai/Kimi-K2.5",
+        "power_law",
+        1.2,
+    ]
+
+    expected = expected_failure_for_test_case(
+        case,
+        plan=plan.op_cases["moe"],
+        full_module_name="trtllm.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="1.3.0rc10",
+    )
+
+    assert expected == {
+        "case_id": create_test_case_id(case, "run_moe_torch", "trtllm.moe"),
+        "source": "sm_exception",
+        "selector": "rule",
+        "reason_type": "framework_version_unsupported",
+        "reason": (
+            "TRT-LLM 1.3.0rc10 SM100 CutlassFusedMoE rejects plain W4A16/int4_wo "
+            "in create_moe with ValueError Unsupported quantization mode [1]."
+        ),
+    }
+    assert (
+        expected_failure_for_test_case(
+            case,
+            plan=plan.op_cases["moe"],
+            full_module_name="trtllm.moe",
+            run_func_name="run_moe_torch",
+            runtime_version="1.3.0rc9",
+        )
+        is None
+    )
 
 
 def test_filter_test_cases_supports_computed_rule_conditions():
