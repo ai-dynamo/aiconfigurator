@@ -345,6 +345,8 @@ mod tests {
             scale_factor: 1.0,
             attn_kind: AttnKind::Hca,
             num_heads: 128,
+            native_heads: 128,
+            tp_size: 1,
             kv_cache_dtype: KvCacheQuantMode::Fp8,
             fmha_quant_mode: FmhaQuantMode::Fp8,
             gemm_quant_mode: GemmQuantMode::Fp8Block,
@@ -356,6 +358,7 @@ mod tests {
         MhcModuleOp {
             name: "mhc_module".into(),
             scale_factor: 1.0,
+            op: "pre".into(),
             hc_mult: 4,
             hidden_size: 7168,
             architecture: "DeepseekV4ForCausalLM".into(),

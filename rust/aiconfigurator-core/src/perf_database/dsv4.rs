@@ -9,12 +9,20 @@
 //! - `dsv4_csa_generation_module_perf.txt`
 //! - `dsv4_hca_generation_module_perf.txt`
 //!
-//! Plus two refinement CSVs retained for prefix-aware corrections of the
-//! HCA path: `dsv4_paged_mqa_logits_module_perf.txt` and
-//! `dsv4_hca_attn_module_perf.txt`.
+//! ## Indexing
+//!
+//! Mirrors Python `load_context_dsv4_kind_module_data` /
+//! `load_generation_dsv4_kind_module_data`. The latency tables are keyed by:
+//!   - `native_heads` (the model's total attention head count, CSV `num_heads`
+//!     column) — selects the data slice; and
+//!   - `tp_size` — the primary interpolation axis.
+//!
+//! NOT by the per-rank partitioned head count. Context grids interpolate over
+//! `(tp_size, isl, batch)`; generation grids over `(tp_size, batch, s_total)`
+//! where `s_total = isl + step` (decode is `q_len=1` with `past_kv=step`).
 //!
 //! All four primary CSVs share the DSA module column layout. Data is
-//! collected only on TRT-LLM today; loaders surface a clean error for
+//! collected only on TRT-LLM / SGLang today; loaders surface a clean error for
 //! backends without DSV4 data.
 
 use std::collections::BTreeMap;
@@ -34,6 +42,13 @@ pub enum AttnKind {
     Hca,
 }
 
+// native_heads -> tp_size -> step -> isl -> batch -> latency
+type ByBatch = BTreeMap<u32, f64>;
+type ByIsl = BTreeMap<u32, ByBatch>;
+type ByStep = BTreeMap<u32, ByIsl>;
+type ByTp = BTreeMap<u32, ByStep>;
+type ByNative = BTreeMap<u32, ByTp>;
+
 pub struct Dsv4Table {
     data_root: PathBuf,
     csa_context: OnceLock<Result<ModuleGrids, AicError>>,
@@ -43,7 +58,7 @@ pub struct Dsv4Table {
 }
 
 struct ModuleGrids {
-    by_keys: BTreeMap<ModuleKey, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, f64>>>>>,
+    by_keys: BTreeMap<ModuleKey, ByNative>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -65,34 +80,55 @@ impl Dsv4Table {
         }
     }
 
-    /// Raw context-DSV4 latency at a specific prefix value.
+    /// Context-DSV4 latency at `lookup_s = isl` (the new-token count). The
+    /// prefix effect is applied additively by the operator (and is negligible),
+    /// so it is not part of this base lookup. Mirrors Python's context base
+    /// `_dsv4_robust_3d_lookup(dict[native_heads], tp_size, isl, b)`.
+    #[allow(clippy::too_many_arguments)]
     pub fn query_context(
         &self,
         attn_kind: AttnKind,
         b: u32,
-        full_seq_tokens: u32,
-        num_heads: u32,
+        isl: u32,
+        native_heads: u32,
+        tp_size: u32,
         kv_quant: KvCacheQuantMode,
         fmha_quant: FmhaQuantMode,
         gemm_quant: GemmQuantMode,
         architecture: &str,
-        prefix: u32,
     ) -> Result<f64, AicError> {
         let grids = match attn_kind {
             AttnKind::Csa => self.load_csa_context()?,
             AttnKind::Hca => self.load_hca_context()?,
         };
-        let slice = prefix_slice(grids, architecture, fmha_quant, kv_quant, gemm_quant, prefix)?;
-        interp_2d_1d_grid(&slice, num_heads, full_seq_tokens, b)
+        let by_tp = select_native(grids, architecture, fmha_quant, kv_quant, gemm_quant, native_heads)?;
+        // Context grid: [tp_size][isl][batch]. The `step` axis is collapsed —
+        // context data is collected at step=0 (Python's context loader has no
+        // step axis). Outer = tp_size, middle = isl, inner = batch.
+        let mut grid: Grid3<f64> = BTreeMap::new();
+        for (&tp, by_step) in by_tp {
+            for by_isl in by_step.values() {
+                for (&isl_v, by_batch) in by_isl {
+                    for (&bb, &lat) in by_batch {
+                        grid.entry(tp).or_default().entry(isl_v).or_default().insert(bb, lat);
+                    }
+                }
+            }
+        }
+        interp_2d_1d_grid(&grid, tp_size, isl, b)
     }
 
-    /// Raw generation-DSV4 latency. `sequence_tokens = isl + step` from CSV.
+    /// Generation-DSV4 latency. `sequence_tokens = isl + step` (absolute KV
+    /// length). Mirrors Python's generation base
+    /// `_dsv4_robust_3d_lookup(dict[native_heads], tp_size, b, s_total, batch_axis="y")`.
+    #[allow(clippy::too_many_arguments)]
     pub fn query_generation(
         &self,
         attn_kind: AttnKind,
         b: u32,
         sequence_tokens: u32,
-        num_heads: u32,
+        native_heads: u32,
+        tp_size: u32,
         kv_quant: KvCacheQuantMode,
         fmha_quant: FmhaQuantMode,
         gemm_quant: GemmQuantMode,
@@ -102,30 +138,29 @@ impl Dsv4Table {
             AttnKind::Csa => self.load_csa_generation()?,
             AttnKind::Hca => self.load_hca_generation()?,
         };
-        let key = ModuleKey {
-            architecture: architecture.to_string(),
-            fmha_quant: fmha_quant.name().to_string(),
-            kv_quant: kv_quant.name().to_string(),
-            gemm_quant: gemm_quant.name().to_string(),
-        };
-        let by_heads = grids
-            .by_keys
-            .get(&key)
-            .ok_or_else(|| missing("DSV4 generation module", &self.data_root, format!("{key:?}")))?;
+        let by_tp = select_native(grids, architecture, fmha_quant, kv_quant, gemm_quant, native_heads)?;
+        // Generation grid: [tp_size][batch][s_total] where s_total = isl + step.
+        // Batch is the MIDDLE (y) axis and s_total the inner (z) axis, matching
+        // Python's generation lookup `_dsv4_robust_3d_lookup(dict, tp, b, s,
+        // batch_axis="y")`. This is the opposite layout from `query_context`
+        // (batch inner) and from DSA generation — and it is load-bearing: the
+        // DSV4 generation table is RAGGED (e.g. s_total=385 lacks batch=16 that
+        // s_total=257/513 have). With batch inner, bracketing on s_total then
+        // intersecting batch keys collapses to the sparse batch set and
+        // extrapolates the wrong value; with batch middle, the exact b row is
+        // selected first and s_total interpolates within it (matches Python).
         let mut grid: Grid3<f64> = BTreeMap::new();
-        for (&n, by_step) in by_heads {
+        for (&tp, by_step) in by_tp {
             for (&step, by_isl) in by_step {
-                for (&isl, by_batch) in by_isl {
-                    let seq = isl + step;
+                for (&isl_v, by_batch) in by_isl {
+                    let s_total = isl_v + step;
                     for (&bb, &lat) in by_batch {
-                        grid.entry(n).or_default().entry(seq).or_default().insert(bb, lat);
+                        grid.entry(tp).or_default().entry(bb).or_default().insert(s_total, lat);
                     }
                 }
             }
         }
-        // Axis order must match the grid: outer = num_heads, middle =
-        // seq_tokens, inner = batch_size. Mirrors `dsa.rs` query_generation.
-        interp_2d_1d_grid(&grid, num_heads, sequence_tokens, b)
+        interp_2d_1d_grid(&grid, tp_size, b, sequence_tokens)
     }
 
     fn load_csa_context(&self) -> Result<&ModuleGrids, AicError> {
@@ -154,53 +189,32 @@ impl Dsv4Table {
     }
 }
 
-fn prefix_slice(
-    grids: &ModuleGrids,
+/// Resolve the `(quant, architecture)` key and select the `native_heads` slice,
+/// returning the `tp_size -> step -> isl -> batch` sub-tree.
+fn select_native<'a>(
+    grids: &'a ModuleGrids,
     architecture: &str,
     fmha: FmhaQuantMode,
     kv: KvCacheQuantMode,
     gemm: GemmQuantMode,
-    prefix: u32,
-) -> Result<Grid3<f64>, AicError> {
+    native_heads: u32,
+) -> Result<&'a ByTp, AicError> {
     let key = ModuleKey {
         architecture: architecture.to_string(),
         fmha_quant: fmha.name().to_string(),
         kv_quant: kv.name().to_string(),
         gemm_quant: gemm.name().to_string(),
     };
-    let by_heads = grids
+    let by_native = grids
         .by_keys
         .get(&key)
-        .ok_or_else(|| AicError::PerfDatabase(format!("DSV4 context module data missing for {key:?}")))?;
-    let mut slice: Grid3<f64> = BTreeMap::new();
-    for (&n, by_step) in by_heads {
-        // The `step` axis is the collection-time prefix; the DSV4 context module
-        // is typically a single `step=0` slice (the prefix effect is carried by
-        // the seq axis `full_seq_tokens = isl + prefix` and the prefix
-        // correction, NOT by indexing the module at the live prefix). Mirror
-        // Python's `_dsv4_robust_3d_lookup`, which queries that single slice:
-        // select the nearest available step to `prefix` (exact when present)
-        // rather than requiring an exact `step == prefix` entry.
-        let Some(&step_key) = by_step
-            .keys()
-            .min_by_key(|&&s| (i64::from(s) - i64::from(prefix)).abs())
-        else {
-            continue;
-        };
-        if let Some(by_isl) = by_step.get(&step_key) {
-            for (&isl, by_batch) in by_isl {
-                for (&bb, &lat) in by_batch {
-                    slice.entry(n).or_default().entry(isl).or_default().insert(bb, lat);
-                }
-            }
-        }
-    }
-    if slice.is_empty() {
-        return Err(AicError::PerfDatabase(format!(
-            "DSV4 context module data missing for prefix={prefix}, {key:?}"
-        )));
-    }
-    Ok(slice)
+        .ok_or_else(|| AicError::PerfDatabase(format!("DSV4 module data missing for {key:?}")))?;
+    by_native.get(&native_heads).ok_or_else(|| {
+        AicError::PerfDatabase(format!(
+            "DSV4 module data missing for native_heads={native_heads}, {key:?} (loaded native_heads: {:?})",
+            by_native.keys().collect::<Vec<_>>()
+        ))
+    })
 }
 
 /// Canonicalize a DSV4 CSV dtype string to the enum `.name()` form.
@@ -221,13 +235,15 @@ fn load_module_parquet(path: &Path) -> Result<ModuleGrids, AicError> {
     let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
     let gemm_type_col = reader.col("gemm_type")?;
     let num_heads_col = reader.col("num_heads")?;
+    // `tp_size` is the primary interpolation axis. Mirror Python's
+    // `row.get("tp_size", 1)`: default to 1 when the column is absent.
+    let tp_size_col = reader.col_optional("tp_size");
     let batch_size_col = reader.col("batch_size")?;
     let isl_col = reader.col("isl")?;
     let step_col = reader.col("step")?;
     let latency_col = reader.col("latency")?;
 
-    let mut by_keys: BTreeMap<ModuleKey, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, f64>>>>> =
-        BTreeMap::new();
+    let mut by_keys: BTreeMap<ModuleKey, ByNative> = BTreeMap::new();
     for row in reader.rows()? {
         let row = row?;
         let key = ModuleKey {
@@ -242,18 +258,23 @@ fn load_module_parquet(path: &Path) -> Result<ModuleGrids, AicError> {
             kv_quant: normalize_dsv4_dtype(&row.str_owned(kv_cache_dtype_col)?),
             gemm_quant: row.str_owned(gemm_type_col)?,
         };
-        // First-wins parity with Python `load_dsv4_module_data`.
+        let tp_size = row.u32_optional(tp_size_col)?.unwrap_or(1);
+        // Last-wins parity with Python `load_*_dsv4_kind_module_data`, which
+        // assigns `data[...][b] = {...}` per row so a later duplicate row (same
+        // full key, e.g. two appended collection runs) overwrites the earlier
+        // one. `BTreeMap::insert` overwrites; do NOT use `or_insert` here.
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.u32(num_heads_col)?)
+            .entry(row.u32(num_heads_col)?) // native_heads (CSV num_heads column)
+            .or_default()
+            .entry(tp_size)
             .or_default()
             .entry(row.u32(step_col)?)
             .or_default()
             .entry(row.u32(isl_col)?)
             .or_default()
-            .entry(row.u32(batch_size_col)?)
-            .or_insert(row.f64(latency_col)?);
+            .insert(row.u32(batch_size_col)?, row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -262,10 +283,6 @@ fn load_module_parquet(path: &Path) -> Result<ModuleGrids, AicError> {
         )));
     }
     Ok(ModuleGrids { by_keys })
-}
-
-fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
-    AicError::PerfDatabase(format!("{table} data missing for {descriptor} at {}", data_root.display()))
 }
 
 fn clone_err(err: &AicError) -> AicError {
@@ -278,7 +295,7 @@ mod tests {
 
     #[test]
     fn dsv4_data_absent_errors_cleanly() {
-        // DSV4 modules aren't collected anywhere yet; loader must surface
+        // DSV4 modules aren't collected for vllm/0.19.0; loader must surface
         // a clean error.
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../src/aiconfigurator/systems/data/b200_sxm/vllm/0.19.0");
@@ -288,12 +305,12 @@ mod tests {
                 AttnKind::Csa,
                 1,
                 1024,
-                128,
+                128, // native_heads
+                1,   // tp_size
                 KvCacheQuantMode::Bfloat16,
                 FmhaQuantMode::Bfloat16,
                 GemmQuantMode::Bfloat16,
                 "DeepseekV4ForCausalLM",
-                0,
             )
             .unwrap_err();
         match err {
@@ -324,19 +341,19 @@ mod tests {
             return;
         }
         let table = Dsv4Table::new(root);
-        // (num_heads=64, isl=512, batch=8, prefix/step=0) are measured grid
-        // points in the CSA context table for this entry, with gemm=fp8_block.
+        // (native_heads=64, tp_size=1, isl=512, batch=8, step=0) are measured
+        // grid points in the CSA context table for this entry, gemm=fp8_block.
         let latency = table
             .query_context(
                 AttnKind::Csa,
                 8,   // batch
-                512, // full_seq_tokens (isl)
-                64,  // num_heads
+                512, // isl
+                64,  // native_heads
+                1,   // tp_size
                 KvCacheQuantMode::Fp8,
                 FmhaQuantMode::Bfloat16,
                 GemmQuantMode::Fp8Block,
                 "DeepseekV4ForCausalLM",
-                0, // prefix (step)
             )
             .expect("DSV4 context lookup must resolve fp8_e4m3 kv_cache_dtype as fp8");
         assert!(latency.is_finite() && latency > 0.0, "unexpected latency: {latency}");

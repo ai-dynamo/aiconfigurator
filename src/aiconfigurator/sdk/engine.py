@@ -351,6 +351,11 @@ def _dsv4_module(
         "scale_factor": op._scale_factor,
         "attn_kind": _attn_kind_for_ratio(op._compress_ratio),
         "num_heads": op._num_heads,
+        # native_heads (model total head count) selects the table slice;
+        # tp_size is the table's primary interpolation axis. See
+        # `perf_database::dsv4` / `load_context_dsv4_kind_module_data`.
+        "native_heads": op._native_heads,
+        "tp_size": op._tp_size,
         "kv_cache_dtype": _quant_name(kv),
         "fmha_quant_mode": _quant_name(fmha) if fmha is not None else "bfloat16",
         "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
@@ -362,6 +367,9 @@ def _mhc_module(op: DeepSeekV4MHCModule, *, architecture: str) -> dict:
     return {
         "name": op._name,
         "scale_factor": op._scale_factor,
+        # op (pre/post/both) is part of the mHC table key — pre and post have
+        # distinct latencies. See `perf_database::mhc` / `_query_mhc_table`.
+        "op": op._op,
         "hc_mult": op._hc_mult,
         "hidden_size": op._hidden_size,
         "architecture": architecture,

@@ -1,11 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! MHC (Qwen3.5 multi-head channel) module perf table.
+//! MHC (Qwen3.5 / DeepSeek-V4 multi-head channel) module perf table.
 //!
-//! CSV columns: model, architecture, num_tokens, hc_mult, hidden_size,
-//! latency. Indexed by (architecture, hc_mult, hidden_size) → num_tokens
-//! → latency. Query is 1-D interpolation along num_tokens.
+//! CSV columns: model, architecture, op_name, num_tokens, hc_mult,
+//! hidden_size, latency. Indexed by (op_name, architecture, hc_mult,
+//! hidden_size) → num_tokens → latency. Query is 1-D interpolation along
+//! num_tokens.
+//!
+//! `op_name` is `pre` or `post` (the two halves of the mHC decoder layer) and
+//! is part of the key: a given (arch, hc_mult, hidden_size, num_tokens) has a
+//! distinct latency for each. Mirrors Python `load_mhc_module_data` /
+//! `_query_mhc_table`, which key `data[op_name][hc_mult][hidden_size]`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +32,7 @@ struct MhcGrids {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct MhcKey {
+    op_name: String,
     architecture: String,
     hc_mult: u32,
     hidden_size: u32,
@@ -39,15 +46,36 @@ impl MhcTable {
         }
     }
 
+    /// Query one mHC op. `op` is `pre`, `post`, or `both` (sum of pre+post),
+    /// mirroring Python `_query_mhc_table`'s `op` argument.
     pub fn query_module(
         &self,
+        op: &str,
         num_tokens: u32,
         hc_mult: u32,
         hidden_size: u32,
         architecture: &str,
     ) -> Result<f64, AicError> {
         let grids = self.load()?;
+        // "both" aggregates the two silicon look-ups (Python sums pre+post).
+        if op == "both" {
+            return Ok(self.query_single("pre", num_tokens, hc_mult, hidden_size, architecture, grids)?
+                + self.query_single("post", num_tokens, hc_mult, hidden_size, architecture, grids)?);
+        }
+        self.query_single(op, num_tokens, hc_mult, hidden_size, architecture, grids)
+    }
+
+    fn query_single(
+        &self,
+        op: &str,
+        num_tokens: u32,
+        hc_mult: u32,
+        hidden_size: u32,
+        architecture: &str,
+        grids: &MhcGrids,
+    ) -> Result<f64, AicError> {
         let key = MhcKey {
+            op_name: op.to_string(),
             architecture: architecture.to_string(),
             hc_mult,
             hidden_size,
@@ -83,6 +111,7 @@ impl MhcTable {
 fn load_mhc_parquet(path: &Path) -> Result<MhcGrids, AicError> {
     let reader = PerfReader::open(path)?;
     let arch_col = reader.col("architecture")?;
+    let op_name_col = reader.col("op_name")?;
     let num_tokens_col = reader.col("num_tokens")?;
     let hc_mult_col = reader.col("hc_mult")?;
     let hidden_size_col = reader.col("hidden_size")?;
@@ -92,16 +121,20 @@ fn load_mhc_parquet(path: &Path) -> Result<MhcGrids, AicError> {
     for row in reader.rows()? {
         let row = row?;
         let key = MhcKey {
+            // `op_name` (pre/post) is part of the key — without it the pre and
+            // post rows for the same (arch, hc_mult, hidden_size, num_tokens)
+            // collide and `post` silently reads `pre`'s latency.
+            op_name: row.str_owned(op_name_col)?,
             architecture: row.str_owned(arch_col)?,
             hc_mult: row.u32(hc_mult_col)?,
             hidden_size: row.u32(hidden_size_col)?,
         };
-        // First-wins parity with Python `load_mhc_data`.
+        // Last-wins parity with Python `load_mhc_module_data`, which assigns
+        // `mhc_data[op][hc_mult][hidden_size][num_tokens] = {...}` per row.
         by_keys
             .entry(key)
             .or_default()
-            .entry(row.u32(num_tokens_col)?)
-            .or_insert(row.f64(latency_col)?);
+            .insert(row.u32(num_tokens_col)?, row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -124,7 +157,7 @@ mod tests {
     fn mhc_absent_on_vllm_b200_errors_clearly() {
         let table = MhcTable::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src/aiconfigurator/systems/data/b200_sxm/vllm/0.19.0"));
         let err = table
-            .query_module(1024, 2, 4096, "Qwen3_5MoeForConditionalGeneration")
+            .query_module("pre", 1024, 2, 4096, "Qwen3_5MoeForConditionalGeneration")
             .unwrap_err();
         match err {
             AicError::Io { .. } | AicError::PerfDatabase(_) => {}

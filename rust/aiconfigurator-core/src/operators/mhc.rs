@@ -15,6 +15,9 @@ use crate::perf_database::PerfDatabase;
 pub struct MhcModuleOp {
     pub name: String,
     pub scale_factor: f64,
+    /// Which half of the mHC layer this op models: `pre`, `post`, or `both`.
+    /// Part of the table key — pre and post have distinct latencies.
+    pub op: String,
     pub hc_mult: u32,
     pub hidden_size: u32,
     pub architecture: String,
@@ -23,6 +26,7 @@ pub struct MhcModuleOp {
 impl MhcModuleOp {
     pub fn new(
         name: impl Into<String>,
+        op: impl Into<String>,
         hc_mult: u32,
         hidden_size: u32,
         architecture: impl Into<String>,
@@ -30,6 +34,7 @@ impl MhcModuleOp {
         Self {
             name: name.into(),
             scale_factor: 1.0,
+            op: op.into(),
             hc_mult,
             hidden_size,
             architecture: architecture.into(),
@@ -39,7 +44,7 @@ impl MhcModuleOp {
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
         let latency =
             db.mhc
-                .query_module(num_tokens, self.hc_mult, self.hidden_size, &self.architecture)?;
+                .query_module(&self.op, num_tokens, self.hc_mult, self.hidden_size, &self.architecture)?;
         Ok(PerformanceResult::new(latency, Source::Silicon)
             .clamp_non_negative()
             .scaled(self.scale_factor))

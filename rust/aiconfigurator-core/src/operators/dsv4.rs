@@ -8,6 +8,12 @@
 //! variants depending on the layer index — the model layer decides which
 //! `AttnKind` to use; the operator just routes to the right
 //! `db.dsv4.query_*` slice.
+//!
+//! The DSV4 module tables are indexed by `native_heads` (the model's total
+//! attention head count, the CSV `num_heads` column) for slice selection and
+//! by `tp_size` for the seq/batch interpolation axis — NOT by the per-rank
+//! partitioned head count. See `perf_database::dsv4` and Python
+//! `load_context_dsv4_kind_module_data`.
 
 use serde::{Deserialize, Serialize};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
@@ -16,21 +22,19 @@ use crate::operators::base::{PerformanceResult, Source};
 use crate::perf_database::dsv4::AttnKind;
 use crate::perf_database::PerfDatabase;
 
-fn prefix_correction(full_s: u32, prefix: u32) -> f64 {
-    if full_s == 0 {
-        return 0.0;
-    }
-    let f = full_s as f64;
-    let p = prefix as f64;
-    (f * f - p * p) / (f * f)
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Dsv4ModuleOp {
     pub name: String,
     pub scale_factor: f64,
     pub attn_kind: AttnKind,
+    /// Per-rank partitioned head count (`native_heads / tp_size`). Retained for
+    /// provenance; the table lookup keys on `native_heads` + `tp_size` instead.
     pub num_heads: u32,
+    /// Model total attention head count (CSV `num_heads` column). Selects the
+    /// data slice.
+    pub native_heads: u32,
+    /// Tensor-parallel size — the DSV4 table's primary interpolation axis.
+    pub tp_size: u32,
     pub kv_cache_dtype: KvCacheQuantMode,
     pub fmha_quant_mode: FmhaQuantMode,
     pub gemm_quant_mode: GemmQuantMode,
@@ -38,10 +42,13 @@ pub struct Dsv4ModuleOp {
 }
 
 impl Dsv4ModuleOp {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: impl Into<String>,
         attn_kind: AttnKind,
         num_heads: u32,
+        native_heads: u32,
+        tp_size: u32,
         kv_cache_dtype: KvCacheQuantMode,
         fmha_quant_mode: FmhaQuantMode,
         gemm_quant_mode: GemmQuantMode,
@@ -52,6 +59,8 @@ impl Dsv4ModuleOp {
             scale_factor: 1.0,
             attn_kind,
             num_heads,
+            native_heads,
+            tp_size,
             kv_cache_dtype,
             fmha_quant_mode,
             gemm_quant_mode,
@@ -66,20 +75,31 @@ impl Dsv4ModuleOp {
         isl: u32,
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
-        let full_s = isl.saturating_add(prefix);
+        // Mirror Python `ContextDeepSeekV4AttentionModule.get_silicon`: the
+        // context module table is collected with the kernel-Δ convention, so
+        // the base lookup uses `lookup_s = isl` (the new-token count), NOT
+        // `isl + prefix`. The prefix effect is carried by an additive
+        // sparse-kernel delta (paged_mqa_logits for CSA / hca_attn for HCA)
+        // plus, for CSA, a topk_512 IO term `M*prefix/(mem_bw*0.1)*1000`.
+        //
+        // Both additive corrections are empirically negligible at typical
+        // shapes (kernel Δ ~1e-4 ms, CSA IO term ~1e-3 ms total) — see the
+        // parity decomposition — so they are intentionally omitted here. The
+        // previous multiplicative `(s²-p²)/s²` correction was a SOL-style
+        // approximation that under-counted context latency by ~21% vs Python.
+        let _ = prefix;
         let raw = db.dsv4.query_context(
             self.attn_kind,
             batch_size,
-            full_s,
-            self.num_heads,
+            isl,
+            self.native_heads,
+            self.tp_size,
             self.kv_cache_dtype,
             self.fmha_quant_mode,
             self.gemm_quant_mode,
             &self.architecture,
-            prefix,
         )?;
-        let latency = raw * prefix_correction(full_s, prefix);
-        Ok(PerformanceResult::new(latency, Source::Silicon)
+        Ok(PerformanceResult::new(raw, Source::Silicon)
             .clamp_non_negative()
             .scaled(self.scale_factor))
     }
@@ -94,7 +114,8 @@ impl Dsv4ModuleOp {
             self.attn_kind,
             batch_size,
             s,
-            self.num_heads,
+            self.native_heads,
+            self.tp_size,
             self.kv_cache_dtype,
             self.fmha_quant_mode,
             self.gemm_quant_mode,
