@@ -404,12 +404,13 @@ def _add_estimate_mode_arguments(parser):
     )
     parser.add_argument(
         "--estimate-mode",
-        choices=["agg", "disagg", "static", "static_ctx", "static_gen"],
+        choices=["agg", "disagg", "afd", "static", "static_ctx", "static_gen"],
         type=str,
         default="agg",
         help="Estimation mode: 'agg' (default, IFB), 'disagg' (separate prefill/decode workers), "
-        "or one of the static modes 'static' / 'static_ctx' / 'static_gen' for a single-pass, "
-        "no-IFB latency/memory breakdown (mirrors the webapp Static Tab).",
+        "'afd' (attention-FFN disaggregated), or one of the static modes "
+        "'static' / 'static_ctx' / 'static_gen' for a single-pass, no-IFB latency/memory "
+        "breakdown (mirrors the webapp Static Tab).",
     )
     parser.add_argument(
         "--system",
@@ -612,6 +613,84 @@ def _add_estimate_mode_arguments(parser):
         type=int,
         default=None,
         help="Number of decode workers (disagg). Required for disagg mode. Alias: --d-workers.",
+    )
+
+    # AFD (Attention-FFN Disaggregation) specific parameters
+    parser.add_argument(
+        "--n-a-nodes",
+        type=int,
+        default=None,
+        help="Number of A-Worker (attention) nodes (AFD mode). Required for afd mode.",
+    )
+    parser.add_argument(
+        "--n-f-nodes",
+        type=int,
+        default=None,
+        help="Number of F-Worker (FFN/MoE) nodes (AFD mode). Required for afd mode.",
+    )
+    parser.add_argument(
+        "--a-tp-size",
+        type=int,
+        default=1,
+        help="Attention-side tensor parallelism (AFD mode). Default: 1.",
+    )
+    parser.add_argument(
+        "--a-batch-size",
+        type=int,
+        default=128,
+        help=("Total in-flight batch size per A-Worker before microbatch splitting (AFD mode). Default: 128."),
+    )
+    parser.add_argument(
+        "--f-moe-ep-size",
+        type=int,
+        default=1,
+        help="FFN-side MoE expert parallelism (AFD mode). Default: 1.",
+    )
+    parser.add_argument(
+        "--num-microbatches",
+        type=int,
+        default=3,
+        help="Number of micro-batches for ping-pong pipeline (AFD mode). Default: 3.",
+    )
+    parser.add_argument(
+        "--pipeline-model",
+        choices=["optimistic", "conservative"],
+        type=str,
+        default="optimistic",
+        help="Pipeline model for AFD: 'optimistic' (K=3, comm hidden) or 'conservative' (K=2). Default: optimistic.",
+    )
+    parser.add_argument(
+        "--comm-overhead-factor",
+        type=float,
+        default=1.0,
+        help="Communication overhead multiplier (AFD mode). Default: 1.0.",
+    )
+    parser.add_argument(
+        "--afd-phase",
+        choices=["prefill", "decode", "both"],
+        type=str,
+        default="decode",
+        help="Which phase AFD is applied to. AFD is orthogonal to P/D disaggregation: "
+        "'decode' (default) models AFD on decode only (existing behavior), 'prefill' "
+        "models AFD on the context phase and reports TTFT, and 'both' reports TTFT+TPOT "
+        "for a deployment where AFD is used on both phases.",
+    )
+    parser.add_argument(
+        "--afd-combined-with-pd",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Combine the single-phase AFD estimate with a regular static "
+        "estimate for the other phase. When enabled (default), --afd-phase=decode "
+        "also runs a static prefill estimate (and vice versa), merging TTFT/TPOT, "
+        "throughput (rate-matched on min seq/s), and GPU budget into one result. "
+        "Pass --no-afd-combined-with-pd to report only the AFD phase. Required to "
+        "be off when --afd-phase=both (AFD covers both phases internally).",
+    )
+    parser.add_argument(
+        "--boundary-on-ffn",
+        action="store_true",
+        default=False,
+        help="Assign boundary ops (add_norm_2, logits_gemm) to F-Worker. Default is A-Worker; pass this flag to flip.",
     )
 
     # Quantization
@@ -1780,6 +1859,77 @@ def _run_support_mode(args):
     print("=" * 60 + "\n")
 
 
+def _print_per_ops_section(title: str, ops: dict) -> None:
+    """Print a single section of per-op latency breakdown."""
+    total = sum(ops.values())
+    print(f"  {title} (total: {total:.3f} ms)")
+    for op_name, latency in sorted(ops.items(), key=lambda x: -x[1]):
+        pct = latency / total * 100 if total > 0 else 0
+        print(f"    {op_name:<40s} {latency:>10.3f} ms  ({pct:>5.1f}%)")
+
+
+def _print_per_ops_latency(per_ops_data: dict) -> None:
+    """Print per-operation latency breakdown from run_agg / run_disagg / run_afd.
+
+    NOTE: ``cli estimate`` now surfaces per-op breakdowns through
+    ``format_estimate_detail_report`` (driven by ``--detail``). These helpers
+    are kept available for the AFD path / future callers that still want the
+    standalone summary print.
+    """
+    print("\n" + "-" * 60)
+    print("  Per-Operation Latency Breakdown")
+    print("-" * 60)
+
+    # Agg mode: mix_step + genonly_step + scheduling
+    scheduling = per_ops_data.get("scheduling")
+    if scheduling:
+        num_mix = scheduling.get("num_mix_steps", 0)
+        num_genonly = scheduling.get("num_genonly_steps", 0)
+        print(f"  Scheduling: {num_mix:.0f} mix steps + {num_genonly:.0f} gen-only steps")
+        print()
+
+    mix_ops = per_ops_data.get("mix_step", {})
+    if mix_ops:
+        _print_per_ops_section("Mix Step", mix_ops)
+
+    genonly_ops = per_ops_data.get("genonly_step", {})
+    if genonly_ops:
+        print()
+        _print_per_ops_section("Gen-Only Step", genonly_ops)
+
+    # Disagg mode: prefill + decode
+    prefill_ops = per_ops_data.get("prefill", {})
+    if prefill_ops:
+        _print_per_ops_section("Prefill (static_ctx)", prefill_ops)
+
+    decode_ops = per_ops_data.get("decode", {})
+    if decode_ops:
+        print()
+        _print_per_ops_section("Decode (static_gen)", decode_ops)
+
+    afd_sections = [
+        ("Prefill A-Worker", per_ops_data.get("prefill_a_worker", {})),
+        ("Prefill F-Worker", per_ops_data.get("prefill_f_worker", {})),
+        ("Decode A-Worker", per_ops_data.get("decode_a_worker", {})),
+        ("Decode F-Worker", per_ops_data.get("decode_f_worker", {})),
+    ]
+    afd_emitted = False
+    for title, ops in afd_sections:
+        if not ops:
+            continue
+        if not afd_emitted:
+            afd_emitted = True
+        print()
+        _print_per_ops_section(title, ops)
+
+    comm = per_ops_data.get("comm", {})
+    if comm:
+        directional = {k: v for k, v in comm.items() if k.endswith("_a2f") or k.endswith("_f2a")}
+        if directional:
+            print()
+            _print_per_ops_section("AFD Transfer (per layer, a2f + f2a)", directional)
+
+
 def _run_estimate_mode(args):
     """Run the estimate mode to predict TTFT, TPOT, and power for a single config."""
     from aiconfigurator.cli.api import cli_estimate
@@ -1863,6 +2013,24 @@ def _run_estimate_mode(args):
             decode_batch_size=args.decode_batch_size,
             decode_num_workers=args.decode_num_workers,
         )
+    elif estimate_mode == "afd":
+        # gpus_per_node and f_tp_size are intentionally derived from the
+        # system_spec / topology by cli_estimate -> _run_afd_estimate;
+        # they are no longer exposed as CLI flags to prevent silent
+        # mis-shaping (e.g. gb200 has 4 GPUs/node, not the historical 8).
+        estimate_kwargs.update(
+            n_a_nodes=args.n_a_nodes,
+            n_f_nodes=args.n_f_nodes,
+            a_tp_size=args.a_tp_size,
+            a_batch_size=args.a_batch_size,
+            f_moe_ep_size=args.f_moe_ep_size,
+            num_microbatches=args.num_microbatches,
+            pipeline_model=args.pipeline_model,
+            comm_overhead_factor=args.comm_overhead_factor,
+            afd_phase=args.afd_phase,
+            afd_combined_with_pd=getattr(args, "afd_combined_with_pd", True),
+            afd_boundary_on_attn=not getattr(args, "boundary_on_ffn", False),
+        )
 
     result = cli_estimate(**estimate_kwargs)
     sol_result = None
@@ -1885,8 +2053,8 @@ def _run_estimate_mode(args):
     print(f"  OSL:              {result.osl}")
 
     # ``--prefix`` and ``--nextn`` are common parameters applied to every
-    # mode (agg / disagg / static*), so surface them in the summary box for
-    # all modes rather than gating on mode.
+    # mode (agg / disagg / afd / static*), so surface them in the summary box
+    # for all modes rather than gating on mode.
     if args.prefix:
         print(f"  Prefix:           {args.prefix}")
     if args.nextn:
@@ -1903,6 +2071,26 @@ def _run_estimate_mode(args):
         print(f"  (d) BS:           {raw.get('(d)bs', 'N/A')}")
         print(f"  (d) Workers:      {raw.get('(d)workers', 'N/A')}")
         print(f"  Total GPUs:       {raw.get('num_total_gpus', 'N/A')}")
+    elif result.mode == "afd":
+        raw = result.raw
+        print(f"  AFD Phase:        {raw.get('phase', 'decode')}")
+        if raw.get("combined_with_pd"):
+            print("  Combined w/ P/D:  yes")
+        print(f"  GPUs/Node:        {raw.get('gpus_per_node', 'N/A')}")
+        print(f"  (a) Nodes:        {raw.get('(a)nodes', 'N/A')}")
+        print(f"  (a) TP:           {raw.get('(a)tp', 'N/A')}")
+        print(f"  (a) BS:           {raw.get('(a)bs', 'N/A')}")
+        print(f"  (a) Workers(DP):  {raw.get('(a)workers', 'N/A')}")
+        print(f"  (f) Nodes:        {raw.get('(f)nodes', 'N/A')}")
+        print(f"  (f) TP:           {raw.get('(f)tp', 'N/A')}")
+        print(f"  (f) EP:           {raw.get('(f)ep', 'N/A')}")
+        print(f"  (f) Workers:      {raw.get('(f)workers', 'N/A')}")
+        print(f"  B_total:          {raw.get('b_total', 'N/A')}")
+        print(f"  Total GPUs:       {raw.get('num_total_gpus', 'N/A')}")
+        print(f"  Pipeline Model:   {raw.get('pipeline_model', 'N/A')}")
+        print(f"  Micro-batches:    {raw.get('num_microbatches', 'N/A')}")
+        boundary_side = "A-Worker" if raw.get("boundary_on_attn", True) else "F-Worker"
+        print(f"  Boundary on:      {boundary_side}")
     else:
         # agg / static / static_ctx / static_gen share the same single-replica shape.
         print(f"  Batch Size:       {result.batch_size}")
@@ -1921,6 +2109,49 @@ def _run_estimate_mode(args):
         print(f"  TPOT:             {result.tpot:.3f} ms")
     elif result.mode == "static_ctx":
         print(f"  TTFT:             {result.ttft:.3f} ms")
+    elif result.mode == "afd":
+        raw = result.raw
+        afd_phase = raw.get("phase")
+        if afd_phase == "both":
+            # phase="both" runs prefill + decode through AFD; un-prefixed
+            # layer scalars are deliberately NaN to keep the two estimates
+            # distinguishable. Render the paired ``prefill_*`` / ``decode_*``
+            # blocks instead so users can compare A/F balance per phase.
+            print("  -- Prefill (AFD) --")
+            print(f"  T_a_layer:        {raw.get('prefill_t_a_layer', 0):.3f} ms")
+            print(f"  T_f_layer:        {raw.get('prefill_t_f_layer', 0):.3f} ms")
+            print(f"  T_a2f_layer:      {raw.get('prefill_t_a2f_layer', 0):.3f} ms")
+            print(f"  T_f2a_layer:      {raw.get('prefill_t_f2a_layer', 0):.3f} ms")
+            print(f"  T_c_layer:        {raw.get('prefill_t_c_layer', 0):.3f} ms  (round-trip = a2f + f2a)")
+            print(f"  T_step:           {raw.get('prefill_t_step', 0):.3f} ms")
+            print(f"  Balance Ratio:    {raw.get('prefill_balance_ratio', 0):.3f}")
+            print("  -- Decode (AFD) --")
+            print(f"  T_a_layer:        {raw.get('decode_t_a_layer', 0):.3f} ms")
+            print(f"  T_f_layer:        {raw.get('decode_t_f_layer', 0):.3f} ms")
+            print(f"  T_a2f_layer:      {raw.get('decode_t_a2f_layer', 0):.3f} ms")
+            print(f"  T_f2a_layer:      {raw.get('decode_t_f2a_layer', 0):.3f} ms")
+            print(f"  T_c_layer:        {raw.get('decode_t_c_layer', 0):.3f} ms  (round-trip = a2f + f2a)")
+            print(f"  T_step:           {raw.get('decode_t_step', 0):.3f} ms")
+            print(f"  Balance Ratio:    {raw.get('decode_balance_ratio', 0):.3f}")
+        else:
+            print(f"  T_a_layer:        {raw.get('t_a_layer', 0):.3f} ms")
+            print(f"  T_f_layer:        {raw.get('t_f_layer', 0):.3f} ms")
+            print(f"  T_a2f_layer:      {raw.get('t_a2f_layer', 0):.3f} ms")
+            print(f"  T_f2a_layer:      {raw.get('t_f2a_layer', 0):.3f} ms")
+            print(f"  T_c_layer:        {raw.get('t_c_layer', 0):.3f} ms  (round-trip = a2f + f2a)")
+            print(f"  T_step:           {raw.get('t_step', 0):.3f} ms")
+            print(f"  Balance Ratio:    {raw.get('balance_ratio', 0):.3f}")
+        # Composition row: shown when the combined-with-PD merge has
+        # written (p)impl/(d)impl markers, i.e. when the AFD result was
+        # merged with a static estimate of the other phase. Lets the user
+        # see at a glance which phase is AFD vs static.
+        p_impl = raw.get("(p)impl")
+        d_impl = raw.get("(d)impl")
+        if p_impl or d_impl:
+            print(f"  Composition:      (p)={p_impl or 'unmodeled'}  (d)={d_impl or 'unmodeled'}")
+        print(f"  TTFT:             {result.ttft:.3f} ms")
+        print(f"  TPOT:             {result.tpot:.3f} ms")
+        print(f"  Request Latency:  {result.request_latency:.3f} ms")
     else:
         print(f"  TTFT:             {result.ttft:.3f} ms")
         print(f"  TPOT:             {result.tpot:.3f} ms")
@@ -1936,6 +2167,12 @@ def _run_estimate_mode(args):
         raw = result.raw
         print(f"  (p) Memory:       {raw.get('(p)memory', 'N/A')} GB")
         print(f"  (d) Memory:       {raw.get('(d)memory', 'N/A')} GB")
+    elif result.mode == "afd":
+        raw = result.raw
+        a_oom = " (OOM!)" if raw.get("(a)is_oom") else ""
+        f_oom = " (OOM!)" if raw.get("(f)is_oom") else ""
+        print(f"  (a) Memory:       {raw.get('(a)memory', 'N/A')} GB{a_oom}")
+        print(f"  (f) Memory:       {raw.get('(f)memory', 'N/A')} GB{f_oom}")
     else:
         print(f"  Memory (GPU):     {result.memory:.2f} GB")
     print("=" * 60)

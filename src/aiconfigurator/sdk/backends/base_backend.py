@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
 import logging
 from collections import defaultdict
 from typing import ClassVar
@@ -640,6 +641,67 @@ class BaseBackend:
         summary.set_summary_df(summary_df)
 
         return summary
+
+    def get_default_free_gpu_memory_fraction(self) -> float | None:
+        """Default KV cache memory fraction for this backend, if it has one."""
+        return None
+
+    def get_kv_cache_memory_check_params(self) -> tuple[float, float]:
+        """Return backend-specific KV cache reserved fraction and tolerance."""
+        return 0.0, 0.0
+
+    def get_partition_memory_usage(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        *,
+        partition_ops,
+        batch_size: int,
+        beam_width: int,
+        isl: int,
+        osl: int,
+        num_tokens: int = 0,
+        prefix: int = 0,
+        max_seq_len: int | None = None,
+        include_kvcache: bool = True,
+        kvcache_multiplier: int = 1,
+    ) -> dict[str, float]:
+        """Get backend memory with weights replaced by a model partition.
+
+        AFD uses the same backend activation/KV/NCCL/other memory model as
+        agg/disagg, then substitutes the weights that actually live on the
+        A- or F-worker pool.
+        """
+        kwargs = {
+            "num_tokens": num_tokens,
+            "prefix": prefix,
+        }
+        if "max_seq_len" in inspect.signature(self._get_memory_usage).parameters:
+            kwargs["max_seq_len"] = max_seq_len
+
+        memory = self._get_memory_usage(
+            model,
+            database,
+            batch_size,
+            beam_width,
+            isl,
+            osl,
+            **kwargs,
+        )
+        memory = dict(memory)
+        memory["weights"] = sum(op.get_weights() for op in partition_ops) / max(model.config.pp_size, 1) / (1 << 30)
+        if include_kvcache:
+            memory["kvcache"] = memory.get("kvcache", 0.0) * max(kvcache_multiplier, 1)
+        else:
+            memory["kvcache"] = 0.0
+
+        memory.setdefault("activations", 0.0)
+        memory.setdefault("nccl", 0.0)
+        memory.setdefault("others", 0.0)
+        memory["total"] = (
+            memory["weights"] + memory["activations"] + memory["kvcache"] + memory["nccl"] + memory["others"]
+        )
+        return memory
 
     def _get_ctx_tokens_list_for_agg_sweep(
         self,

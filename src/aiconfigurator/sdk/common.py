@@ -759,6 +759,97 @@ ColumnsDisagg = [
     "power_w",  # NEW: E2E weighted average power in watts
 ]
 
+"""
+Columns for AFD (Attention-FFN Disaggregated) inference summary dataframe
+
+AFD is orthogonal to P/D disaggregation: the same schema is used whether
+AFD is applied to the prefill phase, the decode phase, or both.
+
+Per-phase layer scalars (``t_a_layer`` / ``t_f_layer`` / ``t_a2f_layer`` /
+``t_f2a_layer`` / ``t_c_layer`` / ``t_step`` / ``balance_ratio`` /
+``comm_hidden``) appear in three forms:
+
+* ``<scalar>``                       -- un-prefixed "headline" value.
+* ``prefill_<scalar>`` / ``decode_<scalar>``  -- per-phase paired values.
+
+Filling rules:
+
+* ``phase="prefill"`` -- un-prefixed and ``prefill_*`` reflect the prefill
+  estimate; ``decode_*`` are NaN/None.
+* ``phase="decode"``  -- mirror of the above.
+* ``phase="both"``    -- ``prefill_*`` and ``decode_*`` carry the two
+  estimates; the un-prefixed scalars are NaN/None (refusing to pick a single
+  "headline" value when two phases run and may diverge).
+* AFD-with-PD combined runs always have ``phase`` set to the AFD side
+  (``"prefill"`` or ``"decode"``); the static side's scalars are NaN/None
+  in the corresponding ``prefill_*``/``decode_*`` slot to flag "this side
+  was not estimated under AFD".
+"""
+ColumnsAFD = [
+    "model",
+    "phase",
+    "isl",
+    "osl",
+    "gpus_per_node",
+    "(a)nodes",
+    "(a)tp",
+    "(a)bs",
+    "(a)micro_bs",
+    "(a)workers",
+    "(a)memory",
+    "(a)is_oom",
+    "(f)nodes",
+    "(f)tp",
+    "(f)ep",
+    "(f)workers",
+    "(f)memory",
+    "(f)is_oom",
+    "t_a_layer",
+    "t_f_layer",
+    "t_a2f_layer",
+    "t_f2a_layer",
+    "t_c_layer",
+    "t_step",
+    "balance_ratio",
+    "comm_hidden",
+    "prefill_t_a_layer",
+    "prefill_t_f_layer",
+    "prefill_t_a2f_layer",
+    "prefill_t_f2a_layer",
+    "prefill_t_c_layer",
+    "prefill_t_step",
+    "prefill_balance_ratio",
+    "prefill_comm_hidden",
+    "decode_t_a_layer",
+    "decode_t_f_layer",
+    "decode_t_a2f_layer",
+    "decode_t_f2a_layer",
+    "decode_t_c_layer",
+    "decode_t_step",
+    "decode_balance_ratio",
+    "decode_comm_hidden",
+    "ttft",
+    "tpot",
+    "request_latency",
+    "b_total",
+    "b_micro_total",
+    "tokens/s",
+    "tokens/s/gpu",
+    "tokens/s/user",
+    "seq/s",
+    "concurrency",
+    "pipeline_model",
+    "num_microbatches",
+    "combined_with_pd",
+    "boundary_on_attn",
+    "num_total_gpus",
+    "memory",
+    "backend",
+    "version",
+    "system",
+    "power_w",
+]
+
 
 class DatabaseMode(Enum):
     """
