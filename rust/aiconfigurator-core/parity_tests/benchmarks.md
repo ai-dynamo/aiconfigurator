@@ -66,7 +66,7 @@ Setup cost: Python session 3.951 ms, Rust estimator 122.381 ms.
 
 - Re-capture the snapshot at the end of every commit that touches the hot
   path (C2, C3, C5, C6, C7) per the Phase 3 plan in
-  `docs/phase1/migration-execution-plan.md`.
+  `../docs/phase1/migration-execution-plan.md`.
 - Keep the latest snapshot under "Latest" below the baseline; do not
   overwrite the baseline.
 - Final Phase 3 snapshot lands in C12 alongside the docs update (see
@@ -377,7 +377,7 @@ the Python reference (FFI bifurcation, interior-mutability caches,
 identity-based Python dicts). Landing them inside the parity PR would
 mix concerns and risk regressions against the parity invariants the
 xfail-flip just locked in. They are scheduled as a dedicated Phase 5
-(see `docs/phase1/migration-execution-plan.md`).
+(see `../docs/phase1/migration-execution-plan.md`).
 
 ## Post-Phase-4 Snapshot (Full Family Coverage)
 
@@ -575,7 +575,7 @@ The Python baseline pays **none** of the JSON/ctypes overhead — it's pure-Pyth
 2. Engine handle reuse across sweep points — drop per-call metrics-dict construction to near zero by passing only `(batch, isl, osl)` on the hot path.
 3. Pure-Rust caller path (no Python on the hot loop) for Mocker/replay-driven scenarios — design doc §2.3 right column.
 
-See `docs/design_doc.html` §2.3 for the architectural framing and `docs/phase1/migration-execution-plan.md` for Phase 5 sequencing.
+See `../docs/design_doc.html` §2.3 for the architectural framing and `../docs/phase1/migration-execution-plan.md` for Phase 5 sequencing.
 
 ## E8 perf gate — new compiled-Engine (PyO3) vs old ctypes (2026-06-03)
 

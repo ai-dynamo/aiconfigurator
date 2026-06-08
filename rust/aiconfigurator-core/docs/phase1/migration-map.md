@@ -206,8 +206,8 @@ Python callers are deprecated or removed.
 | Perf database | `perf_database.py` | `src/perf_database/mod.rs` | Database discovery, mode handling, CSV ownership, shared-layer behavior, interpolation helpers. |
 | Perf database | `interpolation.py` | `src/perf_database/interpolation.rs` | 1D/2D/3D interpolation and extrapolation semantics. |
 | Shared types | `performance_result.py` | `src/result.rs` | Latency, energy, power/source attribution. |
-| Shared types | `system_spec.py` | `src/system_spec.rs` | YAML parsing and typed system hardware spec. |
-| Shared types | `common.py` | `src/enums.rs` | Backend, quant, database mode, model family enums. |
+| Shared types | `system_spec.py` | `src/common/system_spec.rs` | YAML parsing and typed system hardware spec. |
+| Shared types | `common.py` | `src/common/enums.rs` | Backend, quant, database mode, model family enums. |
 | Shared types | `utils.py` | `src/model_config_parser.rs` | HF config parsing, extra params, quant default inference. |
 | Out of scope | `task.py`, `picking.py`, `pareto_analysis.py` | Keep Python | Non-goal for this Rust core migration. |
 

@@ -49,7 +49,7 @@ The Rust crate today has the shape described in `migration-map.md`:
 - `perf_database/*` — per-op-owner tables with lazy load (Pattern A),
   first-wins duplicate handling, parquet-native loading via
   `apache parquet` crate.
-- `interpolation.rs` — 1D / 2D / 3D interpolation + the
+- `perf_database/interpolation.rs` — 1D / 2D / 3D interpolation + the
   `interp_2d_1d_grid_extrapolate_inner` extrapolator for sparse DSA
   num-heads.
 - `session.rs` — `Phase3Estimator` (`Arc`-wrapped) drives
