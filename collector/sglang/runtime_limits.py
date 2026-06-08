@@ -35,6 +35,45 @@ def required_kv_tokens(batch_size: int, seq_len: int, prefix_len: int, *, is_pre
     return batch_size * (seq_len + prefix_len) if is_prefill else batch_size * seq_len
 
 
+def kv_pool_page_size(model_runner) -> int:
+    """Page size of the SGLang KV allocator (1 for token-level allocators)."""
+    allocator = getattr(model_runner, "token_to_kv_pool_allocator", None)
+    page = getattr(allocator, "page_size", None)
+    return int(page) if isinstance(page, int) and page > 0 else 1
+
+
+def required_kv_alloc_tokens(
+    batch_size: int,
+    seq_len: int,
+    prefix_len: int,
+    page_size: int,
+    *,
+    is_prefill: bool,
+) -> int:
+    """KV tokens SGLang's paged ``alloc_extend`` must find free for this case.
+
+    The naive :func:`required_kv_tokens` (``bs*(sl+prefix)``) only counts logical
+    KV tokens, but SGLang's PAGED allocator rounds EACH request's KV span up to a
+    full page independently. With a large page (e.g. 256) and many requests, even
+    tiny ``seq_len`` forces ``batch_size`` whole pages: a bs=512 / sl=1 decode
+    needs 512 pages = ``512 * 256`` slots, which can exceed the KV pool even
+    though ``bs*sl`` is tiny — so ``alloc_extend`` fails with "Prefill out of
+    memory" while the naive check passes. This returns that true paged
+    requirement so such shapes are skipped BEFORE launching. With ``page_size==1``
+    it equals ``required_kv_tokens`` (a no-op for token-level allocators).
+
+    NOTE: this is the real allocation size only, NOT SGLang's eviction
+    over-estimate (``extend_num_tokens + bs*page_size``). The collector clears
+    the pool between shapes, so the cache is empty and nothing needs eviction;
+    adding that slack would over-skip valid shapes (e.g. bs=256/sl<=256).
+    """
+    if batch_size <= 0:
+        return 0
+    per_req = required_kv_tokens(batch_size, seq_len, prefix_len, is_prefill=is_prefill) // batch_size
+    pages_per_req = (per_req + page_size - 1) // page_size
+    return batch_size * pages_per_req * page_size
+
+
 def dsa_indexer_workspace_bytes(
     batch_size: int,
     seq_len: int,

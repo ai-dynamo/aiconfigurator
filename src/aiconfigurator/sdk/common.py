@@ -827,11 +827,17 @@ class PerfDataFilename(Enum):
     dsv4_hca_context_module = "dsv4_hca_context_module_perf.parquet"
     dsv4_csa_generation_module = "dsv4_csa_generation_module_perf.parquet"
     dsv4_hca_generation_module = "dsv4_hca_generation_module_perf.parquet"
-    # DeepSeek-V4 sparse-kernel data (kernel-level past_kv Δ correction).
-    # Indexed by ``arch -> tp -> past_kv -> isl -> bs``.
-    # topk_512 and csa_attn are modeled analytically — no CSV needed.
+    # DeepSeek-V4 sparse-op family — all share one column schema and load
+    # through ``operations.dsv4.load_dsv4_sparse_op_data``:
+    #   csa_attn / hca_attn / paged_mqa_logits : FMLA & indexer kernel latency,
+    #     keyed ``num_heads -> tp -> past_kv -> isl -> bs`` (kernel-level Δ data,
+    #     queried by ``_lookup_sparse_kernel``).
+    #   csa_topk_calib : two rows/shape (score_mode=flat|top_last); the topK
+    #     DELTA (flat-top_last) correction applied to CSA module latency.
     dsv4_paged_mqa_logits_module = "dsv4_paged_mqa_logits_module_perf.parquet"
     dsv4_hca_attn_module = "dsv4_hca_attn_module_perf.parquet"
+    dsv4_csa_attn_module = "dsv4_csa_attn_module_perf.parquet"
+    dsv4_csa_topk_calib = "dsv4_csa_topk_calib_perf.parquet"
     dsv4_megamoe_module = "dsv4_megamoe_module_perf.parquet"
 
 
@@ -870,6 +876,18 @@ class MoEQuantMode(Enum):
     w4a16_mxfp4 = QuantMapping(0.5, 1, "w4a16_mxfp4")  # native data format for gpt oss
     w4a8_mxfp4_mxfp8 = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8")
     # mxfp4 weights, mxfp8 activations (recommended for Blackwell)
+    w4a8_mxfp4_mxfp8_trtllm = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8_trtllm")
+    # Blackwell trtllm-gen fused MoE: MXFP4 (E2M1, block-32) weights x MXFP8 (E4M3)
+    # activations -- the kernel DeepSeek-V4-Pro actually runs in prefill on sm100
+    # (bmm_MxE4m3_MxE2m1MxE4m3 ... sm100f, flashinfer trtllm_fp4_block_scale_moe).
+    # Distinct backend from w4a8_mxfp4_mxfp8 above (flashinfer cutedsl). DSV4 MoE
+    # weights are stored MXFP4 (I8-packed E2M1 + E8M0 scales), so sglang dispatches
+    # by GPU: sm100 -> this (trtllm-gen); sm90 -> w4a16_mxfp4_cutlass below.
+    w4a16_mxfp4_cutlass = QuantMapping(0.5, 1, "w4a16_mxfp4_cutlass")
+    # Hopper (sm90) DeepSeek-V4-Pro MoE: flashinfer cutlass SM90 mixed GEMM
+    # (cutlass_fused_moe(use_w4_group_scaling=True)) -- MXFP4 weights x BF16
+    # activations (weight-only). Distinct backend from w4a16_mxfp4 above, which is
+    # GPT-OSS's triton_kernels mxfp4 path. (DSV4 Hopper silicon data pending.)
 
 
 class FMHAQuantMode(Enum):

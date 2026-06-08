@@ -2091,6 +2091,23 @@ def load_moe_data(moe_file):
 
         quant_mode = common.MoEQuantMode[quant_mode]
 
+        # DeepSeek-V4-Pro's Blackwell MoE runs the trtllm-gen MXFP4xMXFP8 kernel
+        # (moe_runner_backend=flashinfer_mxfp4 -> Mxfp4FlashinferTrtllmMoEMethod ->
+        # trtllm_fp4_block_scale_routed_moe -> bmm_MxE4m3_MxE2m1MxE4m3 ... sm100f),
+        # which is a distinct precision from the flashinfer cutedsl kernel that the
+        # collector also logs under moe_dtype=w4a8_mxfp4_mxfp8. Route those rows to
+        # the dedicated quant mode so DeepSeek-V4 modeling can select it on Blackwell.
+        if quant_mode is common.MoEQuantMode.w4a8_mxfp4_mxfp8 and kernel_source == "sglang_mxfp4_flashinfer_trtllm_moe":
+            quant_mode = common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+
+        # Same idea on Hopper: DeepSeek-V4-Pro runs the flashinfer cutlass SM90
+        # mixed-GEMM (cutlass_fused_moe(use_w4_group_scaling=True), MXFP4 weight x
+        # BF16 act), a distinct backend from GPT-OSS's triton_kernels mxfp4 that the
+        # collector also logs under moe_dtype=w4a16_mxfp4. Route those rows to the
+        # dedicated quant mode so DeepSeek-V4 modeling can select it on Hopper.
+        if quant_mode is common.MoEQuantMode.w4a16_mxfp4 and kernel_source == "sglang_flashinfer_cutlass_moe":
+            quant_mode = common.MoEQuantMode.w4a16_mxfp4_cutlass
+
         moe_data = moe_low_latency_data if kernel_source == "moe_torch_flow_min_latency" else moe_default_data
 
         try:

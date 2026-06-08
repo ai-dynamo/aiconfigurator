@@ -14,7 +14,6 @@ import dataclasses
 import functools
 import itertools
 import os
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -165,16 +164,26 @@ def _expand_model_case_entry(raw_value: object, *, field_name: str) -> list[dict
 def _model_case_values(op_name: str, *, apply_model_filter: bool = True) -> list[dict]:
     values = []
     for data in _load_model_cases_data():
+        # Carry the model file's architecture onto every expanded case dict so
+        # downstream model-family checks use config-derived metadata (the
+        # architecture in the cases YAML mirrors config.json's
+        # ``architectures[0]``) rather than fragile model_name string patterns.
+        arch = data.get("architecture")
         op_values = data.get("model_case_values", {}).get(op_name, [])
         if op_values is None:
             continue
         if isinstance(op_values, dict):
-            values.extend(_expand_model_case_entry(op_values, field_name=f"model_case_values.{op_name}"))
-            continue
-        if not isinstance(op_values, list):
+            expanded = _expand_model_case_entry(op_values, field_name=f"model_case_values.{op_name}")
+        elif isinstance(op_values, list):
+            expanded = []
+            for index, item in enumerate(op_values):
+                expanded.extend(_expand_model_case_entry(item, field_name=f"model_case_values.{op_name}[{index}]"))
+        else:
             raise TypeError(f"model_case_values.{op_name} must be a list or mapping")
-        for index, item in enumerate(op_values):
-            values.extend(_expand_model_case_entry(item, field_name=f"model_case_values.{op_name}[{index}]"))
+        for value in expanded:
+            if arch is not None:
+                value.setdefault("architecture", arch)
+            values.append(value)
 
     model_path = _get_model_path_filter() if apply_model_filter else None
     if model_path:
@@ -526,6 +535,7 @@ class MoeCommonTestCase:
     model_name: str
     token_expert_distribution: str
     power_law_alpha: Optional[float]
+    architecture: str = ""  # config-derived (cases-YAML architecture); for model-family checks
 
 
 @dataclasses.dataclass(frozen=True)
@@ -893,6 +903,7 @@ def get_moe_backend_test_cases(backend: str) -> list[MoeCommonTestCase]:
                     model_name=model_name,
                     token_expert_distribution=token_distribution,
                     power_law_alpha=power_law_alpha,
+                    architecture=str(model_config.get("architecture") or ""),
                 )
             )
     return test_cases
@@ -955,6 +966,7 @@ def get_common_moe_test_cases():
                 model_name=model_name,
                 token_expert_distribution=token_distribution,
                 power_law_alpha=power_law_alpha,
+                architecture=str(model_config.get("architecture") or ""),
             )
         )
 
@@ -1683,6 +1695,18 @@ def get_dsv4_hca_generation_test_cases():
     return _build_dsv4_module_test_cases("generation", ("hca",))
 
 
+def get_dsv4_topk_calib_test_cases():
+    """One case per model (the topk DELTA calibration is just another member of
+    the sparse-op family — same ``[model_path, kernel]`` shape as paged_mqa /
+    csa_attn / hca_attn, dispatched through ``run_dsv4_sparse_kernel_worker``).
+
+    The grid matches the CSA module data 1:1: the worker reads the
+    already-collected ``dsv4_csa_*_module_perf.txt`` and benches exactly those
+    ``(prefix, isl, batch_size)`` shapes — no separate grid is generated here.
+    """
+    return [[model_path, "topk"] for model_path in _selected_dsv4_models()]
+
+
 DSV4_SPARSE_KERNELS = ("paged_mqa_logits", "hca_attn")
 
 
@@ -1736,20 +1760,24 @@ def _build_dsv4_sparse_test_cases(
     return cases
 
 
-def _dsv4_sparse_smoke_or_full(kernel: str):
-    if "--smoke" in sys.argv:
-        return [[1, 1024, 8192, 1, kernel, model_path] for model_path in _selected_dsv4_models()]
-    return _build_dsv4_sparse_test_cases(kernels=(kernel,))
-
-
 def get_dsv4_paged_mqa_logits_test_cases():
-    """paged_mqa_logits sparse-kernel sweep (CSA indexer scoring)."""
-    return _dsv4_sparse_smoke_or_full("paged_mqa_logits")
+    """One case per model. The worker derives shapes from the CSA module CSV
+    (paged_mqa_logits is the CSA indexer scoring sub-kernel), 1:1 with the
+    csa-module rows — no separate sparse sweep grid."""
+    return [[model_path, "paged_mqa_logits"] for model_path in _selected_dsv4_models()]
 
 
 def get_dsv4_hca_attn_test_cases():
-    """hca_attn sparse-kernel sweep (HCA c128 sparse FMLA)."""
-    return _dsv4_sparse_smoke_or_full("hca_attn")
+    """One case per model. The worker derives shapes from the HCA module CSV
+    (hca_attn is the HCA c128 FMLA sub-kernel), 1:1 with the hca-module rows."""
+    return [[model_path, "hca_attn"] for model_path in _selected_dsv4_models()]
+
+
+def get_dsv4_csa_attn_test_cases():
+    """One case per model. The worker derives shapes from the CSA module CSV
+    (csa_attn is the CSA sparse FMLA over the topk-selected c4 positions),
+    1:1 with the csa-module rows — same source as paged_mqa_logits/topk."""
+    return [[model_path, "csa_attn"] for model_path in _selected_dsv4_models()]
 
 
 # Backward-compatible names for older PR comments/tests while the registry and
@@ -1784,7 +1812,6 @@ _dsv4_flash_module_precision_combos = _dsv4_module_precision_combos
 _dsv4_flash_module_filter_pairs = _dsv4_module_filter_pairs
 _build_dsv4_flash_module_test_cases = _build_dsv4_module_test_cases
 _build_dsv4_flash_sparse_test_cases = _build_dsv4_sparse_test_cases
-_dsv4_flash_sparse_smoke_or_full = _dsv4_sparse_smoke_or_full
 get_dsv4_flash_csa_context_test_cases = get_dsv4_csa_context_test_cases
 get_dsv4_flash_hca_context_test_cases = get_dsv4_hca_context_test_cases
 get_dsv4_flash_csa_generation_test_cases = get_dsv4_csa_generation_test_cases

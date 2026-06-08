@@ -57,9 +57,12 @@ def test_dsv4_sparse_smoke_cases_cover_default_models(monkeypatch):
 
     cases = common_test_cases.get_dsv4_paged_mqa_logits_test_cases()
 
+    # Sparse kernels are now one case per model ([model_path, kernel]); the worker
+    # derives the (prefix, isl, bs) shapes 1:1 from the owning module CSV at
+    # runtime instead of a separate smoke sweep grid.
     assert cases == [
-        [1, 1024, 8192, 1, "paged_mqa_logits", _FLASH],
-        [1, 1024, 8192, 1, "paged_mqa_logits", _PRO],
+        [_FLASH, "paged_mqa_logits"],
+        [_PRO, "paged_mqa_logits"],
     ]
 
 

@@ -206,12 +206,24 @@ framework_specific_op_cases:
       cases: all
     dsv4_hca_generation_module:
       cases: all
+    # topK DELTA calibration: one case per model. The worker reads the
+    # already-collected dsv4_csa_*_module_perf.txt in the output dir and benches
+    # exactly those (prefix, isl, batch_size) shapes, so it must run AFTER the
+    # CSA module ops (guaranteed by registry order: topk_calib is registered
+    # after the csa module entries).
+    dsv4_csa_topk_calib:
+      cases: all
     # These kernel-level cases are kept as auxiliary data for future
     # prefix/past_kv correction.  Current DeepSeek-V4 SGLang modeling uses the
     # full CSA/HCA attention-module rows above as the primary path.
     dsv4_paged_mqa_logits_module:
       cases: all
     dsv4_hca_attn_module:
+      cases: all
+    # CSA sparse FMLA over the topk-selected c4 positions. Same source as
+    # paged_mqa_logits/topk_calib (reads dsv4_csa_*_module_perf.txt), so it must
+    # run AFTER the CSA module ops (guaranteed by registry order).
+    dsv4_csa_attn_module:
       cases: all
     mhc_module:
       cases: all
