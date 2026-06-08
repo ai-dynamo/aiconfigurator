@@ -688,11 +688,12 @@ def cli_estimate(
     Args:
         model_path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or local path.
         system_name: System name (GPU type), e.g., 'h200_sxm', 'h100_sxm'.
-        mode: Estimation mode — 'agg' (default), 'disagg', or one of the static
-            modes ``'static'`` / ``'static_ctx'`` / ``'static_gen'``. Static modes
-            run a single-pass ``InferenceSession.run_static`` (no IFB scheduling,
-            no rate matching) and are useful for first-order latency/memory
-            breakdowns.
+        mode: Estimation mode — 'agg' (default), 'disagg', 'afd', or one of the
+            static modes ``'static'`` / ``'static_ctx'`` / ``'static_gen'``.
+            Static modes run a single-pass ``InferenceSession.run_static`` (no
+            IFB scheduling, no rate matching) and are useful for first-order
+            latency/memory breakdowns. ``'afd'`` runs Attention-FFN
+            Disaggregated estimation (see the afd-only args below).
         backend_name: Backend name ('trtllm', 'sglang', 'vllm'). Default is 'trtllm'.
         backend_version: Backend database version. Default is latest.
         database_mode: Database mode for performance estimation
@@ -753,6 +754,35 @@ def cli_estimate(
             Default ``[0.85, 0.3, 0, 0, 0]``.
         stride: (static-only) Stride used by ``run_static`` to accelerate the
             OSL sweep. Ignored by agg / disagg. Default 32.
+        n_a_nodes: (afd-only) Number of A-Worker (attention) nodes. Required
+            when ``mode='afd'``.
+        n_f_nodes: (afd-only) Number of F-Worker (FFN/MoE) nodes. Required
+            when ``mode='afd'``.
+        a_tp_size: (afd-only) Attention-side tensor parallelism size. Default 1.
+        a_batch_size: (afd-only) Total in-flight batch size per A-Worker before
+            micro-batch splitting. Default 128.
+        f_moe_ep_size: (afd-only) FFN-side MoE expert parallelism size. Default 1.
+        num_microbatches: (afd-only) Number of micro-batches for the ping-pong
+            A/F pipeline. Default 3.
+        pipeline_model: (afd-only) Ping-pong overlap model — ``'optimistic'``
+            (K=3, communication hidden) or ``'conservative'`` (K=2). Default
+            ``'optimistic'``.
+        comm_overhead_factor: (afd-only) Multiplier applied to cross-pool
+            communication latency. Default 1.0.
+        afd_phase: (afd-only) Phase AFD is applied to — ``'prefill'``,
+            ``'decode'`` (default), or ``'both'``. AFD is orthogonal to P/D
+            disaggregation: ``'decode'`` models AFD on decode only, ``'prefill'``
+            on the context phase (reports TTFT), and ``'both'`` reports TTFT+TPOT
+            with AFD on both phases.
+        afd_combined_with_pd: (afd-only) When True (default), combine the
+            single-phase AFD estimate with a regular static estimate for the
+            other phase (merging TTFT/TPOT, rate-matched throughput, and GPU
+            budget). Must be False when ``afd_phase='both'`` (AFD already covers
+            both phases). Default True.
+        afd_boundary_on_attn: (afd-only) Assign boundary ops (``add_norm_2``,
+            ``logits_gemm``) to the A-Worker when True (default); set False to
+            place them on the F-Worker. Inverse of the CLI ``--boundary-on-ffn``
+            flag.
 
     Returns:
         EstimateResult with ttft, tpot, power_w, mode, and the full raw result dict.
