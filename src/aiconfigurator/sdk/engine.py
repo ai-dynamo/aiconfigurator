@@ -709,10 +709,19 @@ def build_engine_spec_json(
     def conv(op: Any) -> dict:
         return _to_opspec(op, backend=backend, architecture=architecture, database=database)
 
-    # Vision: emit the decomposed encoder child ops, never an `Op::Vision`.
-    # For text-only models `encoder_ops` is empty.
-    encoder_ops = list(getattr(model, "encoder_ops", []) or [])
-    context_ops = [conv(op) for op in encoder_ops] + [conv(op) for op in model.context_ops]
+    # Vision encoder ops are intentionally NOT emitted into the spec.
+    #
+    # The compile path threads no image configuration (num_images_per_request,
+    # image_height/width, num_image_tokens), so the compiled engine cannot
+    # reproduce `BaseBackend._run_encoder`'s token-count math (eff_batch, eff_s,
+    # pre/post-merge counts) needed to query the vision ops with correct shapes.
+    # Python's `run_static` already treats any request without image dimensions
+    # as text-only and skips the encoder entirely (base_backend `_run_encoder`
+    # early-return). Emitting the encoder ops here would make the compiled engine
+    # query them unconditionally (with wrong shapes), diverging from the Python
+    # reference for VL models. Vision modeling in the compiled path is deferred
+    # until runtime image config is threaded through compile_engine.
+    context_ops = [conv(op) for op in model.context_ops]
     generation_ops = [conv(op) for op in model.generation_ops]
 
     spec = {
