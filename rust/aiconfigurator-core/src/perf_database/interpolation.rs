@@ -139,6 +139,68 @@ pub fn interp_2d_1d_grid(grid: &Grid3<f64>, x: u32, y: u32, z: u32) -> Result<f6
     interp_2d_1d_grid_extrapolate_inner(grid, x, y, z)
 }
 
+/// Require non-exact 3-D interpolation inputs to vary on every axis.
+///
+/// Mirrors `interpolation._require_3d_axis_coverage`. The x-axis is the set of
+/// outer keys; the y-axis is the *union* of all middle keys across every outer
+/// slice; the z-axis is the *union* of all inner keys. If any axis has fewer
+/// than two distinct values, interpolation cannot be well-defined on that axis,
+/// and Python raises `ValueError`. We surface the same error so Rust and Python
+/// agree on sparse single-variation grids.
+fn require_3d_axis_coverage(grid: &Grid3<f64>, context: &str) -> Result<(), AicError> {
+    let x_len = grid.len();
+    let mut y_values: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    let mut z_values: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for middle in grid.values() {
+        for (&y_key, inner) in middle.iter() {
+            y_values.insert(y_key);
+            for &z_key in inner.keys() {
+                z_values.insert(z_key);
+            }
+        }
+    }
+
+    let mut missing: Vec<&str> = Vec::new();
+    if x_len < 2 {
+        missing.push("x");
+    }
+    if y_values.len() < 2 {
+        missing.push("y");
+    }
+    if z_values.len() < 2 {
+        missing.push("z");
+    }
+    if !missing.is_empty() {
+        return Err(AicError::PerfDatabase(format!(
+            "{context} requires data that varies across all 3 dimensions; \
+             missing variation on axis/axes: {}. \
+             Collect more perf data points instead of reducing to lower-dimensional interpolation.",
+            missing.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+/// Strict variant of [`interp_2d_1d_grid`] that mirrors Python's
+/// `interp_3d(..., "bilinear")` with `allow_singleton_axes=False` (the default
+/// used by the generation-attention query). After the exact-hit short-circuit,
+/// it requires the grid to vary across all three axes and errors otherwise —
+/// matching Python's `_require_3d_axis_coverage` guard.
+pub fn interp_2d_1d_grid_strict(
+    grid: &Grid3<f64>,
+    x: u32,
+    y: u32,
+    z: u32,
+    context: &str,
+) -> Result<f64, AicError> {
+    // Python returns the exact leaf before the coverage guard.
+    if let Some(value) = grid.get(&x).and_then(|m| m.get(&y)).and_then(|r| r.get(&z)) {
+        return Ok(*value);
+    }
+    require_3d_axis_coverage(grid, context)?;
+    interp_2d_1d_grid_extrapolate_inner(grid, x, y, z)
+}
+
 /// Same as [`interp_2d_1d_grid`] but allows linear extrapolation on the
 /// `y` (middle) and `z` (inner) axes when the query lands outside the
 /// data envelope. The `x` (outer) axis still requires the query to be
@@ -403,5 +465,58 @@ mod tests {
         // continuation of 10, 20).
         let v = interp_2d_1d_grid(&grid, 3, 1, 1).expect("extrapolation must not error");
         assert!((v - 30.0).abs() < 1e-9, "expected ~30.0, got {v}");
+    }
+
+    #[test]
+    fn strict_singleton_x_axis_non_exact_errors() {
+        // Grid with a single x (outer) value — matching Python's Gemma-4
+        // generation-attention case where `n` has only one distinct value.
+        // A non-exact (y, z) query must error, mirroring Python's
+        // `_require_3d_axis_coverage` ValueError on axis x.
+        let grid = make_grid(&[
+            (2, 100, 1, 10.0),
+            (2, 100, 2, 11.0),
+            (2, 200, 1, 12.0),
+            (2, 200, 2, 13.0),
+        ]);
+        let err = interp_2d_1d_grid_strict(&grid, 2, 150, 1, "3-D bilinear interpolation")
+            .expect_err("singleton x axis with non-exact query must error");
+        let msg = format!("{err}");
+        assert!(msg.contains("axis/axes: x"), "unexpected message: {msg}");
+    }
+
+    #[test]
+    fn strict_singleton_x_axis_exact_hit_returns_value() {
+        // Exact lookups must still succeed even on a singleton axis: Python
+        // returns `_get_exact_3d` before the coverage guard runs.
+        let grid = make_grid(&[
+            (2, 100, 1, 10.0),
+            (2, 100, 2, 11.0),
+            (2, 200, 1, 12.0),
+            (2, 200, 2, 13.0),
+        ]);
+        let v = interp_2d_1d_grid_strict(&grid, 2, 200, 2, "3-D bilinear interpolation")
+            .expect("exact hit must succeed");
+        assert!(approx(v, 13.0, 1e-9));
+    }
+
+    #[test]
+    fn strict_all_axes_varying_interpolates() {
+        // Regression: when every axis varies, strict interpolation behaves
+        // exactly like the permissive variant.
+        let grid = make_grid(&[
+            (1, 1, 1, 10.0),
+            (1, 1, 2, 11.0),
+            (1, 2, 1, 12.0),
+            (1, 2, 2, 13.0),
+            (2, 1, 1, 20.0),
+            (2, 1, 2, 21.0),
+            (2, 2, 1, 22.0),
+            (2, 2, 2, 23.0),
+        ]);
+        let strict =
+            interp_2d_1d_grid_strict(&grid, 1, 1, 1, "3-D bilinear interpolation").unwrap();
+        let permissive = interp_2d_1d_grid(&grid, 1, 1, 1).unwrap();
+        assert!(approx(strict, permissive, 1e-12));
     }
 }

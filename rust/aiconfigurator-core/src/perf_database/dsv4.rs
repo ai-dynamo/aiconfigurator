@@ -174,7 +174,20 @@ fn prefix_slice(
         .ok_or_else(|| AicError::PerfDatabase(format!("DSV4 context module data missing for {key:?}")))?;
     let mut slice: Grid3<f64> = BTreeMap::new();
     for (&n, by_step) in by_heads {
-        if let Some(by_isl) = by_step.get(&prefix) {
+        // The `step` axis is the collection-time prefix; the DSV4 context module
+        // is typically a single `step=0` slice (the prefix effect is carried by
+        // the seq axis `full_seq_tokens = isl + prefix` and the prefix
+        // correction, NOT by indexing the module at the live prefix). Mirror
+        // Python's `_dsv4_robust_3d_lookup`, which queries that single slice:
+        // select the nearest available step to `prefix` (exact when present)
+        // rather than requiring an exact `step == prefix` entry.
+        let Some(&step_key) = by_step
+            .keys()
+            .min_by_key(|&&s| (i64::from(s) - i64::from(prefix)).abs())
+        else {
+            continue;
+        };
+        if let Some(by_isl) = by_step.get(&step_key) {
             for (&isl, by_batch) in by_isl {
                 for (&bb, &lat) in by_batch {
                     slice.entry(n).or_default().entry(isl).or_default().insert(bb, lat);
@@ -188,6 +201,17 @@ fn prefix_slice(
         )));
     }
     Ok(slice)
+}
+
+/// Canonicalize a DSV4 CSV dtype string to the enum `.name()` form.
+///
+/// Mirrors Python `_dsv4_normalize_dtype` / `_DSV4_DTYPE_ALIASES`: the only
+/// alias is `fp8_e4m3` -> `fp8`. Everything else passes through unchanged.
+fn normalize_dsv4_dtype(name: &str) -> String {
+    match name {
+        "fp8_e4m3" => "fp8".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn load_module_parquet(path: &Path) -> Result<ModuleGrids, AicError> {
@@ -208,8 +232,14 @@ fn load_module_parquet(path: &Path) -> Result<ModuleGrids, AicError> {
         let row = row?;
         let key = ModuleKey {
             architecture: row.str_owned(arch_col)?,
-            fmha_quant: row.str_owned(mla_dtype_col)?,
-            kv_quant: row.str_owned(kv_cache_dtype_col)?,
+            // CSV columns use sglang dtype naming; the query side builds keys
+            // from the enum `.name()` (canonical short names). Normalize on
+            // load to match Python `_dsv4_normalize_dtype`, which aliases
+            // `fp8_e4m3` -> `fp8` for `mla_dtype` (fmha) and `kv_cache_dtype`
+            // (kv). `gemm_type` is intentionally left untouched, matching
+            // Python (e.g. `fp8_block` is a real value that must pass through).
+            fmha_quant: normalize_dsv4_dtype(&row.str_owned(mla_dtype_col)?),
+            kv_quant: normalize_dsv4_dtype(&row.str_owned(kv_cache_dtype_col)?),
             gemm_quant: row.str_owned(gemm_type_col)?,
         };
         // First-wins parity with Python `load_dsv4_module_data`.
@@ -270,5 +300,45 @@ mod tests {
             AicError::Io { .. } | AicError::PerfDatabase(_) => {}
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn normalize_dsv4_dtype_aliases_fp8_e4m3() {
+        assert_eq!(normalize_dsv4_dtype("fp8_e4m3"), "fp8");
+        // Non-aliased values must pass through unchanged.
+        assert_eq!(normalize_dsv4_dtype("bfloat16"), "bfloat16");
+        assert_eq!(normalize_dsv4_dtype("fp8_block"), "fp8_block");
+        assert_eq!(normalize_dsv4_dtype("fp8"), "fp8");
+    }
+
+    #[test]
+    fn dsv4_context_resolves_fp8_e4m3_kv_quant() {
+        // Regression for the b200_sxm/sglang/0.5.10 DSV4 context lookup: the
+        // CSV stores `kv_cache_dtype=fp8_e4m3`, but the query builds the key
+        // from `KvCacheQuantMode::Fp8.name()` = "fp8". Without load-side
+        // normalization the lookup misses (Rust-only error vs Python success).
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/aiconfigurator/systems/data/b200_sxm/sglang/0.5.10");
+        if !root.join("dsv4_csa_context_module_perf.parquet").exists() {
+            // Data files are git-lfs tracked; skip if not materialized.
+            return;
+        }
+        let table = Dsv4Table::new(root);
+        // (num_heads=64, isl=512, batch=8, prefix/step=0) are measured grid
+        // points in the CSA context table for this entry, with gemm=fp8_block.
+        let latency = table
+            .query_context(
+                AttnKind::Csa,
+                8,   // batch
+                512, // full_seq_tokens (isl)
+                64,  // num_heads
+                KvCacheQuantMode::Fp8,
+                FmhaQuantMode::Bfloat16,
+                GemmQuantMode::Fp8Block,
+                "DeepseekV4ForCausalLM",
+                0, // prefix (step)
+            )
+            .expect("DSV4 context lookup must resolve fp8_e4m3 kv_cache_dtype as fp8");
+        assert!(latency.is_finite() && latency > 0.0, "unexpected latency: {latency}");
     }
 }

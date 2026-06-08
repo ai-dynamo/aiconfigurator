@@ -29,7 +29,7 @@ use std::sync::OnceLock;
 use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
-use super::interpolation::{interp_2d_1d_grid, Grid3};
+use super::interpolation::{interp_2d_1d_grid, interp_2d_1d_grid_strict, Grid3};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct AttentionTable {
@@ -140,7 +140,13 @@ impl AttentionTable {
             .by_keys
             .get(&key)
             .ok_or_else(|| missing_gen_key(&self.data_root, &key))?;
-        interp_2d_1d_grid(grid, n, kv_seq_tokens, b)
+        // Python's `_query_generation_attention_table` calls
+        // `interp_3d(..., "bilinear")` with the default
+        // `allow_singleton_axes=False`, which runs `_require_3d_axis_coverage`
+        // and raises `ValueError` when the grid does not vary across all three
+        // axes (e.g. Gemma-4 generation attention with a single `n` value).
+        // Use the strict interpolation variant so Rust surfaces the same error.
+        interp_2d_1d_grid_strict(grid, n, kv_seq_tokens, b, "3-D bilinear interpolation")
     }
 
     /// Raw interpolated encoder (non-causal) attention latency in ms.
