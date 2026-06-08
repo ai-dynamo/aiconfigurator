@@ -302,7 +302,8 @@ def _deepseek_v4_attention_sol(
         * (hidden_size + q_lora_rank + num_heads * head_dim + head_dim + local_groups * o_lora_rank)
         * gemm_quant_mode.value.memory
     )
-    kv_cache_bytes = attention_pairs * num_heads * head_dim * kvcache_quant_mode.value.memory
+    # DSv4 compressed attention stores one head_dim KV vector per token, shared by all query heads.
+    kv_cache_bytes = attention_pairs * head_dim * kvcache_quant_mode.value.memory
     rope_bytes = tokens * num_heads * rope_head_dim * fmha_quant_mode.value.memory
 
     sol_math = (
