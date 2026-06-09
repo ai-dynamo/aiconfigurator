@@ -262,7 +262,18 @@ def test_real_rust_core_returns_expected_latency(tmp_path, monkeypatch) -> None:
     data_root.mkdir(parents=True)
     model_configs_root.mkdir()
 
-    (systems_root / "test_sxm.yaml").write_text("data_dir: data/test_sxm\n")
+    (systems_root / "test_sxm.yaml").write_text(
+        "data_dir: data/test_sxm\n"
+        "gpu:\n"
+        "  mem_bw: 1000000000000000000000000000000\n"
+        "  mem_bw_empirical_scaling_factor: 1.0\n"
+        "  mem_empirical_constant_latency: 0.0\n"
+        "node:\n"
+        "  num_gpus_per_node: 8\n"
+        "  inter_node_bw: 1000000000000000000000000000000\n"
+        "  intra_node_bw: 1000000000000000000000000000000\n"
+        "  p2p_latency: 0.0\n"
+    )
     (model_configs_root / "Test--Dense_config.json").write_text(
         """{
   "architectures": ["LlamaForCausalLM"],
