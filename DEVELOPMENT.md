@@ -51,7 +51,7 @@ the companion `aiconfigurator-rust-core` extension:
 
 ```bash
 # Install both the pure package and the precompiled Rust extension (if a
-# precompiled wheel for your platform is available — manylinux_2_28 today).
+# precompiled wheel for your platform is available).
 pip install -e ".[dev,rust]"
 ```
 
