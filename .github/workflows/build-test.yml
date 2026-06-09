@@ -27,8 +27,10 @@ jobs:
             workers: "-n 2"
     steps:
       - name: Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v5
         with:
++         persist-credentials: false
           lfs: true
           fetch-depth: 0
       - name: Detect generator golden changes
