@@ -501,6 +501,12 @@ DOCKER_ENV=(
     -e "DYN_FILE_KV=/work/discovery"
     -e "DYN_NAMESPACE=dynamo"
 )
+WORKER_DOCKER_ENV=("${DOCKER_ENV[@]}")
+if [[ -n "${VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8:-}" ]]; then
+    WORKER_DOCKER_ENV+=(
+        -e "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=${VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8}"
+    )
+fi
 NSYS_DOCKER_MOUNTS=()
 
 mkdir -p \
@@ -914,7 +920,7 @@ run docker run -d \
     -v "${RUN_DIR}:/work" \
     -v "${HF_HOME_HOST}:/work/hf-home" \
     "${NSYS_DOCKER_MOUNTS[@]}" \
-    "${DOCKER_ENV[@]}" \
+    "${WORKER_DOCKER_ENV[@]}" \
     -e "DYN_FORWARDPASS_METRIC_PORT=${FPM_PORT}" \
     -e "DYN_SYSTEM_PORT=${SYSTEM_PORT}" \
     -e "HF_HOME=/work/hf-home" \

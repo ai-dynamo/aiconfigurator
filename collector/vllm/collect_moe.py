@@ -288,7 +288,25 @@ def run_moe_torch(
         # The collector benchmarks the already-sharded local expert weights on
         # one process, so keep FusedMoE's runtime parallel config single-process.
         mxfp4_vllm_cfg = VllmConfig()
+        mxfp4_vllm_cfg.parallel_config.enable_expert_parallel = moe_ep_size > 1
         with set_current_vllm_config(mxfp4_vllm_cfg):
+            # FusedMoE derives EP from tp_size/dp_size/pcp_size plus
+            # parallel_config.enable_expert_parallel. The ep_size constructor
+            # argument is not used by FusedMoEParallelConfig.make(), so pass the
+            # requested EP world size through tp_size to mirror vLLM serving.
+            fused_moe_tp_size = moe_ep_size if moe_ep_size > 1 else 1
+            if fused_moe_tp_size > 1:
+                # The op collector benchmarks one local rank without
+                # initializing vLLM distributed groups. FusedMoE still asks the
+                # parallel-config module for the TP rank while deriving EP, so
+                # pin this synthetic process to rank 0 during construction.
+                from vllm.model_executor.layers.fused_moe import config as fused_moe_config_module
+
+                original_get_tp_rank = fused_moe_config_module.get_tensor_model_parallel_rank
+                fused_moe_config_module.get_tensor_model_parallel_rank = lambda: 0
+            else:
+                fused_moe_config_module = None
+                original_get_tp_rank = None
             fused_moe_kwargs = {
                 "num_experts": num_experts,
                 "top_k": topk,
@@ -296,7 +314,7 @@ def run_moe_torch(
                 "intermediate_size": local_inter_size,
                 "renormalize": True,
                 "quant_config": mxfp4_quant_config,
-                "tp_size": 1,
+                "tp_size": fused_moe_tp_size,
                 "dp_size": 1,
                 "ep_size": moe_ep_size,
                 "prefix": "",
@@ -306,7 +324,11 @@ def run_moe_torch(
             }
             if "reduce_results" in inspect.signature(FusedMoE.__init__).parameters:
                 fused_moe_kwargs["reduce_results"] = False
-            moe_module = FusedMoE(**fused_moe_kwargs)
+            try:
+                moe_module = FusedMoE(**fused_moe_kwargs)
+            finally:
+                if fused_moe_config_module is not None and original_get_tp_rank is not None:
+                    fused_moe_config_module.get_tensor_model_parallel_rank = original_get_tp_rank
             moe_module.to(device)
             moe_module.eval()
             moe_module.requires_grad_(False)
@@ -573,7 +595,22 @@ def run_moe_torch(
             fwd_ctx = get_forward_context()
             if hasattr(fwd_ctx, "moe_layer_index"):
                 fwd_ctx.moe_layer_index = 0
-            moe_module.forward(hs, rl)
+            if moe_ep_size > 1:
+                # The deployed EP path reduces partial outputs across ranks.
+                # This standalone op collector benchmarks only one local rank,
+                # without a distributed process group, so keep the measured row
+                # to local MoE compute and leave EP communication to separate
+                # comm modeling.
+                from vllm.model_executor.layers.fused_moe.runner import moe_runner as moe_runner_module
+
+                original_all_reduce = moe_runner_module.tensor_model_parallel_all_reduce
+                moe_runner_module.tensor_model_parallel_all_reduce = lambda x: x
+                try:
+                    moe_module.forward(hs, rl)
+                finally:
+                    moe_runner_module.tensor_model_parallel_all_reduce = original_all_reduce
+            else:
+                moe_module.forward(hs, rl)
 
         def run_single_iteration():
             if use_mxfp4:

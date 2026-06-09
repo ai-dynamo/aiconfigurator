@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "collector" / "layerwise" / "common"))
 sys.path.insert(0, str(ROOT / "collector" / "layerwise" / "vllm"))
 
 import collect_layerwise as cl
+import parallel_config_patch as pcp
 from random_prompt_tokens import load_random_prompt_token_config
 
 
@@ -54,6 +55,11 @@ def _args(tmp_path):
         ctx_warmup_runs=0,
         ctx_measured_runs=1,
         ctx_repeat_aggregation="median",
+        gen_driver="decode_sweep",
+        gen_warmup_runs=0,
+        gen_measured_runs=1,
+        gen_repeat_aggregation="median",
+        compilation_config_json=None,
         rollup=r"layers\.(\d+)\.(self_attn|mlp)",
         rank_reduce="sum",
         measurement_mode="attribution",
@@ -73,6 +79,7 @@ def _build_args(tmp_path, **overrides):
         moe_tp=1,
         num_slots=None,
         include_moe_layer=False,
+        moe_noop=False,
         target_layer_count=1,
         target_layers=None,
         target_layer_config_depth=None,
@@ -644,6 +651,128 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 [call.kwargs["num_slots"] for call in patcher.mock_calls],
                 [8, 8],
             )
+
+    def test_num_local_experts_build_work_units_as_moe(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            moe_config = {
+                "num_attention_heads": 8,
+                "num_key_value_heads": 8,
+                "intermediate_size": 1024,
+                "num_local_experts": 8,
+                "moe_intermediate_size": 512,
+            }
+            args = _build_args(tmp_path, tp_sizes="2,4", moe_tp=2, num_slots=8)
+
+            with (
+                mock.patch.object(cl, "_load_original_config", return_value=moe_config),
+                mock.patch.object(cl, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
+            ):
+                units = cl.build_work_units(args)
+
+            self.assertEqual([u.row_base["attn_tp"] for u in units], [2, 4])
+            self.assertEqual([u.row_base["moe_tp"] for u in units], [2, 2])
+            self.assertEqual([u.row_base["ep"] for u in units], [1, 2])
+            self.assertEqual([u.row_base["num_slots"] for u in units], [8, 8])
+            self.assertEqual(
+                [call.kwargs["ep"] for call in patcher.mock_calls],
+                [1, 2],
+            )
+
+    def test_gpt_oss_build_work_units_targets_first_moe_layer_for_noop(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            moe_config = {
+                "architectures": ["GptOssForCausalLM"],
+                "model_type": "gpt_oss",
+                "layer_types": ["sliding_attention", "full_attention"],
+                "num_attention_heads": 8,
+                "num_key_value_heads": 8,
+                "intermediate_size": 1024,
+                "num_local_experts": 8,
+                "num_experts_per_tok": 4,
+            }
+            args = _build_args(tmp_path, tp_sizes="2,4", moe_tp=1, moe_noop=True)
+
+            with (
+                mock.patch.object(cl, "_load_original_config", return_value=moe_config),
+                mock.patch.object(cl, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
+            ):
+                units = cl.build_work_units(args)
+
+            self.assertEqual([u.target_layers for u in units], [[0], [0]])
+            self.assertEqual([u.moe_noop for u in units], [True, True])
+            self.assertEqual(
+                [call.kwargs["extra_overrides"] for call in patcher.mock_calls],
+                [{"layer_types": ["sliding_attention"]}, {"layer_types": ["sliding_attention"]}],
+            )
+            self.assertEqual(
+                [call.kwargs["num_hidden_layers"] for call in patcher.mock_calls],
+                [1, 1],
+            )
+
+    def test_scheduler_spec_includes_moe_noop(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            unit = cl.WorkUnit(
+                work_unit_id="wu_moe",
+                model_dir=str(tmp_path / "model"),
+                row_base=_unit(tmp_path, []).row_base,
+                target_layers=[0],
+                datapoints=[cl.DataPoint("gen", 1, 1, 16)],
+                moe_noop=True,
+            )
+            scheduler = cl.Scheduler(_args(tmp_path), [unit])
+
+            spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=1)
+
+            self.assertTrue(spec["moe_noop"])
+
+    def test_parallel_config_patch_treats_num_local_experts_as_moe(self):
+        config = {
+            "num_attention_heads": 8,
+            "num_key_value_heads": 8,
+            "intermediate_size": 1024,
+            "num_local_experts": 8,
+            "moe_intermediate_size": 512,
+        }
+
+        with self.assertRaisesRegex(ValueError, "Constraint violated"):
+            pcp.patch_for_parallelism(
+                "model",
+                attn_tp=4,
+                moe_tp=1,
+                ep=2,
+                original_config=config,
+            )
+
+    def test_parallel_config_patch_divides_num_local_experts_for_ep(self):
+        config = {
+            "num_attention_heads": 8,
+            "num_key_value_heads": 8,
+            "intermediate_size": 1024,
+            "num_local_experts": 128,
+            "num_experts_per_tok": 4,
+            "experts_per_token": 4,
+        }
+
+        with mock.patch.object(pcp, "patch_model_path", return_value="patched") as patcher:
+            result = pcp.patch_for_parallelism(
+                "model",
+                attn_tp=4,
+                moe_tp=1,
+                ep=4,
+                original_config=config,
+            )
+
+        self.assertEqual(result, "patched")
+        overrides = patcher.call_args.kwargs["overrides"]
+        self.assertEqual(overrides["num_attention_heads"], 2)
+        self.assertEqual(overrides["num_key_value_heads"], 2)
+        self.assertEqual(overrides["intermediate_size"], 256)
+        self.assertEqual(overrides["num_local_experts"], 32)
+        self.assertNotIn("num_experts_per_tok", overrides)
+        self.assertNotIn("experts_per_token", overrides)
 
 
 if __name__ == "__main__":

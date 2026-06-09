@@ -14,6 +14,7 @@ Monkey-patches `GPUModelRunner.load_model`:
 Env:
   LAYERWISE_TARGET_LAYERS=3,4   # comma-separated layer indices (default 3)
   LAYERWISE_SKIP_ENABLE=1       # set 0 to disable
+  LAYERWISE_MOE_NOOP=1          # replace target-layer MoE MLPs with identity
 """
 import logging
 import os
@@ -42,6 +43,8 @@ _RETURN_ARITY = {
     # is the FIRST positional (not second like DeepseekV2).
     "Qwen3NextDecoderLayer": 2,
     "Qwen3_5DecoderLayer": 2,
+    # GPT-OSS names decoder blocks TransformerBlock in vLLM 0.20.1.
+    "TransformerBlock": 2,
 }
 
 
@@ -110,6 +113,89 @@ def _find_layers(model):
     return best if best is not None else (None, None)
 
 
+def _find_first_hidden_tensor(args, kwargs):
+    hidden_states = kwargs.get("hidden_states")
+    if hidden_states is None:
+        hidden_states = kwargs.get("x")
+    if hidden_states is None:
+        for a in args:
+            if hasattr(a, "dim") and a.dim() >= 2:
+                hidden_states = a
+                break
+    return hidden_states
+
+
+def _make_moe_noop_forward():
+    def _moe_noop_forward(self, *args, **kwargs):
+        hidden_states = _find_first_hidden_tensor(args, kwargs)
+        if hidden_states is None:
+            raise RuntimeError(
+                "LAYERWISE_MOE_NOOP could not find hidden_states tensor "
+                f"for {type(self).__name__}.forward"
+            )
+        return hidden_states
+    return _moe_noop_forward
+
+
+def _looks_like_moe_mlp(name: str, mod) -> bool:
+    leaf = name.rsplit(".", 1)[-1] if name else ""
+    cls = type(mod).__name__
+    cls_lower = cls.lower()
+    if leaf == "experts":
+        return False
+    has_experts = hasattr(mod, "experts")
+    has_router = hasattr(mod, "router") or hasattr(mod, "gate")
+    if has_experts and (has_router or "moe" in cls_lower or cls == "MLPBlock"):
+        return True
+    return leaf in {"mlp", "moe"} and ("moe" in cls_lower or "sparse" in cls_lower)
+
+
+def _patch_first_moe_mlp(layer) -> tuple[str, str] | None:
+    for name, mod in layer.named_modules():
+        if not name or getattr(mod, "_layerwise_moe_noop", False):
+            continue
+        if not _looks_like_moe_mlp(name, mod):
+            continue
+        mod._layerwise_original_forward = mod.forward
+        mod.forward = types.MethodType(_make_moe_noop_forward(), mod)
+        mod._layerwise_moe_noop = True
+        return name, type(mod).__name__
+    return None
+
+
+def _apply_moe_noop(model, target_layers: set[int]) -> int:
+    layers, path = _find_layers(model)
+    if layers is None:
+        logger.warning(
+            "[vllm-layer-skip] LAYERWISE_MOE_NOOP requested but could not "
+            "locate transformer layers"
+        )
+        return 0
+
+    patched = []
+    missing = []
+    for i in sorted(target_layers):
+        if i < 0 or i >= len(layers):
+            missing.append(i)
+            continue
+        match = _patch_first_moe_mlp(layers[i])
+        if match is None:
+            missing.append(i)
+            continue
+        name, cls = match
+        patched.append(f"{i}.{name}:{cls}")
+
+    if missing:
+        logger.warning(
+            f"[vllm-layer-skip] LAYERWISE_MOE_NOOP found no MoE MLP in "
+            f"target layer(s) {missing} under {path}"
+        )
+    logger.warning(
+        f"[vllm-layer-skip] LAYERWISE_MOE_NOOP patched={patched}"
+    )
+    return len(patched)
+
+
 def _apply_skip(model, target_layers: set[int]) -> int:
     layers, path = _find_layers(model)
     if layers is None:
@@ -165,6 +251,8 @@ def _install_patch():
             # If the wrapper's .model is the *ForCausalLM, use it; else use model.
             root = inner if inner is not None and hasattr(inner, "model") else model
             _apply_skip(root, targets)
+            if os.environ.get("LAYERWISE_MOE_NOOP", "0") == "1":
+                _apply_moe_noop(root, targets)
             # Register PytHooks EARLY only when compile is disabled; under
             # VLLM_COMPILE mode dynamo can't trace `"{}".format(marker_dict)`
             # inside `construct_marker_dict_and_push` and the first forward

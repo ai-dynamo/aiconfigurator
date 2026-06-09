@@ -200,6 +200,50 @@ class VLLMBackend(BaseBackend):
             )
         )
 
+    def _layerwise_moe_compute(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        token_count: int,
+        num_layers: int,
+        is_context: bool,
+    ) -> tuple[float, float, str]:
+        if token_count <= 0 or num_layers <= 0:
+            return 0.0, 0.0, "silicon"
+
+        topk = int(getattr(model, "_topk", 0) or 0)
+        num_experts = int(getattr(model, "_num_experts", 0) or 0)
+        inter_size = int(getattr(model, "_moe_inter_size", 0) or 0)
+        hidden_size = int(getattr(model, "_hidden_size", 0) or 0)
+        if topk <= 0 or num_experts <= 0 or inter_size <= 0 or hidden_size <= 0:
+            return 0.0, 0.0, "silicon"
+
+        cfg = model.config
+        workload_distribution = getattr(cfg, "workload_distribution", "power_law")
+        if workload_distribution == "power_law":
+            workload_distribution = f"power_law_{getattr(model, '_power_law_alpha', 1.2)}"
+
+        result = database.query_moe(
+            num_tokens=int(token_count) * int(getattr(cfg, "attention_dp_size", 1) or 1),
+            hidden_size=hidden_size,
+            inter_size=inter_size,
+            topk=topk,
+            num_experts=num_experts,
+            moe_tp_size=int(getattr(cfg, "moe_tp_size", 1) or 1),
+            moe_ep_size=int(getattr(cfg, "moe_ep_size", 1) or 1),
+            quant_mode=cfg.moe_quant_mode,
+            workload_distribution=workload_distribution,
+            is_context=is_context,
+            moe_backend=getattr(cfg, "moe_backend", None),
+            is_gated=True,
+            enable_eplb=bool(getattr(cfg, "enable_eplb", False)),
+        )
+        return (
+            float(result) * num_layers,
+            float(getattr(result, "energy", 0.0)) * num_layers,
+            getattr(result, "source", "silicon"),
+        )
+
     def _run_context_phase(
         self,
         model: BaseModel,
@@ -226,10 +270,21 @@ class VLLMBackend(BaseBackend):
         allreduce_ms = (
             self._layerwise_tp_allreduce_ms(model, database, tp_size, batch_size * effective_isl) * 2 * num_layers
         )
+        moe_ms, moe_energy, moe_source = self._layerwise_moe_compute(
+            model,
+            database,
+            token_count=batch_size * effective_isl,
+            num_layers=num_layers,
+            is_context=True,
+        )
 
         latency_dict = defaultdict(float, {"context_layerwise": layer_ms, "context_tp_allreduce": allreduce_ms})
         energy_dict = defaultdict(float, {"context_layerwise": 0.0, "context_tp_allreduce": 0.0})
         source_dict = {"context_layerwise": "silicon", "context_tp_allreduce": "silicon"}
+        if moe_ms > 0.0:
+            latency_dict["context_moe"] = moe_ms
+            energy_dict["context_moe"] = moe_energy
+            source_dict["context_moe"] = moe_source
         return latency_dict, energy_dict, source_dict
 
     def _run_generation_phase(
@@ -255,6 +310,9 @@ class VLLMBackend(BaseBackend):
 
         layer_ms_total = 0.0
         fused_allreduce_rms_total = 0.0
+        moe_ms_total = 0.0
+        moe_energy_total = 0.0
+        moe_source: str | None = None
         for i in range(0, osl - 1, stride):
             kv_len = isl + i
             layer_detail = self._query_layerwise_detail(
@@ -290,6 +348,19 @@ class VLLMBackend(BaseBackend):
             repeat_count = min(stride, osl - 1 - i)
             layer_ms_total += max(0.0, layer_step_ms - rms_step_ms) * repeat_count
             fused_allreduce_rms_total += allreduce_rms_step_ms * repeat_count
+            moe_step_ms, moe_step_energy, moe_step_source = self._layerwise_moe_compute(
+                model,
+                database,
+                token_count=effective_bs,
+                num_layers=num_layers,
+                is_context=False,
+            )
+            moe_ms_total += moe_step_ms * repeat_count
+            moe_energy_total += moe_step_energy * repeat_count
+            if moe_source is None or moe_source == moe_step_source:
+                moe_source = moe_step_source
+            else:
+                moe_source = "mixed"
 
         latency_dict = defaultdict(float, {"generation_layerwise": layer_ms_total})
         energy_dict = defaultdict(float, {"generation_layerwise": 0.0})
@@ -298,6 +369,10 @@ class VLLMBackend(BaseBackend):
             latency_dict["generation_tp_allreduce_rms"] = fused_allreduce_rms_total
             energy_dict["generation_tp_allreduce_rms"] = 0.0
             source_dict["generation_tp_allreduce_rms"] = "silicon"
+        if moe_ms_total > 0.0:
+            latency_dict["generation_moe"] = moe_ms_total
+            energy_dict["generation_moe"] = moe_energy_total
+            source_dict["generation_moe"] = moe_source or "silicon"
         return latency_dict, energy_dict, source_dict
 
     def _get_mix_step_latency(
@@ -360,10 +435,21 @@ class VLLMBackend(BaseBackend):
                 )
 
         latency_ms = combined_ctx_ms + combined_allreduce_ms + decode_delta_ms
+        moe_ms, moe_energy, moe_source = self._layerwise_moe_compute(
+            model,
+            database,
+            token_count=combined_tokens,
+            num_layers=num_layers,
+            is_context=ctx_tokens > 0,
+        )
         per_ops = {
             "mixed_layerwise_context_combined": combined_ctx_ms,
             "mixed_layerwise_context_tp_allreduce": combined_allreduce_ms,
             "mixed_layerwise_decode_delta": decode_delta_ms,
         }
         per_ops_source = dict.fromkeys(per_ops, "silicon")
-        return latency_ms, 0.0, per_ops, per_ops_source
+        if moe_ms > 0.0:
+            latency_ms += moe_ms
+            per_ops["mixed_moe"] = moe_ms
+            per_ops_source["mixed_moe"] = moe_source
+        return latency_ms, moe_energy, per_ops, per_ops_source

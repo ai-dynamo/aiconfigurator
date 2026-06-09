@@ -6,7 +6,7 @@ to config_patch.patch_model_path for the actual patching.
 Supports three parallelism axes for MoE models:
   - attn_tp: tensor parallelism for attention (divides heads, intermediate_size)
   - moe_tp:  tensor parallelism within each expert (divides moe_intermediate_size)
-  - ep:      expert parallelism (divides n_routed_experts / num_experts)
+  - ep:      expert parallelism (divides n_routed_experts / num_experts / num_local_experts)
   Constraint: attn_tp == moe_tp * ep
 
 Reusable across trtllm, vllm, and sglang collectors.
@@ -26,6 +26,8 @@ import math
 import os
 
 from config_patch import patch_model_path
+
+EXPERT_COUNT_KEYS = ("n_routed_experts", "num_experts", "num_local_experts")
 
 
 def _load_original_config(model_id: str) -> dict:
@@ -87,7 +89,7 @@ def patch_for_parallelism(
         ep = tp_size
 
     config = original_config or _load_original_config(model_id)
-    is_moe = any((config.get(k, 0) or 0) > 0 for k in ("n_routed_experts", "num_experts"))
+    is_moe = any((config.get(k, 0) or 0) > 0 for k in EXPERT_COUNT_KEYS)
 
     if is_moe and attn_tp != moe_tp * ep:
         raise ValueError(
@@ -112,7 +114,7 @@ def patch_for_parallelism(
     }
 
     # --- MoE expert parallelism (EP) ---
-    for expert_key in ("n_routed_experts", "num_experts"):
+    for expert_key in EXPERT_COUNT_KEYS:
         orig_experts = config.get(expert_key, 0)
         if orig_experts > 0 and ep > 1:
             source_experts = num_slots or orig_experts

@@ -36,7 +36,7 @@ _THIS_DIR = Path(__file__).resolve().parent
 _COMMON_DIR = _THIS_DIR.parent / "common"
 sys.path.insert(0, str(_COMMON_DIR))
 
-from parallel_config_patch import _load_original_config, patch_for_parallelism
+from parallel_config_patch import EXPERT_COUNT_KEYS, _load_original_config, patch_for_parallelism
 from parse_nsys_step_sweep import parse_step_sweep
 from random_prompt_tokens import (
     RandomPromptTokenConfig,
@@ -170,6 +170,7 @@ class WorkUnit:
     row_base: dict[str, Any]
     target_layers: list[int]
     datapoints: list[DataPoint]
+    moe_noop: bool = False
 
     def manifest_rows(self) -> list[dict[str, Any]]:
         rows = []
@@ -178,6 +179,7 @@ class WorkUnit:
                 "work_unit_id": self.work_unit_id,
                 "datapoint_id": dp.datapoint_id(self.work_unit_id),
                 **self.row_base,
+                "moe_noop": self.moe_noop,
                 "phase": dp.phase,
                 "batch_size": dp.batch_size,
                 "new_tokens": dp.new_tokens,
@@ -401,7 +403,7 @@ def _detect_layer_schedule(
         return [
             {"layer_index": i, "layer_type": "dense"}
             for i in sorted_layers
-        ], num_hidden_layers, None
+        ], num_hidden_layers, _layer_types_override(config, num_hidden_layers)
 
     if target_layer_count < 1:
         raise ValueError(f"target_layer_count must be >= 1, got {target_layer_count}")
@@ -422,9 +424,28 @@ def _detect_layer_schedule(
         return [
             {"layer_index": i, "layer_type": "dense"}
             for i in range(target_layer_count)
-        ], num_hidden_layers, None
+        ], num_hidden_layers, _layer_types_override(config, num_hidden_layers)
 
-    # vLLM MoE is opt-in because dummy-weight routing still underestimates MoE.
+    if _is_all_moe_config(config):
+        num_hidden_layers = target_layer_count
+        if target_layer_config_depth is not None:
+            if target_layer_config_depth < target_layer_count:
+                raise ValueError(
+                    f"target_layer_config_depth={target_layer_config_depth} is smaller "
+                    f"than target_layer_count={target_layer_count}"
+                )
+            if max_config_layers and target_layer_config_depth > max_config_layers:
+                raise ValueError(
+                    f"target_layer_config_depth={target_layer_config_depth} exceeds "
+                    f"config num_hidden_layers={max_config_layers}"
+                )
+            num_hidden_layers = target_layer_config_depth
+        return [
+            {"layer_index": i, "layer_type": "moe"}
+            for i in range(target_layer_count)
+        ], num_hidden_layers, _layer_types_override(config, num_hidden_layers)
+
+    # Hybrid vLLM MoE is opt-in because dummy-weight routing still underestimates MoE.
     if target_layer_count != 1:
         raise ValueError(
             "target_layer_count > 1 is currently only supported for dense models"
@@ -439,22 +460,56 @@ def _detect_layer_schedule(
     if "decoder_sparse_step" in config:
         overrides["decoder_sparse_step"] = 1
         overrides["mlp_only_layers"] = []
+    layer_type_overrides = _layer_types_override(config, num_hidden_layers)
+    if layer_type_overrides:
+        overrides.update(layer_type_overrides)
     return layer_schedule, num_hidden_layers, overrides
 
 
+def _layer_types_override(
+    config: dict[str, Any],
+    num_hidden_layers: int,
+) -> dict[str, Any] | None:
+    layer_types = config.get("layer_types")
+    if not isinstance(layer_types, list):
+        return None
+    if len(layer_types) < num_hidden_layers:
+        raise ValueError(
+            f"layer_types has length {len(layer_types)} but num_hidden_layers="
+            f"{num_hidden_layers}"
+        )
+    return {"layer_types": list(layer_types[:num_hidden_layers])}
+
+
 def _is_moe_config(config: dict[str, Any]) -> bool:
-    return any((config.get(k, 0) or 0) > 0 for k in ("n_routed_experts", "num_experts"))
+    return any((config.get(k, 0) or 0) > 0 for k in EXPERT_COUNT_KEYS)
+
+
+def _is_all_moe_config(config: dict[str, Any]) -> bool:
+    model_type = str(config.get("model_type") or "").lower()
+    architectures = [str(x) for x in config.get("architectures") or []]
+    if model_type == "gpt_oss" or "GptOssForCausalLM" in architectures:
+        return True
+    # Hybrid MoE configs usually carry replacement/sparse-step controls.  If a
+    # config exposes experts but none of those controls, assume every decoder
+    # block owns a routed MLP.
+    return _is_moe_config(config) and not any(
+        key in config
+        for key in ("first_k_dense_replace", "decoder_sparse_step", "mlp_only_layers")
+    )
 
 
 def _work_unit_id(
     row_base: dict[str, Any],
     target_layers: list[int],
     num_hidden_layers: int,
+    moe_noop: bool = False,
 ) -> str:
     payload = {
         **row_base,
         "target_layers": target_layers,
         "num_hidden_layers": num_hidden_layers,
+        "moe_noop": moe_noop,
     }
     return "wu_" + _stable_hash(payload)
 
@@ -586,6 +641,7 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
         explicit_target_layers, args.target_layer_config_depth,
     )
     target_layers = [int(x["layer_index"]) for x in layer_schedule]
+    moe_noop = bool(getattr(args, "moe_noop", False) and is_moe)
 
     work_dir = Path(args.work_dir).resolve()
     config_cache_dir = None if args.no_config_cache else (args.config_cache_dir or str(work_dir / "config_cache"))
@@ -655,11 +711,13 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
                 row_base,
                 target_layers,
                 num_hidden_layers,
+                moe_noop,
             ),
             model_dir=model_dir,
             row_base=row_base,
             target_layers=target_layers,
             datapoints=datapoints,
+            moe_noop=moe_noop,
         ))
     return work_units
 
@@ -987,6 +1045,7 @@ class Scheduler:
             "work_unit_id": unit.work_unit_id,
             "model_dir": unit.model_dir,
             "target_layers": unit.target_layers,
+            "moe_noop": unit.moe_noop,
             "datapoints": [asdict(dp) for dp in pending],
             "status_path": str(self.store.status_path),
             "restrict_cudagraph_sizes": not self.args.no_restrict_cudagraph_sizes,
@@ -1475,6 +1534,10 @@ def run_worker(spec_path: Path) -> None:
     # TP/EP.  The parent sets CUDA_VISIBLE_DEVICES to the slot assigned here.
     os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     os.environ["LAYERWISE_TARGET_LAYERS"] = ",".join(str(x) for x in spec["target_layers"])
+    if spec.get("moe_noop"):
+        os.environ["LAYERWISE_MOE_NOOP"] = "1"
+    else:
+        os.environ.pop("LAYERWISE_MOE_NOOP", None)
     max_num_batched_tokens = _max_num_batched_tokens_for_datapoints(
         datapoints,
         int(spec.get("min_max_num_batched_tokens", 1)),
@@ -1538,6 +1601,7 @@ def run_worker(spec_path: Path) -> None:
             "work_unit_id": work_unit_id,
             "attempt_id": spec["attempt_id"],
             "target_layers": spec["target_layers"],
+            "moe_noop": bool(spec.get("moe_noop")),
             "attribution_target": (
                 "cudagraph_wrapper"
                 if str(spec.get("measurement_mode", "deployment-parity")) == "deployment-parity"
@@ -1933,6 +1997,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--moe-tp", type=int, default=1)
     parser.add_argument("--num-slots", type=int, default=None)
     parser.add_argument("--include-moe-layer", action="store_true")
+    parser.add_argument(
+        "--moe-noop",
+        action="store_true",
+        help=(
+            "For MoE configs, replace target-layer routed MLP/MoE modules with "
+            "identity so layerwise can collect attention/norm overhead while "
+            "MoE compute comes from the op-level collector."
+        ),
+    )
     parser.add_argument(
         "--target-layer-count",
         type=int,

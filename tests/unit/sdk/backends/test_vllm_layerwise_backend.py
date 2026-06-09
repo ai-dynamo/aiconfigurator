@@ -3,9 +3,11 @@
 
 import pytest
 
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.backends import base_backend
 from aiconfigurator.sdk.backends.vllm_backend import VLLMBackend
 from aiconfigurator.sdk.config import RuntimeConfig
+from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
 pytestmark = pytest.mark.unit
@@ -228,6 +230,155 @@ def test_vllm_layerwise_generation_uses_fused_allreduce_rms(monkeypatch) -> None
         "generation_layerwise": "silicon",
         "generation_tp_allreduce_rms": "silicon",
     }
+
+
+def test_vllm_layerwise_context_adds_moe_compute(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 8
+        pp_size = 1
+        attention_dp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 8
+        moe_quant_mode = common.MoEQuantMode.nvfp4
+        workload_distribution = "power_law"
+        moe_backend = None
+        enable_eplb = False
+
+    class _Model:
+        model_path = "openai/gpt-oss-120b"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 2880
+        _topk = 4
+        _num_experts = 128
+        _moe_inter_size = 2880
+        _power_law_alpha = 1.2
+
+    class _Database:
+        def query_layerwise(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0):
+            assert (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache) == (
+                "openai/gpt-oss-120b",
+                "CTX",
+                8,
+                1,
+                128,
+                0,
+            )
+            return 0.25
+
+        def query_custom_allreduce(self, quant_mode, tp_size, size):
+            del quant_mode
+            assert (tp_size, size) == (8, 128 * 2880)
+            return 0.0
+
+        def query_moe(self, **kwargs):
+            assert kwargs == {
+                "num_tokens": 128,
+                "hidden_size": 2880,
+                "inter_size": 2880,
+                "topk": 4,
+                "num_experts": 128,
+                "moe_tp_size": 1,
+                "moe_ep_size": 8,
+                "quant_mode": common.MoEQuantMode.nvfp4,
+                "workload_distribution": "power_law_1.2",
+                "is_context": True,
+                "moe_backend": None,
+                "is_gated": True,
+                "enable_eplb": False,
+            }
+            return PerformanceResult(0.5, energy=2.0, source="empirical")
+
+    latency, energy, sources = VLLMBackend()._run_context_phase(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        batch_size=1,
+        isl=128,
+        prefix=0,
+    )
+
+    assert latency["context_layerwise"] == pytest.approx(1.0)
+    assert latency["context_moe"] == pytest.approx(2.0)
+    assert energy["context_moe"] == pytest.approx(8.0)
+    assert sources["context_moe"] == "empirical"
+
+
+def test_vllm_layerwise_generation_adds_moe_compute(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 8
+        pp_size = 1
+        attention_dp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 8
+        moe_quant_mode = common.MoEQuantMode.nvfp4
+        workload_distribution = "balanced"
+        moe_backend = None
+        enable_eplb = False
+
+    class _Model:
+        model_path = "openai/gpt-oss-120b"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 2880
+        _topk = 4
+        _num_experts = 128
+        _moe_inter_size = 2880
+        _nextn = 0
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0):
+            assert (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache) == (
+                "openai/gpt-oss-120b",
+                "GEN",
+                8,
+                16,
+                1024,
+                0,
+            )
+            return {"latency": 1.0, "energy": 0.0, "rms_latency": 0.0}
+
+        def query_moe(self, **kwargs):
+            assert kwargs == {
+                "num_tokens": 16,
+                "hidden_size": 2880,
+                "inter_size": 2880,
+                "topk": 4,
+                "num_experts": 128,
+                "moe_tp_size": 1,
+                "moe_ep_size": 8,
+                "quant_mode": common.MoEQuantMode.nvfp4,
+                "workload_distribution": "balanced",
+                "is_context": False,
+                "moe_backend": None,
+                "is_gated": True,
+                "enable_eplb": False,
+            }
+            return PerformanceResult(0.5, energy=2.0, source="empirical")
+
+    latency, energy, sources = VLLMBackend()._run_generation_phase(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        batch_size=16,
+        beam_width=1,
+        isl=1024,
+        osl=3,
+        stride=32,
+    )
+
+    assert latency["generation_layerwise"] == pytest.approx(8.0)
+    assert latency["generation_moe"] == pytest.approx(4.0)
+    assert energy["generation_moe"] == pytest.approx(16.0)
+    assert sources["generation_moe"] == "empirical"
 
 
 @pytest.mark.parametrize("gen_error", [PerfDataNotAvailableError("missing GEN KV row"), ValueError("sparse GEN KV")])
