@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Single multi-stage Dockerfile that builds BOTH the pure-Python
-# `aiconfigurator` wheel and the platform-specific `aiconfigurator-rust-core`
+# `aiconfigurator` wheel and the platform-specific `aiconfigurator-core`
 # extension wheel, plus a `combined-test` stage that installs both into one
 # venv and exercises the rust backend + python fallback end-to-end.
 #
@@ -27,7 +27,7 @@
 ARG WHEEL_BUILD_BASE=quay.io/pypa/manylinux_2_28_x86_64
 
 # ----------------------------------------------------------------------------
-# Rust-side wheel build (aiconfigurator-rust-core)
+# Rust-side wheel build (aiconfigurator-core)
 # ----------------------------------------------------------------------------
 
 # rust-toolchain: install rustup + the pinned cargo-cyclonedx into the same
@@ -40,7 +40,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN cargo install --locked cargo-cyclonedx --version 0.5.7
 
-# rust-build: produce the aiconfigurator-rust-core wheel. auditwheel
+# rust-build: produce the aiconfigurator-core wheel. auditwheel
 # repair stamps the wheel with the appropriate platform tag based on the
 # actual symbol versions it observes — manylinux_2_28_<arch>,
 # manylinux2014_<arch>, or musllinux_1_2_<arch>.
@@ -120,7 +120,7 @@ RUN aiconfigurator cli default \
 # --- Python fallback path ---
 # Uninstall the rust extension and re-run with the python backend, proving
 # the bare-aiconfigurator install path still works.
-RUN uv pip uninstall aiconfigurator-rust-core && \
+RUN uv pip uninstall aiconfigurator-core && \
     aiconfigurator cli default \
       --model-path Qwen/Qwen3-32B --total-gpus 1 --system h200_sxm \
       --engine-step-backend python --save-dir /tmp/out-python

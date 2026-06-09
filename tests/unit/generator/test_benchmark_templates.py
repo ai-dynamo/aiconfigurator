@@ -65,3 +65,37 @@ class TestBenchmarkTemplates:
         rendered = _render("k8s_bench.yaml.j2", benchmark_env, **_base_context())
         assert "concurrency_array=(0" not in rendered
         assert "concurrency_array=(1 2 8 16 32 64 128)" in rendered
+
+    def test_bench_run_emits_prefix_prompt_args_when_configured(self, benchmark_env):
+        context = _base_context()
+        context["BenchConfig"]["prefix"] = 512
+        context["BenchConfig"]["prefix_prompt_pool_size"] = 3
+
+        rendered = _render("bench_run.sh.j2", benchmark_env, **context)
+
+        prefix_arg_line = (
+            'prefix_args+=(--prefix-prompt-length "${BENCH_PREFIX}" --num-prefix-prompts "${BENCH_PREFIX_PROMPTS}")'
+        )
+        assert 'BENCH_PREFIX="${AICONFIGURATOR_BENCH_PREFIX:-512}"' in rendered
+        assert 'BENCH_PREFIX_PROMPTS="${AICONFIGURATOR_BENCH_PREFIX_PROMPTS:-3}"' in rendered
+        assert '"${BENCH_PREFIX_PROMPTS}" =~ ^[0-9]+$' in rendered
+        assert '"${BENCH_PREFIX_PROMPTS}" -gt 0' in rendered
+        assert prefix_arg_line in rendered
+        assert '"${prefix_args[@]}" \\' in rendered
+
+    def test_k8s_bench_emits_prefix_prompt_args_when_configured(self, benchmark_env):
+        context = _base_context()
+        context["BenchConfig"]["prefix"] = 512
+        context["BenchConfig"]["prefix_prompt_pool_size"] = 3
+
+        rendered = _render("k8s_bench.yaml.j2", benchmark_env, **context)
+
+        prefix_arg_line = (
+            'prefix_args+=(--prefix-prompt-length "${BENCH_PREFIX}" --num-prefix-prompts "${BENCH_PREFIX_PROMPTS}")'
+        )
+        assert 'BENCH_PREFIX="${AICONFIGURATOR_BENCH_PREFIX:-512}"' in rendered
+        assert 'BENCH_PREFIX_PROMPTS="${AICONFIGURATOR_BENCH_PREFIX_PROMPTS:-3}"' in rendered
+        assert '"${BENCH_PREFIX_PROMPTS}" =~ ^[0-9]+$' in rendered
+        assert '"${BENCH_PREFIX_PROMPTS}" -gt 0' in rendered
+        assert prefix_arg_line in rendered
+        assert '"${prefix_args[@]}" \\' in rendered

@@ -4,6 +4,7 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 # Docs: https://docs.coderabbit.ai/getting-started/configure-coderabbit/
 language: "en-US"
+tone_instructions: "Prefer concise, actionable review comments. When a fix is concrete and safe, include a GitHub Suggested Change so it can be applied with one click."
 early_access: false
 reviews:
   profile: "chill"
@@ -11,12 +12,107 @@ reviews:
   high_level_summary: true
   # John likes the poems, no messing
   poem: true
-  review_status: false
+  review_status: true
+  review_details: true
   collapse_walkthrough: false
+  enable_prompt_for_ai_agents: true
   auto_review:
     enabled: true
-    drafts: false
-    auto_incremental_review: false
+    drafts: true
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 5
+  # Include reviewable source areas explicitly so support-matrix CSV diffs are
+  # reviewed even though CSV files are normally skipped by default.
+  path_filters:
+    - ".agents/**"
+    - ".claude/**"
+    - ".github/**"
+    - "collector/**"
+    - "docker/**"
+    - "docs/**"
+    - "rust/**"
+    - "src/**"
+    - "tests/**"
+    - "tools/**"
+    - ".dockerignore"
+    - ".gitattributes"
+    - ".gitignore"
+    - ".pre-commit-config.yaml"
+    - "LICENSE"
+    - "*.md"
+    - "*.ini"
+    - "*.js"
+    - "*.json"
+    - "*.toml"
+    - "*.yaml"
+    - "*.yml"
+    - ".coderabbit.yaml"
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        - Prefer applicable inline comments. When the correct fix is clear, small, and limited to the commented diff hunk, include it as a GitHub Suggested Change so the author can apply it with one click.
+        - Do not use a suggested change when the fix requires broader design choices, multiple files, generated artifacts, unavailable context, or validation that cannot be inferred from the diff.
+        - If a comment is not directly applicable, state the smallest concrete next step and why a one-click suggestion is not safe.
+    - path: ".agents/skills/**/SKILL.md"
+      instructions: |
+        - This file is a skill definition. Apply contract consistency rules when `## Inputs` or `## Outputs` sections are present.
+        - If the skill references another skill by name, verify expected field names match the callee's declared outputs and required inputs.
+        - If the skill declares outputs consumed by another skill, verify callers remain compatible with the updated output fields.
+        - Do not flag missing `## Inputs` or `## Outputs` sections by themselves; enforce these checks only when the sections exist.
+    - path: "src/aiconfigurator/generator/**"
+      instructions: |
+        - Enforce the generator development rules from `.claude/rules/generator-development.md`.
+        - Trace changes across the pipeline: input parsing, defaults, rule evaluation, parameter mapping, template rendering, and emitted artifacts.
+        - For `.j2` templates and `.rule` files, verify `# Guard:` and `# Why:` comments are preserved and followed. Flag removals or bypasses unless the PR explicitly justifies them.
+        - Check cross-backend consistency across TRT-LLM, vLLM, and SGLang when a backend-specific rule, template, parameter, or versioned artifact changes.
+        - For new user-facing generator parameters, require matching CLI, SDK/profiler bridge, generator validator, docs, and test coverage updates where applicable.
+        - For versioned template changes, verify the affected backend versions against `src/aiconfigurator/generator/config/backend_version_matrix.yaml`.
+    - path: "src/aiconfigurator/cli/**"
+      instructions: |
+        - Check that CLI argument changes preserve backward compatibility, validation behavior, defaults, and plain-output expectations.
+        - For new or changed user-facing options, verify docs updates and generator/SDK wiring.
+        - Watch for non-TTY assumptions in tests or output formatting.
+    - path: "src/aiconfigurator/sdk/**"
+      instructions: |
+        - Verify SDK API changes remain compatible with generator inputs, profiler data flow, and documented examples.
+        - Flag silent schema or field-name drift between SDK models and generator/module bridge code.
+    - path: "src/aiconfigurator/generator/module_bridge.py"
+      instructions: |
+        - Treat this as a compatibility bridge between profiler/SDK outputs and generator inputs.
+        - Flag field renames, default changes, or type conversions unless corresponding tests and downstream generator expectations are updated.
+    - path: "src/aiconfigurator/webapp/**"
+      instructions: |
+        - Verify UI changes preserve support-matrix navigation, filtering, and rendering behavior across local static previews and the webapp.
+        - Check that webapp flows handle missing Git LFS performance data gracefully when the change touches default-mode or support data loading.
+    - path: "collector/**"
+      instructions: |
+        - Check collector changes for backend/runtime version accuracy, GPU resource assumptions, reproducible command construction, and clear failure evidence.
+        - Flag changes that make support-matrix or perf-data results harder to trace back to the command, model, system, quantization, or runtime version that produced them.
+    - path: "tools/generator_validator/**"
+      instructions: |
+        - Check that validator changes keep generated artifact coverage aligned across supported backends and versions.
+        - For new generator flags or templates, verify the validator inspects the new emitted behavior instead of only command success.
+    - path: "tools/support_matrix/**"
+      instructions: |
+        - Check support-matrix logic for deterministic ordering, duplicate-row handling, runtime/version matching, and clear PASS/FAIL semantics.
+        - Verify changes distinguish collector/probe failures from actual model/backend support failures.
+    - path: "src/aiconfigurator/systems/support_matrix/**"
+      instructions: |
+        - Review support-matrix CSV updates as source-of-truth compatibility data, not generated noise.
+        - Check that model, backend, runtime version, GPU system, quantization, tensor/pipeline/expert parallelism, and PASS/FAIL wording are internally consistent.
+        - Flag stale or contradictory rows, duplicate keys, or claims that are not supported by linked evidence in the PR.
+    - path: "tests/**"
+      instructions: |
+        - Check that tests cover the changed behavior rather than only the happy path.
+        - Watch for fixtures or golden outputs that mask backend drift, support-matrix ordering changes, or CLI output regressions.
+    - path: ".github/workflows/**"
+      instructions: |
+        - Review workflow edits for least-privilege permissions, safe trigger scopes, secret exposure, fork behavior, and release/cherry-pick side effects.
+        - Verify matrix jobs, artifact uploads, and scheduled support-matrix workflows still produce debuggable evidence.
+    - path: "docs/**"
+      instructions: |
+        - Check that docs match changed CLI, SDK, generator, backend, and support-matrix behavior.
+        - Flag docs that describe unsupported runtimes, stale command names, or behavior not covered by tests or support-matrix evidence.
   suggested_labels: false
   suggested_reviewers: false
   sequence_diagrams: false
@@ -27,5 +123,26 @@ reviews:
       enabled: false
     unit_tests:
       enabled: false
+  tools:
+    ruff:
+      enabled: true
+    shellcheck:
+      enabled: true
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    github-checks:
+      enabled: true
+      timeout_ms: 900000
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - ".claude/rules/**/*.md"
 chat:
   auto_reply: true

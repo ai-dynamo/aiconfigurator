@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, Undefined
+from packaging.version import InvalidVersion, Version
 
 from .rule_engine import apply_rule_plugins
 
@@ -29,6 +30,111 @@ _BASE_DIR = Path(__file__).resolve().parent
 _CONFIG_DIR = (_BASE_DIR.parent / "config").resolve()
 _TEMPLATE_ROOT = _CONFIG_DIR / "backend_templates"
 _BACKEND_MAPPING_FILE = str((_CONFIG_DIR / "backend_config_mapping.yaml").resolve())
+
+
+def _parse_template_version(version: str | None) -> Version | None:
+    if version is None:
+        return None
+    normalized = str(version).strip()
+    if normalized.lower().startswith("v") and len(normalized) > 1 and normalized[1].isdigit():
+        normalized = normalized[1:]
+    if not normalized:
+        return None
+    try:
+        return Version(normalized)
+    except InvalidVersion:
+        return None
+
+
+def _versioned_template_part(template_name: str, prefix: str, suffix: str) -> str | None:
+    default_name = f"{prefix}{suffix}"
+    if template_name == default_name:
+        return None
+    version_prefix = f"{prefix}."
+    if not template_name.startswith(version_prefix) or not template_name.endswith(suffix):
+        return None
+    return template_name[len(version_prefix) : -len(suffix)]
+
+
+def _select_versioned_template(
+    template_candidates: list[Path],
+    prefix: str,
+    suffix: str,
+    version: Optional[str],
+) -> Path | None:
+    """
+    Select a versioned template using exact match, then closest prior version.
+
+    Versioned backend templates are named like ``cli_args.0.5.11.j2`` or
+    ``extra_engine_args.1.3.0rc14.yaml.j2``. If no compatible version exists,
+    the unversioned base template is used.
+    """
+    default_template = next((p for p in template_candidates if p.name == f"{prefix}{suffix}"), None)
+    if not version:
+        return default_template
+
+    requested_version = _parse_template_version(version)
+    normalized_requested = str(version).strip()
+    if normalized_requested.lower().startswith("v") and len(normalized_requested) > 1:
+        normalized_requested = normalized_requested[1:]
+
+    parsed_candidates: list[tuple[Version, Path]] = []
+    for candidate in template_candidates:
+        candidate_version_str = _versioned_template_part(candidate.name, prefix, suffix)
+        if candidate_version_str is None:
+            continue
+        if candidate_version_str == normalized_requested:
+            return candidate
+        candidate_version = _parse_template_version(candidate_version_str)
+        if candidate_version is not None:
+            parsed_candidates.append((candidate_version, candidate))
+
+    if requested_version is None:
+        return default_template
+
+    floor_candidates = [
+        (candidate_version, candidate)
+        for candidate_version, candidate in parsed_candidates
+        if candidate_version <= requested_version
+    ]
+    if floor_candidates:
+        return max(floor_candidates, key=lambda item: item[0])[1]
+    return default_template
+
+
+def _log_versioned_template_selection(
+    template_kind: str,
+    selected_template: Path | None,
+    prefix: str,
+    suffix: str,
+    version: Optional[str],
+) -> None:
+    if not version:
+        return
+    if selected_template is None:
+        logger.warning("No %s template available for %s; using mapping fallback.", template_kind, version)
+        return
+
+    normalized_requested = str(version).strip()
+    if normalized_requested.lower().startswith("v") and len(normalized_requested) > 1:
+        normalized_requested = normalized_requested[1:]
+    selected_version = _versioned_template_part(selected_template.name, prefix, suffix)
+    if selected_version == normalized_requested:
+        return
+    if selected_version is None:
+        logger.warning(
+            "No version-specific %s template for %s, using default %s.",
+            template_kind,
+            version,
+            selected_template.name,
+        )
+    else:
+        logger.warning(
+            "No exact %s template for %s, using closest prior template %s.",
+            template_kind,
+            version,
+            selected_template.name,
+        )
 
 
 def _generate_k8s_via_dynamo(
@@ -181,20 +287,22 @@ def render_backend_templates(
 
     # Resolve engine template (version-specific preferred). Some backends (e.g., vllm, sglang)
     # do not ship engine configs at all, so only warn when such templates actually exist.
-    engine_template_file = None
     engine_template_candidates = list(template_path.glob("extra_engine_args*.yaml.j2"))
     has_engine_templates = bool(engine_template_candidates)
-    if version and has_engine_templates:
-        candidates = [p for p in engine_template_candidates if p.name == f"extra_engine_args.{version}.yaml.j2"]
-        if candidates:
-            engine_template_file = candidates[0]
-        else:
-            logger.warning(f"No version-specific engine template for {version}, using default")
-    if engine_template_file is None and has_engine_templates:
-        default_candidates = [p for p in engine_template_candidates if p.name == "extra_engine_args.yaml.j2"]
-        if default_candidates:
-            engine_template_file = default_candidates[0]
-        # If no engine args template exists (e.g., sglang/vllm), proceed without it
+    engine_template_file = _select_versioned_template(
+        engine_template_candidates,
+        "extra_engine_args",
+        ".yaml.j2",
+        version,
+    )
+    if has_engine_templates:
+        _log_versioned_template_selection(
+            "engine",
+            engine_template_file,
+            "extra_engine_args",
+            ".yaml.j2",
+            version,
+        )
 
     # Render engine templates per worker plan with worker-specific context
     mapping_data = load_yaml_mapping(_BACKEND_MAPPING_FILE)
@@ -284,6 +392,11 @@ def render_backend_templates(
         _set_nested("cuda_graph_config", "batch_sizes", "cuda_graph_batch_sizes")
         _set_nested("cache_transceiver_config", "max_tokens_in_buffer", "cache_transceiver_max_tokens_in_buffer")
 
+        if wc.get("disable_prefix_cache") is False:
+            kv_cache_config = dict(wc.get("kv_cache_config") or {})
+            kv_cache_config.setdefault("enable_block_reuse", True)
+            wc["kv_cache_config"] = kv_cache_config
+
         if wc.get("cache_transceiver_config"):
             cache_transceiver_config = dict(wc["cache_transceiver_config"])
             cache_transceiver_config.setdefault("backend", "DEFAULT")
@@ -324,16 +437,9 @@ def render_backend_templates(
     context["agg_engine_args_inline"] = rendered_templates.get("extra_engine_args_agg.yaml", "")
 
     # Resolve CLI args template (version-specific preferred)
-    cli_template_file = None
     cli_template_candidates = list(template_path.glob("cli_args*.j2"))
-    if version and cli_template_candidates:
-        candidates = [p for p in cli_template_candidates if p.name == f"cli_args.{version}.j2"]
-        if candidates:
-            cli_template_file = candidates[0]
-    if cli_template_file is None:
-        default_candidates = [p for p in cli_template_candidates if p.name == "cli_args.j2"]
-        if default_candidates:
-            cli_template_file = default_candidates[0]
+    cli_template_file = _select_versioned_template(cli_template_candidates, "cli_args", ".j2", version)
+    _log_versioned_template_selection("CLI args", cli_template_file, "cli_args", ".j2", version)
 
     # Compute CLI args per worker using template if present, else mapping fallback
     for worker in worker_plan:
@@ -635,7 +741,10 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context = {}
 
     # Extract ModelConfig (is_moe, nextn, etc.)
-    model_config = param_values.get("ModelConfig", {})
+    model_config = param_values.get("ModelConfig") or {}
+    if not isinstance(model_config, dict):
+        model_config = {}
+    context["ModelConfig"] = dict(model_config)
     if model_config.get("is_moe"):
         context["is_moe"] = model_config["is_moe"]
 
@@ -716,7 +825,19 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
         context["SlaConfig"] = dict(sla_config)
     bench_config = param_values.get("BenchConfig", {}) or {}
     if isinstance(bench_config, dict):
-        context["BenchConfig"] = dict(bench_config)
+        bench_context = dict(bench_config)
+        if bench_context.get("prefix") is None:
+            model_prefix = model_config.get("prefix")
+            service_prefix = service_config.get("prefix")
+            if model_prefix is not None:
+                bench_context["prefix"] = model_prefix
+            elif service_prefix is not None:
+                bench_context["prefix"] = service_prefix
+            else:
+                bench_context["prefix"] = 0
+        if bench_context.get("prefix_prompt_pool_size") is None:
+            bench_context["prefix_prompt_pool_size"] = 1
+        context["BenchConfig"] = bench_context
 
     # Load backend_config_mapping.yaml to understand parameter mappings
     mapping_data = load_yaml_mapping(_BACKEND_MAPPING_FILE)

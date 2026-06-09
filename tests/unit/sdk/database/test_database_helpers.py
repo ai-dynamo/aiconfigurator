@@ -93,6 +93,17 @@ def test_get_supported_databases_basic(temp_systems_dir: Path, perf_database):
     assert result["h200"]["trtllm"] == ["1.2.0", "1.3.0rc2"]
 
 
+def test_get_supported_databases_skips_incomplete_versions(temp_systems_dir: Path, perf_database):
+    setup_mock_filesystem(temp_systems_dir, {"h100": {"vllm": ["0.14.0", "0.22.0"]}})
+    incomplete_path = temp_systems_dir / "data_h100" / "vllm" / "0.22.0" / "INCOMPLETE.txt"
+    incomplete_path.write_text("not enough profiling coverage\n", encoding="utf-8")
+
+    result = perf_database.get_supported_databases(str(temp_systems_dir))
+
+    assert result["h100"]["vllm"] == ["0.14.0"]
+    assert perf_database.get_latest_database_version("h100", "vllm", systems_paths=str(temp_systems_dir)) == "0.14.0"
+
+
 def test_get_supported_databases_empty_dir(temp_systems_dir: Path, perf_database):
     result = perf_database.get_supported_databases(str(temp_systems_dir))
     # defaultdict, but empty
@@ -327,6 +338,77 @@ def test_get_database_skips_incomplete_version_directory(tmp_path: Path, perf_da
         )
 
         assert db.systems_root == str(second_root)
+    finally:
+        perf_database.databases_cache.clear()
+        perf_database.databases_cache.update(cache_snapshot)
+
+
+def test_perf_database_clear_runtime_caches_clears_interpolation_and_lru_state(perf_database):
+    db = object.__new__(perf_database.PerfDatabase)
+    db._extracted_metrics_cache = {"table": object()}
+    cache_clear_calls = []
+
+    def fake_cached_method():
+        return None
+
+    fake_cached_method.cache_clear = lambda: cache_clear_calls.append("cleared")
+    db.fake_cached_method = fake_cached_method
+
+    db.clear_runtime_caches()
+
+    assert db._extracted_metrics_cache == {}
+    assert cache_clear_calls == ["cleared"]
+
+
+def test_clear_database_runtime_caches_clears_matching_cached_database_once(perf_database):
+    class FakeDatabase:
+        def __init__(self):
+            self.clear_count = 0
+
+        def clear_runtime_caches(self):
+            self.clear_count += 1
+
+    keep_db = FakeDatabase()
+    clear_db = FakeDatabase()
+    cache_snapshot = dict(perf_database.databases_cache)
+    try:
+        perf_database.databases_cache.clear()
+        perf_database.databases_cache[("root", "system", False)]["backend"]["1.0.0"] = clear_db
+        perf_database.databases_cache[("root", "system", True)]["backend"]["1.0.0"] = clear_db
+        perf_database.databases_cache[("root", "system", False)]["backend"]["2.0.0"] = keep_db
+        perf_database.databases_cache[("root", "other-system", False)]["backend"]["1.0.0"] = keep_db
+
+        perf_database.clear_database_runtime_caches("system", "backend", "1.0.0")
+
+        assert clear_db.clear_count == 1
+        assert keep_db.clear_count == 0
+    finally:
+        perf_database.databases_cache.clear()
+        perf_database.databases_cache.update(cache_snapshot)
+
+
+def test_unload_database_removes_matching_database_and_clears_runtime_cache(perf_database):
+    class FakeDatabase:
+        def __init__(self):
+            self.clear_count = 0
+
+        def clear_runtime_caches(self):
+            self.clear_count += 1
+
+    keep_db = FakeDatabase()
+    unload_db = FakeDatabase()
+    cache_snapshot = dict(perf_database.databases_cache)
+    try:
+        perf_database.databases_cache.clear()
+        perf_database.databases_cache[("root", "system", False)]["backend"]["1.0.0"] = unload_db
+        perf_database.databases_cache[("root", "system", False)]["backend"]["2.0.0"] = keep_db
+        perf_database.databases_cache[("root", "other-system", False)]["backend"]["1.0.0"] = keep_db
+
+        perf_database.unload_database("system", "backend", "1.0.0")
+
+        assert unload_db.clear_count == 1
+        assert perf_database.databases_cache[("root", "system", False)]["backend"] == {"2.0.0": keep_db}
+        assert perf_database.databases_cache[("root", "other-system", False)]["backend"]["1.0.0"] is keep_db
     finally:
         perf_database.databases_cache.clear()
         perf_database.databases_cache.update(cache_snapshot)

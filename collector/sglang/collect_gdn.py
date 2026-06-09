@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 import torch
 
 try:
-    from collector.common_test_cases import get_common_gdn_test_cases
+    from collector.case_generator import get_common_gdn_test_cases
     from collector.helper import (
         EXIT_CODE_RESTART,
         benchmark_with_power,
@@ -56,7 +56,7 @@ except ModuleNotFoundError:
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from common_test_cases import get_common_gdn_test_cases
+    from case_generator import get_common_gdn_test_cases
 
     from helper import (
         EXIT_CODE_RESTART,

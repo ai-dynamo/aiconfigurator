@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: DeciLMForCausalLM
+model_path: nvidia/Llama-3_3-Nemotron-Super-49B-v1
+model_paths:
+  - nvidia/Llama-3_3-Nemotron-Super-49B-v1
+include_base: true
+description: >
+  Nemotron NAS / DeciLM dense-family model-centric collection plan.

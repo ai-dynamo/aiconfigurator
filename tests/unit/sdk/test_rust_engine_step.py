@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -156,6 +157,99 @@ def test_is_rust_core_available_handles_missing_extension(monkeypatch) -> None:
         rust_engine_step._import_rust_core.cache_clear()
 
 
+def test_forward_pass_perf_model_wraps_pyo3_extension(monkeypatch) -> None:
+    """The Python wrapper serializes inputs to JSON and decodes the PyO3 outputs."""
+    recorded: dict = {}
+
+    class _FakeInner:
+        def __init__(self, kind):
+            recorded["kind"] = kind
+
+        def estimate_forward_pass_time_ms(self, metrics_json):
+            recorded["estimate_metrics"] = metrics_json
+            return 42.0
+
+        def tune_with_fpms(self, iterations_json):
+            recorded.setdefault("tuned", []).append(iterations_json)
+
+        def diagnostics_json(self):
+            return json.dumps({"source": "aic_with_correction"})
+
+        def min_correction_factor(self):
+            return 1.5
+
+        def max_correction_factor(self):
+            return 2.5
+
+        def avg_correction_factor(self):
+            return 2.0
+
+    class _FakePerfModelClass:
+        @staticmethod
+        def from_native(config_json, options_json=None):
+            recorded["from_native"] = (config_json, options_json)
+            return _FakeInner("native")
+
+        @staticmethod
+        def best_available(config_json, options_json=None):
+            recorded["best_available"] = (config_json, options_json)
+            return _FakeInner("best")
+
+        @staticmethod
+        def from_regression(options_json=None):
+            recorded["from_regression"] = options_json
+            return _FakeInner("regression")
+
+    monkeypatch.setattr(rust_engine_step, "_perf_model_class", lambda: _FakePerfModelClass)
+    monkeypatch.setattr(rust_engine_step, "_configure_default_data_roots", lambda config=None: None)
+
+    model = rust_engine_step.RustForwardPassPerfModel.best_available(
+        {"config": True},
+        {"min_observations": 2},
+    )
+    assert json.loads(recorded["best_available"][0]) == {"config": True}
+    assert json.loads(recorded["best_available"][1]) == {"min_observations": 2}
+
+    assert model.estimate_forward_pass_time_ms({"version": 1}) == 42.0
+    assert json.loads(recorded["estimate_metrics"]) == {"version": 1}
+
+    # The Python wrapper passes the raw iteration shape; Rust normalizes it.
+    model.tune_with_fpms([[{"version": 1}], [{"version": 1}]])
+    assert json.loads(recorded["tuned"][-1]) == [[{"version": 1}], [{"version": 1}]]
+
+    assert model.diagnostics() == {"source": "aic_with_correction"}
+    assert model.get_min_correction_factor() == 1.5
+    assert model.get_max_correction_factor() == 2.5
+    assert model.get_avg_correction_factor() == 2.0
+
+    rust_engine_step.RustForwardPassPerfModel.from_native({"config": True}).close()
+    assert json.loads(recorded["from_native"][0]) == {"config": True}
+    assert recorded["from_native"][1] is None
+
+    rust_engine_step.RustForwardPassPerfModel.from_regression({"min_observations": 2}).close()
+    assert json.loads(recorded["from_regression"]) == {"min_observations": 2}
+    model.close()
+
+
+def test_forward_pass_perf_model_returns_none_before_tuning(monkeypatch) -> None:
+    """A regression model not yet tuned returns ``None`` (PyO3 ``Option`` -> ``None``)."""
+
+    class _FakeInner:
+        def estimate_forward_pass_time_ms(self, metrics_json):
+            return None
+
+    class _FakePerfModelClass:
+        @staticmethod
+        def from_regression(options_json=None):
+            return _FakeInner()
+
+    monkeypatch.setattr(rust_engine_step, "_perf_model_class", lambda: _FakePerfModelClass)
+    monkeypatch.setattr(rust_engine_step, "_configure_default_data_roots", lambda config=None: None)
+
+    model = rust_engine_step.RustForwardPassPerfModel.from_regression()
+    assert model.estimate_forward_pass_time_ms({"version": 1}) is None
+
+
 @pytest.mark.skipif(
     not rust_engine_step.is_rust_core_available(),
     reason="Rust core PyO3 extension is not importable "
@@ -239,3 +333,28 @@ def test_real_rust_core_returns_expected_latency(tmp_path, monkeypatch) -> None:
     )
 
     assert latency_ms == pytest.approx(30.5)
+
+
+@pytest.mark.skipif(
+    not rust_engine_step.is_rust_core_available(),
+    reason="Rust core PyO3 extension is not importable "
+           "(install with `pip install -e \".[rust]\"` or `maturin develop --release`)"
+)
+def test_real_forward_pass_perf_model_regression(monkeypatch) -> None:
+    """A real regression-only FPM model needs no perf data and reports diagnostics."""
+    monkeypatch.setattr(rust_engine_step, "_configure_default_data_roots", lambda config=None: None)
+    rust_engine_step._import_rust_core.cache_clear()
+
+    model = rust_engine_step.RustForwardPassPerfModel.from_regression()
+    metrics = [
+        {
+            "version": 1,
+            "scheduled_requests": {"num_decode_requests": 1, "sum_decode_kv_tokens": 128},
+        }
+    ]
+    # Untuned regression models return None until enough observations exist.
+    assert model.estimate_forward_pass_time_ms(metrics) is None
+
+    diagnostics = model.diagnostics()
+    assert "source" in diagnostics
+    assert "readiness" in diagnostics

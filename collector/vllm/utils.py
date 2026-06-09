@@ -4,7 +4,15 @@
 
 # Modified from https://github.com/vllm-project/vllm/blob/v0.11.0/tests/v1/attention/utils.py
 
+"""Shared vLLM collector test harness utilities.
+
+Adapted from vLLM's attention test helpers, this module builds minimal vLLM
+configs, KV-cache specs, distributed setup contexts, cache-population helpers,
+and backend compatibility shims used by the vLLM collectors.
+"""
+
 import functools
+import inspect
 import os
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -55,6 +63,8 @@ from vllm.distributed import init_distributed_environment
 from vllm.distributed.parallel_state import ensure_model_parallel_initialized
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+_COMMON_ATTN_METADATA_PARAMS = set(inspect.signature(CommonAttentionMetadata).parameters)
 
 
 class MockAttentionLayer:
@@ -130,56 +140,33 @@ def create_common_attn_metadata(
     # Calculate max query length
     max_query_len = max(batch_spec.query_lens)
 
-    try:
-        # Newer API uses underscored CPU copies.
-        return CommonAttentionMetadata(
-            query_start_loc=query_start_loc,
-            query_start_loc_cpu=query_start_loc_cpu,
-            seq_lens=seq_lens,
-            _seq_lens_cpu=seq_lens_cpu,
-            _num_computed_tokens_cpu=num_computed_tokens_cpu,
-            num_reqs=batch_spec.batch_size,
-            num_actual_tokens=num_tokens,
-            max_query_len=max_query_len,
-            max_seq_len=max_seq_len,
-            block_table_tensor=block_table_tensor,
-            slot_mapping=slot_mapping,
-            causal=True,
-        )
-    except TypeError:
-        # Older API expects explicit CPU tensors without underscores.
-        try:
-            return CommonAttentionMetadata(
-                query_start_loc=query_start_loc,
-                query_start_loc_cpu=query_start_loc_cpu,
-                seq_lens=seq_lens,
-                seq_lens_cpu=seq_lens_cpu,
-                num_computed_tokens_cpu=num_computed_tokens_cpu,
-                num_reqs=batch_spec.batch_size,
-                num_actual_tokens=num_tokens,
-                max_query_len=max_query_len,
-                max_seq_len=max_seq_len,
-                block_table_tensor=block_table_tensor,
-                slot_mapping=slot_mapping,
-                causal=True,
-            )
-        except TypeError:
-            return CommonAttentionMetadata(
-                query_start_loc=query_start_loc,
-                query_start_loc_cpu=query_start_loc_cpu,
-                seq_lens=seq_lens,
-                seq_lens_cpu=seq_lens_cpu,
-                seq_start_loc_cpu=None,
-                seq_start_loc=None,
-                num_computed_tokens_cpu=num_computed_tokens_cpu,
-                num_reqs=batch_spec.batch_size,
-                num_actual_tokens=num_tokens,
-                max_query_len=max_query_len,
-                max_seq_len=max_seq_len,
-                block_table_tensor=block_table_tensor,
-                slot_mapping=slot_mapping,
-                causal=True,
-            )
+    metadata_kwargs = {
+        "query_start_loc": query_start_loc,
+        "query_start_loc_cpu": query_start_loc_cpu,
+        "seq_lens": seq_lens,
+        "num_reqs": batch_spec.batch_size,
+        "num_actual_tokens": num_tokens,
+        "max_query_len": max_query_len,
+        "max_seq_len": max_seq_len,
+        "block_table_tensor": block_table_tensor,
+        "slot_mapping": slot_mapping,
+        "causal": True,
+    }
+    if "seq_lens_cpu_upper_bound" in _COMMON_ATTN_METADATA_PARAMS:
+        metadata_kwargs["seq_lens_cpu_upper_bound"] = seq_lens_cpu
+    if "_seq_lens_cpu" in _COMMON_ATTN_METADATA_PARAMS:
+        metadata_kwargs["_seq_lens_cpu"] = seq_lens_cpu
+    elif "seq_lens_cpu" in _COMMON_ATTN_METADATA_PARAMS:
+        metadata_kwargs["seq_lens_cpu"] = seq_lens_cpu
+    if "_num_computed_tokens_cpu" in _COMMON_ATTN_METADATA_PARAMS:
+        metadata_kwargs["_num_computed_tokens_cpu"] = num_computed_tokens_cpu
+    elif "num_computed_tokens_cpu" in _COMMON_ATTN_METADATA_PARAMS:
+        metadata_kwargs["num_computed_tokens_cpu"] = num_computed_tokens_cpu
+    if "seq_start_loc_cpu" in _COMMON_ATTN_METADATA_PARAMS:
+        metadata_kwargs["seq_start_loc_cpu"] = None
+    if "seq_start_loc" in _COMMON_ATTN_METADATA_PARAMS:
+        metadata_kwargs["seq_start_loc"] = None
+    return CommonAttentionMetadata(**metadata_kwargs)
 
 
 def get_attention_backend(backend_name: AttentionBackendEnum):
@@ -239,6 +226,7 @@ def create_standard_kv_cache_spec(vllm_config: VllmConfig, use_fp8_kv_cache: boo
 def create_vllm_config(
     model_name: str = "meta-llama/Meta-Llama-3-8B",
     tensor_parallel_size: int = 1,
+    distributed_executor_backend: str | None = None,
     max_model_len: int = 1024,
     dtype: Union[ModelDType, torch.dtype] = "auto",
     num_gpu_blocks: int = 1000,
@@ -283,9 +271,10 @@ def create_vllm_config(
     cache_config.num_gpu_blocks = num_gpu_blocks
     cache_config.num_cpu_blocks = 0
 
-    parallel_config = ParallelConfig(
-        tensor_parallel_size=tensor_parallel_size,
-    )
+    parallel_kwargs: dict[str, object] = {"tensor_parallel_size": tensor_parallel_size}
+    if distributed_executor_backend is not None:
+        parallel_kwargs["distributed_executor_backend"] = distributed_executor_backend
+    parallel_config = ParallelConfig(**parallel_kwargs)
 
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,

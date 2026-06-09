@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: Qwen3VLMoeForConditionalGeneration
+model_path: Qwen/Qwen3-VL-235B-A22B-Instruct
+model_paths:
+  - Qwen/Qwen3-VL-30B-A3B-Instruct
+  - Qwen/Qwen3-VL-235B-A22B-Instruct
+include_base: true
+description: >
+  Qwen3-VL MoE model-centric collection plan. Starts with shared base op cases
+  and includes the Qwen3-VL MoE shapes used by the support matrix.
+
+model_case_values:
+  moe:
+    - model_path: Qwen/Qwen3-VL-30B-A3B-Instruct
+      hidden_size: 2048
+      inter_size: 768
+      topk: 8
+      num_experts: 128
+    - model_path: Qwen/Qwen3-VL-235B-A22B-Instruct
+      hidden_size: 4096
+      inter_size: 1536
+      topk: 8
+      num_experts: 128
+
+all_frameworks_op_cases:
+  moe:
+    cases: all

@@ -16,6 +16,7 @@ import pytest
 import yaml
 
 from aiconfigurator.generator.api import generate_backend_artifacts
+from aiconfigurator.generator.rendering.engine import _select_versioned_template
 from aiconfigurator.generator.utils import resolve_backend_version_for_dynamo
 
 pytestmark = pytest.mark.unit
@@ -23,7 +24,7 @@ pytestmark = pytest.mark.unit
 _DYNAMO_VERSION = "1.2.0"
 _BACKEND_VERSIONS = {
     "vllm": "0.20.1",
-    "sglang": "0.5.10.post1",
+    "sglang": "0.5.11",
     "trtllm": "1.3.0rc14",
 }
 
@@ -32,7 +33,7 @@ _WORKSPACE_ROOT = _REPO_ROOT.parent
 
 _BACKEND_SOURCES = {
     ("vllm", "0.20.1"): ("vllm", "v0.20.1", "vllm/engine/arg_utils.py"),
-    ("sglang", "0.5.10.post1"): ("sglang", "v0.5.10.post1", "python/sglang/srt/server_args.py"),
+    ("sglang", "0.5.11"): ("sglang", "v0.5.11", "python/sglang/srt/server_args.py"),
     ("trtllm", "1.3.0rc14"): ("TensorRT-LLM", "v1.3.0rc14", "tensorrt_llm/llmapi/llm_args.py"),
 }
 
@@ -60,22 +61,32 @@ _ALLOWED_CLI_FLAGS = {
         "--data-parallel-size",
         "--page-size",
         "--kv-cache-dtype",
+        "--mem-fraction-static",
+        "--max-total-tokens",
+        "--chunked-prefill-size",
         "--max-prefill-tokens",
         "--enable-mixed-chunk",
         "--context-length",
         "--max-running-requests",
         "--skip-tokenizer-init",
         "--trust-remote-code",
+        "--disable-radix-cache",
         "--enable-dp-attention",
         "--expert-parallel-size",
-        "--moe-dense-tp-size",
+        "--moe-runner-backend",
+        "--moe-a2a-backend",
+        "--attention-backend",
+        "--disaggregation-transfer-backend",
+        "--disaggregation-bootstrap-port",
+        "--elastic-ep-backend",
         "--disable-cuda-graph",
         "--cuda-graph-bs",
-        "--speculative-algorithm",
-        "--speculative-num-steps",
         "--disable-cuda-graph-padding",
         "--cuda-graph-max-bs",
-        "--disaggregation-transfer-backend",
+        "--speculative-algorithm",
+        "--speculative-num-steps",
+        "--disable-overlap-schedule",
+        "--load-balance-method",
     },
 }
 
@@ -237,6 +248,19 @@ def test_release_1_2_0_backend_version_matrix():
         assert resolve_backend_version_for_dynamo(_DYNAMO_VERSION, backend) == version
 
 
+def test_sglang_0_5_11_cli_template_is_version_specific():
+    template_dir = _REPO_ROOT / "src" / "aiconfigurator" / "generator" / "config" / "backend_templates" / "sglang"
+    selected = _select_versioned_template(
+        list(template_dir.glob("cli_args*.j2")),
+        "cli_args",
+        ".j2",
+        _BACKEND_VERSIONS["sglang"],
+    )
+
+    assert selected is not None
+    assert selected.name == "cli_args.0.5.11.j2"
+
+
 def test_vllm_0_20_1_cli_args_golden_contract():
     tokens = _split_cli(_render("vllm")["cli_args_agg"])
     flags = _flag_set(tokens)
@@ -254,7 +278,25 @@ def test_vllm_0_20_1_cli_args_golden_contract():
     assert speculative == {"method": "mtp", "num_speculative_tokens": 2}
 
 
-def test_sglang_0_5_10_post1_cli_args_golden_contract():
+def test_vllm_0_20_1_k8s_router_contract():
+    k8s = yaml.safe_load(_render("vllm")["k8s_deploy.yaml"])
+    services = k8s["spec"]["services"]
+
+    frontend_env = {item["name"]: item["value"] for item in services["Frontend"]["envs"]}
+    assert frontend_env["DYN_ROUTER_MODE"] == "kv"
+
+    worker_args = services["VllmWorker"]["extraPodSpec"]["mainContainer"]["args"]
+    assert "--kv-events-config" in worker_args
+    kv_events = json.loads(_value_after(worker_args, "--kv-events-config"))
+    assert kv_events == {
+        "publisher": "zmq",
+        "topic": "kv-events",
+        "endpoint": "tcp://*:20081",
+        "enable_kv_cache_events": True,
+    }
+
+
+def test_sglang_0_5_11_cli_args_golden_contract():
     tokens = _split_cli(_render("sglang")["cli_args_agg"])
     flags = _flag_set(tokens)
 
@@ -262,12 +304,82 @@ def test_sglang_0_5_10_post1_cli_args_golden_contract():
     assert _value_after(tokens, "--tensor-parallel-size") == "8"
     assert _value_after(tokens, "--expert-parallel-size") == "4"
     assert _value_after(tokens, "--kv-cache-dtype") == "auto"
+    assert _value_after(tokens, "--mem-fraction-static") == "0.82"
+    assert _value_after(tokens, "--chunked-prefill-size") == "-1"
     assert _value_after(tokens, "--max-prefill-tokens") == "3548"
     assert _value_after(tokens, "--context-length") == "4096"
     assert _value_after(tokens, "--max-running-requests") == "512"
     assert _value_after(tokens, "--speculative-algorithm") == "NEXTN"
     assert _value_after(tokens, "--speculative-num-steps") == "2"
     assert "--disable-cuda-graph" in flags
+    assert "--moe-dense-tp-size" not in flags
+
+
+def test_sglang_0_5_11_k8s_router_contract():
+    k8s = yaml.safe_load(_render("sglang")["k8s_deploy.yaml"])
+    services = k8s["spec"]["services"]
+
+    frontend_env = {item["name"]: item["value"] for item in services["Frontend"]["envs"]}
+    assert frontend_env["DYN_ROUTER_MODE"] == "kv"
+
+    worker_script = services["SGLangWorker"]["extraPodSpec"]["mainContainer"]["args"][0]
+    assert "--kv-events-config" in worker_script
+    assert '"publisher":"zmq"' in worker_script
+    assert '"topic":"kv-events"' in worker_script
+    assert '"endpoint":"tcp://*:5557"' in worker_script
+
+
+def test_sglang_0_5_11_run_router_contract():
+    run_sh = _render("sglang")["run_0.sh"]
+
+    assert "SGLANG_KV_EVENT_PORT_BASE=${SGLANG_KV_EVENT_PORT_BASE:-5557}" in run_sh
+    assert "python3 -m dynamo.frontend --router-mode kv --http-port" in run_sh
+    assert "--kv-events-config" in run_sh
+    assert "tcp://*:${EVENT_PORT}" in run_sh
+
+
+def test_sglang_0_5_11_optional_cli_args_golden_contract():
+    params = copy.deepcopy(_GOLDEN_PARAMS)
+    params["ModelConfig"]["prefix"] = 0
+    params["params"]["agg"].update(
+        {
+            "kv_cache_max_tokens": 8192,
+            "disable_prefix_cache": True,
+            "moe_backend": "triton",
+            "moe_all2all_backend": "none",
+            "kv_transfer_backend": "nixl",
+            "disaggregation_bootstrap_port": 12346,
+            "attention_backend": "fa3",
+            "elastic_ep_backend": "nixl",
+            "cuda_graph_enable_padding": False,
+            "cuda_graph_max_batch_size": 256,
+            "disable_overlap_scheduler": True,
+            "moe_load_balancer": "round_robin",
+        }
+    )
+
+    tokens = _split_cli(
+        generate_backend_artifacts(
+            params,
+            "sglang",
+            backend_version=_BACKEND_VERSIONS["sglang"],
+            deployment_target="dynamo-j2",
+        )["cli_args_agg"]
+    )
+    flags = _flag_set(tokens)
+
+    _assert_generated_flags_are_known("sglang", _BACKEND_VERSIONS["sglang"], flags)
+    assert _value_after(tokens, "--max-total-tokens") == "8192"
+    assert _value_after(tokens, "--moe-runner-backend") == "triton"
+    assert _value_after(tokens, "--moe-a2a-backend") == "none"
+    assert _value_after(tokens, "--disaggregation-transfer-backend") == "nixl"
+    assert _value_after(tokens, "--disaggregation-bootstrap-port") == "12346"
+    assert _value_after(tokens, "--attention-backend") == "fa3"
+    assert _value_after(tokens, "--elastic-ep-backend") == "nixl"
+    assert _value_after(tokens, "--cuda-graph-max-bs") == "256"
+    assert _value_after(tokens, "--load-balance-method") == "round_robin"
+    assert "--disable-radix-cache" in flags
+    assert "--disable-overlap-schedule" in flags
     assert "--moe-dense-tp-size" not in flags
 
 
@@ -288,9 +400,19 @@ def test_trtllm_1_3_0rc14_extra_engine_args_golden_contract():
     assert engine_args["kv_cache_config"]["free_gpu_memory_fraction"] == 0.82
     assert engine_args["kv_cache_config"]["dtype"] == "auto"
     assert engine_args["kv_cache_config"]["tokens_per_block"] == 32
+    assert engine_args["kv_cache_config"]["enable_block_reuse"] is True
     assert engine_args["cuda_graph_config"]["enable_padding"] is True
     assert engine_args["cuda_graph_config"]["batch_sizes"][-1] == 72
     assert engine_args["speculative_config"] == {
         "decoding_type": "MTP",
         "num_nextn_predict_layers": 2,
     }
+
+
+def test_benchmark_prefix_defaults_from_model_config():
+    bench = _render("trtllm")["bench_run.sh"]
+
+    assert 'BENCH_PREFIX="${AICONFIGURATOR_BENCH_PREFIX:-1024}"' in bench
+    assert 'BENCH_PREFIX_PROMPTS="${AICONFIGURATOR_BENCH_PREFIX_PROMPTS:-1}"' in bench
+    assert "--prefix-prompt-length" in bench
+    assert "--num-prefix-prompts" in bench

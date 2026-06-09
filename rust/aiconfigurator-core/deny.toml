@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# cargo-deny plugin for linting dependencies
+# https://github.com/EmbarkStudios/cargo-deny/blob/main/deny.template.toml
+
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "MIT-0",
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "0BSD",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "OpenSSL",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+    "Zlib",
+    "NCSA",
+    "LGPL-3.0",
+    "LGPL-3.0-only",
+    "CC0-1.0",
+    "Unicode-DFS-2016",
+    "WTFPL"
+]
+
+[bans]
+deny = [
+    # Ensure we don't depend on openssl
+    { name = "native-tls" },
+    { name = "openssl-sys" },
+]

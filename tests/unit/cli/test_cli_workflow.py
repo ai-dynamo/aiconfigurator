@@ -9,12 +9,21 @@ while keeping heavy computation mocked out.
 """
 
 import argparse
+import logging
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
-from aiconfigurator.cli.main import build_default_task_configs, build_experiment_task_configs, configure_parser
+from aiconfigurator.cli.main import (
+    _execute_task_configs,
+    build_default_task_configs,
+    build_experiment_task_configs,
+    configure_parser,
+)
 from aiconfigurator.cli.main import main as cli_main
+from aiconfigurator.cli.report_and_save import _apply_inclusive_tpot
+from aiconfigurator.sdk.errors import NoFeasibleConfigError
 
 pytestmark = pytest.mark.unit
 
@@ -183,6 +192,28 @@ class TestCLIIntegration:
         )
         assert args.database_mode == database_mode
 
+    @patch("aiconfigurator.cli.main.TaskRunner")
+    def test_execute_task_configs_no_feasible_config_logs_without_traceback(
+        self,
+        mock_task_runner_class,
+        caplog,
+    ):
+        """Strict-SLA no-match should produce a controlled report, not a traceback."""
+        mock_runner = mock_task_runner_class.return_value
+        mock_runner.run.side_effect = NoFeasibleConfigError("No configuration satisfied the TTFT/TPOT constraints.")
+        mock_task_config = MagicMock(name="TaskConfig")
+        mock_task_config.to_yaml.return_value = "serving_mode: agg"
+        mock_task_config.database_mode = None
+
+        with caplog.at_level(logging.WARNING), pytest.raises(SystemExit) as exc_info:
+            _execute_task_configs({"agg": mock_task_config}, mode="default", strict_sla=True)
+
+        assert exc_info.value.code == 1
+        assert "Experiment agg found no SLA-feasible configuration" in caplog.text
+        assert "No successful experiment runs to compare." in caplog.text
+        assert "Traceback" not in caplog.text
+        assert all(record.exc_info is None for record in caplog.records)
+
     @patch("aiconfigurator.cli.main._execute_task_configs")
     @patch("aiconfigurator.cli.main.build_experiment_task_configs")
     def test_cli_exp_mode_with_database_mode_in_yaml(self, mock_build_exp, mock_execute, tmp_path):
@@ -280,6 +311,88 @@ class TestBuildDefaultTaskConfigs:
         # TaskConfig should be called twice (agg + disagg)
         assert mock_task_config.call_count == 2
 
+    @patch("aiconfigurator.cli.main.TaskConfig")
+    @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
+    def test_auto_megamoe_sweeps_only_sglang(self, mock_supported_databases, mock_task_config):
+        """The SGLang-only MegaMoE override must not be passed to TRT-LLM or vLLM."""
+        mock_supported_databases.return_value = {
+            "gb200": {
+                "trtllm": ["0.5.10"],
+                "sglang": ["0.5.10"],
+                "vllm": ["0.5.10"],
+            }
+        }
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        result = build_default_task_configs(
+            model_path="deepseek-ai/DeepSeek-V4-Pro",
+            total_gpus=2,
+            system="gb200",
+            backend="auto",
+            backend_version="0.5.10",
+            moe_backend="megamoe",
+        )
+
+        assert set(result) == {"agg_sglang", "disagg_sglang"}
+        assert mock_task_config.call_count == 2
+        for call in mock_task_config.call_args_list:
+            assert call.kwargs["backend_name"] == "sglang"
+            assert call.kwargs["moe_backend"] == "megamoe"
+
+    @patch("aiconfigurator.cli.main.check_is_moe", return_value=True)
+    @patch("aiconfigurator.cli.main.TaskConfig")
+    def test_skips_optional_sglang_deepep_when_perf_data_missing(
+        self,
+        mock_task_config,
+        _mock_check_is_moe,
+        tmp_path,
+        caplog,
+    ):
+        """Optional SGLang DeepEP sweeps should not be scheduled without DeepEP op data."""
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+        caplog.set_level(logging.INFO, logger="aiconfigurator.cli.main")
+
+        with patch("aiconfigurator.cli.main._get_backend_data_path", return_value=str(tmp_path)):
+            result = build_default_task_configs(
+                model_path="deepseek-ai/DeepSeek-R1",
+                total_gpus=8,
+                system="b200_sxm",
+                backend="sglang",
+                backend_version="0.5.10",
+                database_mode="HYBRID",
+            )
+
+        assert set(result) == {"agg", "disagg"}
+        assert mock_task_config.call_count == 2
+        assert "Skipping SGLang DeepEP agg sweep" in caplog.text
+        assert "Skipping SGLang DeepEP disagg sweep" in caplog.text
+        assert "wideep_deepep_normal_perf.parquet" in caplog.text
+
+    @patch("aiconfigurator.cli.main.check_is_moe", return_value=True)
+    @patch("aiconfigurator.cli.main.TaskConfig")
+    def test_includes_optional_sglang_deepep_when_perf_data_exists(
+        self,
+        mock_task_config,
+        _mock_check_is_moe,
+        tmp_path,
+    ):
+        """SGLang DeepEP sweeps remain available when required DeepEP op data exists."""
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+        for filename in ("wideep_deepep_normal_perf.parquet", "wideep_deepep_ll_perf.parquet"):
+            (tmp_path / filename).write_text("header\n", encoding="utf-8")
+
+        with patch("aiconfigurator.cli.main._get_backend_data_path", return_value=str(tmp_path)):
+            result = build_default_task_configs(
+                model_path="deepseek-ai/DeepSeek-R1",
+                total_gpus=8,
+                system="h100_sxm",
+                backend="sglang",
+                backend_version="0.5.6.post2",
+            )
+
+        assert set(result) == {"agg", "agg_deepep", "disagg", "disagg_deepep"}
+        assert mock_task_config.call_count == 4
+
 
 class TestBuildExperimentTaskConfigs:
     """Tests for experiment config construction."""
@@ -311,3 +424,38 @@ class TestBuildExperimentTaskConfigs:
         assert set(kwargs_by_backend) == {"rust", "python"}
         assert kwargs_by_backend["rust"]["model_path"] == "Qwen/Qwen3-32B"
         assert kwargs_by_backend["python"]["model_path"] == "Qwen/Qwen3-32B"
+
+
+class TestInclusiveTpot:
+    """Unit tests for _apply_inclusive_tpot output transformation."""
+
+    def _make_df(self, ttft, tpot, osl):
+        return pd.DataFrame([{"ttft": ttft, "tpot": tpot, "osl": osl}])
+
+    def test_formula(self):
+        df = self._make_df(ttft=500.0, tpot=20.0, osl=30)
+        result = _apply_inclusive_tpot(df)
+        expected = (500.0 + 20.0 * 29) / 30
+        assert abs(result["tpot"].iloc[0] - expected) < 1e-9
+
+    def test_does_not_mutate_input(self):
+        df = self._make_df(ttft=500.0, tpot=20.0, osl=30)
+        original_tpot = df["tpot"].iloc[0]
+        _apply_inclusive_tpot(df)
+        assert df["tpot"].iloc[0] == original_tpot
+
+    def test_ttft_unchanged(self):
+        df = self._make_df(ttft=500.0, tpot=20.0, osl=30)
+        result = _apply_inclusive_tpot(df)
+        assert result["ttft"].iloc[0] == 500.0
+
+    def test_missing_columns_is_noop(self):
+        df = pd.DataFrame([{"tpot": 20.0, "osl": 30}])  # no ttft column
+        result = _apply_inclusive_tpot(df)
+        assert result["tpot"].iloc[0] == 20.0
+
+    def test_osl_one_equals_ttft(self):
+        # osl=1: zero decode tokens, inclusive TPOT collapses to TTFT/1 = TTFT
+        df = self._make_df(ttft=500.0, tpot=20.0, osl=1)
+        result = _apply_inclusive_tpot(df)
+        assert abs(result["tpot"].iloc[0] - 500.0) < 1e-9

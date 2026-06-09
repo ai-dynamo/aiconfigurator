@@ -11,6 +11,22 @@ on:
       - synchronize
 
 jobs:
+  cargo-deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install and run cargo-deny
+        working-directory: rust/aiconfigurator-core
+        # Default log level (warn) surfaces "license inferred from file" notes
+        # so any crate that may need a [[licenses.clarify]] entry is named.
+        # --show-stats prints a per-license usage summary at the end.
+        run: |
+          cargo-deny --version || cargo install cargo-deny@0.19.0
+          cargo-deny --all-features check --show-stats licenses bans
+
   build-and-test:
     name: Build and Test (${{ matrix.suite.name }})
     runs-on: ubuntu-latest
@@ -117,7 +133,7 @@ jobs:
         run: git lfs pull
 
       # --- Docker-based Linux builds -----------------------------------------
-      - name: Build aiconfigurator-rust-core wheel (Docker)
+      - name: Build aiconfigurator-core wheel (Docker)
         if: matrix.build_method == 'docker'
         run: |
           mkdir -p dist
@@ -217,8 +233,8 @@ jobs:
           mkdir -p sbom
           python <<'PY'
           import glob, shutil, zipfile
-          whl = glob.glob("dist/aiconfigurator_rust_core-*.whl")[0]
-          out = "sbom/sbom-aiconfigurator-rust-core-${{ matrix.tag_label }}.cdx.json"
+          whl = glob.glob("dist/aiconfigurator_core-*.whl")[0]
+          out = "sbom/sbom-aiconfigurator-core-${{ matrix.tag_label }}.cdx.json"
           with zipfile.ZipFile(whl) as zf:
               name = next(n for n in zf.namelist() if n.endswith(".cyclonedx.json"))
               with zf.open(name) as src, open(out, "wb") as dst:
@@ -228,6 +244,6 @@ jobs:
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v5
         with:
-          name: sbom-aiconfigurator-rust-core-${{ matrix.tag_label }}
-          path: sbom/sbom-aiconfigurator-rust-core-${{ matrix.tag_label }}.cdx.json
+          name: sbom-aiconfigurator-core-${{ matrix.tag_label }}
+          path: sbom/sbom-aiconfigurator-core-${{ matrix.tag_label }}.cdx.json
           if-no-files-found: error

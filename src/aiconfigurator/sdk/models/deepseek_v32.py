@@ -13,6 +13,38 @@ from aiconfigurator.sdk.models.helpers import calc_expectation
 logger = logging.getLogger(__name__)
 
 
+def _dsa_attention_modules_excluded_from_quant(raw_config: dict) -> bool:
+    """Return whether a GLM/DSA checkpoint keeps DSA attention projections unquantized."""
+    quant_config = raw_config.get("quantization_config")
+    quant_config = quant_config if isinstance(quant_config, dict) else {}
+
+    hf_quant_config = raw_config.get("hf_quant_config")
+    hf_quant_config = hf_quant_config if isinstance(hf_quant_config, dict) else {}
+    hf_quant = hf_quant_config.get("quantization")
+    hf_quant = hf_quant if isinstance(hf_quant, dict) else {}
+
+    patterns = [
+        *list(quant_config.get("modules_to_not_convert") or []),
+        *list(quant_config.get("exclude_modules") or []),
+        *list(hf_quant.get("exclude_modules") or []),
+    ]
+    dsa_projection_markers = (
+        "self_attn.q_a_proj",
+        "self_attn.q_b_proj",
+        "self_attn.kv_a_proj",
+        "self_attn.kv_a_proj_with_mqa",
+        "self_attn.kv_b_proj",
+        "self_attn.o_proj",
+    )
+    return any(any(marker in str(pattern) for marker in dsa_projection_markers) for pattern in patterns)
+
+
+def _dsa_gemm_quant_mode(extra_params: object, fallback: common.GEMMQuantMode) -> common.GEMMQuantMode:
+    if isinstance(extra_params, dict):
+        return extra_params.get("dsa_gemm_quant_mode", fallback)
+    return fallback
+
+
 @register_model("DEEPSEEKV32")
 class DeepSeekV32Model(BaseModel):
     """
@@ -40,7 +72,11 @@ class DeepSeekV32Model(BaseModel):
             model_info["context"],
             model_config,
         )
-        extra_params = model_info["extra_params"]
+        extra_params = dict(model_info["extra_params"])
+        if model_info["architecture"] == "GlmMoeDsaForCausalLM" and _dsa_attention_modules_excluded_from_quant(
+            model_info.get("raw_config", {})
+        ):
+            extra_params.setdefault("dsa_gemm_quant_mode", common.GEMMQuantMode.bfloat16)
 
         if backend_name == "sglang" and model_config.enable_wideep:
             logger.debug(
@@ -88,6 +124,7 @@ class DeepSeekV32Model(BaseModel):
         moe_quant_mode = self.config.moe_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
+        dsa_gemm_quant_mode = _dsa_gemm_quant_mode(self.extra_params, gemm_quant_mode)
         workload_distribution = (
             self.config.workload_distribution + f"_{self._power_law_alpha}"
             if self.config.workload_distribution == "power_law"
@@ -105,7 +142,7 @@ class DeepSeekV32Model(BaseModel):
                     local_heads,
                     kvcache_quant_mode,
                     fmha_quant_mode,
-                    gemm_quant_mode,
+                    dsa_gemm_quant_mode,
                     architecture=self.architecture,
                 ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
@@ -199,7 +236,7 @@ class DeepSeekV32Model(BaseModel):
                     self._num_layers * self._mtp_scale_factor,
                     local_heads,
                     kvcache_quant_mode,
-                    gemm_quant_mode,
+                    dsa_gemm_quant_mode,
                     architecture=self.architecture,
                 ),
                 ops.ElementWise(
@@ -354,6 +391,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
         moe_quant_mode = self.config.moe_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
+        dsa_gemm_quant_mode = _dsa_gemm_quant_mode(self.extra_params, gemm_quant_mode)
 
         eplb_enabled = self.config.enable_eplb
         if self.config.workload_distribution == "power_law":
@@ -404,7 +442,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                     local_heads,
                     kvcache_quant_mode,
                     fmha_quant_mode,
-                    gemm_quant_mode,
+                    dsa_gemm_quant_mode,
                     architecture=self.architecture,
                 ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
@@ -495,7 +533,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                     generation_scale,
                     local_heads,
                     kvcache_quant_mode,
-                    gemm_quant_mode,
+                    dsa_gemm_quant_mode,
                     architecture=self.architecture,
                 ),
                 ops.ElementWise("generation_add_norm_2", generation_scale, 2 * h, 2 * h, 0.8),
@@ -600,6 +638,7 @@ class WideEPDeepSeekV32Model(BaseModel):
         moe_quant_mode = self.config.moe_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
+        dsa_gemm_quant_mode = _dsa_gemm_quant_mode(self.extra_params, gemm_quant_mode)
         moe_backend = self.config.moe_backend
         sms = self.config.sms
 
@@ -639,7 +678,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     local_heads,
                     kvcache_quant_mode,
                     fmha_quant_mode,
-                    gemm_quant_mode,
+                    dsa_gemm_quant_mode,
                     architecture=self.architecture,
                 ),
                 *(
@@ -723,7 +762,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     generation_scale,
                     local_heads,
                     kvcache_quant_mode,
-                    gemm_quant_mode,
+                    dsa_gemm_quant_mode,
                     architecture=self.architecture,
                 ),
                 ops.GEMM(

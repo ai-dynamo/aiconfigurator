@@ -150,6 +150,13 @@ class TestFallbackOp:
         mock_db._default_database_mode = common.DatabaseMode.HYBRID
 
         primary = _make_mock_op(10.0, 100.0)
+        seen_modes = []
+
+        def _query(database, **kwargs):
+            seen_modes.append(database._default_database_mode)
+            return PerformanceResult(10.0, energy=100.0)
+
+        primary.query.side_effect = _query
         fallback_1 = _make_mock_op(5.0, 50.0)
 
         op = FallbackOp("test", primary=primary, fallback=[fallback_1])
@@ -157,7 +164,31 @@ class TestFallbackOp:
 
         # During primary query, database mode should have been SILICON
         # After query, it should be restored to HYBRID
+        assert seen_modes == [common.DatabaseMode.SILICON]
         assert mock_db._default_database_mode == common.DatabaseMode.HYBRID
+
+    def test_primary_respects_explicit_sol_mode(self):
+        """Primary uses SOL mode directly when the caller explicitly requests SOL."""
+        mock_db = _make_mock_db()
+        mock_db._default_database_mode = common.DatabaseMode.SOL
+
+        primary = _make_mock_op(10.0, 100.0)
+        seen_modes = []
+
+        def _query(database, **kwargs):
+            seen_modes.append(database._default_database_mode)
+            return PerformanceResult(4.0, energy=0.0, source="sol")
+
+        primary.query.side_effect = _query
+        fallback_1 = _make_mock_op(5.0, 50.0)
+
+        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
+        result = op.query(mock_db, batch_size=4)
+
+        assert seen_modes == [common.DatabaseMode.SOL]
+        assert float(result) == 4.0
+        assert result.source == "sol"
+        assert mock_db._default_database_mode == common.DatabaseMode.SOL
 
     def test_database_mode_restored_after_primary_failure(self):
         """Database mode is restored to original even when primary fails."""

@@ -60,7 +60,7 @@ def generate_config_yaml(
         "SlaConfig": {"isl": isl, "osl": osl},
         "ServiceConfig": {
             "model_path": model_path,
-            "served_model_path": model_path,
+            "served_model_name": model_path,
             "include_frontend": True,
         },
         "ModelConfig": {

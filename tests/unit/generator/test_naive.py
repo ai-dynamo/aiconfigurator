@@ -151,6 +151,65 @@ class TestBuildNaiveGeneratorParams:
         )
         assert result["ServiceConfig"]["include_frontend"] is True
 
+    @patch(
+        "aiconfigurator.generator.naive.get_model_config_from_model_path",
+        return_value={"architecture": "Qwen3ForCausalLM", "num_experts": 0},
+    )
+    @patch(
+        "aiconfigurator.generator.naive._estimate_model_weight_bytes",
+        return_value=30 * 1024**3,
+    )
+    @patch(
+        "aiconfigurator.generator.naive._get_system_config",
+        return_value={"gpus_per_node": 8, "vram_per_gpu": 141 * 1024**3},
+    )
+    def test_generator_dynamo_version_sets_backend_image_default(self, _mock_sys, _mock_est, _mock_model):
+        result = build_naive_generator_params(
+            model_name="Qwen/Qwen3-32B",
+            total_gpus=8,
+            system_name="h200_sxm",
+            backend_name="vllm",
+            generator_dynamo_version="1.2.0",
+        )
+
+        assert result["generator_dynamo_version"] == "1.2.0"
+        assert result["K8sConfig"]["k8s_image"] == "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0"
+
+    @patch(
+        "aiconfigurator.generator.naive.get_model_config_from_model_path",
+        return_value={"architecture": "Qwen3ForCausalLM", "num_experts": 0},
+    )
+    @patch(
+        "aiconfigurator.generator.naive._estimate_model_weight_bytes",
+        return_value=30 * 1024**3,
+    )
+    @patch(
+        "aiconfigurator.generator.naive._get_system_config",
+        return_value={"gpus_per_node": 8, "vram_per_gpu": 141 * 1024**3},
+    )
+    def test_generator_overrides_are_applied_before_schema_defaults(self, _mock_sys, _mock_est, _mock_model):
+        result = build_naive_generator_params(
+            model_name="Qwen/Qwen3-32B",
+            total_gpus=8,
+            system_name="h200_sxm",
+            backend_name="sglang",
+            generator_dynamo_version="1.2.0",
+            generator_overrides={
+                "BenchConfig": {"name": "custom-bench"},
+                "K8sConfig": {"k8s_namespace": "custom-ns"},
+                "LlmdConfig": {"routing_proxy_enabled": False},
+                "SflowConfig": {"slurm_partition": "debug"},
+                "Workers": {"agg": {"max_batch_size": 256}},
+            },
+        )
+
+        assert result["BenchConfig"]["name"] == "custom-bench"
+        assert result["K8sConfig"]["k8s_namespace"] == "custom-ns"
+        assert result["K8sConfig"]["k8s_image"] == "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0"
+        assert result["LlmdConfig"]["routing_proxy_enabled"] is False
+        assert result["SflowConfig"]["slurm_partition"] == "debug"
+        assert result["params"]["agg"]["max_batch_size"] == 256
+
 
 @pytest.mark.unit
 class TestEstimateModelWeightBytesFailsOnMissingModel:
@@ -282,3 +341,18 @@ class TestRenderingNameFallback:
         }
         ctx = prepare_template_context(params, "vllm")
         assert ctx["frontend_replicas"] == 0
+
+    def test_benchmark_prefix_preserves_explicit_model_zero(self):
+        from aiconfigurator.generator.rendering.engine import prepare_template_context
+
+        params = {
+            "K8sConfig": {"name_prefix": "test"},
+            "ServiceConfig": {"model_path": "test", "prefix": 1024},
+            "ModelConfig": {"prefix": 0},
+            "BenchConfig": {},
+            "DynConfig": {"mode": "agg"},
+            "params": {"agg": {}},
+            "WorkerConfig": {},
+        }
+        ctx = prepare_template_context(params, "vllm")
+        assert ctx["BenchConfig"]["prefix"] == 0

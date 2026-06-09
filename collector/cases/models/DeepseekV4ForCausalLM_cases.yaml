@@ -1,0 +1,249 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: DeepseekV4ForCausalLM
+model_path: sgl-project/DeepSeek-V4-Flash-FP8
+model_paths:
+  - deepseek-ai/DeepSeek-V4-Flash
+  - deepseek-ai/DeepSeek-V4-Pro
+  - sgl-project/DeepSeek-V4-Flash-FP8
+  - sgl-project/DeepSeek-V4-Pro-FP8
+include_base: true
+description: >
+  DeepSeek-V4 model-centric collection plan. DSV4 attention and sparse kernel
+  cases use the upstream DeepSeek-V4 op names and can target any listed V4
+  model path; shared mHC and MoE cases cover the V4 family.
+
+model_case_values:
+  moe:
+    - model_paths:
+        - deepseek-ai/DeepSeek-V4-Flash
+        - sgl-project/DeepSeek-V4-Flash-FP8
+      hidden_size: 4096
+      inter_size: 2048
+      topk: 6
+      num_experts: 256
+      wideep: true
+    - model_paths:
+        - deepseek-ai/DeepSeek-V4-Pro
+        - sgl-project/DeepSeek-V4-Pro-FP8
+      hidden_size: 7168
+      inter_size: 3072
+      topk: 6
+      num_experts: 384
+      wideep: true
+  mhc:
+    - model_paths:
+        - deepseek-ai/DeepSeek-V4-Flash
+        - sgl-project/DeepSeek-V4-Flash-FP8
+      hidden_size: 4096
+      hc_mult: 4
+    - model_paths:
+        - deepseek-ai/DeepSeek-V4-Pro
+        - sgl-project/DeepSeek-V4-Pro-FP8
+      hidden_size: 7168
+      hc_mult: 4
+  dsv4:
+    default_model_paths:
+      - deepseek-ai/DeepSeek-V4-Flash
+      - deepseek-ai/DeepSeek-V4-Pro
+    supported_model_paths:
+      - deepseek-ai/DeepSeek-V4-Flash
+      - deepseek-ai/DeepSeek-V4-Pro
+      - sgl-project/DeepSeek-V4-Flash-FP8
+      - sgl-project/DeepSeek-V4-Pro-FP8
+    attention_kinds:
+      - csa
+      - hca
+    module_batch_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+    module_sequence_lengths:
+      - 1
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 1536
+      - 2048
+      - 3072
+      - 4096
+      - 6144
+      - 8192
+      - 10240
+      - 12288
+      - 16384
+      - 32768
+      - 65536
+      - 131072
+      - 262144
+      - 524288
+      - 1048575
+    module_past_kv_lengths:
+      - 0
+      - 1
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 1536
+      - 2048
+      - 3072
+      - 4096
+      - 6144
+      - 8192
+      - 10000
+      - 10240
+      - 12288
+      - 16384
+      - 32768
+      - 65536
+      - 131072
+      - 262144
+      - 524288
+      - 1000000
+      - 1048575
+    module_tp_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+    sparse_batch_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+    sparse_input_lengths:
+      - 1
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 1536
+      - 2048
+      - 3072
+      - 4096
+      - 6144
+      - 8192
+    sparse_past_kv_lengths:
+      - 0
+      - 1
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 1536
+      - 2048
+      - 3072
+      - 4096
+      - 6144
+      - 8192
+      - 10240
+      - 12288
+      - 16384
+      - 32768
+      - 65536
+      - 131072
+      - 262144
+      - 524288
+      - 1048575
+    sparse_chunk_prefill_size: 8192
+    sparse_max_full_sequence_length: 1048576
+    sparse_tp_sizes:
+      hca_attn:
+        - 1
+      paged_mqa_logits:
+        - 1
+
+all_frameworks_op_cases:
+  moe:
+    cases: all
+
+framework_specific_op_cases:
+  sglang:
+    dsv4_csa_context_module:
+      cases: all
+    dsv4_hca_context_module:
+      cases: all
+    dsv4_csa_generation_module:
+      cases: all
+    dsv4_hca_generation_module:
+      cases: all
+    # topK DELTA calibration: one case per model. The worker reads the
+    # already-collected dsv4_csa_*_module_perf.txt in the output dir and benches
+    # exactly those (prefix, isl, batch_size) shapes, so it must run AFTER the
+    # CSA module ops (guaranteed by registry order: topk_calib is registered
+    # after the csa module entries).
+    dsv4_csa_topk_calib:
+      cases: all
+    # These kernel-level cases are kept as auxiliary data for future
+    # prefix/past_kv correction.  Current DeepSeek-V4 SGLang modeling uses the
+    # full CSA/HCA attention-module rows above as the primary path.
+    dsv4_paged_mqa_logits_module:
+      cases: all
+    dsv4_hca_attn_module:
+      cases: all
+    # CSA sparse FMLA over the topk-selected c4 positions. Same source as
+    # paged_mqa_logits/topk_calib (reads dsv4_csa_*_module_perf.txt), so it must
+    # run AFTER the CSA module ops (guaranteed by registry order).
+    dsv4_csa_attn_module:
+      cases: all
+    mhc_module:
+      cases: all
+    wideep_moe:
+      cases: all
+  vllm:
+    dsv4_csa_context_module:
+      cases: all
+    dsv4_hca_context_module:
+      cases: all
+    dsv4_csa_generation_module:
+      cases: all
+    dsv4_hca_generation_module:
+      cases: all
+    # These kernel-level cases are kept as auxiliary data for future
+    # prefix/past_kv correction.  Current DeepSeek-V4 SGLang modeling uses the
+    # full CSA/HCA attention-module rows above as the primary path.
+    dsv4_paged_mqa_logits_module:
+      cases: all
+    dsv4_hca_attn_module:
+      cases: all
+    mhc_module:
+      cases: all

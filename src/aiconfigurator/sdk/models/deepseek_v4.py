@@ -37,9 +37,15 @@ class DeepSeekV4Model(BaseModel):
             model_info["context"],
             model_config,
             model_info["extra_params"],
+            backend_name=backend_name,
         )
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    @property
+    def activation_hidden_size(self) -> int:
+        # DSv4 attention expands Q/O internals, but resident MoE/residual activations use hidden_size.
+        return self._hidden_size
+
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
         super().__init__(*args)
 
         if not isinstance(self.extra_params, common.DeepSeekV4Config):
@@ -76,6 +82,15 @@ class DeepSeekV4Model(BaseModel):
         moe_ep_size = self.config.moe_ep_size
         attention_dp_size = self.config.attention_dp_size
         pp_size = self.config.pp_size
+        moe_backend = self.config.moe_backend
+        use_megamoe = moe_backend == "megamoe"
+        if use_megamoe:
+            if backend_name != common.BackendName.sglang.value:
+                raise ValueError("DeepSeek-V4 MegaMoE modeling is only supported with the SGLang backend.")
+            if moe_tp_size != 1:
+                raise ValueError(f"DeepSeek-V4 MegaMoE requires moe_tp_size=1, got {moe_tp_size}.")
+            if moe_ep_size <= 1:
+                raise ValueError(f"DeepSeek-V4 MegaMoE requires moe_ep_size > 1, got {moe_ep_size}.")
 
         gemm_quant_mode = self.config.gemm_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
@@ -92,11 +107,11 @@ class DeepSeekV4Model(BaseModel):
 
         def _attention_ops(is_context: bool, scale_factor: float):
             ratio_counts = Counter(self._compress_ratios)
-            # DeepSeek-V4 Flash has a small number of pure SWA layers
-            # (compress_ratio=0). Approximate their module latency with HCA
-            # (compress_ratio=128) so the model reuses DeepSeek-V4 HCA perf data
-            # instead of requiring a dedicated SWA collector. KV cache capacity
-            # below still uses the real per-layer ratios.
+            # Some DeepSeek-V4 configs include pure SWA layers (compress_ratio=0).
+            # Approximate their module latency with HCA (compress_ratio=128) so
+            # the model reuses DeepSeek-V4 HCA perf data instead of requiring a
+            # dedicated SWA collector. KV cache capacity below still uses the
+            # real per-layer ratios.
             ratio_counts[128] += ratio_counts.pop(0, 0)
             op_cls = ops.ContextDeepSeekV4AttentionModule if is_context else ops.GenerationDeepSeekV4AttentionModule
             name = "context_attention" if is_context else "generation_attention"
@@ -105,6 +120,8 @@ class DeepSeekV4Model(BaseModel):
                     name,
                     count * scale_factor,
                     local_heads,
+                    self._num_heads,
+                    tp_size,
                     h,
                     deepseek_v4_cfg.q_lora_rank,
                     deepseek_v4_cfg.o_lora_rank,
@@ -119,12 +136,69 @@ class DeepSeekV4Model(BaseModel):
                     kvcache_quant_mode,
                     fmha_quant_mode,
                     gemm_quant_mode,
-                    architecture=self.architecture,
                 )
                 for ratio, count in ratio_counts.items()
                 if count > 0
             ]
 
+        def _moe_ops(phase: str, num_layers: float, is_context: bool):
+            if use_megamoe:
+                return [
+                    ops.DeepSeekV4MegaMoEModule(
+                        f"{phase}_megamoe",
+                        num_layers,
+                        h,
+                        self._moe_inter_size,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        moe_quant_mode,
+                        workload_distribution,
+                        is_context=is_context,
+                    )
+                ]
+            return [
+                ops.MoEDispatch(
+                    f"{phase}_moe_pre_dispatch",
+                    num_layers,
+                    h,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    attention_dp_size,
+                    True,
+                    quant_mode=moe_quant_mode,
+                ),
+                ops.MoE(
+                    f"{phase}_moe",
+                    num_layers,
+                    h,
+                    self._moe_inter_size,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    moe_quant_mode,
+                    workload_distribution,
+                    attention_dp_size,
+                ),
+                ops.MoEDispatch(
+                    f"{phase}_moe_post_dispatch",
+                    num_layers,
+                    h,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    attention_dp_size,
+                    False,
+                    quant_mode=moe_quant_mode,
+                ),
+            ]
+
+        context_moe_ops = _moe_ops("context", self._num_layers, is_context=True)
         self.context_ops.extend(
             [
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
@@ -165,43 +239,7 @@ class DeepSeekV4Model(BaseModel):
                 ),
                 ops.GEMM("context_shared_ffn2_gemm", self._num_layers, h, local_moe_inter_size, gemm_quant_mode),
                 ops.GEMM("context_router_gemm", self._num_layers, self._num_experts, h, common.GEMMQuantMode.bfloat16),
-                ops.MoEDispatch(
-                    "context_moe_pre_dispatch",
-                    self._num_layers,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    True,
-                    quant_mode=moe_quant_mode,
-                ),
-                ops.MoE(
-                    "context_moe",
-                    self._num_layers,
-                    h,
-                    self._moe_inter_size,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    moe_quant_mode,
-                    workload_distribution,
-                    attention_dp_size,
-                ),
-                ops.MoEDispatch(
-                    "context_moe_post_dispatch",
-                    self._num_layers,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    False,
-                    quant_mode=moe_quant_mode,
-                ),
+                *context_moe_ops,
                 ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp_size, h, common.GEMMQuantMode.bfloat16),
             ]
         )
@@ -256,6 +294,11 @@ class DeepSeekV4Model(BaseModel):
                 gemm_quant_mode,
             ),
         ]
+        generation_moe_ops = _moe_ops(
+            "generation",
+            self._num_layers * self._mtp_scale_factor,
+            is_context=False,
+        )
         gen_routed_ops = [
             ops.GEMM(
                 "generation_router_gemm",
@@ -264,43 +307,7 @@ class DeepSeekV4Model(BaseModel):
                 h,
                 common.GEMMQuantMode.bfloat16,
             ),
-            ops.MoEDispatch(
-                "generation_moe_pre_dispatch",
-                self._num_layers * self._mtp_scale_factor,
-                h,
-                self._topk,
-                self._num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                attention_dp_size,
-                True,
-                quant_mode=moe_quant_mode,
-            ),
-            ops.MoE(
-                "generation_moe",
-                self._num_layers * self._mtp_scale_factor,
-                h,
-                self._moe_inter_size,
-                self._topk,
-                self._num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                moe_quant_mode,
-                workload_distribution,
-                attention_dp_size,
-            ),
-            ops.MoEDispatch(
-                "generation_moe_post_dispatch",
-                self._num_layers * self._mtp_scale_factor,
-                h,
-                self._topk,
-                self._num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                attention_dp_size,
-                False,
-                quant_mode=moe_quant_mode,
-            ),
+            *generation_moe_ops,
         ]
         self.generation_ops.append(
             ops.OverlapOp("generation_moe_overlap", group_a=gen_routed_ops, group_b=gen_shared_ops)

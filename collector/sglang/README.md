@@ -15,7 +15,7 @@ The collected performance data can be used for performance modeling, scheduling 
 ## Overview
 
 - **collect_mla_module.py**: Collects performance data for MLA and DSA attention module operators
-- **collect_wideep_deepep_moe.py**: Collects performance data for DeepSeek MoE operators
+- **../wideep/sglang/collect_deepep_moe.py**: Collects performance data for DeepEP MoE operators
 
 ## Requirements
 
@@ -38,7 +38,7 @@ Run scripts directly with command-line arguments for single GPU collection:
 python collect_mla_module.py --mode context --attn-type mla
 
 # MoE
-python collect_wideep_deepep_moe.py --device cuda:0 --output-path /path/to/output/
+python ../wideep/sglang/collect_deepep_moe.py --device cuda:0 --output-path /path/to/output/
 ```
 
 **Arguments:**
@@ -141,7 +141,7 @@ Output format:
 framework,version,device,op_name,kernel_source,model,architecture,mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,step,latency
 ```
 
-## 2. MoE Operator Collection (collect_wideep_deepep_moe.py)
+## 2. MoE Operator Collection (`collector/wideep/sglang/collect_deepep_moe.py`)
 
 ### Features
 - Tests DeepEP MoE operator performance
@@ -154,7 +154,7 @@ framework,version,device,op_name,kernel_source,model,architecture,mla_dtype,kv_c
 #### Direct Mode
 ```bash
 export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
-python collect_wideep_deepep_moe.py --device cuda:0 --output-path /path/to/output/
+python ../wideep/sglang/collect_deepep_moe.py --device cuda:0 --output-path /path/to/output/
 ```
 
 #### Framework Mode
@@ -210,5 +210,4 @@ Output format:
 ```
 framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency
 ```
-
 

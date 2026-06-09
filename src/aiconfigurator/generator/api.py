@@ -580,6 +580,9 @@ def generate_naive_config(
     backend: str = "trtllm",
     output_dir: str | None = None,
     backend_version: str | None = None,
+    generated_config_version: str | None = None,
+    generator_dynamo_version: str | None = None,
+    generator_overrides: dict[str, Any] | None = None,
     deployment_target: str = "dynamo-j2",
 ) -> dict[str, Any]:
     """
@@ -598,7 +601,15 @@ def generate_naive_config(
         output_dir: Directory to save generated artifacts. If None, artifacts
             are generated but not saved to disk.
         backend_version: Optional backend version for version-specific templates.
-            If None, uses the latest available version.
+            If None, uses the latest available version. Kept for direct API
+            callers; CLI callers should prefer generated_config_version.
+        generated_config_version: Explicit backend template version for generated
+            artifacts. Takes precedence over generator_dynamo_version and
+            backend_version.
+        generator_dynamo_version: Dynamo version used to resolve backend
+            template versions and runtime image defaults.
+        generator_overrides: Optional generator config overrides from
+            --generator-config and --generator-set.
         deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', or 'llm-d').
 
     Returns:
@@ -625,6 +636,8 @@ def generate_naive_config(
     from aiconfigurator.sdk.utils import safe_mkdir
 
     logger = logging.getLogger(__name__)
+    generator_overrides = generator_overrides or {}
+    effective_dynamo_version = generator_dynamo_version or generator_overrides.get("generator_dynamo_version")
 
     # Build generator parameters
     generator_params = build_naive_generator_params(
@@ -632,10 +645,23 @@ def generate_naive_config(
         total_gpus=total_gpus,
         system_name=system,
         backend_name=backend,
+        generator_dynamo_version=effective_dynamo_version,
+        generator_overrides=generator_overrides,
     )
 
     # Determine backend version
-    if backend_version is None:
+    if generated_config_version:
+        backend_version = generated_config_version
+        logger.warning("Using generated-config-version: %s", generated_config_version)
+    elif effective_dynamo_version:
+        backend_version = resolve_backend_version_for_dynamo(effective_dynamo_version, backend)
+        logger.warning(
+            "Using generator_dynamo_version: %s; Generated backend version: (%s)%s",
+            effective_dynamo_version,
+            backend,
+            backend_version,
+        )
+    elif backend_version is None:
         backend_version = get_latest_database_version(system=system, backend=backend)
     if backend_version is None:
         logger.warning(

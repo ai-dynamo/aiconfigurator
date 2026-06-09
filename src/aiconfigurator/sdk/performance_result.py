@@ -12,8 +12,9 @@ class PerformanceResult(float):
 
     Behaves exactly like a float for backward compatibility, but stores energy
     instead of power internally. Power is derived as energy / latency. A
-    ``source`` tag records whether the value came from silicon table data or
-    an empirical fallback, and is propagated through arithmetic.
+    ``source`` tag records whether the value came from silicon table data, an
+    empirical fallback, or an explicit SOL estimate, and is propagated through
+    arithmetic.
 
     Supports all arithmetic and comparison operations for full float compatibility.
 
@@ -21,8 +22,10 @@ class PerformanceResult(float):
         - latency: milliseconds (ms)
         - energy: watt-milliseconds (W·ms) = millijoules (mJ)
         - power: watts (W) - derived property
-        - source: ``"silicon"`` (table data) | ``"empirical"`` (HYBRID-mode
-          SOL+empirical fallback) | ``"mixed"`` (sum of values from both)
+        - source: ``"silicon"`` (table data) | ``"empirical"`` (empirical
+          formula fallback) | ``"sol"`` (explicit SOL estimate) |
+          ``"estimated"`` (modeled from measured components) | ``"mixed"``
+          (sum of values from different sources)
 
     Note: 1 W·ms = 1 mJ. We use W·ms to match latency units (ms).
           To convert to Joules: divide by 1000 (J = W·s = W·ms / 1000)
@@ -66,9 +69,10 @@ class PerformanceResult(float):
         Args:
             latency: The latency value in milliseconds (acts as the float value)
             energy: The energy value in watt-milliseconds (W·ms)
-            source: Where this measurement came from --  "silicon" (table data),
-                "empirical" (SOL+empirical fallback in HYBRID mode), or "mixed"
-                (sum of values from different sources).
+            source: Where this measurement came from -- "silicon" (table data),
+                "empirical" (empirical formula fallback), "sol" (explicit SOL
+                estimate), "estimated" (modeled from measured components), or
+                "mixed" (sum of values from different sources).
         """
         instance = float.__new__(cls, latency)
         return instance
@@ -116,10 +120,16 @@ class PerformanceResult(float):
         """Add two PerformanceResults or a PerformanceResult and a number."""
         if isinstance(other, PerformanceResult):
             # Add latencies and energies (both are additive!) and merge sources.
+            if float(self) == 0.0 and self.energy == 0.0:
+                source = other.source
+            elif float(other) == 0.0 and other.energy == 0.0:
+                source = self.source
+            else:
+                source = self._merge_source(self.source, other.source)
             return PerformanceResult(
                 float(self) + float(other),
                 energy=self.energy + other.energy,
-                source=self._merge_source(self.source, other.source),
+                source=source,
             )
         else:
             # Add to latency only, keep same energy and source.

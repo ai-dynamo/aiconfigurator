@@ -5,7 +5,7 @@ from collections import defaultdict
 
 import pytest
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, interpolation
 
 pytestmark = pytest.mark.unit
 
@@ -18,31 +18,31 @@ class TestInterpolationMethods:
         values = [1, 5, 10, 20, 30]
 
         # Test value in the middle
-        left, right = comprehensive_perf_db._nearest_1d_point_helper(7, values, inner_only=True)
+        left, right = interpolation.nearest_1d_point_helper(7, values, inner_only=True)
         assert left == 5
         assert right == 10
 
         # Test exact match
-        left, right = comprehensive_perf_db._nearest_1d_point_helper(10, values, inner_only=True)
+        left, right = interpolation.nearest_1d_point_helper(10, values, inner_only=True)
         assert left == 10
-        assert right == 20
+        assert right == 10
 
         # Test at boundaries
-        left, right = comprehensive_perf_db._nearest_1d_point_helper(1, values, inner_only=True)
+        left, right = interpolation.nearest_1d_point_helper(1, values, inner_only=True)
         assert left == 1
-        assert right == 5
+        assert right == 1
 
     def test_nearest_1d_point_helper_outer(self, comprehensive_perf_db):
         """Test _nearest_1d_point_helper with inner_only=False."""
         values = [10, 20, 30]
 
         # Test value below range
-        left, right = comprehensive_perf_db._nearest_1d_point_helper(5, values, inner_only=False)
+        left, right = interpolation.nearest_1d_point_helper(5, values, inner_only=False)
         assert left == 10
         assert right == 20
 
         # Test value above range
-        left, right = comprehensive_perf_db._nearest_1d_point_helper(40, values, inner_only=False)
+        left, right = interpolation.nearest_1d_point_helper(40, values, inner_only=False)
         assert left == 20
         assert right == 30
 
@@ -50,30 +50,30 @@ class TestInterpolationMethods:
         """Test error cases for _nearest_1d_point_helper."""
         # Empty list
         with pytest.raises(AssertionError):
-            comprehensive_perf_db._nearest_1d_point_helper(10, [], inner_only=True)
+            interpolation.nearest_1d_point_helper(10, [], inner_only=True)
 
         # Single value list with mismatched x
         with pytest.raises(ValueError):
-            comprehensive_perf_db._nearest_1d_point_helper(10, [5], inner_only=True)
+            interpolation.nearest_1d_point_helper(10, [5], inner_only=True)
 
         # Value out of range with inner_only=True
         with pytest.raises(ValueError):
-            comprehensive_perf_db._nearest_1d_point_helper(0, [10, 20], inner_only=True)
+            interpolation.nearest_1d_point_helper(0, [10, 20], inner_only=True)
 
         with pytest.raises(ValueError):
-            comprehensive_perf_db._nearest_1d_point_helper(30, [10, 20], inner_only=True)
+            interpolation.nearest_1d_point_helper(30, [10, 20], inner_only=True)
 
     def test_validate(self, comprehensive_perf_db, caplog):
         """Test _validate method for negative value detection."""
         # Positive value should pass through
-        assert comprehensive_perf_db._validate(10.5) == 10.5
+        assert interpolation.validate_interpolation_result(10.5) == 10.5
 
         # Zero should pass through
-        assert comprehensive_perf_db._validate(0.0) == 0.0
+        assert interpolation.validate_interpolation_result(0.0) == 0.0
 
         # Negative value should log debug but still return
         with caplog.at_level("DEBUG"):
-            result = comprehensive_perf_db._validate(-5.0)
+            result = interpolation.validate_interpolation_result(-5.0)
             assert result == -5.0
             assert "Negative value detected" in caplog.text
 
@@ -81,7 +81,7 @@ class TestInterpolationMethods:
     def test_validate_rejects_non_finite_values(self, comprehensive_perf_db, value):
         """Non-finite interpolation results should fail instead of propagating."""
         with pytest.raises(ValueError, match="Non-finite value detected"):
-            comprehensive_perf_db._validate(value)
+            interpolation.validate_interpolation_result(value)
 
     def test_interp_1d(self, comprehensive_perf_db):
         """Test 1D interpolation."""
@@ -90,19 +90,53 @@ class TestInterpolationMethods:
         y = [100, 200]
 
         # Middle value
-        result = comprehensive_perf_db._interp_1d(x, y, 15)
+        result = interpolation.interp_1d(x, y, 15)
         assert result == 150.0
 
         # At boundaries
-        result = comprehensive_perf_db._interp_1d(x, y, 10)
+        result = interpolation.interp_1d(x, y, 10)
         assert result == 100.0
 
-        result = comprehensive_perf_db._interp_1d(x, y, 20)
+        result = interpolation.interp_1d(x, y, 20)
         assert result == 200.0
 
         # Extrapolation
-        result = comprehensive_perf_db._interp_1d(x, y, 25)
+        result = interpolation.interp_1d(x, y, 25)
         assert result == 250.0
+
+    def test_interp_1d_preserves_energy_dict_leaves(self, comprehensive_perf_db):
+        """Regression test for the power-feature interp bug.
+
+        Per-op data leaves carry latency/power/energy. `interp_1d` used to
+        return only {"latency", "power"}, silently dropping `energy`.
+        After `_extrapolate_data_grid` filled the grid, every extrapolated
+        cell had energy=0 -> the SDK reported 0 W for any GEMM shape near
+        an extrapolated point. This test guards against regression.
+        """
+        x = [10, 20]
+        y = [
+            {"latency": 1.0, "power": 400.0, "energy": 400.0},
+            {"latency": 3.0, "power": 600.0, "energy": 1800.0},
+        ]
+
+        # Midpoint: every metric should interpolate linearly.
+        mid = interpolation.interp_1d(x, y, 15)
+        assert isinstance(mid, dict)
+        assert mid["latency"] == pytest.approx(2.0)
+        assert mid["power"] == pytest.approx(500.0)
+        assert mid["energy"] == pytest.approx(1100.0), (
+            "Energy must not be dropped during 1D interpolation -- regression of the H200 vLLM bfloat16 zero-power bug."
+        )
+
+        # Endpoints
+        left = interpolation.interp_1d(x, y, 10)
+        assert left["energy"] == pytest.approx(400.0)
+        right = interpolation.interp_1d(x, y, 20)
+        assert right["energy"] == pytest.approx(1800.0)
+
+        # Extrapolation also preserves energy.
+        far = interpolation.interp_1d(x, y, 25)
+        assert far["energy"] == pytest.approx(2500.0)
 
     def test_bilinear_interpolation(self, comprehensive_perf_db):
         """Test bilinear interpolation."""
@@ -110,17 +144,25 @@ class TestInterpolationMethods:
         data = {10: {20: 100, 40: 200}, 30: {20: 300, 40: 400}}
 
         # Test interpolation in the middle
-        result = comprehensive_perf_db._bilinear_interpolation([10, 30], [20, 40], 20, 30, data)
+        result = interpolation.bilinear_interpolation([10, 30], [20, 40], 20, 30, data)
         expected = 250.0  # Average of all four corners
         assert abs(result - expected) < 1e-6
 
         # Test at corner points
-        result = comprehensive_perf_db._bilinear_interpolation([10, 30], [20, 40], 10, 20, data)
+        result = interpolation.bilinear_interpolation([10, 30], [20, 40], 10, 20, data)
         assert result == 100.0
 
         # Test along edges
-        result = comprehensive_perf_db._bilinear_interpolation([10, 30], [20, 40], 10, 30, data)
+        result = interpolation.bilinear_interpolation([10, 30], [20, 40], 10, 30, data)
         assert result == 150.0  # Average of 100 and 200
+
+    def test_bilinear_interpolation_degenerate_axis(self, comprehensive_perf_db):
+        """Degenerate bilinear grids should fall back to exact or 1-D interpolation."""
+        data = {8: {1: 100, 2: 140}, 16: {1: 200, 2: 260}}
+
+        assert interpolation.bilinear_interpolation([16, 16], [1, 1], 16, 1, data) == 200
+        assert interpolation.bilinear_interpolation([16, 16], [1, 2], 16, 1.5, data) == 230
+        assert interpolation.bilinear_interpolation([8, 16], [1, 1], 12, 1, data) == 150
 
     def test_interp_3d_linear(self, comprehensive_perf_db):
         """Test 3D linear interpolation."""
@@ -133,13 +175,54 @@ class TestInterpolationMethods:
                     data[x][y][z] = x + y + z
 
         # Test interpolation at center
-        result = comprehensive_perf_db._interp_3d_linear(15, 35, 55, data)
+        result = interpolation.interp_3d_linear(15, 35, 55, data)
         expected = 15 + 35 + 55  # Linear function
         assert abs(result - expected) < 1e-6
 
         # Test at corner point
-        result = comprehensive_perf_db._interp_3d_linear(10, 30, 50, data)
+        result = interpolation.interp_3d_linear(10, 30, 50, data)
         assert result == 90.0
+
+    def test_interp_3d_linear_degenerate_axis(self, comprehensive_perf_db):
+        """Non-exact 3D interpolation should not reduce to a lower-dimensional slice."""
+        data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        for x in [256, 512]:
+            for z in [0, 512]:
+                data[x][1][z] = x + z
+
+        with pytest.raises(ValueError, match="requires data that varies across all 3 dimensions"):
+            interpolation.interp_3d_linear(384, 1, 256, data)
+
+    def test_interp_3d_cubic_degenerate_axis(self, comprehensive_perf_db):
+        """Cubic 2D-then-1D interpolation should require true 3D coverage."""
+        data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        for x in [256, 512]:
+            for z in [0, 512]:
+                data[x][1][z] = x + z
+
+        with pytest.raises(ValueError, match="requires data that varies across all 3 dimensions"):
+            interpolation.interp_3d(384, 1, 256, data, "cubic", comprehensive_perf_db._extracted_metrics_cache)
+
+    def test_interp_3d_exact_sparse_point(self, comprehensive_perf_db):
+        """Exact data should be returned before building a broader stencil."""
+        data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        data[5][128][1] = 100.0
+        data[5][256][1] = 200.0
+        data[5][256][2] = 220.0
+
+        result = interpolation.interp_3d(5, 256, 2, data, "cubic", comprehensive_perf_db._extracted_metrics_cache)
+
+        assert result["latency"] == 220.0
+
+    def test_interp_3d_exact_axis_requires_full_3d_coverage(self, comprehensive_perf_db):
+        """Non-exact 3D interpolation should not use a lower-dimensional curve."""
+        data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        data[16][256][1] = 100.0
+        data[16][258][1] = 104.0
+        data[32][256][1] = 200.0
+
+        with pytest.raises(ValueError, match="requires data that varies across all 3 dimensions"):
+            interpolation.interp_3d(16, 257, 1, data, "cubic", comprehensive_perf_db._extracted_metrics_cache)
 
     def test_interp_2d_1d(self, comprehensive_perf_db):
         """Test 2D-1D interpolation methods."""
@@ -151,7 +234,7 @@ class TestInterpolationMethods:
                     data[x][y][z] = x * 0.1 + y * 0.2 + z * 0.3
 
         # Test bilinear method
-        result_bilinear = comprehensive_perf_db._interp_2d_1d(15, 35, 55, data, method="bilinear")
+        result_bilinear = interpolation.interp_2d_1d(15, 35, 55, data, method="bilinear")
         # Result can be dict (new format) or float (legacy)
         if isinstance(result_bilinear, dict):
             assert result_bilinear["latency"] > 0
@@ -160,7 +243,7 @@ class TestInterpolationMethods:
             assert result_bilinear > 0
 
         # Test cubic method (if scipy is available)
-        result_cubic = comprehensive_perf_db._interp_2d_1d(15, 35, 55, data, method="cubic")
+        result_cubic = interpolation.interp_2d_1d(15, 35, 55, data, method="cubic")
         # Result can be dict (new format) or float (legacy)
         if isinstance(result_cubic, dict):
             assert result_cubic["latency"] > 0
@@ -170,7 +253,53 @@ class TestInterpolationMethods:
 
         # Invalid method should raise error
         with pytest.raises(NotImplementedError):
-            comprehensive_perf_db._interp_2d_1d(15, 35, 55, data, method="invalid")
+            interpolation.interp_2d_1d(15, 35, 55, data, method="invalid")
+
+    def test_interp_2d_1d_handles_singleton_inner_axis(self, comprehensive_perf_db):
+        """Sparse singleton axes should collapse instead of failing bracketing."""
+        data = {
+            1: {256: {1: 11.0, 2: 12.0}},
+            2: {256: {1: 21.0, 2: 22.0}},
+        }
+
+        result = interpolation.interp_2d_1d(
+            1.5,
+            257,
+            1.5,
+            data,
+            method="bilinear",
+            allow_singleton_axes=True,
+        )
+
+        assert result == pytest.approx(16.5)
+
+    def test_interp_2d_1d_rejects_singleton_axis_by_default(self, comprehensive_perf_db):
+        """Generic callers should not silently accept sparse shape misses."""
+        data = {
+            1: {256: {1: 11.0, 2: 12.0}},
+            2: {256: {1: 21.0, 2: 22.0}},
+        }
+
+        with pytest.raises(ValueError, match="only value"):
+            interpolation.interp_2d_1d(1.5, 257, 1.5, data, method="bilinear")
+
+    def test_interp_2d_1d_cubic_falls_back_on_degenerate_slice(self, comprehensive_perf_db):
+        """Cubic interpolation should fall back when a 2-D slice is degenerate."""
+        data = {
+            1: {256: {1: 11.0, 2: 12.0}},
+            2: {256: {1: 21.0, 2: 22.0}},
+        }
+
+        result = interpolation.interp_2d_1d(
+            1.5,
+            257,
+            1.5,
+            data,
+            method="cubic",
+            allow_singleton_axes=True,
+        )
+
+        assert result == pytest.approx(16.5)
 
     def test_interp_3d(self, comprehensive_perf_db):
         """Test general 3D interpolation dispatcher."""
@@ -181,7 +310,9 @@ class TestInterpolationMethods:
                     data[x][y][z] = x + y + z
 
         # Test linear method
-        result_linear = comprehensive_perf_db._interp_3d(15, 35, 55, data, "linear")
+        result_linear = interpolation.interp_3d(
+            15, 35, 55, data, "linear", comprehensive_perf_db._extracted_metrics_cache
+        )
         # Result can be dict (new format) or float (legacy)
         if isinstance(result_linear, dict):
             assert result_linear["latency"] > 0
@@ -190,7 +321,9 @@ class TestInterpolationMethods:
             assert result_linear > 0
 
         # Test fallback to 2D-1D
-        result_bilinear = comprehensive_perf_db._interp_3d(15, 35, 55, data, "bilinear")
+        result_bilinear = interpolation.interp_3d(
+            15, 35, 55, data, "bilinear", comprehensive_perf_db._extracted_metrics_cache
+        )
         # Result can be dict (new format) or float (legacy)
         if isinstance(result_bilinear, dict):
             assert result_bilinear["latency"] > 0
@@ -221,7 +354,7 @@ class TestExtrapolateDataGrid:
         target_z_list = [30, 35, 40]
 
         # Apply extrapolation
-        comprehensive_perf_db._extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
+        interpolation.extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
 
         # Check that new points were created
         assert 15 in data_dict  # New x value
@@ -247,9 +380,7 @@ class TestExtrapolateDataGrid:
         target_z_list = [10, 15, 20]
 
         # Apply extrapolation with sqrt
-        comprehensive_perf_db._extrapolate_data_grid(
-            data_dict, target_x_list, target_y_list, target_z_list, sqrt_y_value=True
-        )
+        interpolation.extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list, sqrt_y_value=True)
 
         # Check that interpolation happened
         assert 9 in data_dict[10]
@@ -268,9 +399,49 @@ class TestExtrapolateDataGrid:
         target_z_list = [30, 40]  # Try to extrapolate in z
 
         with caplog.at_level("WARNING"):
-            comprehensive_perf_db._extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
+            interpolation.extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
             # Should warn about insufficient data
             assert "only one data point" in caplog.text
+
+    def test_extrapolate_data_grid_preserves_energy_dict_leaves(self, comprehensive_perf_db):
+        """Regression test: extrapolated grid cells must carry energy too.
+
+        Before the fix, `_extrapolate_data_grid` filled in new cells via
+        `interp_1d` on dict leaves and quietly dropped the `energy` field.
+        That produced grid points with valid latency but `energy=0`, which
+        was the root cause of the H200 vLLM bfloat16 zero-power bug
+        (see PR153 power-validation docs, section 10.8.8).
+        """
+        data_dict = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+        # 2x2x2 cube of dict-leaf data with non-trivial energy.
+        for x in [10, 20]:
+            for y in [30, 40]:
+                for z in [50, 60]:
+                    lat = (x + y + z) / 10.0
+                    power = 100.0 + x + y + z
+                    data_dict[x][y][z] = {
+                        "latency": lat,
+                        "power": power,
+                        "energy": lat * power,
+                    }
+
+        target_x_list = [10, 15, 20]
+        target_y_list = [30, 35, 40]
+        target_z_list = [50, 55, 60]
+        interpolation.extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
+
+        # Every newly created cell must have a positive energy field.
+        new_cells = [
+            data_dict[10][30][55],
+            data_dict[10][35][50],
+            data_dict[15][30][50],
+            data_dict[15][35][55],
+            data_dict[20][35][60],
+        ]
+        for cell in new_cells:
+            assert isinstance(cell, dict), f"expected dict leaf, got {type(cell)}"
+            assert "energy" in cell, f"energy field missing from extrapolated cell: {cell}"
+            assert cell["energy"] > 0, f"extrapolated cell has zero energy: {cell}"
 
     def test_extrapolate_data_grid_boundary_extension(self, comprehensive_perf_db):
         """Test extrapolation beyond original data boundaries."""
@@ -286,7 +457,7 @@ class TestExtrapolateDataGrid:
         target_y_list = [20, 30, 40, 50]  # 20 and 50 are outside
         target_z_list = [40, 50, 60, 70]  # 40 and 70 are outside
 
-        comprehensive_perf_db._extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
+        interpolation.extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
 
         # Check extrapolated values exist
         assert 5 in data_dict
@@ -302,11 +473,17 @@ class TestExtrapolateDataGrid:
 
 
 class TestCorrectData:
-    """Test cases for _correct_data method."""
+    """Test cases for per-op ``_correct_sol`` SOL clamping.
+
+    The ``PerfDatabase._correct_data`` wrapper has been retired;
+    callers invoke ``GEMM._correct_sol(db)`` / ``GenerationAttention._correct_sol(db)``
+    directly. These tests exercise the SOL clamp on a database whose
+    instance attributes have been mutated to artificially low values."""
 
     def test_correct_gemm_data(self, mutable_comprehensive_perf_db, caplog):
-        """Test that _correct_data adjusts GEMM data based on SOL."""
-        # Manually set a GEMM value that's too optimistic (lower than SOL)
+        """``GEMM._correct_sol`` clamps GEMM data to >= SOL."""
+        from aiconfigurator.sdk.operations.gemm import GEMM
+
         db = mutable_comprehensive_perf_db
         quant_mode = common.GEMMQuantMode.bfloat16
         m, n, k = 64, 128, 256
@@ -317,16 +494,16 @@ class TestCorrectData:
         # Set an artificially low value
         db._gemm_data[quant_mode][m][n][k] = sol_value * 0.5
 
-        # Run correction
         with caplog.at_level("DEBUG"):
-            db._correct_data()
+            GEMM._correct_sol(db)
 
-        # Check that the value was corrected
         assert db._gemm_data[quant_mode][m][n][k] >= sol_value
         assert f"sol {sol_value} > perf_db" in caplog.text or "gemm quant" in caplog.text
 
     def test_correct_generation_attention_data(self, mutable_comprehensive_perf_db, caplog):
-        """Test that _correct_data adjusts generation attention data."""
+        """``GenerationAttention._correct_sol`` clamps generation attention data to >= SOL."""
+        from aiconfigurator.sdk.operations.attention import GenerationAttention
+
         db = mutable_comprehensive_perf_db
         kv_cache_quant_mode = common.KVCacheQuantMode.bfloat16
         n_kv = 0  # MHA case
@@ -340,11 +517,9 @@ class TestCorrectData:
         # Set an artificially low value
         db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][s] = sol_value * 0.5
 
-        # Run correction
         with caplog.at_level("DEBUG"):
-            db._correct_data()
+            GenerationAttention._correct_sol(db)
 
-        # Check that the value was corrected
         corrected_value = db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][s]
         assert corrected_value >= sol_value
 
@@ -354,9 +529,14 @@ class TestUpdateSupportMatrix:
 
     def test_support_matrix_creation(self, comprehensive_perf_db):
         """Test that supported_quant_mode is properly created."""
-        # The fixture should have already called _update_support_matrix
+        # ``supported_quant_mode`` is a ``_LazySupportMatrix`` (dict-like
+        # view that resolves keys on first read) rather than a plain
+        # dict. Both shapes support the same per-key access pattern the
+        # rest of this test exercises.
+        from aiconfigurator.sdk.perf_database import _LazySupportMatrix
+
         assert hasattr(comprehensive_perf_db, "supported_quant_mode")
-        assert isinstance(comprehensive_perf_db.supported_quant_mode, dict)
+        assert isinstance(comprehensive_perf_db.supported_quant_mode, (dict, _LazySupportMatrix))
 
         # Check expected keys
         expected_keys = [

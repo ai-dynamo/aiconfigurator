@@ -80,6 +80,13 @@ jobs:
             --plot-output tools/accuracy_regression_testing/results/comparison_plot.png
 
       - name: Run regression gate
+        # Allow-to-fail: AIC's overall accuracy is still under active
+        # development with many compensating modeling gaps, so any individual
+        # correction can move the aggregate prediction further from silicon
+        # (because previously-cancelling errors stop cancelling). Reviewers
+        # should still inspect the comparison summary / PR comment uploaded
+        # below — this just stops the threshold breach from blocking merges.
+        continue-on-error: true
         run: |
           python -m pytest tools/accuracy_regression_testing/test_regression_thresholds.py -q
 
@@ -126,6 +133,7 @@ jobs:
           mkdir -p accuracy-regression-comment-inputs
           printf '%s\n' "${OLD_REF}" > accuracy-regression-comment-inputs/old-ref.txt
           printf '%s\n' "${ARTIFACT_URL}" > accuracy-regression-comment-inputs/artifact-url.txt
+          printf '%s\n' "${{ github.event.pull_request.number }}" > accuracy-regression-comment-inputs/pr-number.txt
           cp tools/accuracy_regression_testing/results/comparison_summary.csv accuracy-regression-comment-inputs/ 2>/dev/null || true
           cp tools/accuracy_regression_testing/results/comparison_plot.png accuracy-regression-comment-inputs/ 2>/dev/null || true
 

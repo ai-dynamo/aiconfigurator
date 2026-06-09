@@ -1,0 +1,14 @@
+/Users/hsaturleyhal/ai-dynamo/aiconfigurator/target/debug/deps/pyo3_build_config-e7b3c8b862dd665a.d: /Users/hsaturleyhal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.22.6/src/lib.rs /Users/hsaturleyhal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.22.6/src/errors.rs /Users/hsaturleyhal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.22.6/src/impl_.rs /Users/hsaturleyhal/ai-dynamo/aiconfigurator/target/debug/build/pyo3-build-config-baf40f5b44fcfa8b/out/pyo3-build-config-file.txt /Users/hsaturleyhal/ai-dynamo/aiconfigurator/target/debug/build/pyo3-build-config-baf40f5b44fcfa8b/out/pyo3-build-config.txt
+
+/Users/hsaturleyhal/ai-dynamo/aiconfigurator/target/debug/deps/libpyo3_build_config-e7b3c8b862dd665a.rlib: /Users/hsaturleyhal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.22.6/src/lib.rs /Users/hsaturleyhal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.22.6/src/errors.rs /Users/hsaturleyhal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.22.6/src/impl_.rs /Users/hsaturleyhal/ai-dynamo/aiconfigurator/target/debug/build/pyo3-build-config-baf40f5b44fcfa8b/out/pyo3-build-config-file.txt /Users/hsaturleyhal/ai-dynamo/aiconfigurator/target/debug/build/pyo3-build-config-baf40f5b44fcfa8b/out/pyo3-build-config.txt
+
+/Users/hsaturleyhal/ai-dynamo/aiconfigurator/target/debug/deps/libpyo3_build_config-e7b3c8b862dd665a.rmeta: /Users/hsaturleyhal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.22.6/src/lib.rs /Users/hsaturleyhal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.22.6/src/errors.rs /Users/hsaturleyhal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.22.6/src/impl_.rs /Users/hsaturleyhal/ai-dynamo/aiconfigurator/target/debug/build/pyo3-build-config-baf40f5b44fcfa8b/out/pyo3-build-config-file.txt /Users/hsaturleyhal/ai-dynamo/aiconfigurator/target/debug/build/pyo3-build-config-baf40f5b44fcfa8b/out/pyo3-build-config.txt
+
+/Users/hsaturleyhal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.22.6/src/lib.rs:
+/Users/hsaturleyhal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.22.6/src/errors.rs:
+/Users/hsaturleyhal/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pyo3-build-config-0.22.6/src/impl_.rs:
+/Users/hsaturleyhal/ai-dynamo/aiconfigurator/target/debug/build/pyo3-build-config-baf40f5b44fcfa8b/out/pyo3-build-config-file.txt:
+/Users/hsaturleyhal/ai-dynamo/aiconfigurator/target/debug/build/pyo3-build-config-baf40f5b44fcfa8b/out/pyo3-build-config.txt:
+
+# env-dep:CARGO_PKG_VERSION=0.22.6
+# env-dep:OUT_DIR=/Users/hsaturleyhal/ai-dynamo/aiconfigurator/target/debug/build/pyo3-build-config-baf40f5b44fcfa8b/out

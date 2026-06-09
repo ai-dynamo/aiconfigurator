@@ -1,0 +1,221 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+op: attention_generation
+description: Base collector v2 cases for attention_generation.
+model_ops:
+- attention_generation
+all_frameworks_op_cases:
+  attention_generation:
+    cases:
+    - id: base_attention_generation_shape_sweep
+      description: 'Decode attention shapes. MHA uses self attention; XQA/GQA sweeps explicit key-value head counts.
+
+        '
+      batch_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 2048
+      sequence_lengths:
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 2048
+      - 4096
+      - 8192
+      - 16384
+      - 32768
+      - 65536
+      - 131072
+      mha_query_head_counts:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 12
+      - 16
+      - 24
+      - 32
+      - 40
+      - 48
+      - 64
+      - 96
+      xqa_query_head_counts:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 96
+      - 128
+      kv_head_counts:
+      - 1
+      - 2
+      - 4
+      - 8
+      head_dims:
+      - 128
+      - 256
+      max_mha_tokens_per_step: 8388608
+      max_xqa_tokens_per_step: 16777216
+      min_batch_options_per_sequence: 4
+      drop_largest_sequence_for_batch_at_least: 256
+      precision_cases:
+      - id: bf16
+        fp8_kv_cache: false
+      - id: fp8_kv_cache
+        fp8_kv_cache: true
+framework_specific_op_cases:
+  sglang:
+    attention_generation:
+      cases:
+      - id: base_attention_generation_shape_sweep
+        head_dims:
+        - 128
+        - 192
+        - 256
+        window_sizes:
+        - 0
+        - 128
+        - 1024
+  trtllm:
+    attention_generation:
+      cases:
+      - id: base_attention_generation_shape_sweep
+        mha_query_head_counts:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 8
+        - 10
+        - 12
+        - 16
+        - 20
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        - 96
+        xqa_query_head_counts:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 8
+        - 10
+        - 12
+        - 16
+        - 20
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        - 96
+        - 128
+        head_dims:
+        - 64
+        - 128
+        - 192
+        - 256
+        window_sizes:
+        - 0
+        - 1024
+  vllm:
+    attention_generation:
+      cases:
+      - id: base_attention_generation_shape_sweep
+        mha_query_head_counts:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 12
+        - 16
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        xqa_query_head_counts:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 12
+        - 16
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        head_dims:
+        - 64
+        - 128
+        - 192
+        - 256
+        - 512
+        window_sizes:
+        - 0
+        - 128
+        - 1024
+        - 8192
+  vllm_xpu:
+    attention_generation:
+      cases:
+      - id: base_attention_generation_shape_sweep
+        mha_query_head_counts:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 12
+        - 16
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        xqa_query_head_counts:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 12
+        - 16
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        head_dims:
+        - 128
+        - 64
+        window_sizes:
+        - 0
+        - 128

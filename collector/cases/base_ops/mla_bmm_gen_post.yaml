@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+op: mla_bmm_gen_post
+description: Base collector v2 cases for mla_bmm_gen_post.
+all_frameworks_op_cases:
+  mla_bmm_gen_post:
+    cases:
+    - id: base_mla_bmm_generation_post_shape_sweep
+      description: 'MLA generation post-BMM shapes. Benchmarks the attention-output x w_vc helper BMM used around MLA generation.
+
+        '
+      token_counts:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 48
+      - 64
+      - 80
+      - 96
+      - 128
+      - 160
+      - 192
+      - 256
+      - 320
+      - 384
+      - 512
+      - 768
+      - 1024
+      - 1536
+      - 2048
+      - 3072
+      - 4096
+      - 6144
+      - 8192
+      - 12288
+      - 16384
+      - 20480
+      head_counts:
+      - 128
+      - 64
+      - 32
+      - 16
+      - 8
+      - 4
+      - 2
+      - 1
+      dtypes:
+      - bfloat16
+      - fp8
+      num_warmups: 2
+      num_runs: 10

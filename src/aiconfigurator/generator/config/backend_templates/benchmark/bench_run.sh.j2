@@ -31,8 +31,16 @@ BENCH_ISL="${AICONFIGURATOR_BENCH_ISL:-{{ BenchConfig.isl }}}"
 BENCH_ISL_STDDEV="${AICONFIGURATOR_BENCH_ISL_STDDEV:-{{ BenchConfig.isl_stddev }}}"
 BENCH_OSL="${AICONFIGURATOR_BENCH_OSL:-{{ BenchConfig.osl }}}"
 BENCH_OSL_STDDEV="${AICONFIGURATOR_BENCH_OSL_STDDEV:-{{ BenchConfig.osl_stddev }}}"
+BENCH_PREFIX="${AICONFIGURATOR_BENCH_PREFIX:-{{ BenchConfig.prefix | default(0) }}}"
+BENCH_PREFIX_PROMPTS="${AICONFIGURATOR_BENCH_PREFIX_PROMPTS:-{{ BenchConfig.prefix_prompt_pool_size | default(1) }}}"
 BENCH_UI="simple"
 BENCH_MULTI_ROUND="${AICONFIGURATOR_BENCH_MULTI_ROUND:-20}"
+
+prefix_args=()
+if [[ "${BENCH_PREFIX}" =~ ^[0-9]+$ && "${BENCH_PREFIX}" -gt 0 \
+    && "${BENCH_PREFIX_PROMPTS}" =~ ^[0-9]+$ && "${BENCH_PREFIX_PROMPTS}" -gt 0 ]]; then
+  prefix_args+=(--prefix-prompt-length "${BENCH_PREFIX}" --num-prefix-prompts "${BENCH_PREFIX_PROMPTS}")
+fi
 
 for concurrency in "${concurrency_array[@]}"; do
   echo "Run concurrency: $concurrency"
@@ -44,6 +52,7 @@ for concurrency in "${concurrency_array[@]}"; do
     --tokenizer "${BENCH_TOKENIZER}" \
     --isl "${BENCH_ISL}" --isl-stddev "${BENCH_ISL_STDDEV}" \
     --osl "${BENCH_OSL}" --osl-stddev "${BENCH_OSL_STDDEV}" \
+    "${prefix_args[@]}" \
     --extra-inputs ignore_eos:true \
     --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
     --concurrency ${concurrency} \

@@ -52,7 +52,7 @@ class TestConstruction:
 
 
 class TestMergeSource:
-    @pytest.mark.parametrize("src", ["silicon", "empirical", "mixed"])
+    @pytest.mark.parametrize("src", ["silicon", "empirical", "sol", "mixed"])
     def test_same_source_preserved(self, src):
         assert PerformanceResult._merge_source(src, src) == src
 
@@ -90,6 +90,13 @@ class TestAddPerformanceResult:
     def test_same_empirical_preserved(self):
         result = pr(1.0, source="empirical") + pr(2.0, source="empirical")
         assert result.source == "empirical"
+
+    def test_zero_latency_energy_source_is_neutral(self):
+        result = pr(0.0, energy=0.0, source="empirical") + pr(2.0, source="silicon")
+        assert result.source == "silicon"
+
+        result = pr(2.0, source="silicon") + pr(0.0, energy=0.0, source="empirical")
+        assert result.source == "silicon"
 
     def test_different_sources_become_mixed(self):
         result = pr(1.0, source="silicon") + pr(2.0, source="empirical")

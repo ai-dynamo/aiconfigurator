@@ -21,6 +21,7 @@ pub enum ModelFamily {
     NemotronH,
     HybridMoe,
     Qwen35,
+    Gemma4Moe,
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +39,7 @@ pub struct ModelSpec {
     pub top_k: u32,
     pub num_experts: u32,
     pub moe_intermediate_size: u32,
+    pub shared_expert_intermediate_size: u32,
 }
 
 impl ModelSpec {
@@ -70,6 +72,7 @@ impl ModelSpec {
                 | ModelFamily::DeepSeekV4
                 | ModelFamily::KimiK25
                 | ModelFamily::HybridMoe
+                | ModelFamily::Gemma4Moe
         ) || (matches!(self.family, ModelFamily::NemotronH | ModelFamily::Qwen35)
             && self.num_experts > 0
             && self.top_k > 0)
@@ -91,7 +94,7 @@ impl ModelSpec {
         let model_value = llm_config_value(value, &architecture);
         let family = architecture_to_family(&architecture)?;
 
-        let num_hidden_layers = required_u32(model_value, "num_hidden_layers", path)?;
+        let num_hidden_layers = required_num_hidden_layers(model_value, path)?;
         let num_attention_heads = required_u32(model_value, "num_attention_heads", path)?;
         let hidden_size = required_u32(model_value, "hidden_size", path)?;
         let intermediate_size = optional_u32(model_value, "intermediate_size", path)?.unwrap_or(0);
@@ -105,13 +108,23 @@ impl ModelSpec {
         let head_dim = optional_u32(model_value, "head_dim", path)?
             .or(optional_u32(model_value, "attention_head_dim", path)?)
             .unwrap_or(hidden_size / num_attention_heads.max(1));
-        let top_k = optional_u32(model_value, "num_experts_per_tok", path)?.unwrap_or(0);
+        let top_k = optional_u32(model_value, "num_experts_per_tok", path)?
+            .or(optional_u32(model_value, "top_k_experts", path)?)
+            .unwrap_or(0);
         let num_experts = optional_u32(model_value, "num_local_experts", path)?
             .or(optional_u32(model_value, "n_routed_experts", path)?)
             .or(optional_u32(model_value, "num_experts", path)?)
             .unwrap_or(0);
         let moe_intermediate_size =
             optional_u32(model_value, "moe_intermediate_size", path)?.unwrap_or(intermediate_size);
+        let shared_expert_intermediate_size =
+            optional_u32(model_value, "shared_expert_intermediate_size", path)?
+                .or(optional_u32(
+                    model_value,
+                    "moe_shared_expert_intermediate_size",
+                    path,
+                )?)
+                .unwrap_or(0);
 
         Ok(Self {
             architecture,
@@ -127,6 +140,7 @@ impl ModelSpec {
             top_k,
             num_experts,
             moe_intermediate_size,
+            shared_expert_intermediate_size,
         })
     }
 }
@@ -229,7 +243,10 @@ fn llm_config_value<'a>(value: &'a Value, architecture: &str) -> &'a Value {
         "KimiK25ForConditionalGeneration"
         | "Llama4ForConditionalGeneration"
         | "Qwen3_5ForConditionalGeneration"
-        | "Qwen3_5MoeForConditionalGeneration" => Some("text_config"),
+        | "Qwen3_5MoeForConditionalGeneration"
+        | "Gemma4ForConditionalGeneration"
+        | "Qwen3VLForConditionalGeneration"
+        | "Qwen3VLMoeForConditionalGeneration" => Some("text_config"),
         _ => None,
     };
     text_key
@@ -241,13 +258,18 @@ fn llm_config_value<'a>(value: &'a Value, architecture: &str) -> &'a Value {
 fn architecture_to_family(architecture: &str) -> Result<ModelFamily, AicError> {
     let family = match architecture {
         "GPT" => ModelFamily::Gpt,
-        "LLAMA" | "LlamaForCausalLM" | "Qwen2ForCausalLM" | "Qwen3ForCausalLM"
+        "LLAMA"
+        | "LlamaForCausalLM"
+        | "Qwen2ForCausalLM"
+        | "Qwen3ForCausalLM"
+        | "Qwen3VLForConditionalGeneration"
         | "MiMoForCausalLM" => ModelFamily::Llama,
         "MOE"
         | "MixtralForCausalLM"
         | "GptOssForCausalLM"
         | "Qwen2MoeForCausalLM"
         | "Qwen3MoeForCausalLM"
+        | "Qwen3VLMoeForConditionalGeneration"
         | "MiniMaxM2ForCausalLM" => ModelFamily::Moe,
         "DEEPSEEK" | "DeepSeekForCausalLM" | "DeepseekV3ForCausalLM" => ModelFamily::DeepSeek,
         "DEEPSEEKV32" | "DeepseekV32ForCausalLM" | "GlmMoeDsaForCausalLM" => {
@@ -263,6 +285,7 @@ fn architecture_to_family(architecture: &str) -> Result<ModelFamily, AicError> {
         "QWEN35" | "Qwen3_5ForConditionalGeneration" | "Qwen3_5MoeForConditionalGeneration" => {
             ModelFamily::Qwen35
         }
+        "GEMMA4MOE" | "Gemma4ForConditionalGeneration" => ModelFamily::Gemma4Moe,
         _ => {
             return Err(AicError::UnsupportedModel(format!(
                 "architecture '{architecture}' is not mapped to an AIC model family"
@@ -279,6 +302,32 @@ fn required_u32(value: &Value, key: &str, path: &Path) -> Result<u32, AicError> 
             path.display()
         ))
     })
+}
+
+fn required_num_hidden_layers(value: &Value, path: &Path) -> Result<u32, AicError> {
+    if let Some(layers) = optional_u32(value, "num_hidden_layers", path)? {
+        return Ok(layers);
+    }
+    if let Some(layer_blocks) = value.get("layers_block_type").and_then(Value::as_array) {
+        return u32::try_from(layer_blocks.len()).map_err(|_| {
+            AicError::ModelConfig(format!(
+                "layers_block_type in model config {} is too large for u32",
+                path.display()
+            ))
+        });
+    }
+    if let Some(pattern) = value.get("hybrid_override_pattern").and_then(Value::as_str) {
+        return u32::try_from(pattern.chars().count()).map_err(|_| {
+            AicError::ModelConfig(format!(
+                "hybrid_override_pattern in model config {} is too large for u32",
+                path.display()
+            ))
+        });
+    }
+    Err(AicError::ModelConfig(format!(
+        "model config {} must define 'num_hidden_layers' or a parseable layer pattern",
+        path.display()
+    )))
 }
 
 fn optional_u32(value: &Value, key: &str, path: &Path) -> Result<Option<u32>, AicError> {

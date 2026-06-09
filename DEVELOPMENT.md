@@ -47,7 +47,7 @@ pip install -e ".[dev]"
 
 The bare `aiconfigurator` package is **pure Python**: no Docker, no Rust
 compile, installs anywhere pip works. If you want the Rust-accelerated forward-pass estimator (opt-in via `--engine-step-backend rust`), also install
-the companion `aiconfigurator-rust-core` extension:
+the companion `aiconfigurator-core` extension:
 
 ```bash
 # Install both the pure package and the precompiled Rust extension (if a
@@ -61,7 +61,7 @@ For Rust-side iteration without reinstalling, work directly in the
 ```bash
 pip install maturin
 cd rust/aiconfigurator-core
-maturin develop --release   # builds aiconfigurator_rust_core from this checkout
+maturin develop --release   # builds aiconfigurator_core from this checkout
 ```
 
 ### 5. Install Pre-Commit Hooks
@@ -122,17 +122,17 @@ pre-commit run --all-files
 | Distribution | Wheel tag | Contents | Build tool |
 |---|---|---|---|
 | `aiconfigurator` | `py3-none-any` | Pure Python SDK + CLI + bundled data files (model_configs, systems, generator templates) | setuptools |
-| `aiconfigurator-rust-core` | `cp310-abi3-<platform>` (matrix below) | PyO3 extension module `aiconfigurator_rust_core.aiconfigurator_core` | maturin |
+| `aiconfigurator-core` | `cp310-abi3-<platform>` (matrix below) | PyO3 extension module `aiconfigurator_core._core` | maturin |
 
 The pure-Python `aiconfigurator` works without the rust extension. The
 SDK's `--engine-step-backend rust` flag is gated by `is_rust_core_available()`
 which falls back to the Python latency path on platforms where the
 extension isn't installed. Version coordination: lock-step minor versions
-(`aiconfigurator 0.9.x` requires `aiconfigurator-rust-core>=0.9.0,<0.10.0`).
+(`aiconfigurator 0.9.x` requires `aiconfigurator-core>=0.9.0,<0.10.0`).
 
 #### Supported platforms
 
-CI publishes a precompiled `aiconfigurator-rust-core` wheel for each of the
+CI publishes a precompiled `aiconfigurator-core` wheel for each of the
 following platforms; `pip install aiconfigurator[rust]` picks the right one
 automatically:
 
@@ -194,7 +194,7 @@ aiconfigurator cli ... --engine-step-backend rust
 
 #### SBOM (CycloneDX)
 
-The `aiconfigurator-rust-core` wheel ships a CycloneDX JSON SBOM for the
+The `aiconfigurator-core` wheel ships a CycloneDX JSON SBOM for the
 Rust crate's dependency graph at
 `<wheel>.dist-info/sboms/aiconfigurator-core.cyclonedx.json` per PEP 770.
 The SBOM is emitted by maturin's built-in `cargo-cyclonedx` integration —
@@ -213,8 +213,8 @@ maturin build --release
 To inspect the SBOM in a built wheel:
 
 ```bash
-unzip -p dist/aiconfigurator_rust_core-*.whl \
-  'aiconfigurator_rust_core-*.dist-info/sboms/*.cyclonedx.json' | jq .
+unzip -p dist/aiconfigurator_core-*.whl \
+  'aiconfigurator_core-*.dist-info/sboms/*.cyclonedx.json' | jq .
 ```
 
 ### Running Tests

@@ -69,6 +69,8 @@ def get_model(
     model_family = _architecture_to_model_family(architecture)
 
     _apply_model_quant_defaults(model_config, raw_config, architecture, backend_name)
+    if check_is_moe(model_path, model_info=model_info):
+        model_config.resolve_moe_parallelism()
 
     if model_config.overwrite_num_layers > 0:
         model_info["layers"] = model_config.overwrite_num_layers
@@ -99,12 +101,14 @@ from aiconfigurator.sdk.models.deepseek_v32 import (
     TrtllmWideEPDeepSeekV32Model,
     WideEPDeepSeekV32Model,
 )
+from aiconfigurator.sdk.models.gemma4 import Gemma4MixModel
 from aiconfigurator.sdk.models.gpt import GPTModel
 from aiconfigurator.sdk.models.hybrid_moe import HybridMoEModel
 from aiconfigurator.sdk.models.llama import LLAMAModel
 from aiconfigurator.sdk.models.moe import MOEModel, SGLangEPMOEModel
 from aiconfigurator.sdk.models.nemotron_h import NemotronHModel
 from aiconfigurator.sdk.models.nemotron_nas import NemotronNas
+from aiconfigurator.sdk.models.qwen3vl import Qwen3VLModel, Qwen3VLMoEModel
 from aiconfigurator.sdk.models.qwen35 import Qwen35Model
 
 __all__ = [
@@ -113,11 +117,14 @@ __all__ = [
     "DeepSeekV4Model",
     "DeepSeekV32Model",
     "GPTModel",
+    "Gemma4MixModel",
     "HybridMoEModel",
     "LLAMAModel",
     "MOEModel",
     "NemotronHModel",
     "NemotronNas",
+    "Qwen3VLMoEModel",
+    "Qwen3VLModel",
     "Qwen35Model",
     "SGLangEPMOEModel",
     "TrtllmWideEPDeepSeekModel",

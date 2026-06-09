@@ -96,6 +96,7 @@ class BaseModel:
         self.config = model_config
         self.extra_params = extra_params
         self._use_qk_norm = bool(extra_params.get("use_qk_norm", False)) if isinstance(extra_params, dict) else False
+        self.encoder_ops = []
         self.context_ops = []
         self.generation_ops = []
 
@@ -123,6 +124,10 @@ class BaseModel:
 
         self._nextn = model_config.nextn
         self._nextn_accept_rates = model_config.nextn_accept_rates
+
+    @property
+    def activation_hidden_size(self) -> int:
+        return self._num_heads * self._head_size
 
     def get_kvcache_elements_per_token(self) -> int:
         """KV cache size per token (per GPU) summed over all layers, in elements.

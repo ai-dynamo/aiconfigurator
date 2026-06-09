@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+op: mla
+description: Base collector v2 cases for mla.
+common_case_values:
+  mla:
+    context_batch_sizes:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+    - 128
+    - 256
+    context_sequence_lengths:
+    - 1
+    - 16
+    - 32
+    - 64
+    - 128
+    - 256
+    - 512
+    - 1024
+    - 1536
+    - 2048
+    - 3072
+    - 4096
+    - 6144
+    - 8192
+    - 10240
+    - 12288
+    - 16384
+    - 32768
+    generation_batch_sizes:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+    - 128
+    - 256
+    - 512
+    - 1024
+    generation_target_sequence_lengths:
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+    - 128
+    - 256
+    - 512
+    - 1024
+    - 2048
+    - 4096
+    - 8192
+    - 16384
+    - 32768
+    - 65536
+    - 131072
+    kv_cache_block_sizes:
+    - 64
+    max_context_tokens: 65536
+    max_generation_tokens: 8388608
+    constraints:
+    - 'context: batch_size * sequence_length <= max_context_tokens'
+    - 'generation: batch_size * target_sequence_length <= max_generation_tokens'
+    - 'generation: input_length == target_sequence_length - 1'

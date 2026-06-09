@@ -249,7 +249,7 @@ class TestTrtLLMWideEPMoE:
         call_args = mock_database.query_wideep_moe_compute.call_args[1]
         assert call_args["num_slots"] == 12
 
-    @patch("aiconfigurator.sdk.operations.logger")
+    @patch("aiconfigurator.sdk.operations.moe.logger")
     def test_query_debug_logging(self, mock_logger, mock_database):
         """Test that debug logging is called during query."""
         moe = TrtLLMWideEPMoE(

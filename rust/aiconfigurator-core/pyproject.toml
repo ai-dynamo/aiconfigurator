@@ -9,7 +9,7 @@
 # isn't importable.
 
 [project]
-name = "aiconfigurator-rust-core"
+name = "aiconfigurator-core"
 version = "0.9.0"
 description = "Native Rust accelerator for aiconfigurator's forward-pass latency estimator"
 authors = [
@@ -40,5 +40,5 @@ build-backend = "maturin"
 manifest-path = "Cargo.toml"
 bindings = "pyo3"
 features = ["extension-module"]
-module-name = "aiconfigurator_rust_core.aiconfigurator_core"
+module-name = "aiconfigurator_core._core"
 python-source = "python"

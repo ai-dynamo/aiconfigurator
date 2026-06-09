@@ -9,7 +9,8 @@ using SGLang's own ServerArgs → ModelRunner → ForwardBatch pipeline with dum
 weights. Op names and data schema are aligned with vLLM and TRT-LLM
 collect_mla_module.py so that perf_database queries work across frameworks.
 
-Supported models and their attention types are defined in SUPPORTED_MODELS.
+Supported models, attention types, and micro-sweeps are defined in collector v2
+YAML and loaded through collector.case_generator.
 
 Usage:
     # DSA context phase (DeepSeek-V3.2 style)
@@ -25,10 +26,12 @@ import argparse
 import gc
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import traceback
+import types
 from importlib.metadata import version as get_version
 
 import numpy as np
@@ -40,30 +43,61 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from helper import benchmark_with_power, get_sm_version, log_perf
 
+try:
+    from collector.case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
+except ModuleNotFoundError:
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
+
+try:
+    from collector.sglang.runtime_limits import (
+        alloc_prefix_indices as _alloc_prefix_indices,
+    )
+    from collector.sglang.runtime_limits import (
+        dsa_indexer_prefill_shape_is_supported,
+        dsa_indexer_total_kv_tokens_supported,
+        dsa_indexer_workspace_bytes,
+        dsa_indexer_workspace_limit_bytes,
+        required_kv_tokens,
+        required_prefill_extend_tokens,
+        sglang_dsa_mqa_logits_chunking_supported,
+    )
+    from collector.sglang.runtime_limits import (
+        kv_pool_capacity_tokens as _kv_pool_capacity_tokens,
+    )
+    from collector.sglang.runtime_limits import (
+        runtime_chunk_size as _runtime_chunk_size,
+    )
+    from collector.sglang.runtime_limits import (
+        temporarily_chunked_alloc_extend as _temporarily_chunked_alloc_extend,
+    )
+except ModuleNotFoundError:
+    from runtime_limits import (
+        alloc_prefix_indices as _alloc_prefix_indices,
+    )
+    from runtime_limits import (
+        dsa_indexer_prefill_shape_is_supported,
+        dsa_indexer_total_kv_tokens_supported,
+        dsa_indexer_workspace_bytes,
+        dsa_indexer_workspace_limit_bytes,
+        required_kv_tokens,
+        required_prefill_extend_tokens,
+        sglang_dsa_mqa_logits_chunking_supported,
+    )
+    from runtime_limits import (
+        kv_pool_capacity_tokens as _kv_pool_capacity_tokens,
+    )
+    from runtime_limits import (
+        runtime_chunk_size as _runtime_chunk_size,
+    )
+    from runtime_limits import (
+        temporarily_chunked_alloc_extend as _temporarily_chunked_alloc_extend,
+    )
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Constants
 # ═══════════════════════════════════════════════════════════════════════
-
-SUPPORTED_MODELS: dict[str, str] = {
-    "deepseek-ai/DeepSeek-V3": "mla",
-    "deepseek-ai/DeepSeek-V3.2": "dsa",
-    "zai-org/GLM-5": "dsa",
-}
-
-MODEL_ARCHITECTURE: dict[str, str] = {
-    "deepseek-ai/DeepSeek-V3": "DeepseekV3ForCausalLM",
-    "deepseek-ai/DeepSeek-V3.2": "DeepseekV32ForCausalLM",
-    "zai-org/GLM-5": "GlmMoeDsaForCausalLM",
-}
-
-# Native num_attention_heads per model — used to filter TP-sim head counts
-# and to always override correctly when head_num != native.
-MODEL_NATIVE_HEADS: dict[str, int] = {
-    "deepseek-ai/DeepSeek-V3": 128,
-    "deepseek-ai/DeepSeek-V3.2": 128,
-    "zai-org/GLM-5": 64,
-}
 
 # Perf-database-compatible dtype strings → SGLang ServerArgs kv_cache_dtype values.
 # The perf DB uses enum names like "fp8"; SGLang uses "fp8_e4m3".
@@ -79,6 +113,87 @@ _MODEL_CONFIG_DIR = os.path.join(
     "aiconfigurator",
     "model_configs",
 )
+_GLM5_DSA_ARCHITECTURE = "GlmMoeDsaForCausalLM"
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_int_list(value: str | None) -> list[int] | None:
+    if not value:
+        return None
+    return [int(item) for item in value.split(",") if item]
+
+
+def _filter_cases_from_env(test_cases, *, is_prefill: bool, attn_type: str):
+    if not (is_prefill and attn_type == "dsa"):
+        return test_cases
+
+    seq_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_SEQ_LENS"))
+    prefix_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_PREFIX_LENS"))
+    batch_filter = _parse_int_list(os.environ.get("AIC_DSA_CONTEXT_BATCH_SIZES"))
+
+    if seq_filter is None and prefix_filter is None and batch_filter is None:
+        return test_cases
+
+    seq_set = set(seq_filter) if seq_filter is not None else None
+    prefix_set = set(prefix_filter) if prefix_filter is not None else None
+    batch_set = set(batch_filter) if batch_filter is not None else None
+
+    filtered = []
+    for bs, seq_len, ip, prefix_len in test_cases:
+        if batch_set is not None and bs not in batch_set:
+            continue
+        if seq_set is not None and seq_len not in seq_set:
+            continue
+        if prefix_set is not None and prefix_len not in prefix_set:
+            continue
+        filtered.append((bs, seq_len, ip, prefix_len))
+    print(f"[DSA] Env-filtered context cases: {len(filtered)}/{len(test_cases)}")
+    return filtered
+
+
+def _is_glm5_dsa_model(model_id: str) -> bool:
+    return _module_model_architecture(model_id) == _GLM5_DSA_ARCHITECTURE
+
+
+def _enable_glm5_dsa_piecewise_graph(attn_type: str, model_id: str) -> bool:
+    if _env_flag("AIC_DISABLE_PIECEWISE_CUDA_GRAPH"):
+        return False
+    # SGLang 0.5.10 full-model piecewise capture rejects the GLM-5 DSA
+    # attention path; module-level piecewise replay remains enabled below.
+    return _env_flag("AIC_ENABLE_PIECEWISE_CUDA_GRAPH") and attn_type == "dsa" and _is_glm5_dsa_model(model_id)
+
+
+def _piecewise_cuda_graph_tokens_for_cases(test_cases, is_prefill: bool) -> list[int] | None:
+    env_tokens = _parse_int_list(os.environ.get("AIC_PIECEWISE_CUDA_GRAPH_TOKENS"))
+    if env_tokens is not None:
+        return env_tokens
+
+    tokens = set()
+    for batch_size, seq_len, *_rest in test_cases:
+        token_count = int(batch_size) * int(seq_len) if is_prefill else int(batch_size)
+        if is_prefill:
+            token_count = ((token_count + 7) // 8) * 8
+        tokens.add(token_count)
+    return sorted(tokens)
+
+
+def _generation_cuda_graph_enabled_for_tokens(num_tokens: int) -> bool:
+    """Match SGLang decode CUDA graph coverage for module microbenchmarks."""
+    if _env_flag("AIC_DISABLE_CUDA_GRAPH"):
+        return False
+
+    cuda_graph_bs = _parse_int_list(os.environ.get("AIC_CUDA_GRAPH_BS"))
+    if cuda_graph_bs is not None:
+        return int(num_tokens) in set(cuda_graph_bs)
+
+    max_bs = int(os.environ.get("AIC_CUDA_GRAPH_MAX_BS", "256"))
+    return 0 < int(num_tokens) <= max_bs
 
 
 def _resolve_local_model_path(model_id: str) -> str:
@@ -139,6 +254,13 @@ def _resolve_local_model_path(model_id: str) -> str:
     os.makedirs(tmp_dir, exist_ok=True)
     with open(os.path.join(tmp_dir, "config.json"), "w") as f:
         json.dump(config, f)
+
+    quant_config_file = os.path.join(
+        _MODEL_CONFIG_DIR,
+        f"{model_id.replace('/', '--')}_hf_quant_config.json",
+    )
+    if os.path.exists(quant_config_file):
+        shutil.copyfile(quant_config_file, os.path.join(tmp_dir, "hf_quant_config.json"))
 
     return tmp_dir
 
@@ -227,18 +349,21 @@ def _get_mla_backend_list() -> list[str]:
 # Test Case Generation
 # ═══════════════════════════════════════════════════════════════════════
 
-# Sweep ranges — aligned with vllm/trtllm collect_mla_module.py
-_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-_SEQ_LENGTHS = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
-_HEAD_NUMS = [128, 64, 32, 16, 8]  # 8 covers GLM-5 (native 64) at tp=8
 
-# Reduced head-count list for module-level benchmarks.  Each test case spawns a
-# subprocess that loads a full ModelRunner (~15-20 s), so fewer head counts means
-# fewer subprocesses and faster overall collection.  TP1 (128) and TP2 (64) are
-# the most common production configs.  Kernel-level collectors (collect_mla.py,
-# collect_attn.py) already sweep all 5 head counts; the module benchmark captures
-# scheduling/dispatch overhead which varies less with head count.
-_MODULE_HEAD_NUMS = [128, 64]
+def _module_model_architecture(model_path: str) -> str:
+    """Return the YAML-declared architecture for a module benchmark model."""
+    for spec in get_mla_module_model_specs(apply_model_filter=False):
+        if spec.model_path == model_path:
+            return spec.architecture
+    return "unknown"
+
+
+def _module_model_native_heads(model_path: str) -> int:
+    """Return native attention heads for TP-sim filtering."""
+    for spec in get_mla_module_model_specs(apply_model_filter=False):
+        if spec.model_path == model_path:
+            return spec.native_num_heads
+    return 128
 
 
 def get_context_test_cases(attn_type: str):
@@ -247,14 +372,18 @@ def get_context_test_cases(attn_type: str):
     Returns list of [seq_len, batch_size, num_heads, kv_cache_dtype,
                      compute_dtype, gemm_type].
     """
+    sweep = get_mla_module_sweep_spec("sglang")
     cases = []
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context"):
-        for num_heads in _HEAD_NUMS:
-            for batch_size in _BATCH_SIZES:
-                for seq_len in _SEQ_LENGTHS:
-                    if batch_size * seq_len > 128 * 1024:
+        for num_heads in sweep.inner_sweep_head_counts:
+            for batch_size in sweep.context_batch_sizes:
+                for seq_len in sweep.context_sequence_lengths:
+                    if batch_size * seq_len > sweep.context_max_tokens:
                         continue
-                    if seq_len >= 8192 and batch_size > 8:
+                    if (
+                        seq_len >= sweep.context_large_sequence_min
+                        and batch_size > sweep.context_large_sequence_max_batch_size
+                    ):
                         continue
                     cases.append([seq_len, batch_size, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
@@ -266,14 +395,18 @@ def get_generation_test_cases(attn_type: str):
     Returns list of [kv_cache_len, batch_size, num_heads, kv_cache_dtype,
                      compute_dtype, gemm_type].
     """
+    sweep = get_mla_module_sweep_spec("sglang")
     cases = []
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation"):
-        for num_heads in _HEAD_NUMS:
-            for batch_size in _BATCH_SIZES:
-                for seq_len in _SEQ_LENGTHS:
-                    if batch_size * seq_len > 256 * 1024:
+        for num_heads in sweep.inner_sweep_head_counts:
+            for batch_size in sweep.generation_batch_sizes:
+                for seq_len in sweep.generation_sequence_lengths:
+                    if batch_size * seq_len > sweep.generation_max_tokens:
                         continue
-                    if seq_len >= 8192 and batch_size > 16:
+                    if (
+                        seq_len >= sweep.generation_large_sequence_min
+                        and batch_size > sweep.generation_large_sequence_max_batch_size
+                    ):
                         continue
                     cases.append([seq_len, batch_size, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
@@ -292,22 +425,33 @@ def _get_module_precision_combos():
     captures module-level overhead (scheduling, memory management, attention
     dispatch) which is largely precision-independent with dummy weights.
     """
-    return [("bfloat16", "bfloat16", "bfloat16")]
+    return get_mla_module_sweep_spec("sglang").module_precision_combos
+
+
+def _dsa_context_prefix_shape_is_valid(batch_size: int, seq_len: int, prefix_len: int) -> bool:
+    """Return whether a DSA prefix-context sample is structurally valid.
+
+    Single-token extension is a decode/generation shape.  SGLang's DSA prefill
+    indexer can illegal-access on that shape, so context collection skips it
+    before launching kernels.  Capacity is checked after ModelRunner
+    construction against the actual runtime limits.
+    """
+    return prefix_len >= 0 and dsa_indexer_prefill_shape_is_supported(batch_size, seq_len)
 
 
 def _build_module_test_cases(attn_type: str, mode: str):
-    """Build one test case per unique (num_heads, precision, model) group.
+    """Build one test case per unique (local heads, target TP, precision, model) group.
 
     Output format: [seq_len, batch_size, num_heads, kv_cache_dtype,
                     compute_dtype, gemm_type, model_path,
-                    attn_type, attention_backend]
+                    attn_type, attention_backend, target_tp_size]
 
     Each test case triggers a subprocess that sweeps all (batch_size, seq_len)
     combinations internally, so we only need one entry per group — not one per
     individual point. seq_len and batch_size are set to 0 as placeholders.
 
-    Uses _get_module_precision_combos() instead of the full
-    _get_precision_combos() and _MODULE_HEAD_NUMS instead of _HEAD_NUMS to keep
+    Uses the YAML ``module_precision_combos`` and ``top_level_head_counts``
+    instead of the full inner sweep to keep
     the subprocess count low — each subprocess loads a full ModelRunner which
     takes ~15-20 s.  With 4 precision combos x 5 head counts = 20 subprocesses,
     the collection exceeds typical container timeouts.  1 combo x 2 heads per
@@ -319,27 +463,34 @@ def _build_module_test_cases(attn_type: str, mode: str):
     """
     if attn_type == "dsa" and _skip_sm120_deepgemm_attention_modules():
         return []
-    model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
+    model_specs = get_mla_module_model_specs(attention_type=attn_type)
+    sweep = get_mla_module_sweep_spec("sglang")
     cases = []
-    for model_path in model_paths:
-        native_heads = MODEL_NATIVE_HEADS.get(model_path, 128)
+    for model_spec in model_specs:
         for compute_dtype, kv_dtype, gemm_type in _get_module_precision_combos():
-            for num_heads in _MODULE_HEAD_NUMS:
-                if num_heads > native_heads:
-                    continue  # Skip invalid TP-sim configs
-                cases.append(
-                    [
-                        0,
-                        0,
-                        num_heads,
-                        kv_dtype,
-                        compute_dtype,
-                        gemm_type,
-                        model_path,
-                        attn_type,
-                        None,
-                    ]
-                )
+            target_tps = sweep.module_tp_sizes if attn_type == "dsa" else [1]
+            for target_tp_size in target_tps:
+                if model_spec.native_num_heads % target_tp_size != 0:
+                    continue
+                num_heads = model_spec.native_num_heads // target_tp_size
+                if num_heads not in sweep.inner_sweep_head_counts:
+                    continue
+                batch_sizes = sweep.context_batch_sizes if attn_type == "dsa" and mode == "context" else [0]
+                for batch_size in batch_sizes:
+                    cases.append(
+                        [
+                            0,
+                            batch_size,
+                            num_heads,
+                            kv_dtype,
+                            compute_dtype,
+                            gemm_type,
+                            model_spec.model_path,
+                            attn_type,
+                            None,
+                            target_tp_size,
+                        ]
+                    )
     return cases
 
 
@@ -360,14 +511,14 @@ def _build_wideep_mla_test_cases(mode: str):
     """
     if _skip_sm120_deepgemm_attention_modules():
         return []
-    model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == "mla"]
+    model_specs = get_mla_module_model_specs(attention_type="mla", wideep_mla=True)
+    sweep = get_mla_module_sweep_spec("sglang")
     backends = _get_mla_backend_list()
     cases = []
-    for model_path in model_paths:
-        native_heads = MODEL_NATIVE_HEADS.get(model_path, 128)
+    for model_spec in model_specs:
         for backend in backends:
-            for num_heads in _HEAD_NUMS:
-                if num_heads > native_heads:
+            for num_heads in sweep.inner_sweep_head_counts:
+                if num_heads > model_spec.native_num_heads:
                     continue
                 # Single precision: run with bfloat16, log as fp8_block/fp8
                 cases.append(
@@ -378,7 +529,7 @@ def _build_wideep_mla_test_cases(mode: str):
                         "bfloat16",
                         "bfloat16",
                         "bfloat16",
-                        model_path,
+                        model_spec.model_path,
                         "mla",
                         backend,
                     ]
@@ -525,6 +676,106 @@ def _patch_nsa_rope_contiguity(model_runner):
         print(f"Patched rope contiguity for layer {layer}")
 
 
+def _patch_nsa_indexer_compile_for_module_cuda_graph(attention_module) -> None:
+    """Use eager indexer gate helpers during module-level CUDA graph capture.
+
+    SGLang's piecewise runner compiles/captures the whole model path.  The AIC
+    module collector captures just ``self_attn.forward``.  In that narrower
+    capture, the NSA indexer's small ``@torch.compile`` gate helpers can lazily
+    invoke inductor inside ``torch.cuda.graph(...)`` and fail on CPU->CUDA
+    copies.  Binding the original wrapped functions keeps the same math while
+    avoiding compile work inside graph capture.
+    """
+    indexer = getattr(attention_module, "indexer", None)
+    if indexer is None:
+        return
+    actual_indexer = getattr(indexer, "_module", indexer)
+    for name in (
+        "_project_and_scale_head_gates",
+        "_get_logits_head_gate",
+        "_apply_q_scale_and_softmax_scale",
+    ):
+        bound = getattr(actual_indexer, name, None)
+        if bound is None:
+            continue
+        raw = getattr(bound, "__wrapped__", None)
+        if raw is None:
+            raw = getattr(getattr(type(actual_indexer), name, None), "__wrapped__", None)
+        if raw is not None:
+            setattr(actual_indexer, name, types.MethodType(raw, actual_indexer))
+
+
+class CudaIllegalAccessError(RuntimeError):
+    """Stop the current subprocess after a CUDA illegal access poisons context."""
+
+
+def _expect_module_attr(module, attr_name: str, expected: int, module_name: str) -> None:
+    value = getattr(module, attr_name, None)
+    if value != expected:
+        raise RuntimeError(f"{module_name}.{attr_name}={value}, expected {expected}")
+
+
+def _validate_dsa_tp_module_shapes(model_runner, local_num_heads: int, target_tp_size: int) -> None:
+    """Verify the single-GPU DSA module emulates one target TP rank.
+
+    The collector cannot launch a full distributed TP group for every
+    micro-benchmark.  Instead it loads a single local-rank attention module with
+    local ``num_attention_heads``.  That must also localize the TP-sharded
+    projection GEMMs, not just the value logged as ``num_heads``.
+    """
+    if target_tp_size <= 1:
+        return
+
+    try:
+        attn = model_runner.model.model.layers[0].self_attn
+    except AttributeError as exc:
+        raise RuntimeError("failed to locate DSA self_attn module for TP shape validation") from exc
+
+    _expect_module_attr(attn, "num_heads", local_num_heads, "self_attn")
+    _expect_module_attr(attn, "num_local_heads", local_num_heads, "self_attn")
+
+    qk_nope_head_dim = int(attn.qk_nope_head_dim)
+    qk_rope_head_dim = int(attn.qk_rope_head_dim)
+    v_head_dim = int(attn.v_head_dim)
+    qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+
+    q_b_proj = getattr(attn, "q_b_proj", None)
+    if q_b_proj is not None:
+        q_b_out = local_num_heads * qk_head_dim
+        _expect_module_attr(q_b_proj, "output_size", q_b_out, "q_b_proj")
+        _expect_module_attr(q_b_proj, "output_size_per_partition", q_b_out, "q_b_proj")
+
+    kv_b_proj = getattr(attn, "kv_b_proj", None)
+    if kv_b_proj is not None:
+        kv_b_out = local_num_heads * (qk_nope_head_dim + v_head_dim)
+        _expect_module_attr(kv_b_proj, "output_size", kv_b_out, "kv_b_proj")
+        _expect_module_attr(kv_b_proj, "output_size_per_partition", kv_b_out, "kv_b_proj")
+
+    o_proj = getattr(attn, "o_proj", None)
+    if o_proj is not None:
+        o_proj_in = local_num_heads * v_head_dim
+        _expect_module_attr(o_proj, "input_size", o_proj_in, "o_proj")
+        _expect_module_attr(o_proj, "input_size_per_partition", o_proj_in, "o_proj")
+        _expect_module_attr(o_proj, "output_size", int(attn.hidden_size), "o_proj")
+
+
+def _import_sglang_forward_context():
+    """Return SGLang's forward-context wrapper across runtime API versions."""
+    try:
+        from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+    except ModuleNotFoundError:
+        from contextlib import nullcontext
+
+        class ForwardContext:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        def forward_context(_context):
+            return nullcontext()
+
+    return ForwardContext, forward_context
+
+
 def load_model_runner(
     model_path: str,
     head_num: int,
@@ -533,12 +784,16 @@ def load_model_runner(
     device: str = "cuda:0",
     tp_rank: int = 0,
     gemm_type: str = "bfloat16",
+    target_tp_size: int = 1,
+    enable_piecewise_cuda_graph: bool = False,
+    piecewise_cuda_graph_tokens: list[int] | None = None,
+    max_total_tokens: int | None = None,
 ):
     """Load SGLang ModelRunner with dummy weights.
 
     Args:
         model_path: HuggingFace model path (e.g. "deepseek-ai/DeepSeek-V3.2").
-        head_num: Number of attention heads to benchmark.
+        head_num: Number of local attention heads to benchmark for one target TP rank.
         kv_cache_dtype: Perf-DB-compatible string ("bfloat16" or "fp8").
             Mapped to SGLang-native string via SGLANG_KV_DTYPE.
         attention_backend: Backend string for ServerArgs (e.g. "nsa", "fa3").
@@ -588,10 +843,10 @@ def load_model_runner(
         load_format=load_format,
         tp_size=1,
         trust_remote_code=True,
-        mem_fraction_static=0.5,
         disable_radix_cache=True,
-        disable_cuda_graph=True,
+        disable_cuda_graph=not enable_piecewise_cuda_graph,
         kv_cache_dtype=sglang_kv_dtype,
+        max_total_tokens=max_total_tokens,
     )
 
     # Quantization control: bf16 (dummy weights) vs fp8 (real fp8 weight
@@ -599,20 +854,39 @@ def load_model_runner(
     # fp8).
     if gemm_type == "fp8_block":
         server_args.quantization = "fp8"
+    elif gemm_type == "nvfp4":
+        server_args.quantization = "modelopt_fp4"
     else:
         server_args.quantization = None
 
-    # Disable piecewise CUDA graph — its warmup compile OOMs on large models
-    # (e.g. 64 GiB allocation with fp8 + 128 heads on H200).
-    # Not a ServerArgs constructor param; set post-init like collect_attn.py.
-    # Field renamed in sglang 0.5.10: enable_piecewise_cuda_graph → disable_piecewise_cuda_graph.
+    if enable_piecewise_cuda_graph:
+        server_args.disable_cuda_graph_padding = True
+        server_args.cuda_graph_max_bs = int(os.environ.get("AIC_CUDA_GRAPH_MAX_BS", "256"))
+        cuda_graph_bs = _parse_int_list(os.environ.get("AIC_CUDA_GRAPH_BS"))
+        if cuda_graph_bs:
+            server_args.cuda_graph_bs = cuda_graph_bs
+        if piecewise_cuda_graph_tokens:
+            server_args.piecewise_cuda_graph_tokens = piecewise_cuda_graph_tokens
+        max_piecewise_tokens = os.environ.get("AIC_PIECEWISE_CUDA_GRAPH_MAX_TOKENS")
+        if max_piecewise_tokens:
+            server_args.piecewise_cuda_graph_max_tokens = int(max_piecewise_tokens)
+        elif piecewise_cuda_graph_tokens:
+            server_args.piecewise_cuda_graph_max_tokens = max(piecewise_cuda_graph_tokens)
+        if hasattr(server_args, "enforce_piecewise_cuda_graph"):
+            server_args.enforce_piecewise_cuda_graph = True
+
     if hasattr(server_args, "disable_piecewise_cuda_graph"):
-        server_args.disable_piecewise_cuda_graph = True  # sglang >=0.5.10
+        server_args.disable_piecewise_cuda_graph = not enable_piecewise_cuda_graph
     else:
-        server_args.enable_piecewise_cuda_graph = False  # sglang <=0.5.9
+        server_args.enable_piecewise_cuda_graph = enable_piecewise_cuda_graph
 
     server_args.attention_backend = attention_backend
-    print(f"Using attention backend: {attention_backend}, kv_cache_dtype: {sglang_kv_dtype}, gpu_id: {gpu_id}")
+    print(
+        f"Using attention backend: {attention_backend}, kv_cache_dtype: {sglang_kv_dtype}, "
+        f"gpu_id: {gpu_id}, chunked_prefill_size={server_args.chunked_prefill_size}, "
+        f"max_prefill_tokens={server_args.max_prefill_tokens}, max_total_tokens={max_total_tokens}, "
+        f"piecewise_cuda_graph={enable_piecewise_cuda_graph}"
+    )
 
     if num_layers > 0 and load_format == "dummy":
         override_args = {
@@ -641,7 +915,7 @@ def load_model_runner(
 
     model_runner = ModelRunner(
         model_config=model_config,
-        mem_fraction_static=0.5,
+        mem_fraction_static=server_args.mem_fraction_static,
         gpu_id=gpu_id,
         tp_rank=gpu_id,
         tp_size=server_args.tp_size,
@@ -654,6 +928,7 @@ def load_model_runner(
     )
 
     _patch_nsa_rope_contiguity(model_runner)
+    _validate_dsa_tp_module_shapes(model_runner, head_num, target_tp_size)
 
     return model_runner
 
@@ -678,6 +953,8 @@ def run_attention_torch(
     kv_cache_dtype: str,
     compute_dtype: str,
     gemm_type: str,
+    target_tp_size: int = 1,
+    use_module_cuda_graph: bool = False,
 ):
     """Run attention benchmark for both prefill and decode phases.
 
@@ -688,7 +965,7 @@ def run_attention_torch(
         gemm_type: Perf-DB-compatible string for logging.
     """
     attention_module = model_runner.model.model.layers[test_layer].self_attn
-    architecture = MODEL_ARCHITECTURE.get(model_path, "unknown")
+    architecture = _module_model_architecture(model_path)
     backend_name = model_runner.server_args.attention_backend
     version = get_version("sglang")
     device_name = torch.cuda.get_device_name(device)
@@ -724,7 +1001,11 @@ def run_attention_torch(
 
     logged_count = 0
     for test_case in test_cases:
-        batch_size, seq_length, is_prefill = test_case
+        if len(test_case) == 4:
+            batch_size, seq_length, is_prefill, prefix_len = test_case
+        else:
+            batch_size, seq_length, is_prefill = test_case
+            prefix_len = 0
 
         if is_prefill:
             logged_count += int(
@@ -748,6 +1029,9 @@ def run_attention_torch(
                     log_mla_dtype=log_mla_dtype,
                     log_kv_dtype=log_kv_dtype,
                     log_gemm_type=log_gemm_type,
+                    target_tp_size=target_tp_size,
+                    prefix_len=prefix_len,
+                    use_module_cuda_graph=use_module_cuda_graph,
                 )
             )
         else:
@@ -772,6 +1056,8 @@ def run_attention_torch(
                     log_mla_dtype=log_mla_dtype,
                     log_kv_dtype=log_kv_dtype,
                     log_gemm_type=log_gemm_type,
+                    target_tp_size=target_tp_size,
+                    use_module_cuda_graph=use_module_cuda_graph,
                 )
             )
     return logged_count
@@ -797,6 +1083,9 @@ def _run_prefill(
     log_mla_dtype: str,
     log_kv_dtype: str,
     log_gemm_type: str,
+    target_tp_size: int,
+    prefix_len: int = 0,
+    use_module_cuda_graph: bool = False,
 ):
     """Run prefill (context) benchmark for a single (batch_size, seq_length) point."""
     is_wideep_mla = attn_type == "mla"
@@ -809,23 +1098,28 @@ def _run_prefill(
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
     from sglang.srt.utils import BumpAllocator
 
-    print(f"\nPrefill: batch_size={batch_size}, seq_length={seq_length}")
+    forward_context_type, forward_context = _import_sglang_forward_context()
+
+    print(f"\nPrefill: batch_size={batch_size}, seq_length={seq_length}, prefix_len={prefix_len}")
 
     try:
         model_runner.req_to_token_pool.clear()
         model_runner.token_to_kv_pool_allocator.clear()
+
+        prefix_indices = _alloc_prefix_indices(model_runner, batch_size, prefix_len)
+        full_length = prefix_len + seq_length
 
         reqs = []
         for i in range(batch_size):
             req = Req(
                 rid=str(i),
                 origin_input_text="",
-                origin_input_ids=list(torch.randint(0, 10000, (seq_length,)).tolist()),
+                origin_input_ids=list(torch.randint(0, 10000, (full_length,)).tolist()),
                 sampling_params=SamplingParams(temperature=0, max_new_tokens=1),
             )
-            req.prefix_indices = torch.empty((0,), dtype=torch.int64)
+            req.prefix_indices = prefix_indices[i]
             req.fill_ids = req.origin_input_ids
-            req.extend_input_len = len(req.fill_ids)
+            req.extend_input_len = seq_length if prefix_len else len(req.fill_ids)
             req.logprob_start_len = 0
             reqs.append(req)
 
@@ -846,9 +1140,13 @@ def _run_prefill(
             enable_overlap=False,
             spec_algorithm=SpeculativeAlgorithm.NONE,
         )
-        batch.prepare_for_extend()
-        model_worker_batch = batch.get_model_worker_batch()
-        forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
+        with _temporarily_chunked_alloc_extend(model_runner, batch_size * seq_length):
+            batch.prepare_for_extend()
+        if hasattr(batch, "get_model_worker_batch"):
+            batch_for_forward = batch.get_model_worker_batch()
+        else:
+            batch_for_forward = batch
+        forward_batch = ForwardBatch.init_new(batch_for_forward, model_runner)
         model_runner.attn_backend.init_forward_metadata(forward_batch)
 
         hidden_states = torch.randn(
@@ -857,21 +1155,323 @@ def _run_prefill(
             dtype=torch.bfloat16,
             device="cuda",
         )
-        positions = torch.arange(seq_length, device="cuda").unsqueeze(0).expand(batch_size, -1).contiguous().flatten()
+        positions = (
+            torch.arange(prefix_len, prefix_len + seq_length, device="cuda")
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+            .contiguous()
+            .flatten()
+        )
         zero_allocator = BumpAllocator(buffer_size=256, dtype=torch.float32, device="cuda")
 
         attn_inputs = AttentionInputs(hidden_states, forward_batch, dummy_qkv_latent_func)
         get_attn_tp_context().set_attn_inputs(attn_inputs)
 
+        use_module_piecewise_replay = _env_flag("AIC_ENABLE_MODULE_PIECEWISE_REPLAY") or (
+            attn_type == "dsa" and _is_glm5_dsa_model(model_path)
+        )
+        use_full_model_piecewise_replay = _env_flag("AIC_ENABLE_FULL_MODEL_PIECEWISE_REPLAY")
+        use_module_cuda_graph = use_module_cuda_graph or _env_flag("AIC_ENABLE_MODULE_CUDA_GRAPH")
+        use_module_piecewise_context = _env_flag("AIC_ENABLE_MODULE_PIECEWISE_CONTEXT")
+        token_count = batch_size * seq_length
+        max_piecewise_tokens = int(getattr(model_runner.server_args, "piecewise_cuda_graph_max_tokens", 0) or 0) or (
+            max(int(x) for x in model_runner.server_args.piecewise_cuda_graph_tokens)
+            if model_runner.server_args.piecewise_cuda_graph_tokens
+            else 0
+        )
+        if use_module_piecewise_replay and max_piecewise_tokens and token_count > max_piecewise_tokens:
+            print(
+                "  Module piecewise CUDA graph replay disabled: "
+                f"num_tokens={token_count} exceeds max={max_piecewise_tokens}; "
+                "using piecewise context without graph replay"
+            )
+            use_module_piecewise_replay = False
+            use_module_cuda_graph = False
+            use_module_piecewise_context = True
+        if use_module_piecewise_replay:
+            print("  Module piecewise CUDA graph replay enabled")
+            use_full_model_piecewise_replay = False
+            use_module_cuda_graph = False
+            use_module_piecewise_context = False
+        if use_full_model_piecewise_replay:
+            print("  Full model piecewise CUDA graph replay enabled")
+            use_module_cuda_graph = False
+            use_module_piecewise_context = False
+        if use_module_piecewise_context:
+            from sglang.srt.compilation.piecewise_context_manager import (
+                enable_piecewise_cuda_graph,
+            )
+            from sglang.srt.compilation.piecewise_context_manager import (
+                set_forward_context as set_piecewise_forward_context,
+            )
+
+            if use_module_cuda_graph:
+                print("  Module CUDA graph disabled; using piecewise CUDA graph context")
+                use_module_cuda_graph = False
+
+        if use_module_cuda_graph:
+            _patch_nsa_indexer_compile_for_module_cuda_graph(attention_module)
+
+        if use_module_piecewise_replay:
+            from sglang.srt.layers.logits_processor import LogitsProcessorOutput
+
+            replay_token_count = getattr(model_runner, "_aic_module_piecewise_replay_token_count", None)
+            if (
+                getattr(model_runner, "_aic_module_piecewise_replay_initialized", False)
+                and replay_token_count != token_count
+            ):
+                # The module-only wrapper compiles against the current token
+                # shape. Reusing it for a different token_count can trigger
+                # runtime recompilation outside the PCG capture stream, which
+                # SGLang rejects with "PCG capture stream is not set".
+                model_runner.piecewise_cuda_graph_runner = None
+                model_runner._aic_module_piecewise_replay_initialized = False
+                model_runner._aic_module_piecewise_replay_token_count = None
+
+            if getattr(model_runner, "_aic_module_piecewise_replay_initialized", False):
+                print("  Module piecewise runner=True")
+            else:
+                original_piecewise_tokens = getattr(model_runner.server_args, "piecewise_cuda_graph_tokens", None)
+                original_piecewise_max_tokens = getattr(
+                    model_runner.server_args, "piecewise_cuda_graph_max_tokens", None
+                )
+                model_runner.server_args.piecewise_cuda_graph_tokens = [token_count]
+                model_runner.server_args.piecewise_cuda_graph_max_tokens = token_count
+                module_hidden_states = torch.randn(
+                    token_count,
+                    model_runner.model.config.hidden_size,
+                    dtype=torch.bfloat16,
+                    device="cuda",
+                )
+                module_logits = torch.empty(
+                    module_hidden_states.shape[0],
+                    1,
+                    dtype=torch.float32,
+                    device="cuda",
+                )
+
+                class _AttentionOnlyLayer(torch.nn.Module):
+                    def __init__(self, self_attn):
+                        super().__init__()
+                        self.self_attn = self_attn
+
+                class _AttentionOnlyLanguageModel(torch.nn.Module):
+                    def __init__(self, self_attn, hidden_buffer, logits_buffer):
+                        super().__init__()
+                        self.layers = torch.nn.ModuleList([_AttentionOnlyLayer(self_attn)])
+                        self.hidden_states = hidden_buffer
+                        self.logits = logits_buffer
+
+                    def forward(
+                        self,
+                        input_ids: torch.Tensor,
+                        positions: torch.Tensor,
+                        forward_batch,
+                        **kwargs,
+                    ):
+                        hidden = self.hidden_states[: input_ids.shape[0]]
+                        attn_inputs = AttentionInputs(hidden, forward_batch, dummy_qkv_latent_func)
+                        get_attn_tp_context().set_attn_inputs(attn_inputs)
+                        out = self.layers[0].self_attn(
+                            positions=positions,
+                            hidden_states=hidden,
+                            forward_batch=forward_batch,
+                            zero_allocator=zero_allocator,
+                        )
+                        if isinstance(out, tuple):
+                            out = out[0]
+                        return LogitsProcessorOutput(
+                            next_token_logits=self.logits[: input_ids.shape[0]],
+                            hidden_states=out,
+                        )
+
+                class _AttentionOnlyModel(torch.nn.Module):
+                    def __init__(self, self_attn):
+                        super().__init__()
+                        self.model = _AttentionOnlyLanguageModel(self_attn, module_hidden_states, module_logits)
+
+                    def forward(
+                        self,
+                        input_ids: torch.Tensor,
+                        positions: torch.Tensor,
+                        forward_batch,
+                        **kwargs,
+                    ):
+                        return self.model.forward(input_ids, positions, forward_batch, **kwargs)
+
+                original_model = model_runner.model
+                original_num_layers = model_runner.model_config.num_hidden_layers
+                import sglang.srt.model_executor.piecewise_cuda_graph_runner as pcg_runner_mod
+                from sglang.srt.compilation.piecewise_context_manager import (
+                    set_forward_context as set_piecewise_forward_context,
+                )
+                from sglang.srt.layers.dp_attention import (
+                    DpPaddingMode,
+                    set_dp_buffer_len,
+                    set_is_extend_in_batch,
+                )
+
+                original_install_torch_compiled = pcg_runner_mod.install_torch_compiled
+                original_warmup_compile = pcg_runner_mod.PiecewiseCudaGraphRunner.warmup_compile
+                original_capture_one_batch_size = pcg_runner_mod.PiecewiseCudaGraphRunner.capture_one_batch_size
+
+                def _install_torch_compiled_with_module_dims(module, *args, **kwargs):
+                    if isinstance(module, _AttentionOnlyLanguageModel) and kwargs.get("dynamic_arg_dims") is None:
+                        kwargs["dynamic_arg_dims"] = {
+                            "input_ids": 0,
+                            "positions": 0,
+                        }
+                    return original_install_torch_compiled(module, *args, **kwargs)
+
+                def _run_module_piecewise_target(runner, target_forward_batch):
+                    static_forward_batch = runner.replay_prepare(target_forward_batch)
+                    if static_forward_batch.dp_padding_mode is None:
+                        static_forward_batch.dp_padding_mode = DpPaddingMode.get_default_mode_in_cuda_graph()
+                    runner.model_runner.attn_backend.init_forward_metadata(target_forward_batch)
+                    static_forward_batch.dp_local_start_pos = None
+                    static_forward_batch.dp_local_num_tokens = None
+                    set_dp_buffer_len(
+                        None,
+                        len(static_forward_batch.input_ids),
+                        static_forward_batch.dp_padding_mode.is_max_len(),
+                    )
+                    set_is_extend_in_batch(False)
+                    with (
+                        forward_context(forward_context_type(attn_backend=runner.model_runner.attn_backend)),
+                        set_piecewise_forward_context(
+                            static_forward_batch,
+                            runner.attention_layers,
+                            runner.quant_config,
+                            runner.moe_layers,
+                            runner.moe_fusions,
+                            dsa_indexers=runner.dsa_indexers,
+                        ),
+                    ):
+                        return runner.model_runner.model.forward(
+                            static_forward_batch.input_ids,
+                            static_forward_batch.positions,
+                            static_forward_batch,
+                        )
+
+                def _warmup_compile_with_module_batch(runner, num_tokens: int):
+                    target_forward_batch = getattr(
+                        runner.model_runner,
+                        "_aic_module_piecewise_forward_batch",
+                        None,
+                    )
+                    if target_forward_batch is not None and num_tokens in runner.capture_num_tokens:
+                        return _run_module_piecewise_target(runner, target_forward_batch)
+                    return original_warmup_compile(runner, num_tokens)
+
+                def _capture_one_batch_size_with_module_batch(runner, num_tokens: int):
+                    target_forward_batch = getattr(
+                        runner.model_runner,
+                        "_aic_module_piecewise_forward_batch",
+                        None,
+                    )
+                    if target_forward_batch is not None and num_tokens in runner.capture_num_tokens:
+                        for _ in range(2):
+                            runner.device_module.synchronize()
+                            runner.model_runner.tp_group.barrier()
+                            _run_module_piecewise_target(runner, target_forward_batch)
+                        return
+                    return original_capture_one_batch_size(runner, num_tokens)
+
+                module_model = _AttentionOnlyModel(attention_module).to("cuda")
+                module_model.config = getattr(original_model, "config", None)
+                module_model.quant_config = getattr(original_model, "quant_config", None)
+                module_model.model.config = getattr(
+                    getattr(original_model, "model", original_model), "config", module_model.config
+                )
+                model_runner.model = module_model
+                model_runner.model_config.num_hidden_layers = 1
+                model_runner._aic_module_piecewise_forward_batch = forward_batch
+                try:
+                    pcg_runner_mod.install_torch_compiled = _install_torch_compiled_with_module_dims
+                    pcg_runner_mod.PiecewiseCudaGraphRunner.warmup_compile = _warmup_compile_with_module_batch
+                    pcg_runner_mod.PiecewiseCudaGraphRunner.capture_one_batch_size = (
+                        _capture_one_batch_size_with_module_batch
+                    )
+                    with torch.no_grad():
+                        model_runner.init_piecewise_cuda_graphs()
+                finally:
+                    pcg_runner_mod.install_torch_compiled = original_install_torch_compiled
+                    pcg_runner_mod.PiecewiseCudaGraphRunner.warmup_compile = original_warmup_compile
+                    pcg_runner_mod.PiecewiseCudaGraphRunner.capture_one_batch_size = original_capture_one_batch_size
+                    model_runner.model_config.num_hidden_layers = original_num_layers
+                    if hasattr(model_runner, "_aic_module_piecewise_forward_batch"):
+                        delattr(model_runner, "_aic_module_piecewise_forward_batch")
+                    model_runner.server_args.piecewise_cuda_graph_tokens = original_piecewise_tokens
+                    model_runner.server_args.piecewise_cuda_graph_max_tokens = original_piecewise_max_tokens
+                model_runner._aic_module_piecewise_replay_initialized = True
+                model_runner._aic_module_piecewise_replay_token_count = token_count
+                print(f"  Module piecewise runner={model_runner.piecewise_cuda_graph_runner is not None}")
+
+        def call_attention_module():
+            with forward_context(forward_context_type(attn_backend=model_runner.attn_backend)):
+                if use_module_piecewise_context:
+                    with (
+                        enable_piecewise_cuda_graph(),
+                        set_piecewise_forward_context(
+                            forward_batch,
+                            getattr(model_runner, "attention_layers", []),
+                            getattr(model_runner.model, "quant_config", None),
+                            getattr(model_runner, "moe_layers", []),
+                            getattr(model_runner, "moe_fusions", []),
+                            dsa_indexers=getattr(model_runner, "dsa_indexers", None),
+                        ),
+                    ):
+                        # Keep DSA dispatch consistent with SGLang's
+                        # piecewise path even when we do not replay a
+                        # captured CUDA graph for this token count.
+                        model_runner.attn_backend.init_forward_metadata(forward_batch)
+                        attention_module(
+                            positions=positions,
+                            hidden_states=hidden_states,
+                            forward_batch=forward_batch,
+                            zero_allocator=zero_allocator,
+                        )
+                else:
+                    attention_module(
+                        positions=positions,
+                        hidden_states=hidden_states,
+                        forward_batch=forward_batch,
+                        zero_allocator=zero_allocator,
+                    )
+
+        last_can_run_graph = None
+
+        def call_full_model_piecewise_replay():
+            nonlocal last_can_run_graph
+            output = model_runner.forward(forward_batch)
+            last_can_run_graph = getattr(output, "can_run_graph", None)
+
+        call_target = (
+            call_full_model_piecewise_replay
+            if (use_full_model_piecewise_replay or use_module_piecewise_replay)
+            else call_attention_module
+        )
+
         # Warmup
         for _ in range(num_warmup):
             with torch.no_grad():
-                attention_module(
-                    positions=positions,
-                    hidden_states=hidden_states,
-                    forward_batch=forward_batch,
-                    zero_allocator=zero_allocator,
-                )
+                call_target()
+            torch.cuda.synchronize()
+        if use_full_model_piecewise_replay or use_module_piecewise_replay:
+            print(f"  Piecewise can_run_graph={last_can_run_graph}")
+
+        module_cuda_graph = None
+        if use_module_cuda_graph:
+            try:
+                torch.cuda.synchronize()
+                module_cuda_graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(module_cuda_graph):
+                    call_target()
+                torch.cuda.synchronize()
+                print("  Module CUDA graph capture enabled")
+            except Exception:
+                print("  Module CUDA graph capture failed")
+                raise
 
         # Timed runs — skip first 2 for stability
         cuda_times = []
@@ -880,12 +1480,10 @@ def _run_prefill(
             end_event = torch.cuda.Event(enable_timing=True)
             start_event.record()
             with torch.no_grad():
-                attention_module(
-                    positions=positions,
-                    hidden_states=hidden_states,
-                    forward_batch=forward_batch,
-                    zero_allocator=zero_allocator,
-                )
+                if module_cuda_graph is not None:
+                    module_cuda_graph.replay()
+                else:
+                    call_target()
             end_event.record()
             torch.cuda.synchronize()
             if i > 1:
@@ -915,8 +1513,8 @@ def _run_prefill(
                         "num_heads": head_num,
                         "batch_size": batch_size,
                         "isl": seq_length,
-                        "tp_size": 1,
-                        "step": 0,
+                        "tp_size": target_tp_size,
+                        "step": prefix_len,
                         "latency": f"{avg_time_ms:.4f}",
                     }
                 ],
@@ -950,14 +1548,23 @@ def _run_prefill(
             torch.cuda.empty_cache()
             return False
         if "cuda" in error_str and "illegal" in error_str:
-            print("  CUDA illegal access detected — stopping to prevent cascading failures")
-            raise
+            print("  CUDA illegal access detected — stopping this subprocess to preserve prior rows")
+            raise CudaIllegalAccessError(f"CUDA illegal access at b={batch_size}, s={seq_length}") from e
         print("  Skipping this configuration...")
         return False
     finally:
-        model_runner.req_to_token_pool.clear()
-        model_runner.token_to_kv_pool_allocator.clear()
-        torch.cuda.empty_cache()
+        for cleanup_name, cleanup_fn in (
+            ("req_to_token_pool.clear", model_runner.req_to_token_pool.clear),
+            ("token_to_kv_pool_allocator.clear", model_runner.token_to_kv_pool_allocator.clear),
+            ("torch.cuda.empty_cache", torch.cuda.empty_cache),
+        ):
+            try:
+                cleanup_fn()
+            except Exception as cleanup_exc:
+                print(
+                    f"  Warning: cleanup step {cleanup_name} failed after benchmark: "
+                    f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                )
 
 
 def _run_decode(
@@ -980,6 +1587,8 @@ def _run_decode(
     log_mla_dtype: str,
     log_kv_dtype: str,
     log_gemm_type: str,
+    target_tp_size: int,
+    use_module_cuda_graph: bool = False,
 ):
     """Run decode (generation) benchmark for a single (batch_size, kv_cache_length) point."""
     is_wideep_mla = attn_type == "mla"
@@ -991,6 +1600,8 @@ def _run_decode(
     from sglang.srt.sampling.sampling_params import SamplingParams
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
     from sglang.srt.utils import BumpAllocator
+
+    forward_context_type, forward_context = _import_sglang_forward_context()
 
     print(f"\nDecode: batch_size={batch_size}, kv_cache_length={seq_length}")
 
@@ -1035,8 +1646,11 @@ def _run_decode(
         batch.prepare_for_extend()
         batch.output_ids = torch.randint(0, 10000, (batch_size,), dtype=torch.int64, device="cuda")
         batch.prepare_for_decode()
-        model_worker_batch_decode = batch.get_model_worker_batch()
-        forward_batch_decode = ForwardBatch.init_new(model_worker_batch_decode, model_runner)
+        if hasattr(batch, "get_model_worker_batch"):
+            batch_for_forward_decode = batch.get_model_worker_batch()
+        else:
+            batch_for_forward_decode = batch
+        forward_batch_decode = ForwardBatch.init_new(batch_for_forward_decode, model_runner)
         model_runner.attn_backend.init_forward_metadata(forward_batch_decode)
 
         decode_hidden = torch.randn(
@@ -1050,14 +1664,17 @@ def _run_decode(
 
         attn_inputs_decode = AttentionInputs(decode_hidden, forward_batch_decode, dummy_qkv_latent_func)
         get_attn_tp_context().set_attn_inputs(attn_inputs_decode)
+        if use_module_cuda_graph or _env_flag("AIC_ENABLE_MODULE_CUDA_GRAPH"):
+            _patch_nsa_indexer_compile_for_module_cuda_graph(attention_module)
 
         def kernel_func():
-            attention_module(
-                positions=decode_positions,
-                hidden_states=decode_hidden,
-                forward_batch=forward_batch_decode,
-                zero_allocator=zero_allocator,
-            )
+            with forward_context(forward_context_type(attn_backend=model_runner.attn_backend)):
+                attention_module(
+                    positions=decode_positions,
+                    hidden_states=decode_hidden,
+                    forward_batch=forward_batch_decode,
+                    zero_allocator=zero_allocator,
+                )
 
         # Pre-warm JIT / autotuning before CUDA graph capture.
         # DSA decode on Blackwell calls DeepGEMM fp8_paged_mqa_logits and
@@ -1075,12 +1692,18 @@ def _run_decode(
                 kernel_func()
                 torch.cuda.synchronize()
 
+        use_benchmark_cuda_graph = not (
+            attn_type == "dsa" and not _generation_cuda_graph_enabled_for_tokens(batch_size)
+        )
+        print(f"  Decode module CUDA graph: {use_benchmark_cuda_graph} (tokens={batch_size})")
+
         with benchmark_with_power(
             device=device,
             kernel_func=kernel_func,
             num_warmups=num_warmup,
             num_runs=num_iterations,
             repeat_n=1,
+            use_cuda_graph=use_benchmark_cuda_graph,
         ) as results:
             pass
 
@@ -1088,7 +1711,7 @@ def _run_decode(
         power_stats = results["power_stats"]
 
         # Log perf — wideep MLA uses isl=seq_len, step=0 (old convention).
-        # DSA uses isl=1, step=seq_len (matches vllm convention).
+        # DSA uses isl=1, step=seq_len, where seq_len is past-KV length.
         # The wideep generation loader computes s = isl + step, so both
         # conventions yield the same effective key when step=0 → s=seq_len.
         try:
@@ -1116,7 +1739,7 @@ def _run_decode(
                         "num_heads": head_num,
                         "batch_size": batch_size,
                         "isl": log_isl,
-                        "tp_size": 1,
+                        "tp_size": target_tp_size,
                         "step": log_step,
                         "latency": f"{avg_time_ms:.4f}",
                     }
@@ -1148,14 +1771,23 @@ def _run_decode(
             torch.cuda.empty_cache()
             return False
         if "cuda" in error_str and "illegal" in error_str:
-            print("  CUDA illegal access detected — stopping to prevent cascading failures")
-            raise
+            print("  CUDA illegal access detected — stopping this subprocess to preserve prior rows")
+            raise CudaIllegalAccessError(f"CUDA illegal access at b={batch_size}, s={seq_length}") from e
         print("  Skipping this configuration...")
         return False
     finally:
-        model_runner.req_to_token_pool.clear()
-        model_runner.token_to_kv_pool_allocator.clear()
-        torch.cuda.empty_cache()
+        for cleanup_name, cleanup_fn in (
+            ("req_to_token_pool.clear", model_runner.req_to_token_pool.clear),
+            ("token_to_kv_pool_allocator.clear", model_runner.token_to_kv_pool_allocator.clear),
+            ("torch.cuda.empty_cache", torch.cuda.empty_cache),
+        ):
+            try:
+                cleanup_fn()
+            except Exception as cleanup_exc:
+                print(
+                    f"  Warning: cleanup step {cleanup_name} failed after benchmark: "
+                    f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                )
 
 
 def _resolve_perf_path(output_path: str | None, filename: str) -> str:
@@ -1182,6 +1814,8 @@ def run_mla_module(
     gpu_id: int,
     output_path: str | None = None,
     attention_backend: str | None = None,
+    batch_size_filter: int | None = None,
+    target_tp_size: int = 1,
 ):
     """Run MLA/DSA module benchmark — called inside a subprocess.
 
@@ -1203,12 +1837,27 @@ def run_mla_module(
 
     # Filter to matching precision combo.
     # Test case format: [seq_len, batch_size, num_heads, kv_dtype, compute_dtype, gemm_type]
-    # run_attention_torch expects: (batch_size, seq_length, is_prefill)
-    cases = [
+    # run_attention_torch expects: (batch_size, seq_length, is_prefill, prefix_len)
+    base_cases = [
         (tc[1], tc[0], is_prefill)
         for tc in all_cases
         if tc[3] == kv_cache_dtype and tc[4] == compute_dtype and tc[5] == gemm_type and tc[2] == head_num
     ]
+    if batch_size_filter:
+        base_cases = [(bs, seq_len, ip) for bs, seq_len, ip in base_cases if bs == batch_size_filter]
+    if is_prefill and attn_type == "dsa":
+        prefix_lens = get_mla_module_sweep_spec("sglang").context_prefix_lengths
+        # Run prefix as the outer loop so a late long-prefix illegal access does
+        # not discard all larger-ISL rows for the current batch-size subprocess.
+        cases = [
+            (bs, seq_len, ip, prefix_len)
+            for prefix_len in prefix_lens
+            for bs, seq_len, ip in base_cases
+            if _dsa_context_prefix_shape_is_valid(bs, seq_len, prefix_len)
+        ]
+    else:
+        cases = [(bs, seq_len, ip, 0) for bs, seq_len, ip in base_cases]
+    cases = _filter_cases_from_env(cases, is_prefill=is_prefill, attn_type=attn_type)
 
     # Known-crash skip: B200 DSv3.2 DSA generation at reduced heads ≤ 32 and
     # kv_cache_length ≥ 256 produces an async CUDA illegal memory access
@@ -1229,7 +1878,7 @@ def run_mla_module(
         and get_sm_version() == 100
     ):
         before = len(cases)
-        cases = [(bs, seq_len, ip) for (bs, seq_len, ip) in cases if seq_len < 256]
+        cases = [(bs, seq_len, ip, prefix_len) for (bs, seq_len, ip, prefix_len) in cases if seq_len < 256]
         skipped = before - len(cases)
         if skipped:
             print(
@@ -1241,10 +1890,44 @@ def run_mla_module(
     print(f"\n{'=' * 60}")
     print(
         f"{attn_type.upper()} Module {phase_name}: model={model_path}, backend={attention_backend}, "
-        f"head_num={head_num}, kv={kv_cache_dtype}, compute={compute_dtype}, gemm={gemm_type}, GPU={gpu_id}"
+        f"head_num={head_num}, target_tp={target_tp_size}, kv={kv_cache_dtype}, "
+        f"compute={compute_dtype}, gemm={gemm_type}, GPU={gpu_id}"
     )
     print(f"Test cases: {len(cases)}")
     print(f"{'=' * 60}")
+
+    use_module_cuda_graph = _enable_glm5_dsa_piecewise_graph(attn_type, model_path)
+    enable_runner_piecewise_cuda_graph = _enable_glm5_dsa_piecewise_graph(attn_type, model_path)
+
+    if is_prefill and attn_type == "dsa":
+        before = len(cases)
+        cases = [
+            (bs, seq_len, ip, prefix_len)
+            for (bs, seq_len, ip, prefix_len) in cases
+            if dsa_indexer_total_kv_tokens_supported(bs, seq_len, prefix_len, is_prefill=True)
+        ]
+        skipped = before - len(cases)
+        if skipped:
+            print(f"[DSA] Dropped {skipped} context cases beyond DSA indexer total KV token limit")
+
+    max_total_tokens = None
+    if cases:
+        max_total_tokens = max(
+            required_kv_tokens(bs, seq_len, prefix_len, is_prefill=ip) for (bs, seq_len, ip, prefix_len) in cases
+        )
+        if max_total_tokens > 0:
+            max_total_tokens += max(1024, max_total_tokens // 20)
+
+    piecewise_cuda_graph_tokens = (
+        _piecewise_cuda_graph_tokens_for_cases(cases, is_prefill) if enable_runner_piecewise_cuda_graph else None
+    )
+    if use_module_cuda_graph:
+        print("[DSA] Module CUDA graph capture enabled for GLM-5 DSA piecewise parity")
+    if enable_runner_piecewise_cuda_graph:
+        token_msg = piecewise_cuda_graph_tokens if piecewise_cuda_graph_tokens is not None else "SGLang default"
+        print(f"[DSA] SGLang piecewise CUDA graph enabled with tokens={token_msg}")
+    if max_total_tokens is not None:
+        print(f"[DSA] SGLang max_total_tokens capped for collector at {max_total_tokens}")
 
     cleanup_distributed()
     torch.cuda.empty_cache()
@@ -1257,7 +1940,63 @@ def run_mla_module(
             attention_backend=attention_backend,
             device=device,
             gemm_type=gemm_type,
+            target_tp_size=target_tp_size,
+            enable_piecewise_cuda_graph=enable_runner_piecewise_cuda_graph,
+            piecewise_cuda_graph_tokens=piecewise_cuda_graph_tokens,
+            max_total_tokens=max_total_tokens,
         )
+
+        if is_prefill and attn_type == "dsa":
+            chunk_size = _runtime_chunk_size(model_runner)
+            before = len(cases)
+            cases = [
+                (bs, seq_len, ip, prefix_len)
+                for (bs, seq_len, ip, prefix_len) in cases
+                if required_prefill_extend_tokens(bs, seq_len) <= chunk_size
+            ]
+            skipped = before - len(cases)
+            print(
+                f"[DSA] SGLang runtime chunked_prefill_size={chunk_size}; "
+                f"dropped {skipped} context cases with fresh_tokens > chunked_prefill_size"
+            )
+
+            kv_capacity = _kv_pool_capacity_tokens(model_runner)
+            if kv_capacity is not None:
+                before = len(cases)
+                cases = [
+                    (bs, seq_len, ip, prefix_len)
+                    for (bs, seq_len, ip, prefix_len) in cases
+                    if required_kv_tokens(bs, seq_len, prefix_len, is_prefill=True) <= kv_capacity
+                ]
+                skipped = before - len(cases)
+                if skipped:
+                    print(f"[DSA] Dropped {skipped} context cases beyond actual KV pool capacity={kv_capacity} tokens")
+
+            if sglang_dsa_mqa_logits_chunking_supported():
+                print("[DSA] SGLang MQA logits chunk path detected; skipping collector indexer workspace pre-filter")
+            else:
+                free_mem, total_mem = torch.cuda.mem_get_info()
+                workspace_limit = dsa_indexer_workspace_limit_bytes(free_mem, total_mem)
+                before = len(cases)
+                cases = [
+                    (bs, seq_len, ip, prefix_len)
+                    for (bs, seq_len, ip, prefix_len) in cases
+                    if dsa_indexer_workspace_bytes(
+                        bs,
+                        seq_len,
+                        prefix_len,
+                        head_num,
+                        target_tp_size,
+                        is_prefill=True,
+                    )
+                    <= workspace_limit
+                ]
+                skipped = before - len(cases)
+                if skipped:
+                    print(
+                        f"[DSA] Dropped {skipped} context cases beyond estimated indexer "
+                        f"workspace limit={workspace_limit} bytes (free={free_mem}, total={total_mem})"
+                    )
 
         logged_count = run_attention_torch(
             model_runner=model_runner,
@@ -1273,6 +2012,8 @@ def run_mla_module(
             kv_cache_dtype=kv_cache_dtype,
             compute_dtype=compute_dtype,
             gemm_type=gemm_type,
+            target_tp_size=target_tp_size,
+            use_module_cuda_graph=use_module_cuda_graph,
         )
         if cases and logged_count == 0:
             raise RuntimeError(
@@ -1296,6 +2037,8 @@ def _run_mla_subprocess(
     gpu_id: int,
     output_path: str | None = None,
     attention_backend: str | None = None,
+    batch_size_filter: int | None = None,
+    target_tp_size: int = 1,
 ):
     """Run MLA/DSA benchmark in a subprocess with CUDA_VISIBLE_DEVICES isolation."""
     env = os.environ.copy()
@@ -1304,11 +2047,13 @@ def _run_mla_subprocess(
     phase = "context" if is_prefill else "generation"
     output_repr = f'"{output_path}"' if output_path else "None"
     backend_repr = f'"{attention_backend}"' if attention_backend else "None"
+    batch_filter_repr = "None" if batch_size_filter is None else str(batch_size_filter)
     code = (
         f'import sys; sys.path.insert(0, "{os.path.dirname(os.path.abspath(__file__))}")\n'
         f"from collect_mla_module import run_mla_module\n"
         f'run_mla_module("{attn_type}", {head_num}, "{model_path}", '
-        f'"{kv_cache_dtype}", "{compute_dtype}", "{gemm_type}", {is_prefill}, 0, {output_repr}, {backend_repr})\n'
+        f'"{kv_cache_dtype}", "{compute_dtype}", "{gemm_type}", {is_prefill}, '
+        f"0, {output_repr}, {backend_repr}, {batch_filter_repr}, {target_tp_size})\n"
     )
 
     proc = subprocess.Popen(
@@ -1319,14 +2064,12 @@ def _run_mla_subprocess(
         cwd=os.path.dirname(os.path.abspath(__file__)),
     )
 
-    # Per-subprocess timeout: 120 s is enough for model loading (~20 s) plus
-    # a full inner sweep (~100 combos x 13 forwards ≈ 2 s).  The old 1800 s
-    # timeout was set for DeepGEMM JIT compile on first-ever invocation, but
-    # in practice that JIT cache is pre-warmed and the subprocess should finish
-    # well within 120 s.  A hanging subprocess (e.g. CUDA deadlock at reduced
-    # heads) must not block the rest of the collection.
+    # Per-subprocess timeout: keep the historical 120 s default, but allow
+    # GLM-5 DSA piecewise CUDA graph capture runs to raise it from the launch
+    # script. First-time capture/compile can legitimately exceed 120 s.
+    subprocess_timeout = int(os.environ.get("AIC_MLA_MODULE_SUBPROCESS_TIMEOUT_SEC", "120"))
     try:
-        stdout, _ = proc.communicate(timeout=120)
+        stdout, _ = proc.communicate(timeout=subprocess_timeout)
         if stdout:
             print(stdout.decode("utf-8", errors="replace"))
     except subprocess.TimeoutExpired:
@@ -1334,8 +2077,9 @@ def _run_mla_subprocess(
         proc.wait()
         print(
             f"  WARNING: {attn_type.upper()} module {phase} subprocess timed out "
+            f"after {subprocess_timeout}s "
             f"(heads={head_num}, model={model_path}, kv={kv_cache_dtype}, "
-            f"gemm={gemm_type}) — skipping"
+            f"gemm={gemm_type}, target_tp={target_tp_size}) — skipping"
         )
         return  # Skip this config instead of raising
 
@@ -1362,6 +2106,7 @@ def run_mla_module_worker(
     model_path: str,
     attn_type: str,
     attention_backend: str | None = None,
+    target_tp_size: int = 1,
     *,
     perf_filename: str,
     device: str = "cuda:0",
@@ -1370,8 +2115,8 @@ def run_mla_module_worker(
 
     Each call runs ALL (batch_size, seq_len) combos for the given
     (attn_type, num_heads, precision, model) combo in a subprocess.
-    The seq_len and batch_size args from the individual test case are
-    ignored here because the subprocess sweeps all combos internally.
+    DSA context uses batch_size to shard the prefix sweep across subprocesses;
+    other module cases keep batch_size as a placeholder.
 
     For wideep MLA test cases, attention_backend is the 9th positional
     element specifying which backend to benchmark (e.g. "flashinfer", "fa3").
@@ -1383,13 +2128,14 @@ def run_mla_module_worker(
     device_str = str(device) if not isinstance(device, str) else device
     gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
     is_prefill = "context" in perf_filename
+    batch_size_filter = batch_size if is_prefill and attn_type == "dsa" and batch_size > 0 else None
 
     print(f"\n{'=' * 60}")
     print(
         f"{attn_type.upper()} Module {'Context' if is_prefill else 'Generation'}: "
-        f"model={model_path}, heads={num_heads}, kv={kv_cache_dtype}, "
+        f"model={model_path}, heads={num_heads}, target_tp={target_tp_size}, kv={kv_cache_dtype}, "
         f"compute={compute_dtype}, gemm={gemm_type}, "
-        f"backend={attention_backend or 'auto'}, GPU={gpu_id}"
+        f"backend={attention_backend or 'auto'}, batch_filter={batch_size_filter or 'all'}, GPU={gpu_id}"
     )
     print(f"{'=' * 60}")
 
@@ -1409,6 +2155,8 @@ def run_mla_module_worker(
         gpu_id=gpu_id,
         output_path=output_path,
         attention_backend=attention_backend,
+        batch_size_filter=batch_size_filter,
+        target_tp_size=target_tp_size,
     )
 
 
@@ -1437,22 +2185,29 @@ def main():
     if args.attn_type:
         attn_types = [args.attn_type]
     else:
-        attn_types = list(set(SUPPORTED_MODELS.values()))
+        attn_types = sorted({spec.attention_type for spec in get_mla_module_model_specs(apply_model_filter=False)})
 
     for attn_type in attn_types:
         # Determine models
         if args.model:
             models = [args.model]
         else:
-            models = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
+            models = [
+                spec.model_path
+                for spec in get_mla_module_model_specs(attention_type=attn_type, apply_model_filter=False)
+            ]
 
         for model_path in models:
             print(f"\n{'=' * 60}")
             print(f"Model: {model_path}  |  Attention: {attn_type.upper()}  |  Mode: {args.mode}")
             print(f"{'=' * 60}")
 
-            native_heads = MODEL_NATIVE_HEADS.get(model_path, 128)
-            head_nums = [args.num_heads] if args.num_heads else [h for h in _HEAD_NUMS if h <= native_heads]
+            native_heads = _module_model_native_heads(model_path)
+            head_nums = (
+                [args.num_heads]
+                if args.num_heads
+                else [h for h in get_mla_module_sweep_spec("sglang").inner_sweep_head_counts if h <= native_heads]
+            )
 
             for compute_dtype, kv_dtype, gemm_type in _get_precision_combos(args.mode):
                 if args.kv_cache_dtype and kv_dtype != args.kv_cache_dtype:

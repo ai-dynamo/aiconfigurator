@@ -49,13 +49,13 @@ The database contains the function **query_moe** which defines how we estimate t
 
 ### 3. Collect Data for the Operation
 
-Taking MoE for TensorRT-LLM as an example, it's defined in `collector/trtllm/collect_moe_v*.py` (version-specific files, e.g. `collect_moe_v3.py` for trtllm >= 1.1.0).
+Taking MoE for TensorRT-LLM as an example, the current collector lives in `collector/trtllm/collect_moe.py`, while shared model/op case values live under `collector/cases/`.
 
 #### 3.1 Adding New Test Cases
 
-If the MoE operation you want is not covered by the current inherited [database](../src/aiconfigurator/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt), you need to add the test case in the appropriate `collect_moe_v*.py` and collect your own data. 
+If the MoE operation you want is not covered by the current inherited [database](../src/aiconfigurator/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt), you need to add the test case in the relevant YAML case file and collect your own data.
 
-For example, if you want to cover a new model with `num_experts=1024, topk=16`, you need to extend the **model_config_list** defined in the **`get_moe_test_cases()`** function in the version-matched `collect_moe_v*.py` file.
+For example, if you want to cover a new model with `num_experts=1024, topk=16`, you should extend the model's `*_cases.yaml` under `collector/cases/models/` or the shared MoE cases under `collector/cases/base_ops/` when the case is common across models.
 
 #### 3.2 Update Database
 
@@ -89,7 +89,7 @@ This typically refers to a MoE model, as the MoE operation of a new model usuall
 
 You need to follow several steps:
 
-1. Define a new MoE operation test case in the version-matched `collect_moe_v*.py` and follow the collector [README](../collector/README.md) to collect the MoE data points for your model.
+1. Define a new MoE operation test case in the relevant collector YAML case file and follow the collector [README](../collector/README.md) to collect the MoE data points for your model.
 
 2. Update the inherited database such as `src/aiconfigurator/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt` with the `moe_perf.txt` file you get in step 1.
 
@@ -110,6 +110,21 @@ Steps required:
 5. **Add data loading code** in `perf_database.py` to load your data, which is leveraged by the method `query_conv`
 6. **Add new model definition** in `models.py` to build your model with new operation. A new model class is mapping to a new model family.  
 update your model in ModelFamily dict defined in [`common.py`](../src/aiconfigurator/sdk/common.py)
+
+### AFD Operation Partitioning Compatibility
+
+Attention-FFN Disaggregated (AFD) estimate mode has one additional maintenance contract beyond the normal aggregated and P/D-disaggregated paths. [`sdk/afd_partition.py`](../src/aiconfigurator/sdk/afd_partition.py) splits a model's `context_ops` / `generation_ops` into A-worker and F-worker pools by operation name. When adding a new model family or new operation, make sure the generated operation names can be classified by the AFD partitioner.
+
+The current AFD partitioning contract is:
+
+1. **A-worker ops**: operations that belong to the embedding / attention side, such as `embedding`, `add_norm_1`, attention norms, `qkv`, MLA, BMM, RoPE, attention kernels, and projection GEMMs.
+2. **F-worker ops**: operations that belong to the FFN / MoE side, such as router GEMMs, dense `ffn` / `mlp` ops, routed expert ops, shared expert ops, and activation / gate / up / down GEMMs.
+3. **Boundary ops**: operations that naturally sit at the A/F boundary, such as `add_norm_2`, FFN/MoE/MLP norms, `logits_gemm`, `reduce_add`, and `*_combine`. These default to the A-worker and can be moved to the F-worker with the AFD boundary placement option.
+4. **Skipped model-internal communication ops**: communication or dispatch operations already represented by the AFD communication model, such as `CustomAllReduce`, `P2P`, `NCCL`, TP all-gather / reduce-scatter, and MoE dispatch ops. These should not be counted again in either compute pool because AFD adds its own cross-pool and intra-pool communication through `AFDTransfer`, `AFDFAllGather`, `AFDFReduceScatter`, and `AFDCombine`.
+5. **Overlap ops**: an `OverlapOp` can stay atomic only when every non-skipped inner op belongs to the same side. If an overlap group spans the A/F boundary, the partitioner must fail or be extended to split / rebuild that overlap explicitly.
+6. **Layer families that need explicit rules**: Mamba and GDN layers are not covered by the current attention/FFN partition rules. Until a dedicated partitioning rule, operation model, and communication / memory accounting are added, the partitioner raises an explicit `AFDPartitionError` for these ops instead of falling back to an unknown-op side assignment.
+
+If a new operation cannot be classified, do not rely on an unknown-op fallback for production use. Update `sdk/afd_partition.py` with an explicit classification rule and add a focused unit test in `tests/unit/sdk/test_afd_partition.py`.
 
 ## Final Steps
 

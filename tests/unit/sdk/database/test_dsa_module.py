@@ -1,27 +1,47 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import math
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
-from aiconfigurator.sdk import common
-from aiconfigurator.sdk.perf_database import DEFAULT_DSA_ARCHITECTURE, LoadedOpData
+from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.operations.dsa import (
+    DEFAULT_DSA_ARCHITECTURE,
+    load_context_dsa_module_data,
+    load_generation_dsa_module_data,
+)
+from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataNotAvailableError
 
 pytestmark = pytest.mark.unit
+
+GLM5_ARCHITECTURE = "GlmMoeDsaForCausalLM"
 
 
 def _dsa_value(latency: float) -> dict[str, float]:
     return {"latency": latency, "power": 10.0, "energy": latency * 10.0}
 
 
-def _context_dsa_data(dsa_dict: dict) -> dict:
+def _context_dsa_data(dsa_dict: dict, architecture: str = DEFAULT_DSA_ARCHITECTURE) -> dict:
     return {
         common.FMHAQuantMode.bfloat16: {
             common.KVCacheQuantMode.bfloat16: {
                 common.GEMMQuantMode.bfloat16: {
-                    DEFAULT_DSA_ARCHITECTURE: dsa_dict,
+                    architecture: dsa_dict,
                 },
+            },
+        },
+    }
+
+
+def _generation_dsa_data(dsa_dict: dict) -> dict:
+    return {
+        common.KVCacheQuantMode.bfloat16: {
+            common.GEMMQuantMode.bfloat16: {
+                DEFAULT_DSA_ARCHITECTURE: dsa_dict,
             },
         },
     }
@@ -35,6 +55,135 @@ def _context_dsa_data(dsa_dict: dict) -> dict:
 class TestContextDSAModule:
     """Tests for query_context_dsa_module."""
 
+    def test_missing_architecture_raises_perf_data_not_available(self, stub_perf_db):
+        dsa_dict = {32: {256: {1: _dsa_value(10.0)}}}
+        stub_perf_db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data(dsa_dict), common.PerfDataFilename.dsa_context_module, "extrapolated"
+        )
+
+        with pytest.raises(PerfDataNotAvailableError, match="Context DSA module data not available"):
+            stub_perf_db.query_context_dsa_module(
+                b=1,
+                s=256,
+                prefix=0,
+                num_heads=32,
+                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+                fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.SILICON,
+                architecture="GlmMoeDsaForCausalLM",
+            )
+
+    def test_glm5_context_loader_requires_step_column(self, tmp_path):
+        data_path = tmp_path / "dsa_context_module_perf.txt"
+        data_path.write_text(
+            "architecture,gemm_type,mla_dtype,kv_cache_dtype,num_heads,batch_size,isl,latency\n"
+            f"{GLM5_ARCHITECTURE},bfloat16,bfloat16,bfloat16,32,1,256,10.0\n"
+        )
+
+        with pytest.raises(ValueError, match="requires a non-empty step column"):
+            load_context_dsa_module_data(str(data_path))
+
+    def test_glm5_context_loader_accepts_numeric_zero_step(self, tmp_path):
+        data_path = tmp_path / "dsa_context_module_perf.parquet"
+        table = pa.table(
+            {
+                "architecture": [GLM5_ARCHITECTURE],
+                "gemm_type": ["bfloat16"],
+                "mla_dtype": ["bfloat16"],
+                "kv_cache_dtype": ["bfloat16"],
+                "num_heads": [32],
+                "batch_size": [1],
+                "isl": [256],
+                "step": [0],
+                "latency": [10.0],
+            }
+        )
+        pq.write_table(table, data_path)
+
+        data = load_context_dsa_module_data(str(data_path))
+
+        value = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][
+            GLM5_ARCHITECTURE
+        ][32][0][256][1]
+        assert value["latency"] == pytest.approx(10.0)
+
+    def test_default_context_loader_treats_whitespace_step_as_missing(self, tmp_path):
+        data_path = tmp_path / "dsa_context_module_perf.txt"
+        data_path.write_text(
+            "architecture,gemm_type,mla_dtype,kv_cache_dtype,num_heads,batch_size,isl,step,latency\n"
+            f"{DEFAULT_DSA_ARCHITECTURE},bfloat16,bfloat16,bfloat16,32,1,256,  ,10.0\n"
+        )
+
+        data = load_context_dsa_module_data(str(data_path))
+
+        value = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][
+            DEFAULT_DSA_ARCHITECTURE
+        ][32][0][256][1]
+        assert value["latency"] == pytest.approx(10.0)
+
+    def test_glm5_context_rejects_legacy_shape_without_prefix_axis(self, stub_perf_db):
+        legacy_dsa_dict = {32: {256: {1: _dsa_value(10.0)}}}
+        stub_perf_db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data(legacy_dsa_dict, GLM5_ARCHITECTURE),
+            common.PerfDataFilename.dsa_context_module,
+            "legacy-glm5",
+        )
+
+        with pytest.raises(PerfDataNotAvailableError, match="Context DSA module data not available"):
+            stub_perf_db.query_context_dsa_module(
+                b=1,
+                s=256,
+                prefix=0,
+                num_heads=32,
+                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+                fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.SILICON,
+                architecture=GLM5_ARCHITECTURE,
+            )
+
+    def test_glm5_context_accepts_prefix_axis(self, stub_perf_db):
+        dsa_dict = {32: {0: {256: {1: _dsa_value(10.0)}}}}
+        stub_perf_db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data(dsa_dict, GLM5_ARCHITECTURE), common.PerfDataFilename.dsa_context_module, "glm5-prefix"
+        )
+
+        result = stub_perf_db.query_context_dsa_module(
+            b=1,
+            s=256,
+            prefix=0,
+            num_heads=32,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SILICON,
+            architecture=GLM5_ARCHITECTURE,
+        )
+
+        assert float(result) == pytest.approx(10.0)
+
+    def test_glm5_context_prefix_axis_sparse_batch_falls_back_to_smaller_batch(self, stub_perf_db):
+        dsa_dict = {16: {0: {16384: {1: _dsa_value(6.2052)}}}}
+        stub_perf_db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data(dsa_dict, GLM5_ARCHITECTURE), common.PerfDataFilename.dsa_context_module, "glm5-prefix"
+        )
+
+        result = stub_perf_db.query_context_dsa_module(
+            b=2,
+            s=16384,
+            prefix=0,
+            num_heads=16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SILICON,
+            architecture=GLM5_ARCHITECTURE,
+        )
+
+        assert float(result) == pytest.approx(12.4104)
+        assert result.energy == pytest.approx(124.104)
+
     def test_topk_piecewise_from_raw_handles_both_boundary_sides(self, stub_perf_db):
         raw_dsa_dict = {
             32: {
@@ -45,8 +194,8 @@ class TestContextDSAModule:
             }
         }
 
-        below = stub_perf_db._interp_dsa_context_topk_piecewise_from_raw(32, 2047, 1, raw_dsa_dict, 2048)
-        above = stub_perf_db._interp_dsa_context_topk_piecewise_from_raw(32, 2049, 1, raw_dsa_dict, 2048)
+        below = interpolation.interp_dsa_context_topk_piecewise_from_raw(32, 2047, 1, raw_dsa_dict, 2048)
+        above = interpolation.interp_dsa_context_topk_piecewise_from_raw(32, 2049, 1, raw_dsa_dict, 2048)
 
         assert below is not None
         assert above is not None
@@ -80,7 +229,7 @@ class TestContextDSAModule:
         def fail_interp_3d(*args, **kwargs):
             raise AssertionError("_interp_3d should not be used for topk + 1 when raw right-regime anchors exist")
 
-        monkeypatch.setattr(stub_perf_db, "_interp_3d", fail_interp_3d)
+        monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", fail_interp_3d)
 
         result = stub_perf_db.query_context_dsa_module(
             b=1,
@@ -116,7 +265,7 @@ class TestContextDSAModule:
             cubic_calls.append((args, kwargs))
             return {"latency": 123.0, "power": 0.0, "energy": 456.0}
 
-        monkeypatch.setattr(stub_perf_db, "_interp_3d", fake_interp_3d)
+        monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", fake_interp_3d)
 
         result = stub_perf_db.query_context_dsa_module(
             b=1,
@@ -133,6 +282,82 @@ class TestContextDSAModule:
         assert float(result) == pytest.approx(123.0)
         assert result.energy == pytest.approx(456.0)
         assert len(cubic_calls) == 1
+
+    def test_prefix_axis_interpolates_measured_prefix_slices(self, stub_perf_db):
+        dsa_dict = {
+            32: {
+                0: {256: {1: _dsa_value(10.0)}},
+                1024: {256: {1: _dsa_value(50.0)}},
+            }
+        }
+        stub_perf_db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data(dsa_dict), common.PerfDataFilename.dsa_context_module, "prefix"
+        )
+        stub_perf_db._raw_context_dsa_module_data = LoadedOpData(
+            _context_dsa_data(dsa_dict), common.PerfDataFilename.dsa_context_module, "raw-prefix"
+        )
+
+        result = stub_perf_db.query_context_dsa_module(
+            b=1,
+            s=256,
+            prefix=512,
+            num_heads=32,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        assert float(result) == pytest.approx(30.0)
+        assert result.energy == pytest.approx(300.0)
+
+    def test_prefix_axis_uses_exact_prefix_slice_when_available(self, stub_perf_db):
+        dsa_dict = {
+            32: {
+                0: {256: {1: _dsa_value(10.0)}},
+                512: {256: {1: _dsa_value(33.0)}},
+                1024: {256: {1: _dsa_value(50.0)}},
+            }
+        }
+        stub_perf_db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data(dsa_dict), common.PerfDataFilename.dsa_context_module, "prefix"
+        )
+
+        result = stub_perf_db.query_context_dsa_module(
+            b=1,
+            s=256,
+            prefix=512,
+            num_heads=32,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        assert float(result) == pytest.approx(33.0)
+
+    def test_unsupported_silicon_candidate_logs_warning_without_traceback(self, stub_perf_db, caplog):
+        dsa_dict = {64: {4000: {1: _dsa_value(10.0)}}}
+        stub_perf_db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data(dsa_dict), common.PerfDataFilename.dsa_context_module, "single-head"
+        )
+
+        caplog.set_level(logging.WARNING, logger="aiconfigurator.sdk.perf_database")
+        with pytest.raises(PerfDataNotAvailableError, match="Context DSA module data not available"):
+            stub_perf_db.query_context_dsa_module(
+                b=1,
+                s=4000,
+                prefix=0,
+                num_heads=32,
+                index_topk=2048,
+                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+                fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
+        assert any("Context DSA module data not available" in record.getMessage() for record in caplog.records)
+        assert all(record.exc_info is None for record in caplog.records)
 
     def test_sol_returns_positive(self, comprehensive_perf_db):
         result = comprehensive_perf_db.query_context_dsa_module(
@@ -270,6 +495,69 @@ class TestContextDSAModule:
 
 class TestGenerationDSAModule:
     """Tests for query_generation_dsa_module."""
+
+    def test_missing_architecture_raises_perf_data_not_available(self, stub_perf_db):
+        dsa_dict = {32: {1: {256: _dsa_value(10.0)}}}
+        stub_perf_db._generation_dsa_module_data = LoadedOpData(
+            _generation_dsa_data(dsa_dict), common.PerfDataFilename.dsa_generation_module, "extrapolated"
+        )
+
+        with pytest.raises(PerfDataNotAvailableError, match="Generation DSA module data not available"):
+            stub_perf_db.query_generation_dsa_module(
+                b=1,
+                s=256,
+                num_heads=32,
+                kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.SILICON,
+                architecture="GlmMoeDsaForCausalLM",
+            )
+
+    def test_unsupported_silicon_candidate_logs_warning_without_traceback(self, stub_perf_db, caplog):
+        dsa_dict = {64: {1: {4000: _dsa_value(10.0)}}}
+        stub_perf_db._generation_dsa_module_data = LoadedOpData(
+            _generation_dsa_data(dsa_dict), common.PerfDataFilename.dsa_generation_module, "single-head"
+        )
+
+        caplog.set_level(logging.WARNING, logger="aiconfigurator.sdk.perf_database")
+        with pytest.raises(PerfDataNotAvailableError, match="Generation DSA module data not available"):
+            stub_perf_db.query_generation_dsa_module(
+                b=1,
+                s=4000,
+                num_heads=32,
+                index_topk=2048,
+                kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
+        assert any("Generation DSA module data not available" in record.getMessage() for record in caplog.records)
+        assert all(record.exc_info is None for record in caplog.records)
+
+    def test_generation_loader_indexes_total_decode_length(self, tmp_path):
+        data_path = tmp_path / "dsa_generation_module_perf.parquet"
+        table = pa.table(
+            {
+                "architecture": [DEFAULT_DSA_ARCHITECTURE],
+                "gemm_type": ["bfloat16"],
+                "mla_dtype": ["bfloat16"],
+                "kv_cache_dtype": ["bfloat16"],
+                "num_heads": [32],
+                "batch_size": [1],
+                "isl": [1],
+                "tp_size": [1],
+                "step": [149],
+                "latency": [20.0],
+                "power": [10.0],
+            }
+        )
+        pq.write_table(table, data_path)
+
+        data = load_generation_dsa_module_data(str(data_path))
+
+        assert data[common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][DEFAULT_DSA_ARCHITECTURE][32][1][
+            150
+        ] == _dsa_value(20.0)
 
     def test_sol_returns_positive(self, comprehensive_perf_db):
         result = comprehensive_perf_db.query_generation_dsa_module(

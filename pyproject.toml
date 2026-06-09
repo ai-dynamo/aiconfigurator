@@ -48,6 +48,7 @@ dependencies = [
     "plotext>=5.3.2",
     "plotly>=6.0.1",
     "prettytable>=3.16.0",
+    "pyarrow>=15.0.0",
     "pyyaml>=6.0",
     "scipy>=1.13.1",
     "tqdm>=4.0.0",
@@ -58,12 +59,12 @@ dependencies = [
 
 [project.optional-dependencies]
 # Opt in to the native Rust forward-pass estimator. Pulls in the matching
-# `aiconfigurator-rust-core` wheel for the user's platform (manylinux_2_28
+# `aiconfigurator-core` wheel for the user's platform (manylinux_2_28
 # Linux x86_64 / aarch64 today; macOS + musllinux + Windows planned). On
 # platforms without a precompiled extension wheel, this extra fails to
 # install — the bare `pip install aiconfigurator` keeps working with the
 # Python fallback path.
-rust = ["aiconfigurator-rust-core>=0.9.0,<0.10.0"]
+rust = ["aiconfigurator-core>=0.9.0,<0.10.0"]
 dev = [
     "uv",
     "ruff==0.14.1",
@@ -101,7 +102,15 @@ aiconfigurator = "aiconfigurator.main:main"
 [tool.setuptools.package-data]
 "aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
 "aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule"]
-"aiconfigurator" = ["systems/*.yaml", "systems/*.csv", "systems/**/*.txt", "model_configs/*.json"]
+"aiconfigurator" = [
+    "systems/*.yaml",
+    "systems/*.csv",
+    "systems/**/*.csv",
+    "systems/**/*.json",
+    "systems/**/*.txt",
+    "systems/**/*.parquet",
+    "model_configs/*.json",
+]
 "aiconfigurator.webapp.components.profiling" = ["styles.css", "js/*.js"]
 
 [tool.setuptools.packages.find]

@@ -28,6 +28,18 @@ from aiconfigurator.sdk.utils import safe_mkdir
 logger = logging.getLogger(__name__)
 
 
+def _apply_inclusive_tpot(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of df with tpot replaced by inclusive semantics.
+
+    inclusive tpot = (ttft + tpot * (osl - 1)) / osl
+    Applied to output copies only — never to internal computation DataFrames.
+    """
+    if "ttft" in df.columns:
+        df = df.copy()
+        df["tpot"] = (df["ttft"] + df["tpot"] * (df["osl"] - 1)) / df["osl"]
+    return df
+
+
 def _check_power_data_available(best_configs: dict[str, pd.DataFrame], threshold: float = 0.9) -> bool:
     """
     Check if power data is available and meaningful across configurations.
@@ -173,6 +185,11 @@ def _plot_worker_setup_table(
                     f"(={_cli_underline(str(row['(d)tp']))}x"
                     f"{_cli_underline(str(row['(d)pp']))})"
                 )
+            gpus_replica_str = (
+                f"{row['num_total_gpus']} "
+                f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
+                f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
+            )
             row_data = [
                 i + 1,
                 row["backend"],
@@ -187,11 +204,7 @@ def _plot_worker_setup_table(
                     f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
                     f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
                     row["replicas"],
-                    (
-                        f"{row['num_total_gpus']} "
-                        f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
-                        f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
-                    ),
+                    gpus_replica_str,
                     row["(p)workers"],
                     p_gpus_worker,
                     p_parallel,
@@ -283,8 +296,20 @@ def log_final_summary(
     top_n: int = 5,
     target_request_rate: float | None = None,
     target_concurrency: float | None = None,
+    inclusive_tpot: bool = False,
 ):
     """Log final summary of configuration results"""
+    # display_* copies carry inclusive TPOT for printed values only.
+    # The originals are kept for _plot_worker_setup_table which does TPOT filtering.
+    if inclusive_tpot:
+        display_best_configs = {k: _apply_inclusive_tpot(v) for k, v in best_configs.items()}
+        display_pareto_fronts = {
+            k: _apply_inclusive_tpot(v) if v is not None else None for k, v in pareto_fronts.items()
+        }
+    else:
+        display_best_configs = best_configs
+        display_pareto_fronts = pareto_fronts
+
     load_match = target_request_rate is not None or target_concurrency is not None
 
     # Consolidate and format results into a summary box for clear presentation
@@ -356,7 +381,7 @@ def log_final_summary(
 
     # ============================= overall summary
     summary_box.append("  Overall Best Configuration:")
-    best_config_df = best_configs[chosen_exp]
+    best_config_df = display_best_configs[chosen_exp]
     best_throughput = best_throughputs[chosen_exp]
 
     summary_box.append(f"    - Best Throughput: {best_throughput * chosen_task_config.total_gpus:,.2f} tokens/s")
@@ -374,13 +399,13 @@ def log_final_summary(
 
     # ============================= pareto frontier
     pareto_plot_buf = ""
-    if len(pareto_fronts) <= 10:  # avoid overly crowded plots
+    if len(display_pareto_fronts) <= 10:  # avoid overly crowded plots
         summary_box.append("  Pareto Frontier:")
         target_x_axis = "tokens/s/user"
         if pareto_x_axis:
             target_x_axis = pareto_x_axis.get(chosen_exp, target_x_axis)
         series_payload = []
-        for name, df in pareto_fronts.items():
+        for name, df in display_pareto_fronts.items():
             if df is None or df.empty:
                 continue
             series_axis = pareto_x_axis.get(name, target_x_axis) if pareto_x_axis else target_x_axis
@@ -471,6 +496,16 @@ def save_results(
     backend: str | None = None,
 ):
     """Save the results to a directory."""
+    # display_* copies carry inclusive TPOT for CSV/plot output only.
+    # Originals are kept for artifact generation (task_config_to_generator_config).
+    if getattr(args, "inclusive_tpot", False):
+        display_best_configs = {k: _apply_inclusive_tpot(v) for k, v in best_configs.items()}
+        display_pareto_fronts = {
+            k: _apply_inclusive_tpot(v) if v is not None else None for k, v in pareto_fronts.items()
+        }
+    else:
+        display_best_configs = best_configs
+        display_pareto_fronts = pareto_fronts
 
     first_exp_name = list(task_configs.keys())[0]
     first_task = task_configs[first_exp_name]
@@ -545,7 +580,7 @@ def save_results(
         ]
         color_idx = 0
 
-        for exp_name, pareto_df in pareto_fronts.items():
+        for exp_name, pareto_df in display_pareto_fronts.items():
             if pareto_df is None or pareto_df.empty:
                 continue
             if pareto_axis.get(exp_name, global_x_axis) != global_x_axis:
@@ -594,14 +629,14 @@ def save_results(
         plt.close()
 
         # Save each experiment's results in its own subdirectory
-        for exp_name, pareto_df in pareto_fronts.items():
+        for exp_name, pareto_df in display_pareto_fronts.items():
             exp_dir = os.path.join(safe_result_dir, exp_name)
             safe_mkdir(exp_dir, exist_ok=True)
 
-            # 1. Save best config dataframe
+            # 1. Save best config dataframe (display copy carries inclusive TPOT if flag set)
             #    Strip the object-typed _per_ops_source column before CSV write; it is
             #    saved as one per_ops_source.json per topN/ subdir below.
-            best_config_df = best_configs.get(exp_name)  # top n configs
+            best_config_df = display_best_configs.get(exp_name)  # top n configs
             best_config_per_ops_source: list[dict | None] = []
             if best_config_df is not None:
                 if "_per_ops_source" in best_config_df.columns:
@@ -732,8 +767,10 @@ def save_results(
                         f.write(exp_task_config.to_yaml())
 
             # 4. Save the generated config for this experiment, sub-directory for each best config
-            if best_config_df is not None:
-                for i, (idx, result_df) in enumerate(best_config_df.iterrows()):
+            # Use original (non-display) data so --inclusive-tpot does not affect deployment artifacts.
+            artifact_config_df = best_configs.get(exp_name)
+            if artifact_config_df is not None:
+                for i, (idx, result_df) in enumerate(artifact_config_df.iterrows()):
                     # For multi-backend mode, get the task_config for this row's backend
                     if backend == "auto" and "backend" in result_df:
                         row_backend = result_df["backend"]
@@ -757,7 +794,7 @@ def save_results(
                     with open(os.path.join(top_config_dir, "generator_config.yaml"), "w") as f:
                         yaml.safe_dump(cfg, f, sort_keys=False)
 
-                    # Per-op data source breakdown (silicon / empirical / mixed),
+                    # Per-op data source breakdown (silicon / empirical / sol / mixed),
                     # pulled from PerformanceResult.source via the InferenceSummary.
                     # Same nested shape as per_ops_data, populated only when the row
                     # carried it through the pareto search.

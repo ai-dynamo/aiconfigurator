@@ -23,6 +23,7 @@ from aiconfigurator.cli.main import (
     build_experiment_task_configs,
 )
 from aiconfigurator.cli.report_and_save import save_results
+from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task import (
     DEFAULT_DECODE_LATENCY_CORRECTION_SCALE,
@@ -443,7 +444,15 @@ class EstimateResult:
     """Full result dict from the InferenceSummary."""
 
     mode: str = "agg"
-    """Estimation mode: 'agg' or 'disagg'."""
+    """Estimation mode: 'agg', 'disagg', 'static', 'static_ctx', or 'static_gen'."""
+
+    summary: object | None = None
+    """The underlying :class:`InferenceSummary`.
+
+    Populated for static and agg modes. ``None`` for disagg (which uses its
+    own DisaggInferenceSession.run_disagg pipeline and does not expose a
+    single summary object with per-op breakdowns at the API boundary).
+    """
 
     per_ops_data: dict | None = None
     """Per-operation latency breakdown (populated when available)."""
@@ -468,15 +477,15 @@ class EstimateResult:
             },
         }
 
-    Values are ``"silicon"`` (table data), ``"empirical"`` (HYBRID-mode
-    SOL+empirical fallback), or ``"mixed"`` (a sum of values from both
-    sources). The ``scheduling`` section of ``per_ops_data`` is intentionally
-    omitted here -- those entries are scheduling math / aggregate sums, not
-    DB queries.
+    Values are ``"silicon"`` (table data), ``"empirical"`` (formula fallback),
+    ``"sol"`` (explicit SOL estimate), or ``"mixed"`` (a sum of values from
+    different sources). The ``scheduling`` section of ``per_ops_data`` is
+    intentionally omitted here -- those entries are scheduling math / aggregate
+    sums, not DB queries.
     """
 
     kv_cache_warning: str | None = None
-    """Warning message when batch_size exceeds KV cache capacity."""
+    """Warning message for non-fatal memory capacity issues."""
 
     @property
     def request_latency(self) -> float:
@@ -557,26 +566,19 @@ def _resolve_moe_parallelism(
 ) -> tuple[int, int]:
     """Resolve and validate MoE parallelism widths, returning (moe_tp_size, moe_ep_size).
 
-    For dense (non-MoE) models the width constraint is not enforced because
-    MoE parallelism has no effect on the computation.
+    For dense (non-MoE) models, MoE parallelism has no effect on the
+    computation, so leave the fields as provided.
     """
-    if moe_tp_size is None and moe_ep_size is None:
-        moe_tp_size = tp_size
-        moe_ep_size = attention_dp_size
-    elif moe_tp_size is None:
-        moe_tp_size = tp_size * attention_dp_size // moe_ep_size
-    elif moe_ep_size is None:
-        moe_ep_size = tp_size * attention_dp_size // moe_tp_size
+    if model_path is not None and not check_is_moe(model_path):
+        return moe_tp_size, moe_ep_size
 
-    attn_width = tp_size * attention_dp_size
-    moe_width = moe_tp_size * moe_ep_size
-    if attn_width != moe_width and (model_path is None or check_is_moe(model_path)):
-        raise ValueError(
-            f"Parallelism width mismatch: tp_size({tp_size}) * attention_dp_size({attention_dp_size}) = {attn_width}, "
-            f"but moe_tp_size({moe_tp_size}) * moe_ep_size({moe_ep_size}) = {moe_width}. "
-            f"These must be equal."
-        )
-    return moe_tp_size, moe_ep_size
+    cfg = ModelConfig(
+        tp_size=tp_size,
+        attention_dp_size=attention_dp_size,
+        moe_tp_size=moe_tp_size,
+        moe_ep_size=moe_ep_size,
+    )
+    return cfg.resolve_moe_parallelism()
 
 
 def _build_model_config(
@@ -657,11 +659,28 @@ def cli_estimate(
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
     engine_step_backend: str | None = None,
+    # Static-mode (and shared) extras
+    prefix: int = 0,
+    nextn: int = 0,
+    nextn_accept_rates: list[float] | None = None,
+    stride: int = 32,
+    # AFD-specific parameters (ignored when mode != 'afd')
+    n_a_nodes: int | None = None,
+    n_f_nodes: int | None = None,
+    a_tp_size: int = 1,
+    a_batch_size: int = 128,
+    f_moe_ep_size: int = 1,
+    num_microbatches: int = 3,
+    pipeline_model: str = "optimistic",
+    comm_overhead_factor: float = 1.0,
+    afd_phase: str = "decode",
+    afd_combined_with_pd: bool = True,
+    afd_boundary_on_attn: bool = True,
 ) -> EstimateResult:
     """
     Estimate TTFT, TPOT, and power for a single model/system/config combination.
 
-    Supports both aggregated (IFB) and disaggregated serving estimation.
+    Supports aggregated (IFB), disaggregated, and static-batching estimation.
 
     This is the programmatic equivalent of:
         aiconfigurator cli estimate --model-path ... --system ... --batch-size ...
@@ -669,7 +688,12 @@ def cli_estimate(
     Args:
         model_path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or local path.
         system_name: System name (GPU type), e.g., 'h200_sxm', 'h100_sxm'.
-        mode: Estimation mode — 'agg' (default) or 'disagg'.
+        mode: Estimation mode — 'agg' (default), 'disagg', 'afd', or one of the
+            static modes ``'static'`` / ``'static_ctx'`` / ``'static_gen'``.
+            Static modes run a single-pass ``InferenceSession.run_static`` (no
+            IFB scheduling, no rate matching) and are useful for first-order
+            latency/memory breakdowns. ``'afd'`` runs Attention-FFN
+            Disaggregated estimation (see the afd-only args below).
         backend_name: Backend name ('trtllm', 'sglang', 'vllm'). Default is 'trtllm'.
         backend_version: Backend database version. Default is latest.
         database_mode: Database mode for performance estimation
@@ -683,8 +707,12 @@ def cli_estimate(
             prefill/decode TP when their specific args are omitted.
         pp_size: Pipeline parallelism size. Default is 1.
         attention_dp_size: Attention data parallelism size. Default is 1.
-        moe_tp_size: MoE tensor parallelism size. Default is None (auto).
-        moe_ep_size: MoE expert parallelism size. Default is None (auto).
+        moe_tp_size: MoE tensor parallelism size. At least one of ``moe_tp_size``
+            or ``moe_ep_size`` is required for MoE models; the missing dimension
+            is inferred when possible.
+        moe_ep_size: MoE expert parallelism size. At least one of ``moe_tp_size``
+            or ``moe_ep_size`` is required for MoE models; the missing dimension
+            is inferred when possible.
         gemm_quant_mode: GEMM quantization mode. Default is None (auto-inferred).
         kvcache_quant_mode: KV cache quantization mode. Default is None (auto-inferred).
         fmha_quant_mode: FMHA quantization mode. Default is None (auto-inferred).
@@ -713,6 +741,48 @@ def cli_estimate(
             Controls how many KV blocks TRT-LLM pre-allocates per sequence. Defaults
             to ``isl + osl`` when ``None``.
         engine_step_backend: Experimental static latency backend ("python" or "rust").
+        prefix: (common) Prefix cache length (subset of ``isl`` already cached).
+            Applied to agg, disagg, and all static modes. Default 0.
+        nextn: (common) Number of MTP/speculative draft tokens. Applied to
+            agg, disagg, and all static modes. Default 0 (disabled).
+            **Note:** unlike :func:`cli_default`, this entrypoint does **not**
+            auto-set ``nextn=1`` for DeepSeek/Qwen3.5 models — pass
+            ``nextn=1`` explicitly when you want MTP to mirror the default-mode
+            behavior.
+        nextn_accept_rates: (common) Acceptance rates for the MTP draft tokens
+            (only the first ``nextn`` entries are used).
+            Default ``[0.85, 0.3, 0, 0, 0]``.
+        stride: (static-only) Stride used by ``run_static`` to accelerate the
+            OSL sweep. Ignored by agg / disagg. Default 32.
+        n_a_nodes: (afd-only) Number of A-Worker (attention) nodes. Required
+            when ``mode='afd'``.
+        n_f_nodes: (afd-only) Number of F-Worker (FFN/MoE) nodes. Required
+            when ``mode='afd'``.
+        a_tp_size: (afd-only) Attention-side tensor parallelism size. Default 1.
+        a_batch_size: (afd-only) Total in-flight batch size per A-Worker before
+            micro-batch splitting. Default 128.
+        f_moe_ep_size: (afd-only) FFN-side MoE expert parallelism size. Default 1.
+        num_microbatches: (afd-only) Number of micro-batches for the ping-pong
+            A/F pipeline. Default 3.
+        pipeline_model: (afd-only) Ping-pong overlap model — ``'optimistic'``
+            (K=3, communication hidden) or ``'conservative'`` (K=2). Default
+            ``'optimistic'``.
+        comm_overhead_factor: (afd-only) Multiplier applied to cross-pool
+            communication latency. Default 1.0.
+        afd_phase: (afd-only) Phase AFD is applied to — ``'prefill'``,
+            ``'decode'`` (default), or ``'both'``. AFD is orthogonal to P/D
+            disaggregation: ``'decode'`` models AFD on decode only, ``'prefill'``
+            on the context phase (reports TTFT), and ``'both'`` reports TTFT+TPOT
+            with AFD on both phases.
+        afd_combined_with_pd: (afd-only) When True (default), combine the
+            single-phase AFD estimate with a regular static estimate for the
+            other phase (merging TTFT/TPOT, rate-matched throughput, and GPU
+            budget). Must be False when ``afd_phase='both'`` (AFD already covers
+            both phases). Default True.
+        afd_boundary_on_attn: (afd-only) Assign boundary ops (``add_norm_2``,
+            ``logits_gemm``) to the A-Worker when True (default); set False to
+            place them on the F-Worker. Inverse of the CLI ``--boundary-on-ffn``
+            flag.
 
     Returns:
         EstimateResult with ttft, tpot, power_w, mode, and the full raw result dict.
@@ -788,6 +858,37 @@ def cli_estimate(
             db.set_default_database_mode(DatabaseMode[database_mode])
         return db
 
+    if mode in ("static", "static_ctx", "static_gen"):
+        resolved_version = _resolve_version_for(system_name)
+        return _run_static_estimate(
+            static_mode=mode,
+            model_path=model_path,
+            system_name=system_name,
+            backend_name=backend_name,
+            resolved_version=resolved_version,
+            isl=isl,
+            osl=osl,
+            batch_size=batch_size,
+            prefix=prefix,
+            tp_size=tp_size,
+            pp_size=pp_size,
+            attention_dp_size=attention_dp_size,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+            gemm_quant_mode=gemm_quant_mode,
+            kvcache_quant_mode=kvcache_quant_mode,
+            fmha_quant_mode=fmha_quant_mode,
+            moe_quant_mode=moe_quant_mode,
+            comm_quant_mode=comm_quant_mode,
+            nextn=nextn,
+            nextn_accept_rates=nextn_accept_rates,
+            stride=stride,
+            engine_step_backend=engine_step_backend,
+            load_database=_load_database,
+            get_backend=get_backend,
+            get_model=get_model,
+        )
+
     if mode == "agg":
         resolved_version = _resolve_version_for(system_name)
         return _run_agg_estimate(
@@ -815,6 +916,9 @@ def cli_estimate(
             free_gpu_memory_fraction=free_gpu_memory_fraction,
             max_seq_len=max_seq_len,
             engine_step_backend=engine_step_backend,
+            prefix=prefix,
+            nextn=nextn,
+            nextn_accept_rates=nextn_accept_rates,
         )
     elif mode == "disagg":
         prefill_resolved_version = _resolve_version_for(system_name)
@@ -873,9 +977,138 @@ def cli_estimate(
             get_backend=get_backend,
             get_model=get_model,
             engine_step_backend=engine_step_backend,
+            prefix=prefix,
+            nextn=nextn,
+            nextn_accept_rates=nextn_accept_rates,
+        )
+    elif mode == "afd":
+        for name, val in [
+            ("n_a_nodes", n_a_nodes),
+            ("n_f_nodes", n_f_nodes),
+        ]:
+            if val is None:
+                raise ValueError(f"{name} is required for afd mode.")
+        if afd_phase not in ("prefill", "decode", "both"):
+            raise ValueError(f"afd_phase must be 'prefill', 'decode', or 'both'; got {afd_phase!r}.")
+        # ``combined_with_pd`` only makes sense for single-phase AFD: when
+        # AFD covers prefill+decode internally there is no separate static
+        # pool to combine with. ``AFDConfig.__post_init__`` enforces the
+        # same invariant, but checking up-front gives a clearer CLI-level
+        # error before any database/model loading happens.
+        if afd_phase == "both" and afd_combined_with_pd:
+            raise ValueError(
+                "afd_combined_with_pd=True is incompatible with afd_phase='both': "
+                "'both' means AFD covers prefill+decode internally; there is no "
+                "separate static pool to combine with. Pass --no-afd-combined-with-pd, "
+                "or pick afd_phase in {'prefill','decode'}."
+            )
+
+        resolved_version = _resolve_version_for(system_name)
+        afd_result = _run_afd_estimate(
+            model_path=model_path,
+            system_name=system_name,
+            backend_name=backend_name,
+            resolved_version=resolved_version,
+            isl=isl,
+            osl=osl,
+            tp_size=tp_size,
+            a_tp_size=a_tp_size,
+            n_a_nodes=n_a_nodes,
+            n_f_nodes=n_f_nodes,
+            a_batch_size=a_batch_size,
+            f_moe_ep_size=f_moe_ep_size,
+            num_microbatches=num_microbatches,
+            pipeline_model=pipeline_model,
+            comm_overhead_factor=comm_overhead_factor,
+            afd_phase=afd_phase,
+            afd_combined_with_pd=afd_combined_with_pd,
+            afd_boundary_on_attn=afd_boundary_on_attn,
+            gemm_quant_mode=gemm_quant_mode,
+            kvcache_quant_mode=kvcache_quant_mode,
+            fmha_quant_mode=fmha_quant_mode,
+            moe_quant_mode=moe_quant_mode,
+            comm_quant_mode=comm_quant_mode,
+            load_database=_load_database,
+            get_backend=get_backend,
+            get_model=get_model,
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
+            max_seq_len=max_seq_len,
+            prefix=prefix,
+            nextn=nextn,
+            nextn_accept_rates=nextn_accept_rates,
+        )
+        # ``phase == "both"`` covers prefill+decode inside AFD; no static
+        # complement is needed. When ``combined_with_pd`` is False the
+        # caller explicitly asked for the AFD-only estimate of a single
+        # phase (the other phase is left unmodeled and the result's GPU
+        # budget only counts the AFD pool). In both cases we short-circuit
+        # before running the static estimate.
+        if afd_phase == "both" or not afd_combined_with_pd:
+            return afd_result
+
+        static_mode = "static_gen" if afd_phase == "prefill" else "static_ctx"
+        static_result = _run_static_estimate(
+            static_mode=static_mode,
+            model_path=model_path,
+            system_name=system_name,
+            backend_name=backend_name,
+            resolved_version=resolved_version,
+            isl=isl,
+            osl=osl,
+            batch_size=batch_size,
+            prefix=prefix,
+            tp_size=tp_size,
+            pp_size=pp_size,
+            attention_dp_size=attention_dp_size,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+            gemm_quant_mode=gemm_quant_mode,
+            kvcache_quant_mode=kvcache_quant_mode,
+            fmha_quant_mode=fmha_quant_mode,
+            moe_quant_mode=moe_quant_mode,
+            comm_quant_mode=comm_quant_mode,
+            nextn=nextn,
+            nextn_accept_rates=nextn_accept_rates,
+            stride=stride,
+            engine_step_backend=engine_step_backend,
+            load_database=_load_database,
+            get_backend=get_backend,
+            get_model=get_model,
+        )
+        if static_result.summary is not None and static_result.summary.check_oom():
+            phase_label = "decode" if static_mode == "static_gen" else "prefill"
+            raise RuntimeError(
+                f"OOM: the model '{model_path}' does not fit in GPU memory on system "
+                f"'{system_name}' for the regular {phase_label} phase."
+            )
+        return _combine_afd_static_estimate_results(
+            afd_result=afd_result,
+            static_result=static_result,
+            afd_phase=afd_phase,
         )
     else:
-        raise ValueError(f"Unsupported estimate mode: {mode!r}. Use 'agg' or 'disagg'.")
+        raise ValueError(
+            f"Unsupported estimate mode: {mode!r}. Use 'agg', 'disagg', 'afd', 'static', 'static_ctx', or 'static_gen'."
+        )
+
+
+def _apply_nextn(
+    model_config,
+    nextn: int | None,
+    nextn_accept_rates: list[float] | None,
+) -> None:
+    """Apply common ``nextn`` / ``nextn_accept_rates`` overrides onto a ModelConfig.
+
+    Mirrors the static-mode path so agg / disagg / static all respond to the
+    same CLI flags. When ``nextn>0`` and no explicit accept rates are given,
+    fall back to the project-wide default ``[0.85, 0.3, 0, 0, 0]`` (matches
+    ``cli default``'s _base_common_layer).
+    """
+    model_config.nextn = int(nextn or 0)
+    if nextn_accept_rates is not None:
+        model_config.nextn_accept_rates = list(nextn_accept_rates)
+    elif model_config.nextn > 0:
+        model_config.nextn_accept_rates = [0.85, 0.3, 0.0, 0.0, 0.0]
 
 
 def _run_agg_estimate(
@@ -904,6 +1137,10 @@ def _run_agg_estimate(
     free_gpu_memory_fraction=None,
     max_seq_len=None,
     engine_step_backend=None,
+    # Common (also accepted by disagg / static)
+    prefix: int = 0,
+    nextn: int = 0,
+    nextn_accept_rates: list[float] | None = None,
 ) -> EstimateResult:
     """Run aggregated (IFB) estimation."""
     from aiconfigurator.sdk.config import RuntimeConfig
@@ -925,10 +1162,12 @@ def _run_agg_estimate(
         moe_quant_mode,
         comm_quant_mode,
     )
+    _apply_nextn(model_config, nextn, nextn_accept_rates)
     runtime_config = RuntimeConfig(
         isl=isl,
         osl=osl,
         batch_size=batch_size,
+        prefix=prefix,
         engine_step_backend=engine_step_backend,
     )
 
@@ -980,9 +1219,124 @@ def _run_agg_estimate(
         backend_version=resolved_version,
         raw=result_dict,
         mode="agg",
+        summary=summary,
         per_ops_data=summary.get_per_ops_data(),
         per_ops_source=summary.get_per_ops_source(),
         kv_cache_warning=kv_warning,
+    )
+
+
+def _run_static_estimate(
+    *,
+    static_mode: str,
+    model_path,
+    system_name,
+    backend_name,
+    resolved_version,
+    isl,
+    osl,
+    batch_size,
+    prefix,
+    tp_size,
+    pp_size,
+    attention_dp_size,
+    moe_tp_size,
+    moe_ep_size,
+    gemm_quant_mode,
+    kvcache_quant_mode,
+    fmha_quant_mode,
+    moe_quant_mode,
+    comm_quant_mode,
+    nextn,
+    nextn_accept_rates,
+    stride,
+    engine_step_backend,
+    load_database,
+    get_backend,
+    get_model,
+) -> EstimateResult:
+    """Run a single-pass static-batching estimation.
+
+    Wraps :meth:`InferenceSession.run_static` and produces an ``EstimateResult``
+    whose ``raw`` dict follows :data:`aiconfigurator.sdk.common.ColumnsStatic`.
+    """
+    from aiconfigurator.sdk.config import RuntimeConfig
+    from aiconfigurator.sdk.inference_session import InferenceSession
+
+    if static_mode not in ("static", "static_ctx", "static_gen"):
+        raise ValueError(
+            f"Unsupported static mode: {static_mode!r}. Expected one of 'static', 'static_ctx', 'static_gen'."
+        )
+
+    moe_tp_size, moe_ep_size = _resolve_moe_parallelism(
+        tp_size, attention_dp_size, moe_tp_size, moe_ep_size, model_path=model_path
+    )
+
+    model_config = _build_model_config(
+        tp_size,
+        pp_size,
+        attention_dp_size,
+        moe_tp_size,
+        moe_ep_size,
+        gemm_quant_mode,
+        kvcache_quant_mode,
+        fmha_quant_mode,
+        moe_quant_mode,
+        comm_quant_mode,
+    )
+    _apply_nextn(model_config, nextn, nextn_accept_rates)
+
+    runtime_config = RuntimeConfig(
+        batch_size=batch_size,
+        isl=isl,
+        osl=osl,
+        prefix=prefix,
+        engine_step_backend=engine_step_backend,
+    )
+
+    model = get_model(model_path, model_config, backend_name)
+    database = load_database(system_name)
+    backend = get_backend(backend_name)
+    session = InferenceSession(model, database, backend)
+    summary = session.run_static(
+        runtime_config=runtime_config,
+        mode=static_mode,
+        stride=stride,
+    )
+
+    static_warning = None
+    if summary.check_oom():
+        static_warning = (
+            f"OOM: the model '{model_path}' does not fit in GPU memory on system "
+            f"'{system_name}' with the given parallelism (tp={tp_size}, pp={pp_size}, "
+            f"dp={attention_dp_size}) and batch_size={batch_size}. Reduce batch_size, "
+            "increase tp/pp, use quantization, or pick a system with more VRAM per GPU."
+        )
+
+    result_dict = summary.get_result_dict()
+    if result_dict is None:
+        raise RuntimeError("Static estimation produced no results. The configuration may be invalid.")
+
+    return EstimateResult(
+        ttft=float(result_dict.get("ttft", 0.0) or 0.0),
+        tpot=float(result_dict.get("tpot", 0.0) or 0.0),
+        power_w=float(result_dict.get("power_w", 0.0) or 0.0),
+        isl=isl,
+        osl=osl,
+        batch_size=batch_size,
+        ctx_tokens=isl,  # static has no IFB budget; expose isl for convenience.
+        tp_size=tp_size,
+        pp_size=pp_size,
+        model_path=model_path,
+        system_name=system_name,
+        backend_name=backend_name,
+        backend_version=resolved_version,
+        raw=result_dict,
+        mode=static_mode,
+        summary=summary,
+        per_ops_data=None,
+        per_ops_source=None,
+        kv_cache_warning=static_warning,
     )
 
 
@@ -1018,6 +1372,10 @@ def _run_disagg_estimate(
     get_backend,
     get_model,
     engine_step_backend=None,
+    # Common (also accepted by agg / static)
+    prefix: int = 0,
+    nextn: int = 0,
+    nextn_accept_rates: list[float] | None = None,
 ) -> EstimateResult:
     """Run disaggregated estimation."""
     from aiconfigurator.sdk.config import RuntimeConfig
@@ -1063,8 +1421,12 @@ def _run_disagg_estimate(
         moe_quant_mode,
         comm_quant_mode,
     )
+    # Apply common nextn/MTP overrides to *both* prefill and decode worker
+    # configs so a single ``--nextn N`` reaches each side of the disagg pair.
+    _apply_nextn(prefill_model_config, nextn, nextn_accept_rates)
+    _apply_nextn(decode_model_config, nextn, nextn_accept_rates)
 
-    runtime_config = RuntimeConfig(isl=isl, osl=osl, engine_step_backend=engine_step_backend)
+    runtime_config = RuntimeConfig(isl=isl, osl=osl, prefix=prefix, engine_step_backend=engine_step_backend)
 
     prefill_database = load_database(system_name)
     decode_database = load_database(decode_system_name)
@@ -1127,6 +1489,285 @@ def _run_disagg_estimate(
         raw=result_dict,
         mode="disagg",
         per_ops_data=summary.get_per_ops_data(),
+        per_ops_source=summary.get_per_ops_source(),
+    )
+
+
+def _combine_afd_static_estimate_results(
+    *,
+    afd_result: EstimateResult,
+    static_result: EstimateResult,
+    afd_phase: str,
+) -> EstimateResult:
+    """Merge an AFD phase with the regular static phase into one estimate result."""
+    if afd_phase not in ("prefill", "decode"):
+        raise ValueError(f"afd_phase must be 'prefill' or 'decode', got {afd_phase!r}.")
+
+    afd_raw = afd_result.raw
+    afd_gpus = afd_result.num_total_gpus
+    static_gpus = static_result.num_total_gpus
+    total_gpus = afd_gpus + static_gpus
+
+    if afd_phase == "decode":
+        ttft = static_result.ttft
+        tpot = afd_result.tpot
+        prefill_seq_s = static_result.seq_per_second
+        decode_seq_s = afd_result.seq_per_second
+        concurrency = afd_result.concurrency
+        prefill_impl = "static_ctx"
+        decode_impl = "afd"
+        prefill_power = static_result.power_w
+        decode_power = afd_result.power_w
+    else:
+        ttft = afd_result.ttft
+        tpot = static_result.tpot
+        afd_batch = float(afd_raw.get("b_total", afd_result.concurrency) or 0.0)
+        prefill_seq_s = afd_batch / (ttft / 1000.0) if ttft > 0.0 else 0.0
+        decode_seq_s = static_result.seq_per_second
+        concurrency = static_result.concurrency
+        prefill_impl = "afd"
+        decode_impl = "static_gen"
+        prefill_power = afd_result.power_w
+        decode_power = static_result.power_w
+
+    seq_candidates = [v for v in (prefill_seq_s, decode_seq_s) if v > 0.0]
+    seq_s = min(seq_candidates) if seq_candidates else 0.0
+    tokens_s = seq_s * afd_result.osl
+    decode_time = tpot * max(afd_result.osl - 1, 0)
+    request_latency = ttft + decode_time
+    power_w = (prefill_power * ttft + decode_power * decode_time) / request_latency if request_latency > 0.0 else 0.0
+
+    result_dict = dict(afd_raw)
+    result_dict.update(
+        {
+            "ttft": round(ttft, 3),
+            "tpot": round(tpot, 3),
+            "request_latency": round(request_latency, 3),
+            "seq/s": round(seq_s, 3),
+            "tokens/s": round(tokens_s, 2),
+            "tokens/s/gpu": round(tokens_s / total_gpus, 2) if total_gpus > 0 else 0.0,
+            "tokens/s/user": round(1000.0 / tpot, 2) if tpot > 0.0 else 0.0,
+            "concurrency": concurrency,
+            "num_total_gpus": total_gpus,
+            "memory": round(max(afd_result.memory, static_result.memory), 2),
+            "power_w": round(power_w, 3),
+            "(p)impl": prefill_impl,
+            "(d)impl": decode_impl,
+        }
+    )
+
+    per_ops_data = dict(afd_result.per_ops_data or {})
+    static_summary = static_result.summary
+    if static_summary is not None:
+        if static_result.mode == "static_ctx":
+            prefill_ctx_latency = static_summary.get_context_latency_dict()
+            if prefill_ctx_latency:
+                per_ops_data["prefill"] = dict(prefill_ctx_latency)
+        elif static_result.mode == "static_gen":
+            decode_gen_latency = static_summary.get_generation_latency_dict()
+            if decode_gen_latency:
+                per_ops_data["decode"] = dict(decode_gen_latency)
+
+    per_ops_source = dict(afd_result.per_ops_source or {})
+
+    return EstimateResult(
+        ttft=result_dict.get("ttft", 0.0),
+        tpot=result_dict.get("tpot", 0.0),
+        power_w=result_dict.get("power_w", 0.0),
+        isl=afd_result.isl,
+        osl=afd_result.osl,
+        batch_size=afd_result.batch_size,
+        ctx_tokens=afd_result.ctx_tokens,
+        tp_size=afd_result.tp_size,
+        pp_size=afd_result.pp_size,
+        model_path=afd_result.model_path,
+        system_name=afd_result.system_name,
+        backend_name=afd_result.backend_name,
+        backend_version=afd_result.backend_version,
+        raw=result_dict,
+        mode="afd",
+        per_ops_data=per_ops_data,
+        per_ops_source=per_ops_source,
+        kv_cache_warning=static_result.kv_cache_warning,
+    )
+
+
+def _run_afd_estimate(
+    *,
+    model_path,
+    system_name,
+    backend_name,
+    resolved_version,
+    isl,
+    osl,
+    tp_size,
+    a_tp_size,
+    n_a_nodes,
+    n_f_nodes,
+    a_batch_size,
+    f_moe_ep_size,
+    num_microbatches,
+    pipeline_model,
+    comm_overhead_factor,
+    afd_phase,
+    afd_combined_with_pd,
+    afd_boundary_on_attn,
+    gemm_quant_mode,
+    kvcache_quant_mode,
+    fmha_quant_mode,
+    moe_quant_mode,
+    comm_quant_mode,
+    load_database,
+    get_backend,
+    get_model,
+    free_gpu_memory_fraction,
+    max_seq_len,
+    prefix: int = 0,
+    nextn: int = 0,
+    nextn_accept_rates: list[float] | None = None,
+) -> EstimateResult:
+    """Run AFD (Attention-FFN Disaggregated) estimation.
+
+    AFD is orthogonal to P/D disagg: ``afd_phase`` selects whether this
+    single-point estimate covers the prefill phase (TTFT), the decode
+    phase (TPOT), or both.  Memory (HBM) bound for each pool is surfaced
+    via ``summary.check_oom()``; the raw result dict also carries
+    per-pool ``(a)is_oom`` / ``(f)is_oom`` booleans.
+
+    ``gpus_per_node`` is pulled from ``database.system_spec`` and is
+    therefore not a parameter; ``f_tp_size`` is derived (Phase 1:
+    F-DP=1) inside ``AFDConfig.__post_init__``.
+    """
+    from aiconfigurator.sdk.config import AFDConfig, RuntimeConfig
+    from aiconfigurator.sdk.inference_session import AFDInferenceSession
+
+    # Load the database first so we can read gpus_per_node from the
+    # system_spec — the single source of truth that drives BW selection
+    # in perf_database / AFDTransfer. Doing this before building the
+    # model configs lets us derive f_tp_size = n_f_nodes * gpus_per_node
+    # under the Phase 1 F-DP=1 assumption.
+    database = load_database(system_name)
+    backend = get_backend(backend_name)
+    gpus_per_node = int(database.system_spec["node"]["num_gpus_per_node"])
+
+    f_tp_size = n_f_nodes * gpus_per_node
+
+    # Build model configs for A-Worker and F-Worker.
+    # A-Worker: attention-only pool; MoE dims are irrelevant but must satisfy
+    #   tp_size * attention_dp_size == moe_tp_size * moe_ep_size.
+    # F-Worker: FFN/MoE pool; moe_tp_size = tp_f / f_moe_ep_size so the
+    #   product constraint holds with attention_dp_size = 1.
+    if f_moe_ep_size <= 0 or f_tp_size % f_moe_ep_size != 0:
+        raise ValueError(
+            f"f_moe_ep_size ({f_moe_ep_size}) must be a positive divisor of "
+            f"f_tp_size ({f_tp_size}) (= n_f_nodes * gpus_per_node, "
+            f"n_f_nodes={n_f_nodes}, gpus_per_node={gpus_per_node}) so that "
+            "f_moe_tp = f_tp / f_moe_ep is an integer."
+        )
+    f_moe_tp_size = f_tp_size // f_moe_ep_size
+
+    a_model_config = _build_model_config(
+        a_tp_size,
+        1,
+        1,
+        a_tp_size,
+        1,
+        gemm_quant_mode,
+        kvcache_quant_mode,
+        fmha_quant_mode,
+        moe_quant_mode,
+        comm_quant_mode,
+    )
+    f_model_config = _build_model_config(
+        f_tp_size,
+        1,
+        1,
+        f_moe_tp_size,
+        f_moe_ep_size,
+        gemm_quant_mode,
+        kvcache_quant_mode,
+        fmha_quant_mode,
+        moe_quant_mode,
+        comm_quant_mode,
+    )
+    # Pass speculative decode knobs through to A/F model configs. TODO:
+    # AFDTransfer still models committed decode-token volume only; recalibrate
+    # MTP transfer amplification once the serving semantics are finalized.
+    _apply_nextn(a_model_config, nextn, nextn_accept_rates)
+    _apply_nextn(f_model_config, nextn, nextn_accept_rates)
+
+    afd_config = AFDConfig(
+        n_a_nodes=n_a_nodes,
+        n_f_nodes=n_f_nodes,
+        gpus_per_node=gpus_per_node,
+        tp_a=a_tp_size,
+        # tp_f is derived inside AFDConfig (Phase 1: F-DP=1).
+        f_moe_ep_size=f_moe_ep_size,
+        a_batch_size=a_batch_size,
+        num_microbatches=num_microbatches,
+        pipeline_model=pipeline_model,
+        comm_overhead_factor=comm_overhead_factor,
+        phase=afd_phase,
+        combined_with_pd=bool(afd_combined_with_pd),
+        boundary_on_attn=bool(afd_boundary_on_attn),
+    )
+    runtime_config = RuntimeConfig(
+        isl=isl,
+        osl=osl,
+        batch_size=afd_config.n_a_workers * a_batch_size,
+        prefix=prefix,
+    )
+
+    session = AFDInferenceSession(
+        model_path=model_path,
+        a_model_config=a_model_config,
+        f_model_config=f_model_config,
+        database=database,
+        backend=backend,
+        afd_config=afd_config,
+    )
+    summary = session.run_afd(
+        runtime_config,
+        phase=afd_phase,
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+        max_seq_len=max_seq_len,
+    )
+
+    if summary.check_oom():
+        raise RuntimeError(
+            f"OOM: the model '{model_path}' does not fit in GPU memory on system '{system_name}' "
+            f"with the given AFD configuration (phase={afd_phase}). "
+            "Try increasing a_tp_size or n_f_nodes (which widens the F-replica "
+            "under Phase 1 F-DP=1), reducing batch size, or using a system "
+            "with more VRAM per GPU."
+        )
+
+    result_dict = summary.get_result_dict()
+    if result_dict is None:
+        raise RuntimeError("AFD estimation produced no results. The configuration may be invalid.")
+    result_dict = dict(result_dict)
+    if afd_phase == "both":
+        result_dict.setdefault("(p)impl", "afd")
+        result_dict.setdefault("(d)impl", "afd")
+
+    return EstimateResult(
+        ttft=result_dict.get("ttft", 0.0),
+        tpot=result_dict.get("tpot", 0.0),
+        power_w=result_dict.get("power_w", 0.0),
+        isl=isl,
+        osl=osl,
+        batch_size=a_batch_size,
+        ctx_tokens=0,
+        tp_size=a_tp_size,
+        pp_size=1,
+        model_path=model_path,
+        system_name=system_name,
+        backend_name=backend_name,
+        backend_version=resolved_version,
+        raw=result_dict,
+        mode="afd",
+        per_ops_data=summary.get_per_ops_data(),
+        per_ops_source=summary.get_per_ops_source(),
     )
 
 

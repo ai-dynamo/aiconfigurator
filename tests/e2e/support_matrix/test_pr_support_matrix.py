@@ -86,7 +86,7 @@ def test_pr_support_matrix(model: str, system: str, backend: str, version: str):
 
     from tools.support_matrix.support_matrix import SupportMatrix
 
-    success_dict, error_dict = SupportMatrix.run_single_test(
+    status_dict, error_dict = SupportMatrix.run_single_test(
         model=model,
         system=system,
         backend=backend,
@@ -96,9 +96,9 @@ def test_pr_support_matrix(model: str, system: str, backend: str, version: str):
 
     failures: list[str] = []
     for mode, expected in [("agg", agg_supported), ("disagg", disagg_supported)]:
-        if expected and not success_dict[mode]:
+        if expected and status_dict[mode] != "PASS":
             error_msg = error_dict[mode] or "no error message captured"
-            failures.append(f"  {mode}: expected PASS but got FAIL — {error_msg}")
+            failures.append(f"  {mode}: expected PASS but got {status_dict[mode]} — {error_msg}")
 
     if failures:
         detail = "\n".join(failures)

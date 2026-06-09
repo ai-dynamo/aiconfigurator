@@ -11,8 +11,9 @@ output), not just the bare attention kernel.  Uses TRT-LLM's own modeling code
 to construct a single-layer mock model with dummy weights, then extracts the
 attention module for benchmarking.
 
-Supported models and their attention types are defined in SUPPORTED_MODELS.
-Model dimensions are loaded from the HF config.json via from_pretrained().
+Supported models, attention types, and micro-sweeps are defined in collector v2
+YAML and loaded through collector.case_generator. Model dimensions are loaded
+from the HF config.json via from_pretrained().
 
 Usage:
     # MLA context phase (DeepSeek-V3)
@@ -78,6 +79,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from collector.case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.registry_types import PerfFile
 
@@ -112,17 +114,6 @@ try:
         DeepseekV32Attention.post_load_weights = _post_load_weights
 except ImportError:
     pass
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Supported Models — model_path → attention type
-# ═══════════════════════════════════════════════════════════════════════
-
-SUPPORTED_MODELS: dict[str, str] = {
-    "deepseek-ai/DeepSeek-V3": "mla",
-    "deepseek-ai/DeepSeek-V3.2": "dsa",
-    "zai-org/GLM-5": "dsa",
-}
 
 
 def _is_sm120_or_newer() -> bool:
@@ -195,18 +186,27 @@ def get_context_test_cases(attn_type: str):
     """Context-phase test cases.
 
     Returns list of [seq_len, batch_size, num_heads, kv_cache_dtype,
-                     compute_dtype, gemm_type].
+                     compute_dtype, gemm_type, prefix_len].
     """
     cases = []
-    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 32768]
+    sweep = get_mla_module_sweep_spec("trtllm")
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context", attn_type):
-        for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
-            for b in b_list:
-                for s in s_list:
-                    if b * s > 131072:
+        for num_heads in sweep.inner_sweep_head_counts:
+            for b in sweep.context_batch_sizes:
+                for s in sweep.context_sequence_lengths:
+                    if b * s > sweep.context_max_tokens:
                         continue
-                    cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
+                    if (
+                        sweep.context_large_sequence_min
+                        and s >= sweep.context_large_sequence_min
+                        and b > sweep.context_large_sequence_max_batch_size
+                    ):
+                        continue
+                    if attn_type == "dsa":
+                        for prefix_len in sweep.context_prefix_lengths:
+                            cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type, prefix_len])
+                    else:
+                        cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
 
 
@@ -217,13 +217,18 @@ def get_generation_test_cases(attn_type: str):
                      compute_dtype, gemm_type].
     """
     cases = []
-    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-    s_list = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+    sweep = get_mla_module_sweep_spec("trtllm")
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation", attn_type):
-        for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
-            for b in b_list:
-                for s in s_list:
-                    if b * s > 1024 * 4096 * 2 * 2 * 2:
+        for num_heads in sweep.inner_sweep_head_counts:
+            for b in sweep.generation_batch_sizes:
+                for s in sweep.generation_sequence_lengths:
+                    if b * s > sweep.generation_max_tokens:
+                        continue
+                    if (
+                        sweep.generation_large_sequence_min
+                        and s >= sweep.generation_large_sequence_min
+                        and b > sweep.generation_large_sequence_max_batch_size
+                    ):
                         continue
                     cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
@@ -237,11 +242,15 @@ def _build_module_test_cases(attn_type: str, mode: str):
      model_path, attn_type]
     """
     base_cases = get_context_test_cases(attn_type) if mode == "context" else get_generation_test_cases(attn_type)
-    model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
+    model_specs = get_mla_module_model_specs(attention_type=attn_type)
     cases = []
-    for model_path in model_paths:
-        for s, b, h, kv_dtype, compute_dtype, gemm_type in base_cases:
-            cases.append([s, b, h, kv_dtype, compute_dtype, gemm_type, model_path, attn_type])
+    for model_spec in model_specs:
+        for base_case in base_cases:
+            s, b, h, kv_dtype, compute_dtype, gemm_type, *rest = base_case
+            case = [s, b, h, kv_dtype, compute_dtype, gemm_type, model_spec.model_path, attn_type]
+            if rest:
+                case.append(rest[0])
+            cases.append(case)
     return cases
 
 
@@ -474,6 +483,7 @@ def create_kv_cache_and_metadata(
     batch_size: int,
     seq_len: int,
     is_context: bool,
+    prefix_len: int = 0,
     use_fp8_kv_cache: bool = False,
     device: str = "cuda:0",
 ):
@@ -492,11 +502,13 @@ def create_kv_cache_and_metadata(
     qk_rope_head_dim = config.qk_rope_head_dim
     head_dim = kv_lora_rank + qk_rope_head_dim
 
+    prefix_len = int(prefix_len) if is_context else 0
+
     if is_context:
-        max_seq = seq_len + 1
+        max_seq = prefix_len + seq_len + 1
         total_tokens = seq_len * batch_size
         seq_len_q = seq_len
-        kv_cache_len = 0
+        kv_cache_len = prefix_len
     else:
         max_seq = seq_len + 1
         total_tokens = batch_size
@@ -536,7 +548,7 @@ def create_kv_cache_and_metadata(
     )
 
     request_ids = list(range(batch_size))
-    token_nums = [max_seq] * batch_size
+    token_nums = [prefix_len + seq_len_q] * batch_size if is_context else [max_seq] * batch_size
     kv_cache_manager.add_dummy_requests(request_ids, token_nums)
 
     # --- Attention Metadata ---
@@ -565,7 +577,7 @@ def create_kv_cache_and_metadata(
         ),
         cross=None,
         request_ids=request_ids,
-        prompt_lens=[seq_len_q if is_context else kv_cache_len] * batch_size,
+        prompt_lens=[prefix_len + seq_len_q if is_context else kv_cache_len] * batch_size,
         runtime_features=AttentionRuntimeFeatures(
             chunked_prefill=False,
             cache_reuse=False,
@@ -597,6 +609,7 @@ def run_mla_module(
     compute_dtype: str,
     gemm_type: str,
     perf_filename: str,
+    prefix_len: int = 0,
     *,
     model_path: str,
     attn_type: str,
@@ -611,11 +624,13 @@ def run_mla_module(
     use_fp8_kv_cache = kv_cache_dtype == "fp8"
 
     is_context = "context" in perf_filename
+    prefix_len = int(prefix_len) if is_context else 0
     phase = "context" if is_context else "generation"
     variant = attn_type.upper()
     print(
         f"\n[{variant} module] {phase} b={batch_size}, s={seq_len}, "
-        f"heads={num_heads}, gemm={gemm_type}, compute={compute_dtype}, kv={kv_cache_dtype}, model={model_path}"
+        f"prefix={prefix_len}, heads={num_heads}, gemm={gemm_type}, "
+        f"compute={compute_dtype}, kv={kv_cache_dtype}, model={model_path}"
     )
 
     # 1. Create attention layer (from_pretrained reads config.json)
@@ -634,6 +649,7 @@ def run_mla_module(
         batch_size=batch_size,
         seq_len=seq_len,
         is_context=is_context,
+        prefix_len=prefix_len,
         use_fp8_kv_cache=use_fp8_kv_cache,
         device=device,
     )
@@ -643,7 +659,7 @@ def run_mla_module(
     if is_context:
         num_tokens = seq_len * batch_size
         position_ids = (
-            torch.arange(seq_len, device=torch_device, dtype=torch.long)
+            torch.arange(prefix_len, prefix_len + seq_len, device=torch_device, dtype=torch.long)
             .unsqueeze(0)
             .expand(batch_size, -1)
             .reshape(-1)
@@ -701,7 +717,7 @@ def run_mla_module(
     # 6. Log results
     if is_context:
         isl = seq_len
-        step = 0
+        step = prefix_len
     else:
         isl = 1
         step = seq_len
@@ -737,7 +753,8 @@ def run_mla_module(
 
     print(
         f"  [{phase}] b={batch_size}, s={seq_len}, heads={num_heads}, "
-        f"gemm={gemm_type}, compute={compute_dtype}, kv={kv_cache_dtype}: {latency:.4f} ms"
+        f"prefix={prefix_len}, gemm={gemm_type}, compute={compute_dtype}, "
+        f"kv={kv_cache_dtype}: {latency:.4f} ms"
     )
 
     _cleanup(kv_cache_manager)
@@ -753,6 +770,7 @@ def run_mla_module_worker(
     gemm_type: str,
     model_path: str,
     attn_type: str,
+    prefix_len: int = 0,
     *,
     perf_filename: str,
     device: str = "cuda:0",
@@ -765,6 +783,7 @@ def run_mla_module_worker(
         kv_cache_dtype=kv_cache_dtype,
         compute_dtype=compute_dtype,
         gemm_type=gemm_type,
+        prefix_len=prefix_len,
         perf_filename=perf_filename,
         model_path=model_path,
         attn_type=attn_type,
@@ -796,7 +815,8 @@ def _perf_file_for(attn_type: str, mode: str) -> str:
 
 
 def main():
-    model_names = list(SUPPORTED_MODELS.keys())
+    all_model_specs = get_mla_module_model_specs(apply_model_filter=False)
+    model_names = [spec.model_path for spec in all_model_specs]
 
     parser = argparse.ArgumentParser(
         description="MLA/DSA module-level collector for TRT-LLM",
@@ -839,11 +859,13 @@ def main():
 
     # Select models to run
     if args.model:
-        models_to_run = {args.model: SUPPORTED_MODELS[args.model]}
+        model_specs_to_run = [spec for spec in all_model_specs if spec.model_path == args.model]
     else:
-        models_to_run = SUPPORTED_MODELS
+        model_specs_to_run = all_model_specs
 
-    for model_path, attn_type in models_to_run.items():
+    for model_spec in model_specs_to_run:
+        model_path = model_spec.model_path
+        attn_type = model_spec.attention_type
         print(f"\n{'=' * 60}")
         print(f"Model: {model_path}  |  Attention: {attn_type.upper()}")
         print(f"{'=' * 60}")

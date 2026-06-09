@@ -74,6 +74,7 @@ def model():
     model.model_path = "test-model"
     model.model_name = "test-model"
     model._nextn = 0
+    model.encoder_ops = []
     model.context_ops = [
         _StaticOp("context_attention", latency_ms=11.0, energy_wms=110.0),
         _StaticOp("logits_gemm", latency_ms=3.0, energy_wms=30.0),

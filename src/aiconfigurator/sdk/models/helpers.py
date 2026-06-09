@@ -23,6 +23,17 @@ from aiconfigurator.sdk.utils import (
 
 logger = logging.getLogger(__name__)
 
+_MOE_MODEL_FAMILIES = {
+    "MOE",
+    "DEEPSEEK",
+    "DEEPSEEKV32",
+    "DEEPSEEKV4",
+    "KIMIK25",
+    "HYBRIDMOE",
+    "QWEN3VL_MOE",
+    "GEMMA4MIX",
+}
+
 
 @cache
 def _get_model_info(model_path: str) -> dict:
@@ -149,13 +160,6 @@ def _apply_model_quant_defaults(
     if applied:
         logger.debug("Using model-provided quantization defaults: %s", ", ".join(applied))
 
-    # FIXME: temporary workaround for Deepseek V3 fp8 fmha quant mode, only bfloat16+fp8kvcache is supported
-    if (
-        architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
-        and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
-    ):
-        model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
-
     # DSA module (DeepSeek-V3.2 / GLM-5): DSA perf tables only have bfloat16 FMHA currently.
     if (
         architecture in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM")
@@ -196,22 +200,22 @@ def get_model_family(model_path: str) -> str:
     return _architecture_to_model_family(architecture)
 
 
-def check_is_moe(model_path: str) -> bool:
+def check_is_moe(model_path: str, model_info: dict | None = None) -> bool:
     """
     Check if the model is a MoE model.
 
     For NEMOTRONH models, checks if 'E' (MoE layer) is in hybrid_override_pattern..
     E.g., Nemotron_H is not an MoE model, but Nemotron_3 is an MoE model.
     """
-    family = get_model_family(model_path)
-    if family in ("MOE", "DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25", "HYBRIDMOE"):
+    if model_info is None:
+        model_info = _get_model_info(model_path)
+    family = _architecture_to_model_family(model_info["architecture"])
+    if family in _MOE_MODEL_FAMILIES:
         return True
     if family == "QWEN35":
-        model_info = _get_model_info(model_path)
         extra_params = model_info.get("extra_params")
         return isinstance(extra_params, common.Qwen35Config) and extra_params.num_experts > 0
     if family == "NEMOTRONH":
-        model_info = _get_model_info(model_path)
         extra_params = model_info.get("extra_params")
         if extra_params is None or not hasattr(extra_params, "hybrid_override_pattern"):
             logger.warning(f"NEMOTRONH model {model_path} missing hybrid_override_pattern, defaulting is_moe=False")

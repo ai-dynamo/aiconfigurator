@@ -69,7 +69,7 @@ python3 -m pytest -m "unit or build"
 
 ### Rust Engine Step Opt-In
 
-The Python SDK keeps using the existing Python latency path by default. The Rust core ships as a separate distribution `aiconfigurator-rust-core`; install it via the `[rust]` extra. The SDK imports the extension as `aiconfigurator_rust_core.aiconfigurator_core` and falls back to the Python path if the extension isn't installed.
+The Python SDK keeps using the existing Python latency path by default. The Rust core ships as a separate distribution `aiconfigurator-core`; install it via the `[rust]` extra. The SDK imports the extension as `aiconfigurator_core` and falls back to the Python path if the extension isn't installed.
 
 ```bash
 # Install both: pure-Python aiconfigurator + the optional Rust extension.

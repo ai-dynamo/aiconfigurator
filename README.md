@@ -6,6 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # aiconfigurator
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/aiconfigurator)
+[![Discord](https://dcbadge.limes.pink/api/server/mRJ2KNzwYE?style=flat)](https://discord.gg/mRJ2KNzwYE)
+
 
 In disaggregated serving, configuring an effective deployment is challenging: you need to decide how many prefill and decode
 workers to run, and the parallelism for each worker. Combined with SLA targets for TTFT (Time to First Token) and
@@ -49,7 +51,7 @@ python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.9 or lat
 pip3 install .
 
 # 5. Install aiconfigurator with webapp support
-pip3 install .[webapp]
+pip3 install ".[webapp]"
 ```
 
 ### Build with Docker
@@ -438,9 +440,9 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 
 #### Detailed Support Matrix
 
-For a comprehensive, interactive view of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, visit the **[Support Matrix on GitHub Pages](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)**. The page fetches `support_matrix.csv` directly from GitHub at load time and supports filtering by system, mode, model search, and switching between branches.
+For a comprehensive, interactive view of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, visit the **[Support Matrix on GitHub Pages](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)**. The page fetches the split support matrix CSV files directly from GitHub at load time and supports filtering by system, mode, model search, and switching between branches.
 
-The raw data is also available as a [CSV file](src/aiconfigurator/systems/support_matrix.csv).
+The raw data is also available as [per-system CSV files](src/aiconfigurator/systems/support_matrix).
 
 You can also check support via the CLI:
 ```bash
@@ -453,6 +455,7 @@ We welcome contributions from the community! Check out the below resources to ge
 
 - [DEVELOPMENT.md](DEVELOPMENT.md) - Set up your development environment, run tests, and follow our coding standards
 - [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines and requirements
+- [Discord](https://discord.gg/mRJ2KNzwYE) - Chat with team and community
 
 ### How To Add A New Model
 Adding a new model will require modifying the source code and perhaps collecting new data for the model. Please refer to [How to Add a New Model](docs/add_a_new_model.md).

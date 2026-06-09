@@ -4,7 +4,7 @@
 data_dir: data/b60 # relative to systems_dir
 gpu:
   mem_bw: 456000000000 # 456GB/s
-  mem_bw_empirical_scaling_factor: 0.8 # some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_bw_empirical_scaling_factor: 0.5 # standalone kernel bench shows ~220GB/s effective BW for mem-bound ops (RMSNorm/SiLU/Rotary), ~48% of 456GB/s spec
   mem_empirical_constant_latency: 0.000003 # 3us some nonofficial correction based on observations, you should try to modify based on your own observations
   mem_capacity: 25769803776 # 24GiB
   float32_tc_flops: 12280000000000 # 12.28TFLOPS

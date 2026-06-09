@@ -15,15 +15,49 @@ import yaml
 from munch import DefaultMunch, Munch
 
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import _apply_model_quant_defaults, check_is_moe, get_model_family
 from aiconfigurator.sdk.pareto_analysis import get_pareto_front
-from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version
+from aiconfigurator.sdk.perf_database import (
+    get_database,
+    get_latest_database_version,
+    has_perf_data_not_available_cause,
+    load_system_spec,
+)
 from aiconfigurator.sdk.utils import ListFlowDumper, enumerate_parallel_config, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE = 1.1
 DEFAULT_DECODE_LATENCY_CORRECTION_SCALE = 1.08
+
+
+def _lookup_num_gpus_per_node(system_name: str) -> int | None:
+    """Best-effort lookup of ``num_gpus_per_node`` from a system's yaml spec.
+
+    Used by AFD finalization to cross-check yaml overrides without paying
+    the cost of loading the full perf database. Returns ``None`` if the
+    spec cannot be found / parsed; callers must treat ``None`` as "skip
+    the cross-check" rather than as a definitive answer.
+    """
+    import os
+
+    from aiconfigurator.sdk.perf_database import get_systems_paths
+
+    for systems_root in get_systems_paths():
+        yaml_path = os.path.join(systems_root, f"{system_name}.yaml")
+        if not os.path.isfile(yaml_path):
+            continue
+        try:
+            with open(yaml_path) as fh:
+                spec = yaml.safe_load(fh) or {}
+        except Exception:
+            logger.debug("Could not read system yaml at %s", yaml_path, exc_info=True)
+            continue
+        node = spec.get("node") if isinstance(spec, dict) else None
+        if isinstance(node, dict) and isinstance(node.get("num_gpus_per_node"), int):
+            return int(node["num_gpus_per_node"])
+    return None
 
 
 class UnsupportedWideepConfigError(ValueError):
@@ -34,12 +68,75 @@ _DEEPSEEK_V4_NATIVE_FP4_TO_FP8_MODEL = {
     "deepseek-ai/DeepSeek-V4-Flash": "sgl-project/DeepSeek-V4-Flash-FP8",
     "deepseek-ai/DeepSeek-V4-Pro": "sgl-project/DeepSeek-V4-Pro-FP8",
 }
+_DEEPSEEK_V4_MEGAMOE_SUPPORTED_MODELS = {
+    "deepseek-ai/DeepSeek-V4-Pro",
+    "sgl-project/DeepSeek-V4-Pro-FP8",
+}
+_LARGE_PIPELINE_PARALLEL_MODEL_FAMILIES = {"DEEPSEEKV32", "DEEPSEEKV4"}
+_LARGE_PIPELINE_PARALLEL_BACKENDS = {
+    common.BackendName.sglang.value,
+    common.BackendName.trtllm.value,
+    common.BackendName.vllm.value,
+}
 
 
 def _is_hopper_system(system_name: str | None) -> bool:
     if not system_name:
         return False
     return system_name.startswith(("h100", "h200", "gh200"))
+
+
+def _is_blackwell_system(system_name: str | None) -> bool:
+    spec = load_system_spec(system_name)
+    return int(spec.get("gpu", {}).get("sm_version", -1)) >= 100
+
+
+def _sglang_megamoe_parallel_lists(system_name: str, should_enable_pp: bool) -> dict:
+    spec = load_system_spec(system_name)
+    node_spec = spec.get("node", {})
+    has_rack_nvl = int(node_spec.get("num_gpus_per_rack", 0) or 0) >= 32
+    ep_list = [4, 8, 16, 32] if has_rack_nvl else [8]
+    return {
+        "num_gpu_per_worker": ep_list,
+        "tp_list": [1, 2, 4, 8],
+        "pp_list": ep_list if should_enable_pp else [1],
+        "dp_list": [1, 2, 4, 8, 16, 32] if has_rack_nvl else [1, 2, 4, 8],
+        "moe_tp_list": [1],
+        "moe_ep_list": ep_list,
+    }
+
+
+def _merge_int_list(values: list[int], additions: list[int]) -> list[int]:
+    return sorted(dict.fromkeys([*values, *additions]))
+
+
+def _large_pipeline_parallel_worker_defaults_apply(ctx: TaskContext) -> bool:
+    if not ctx.is_moe:
+        return False
+    if ctx.model_family not in _LARGE_PIPELINE_PARALLEL_MODEL_FAMILIES:
+        return False
+    if ctx.backend_name not in _LARGE_PIPELINE_PARALLEL_BACKENDS:
+        return False
+    if ctx.enable_wideep or ctx.moe_backend in {"deepep_moe", "megamoe"}:
+        return False
+    if ctx.total_gpus is None or ctx.total_gpus < 16:
+        return False
+    systems = [ctx.system_name]
+    if ctx.decode_system_name:
+        systems.append(ctx.decode_system_name)
+    try:
+        return all(_is_blackwell_system(system) for system in systems)
+    except Exception:
+        return False
+
+
+def _include_large_pipeline_parallel_worker(config: dict) -> None:
+    config["num_gpu_per_worker"] = _merge_int_list(config["num_gpu_per_worker"], [16])
+    config["tp_list"] = _merge_int_list(config["tp_list"], [8])
+    config["pp_list"] = _merge_int_list(config["pp_list"], [2])
+    config["dp_list"] = _merge_int_list(config["dp_list"], [1])
+    config["moe_tp_list"] = _merge_int_list(config["moe_tp_list"], [1, 2, 4, 8])
+    config["moe_ep_list"] = _merge_int_list(config["moe_ep_list"], [1, 2, 4, 8])
 
 
 def _validate_deepseek_v4_model_hardware_support(
@@ -66,6 +163,39 @@ def _validate_deepseek_v4_model_hardware_support(
     )
 
 
+def _validate_megamoe_backend_support(
+    *,
+    model_path: str,
+    model_family: str,
+    backend_name: str,
+    moe_backend: str | None,
+    system_name: str,
+    decode_system_name: str | None,
+) -> None:
+    if moe_backend != "megamoe":
+        return
+    if backend_name != common.BackendName.sglang.value:
+        raise ValueError("moe_backend='megamoe' is currently supported only for the SGLang backend.")
+    if model_family != "DEEPSEEKV4":
+        raise ValueError("moe_backend='megamoe' is currently supported only for DeepSeek-V4 models.")
+    if model_path not in _DEEPSEEK_V4_MEGAMOE_SUPPORTED_MODELS:
+        supported_models = ", ".join(sorted(_DEEPSEEK_V4_MEGAMOE_SUPPORTED_MODELS))
+        raise ValueError(
+            "moe_backend='megamoe' currently has packaged performance data only for DeepSeek-V4-Pro; "
+            f"got model_path={model_path!r}. Supported models: {supported_models}."
+        )
+
+    systems = [system_name]
+    if decode_system_name:
+        systems.append(decode_system_name)
+    non_blackwell = sorted({system for system in systems if not _is_blackwell_system(system)})
+    if non_blackwell:
+        raise ValueError(
+            "moe_backend='megamoe' requires Blackwell-class systems (SM >= 100); "
+            f"non-Blackwell systems: {non_blackwell}."
+        )
+
+
 @dataclass(frozen=True)
 class ConfigLayer:
     name: str
@@ -88,7 +218,7 @@ class ConfigLayer:
 
 @dataclass
 class TaskContext:
-    serving_mode: Literal["agg", "disagg"]
+    serving_mode: Literal["agg", "disagg", "afd"]
     model_path: str
     model_family: str
     system_name: str
@@ -109,6 +239,9 @@ class TaskContext:
     free_gpu_memory_fraction: float | None = None
     max_seq_len: int | None = None
     engine_step_backend: str | None = None
+    image_height: int = 0
+    image_width: int = 0
+    num_images_per_request: int = 1
     profiles: list[str] = field(default_factory=list)
     yaml_patch: dict = field(default_factory=dict)
     yaml_mode: Literal["patch", "replace"] = "patch"
@@ -182,6 +315,22 @@ def _get_database_with_optional_missing_data(
     return get_database(**kwargs)
 
 
+def _config_get(obj: object, key: str, default: Any = None) -> Any:
+    """Read config values without treating DefaultMunch's missing-value sentinel as set."""
+    if isinstance(obj, Mapping):
+        return obj.get(key, default)
+    value = getattr(obj, key, default)
+    if value is DefaultMunch:
+        return default
+    return value
+
+
+def _config_get_or(obj: object, key: str, fallback: Any) -> Any:
+    """Read config values and treat None/missing as unset."""
+    value = _config_get(obj, key, None)
+    return fallback if value is None else value
+
+
 def build_disagg_parallel_lists(
     backend_name: str,
     prefill_system: str,
@@ -209,7 +358,7 @@ def build_disagg_parallel_lists(
         should_enable_pp: Enable pipeline-parallelism candidates (default ``False``).
         prefill_enable_wideep: Override WideEP for prefill (None = use *enable_wideep*).
         decode_enable_wideep: Override WideEP for decode (None = use *enable_wideep*).
-        moe_backend: MoE communication backend (``"deepep_moe"`` or ``None``).
+        moe_backend: MoE backend (``"deepep_moe"``, ``"megamoe"``, or ``None``).
 
     Returns:
         ``(prefill_worker_config, decode_worker_config)`` - two dicts each containing
@@ -280,7 +429,10 @@ def build_disagg_parallel_lists(
                 decode_worker_config["moe_tp_list"] = parallel_config_list
                 decode_worker_config["moe_ep_list"] = parallel_config_list
         elif backend_name == "sglang":
-            if enable_wideep:
+            if moe_backend == "megamoe":
+                prefill_worker_config.update(_sglang_megamoe_parallel_lists(prefill_system, should_enable_pp))
+                decode_worker_config.update(_sglang_megamoe_parallel_lists(decode_system, should_enable_pp))
+            elif enable_wideep:
                 # Inter-node DeepEP (ep >= 8, cross-node)
                 prefill_worker_config["num_gpu_per_worker"] = [8, 16, 32]
                 prefill_worker_config["tp_list"] = [1, 2, 4, 8]
@@ -368,26 +520,87 @@ class TaskConfigFactory:
 
         # On Blackwell, GPT-OSS defaults to w4a8_mxfp4_mxfp8 (MXFP8 activations)
         # for higher tensor core throughput. Profiles applied after this can override.
+        # The three serving modes consume the override from different keys, so
+        # each gets an explicit branch -- collapsing afd into the disagg ``else``
+        # silently lost this promotion (AFD reads ``worker_config``, not the
+        # ``prefill_/decode_worker_config`` keys the disagg branch writes).
         # In disagg mode, prefill and decode may run on different hardware, so only
         # promote the workers that are actually on Blackwell.
-        _blackwell_systems = ("gb200", "gb300", "b200_sxm", "b300_sxm")
         if ctx.backend_name == "trtllm" and ctx.model_path in ("openai/gpt-oss-120b", "openai/gpt-oss-20b"):
             quant_override = {"moe_quant_mode": "w4a8_mxfp4_mxfp8"}
             if ctx.serving_mode == "agg":
-                if ctx.system_name in _blackwell_systems:
+                if _is_blackwell_system(ctx.system_name):
                     _deep_merge(config_dict, {"worker_config": quant_override})
                     applied_layers.append("gptoss-blackwell-mxfp8")
-            else:
+            elif ctx.serving_mode == "afd":
+                # AFD is single-system (A/F pools share ``ctx.system_name``)
+                # and consumes ``worker_config`` -- same shape as agg.
+                # TODO(afd-heterogeneous): once a later phase lets the A-pool
+                # and F-pool run on different hardware (e.g. Hopper-attn +
+                # Blackwell-ffn), ``ctx.system_name`` will no longer
+                # uniquely describe the F-pool. Split this check into
+                # ``a_system_name`` / ``f_system_name`` like the disagg
+                # branch below does for prefill/decode, and promote
+                # ``worker_config.moe_quant_mode`` only when the F-pool
+                # (where the MoE GEMM actually runs) is on Blackwell.
+                if _is_blackwell_system(ctx.system_name):
+                    _deep_merge(config_dict, {"worker_config": quant_override})
+                    applied_layers.append("gptoss-blackwell-mxfp8-afd")
+            elif ctx.serving_mode == "disagg":
                 prefill_system = ctx.system_name
                 decode_system = ctx.decode_system_name or ctx.system_name
                 promoted = {}
-                if prefill_system in _blackwell_systems:
+                if _is_blackwell_system(prefill_system):
                     promoted["prefill_worker_config"] = quant_override
-                if decode_system in _blackwell_systems:
+                if _is_blackwell_system(decode_system):
                     promoted["decode_worker_config"] = quant_override
                 if promoted:
                     _deep_merge(config_dict, promoted)
                     applied_layers.append("gptoss-blackwell-mxfp8")
+
+        # DeepSeek-V4-Pro ships MXFP4 MoE expert weights (I8-packed E2M1 + E8M0
+        # block scales). The fused-MoE kernel sglang runs is hardware-specific:
+        #   - Blackwell (sm100): trtllm-gen MXFP4xMXFP8 -> w4a8_mxfp4_mxfp8_trtllm
+        #   - Hopper    (sm90) : flashinfer cutlass SM90 mixed GEMM, MXFP4 weight x
+        #                        BF16 act -> w4a16_mxfp4_cutlass (weight-only).
+        # NOTE: w4a16_mxfp4 currently has no DSV4 sglang silicon data in the DB
+        # (AIC's w4a16_mxfp4 was GPT-OSS's triton kernel, a different backend than
+        # DSV4's cutlass-sm90), so Hopper modeling is roofline/SOL until DSV4 Hopper
+        # data is collected; the Hopper path may move to w4fp8 later.
+        # Skip when moe_backend == "megamoe": the fused MegaMoE path keys its perf
+        # table on its own quant (w4a8_mxfp4_mxfp8, not the trtllm-gen variant), so
+        # forcing w4a8_mxfp4_mxfp8_trtllm here would miss the megamoe data table.
+        if (
+            ctx.backend_name == "sglang"
+            and ctx.model_path == "deepseek-ai/DeepSeek-V4-Pro"
+            and ctx.moe_backend != "megamoe"
+        ):
+
+            def _dsv4_moe_mode(system_name):
+                if _is_blackwell_system(system_name):
+                    return "w4a8_mxfp4_mxfp8_trtllm"
+                if _is_hopper_system(system_name):
+                    return "w4a16_mxfp4_cutlass"
+                return None
+
+            if ctx.serving_mode == "agg":
+                mode = _dsv4_moe_mode(ctx.system_name)
+                if mode:
+                    _deep_merge(config_dict, {"worker_config": {"moe_quant_mode": mode}})
+                    applied_layers.append(f"dsv4pro-moe-{mode}")
+            else:
+                prefill_system = ctx.system_name
+                decode_system = ctx.decode_system_name or ctx.system_name
+                promoted = {}
+                pm = _dsv4_moe_mode(prefill_system)
+                dm = _dsv4_moe_mode(decode_system)
+                if pm:
+                    promoted["prefill_worker_config"] = {"moe_quant_mode": pm}
+                if dm:
+                    promoted["decode_worker_config"] = {"moe_quant_mode": dm}
+                if promoted:
+                    _deep_merge(config_dict, promoted)
+                    applied_layers.append("dsv4pro-moe-arch")
 
         for profile in ctx.profiles:
             layers = cls.PROFILE_REGISTRY.get(profile)
@@ -417,6 +630,8 @@ class TaskConfigFactory:
             cls._finalize_agg(config, ctx)
         elif ctx.serving_mode == "disagg":
             cls._finalize_disagg(config, ctx)
+        elif ctx.serving_mode == "afd":
+            cls._finalize_afd(config, ctx)
         else:
             raise ValueError(f"Invalid serving mode: {ctx.serving_mode}")
 
@@ -433,6 +648,8 @@ class TaskConfigFactory:
             return [ConfigLayer("agg-defaults", cls._agg_defaults_layer)]
         if ctx.serving_mode == "disagg":
             return [ConfigLayer("disagg-defaults", cls._disagg_defaults_layer)]
+        if ctx.serving_mode == "afd":
+            return [ConfigLayer("afd-defaults", cls._afd_defaults_layer)]
         return []
 
     @staticmethod
@@ -447,6 +664,9 @@ class TaskConfigFactory:
             "runtime_config": {
                 "isl": ctx.isl,
                 "osl": ctx.osl,
+                "image_height": ctx.image_height,
+                "image_width": ctx.image_width,
+                "num_images_per_request": ctx.num_images_per_request,
                 "prefix": ctx.prefix,
                 "ttft": ctx.ttft,
                 "tpot": ctx.tpot,
@@ -500,7 +720,9 @@ class TaskConfigFactory:
                     worker_config["moe_tp_list"] = [1, 2, 4, 8]
                     worker_config["moe_ep_list"] = [1, 2, 4, 8]
             elif ctx.backend_name == "sglang":
-                if ctx.enable_wideep:
+                if ctx.moe_backend == "megamoe":
+                    worker_config.update(_sglang_megamoe_parallel_lists(ctx.system_name, should_enable_pp))
+                elif ctx.enable_wideep:
                     # Inter-node DeepEP (ep >= 8, cross-node)
                     worker_config["num_gpu_per_worker"] = [8, 16, 32, 64]
                     worker_config["tp_list"] = [1, 2, 4, 8]
@@ -533,6 +755,9 @@ class TaskConfigFactory:
                 worker_config["moe_ep_list"] = [1, 2, 4, 8]
             else:
                 raise ValueError(f"Invalid backend: {ctx.backend_name}")
+
+        if _large_pipeline_parallel_worker_defaults_apply(ctx):
+            _include_large_pipeline_parallel_worker(worker_config)
 
         return {
             "is_moe": ctx.is_moe,
@@ -567,6 +792,10 @@ class TaskConfigFactory:
             wc.setdefault("enable_eplb", None)
             wc.setdefault("moe_backend", ctx.moe_backend)
             wc.setdefault("attention_backend", "flashinfer")
+
+        if _large_pipeline_parallel_worker_defaults_apply(ctx):
+            _include_large_pipeline_parallel_worker(prefill_worker_config)
+            _include_large_pipeline_parallel_worker(decode_worker_config)
 
         replica_config = {
             "num_gpu_per_replica": [
@@ -655,6 +884,106 @@ class TaskConfigFactory:
             decode_cfg.num_gpu_per_worker = [num for num in decode_cfg.num_gpu_per_worker if num <= ctx.total_gpus]
             logger.debug("Overwriting num gpu per decode worker to %s", decode_cfg.num_gpu_per_worker)
 
+    @staticmethod
+    def _afd_defaults_layer(ctx: TaskContext) -> dict:
+        """Default configuration for AFD (Attention-FFN Disaggregation) mode.
+
+        AFD is orthogonal to P/D disaggregation — ``phase`` selects whether
+        this session simulates prefill, decode (default), or both.
+
+        Notes on derived fields (intentionally absent from this default
+        layer):
+
+        * ``gpus_per_node`` — single source of truth is
+          ``system_spec['node']['num_gpus_per_node']``; injected at
+          AFDConfig construction in ``run_afd``. Setting it here would
+          let the default (e.g. ``8``) silently mis-shape AFDTransfer /
+          ``n_f_workers`` on systems where the spec says otherwise
+          (e.g. gb200 = 4).
+        * ``tp_f`` — Phase 1 locks F-DP = 1, so
+          ``tp_f == n_f_nodes * gpus_per_node`` is derived in
+          ``AFDConfig.__post_init__``.
+        """
+        return {
+            "afd_config": {
+                "n_a_nodes": 1,
+                "n_f_nodes": 1,
+                "tp_a": 1,
+                "f_moe_ep_size": 1,
+                "a_batch_size": 128,
+                "num_microbatches": 3,
+                "pipeline_model": "optimistic",
+                "comm_overhead_factor": 1.0,
+                "phase": "decode",
+                "combined_with_pd": True,
+                "boundary_on_attn": True,
+            },
+            "worker_config": {
+                "system_name": ctx.system_name,
+                "backend_name": ctx.backend_name,
+                "backend_version": ctx.resolved_backend_version_for(ctx.system_name),
+            },
+        }
+
+    @classmethod
+    def _finalize_afd(cls, config: DefaultMunch, ctx: TaskContext) -> None:
+        """AFD mode finalization: cross-check yaml overrides and resource budget.
+
+        ``gpus_per_node`` is anchored to ``system_spec`` (see
+        ``_afd_defaults_layer``); we look up the spec value here so we
+        can both:
+
+        1. Fail loudly if the user explicitly set
+           ``afd_config.gpus_per_node`` in their yaml patch and it
+           disagrees with the spec (silent mismatch is the real
+           foot-gun; an explicit what-if override remains possible by
+           bumping the spec yaml or asking for a follow-up flag).
+        2. Use the right per-node GPU count when validating
+           ``total_gpus`` against the requested ``(n_a_nodes +
+           n_f_nodes) * gpus_per_node`` budget.
+        """
+        afd_cfg = config.get("afd_config", {})
+
+        spec_gpus_per_node = _lookup_num_gpus_per_node(ctx.system_name)
+
+        user_set_gpus_per_node = (
+            ctx.yaml_patch
+            and isinstance(ctx.yaml_patch.get("afd_config"), dict)
+            and "gpus_per_node" in ctx.yaml_patch["afd_config"]
+        )
+        if user_set_gpus_per_node:
+            user_value = ctx.yaml_patch["afd_config"]["gpus_per_node"]
+            if spec_gpus_per_node is not None and int(user_value) != int(spec_gpus_per_node):
+                raise ValueError(
+                    f"afd_config.gpus_per_node={user_value} from yaml does not match "
+                    f"system_spec['node']['num_gpus_per_node']={spec_gpus_per_node} for "
+                    f"system '{ctx.system_name}'. Remove the override, or update the "
+                    "system spec yaml to match the desired what-if topology."
+                )
+        elif "gpus_per_node" in afd_cfg:
+            # Sanitize the merged config so downstream consumers can't
+            # accidentally re-introduce a stale default.
+            afd_cfg.pop("gpus_per_node", None)
+
+        if ctx.total_gpus is not None and ctx.total_gpus > 0:
+            n_a_nodes = afd_cfg.get("n_a_nodes", 1)
+            n_f_nodes = afd_cfg.get("n_f_nodes", 1)
+            if spec_gpus_per_node is None:
+                logger.debug(
+                    "AFD total_gpus check skipped: could not resolve num_gpus_per_node for system '%s'.",
+                    ctx.system_name,
+                )
+                return
+            total_requested = (n_a_nodes + n_f_nodes) * spec_gpus_per_node
+            if total_requested > ctx.total_gpus:
+                raise ValueError(
+                    f"AFD config requests {total_requested} GPUs "
+                    f"((n_a_nodes={n_a_nodes} + n_f_nodes={n_f_nodes}) * "
+                    f"gpus_per_node={spec_gpus_per_node}), which exceeds "
+                    f"total_gpus={ctx.total_gpus}. Reduce n_a_nodes/n_f_nodes "
+                    f"or increase total_gpus."
+                )
+
 
 _quants = {
     "fp8": {
@@ -737,6 +1066,9 @@ class TaskConfig:
         backend_version: str | None = None,
         isl: int = 4000,
         osl: int = 1000,
+        image_height: int = 0,
+        image_width: int = 0,
+        num_images_per_request: int = 1,
         prefix: int = 0,
         ttft: float = 1000,
         tpot: float = 50,
@@ -812,8 +1144,18 @@ class TaskConfig:
         if enable_wideep and moe_backend is None:
             moe_backend = "deepep_moe"
 
+        model_family = get_model_family(model_path)
+
         _validate_deepseek_v4_model_hardware_support(
             model_path=model_path,
+            system_name=system_name,
+            decode_system_name=decode_system_name,
+        )
+        _validate_megamoe_backend_support(
+            model_path=model_path,
+            model_family=model_family,
+            backend_name=backend_name,
+            moe_backend=moe_backend,
             system_name=system_name,
             decode_system_name=decode_system_name,
         )
@@ -821,13 +1163,16 @@ class TaskConfig:
         ctx = TaskContext(
             serving_mode=serving_mode,
             model_path=model_path,
-            model_family=get_model_family(model_path),
+            model_family=model_family,
             system_name=system_name,
             decode_system_name=decode_system_name,
             backend_name=backend_name,
             backend_version=backend_version,
             isl=isl,
             osl=osl,
+            image_height=image_height,
+            image_width=image_width,
+            num_images_per_request=num_images_per_request,
             prefix=prefix,
             ttft=ttft,
             tpot=tpot,
@@ -901,6 +1246,11 @@ class TaskConfig:
         elif serving_mode == "disagg":
             self._convert_worker_config_to_enum(self.config.prefill_worker_config)
             self._convert_worker_config_to_enum(self.config.decode_worker_config)
+        elif serving_mode == "afd":
+            # AFD worker_config is minimal (system / backend / version); no
+            # quant modes to convert at the worker level — per-side
+            # ModelConfigs are built inside TaskRunner.run_afd().
+            pass
         else:
             raise ValueError(f"Invalid serving mode: {serving_mode}")
 
@@ -911,27 +1261,6 @@ class TaskConfig:
         Check that the task can be run by AIC.
         """
 
-        # fp8_static GEMM mode is currently TRTLLM-only.
-        def _validate_fp8_static(worker_cfg: DefaultMunch, target: str) -> None:
-            gemm_quant_mode = worker_cfg.get("gemm_quant_mode", None)
-            if gemm_quant_mode is None:
-                return
-            mode_name = gemm_quant_mode.name if hasattr(gemm_quant_mode, "name") else str(gemm_quant_mode)
-            if str(mode_name).lower() != common.GEMMQuantMode.fp8_static.name:
-                return
-
-            backend_name = worker_cfg.get("backend_name", None)
-            if str(backend_name).lower() != common.BackendName.trtllm.value:
-                raise ValueError(
-                    f"fp8_static is currently only supported in trtllm backend. we got backend='{backend_name}'."
-                )
-
-        if self.serving_mode == "agg":
-            _validate_fp8_static(self.config.worker_config, "worker_config")
-        elif self.serving_mode == "disagg":
-            _validate_fp8_static(self.config.prefill_worker_config, "prefill_worker_config")
-            _validate_fp8_static(self.config.decode_worker_config, "decode_worker_config")
-
         database_mode_for_validation = getattr(self.config, "database_mode", None)
         allow_missing_data = (
             database_mode_for_validation is not None
@@ -939,6 +1268,7 @@ class TaskConfig:
         )
 
         model_family = get_model_family(self.model_path)
+        model_is_moe = check_is_moe(self.model_path)
         is_deepseek_fam = model_family in ("DEEPSEEK", "KIMIK25")
         is_deepseek_v32 = model_family == "DEEPSEEKV32"
         is_deepseek_v4 = model_family == "DEEPSEEKV4"
@@ -954,14 +1284,9 @@ class TaskConfig:
                 return None
             return value.name if hasattr(value, "name") else str(value)
 
-        def _get_cfg_value(cfg: object, key: str) -> object:
-            if isinstance(cfg, Mapping):
-                return cfg.get(key, None)
-            return getattr(cfg, key, None)
-
         def _load_worker_supported_quant_modes(worker_cfg: object) -> tuple[dict, str, str]:
-            system_name = _get_cfg_value(worker_cfg, "system_name") or self.system_name
-            backend_version = _get_cfg_value(worker_cfg, "backend_version") or self.backend_version
+            system_name = _config_get(worker_cfg, "system_name") or self.system_name
+            backend_version = _config_get(worker_cfg, "backend_version") or self.backend_version
             try:
                 database = _get_database_with_optional_missing_data(
                     system=system_name,
@@ -1005,11 +1330,11 @@ class TaskConfig:
 
         def _resolve_model_quant_modes(worker_cfg: object, worker_name: str) -> None:
             model_config = config.ModelConfig(
-                gemm_quant_mode=_get_cfg_value(worker_cfg, "gemm_quant_mode"),
-                moe_quant_mode=_get_cfg_value(worker_cfg, "moe_quant_mode"),
-                kvcache_quant_mode=_get_cfg_value(worker_cfg, "kvcache_quant_mode"),
-                fmha_quant_mode=_get_cfg_value(worker_cfg, "fmha_quant_mode"),
-                comm_quant_mode=_get_cfg_value(worker_cfg, "comm_quant_mode"),
+                gemm_quant_mode=_config_get(worker_cfg, "gemm_quant_mode"),
+                moe_quant_mode=_config_get(worker_cfg, "moe_quant_mode"),
+                kvcache_quant_mode=_config_get(worker_cfg, "kvcache_quant_mode"),
+                fmha_quant_mode=_config_get(worker_cfg, "fmha_quant_mode"),
+                comm_quant_mode=_config_get(worker_cfg, "comm_quant_mode"),
             )
             # TODO: _apply_model_quant_defaults is only called here. Maybe these two functions should be merged.
             _apply_model_quant_defaults(
@@ -1031,8 +1356,9 @@ class TaskConfig:
             for k, v in quant_modes.items():
                 worker_cfg[k] = v
 
-        enable_wideep = bool(getattr(self.config, "enable_wideep", self.enable_wideep))
-        moe_backend = getattr(self.config, "moe_backend", None)
+        cfg_enable_wideep = _config_get(self.config, "enable_wideep")
+        enable_wideep = bool(self.enable_wideep if cfg_enable_wideep is None else cfg_enable_wideep)
+        moe_backend = _config_get(self.config, "moe_backend") or self.moe_backend
 
         # DeepSeek uses MLA perf tables; others use attention perf tables.
         # vLLM absorbs MLA KV projections into standard attention kernels, so it
@@ -1057,27 +1383,56 @@ class TaskConfig:
         def _validate_worker_config(
             wc: object, *, validate_context: bool, validate_generation: bool, worker_name: str
         ) -> None:
+            explicit_fmha_mode = _config_get(wc, "fmha_quant_mode") is not None
             _resolve_model_quant_modes(wc, worker_name)
             supported, system_name, backend_version = _load_worker_supported_quant_modes(wc)
-            gemm_mode = _to_name(_get_cfg_value(wc, "gemm_quant_mode"))
+            gemm_mode = _to_name(_config_get(wc, "gemm_quant_mode"))
             _supported_or_raise("gemm", gemm_mode, supported, system_name, backend_version)
 
-            moe_mode = _to_name(_get_cfg_value(wc, "moe_quant_mode"))
-            wc_moe_backend = getattr(wc, "moe_backend", None) or moe_backend
-            if self.backend_name == "sglang" and wc_moe_backend == "deepep_moe":
-                if validate_context:
-                    _supported_or_raise("wideep_context_moe", moe_mode, supported, system_name, backend_version)
-                if validate_generation:
-                    _supported_or_raise("wideep_generation_moe", moe_mode, supported, system_name, backend_version)
-            else:
-                _supported_or_raise("moe", moe_mode, supported, system_name, backend_version)
+            moe_mode = _to_name(_config_get(wc, "moe_quant_mode"))
+            wc_moe_backend = _config_get(wc, "moe_backend") or moe_backend
+            if model_is_moe:
+                if self.backend_name == "sglang" and wc_moe_backend == "megamoe":
+                    if not is_deepseek_v4:
+                        raise ValueError("moe_backend='megamoe' is currently supported only for DeepSeek-V4 models.")
+                    if not supported.get("dsv4_megamoe_module"):
+                        raise ValueError(
+                            "moe_backend='megamoe' requires dsv4_megamoe_module performance data for "
+                            f"system='{system_name}', backend='{self.backend_name}', version='{backend_version}'."
+                        )
+                    _supported_or_raise("dsv4_megamoe_module", moe_mode, supported, system_name, backend_version)
+                elif self.backend_name == "sglang" and wc_moe_backend == "deepep_moe":
+                    if validate_context:
+                        _supported_or_raise("wideep_context_moe", moe_mode, supported, system_name, backend_version)
+                    if validate_generation:
+                        _supported_or_raise("wideep_generation_moe", moe_mode, supported, system_name, backend_version)
+                else:
+                    _supported_or_raise("moe", moe_mode, supported, system_name, backend_version)
 
             if validate_context:
-                fmha_mode = _to_name(_get_cfg_value(wc, "fmha_quant_mode"))
+                fmha_mode = _to_name(_config_get(wc, "fmha_quant_mode"))
+                context_modes = supported.get(context_attn_key, []) or []
+                if (
+                    not explicit_fmha_mode
+                    and model_architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
+                    and fmha_mode == common.FMHAQuantMode.fp8.name
+                    and context_modes
+                    and common.FMHAQuantMode.fp8.name not in context_modes
+                    and common.FMHAQuantMode.bfloat16.name in context_modes
+                ):
+                    wc["fmha_quant_mode"] = common.FMHAQuantMode.bfloat16
+                    fmha_mode = common.FMHAQuantMode.bfloat16.name
+                    logger.info(
+                        "Using bfloat16 FMHA for %s because %s/%s %s data does not support fp8",
+                        worker_name,
+                        system_name,
+                        self.backend_name,
+                        context_attn_key,
+                    )
                 _supported_or_raise(context_attn_key, fmha_mode, supported, system_name, backend_version)
 
             if validate_generation:
-                kvcache_mode = _to_name(_get_cfg_value(wc, "kvcache_quant_mode"))
+                kvcache_mode = _to_name(_config_get(wc, "kvcache_quant_mode"))
                 _supported_or_raise(generation_attn_key, kvcache_mode, supported, system_name, backend_version)
 
         # agg/disagg worker configs use the same field names
@@ -1257,6 +1612,9 @@ class TaskRunner:
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
             osl=task_config.runtime_config.osl,
+            image_height=getattr(task_config.runtime_config, "image_height", 0),
+            image_width=getattr(task_config.runtime_config, "image_width", 0),
+            num_images_per_request=getattr(task_config.runtime_config, "num_images_per_request", 1),
             prefix=task_config.runtime_config.prefix,
             ttft=task_config.runtime_config.ttft,
             tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
@@ -1283,12 +1641,15 @@ class TaskRunner:
             )
             return None
         logger.debug("Task %s: Setting up model config", task_config.task_name)
+        task_workload_distribution = _config_get(task_config, "workload_distribution", "power_law")
+        worker_workload_distribution = _config_get(task_config.worker_config, "workload_distribution", None)
         model_config = config.ModelConfig(
             gemm_quant_mode=task_config.worker_config.gemm_quant_mode,
             kvcache_quant_mode=task_config.worker_config.kvcache_quant_mode,
             fmha_quant_mode=task_config.worker_config.fmha_quant_mode,
             moe_quant_mode=task_config.worker_config.moe_quant_mode,
             comm_quant_mode=task_config.worker_config.comm_quant_mode,
+            workload_distribution=worker_workload_distribution or task_workload_distribution,
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
             moe_backend=task_config.moe_backend,  # sglang wideep only
@@ -1348,6 +1709,9 @@ class TaskRunner:
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
             osl=task_config.runtime_config.osl,
+            image_height=getattr(task_config.runtime_config, "image_height", 0),
+            image_width=getattr(task_config.runtime_config, "image_width", 0),
+            num_images_per_request=getattr(task_config.runtime_config, "num_images_per_request", 1),
             prefix=task_config.runtime_config.prefix,
             ttft=task_config.runtime_config.ttft,
             tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
@@ -1358,21 +1722,19 @@ class TaskRunner:
         # Get database mode from config
         database_mode = getattr(task_config, "database_mode", None)
 
-        def _wc_get(wc: object, key: str, fallback):
-            """Read from worker_config; treat None/missing as 'not set'."""
-            val = getattr(wc, key, None)
-            return val if val is not None else fallback
-
         _pwc = task_config.prefill_worker_config
         _dwc = task_config.decode_worker_config
-        prefill_enable_wideep = _wc_get(_pwc, "enable_wideep", task_config.enable_wideep)
-        prefill_enable_eplb = _wc_get(_pwc, "enable_eplb", getattr(task_config, "enable_eplb", False))
-        prefill_moe_backend = _wc_get(_pwc, "moe_backend", task_config.moe_backend)
-        prefill_attention_backend = _wc_get(_pwc, "attention_backend", task_config.attention_backend)
-        decode_enable_wideep = _wc_get(_dwc, "enable_wideep", task_config.enable_wideep)
-        decode_enable_eplb = _wc_get(_dwc, "enable_eplb", getattr(task_config, "enable_eplb", False))
-        decode_moe_backend = _wc_get(_dwc, "moe_backend", task_config.moe_backend)
-        decode_attention_backend = _wc_get(_dwc, "attention_backend", task_config.attention_backend)
+        prefill_enable_wideep = _config_get_or(_pwc, "enable_wideep", task_config.enable_wideep)
+        prefill_enable_eplb = _config_get_or(_pwc, "enable_eplb", getattr(task_config, "enable_eplb", False))
+        prefill_moe_backend = _config_get_or(_pwc, "moe_backend", task_config.moe_backend)
+        prefill_attention_backend = _config_get_or(_pwc, "attention_backend", task_config.attention_backend)
+        task_workload_distribution = _config_get(task_config, "workload_distribution", "power_law")
+        prefill_workload_distribution = _config_get_or(_pwc, "workload_distribution", task_workload_distribution)
+        decode_enable_wideep = _config_get_or(_dwc, "enable_wideep", task_config.enable_wideep)
+        decode_enable_eplb = _config_get_or(_dwc, "enable_eplb", getattr(task_config, "enable_eplb", False))
+        decode_moe_backend = _config_get_or(_dwc, "moe_backend", task_config.moe_backend)
+        decode_attention_backend = _config_get_or(_dwc, "attention_backend", task_config.attention_backend)
+        decode_workload_distribution = _config_get_or(_dwc, "workload_distribution", task_workload_distribution)
 
         logger.debug("Task %s: Setting up prefill database", task_config.task_name)
         try:
@@ -1399,6 +1761,7 @@ class TaskRunner:
             fmha_quant_mode=task_config.prefill_worker_config.fmha_quant_mode,
             moe_quant_mode=task_config.prefill_worker_config.moe_quant_mode,
             comm_quant_mode=task_config.prefill_worker_config.comm_quant_mode,
+            workload_distribution=prefill_workload_distribution,
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
             moe_backend=prefill_moe_backend,
@@ -1461,6 +1824,7 @@ class TaskRunner:
             fmha_quant_mode=task_config.decode_worker_config.fmha_quant_mode,
             moe_quant_mode=task_config.decode_worker_config.moe_quant_mode,
             comm_quant_mode=task_config.decode_worker_config.comm_quant_mode,
+            workload_distribution=decode_workload_distribution,
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
             moe_backend=decode_moe_backend,
@@ -1546,6 +1910,110 @@ class TaskRunner:
         )
         return {"pareto_df": result_df}
 
+    def run_afd(self, task_config: DefaultMunch) -> dict[str, pd.DataFrame | None]:
+        """Run AFD (Attention-FFN Disaggregated) estimation via TaskConfig.
+
+        Unlike agg/disagg, AFD runs a single-point estimation using the
+        AFDInferenceSession (no Pareto sweep in this baseline).
+
+        The phase of the simulation — ``"prefill"``, ``"decode"``, or
+        ``"both"`` — is picked up from ``afd_config.phase``.  This makes AFD
+        orthogonal to P/D disaggregation: a user can model a P-only, D-only,
+        or combined AFD deployment with the same session.
+        """
+        from aiconfigurator.sdk.config import AFDConfig, ModelConfig, RuntimeConfig
+        from aiconfigurator.sdk.inference_session import AFDInferenceSession
+
+        logger.debug("Task %s: Setting up AFD config", task_config.task_name)
+        afd_cfg_dict = task_config.afd_config
+
+        # Load the database first so we can pull ``gpus_per_node`` from
+        # the authoritative system_spec; ``AFDConfig`` rejects the
+        # default-sentinel path so this ordering is enforced by design.
+        worker_cfg = task_config.worker_config
+        try:
+            database_mode = getattr(task_config, "database_mode", None)
+            database = self._get_database(
+                system=worker_cfg.system_name,
+                backend=worker_cfg.backend_name,
+                version=worker_cfg.backend_version,
+                database_mode=database_mode,
+            )
+        except Exception:
+            logger.exception("Error getting database for AFD task")
+            return None
+
+        from aiconfigurator.sdk.backends.factory import get_backend
+
+        backend = get_backend(worker_cfg.backend_name)
+
+        gpus_per_node = int(database.system_spec["node"]["num_gpus_per_node"])
+
+        afd_config = AFDConfig(
+            n_a_nodes=int(afd_cfg_dict.get("n_a_nodes", 1)),
+            n_f_nodes=int(afd_cfg_dict.get("n_f_nodes", 1)),
+            gpus_per_node=gpus_per_node,
+            tp_a=int(afd_cfg_dict.get("tp_a", 1)),
+            # tp_f is derived inside AFDConfig (Phase 1: F-DP=1); not
+            # threaded through from yaml. ``_finalize_afd`` is
+            # responsible for cross-checking any explicit yaml override.
+            f_moe_ep_size=int(afd_cfg_dict.get("f_moe_ep_size", 1)),
+            a_batch_size=int(afd_cfg_dict.get("a_batch_size", 128)),
+            num_microbatches=int(afd_cfg_dict.get("num_microbatches", 3)),
+            pipeline_model=str(afd_cfg_dict.get("pipeline_model", "optimistic")),
+            comm_overhead_factor=float(afd_cfg_dict.get("comm_overhead_factor", 1.0)),
+            phase=str(afd_cfg_dict.get("phase", "decode")),
+            combined_with_pd=bool(afd_cfg_dict.get("combined_with_pd", True)),
+            boundary_on_attn=bool(afd_cfg_dict.get("boundary_on_attn", True)),
+        )
+
+        runtime_config = RuntimeConfig(
+            isl=task_config.runtime_config.isl,
+            osl=task_config.runtime_config.osl,
+            batch_size=afd_config.n_a_workers * afd_config.a_batch_size,
+        )
+
+        # On the F-Worker, tp * attention_dp must equal moe_tp * moe_ep; since
+        # we keep attention_dp=1 on the F-side, moe_tp = tp_f / f_moe_ep_size.
+        if afd_config.f_moe_ep_size <= 0 or afd_config.tp_f % afd_config.f_moe_ep_size != 0:
+            raise ValueError(
+                f"f_moe_ep_size ({afd_config.f_moe_ep_size}) must be a positive divisor "
+                f"of tp_f ({afd_config.tp_f}) so that f_moe_tp is an integer."
+            )
+        f_moe_tp = afd_config.tp_f // afd_config.f_moe_ep_size
+
+        a_model_config = ModelConfig(
+            tp_size=afd_config.tp_a,
+            pp_size=1,
+            moe_tp_size=afd_config.tp_a,
+            moe_ep_size=1,
+            attention_dp_size=1,
+        )
+        f_model_config = ModelConfig(
+            tp_size=afd_config.tp_f,
+            pp_size=1,
+            moe_tp_size=f_moe_tp,
+            moe_ep_size=afd_config.f_moe_ep_size,
+            attention_dp_size=1,
+        )
+
+        session = AFDInferenceSession(
+            model_path=task_config.model_path,
+            a_model_config=a_model_config,
+            f_model_config=f_model_config,
+            database=database,
+            backend=backend,
+            afd_config=afd_config,
+        )
+        summary = session.run_afd(
+            runtime_config,
+            phase=afd_config.phase,
+            free_gpu_memory_fraction=getattr(task_config, "free_gpu_memory_fraction", None),
+            max_seq_len=getattr(task_config, "max_seq_len", None),
+        )
+        result_df = summary.get_summary_df()
+        return {"pareto_df": result_df}
+
     def run(
         self,
         task_config: TaskConfig,
@@ -1565,14 +2033,36 @@ class TaskRunner:
                 result = self.run_agg(task_config.config)
             elif serving_mode == "disagg":
                 result = self.run_disagg(task_config.config, autoscale=autoscale)
+            elif serving_mode == "afd":
+                if autoscale:
+                    raise ValueError("autoscale mode is not supported for afd serving mode.")
+                result = self.run_afd(task_config.config)
             else:
                 raise ValueError(f"Invalid serving mode: {serving_mode}")
-        except Exception:
-            logger.exception(
-                "Error running pareto analysis for %s in %s mode",
+        except NoFeasibleConfigError as exc:
+            logger.warning(
+                "No feasible configuration found for %s in %s mode: %s",
                 task_config.task_name,
                 serving_mode,
+                exc,
             )
+            result = None
+            raise
+        except Exception as exc:
+            if has_perf_data_not_available_cause(exc):
+                logger.log(
+                    logging.ERROR,
+                    "Error running pareto analysis for %s in %s mode: %s",
+                    task_config.task_name,
+                    serving_mode,
+                    exc,
+                )
+            else:
+                logger.exception(
+                    "Error running pareto analysis for %s in %s mode",
+                    task_config.task_name,
+                    serving_mode,
+                )
             result = None
             raise
 

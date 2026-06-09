@@ -12,11 +12,20 @@ use csv::StringRecord;
 
 use crate::AicError;
 
+// Prefer exact MoE distribution matches; uniform is a cheap fallback, while
+// mismatched shaped distributions should be selected only when closer overall.
+const DIST_PENALTY_SAME: f64 = 0.0;
+const DIST_PENALTY_UNIFORM: f64 = 0.05;
+const DIST_PENALTY_OTHER: f64 = 0.25;
+
 #[derive(Clone, Debug)]
 pub(crate) struct PerfDatabase {
+    system: SystemSpec,
     gemm: Vec<GemmPoint>,
     context_attention: Vec<ContextAttentionPoint>,
     generation_attention: Vec<GenerationAttentionPoint>,
+    custom_allreduce: Vec<CustomAllReducePoint>,
+    nccl: Vec<NcclPoint>,
     moe: Vec<MoePoint>,
     context_mla: Vec<ContextMlaPoint>,
     generation_mla: Vec<GenerationMlaPoint>,
@@ -28,6 +37,8 @@ struct QueryCache {
     gemm: HashMap<(String, u32, u32, u32), f64>,
     context_attention: HashMap<(String, String, u32, u32, u32, u32, u32, u32), f64>,
     generation_attention: HashMap<(String, u32, u32, u32, u32, u32), f64>,
+    custom_allreduce: HashMap<(u32, u64), f64>,
+    nccl: HashMap<(String, String, u32, u64), f64>,
     moe: HashMap<(String, u32, u32, u32, u32, u32, u32, u32, String), Option<f64>>,
     context_mla: HashMap<(String, String, u32, u32, u32), Option<f64>>,
     generation_mla: HashMap<(String, u32, u32, u32), Option<f64>>,
@@ -41,26 +52,42 @@ impl PerfDatabase {
         backend_version: Option<&str>,
     ) -> Result<Self, AicError> {
         let system_path = systems_root.join(format!("{system_name}.yaml"));
-        let data_dir = read_data_dir(&system_path)?;
-        let backend_root = systems_root.join(data_dir).join(backend);
+        let system = read_system_spec(&system_path)?;
+        let backend_root = systems_root.join(&system.data_dir).join(backend);
         let version_path = resolve_backend_version(&backend_root, backend_version)?;
 
         let gemm_path = version_path.join("gemm_perf.txt");
         let context_attention_path = version_path.join("context_attention_perf.txt");
         let generation_attention_path = version_path.join("generation_attention_perf.txt");
+        let custom_allreduce_path = version_path.join("custom_allreduce_perf.txt");
+        let nccl_path = systems_root
+            .join(&system.data_dir)
+            .join("nccl")
+            .join(&system.nccl_version)
+            .join("nccl_perf.txt");
         let moe_path = version_path.join("moe_perf.txt");
         let context_mla_path = version_path.join("context_mla_perf.txt");
         let generation_mla_path = version_path.join("generation_mla_perf.txt");
 
         Ok(Self {
+            system,
             gemm: load_gemm_points(&gemm_path)?,
             context_attention: load_context_attention_points(&context_attention_path)?,
             generation_attention: load_generation_attention_points(&generation_attention_path)?,
+            custom_allreduce: load_optional_custom_allreduce_points(&custom_allreduce_path)?,
+            nccl: load_optional_nccl_points(&nccl_path)?,
             moe: load_optional_moe_points(&moe_path)?,
             context_mla: load_optional_context_mla_points(&context_mla_path)?,
             generation_mla: load_optional_generation_mla_points(&generation_mla_path)?,
             query_cache: Arc::new(Mutex::new(QueryCache::default())),
         })
+    }
+
+    // TODO(remove-after-rust-migration): parity check/benchmark-only cache reset.
+    pub(crate) fn clear_query_cache(&self) {
+        if let Ok(mut cache) = self.query_cache.lock() {
+            *cache = QueryCache::default();
+        }
     }
 
     pub(crate) fn query_gemm(&self, quant: &str, m: u32, n: u32, k: u32) -> Result<f64, AicError> {
@@ -69,6 +96,31 @@ impl PerfDatabase {
             if let Some(latency) = cache.gemm.get(&key) {
                 return Ok(*latency);
             }
+        }
+
+        let mut same_shape_points = Vec::new();
+        let mut same_quant_points = Vec::new();
+        for point in self
+            .gemm
+            .iter()
+            .filter(|point| point.quant == quant && point.n == n && point.k == k)
+        {
+            same_shape_points.push((point.m, point.latency_ms));
+        }
+        for point in self.gemm.iter().filter(|point| point.quant == quant) {
+            same_quant_points.push((point.m, point.n, point.k, point.latency_ms));
+        }
+        if let Some(latency) = interpolate_1d_latency(&same_shape_points, m) {
+            if let Ok(mut cache) = self.query_cache.lock() {
+                cache.gemm.insert(key, latency);
+            }
+            return Ok(latency);
+        }
+        if let Some(latency) = interpolate_3d_latency(&same_quant_points, m, n, k) {
+            if let Ok(mut cache) = self.query_cache.lock() {
+                cache.gemm.insert(key, latency);
+            }
+            return Ok(latency);
         }
 
         let mut best: Option<(f64, f64)> = None;
@@ -120,6 +172,9 @@ impl PerfDatabase {
 
         let full_sequence_tokens = sequence_tokens.saturating_add(prefix_tokens);
         let query_kv_heads = normalized_kv_heads(num_heads, num_kv_heads);
+        let mut same_heads_points = Vec::new();
+        let mut same_shape_batch_points = Vec::new();
+        let mut same_shape_sequence_points = Vec::new();
         let mut best: Option<(f64, f64)> = None;
 
         for point in self.context_attention.iter().filter(|point| {
@@ -129,6 +184,15 @@ impl PerfDatabase {
                 && point.head_dim == head_dim
                 && point.window_size == 0
         }) {
+            if point.num_heads == num_heads {
+                same_heads_points.push((point.sequence_tokens, point.batch_size, point.latency_ms));
+            }
+            if point.num_heads == num_heads && point.sequence_tokens == full_sequence_tokens {
+                same_shape_batch_points.push((point.batch_size, point.latency_ms));
+            }
+            if point.num_heads == num_heads && point.batch_size == batch_size {
+                same_shape_sequence_points.push((point.sequence_tokens, point.latency_ms));
+            }
             let score = relative_distance(point.batch_size, batch_size)
                 + relative_distance(point.sequence_tokens, full_sequence_tokens)
                 + relative_distance(point.num_heads, num_heads);
@@ -137,7 +201,11 @@ impl PerfDatabase {
             }
         }
 
-        let latency = best.map(|(_, latency)| latency).ok_or_else(|| {
+        let latency = interpolate_2d_latency(&same_heads_points, full_sequence_tokens, batch_size)
+            .or_else(|| interpolate_1d_latency(&same_shape_batch_points, batch_size))
+            .or_else(|| interpolate_1d_latency(&same_shape_sequence_points, full_sequence_tokens))
+            .or_else(|| best.map(|(_, latency)| latency))
+            .ok_or_else(|| {
             AicError::PerfDatabase(format!(
                 "no context-attention perf point for fmha_quant={fmha_quant}, kv_cache_quant={kv_cache_quant}, b={batch_size}, s={full_sequence_tokens}, prefix={prefix_tokens}, n={num_heads}, n_kv={num_kv_heads}, head_dim={head_dim}"
             ))
@@ -180,6 +248,9 @@ impl PerfDatabase {
         }
 
         let query_kv_heads = normalized_kv_heads(num_heads, num_kv_heads);
+        let mut same_heads_points = Vec::new();
+        let mut same_shape_batch_points = Vec::new();
+        let mut same_shape_sequence_points = Vec::new();
         let mut best: Option<(f64, f64)> = None;
 
         for point in self.generation_attention.iter().filter(|point| {
@@ -188,6 +259,15 @@ impl PerfDatabase {
                 && point.head_dim == head_dim
                 && point.window_size == 0
         }) {
+            if point.num_heads == num_heads {
+                same_heads_points.push((point.batch_size, point.sequence_tokens, point.latency_ms));
+            }
+            if point.num_heads == num_heads && point.sequence_tokens == sequence_tokens {
+                same_shape_batch_points.push((point.batch_size, point.latency_ms));
+            }
+            if point.num_heads == num_heads && point.batch_size == batch_size {
+                same_shape_sequence_points.push((point.sequence_tokens, point.latency_ms));
+            }
             let score = relative_distance(point.batch_size, batch_size)
                 + relative_distance(point.sequence_tokens, sequence_tokens)
                 + relative_distance(point.num_heads, num_heads);
@@ -196,7 +276,13 @@ impl PerfDatabase {
             }
         }
 
-        let latency = best.map(|(_, latency)| latency).ok_or_else(|| {
+        let sampled_latency =
+            average_generation_attention_latency(&same_heads_points, batch_size, sequence_tokens);
+        let latency = sampled_latency
+            .or_else(|| interpolate_1d_latency(&same_shape_batch_points, batch_size))
+            .or_else(|| interpolate_1d_latency(&same_shape_sequence_points, sequence_tokens))
+            .or_else(|| best.map(|(_, latency)| latency))
+            .ok_or_else(|| {
             AicError::PerfDatabase(format!(
                 "no generation-attention perf point for kv_cache_quant={kv_cache_quant}, b={batch_size}, s={sequence_tokens}, n={num_heads}, n_kv={num_kv_heads}, head_dim={head_dim}"
             ))
@@ -205,6 +291,154 @@ impl PerfDatabase {
             cache.generation_attention.insert(key, latency);
         }
         Ok(latency)
+    }
+
+    pub(crate) fn query_mem_op(&self, mem_bytes: u64) -> f64 {
+        (mem_bytes as f64 / (self.system.mem_bw * self.system.mem_bw_empirical_scaling_factor)
+            + self.system.mem_empirical_constant_latency)
+            * 1000.0
+    }
+
+    pub(crate) fn query_p2p(&self, message_bytes: u64) -> f64 {
+        (message_bytes as f64 / self.system.inter_node_bw + self.system.p2p_latency) * 1000.0
+    }
+
+    pub(crate) fn query_custom_allreduce(&self, tp_size: u32, size: u64) -> f64 {
+        if tp_size <= 1 {
+            return 0.0;
+        }
+        let key = (tp_size, size);
+        if let Ok(cache) = self.query_cache.lock() {
+            if let Some(latency) = cache.custom_allreduce.get(&key) {
+                return *latency;
+            }
+        }
+
+        let effective_tp = tp_size.min(self.system.num_gpus_per_node.max(1));
+        let mut points = Vec::new();
+        for point in self
+            .custom_allreduce
+            .iter()
+            .filter(|point| point.tp_size == effective_tp)
+        {
+            points.push((point.message_size, point.latency_ms));
+        }
+        let latency = interpolate_1d_latency_u64(&points, size)
+            .map(|latency| {
+                self.scale_collective_latency_for_gpu_count(latency, effective_tp, tp_size)
+            })
+            .unwrap_or_else(|| self.custom_allreduce_empirical(tp_size, size));
+        if let Ok(mut cache) = self.query_cache.lock() {
+            cache.custom_allreduce.insert(key, latency);
+        }
+        latency
+    }
+
+    pub(crate) fn query_nccl(&self, quant: &str, num_gpus: u32, operation: &str, size: u64) -> f64 {
+        if num_gpus <= 1 {
+            return 0.0;
+        }
+        let key = (quant.to_string(), operation.to_string(), num_gpus, size);
+        if let Ok(cache) = self.query_cache.lock() {
+            if let Some(latency) = cache.nccl.get(&key) {
+                return *latency;
+            }
+        }
+
+        let mut available_gpu_counts = self
+            .nccl
+            .iter()
+            .filter(|point| point.quant == quant && point.operation == operation)
+            .map(|point| point.num_gpus)
+            .collect::<Vec<_>>();
+        available_gpu_counts.sort_unstable();
+        available_gpu_counts.dedup();
+        let effective_gpus = available_gpu_counts
+            .iter()
+            .copied()
+            .filter(|count| *count <= num_gpus)
+            .max()
+            .or_else(|| available_gpu_counts.first().copied());
+
+        let latency = effective_gpus
+            .and_then(|effective_gpus| {
+                let mut points = Vec::new();
+                for point in self.nccl.iter().filter(|point| {
+                    point.quant == quant
+                        && point.operation == operation
+                        && point.num_gpus == effective_gpus
+                }) {
+                    points.push((point.message_size, point.latency_ms));
+                }
+                interpolate_1d_latency_u64(&points, size).map(|latency| {
+                    if num_gpus > effective_gpus && effective_gpus > 1 {
+                        let max_bw = self.p2p_bandwidth(effective_gpus);
+                        let target_bw = self.p2p_bandwidth(num_gpus);
+                        latency
+                            * collective_gpu_count_scale(effective_gpus, num_gpus)
+                            * (max_bw / target_bw)
+                    } else {
+                        latency
+                    }
+                })
+            })
+            .unwrap_or_else(|| self.nccl_empirical(quant, num_gpus, operation, size));
+        if let Ok(mut cache) = self.query_cache.lock() {
+            cache.nccl.insert(key, latency);
+        }
+        latency
+    }
+
+    fn custom_allreduce_empirical(&self, tp_size: u32, size: u64) -> f64 {
+        if tp_size <= 1 {
+            return 0.0;
+        }
+        let tp = f64::from(tp_size);
+        let p2p_bw = if tp_size <= self.system.num_gpus_per_node {
+            self.system.intra_node_bw
+        } else {
+            self.system.inter_node_bw
+        };
+        let sol_ms = 2.0 * size as f64 * 2.0 / tp * (tp - 1.0) / p2p_bw * 1000.0;
+        sol_ms / 0.8
+    }
+
+    fn nccl_empirical(&self, quant: &str, num_gpus: u32, operation: &str, size: u64) -> f64 {
+        let dtype_bytes = match quant {
+            "fp8" | "fp8_block" | "int8" => 1.0,
+            "nvfp4" | "fp4" => 0.5,
+            _ => 2.0,
+        };
+        let multiplier = if operation == "all_reduce" { 2.0 } else { 1.0 };
+        let sol_ms = multiplier * dtype_bytes * size as f64 * f64::from(num_gpus.saturating_sub(1))
+            / f64::from(num_gpus.max(1))
+            / self.p2p_bandwidth(num_gpus)
+            * 1000.0;
+        sol_ms / 0.8
+    }
+
+    fn p2p_bandwidth(&self, num_gpus: u32) -> f64 {
+        if num_gpus <= self.system.num_gpus_per_node {
+            self.system.intra_node_bw
+        } else {
+            self.system.inter_node_bw
+        }
+    }
+
+    fn scale_collective_latency_for_gpu_count(
+        &self,
+        latency: f64,
+        measured_gpus: u32,
+        requested_gpus: u32,
+    ) -> f64 {
+        if requested_gpus <= measured_gpus || measured_gpus <= 1 {
+            return latency;
+        }
+        let measured_bw = self.p2p_bandwidth(measured_gpus);
+        let requested_bw = self.p2p_bandwidth(requested_gpus);
+        latency
+            * collective_gpu_count_scale(measured_gpus, requested_gpus)
+            * (measured_bw / requested_bw)
     }
 
     pub(crate) fn query_moe(
@@ -236,14 +470,24 @@ impl PerfDatabase {
             }
         }
 
+        let requested_distribution_available = self
+            .moe
+            .iter()
+            .any(|point| point.quant == quant && point.distribution == distribution);
+        let used_distribution = if requested_distribution_available {
+            distribution
+        } else {
+            "uniform"
+        };
+        let mut same_shape_points = Vec::new();
         let mut best: Option<(f64, f64)> = None;
         for point in self.moe.iter().filter(|point| point.quant == quant) {
-            let distribution_penalty = if point.distribution == distribution {
-                0.0
+            let distribution_penalty = if point.distribution == used_distribution {
+                DIST_PENALTY_SAME
             } else if point.distribution == "uniform" {
-                0.05
+                DIST_PENALTY_UNIFORM
             } else {
-                0.25
+                DIST_PENALTY_OTHER
             };
             let score = distribution_penalty
                 + relative_distance(point.num_tokens, num_tokens)
@@ -256,8 +500,19 @@ impl PerfDatabase {
             if best.map_or(true, |(best_score, _)| score < best_score) {
                 best = Some((score, point.latency_ms));
             }
+            if point.distribution == used_distribution
+                && point.hidden_size == hidden_size
+                && point.inter_size == inter_size
+                && point.top_k == top_k
+                && point.num_experts == num_experts
+                && point.moe_tp_size == moe_tp_size
+                && point.moe_ep_size == moe_ep_size
+            {
+                same_shape_points.push((point.num_tokens, point.latency_ms));
+            }
         }
-        let latency = best.map(|(_, latency)| latency);
+        let latency = interpolate_1d_latency(&same_shape_points, num_tokens)
+            .or_else(|| best.map(|(_, latency)| latency));
         if let Ok(mut cache) = self.query_cache.lock() {
             cache.moe.insert(key, latency);
         }
@@ -410,25 +665,177 @@ struct GenerationMlaPoint {
     latency_ms: f64,
 }
 
-fn read_data_dir(system_path: &Path) -> Result<PathBuf, AicError> {
+#[derive(Clone, Debug)]
+struct CustomAllReducePoint {
+    tp_size: u32,
+    message_size: u64,
+    latency_ms: f64,
+}
+
+#[derive(Clone, Debug)]
+struct NcclPoint {
+    quant: String,
+    operation: String,
+    num_gpus: u32,
+    message_size: u64,
+    latency_ms: f64,
+}
+
+#[derive(Clone, Debug)]
+struct SystemSpec {
+    data_dir: PathBuf,
+    nccl_version: String,
+    mem_bw: f64,
+    mem_bw_empirical_scaling_factor: f64,
+    mem_empirical_constant_latency: f64,
+    num_gpus_per_node: u32,
+    inter_node_bw: f64,
+    intra_node_bw: f64,
+    p2p_latency: f64,
+}
+
+fn read_system_spec(system_path: &Path) -> Result<SystemSpec, AicError> {
     let text = fs::read_to_string(system_path).map_err(|source| AicError::Io {
         path: system_path.to_path_buf(),
         source,
     })?;
+    let mut data_dir = None;
+    let mut nccl_version = None;
+    let mut section = "";
+    let mut mem_bw = None;
+    let mut mem_bw_empirical_scaling_factor = None;
+    let mut mem_empirical_constant_latency = None;
+    let mut num_gpus_per_node = None;
+    let mut inter_node_bw = None;
+    let mut intra_node_bw = None;
+    let mut p2p_latency = None;
+
     for line in text.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        let Some(value) = line.strip_prefix("data_dir:") else {
+        let raw = line.split('#').next().unwrap_or("");
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if !raw.starts_with(' ') && line.ends_with(':') {
+            section = line.trim_end_matches(':');
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("data_dir:") {
+            data_dir = Some(PathBuf::from(clean_yaml_scalar(value)));
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
             continue;
         };
-        let value = value.trim().trim_matches('"').trim_matches('\'');
-        if !value.is_empty() {
-            return Ok(PathBuf::from(value));
+        let value = clean_yaml_scalar(value);
+        match (section, name.trim()) {
+            ("gpu", "mem_bw") => {
+                mem_bw = Some(parse_required_yaml_f64(system_path, "gpu.mem_bw", &value)?)
+            }
+            ("gpu", "mem_bw_empirical_scaling_factor") => {
+                mem_bw_empirical_scaling_factor = parse_yaml_f64(&value)
+            }
+            ("gpu", "mem_empirical_constant_latency") => {
+                mem_empirical_constant_latency = parse_yaml_f64(&value)
+            }
+            ("node", "num_gpus_per_node") => {
+                num_gpus_per_node = Some(parse_required_yaml_u32(
+                    system_path,
+                    "node.num_gpus_per_node",
+                    &value,
+                )?)
+            }
+            ("node", "inter_node_bw") => {
+                inter_node_bw = Some(parse_required_yaml_f64(
+                    system_path,
+                    "node.inter_node_bw",
+                    &value,
+                )?)
+            }
+            ("node", "intra_node_bw") => {
+                intra_node_bw = Some(parse_required_yaml_f64(
+                    system_path,
+                    "node.intra_node_bw",
+                    &value,
+                )?)
+            }
+            ("node", "p2p_latency") => p2p_latency = parse_yaml_f64(&value),
+            ("misc", "nccl_version") => nccl_version = Some(value),
+            _ => {}
         }
     }
-    Err(AicError::PerfDatabase(format!(
-        "missing data_dir in system file {}",
+    Ok(SystemSpec {
+        data_dir: data_dir.ok_or_else(|| {
+            AicError::PerfDatabase(format!(
+                "missing data_dir in system file {}",
+                system_path.display()
+            ))
+        })?,
+        nccl_version: nccl_version.unwrap_or_default(),
+        mem_bw: require_system_field(system_path, "gpu.mem_bw", mem_bw)?,
+        mem_bw_empirical_scaling_factor: mem_bw_empirical_scaling_factor.unwrap_or(1.0),
+        mem_empirical_constant_latency: mem_empirical_constant_latency.unwrap_or(0.0),
+        num_gpus_per_node: require_system_field(
+            system_path,
+            "node.num_gpus_per_node",
+            num_gpus_per_node,
+        )?,
+        inter_node_bw: require_system_field(system_path, "node.inter_node_bw", inter_node_bw)?,
+        intra_node_bw: require_system_field(system_path, "node.intra_node_bw", intra_node_bw)?,
+        p2p_latency: p2p_latency.unwrap_or(0.0),
+    })
+}
+
+fn clean_yaml_scalar(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string()
+}
+
+fn parse_yaml_f64(value: &str) -> Option<f64> {
+    value.split_whitespace().next()?.parse::<f64>().ok()
+}
+
+fn parse_required_yaml_f64(system_path: &Path, field: &str, value: &str) -> Result<f64, AicError> {
+    value
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| missing_system_field_error(system_path, field))?
+        .parse::<f64>()
+        .map_err(|_| invalid_system_field_error(system_path, field, value))
+}
+
+fn parse_required_yaml_u32(system_path: &Path, field: &str, value: &str) -> Result<u32, AicError> {
+    value
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| missing_system_field_error(system_path, field))?
+        .parse::<u32>()
+        .map_err(|_| invalid_system_field_error(system_path, field, value))
+}
+
+fn require_system_field<T>(
+    system_path: &Path,
+    field: &str,
+    value: Option<T>,
+) -> Result<T, AicError> {
+    value.ok_or_else(|| missing_system_field_error(system_path, field))
+}
+
+fn missing_system_field_error(system_path: &Path, field: &str) -> AicError {
+    AicError::PerfDatabase(format!(
+        "missing {field} in system file {}",
         system_path.display()
-    )))
+    ))
+}
+
+fn invalid_system_field_error(system_path: &Path, field: &str, value: &str) -> AicError {
+    AicError::PerfDatabase(format!(
+        "invalid {field} value {value:?} in system file {}",
+        system_path.display()
+    ))
 }
 
 fn resolve_backend_version(
@@ -510,6 +917,207 @@ fn version_number_runs(version: &str) -> Vec<u64> {
         numbers.push(number);
     }
     numbers
+}
+
+fn interpolate_1d_latency(points: &[(u32, f64)], query: u32) -> Option<f64> {
+    if points.is_empty() {
+        return None;
+    }
+
+    let mut sorted = points.to_vec();
+    sorted.sort_by_key(|(x, _)| *x);
+    sorted.dedup_by_key(|(x, _)| *x);
+
+    if let Some((_, latency)) = sorted.iter().find(|(x, _)| *x == query) {
+        return Some(*latency);
+    }
+    if sorted.len() < 2 {
+        return None;
+    }
+
+    let (left, right) = if query < sorted[0].0 {
+        (sorted[0], sorted[1])
+    } else if query > sorted[sorted.len() - 1].0 {
+        (sorted[sorted.len() - 2], sorted[sorted.len() - 1])
+    } else {
+        let mut bracket = None;
+        for window in sorted.windows(2) {
+            if query >= window[0].0 && query <= window[1].0 {
+                bracket = Some((window[0], window[1]));
+                break;
+            }
+        }
+        bracket?
+    };
+
+    let (x0, y0) = (f64::from(left.0), left.1);
+    let (x1, mut y1) = (f64::from(right.0), right.1);
+    let x = f64::from(query);
+
+    if x0 == x1 {
+        return Some(y0);
+    }
+    // When extrapolating with a negative measured slope, flatten the line to
+    // avoid nonsensical latency estimates; keep this in sync with the u64 path.
+    if (x0 - x1) * (y0 - y1) < 0.0 && (x - x0) * (x - x1) > 0.0 {
+        y1 = y0;
+    }
+    Some(y0 + (y1 - y0) / (x1 - x0) * (x - x0))
+}
+
+fn interpolate_1d_latency_u64(points: &[(u64, f64)], query: u64) -> Option<f64> {
+    if points.is_empty() {
+        return None;
+    }
+
+    let mut sorted = points.to_vec();
+    sorted.sort_by_key(|(x, _)| *x);
+    sorted.dedup_by_key(|(x, _)| *x);
+
+    if let Some((_, latency)) = sorted.iter().find(|(x, _)| *x == query) {
+        return Some(*latency);
+    }
+    if sorted.len() < 2 {
+        return None;
+    }
+
+    let (left, right) = if query < sorted[0].0 {
+        (sorted[0], sorted[1])
+    } else if query > sorted[sorted.len() - 1].0 {
+        (sorted[sorted.len() - 2], sorted[sorted.len() - 1])
+    } else {
+        let mut bracket = None;
+        for window in sorted.windows(2) {
+            if query >= window[0].0 && query <= window[1].0 {
+                bracket = Some((window[0], window[1]));
+                break;
+            }
+        }
+        bracket?
+    };
+
+    let (x0, y0) = (left.0 as f64, left.1);
+    let (x1, mut y1) = (right.0 as f64, right.1);
+    let x = query as f64;
+
+    if x0 == x1 {
+        return Some(y0);
+    }
+    // Same negative-slope extrapolation guard used by interpolate_1d_latency.
+    if (x0 - x1) * (y0 - y1) < 0.0 && (x - x0) * (x - x1) > 0.0 {
+        y1 = y0;
+    }
+    Some(y0 + (y1 - y0) / (x1 - x0) * (x - x0))
+}
+
+fn interpolate_2d_latency(points: &[(u32, u32, f64)], query_x: u32, query_y: u32) -> Option<f64> {
+    if points.is_empty() {
+        return None;
+    }
+    let mut xs = points.iter().map(|(x, _, _)| *x).collect::<Vec<_>>();
+    xs.sort_unstable();
+    xs.dedup();
+    let (x_left, x_right) = axis_pair(&xs, query_x)?;
+
+    let left_points = points
+        .iter()
+        .filter(|(x, _, _)| *x == x_left)
+        .map(|(_, y, latency)| (*y, *latency))
+        .collect::<Vec<_>>();
+    let left_latency = interpolate_1d_latency(&left_points, query_y)?;
+
+    if x_left == x_right {
+        return Some(left_latency);
+    }
+
+    let right_points = points
+        .iter()
+        .filter(|(x, _, _)| *x == x_right)
+        .map(|(_, y, latency)| (*y, *latency))
+        .collect::<Vec<_>>();
+    let right_latency = interpolate_1d_latency(&right_points, query_y)?;
+    interpolate_1d_latency(&[(x_left, left_latency), (x_right, right_latency)], query_x)
+}
+
+fn interpolate_3d_latency(
+    points: &[(u32, u32, u32, f64)],
+    query_x: u32,
+    query_y: u32,
+    query_z: u32,
+) -> Option<f64> {
+    if points.is_empty() {
+        return None;
+    }
+    let mut xs = points.iter().map(|(x, _, _, _)| *x).collect::<Vec<_>>();
+    xs.sort_unstable();
+    xs.dedup();
+    let (x_left, x_right) = axis_pair(&xs, query_x)?;
+
+    let left_points = points
+        .iter()
+        .filter(|(x, _, _, _)| *x == x_left)
+        .map(|(_, y, z, latency)| (*y, *z, *latency))
+        .collect::<Vec<_>>();
+    let left_latency = interpolate_2d_latency(&left_points, query_y, query_z)?;
+
+    if x_left == x_right {
+        return Some(left_latency);
+    }
+
+    let right_points = points
+        .iter()
+        .filter(|(x, _, _, _)| *x == x_right)
+        .map(|(_, y, z, latency)| (*y, *z, *latency))
+        .collect::<Vec<_>>();
+    let right_latency = interpolate_2d_latency(&right_points, query_y, query_z)?;
+    interpolate_1d_latency(&[(x_left, left_latency), (x_right, right_latency)], query_x)
+}
+
+fn axis_pair(sorted: &[u32], query: u32) -> Option<(u32, u32)> {
+    if sorted.is_empty() {
+        return None;
+    }
+    if sorted.contains(&query) {
+        return Some((query, query));
+    }
+    if sorted.len() < 2 {
+        return None;
+    }
+    if query < sorted[0] {
+        return Some((sorted[0], sorted[1]));
+    }
+    if query > sorted[sorted.len() - 1] {
+        return Some((sorted[sorted.len() - 2], sorted[sorted.len() - 1]));
+    }
+    for window in sorted.windows(2) {
+        if query >= window[0] && query <= window[1] {
+            return Some((window[0], window[1]));
+        }
+    }
+    None
+}
+
+fn average_generation_attention_latency(
+    points: &[(u32, u32, f64)],
+    batch_size: u32,
+    sequence_tokens: u32,
+) -> Option<f64> {
+    let s_min = (sequence_tokens.saturating_mul(9) / 10).max(1);
+    let s_max = sequence_tokens.saturating_mul(11) / 10;
+    let mut sum = 0.0;
+    for i in 0..5_u32 {
+        let sample = s_min + (s_max.saturating_sub(s_min)) * i / 4;
+        sum += interpolate_2d_latency(points, batch_size, sample)?;
+    }
+    Some(sum / 5.0)
+}
+
+fn collective_gpu_count_scale(measured_gpus: u32, requested_gpus: u32) -> f64 {
+    if measured_gpus <= 1 || requested_gpus <= 1 {
+        return 1.0;
+    }
+    (f64::from(requested_gpus - 1) / f64::from(requested_gpus))
+        * (f64::from(measured_gpus) / f64::from(measured_gpus - 1))
 }
 
 fn load_gemm_points(path: &Path) -> Result<Vec<GemmPoint>, AicError> {
@@ -635,6 +1243,76 @@ fn load_generation_attention_points(
             "no generation-attention rows loaded from {}",
             path.display()
         )));
+    }
+    Ok(points)
+}
+
+fn load_optional_custom_allreduce_points(
+    path: &Path,
+) -> Result<Vec<CustomAllReducePoint>, AicError> {
+    if !path.is_file() || is_lfs_pointer(path)? {
+        return Ok(Vec::new());
+    }
+    let mut reader = csv::ReaderBuilder::new()
+        .trim(csv::Trim::All)
+        .from_path(path)
+        .map_err(|source| AicError::Csv {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let headers = header_map(reader.headers().map_err(|source| AicError::Csv {
+        path: path.to_path_buf(),
+        source,
+    })?);
+    let is_b60 = path.to_string_lossy().contains("b60");
+    let mut points = Vec::new();
+    for record in reader.records() {
+        let record = record.map_err(|source| AicError::Csv {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let kernel_source = optional_field(&record, &headers, "kernel_source").unwrap_or("");
+        let backend = optional_field(&record, &headers, "backend").unwrap_or("");
+        if !is_b60 && (kernel_source.ends_with("_eager") || backend.ends_with("_eager")) {
+            continue;
+        }
+        points.push(CustomAllReducePoint {
+            tp_size: parse_u32(&record, &headers, "num_gpus", path)?,
+            message_size: parse_u64(&record, &headers, "message_size", path)?,
+            latency_ms: parse_f64(&record, &headers, "latency", path)?,
+        });
+    }
+    Ok(points)
+}
+
+fn load_optional_nccl_points(path: &Path) -> Result<Vec<NcclPoint>, AicError> {
+    if !path.is_file() || is_lfs_pointer(path)? {
+        return Ok(Vec::new());
+    }
+    let mut reader = csv::ReaderBuilder::new()
+        .trim(csv::Trim::All)
+        .from_path(path)
+        .map_err(|source| AicError::Csv {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let headers = header_map(reader.headers().map_err(|source| AicError::Csv {
+        path: path.to_path_buf(),
+        source,
+    })?);
+    let mut points = Vec::new();
+    for record in reader.records() {
+        let record = record.map_err(|source| AicError::Csv {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        points.push(NcclPoint {
+            quant: required_field(&record, &headers, "nccl_dtype", path)?.to_string(),
+            operation: required_field(&record, &headers, "op_name", path)?.to_string(),
+            num_gpus: parse_u32(&record, &headers, "num_gpus", path)?,
+            message_size: parse_u64(&record, &headers, "message_size", path)?,
+            latency_ms: parse_f64(&record, &headers, "latency", path)?,
+        });
     }
     Ok(points)
 }
@@ -802,6 +1480,15 @@ fn required_field<'a>(
     })
 }
 
+fn optional_field<'a>(
+    record: &'a StringRecord,
+    headers: &HashMap<String, usize>,
+    name: &str,
+) -> Option<&'a str> {
+    let idx = headers.get(name)?;
+    record.get(*idx)
+}
+
 fn parse_u32(
     record: &StringRecord,
     headers: &HashMap<String, usize>,
@@ -812,6 +1499,21 @@ fn parse_u32(
     raw.parse::<u32>().map_err(|source| {
         AicError::PerfDatabase(format!(
             "invalid u32 value '{raw}' for column '{name}' in {}: {source}",
+            path.display()
+        ))
+    })
+}
+
+fn parse_u64(
+    record: &StringRecord,
+    headers: &HashMap<String, usize>,
+    name: &str,
+    path: &Path,
+) -> Result<u64, AicError> {
+    let raw = required_field(record, headers, name, path)?;
+    raw.parse::<u64>().map_err(|source| {
+        AicError::PerfDatabase(format!(
+            "invalid u64 value '{raw}' for column '{name}' in {}: {source}",
             path.display()
         ))
     })

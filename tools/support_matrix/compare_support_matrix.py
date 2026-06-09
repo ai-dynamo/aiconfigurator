@@ -15,7 +15,7 @@ Exit codes:
     2: Validation errors (sanity or range check failures)
 
 Usage:
-    python compare_support_matrix.py --old <old_csv> --new <new_csv> [--output-diff <diff_file>]
+    python compare_support_matrix.py --old <old_matrix> --new <new_matrix> [--output-diff <diff_file>]
 """
 
 import argparse
@@ -23,16 +23,28 @@ import csv
 import json
 import os
 import sys
+from pathlib import Path
 
 # Ensure local repo paths are importable when running as a standalone script.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 sys.path.insert(0, _REPO_ROOT)
 
-from tools.support_matrix.support_matrix import SupportMatrix
+from tools.support_matrix.support_matrix import (
+    STATUS_FAIL,
+    STATUS_FRAMEWORK_INCOMPATIBLE,
+    STATUS_HW_INCOMPATIBLE,
+    STATUS_PASS,
+    SUPPORT_MATRIX_BASE_HEADER,
+    SUPPORT_MATRIX_HEADER,
+    VALID_STATUSES,
+    SupportMatrix,
+)
+
+SUPPORTED_HEADERS = (SUPPORT_MATRIX_HEADER, SUPPORT_MATRIX_BASE_HEADER)
 
 
-def read_csv(csv_path: str) -> tuple[list[str], list[list[str]]]:
+def _read_single_csv(csv_path: Path) -> tuple[list[str], list[list[str]]]:
     """
     Read a CSV file and return header and data rows.
 
@@ -58,6 +70,43 @@ def read_csv(csv_path: str) -> tuple[list[str], list[list[str]]]:
     return header, data_rows
 
 
+def read_csv(matrix_path: str) -> tuple[list[str], list[list[str]]]:
+    """
+    Read either a legacy support matrix CSV or a split support matrix directory.
+
+    Split support matrix directories are expected to contain one CSV per system,
+    named ``<system>.csv``.
+    """
+    path = Path(matrix_path)
+    if not path.is_dir():
+        return _read_single_csv(path)
+
+    csv_paths = sorted(path.glob("*.csv"))
+    if not csv_paths:
+        raise FileNotFoundError(f"No support matrix CSV files found in directory: {matrix_path}")
+
+    combined_header: list[str] | None = None
+    combined_rows: list[list[str]] = []
+    for csv_path in csv_paths:
+        header, data_rows = _read_single_csv(csv_path)
+        if combined_header is None:
+            combined_header = header
+        elif header != combined_header:
+            raise ValueError(f"Inconsistent CSV header in {csv_path}: expected {combined_header}, got {header}")
+
+        systems = {row[2] for row in data_rows if len(row) >= 3}
+        if len(systems) != 1:
+            raise ValueError(f"{csv_path} must contain rows for exactly one system, found {sorted(systems)}")
+
+        [system] = systems
+        if csv_path.stem != system:
+            raise ValueError(f"{csv_path} filename must match its System value '{system}'")
+
+        combined_rows.extend(data_rows)
+
+    return combined_header or [], combined_rows
+
+
 def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]:
     """
     Validate CSV structure and data.
@@ -70,10 +119,8 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
         List of error messages (empty if all checks pass)
     """
     errors = []
-    expected_header = ["HuggingFaceID", "Architecture", "System", "Backend", "Version", "Mode", "Status", "ErrMsg"]
-
-    if header != expected_header:
-        errors.append(f"Invalid header: expected {expected_header}, got {header}")
+    if header not in SUPPORTED_HEADERS:
+        errors.append(f"Invalid header: expected {SUPPORT_MATRIX_HEADER}, got {header}")
         return errors  # Can't continue without valid header
 
     if len(data_rows) == 0:
@@ -81,8 +128,8 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
         return errors
 
     for i, row in enumerate(data_rows, start=2):
-        if len(row) != len(expected_header):
-            errors.append(f"Row {i} has {len(row)} columns, expected {len(expected_header)}")
+        if len(row) != len(header):
+            errors.append(f"Row {i} has {len(row)} columns, expected {len(header)}")
             continue
 
         mode = row[5]
@@ -90,8 +137,18 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
             errors.append(f"Row {i}: Invalid mode '{mode}', expected 'agg' or 'disagg'")
 
         status = row[6]
-        if status not in ["PASS", "FAIL"]:
-            errors.append(f"Row {i}: Invalid status '{status}', expected 'PASS' or 'FAIL'")
+        if status not in VALID_STATUSES:
+            errors.append(f"Row {i}: Invalid status '{status}', expected one of {sorted(VALID_STATUSES)}")
+
+        err_msg = row[7].strip() if len(row) > 7 else ""
+        if status == STATUS_HW_INCOMPATIBLE and not err_msg:
+            errors.append(f"Row {i}: {STATUS_HW_INCOMPATIBLE} rows must include a hardware incompatibility reason")
+        if status == STATUS_FRAMEWORK_INCOMPATIBLE and not err_msg:
+            errors.append(
+                f"Row {i}: {STATUS_FRAMEWORK_INCOMPATIBLE} rows must include a framework incompatibility reason"
+            )
+        if header == SUPPORT_MATRIX_HEADER and not row[8].strip():
+            errors.append(f"Row {i}: Command column must include the support-matrix rerun command")
 
     return errors
 
@@ -193,6 +250,30 @@ def compare_csv_files(
     return added_rows, removed_rows, changed_rows
 
 
+def find_blocking_status_transitions(changed_rows: list[tuple]) -> list[str]:
+    """
+    Return status transitions that should block an automated support-matrix PR.
+
+    Hardware-incompatible rows are produced by deterministic preflight, and
+    framework-incompatible rows are produced by deterministic runtime/data gap
+    classification. A previous PASS becoming either terminal incompatibility, or
+    an incompatibility becoming a normal FAIL, should be investigated explicitly.
+    """
+    errors = []
+    for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in changed_rows:
+        if old_status == STATUS_PASS and new_status in {STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}:
+            errors.append(
+                f"Unexpected PASS -> {new_status} transition: "
+                f"{huggingface_id} ({architecture}) {system}/{backend} v{version} {mode}"
+            )
+        elif old_status in {STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE} and new_status == STATUS_FAIL:
+            errors.append(
+                f"Unexpected {old_status} -> FAIL transition: "
+                f"{huggingface_id} ({architecture}) {system}/{backend} v{version} {mode}"
+            )
+    return errors
+
+
 def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], changed_rows: list[tuple]) -> str:
     """
     Generate PR description markdown with tables of changes.
@@ -208,18 +289,28 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     Returns:
         Markdown formatted PR description
     """
-    regressions = [r for r in changed_rows if r[6] == "PASS" and r[7] == "FAIL"]
-    fixed = [r for r in changed_rows if r[6] == "FAIL" and r[7] == "PASS"]
+    regressions = [r for r in changed_rows if r[6] == STATUS_PASS and r[7] == STATUS_FAIL]
+    fixed = [
+        r
+        for r in changed_rows
+        if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+    ]
+    reclassified_hw = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_HW_INCOMPATIBLE]
+    reclassified_framework = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_FRAMEWORK_INCOMPATIBLE]
 
     lines = [
-        "This PR updates aiconfigurator/systems/support_matrix.csv with the following changes:",
+        "This PR updates the split support matrix CSV files with the following changes:",
         "",
         "### Summary",
         "",
         "| Category | Count |",
         "|----------|-------|",
         f"| Regressions (PASS -> FAIL) | {len(regressions)} |",
-        f"| Fixed (FAIL -> PASS) | {len(fixed)} |",
+        f"| Fixed ({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE}/{STATUS_FRAMEWORK_INCOMPATIBLE} -> PASS) | {len(fixed)} |",
+        f"| Reclassified as hardware-incompatible ({STATUS_FAIL} -> {STATUS_HW_INCOMPATIBLE}) "
+        f"| {len(reclassified_hw)} |",
+        f"| Reclassified as framework-incompatible ({STATUS_FAIL} -> {STATUS_FRAMEWORK_INCOMPATIBLE}) "
+        f"| {len(reclassified_framework)} |",
         f"| Removed rows | {len(removed_rows)} |",
         f"| Added rows | {len(added_rows)} |",
         "",
@@ -250,7 +341,10 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     lines.append("")
 
     # Fixed (FAIL -> PASS)
-    lines.append(f"### {section}. Fixed (FAIL -> PASS): {len(fixed)} rows")
+    lines.append(
+        f"### {section}. Fixed "
+        f"({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE}/{STATUS_FRAMEWORK_INCOMPATIBLE} -> PASS): {len(fixed)} rows"
+    )
     section += 1
     if fixed:
         lines.append("")
@@ -269,6 +363,64 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     else:
         lines.append("")
         lines.append("*No fixes*")
+    lines.append("")
+
+    # Reclassified hardware incompatibilities
+    lines.append(
+        f"### {section}. Reclassified as hardware-incompatible ({STATUS_FAIL} -> {STATUS_HW_INCOMPATIBLE}): "
+        f"{len(reclassified_hw)} rows"
+    )
+    section += 1
+    if reclassified_hw:
+        lines.append("")
+        lines.append(
+            "| HuggingFaceID | Architecture | System | Backend | Version | Mode | Previous Status | New Status |"
+        )
+        lines.append(
+            "|---------------|--------------|--------|---------|---------|------|-----------------|------------|"
+        )
+        for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in reclassified_hw:
+            row = (
+                f"| {huggingface_id} | {architecture} | {system} | {backend} "
+                f"| {version} | {mode} | {old_status} | {new_status} |"
+            )
+            lines.append(row)
+    else:
+        lines.append("")
+        lines.append("*No hardware-incompatible reclassifications*")
+    lines.append("")
+
+    lines.append(
+        f"### {section}. Reclassified as framework-incompatible "
+        f"({STATUS_FAIL} -> {STATUS_FRAMEWORK_INCOMPATIBLE}): {len(reclassified_framework)} rows"
+    )
+    section += 1
+    if reclassified_framework:
+        lines.append("")
+        lines.append(
+            "| HuggingFaceID | Architecture | System | Backend | Version | Mode | Previous Status | New Status |"
+        )
+        lines.append(
+            "|---------------|--------------|--------|---------|---------|------|-----------------|------------|"
+        )
+        for (
+            huggingface_id,
+            architecture,
+            system,
+            backend,
+            version,
+            mode,
+            old_status,
+            new_status,
+        ) in reclassified_framework:
+            row = (
+                f"| {huggingface_id} | {architecture} | {system} | {backend} "
+                f"| {version} | {mode} | {old_status} | {new_status} |"
+            )
+            lines.append(row)
+    else:
+        lines.append("")
+        lines.append("*No framework-incompatible reclassifications*")
     lines.append("")
 
     # Removed rows
@@ -308,13 +460,13 @@ def main():
         "--old",
         type=str,
         required=True,
-        help="Path to the old support matrix CSV",
+        help="Path to the old support matrix CSV or split support matrix directory",
     )
     parser.add_argument(
         "--new",
         type=str,
         required=True,
-        help="Path to the new support matrix CSV",
+        help="Path to the new support matrix CSV or split support matrix directory",
     )
     parser.add_argument(
         "--output-diff",
@@ -327,23 +479,23 @@ def main():
     print("=" * 80)
     print("Support Matrix Comparison")
     print("=" * 80)
-    print(f"Old CSV: {args.old}")
-    print(f"New CSV: {args.new}")
+    print(f"Old support matrix: {args.old}")
+    print(f"New support matrix: {args.new}")
     print()
 
     # Read both CSVs
     try:
         old_header, old_data_rows = read_csv(args.old)
-        print(f"✓ Old CSV loaded: {len(old_data_rows)} rows")
+        print(f"✓ Old support matrix loaded: {len(old_data_rows)} rows")
     except Exception as e:
-        print(f"✗ Failed to read old CSV: {e}")
+        print(f"✗ Failed to read old support matrix: {e}")
         sys.exit(2)
 
     try:
         new_header, new_data_rows = read_csv(args.new)
-        print(f"✓ New CSV loaded: {len(new_data_rows)} rows")
+        print(f"✓ New support matrix loaded: {len(new_data_rows)} rows")
     except Exception as e:
-        print(f"✗ Failed to read new CSV: {e}")
+        print(f"✗ Failed to read new support matrix: {e}")
         sys.exit(2)
 
     print()
@@ -351,7 +503,7 @@ def main():
     # Run validation checks on new CSV
     validation_errors = []
 
-    print("Running validation checks on new CSV...")
+    print("Running validation checks on new support matrix...")
     print("-" * 40)
 
     # 1. CSV sanity check
@@ -377,21 +529,54 @@ def main():
     print()
 
     # Compare CSVs
-    print("Comparing old and new CSVs...")
+    print("Comparing old and new support matrices...")
     print("-" * 40)
 
     added_rows, removed_rows, changed_rows = compare_csv_files(old_data_rows, new_data_rows)
+    transition_errors = find_blocking_status_transitions(changed_rows)
+    validation_errors.extend(transition_errors)
+
+    regression_count = len([r for r in changed_rows if r[6] == STATUS_PASS and r[7] == STATUS_FAIL])
+    fixed_count = len(
+        [
+            r
+            for r in changed_rows
+            if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+        ]
+    )
+    reclassified_hw_count = len([r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_HW_INCOMPATIBLE])
+    reclassified_framework_count = len(
+        [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_FRAMEWORK_INCOMPATIBLE]
+    )
 
     print(f"Added rows: {len(added_rows)}")
     print(f"Removed rows: {len(removed_rows)}")
     print(f"Changed rows: {len(changed_rows)}")
-    print(f"  - Regressions (PASS -> FAIL): {len([r for r in changed_rows if r[6] == 'PASS' and r[7] == 'FAIL'])}")
-    print(f"  - Fixed (FAIL -> PASS): {len([r for r in changed_rows if r[6] == 'FAIL' and r[7] == 'PASS'])}")
+    print(f"  - Regressions (PASS -> FAIL): {regression_count}")
+    print(f"  - Fixed ({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE}/{STATUS_FRAMEWORK_INCOMPATIBLE} -> PASS): {fixed_count}")
+    print(
+        f"  - Reclassified as hardware-incompatible ({STATUS_FAIL} -> {STATUS_HW_INCOMPATIBLE}): "
+        f"{reclassified_hw_count}"
+    )
+    print(
+        f"  - Reclassified as framework-incompatible ({STATUS_FAIL} -> {STATUS_FRAMEWORK_INCOMPATIBLE}): "
+        f"{reclassified_framework_count}"
+    )
+    if transition_errors:
+        print("Blocking status transitions:")
+        for err in transition_errors:
+            print(f"  - {err}")
 
     has_changes = len(added_rows) > 0 or len(removed_rows) > 0 or len(changed_rows) > 0
 
-    regressions = [r for r in changed_rows if r[6] == "PASS" and r[7] == "FAIL"]
-    fixed = [r for r in changed_rows if r[6] == "FAIL" and r[7] == "PASS"]
+    regressions = [r for r in changed_rows if r[6] == STATUS_PASS and r[7] == STATUS_FAIL]
+    fixed = [
+        r
+        for r in changed_rows
+        if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+    ]
+    reclassified_hw = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_HW_INCOMPATIBLE]
+    reclassified_framework = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_FRAMEWORK_INCOMPATIBLE]
 
     # Generate output
     if args.output_diff:
@@ -403,9 +588,12 @@ def main():
             "changed_count": len(changed_rows),
             "regression_count": len(regressions),
             "fixed_count": len(fixed),
+            "reclassified_hw_incompatible_count": len(reclassified_hw),
+            "reclassified_framework_incompatible_count": len(reclassified_framework),
             "added_rows": added_rows,
             "removed_rows": removed_rows,
             "changed_rows": changed_rows,
+            "blocking_status_transition_errors": transition_errors,
             "pr_description": generate_pr_description(added_rows, removed_rows, changed_rows),
         }
         with open(args.output_diff, "w") as f:

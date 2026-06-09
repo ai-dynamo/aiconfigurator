@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: NemotronHForCausalLM
+model_path: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+model_paths:
+  - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+  - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+  - nvidia/Nemotron-H-56B-Base-8K
+include_base: true
+description: >
+  Nemotron-H hybrid Mamba/MoE model-centric collection plan.
+
+model_case_values:
+  moe:
+    - model_path: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      hidden_size: 2688
+      inter_size: 1856
+      topk: 6
+      num_experts: 128
+    - model_path: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+      hidden_size: 4096
+      inter_size: 2688
+      topk: 22
+      num_experts: 512
+    - model_path: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+      hidden_size: 1024
+      inter_size: 2688
+      topk: 22
+      num_experts: 512
+    - model_path: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+      hidden_size: 8192
+      inter_size: 5120
+      topk: 22
+      num_experts: 512
+    - model_path: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+      hidden_size: 2048
+      inter_size: 5120
+      topk: 22
+      num_experts: 512
+  mamba2:
+    - model_path: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      d_model: 2688
+      d_state: 128
+      d_conv: 4
+      nheads: 64
+      head_dim: 64
+      n_groups: 8
+      chunk_size: 128
+    - model_path: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+      d_model: 4096
+      d_state: 128
+      d_conv: 4
+      nheads: 128
+      head_dim: 64
+      n_groups: 8
+      chunk_size: 128
+    - model_path: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+      d_model: 8192
+      d_state: 128
+      d_conv: 4
+      nheads: 256
+      head_dim: 64
+      n_groups: 8
+      chunk_size: 128
+    - model_path: nvidia/Nemotron-H-56B-Base-8K
+      d_model: 8192
+      d_state: 256
+      d_conv: 4
+      nheads: 256
+      head_dim: 64
+      n_groups: 8
+      chunk_size: 128
+
+all_frameworks_op_cases:
+  mamba2:
+    cases: all
+  moe:
+    cases: all

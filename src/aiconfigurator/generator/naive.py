@@ -107,6 +107,32 @@ def _sanitize_rfc1123(name: str) -> str:
     return sanitized or "dynamo"
 
 
+def _deep_merge_dicts(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in incoming.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _section_override(overrides: dict[str, Any] | None, section: str) -> dict[str, Any]:
+    value = (overrides or {}).get(section)
+    return value if isinstance(value, dict) else {}
+
+
+def _role_override(overrides: dict[str, Any], role: str) -> dict[str, Any]:
+    value = overrides.get(role)
+    return value if isinstance(value, dict) else {}
+
+
+def _drop_empty_worker_roles(params: dict[str, Any]) -> None:
+    worker_params = params.get("params")
+    if isinstance(worker_params, dict):
+        params["params"] = {role: values for role, values in worker_params.items() if values}
+
+
 def _get_system_config(system_name: str) -> dict[str, Any]:
     """
     Read system configuration from YAML config file.
@@ -278,6 +304,8 @@ def build_naive_generator_params(
     backend_name: str,
     mode: str = "agg",
     optimization_type: str | None = None,
+    generator_dynamo_version: str | None = None,
+    generator_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build generator parameters for naive configuration generation.
@@ -295,6 +323,10 @@ def build_naive_generator_params(
             ``"disagg"`` (disaggregated, separate prefill/decode workers).
         optimization_type: ``"throughput"`` or ``"latency"`` (or ``None``
             for legacy callers). Influences parallelization for MoE models.
+        generator_dynamo_version: Optional Dynamo version used by schema
+            defaults such as backend runtime images.
+        generator_overrides: Optional raw generator override mapping loaded
+            from ``--generator-config`` and ``--generator-set``.
 
     Returns:
         Dictionary containing generator parameters.  When ``mode="agg"``,
@@ -366,6 +398,48 @@ def build_naive_generator_params(
 
     name_prefix = _sanitize_rfc1123(model_name)
 
+    overrides = generator_overrides or {}
+    effective_dynamo_version = generator_dynamo_version or overrides.get("generator_dynamo_version")
+
+    service = {
+        "model_name": model_name,
+        "served_model_name": model_name,
+        "model_path": model_name,
+        "include_frontend": True,
+    }
+    k8s = {
+        "system_name": system_name,
+        "name_prefix": name_prefix,
+    }
+    dyn_config = {
+        "mode": mode,
+    }
+    sla = {
+        "isl": default_isl,
+        "osl": default_osl,
+    }
+    node_config = {
+        "num_gpus_per_node": gpus_per_node,
+    }
+    model_config = {
+        "is_moe": is_moe,
+        "fits_in_memory": fits,
+        "required_tp": required_tp,
+    }
+
+    service = _deep_merge_dicts(service, _section_override(overrides, "ServiceConfig"))
+    k8s = _deep_merge_dicts(k8s, _section_override(overrides, "K8sConfig"))
+    dyn_config = _deep_merge_dicts(dyn_config, _section_override(overrides, "DynConfig"))
+    sla = _deep_merge_dicts(sla, _section_override(overrides, "SlaConfig"))
+    node_config = _deep_merge_dicts(node_config, _section_override(overrides, "NodeConfig"))
+    model_config = _deep_merge_dicts(model_config, _section_override(overrides, "ModelConfig"))
+    bench_config = _section_override(overrides, "BenchConfig")
+    sflow_config = _section_override(overrides, "SflowConfig")
+    llmd_config = _section_override(overrides, "LlmdConfig")
+
+    worker_overrides = _section_override(overrides, "Workers")
+    params_overrides = _section_override(overrides, "params")
+
     if mode == "disagg":
         # Disaggregated: separate prefill and decode workers with identical parallelization
         if total_gpus < 2 * min_gpus:
@@ -379,83 +453,68 @@ def build_naive_generator_params(
             )
         prefill_workers = 1
         decode_workers = max(1, (total_gpus // min_gpus) - 1) if total_gpus > min_gpus else 1
-        params = {
-            "ServiceConfig": {
-                "model_name": model_name,
-                "served_model_name": model_name,
-                "model_path": model_name,
-                "include_frontend": True,
-            },
-            "K8sConfig": {
-                "system_name": system_name,
-                "name_prefix": name_prefix,
-            },
-            "params": {
-                # TODO: consider tuning prefill-specific defaults for
-                # max_batch_size and max_num_tokens separately from decode.
-                "prefill": dict(worker_params),
-                "decode": dict(worker_params),
-            },
-            "DynConfig": {
-                "mode": "disagg",
-            },
-            "SlaConfig": {
-                "isl": default_isl,
-                "osl": default_osl,
-            },
-            "NodeConfig": {
-                "num_gpus_per_node": gpus_per_node,
-            },
-            "WorkerConfig": {
-                "prefill_workers": prefill_workers,
-                "prefill_gpus_per_worker": min_gpus,
-                "decode_workers": decode_workers,
-                "decode_gpus_per_worker": min_gpus,
-            },
-            "ModelConfig": {
-                "is_moe": is_moe,
-                "fits_in_memory": fits,
-                "required_tp": required_tp,
-            },
-            "backend": backend_name,
+        prefill_params = _deep_merge_dicts(dict(worker_params), _role_override(worker_overrides, "prefill"))
+        prefill_params = _deep_merge_dicts(prefill_params, _role_override(params_overrides, "prefill"))
+        decode_params = _deep_merge_dicts(dict(worker_params), _role_override(worker_overrides, "decode"))
+        decode_params = _deep_merge_dicts(decode_params, _role_override(params_overrides, "decode"))
+        worker_config = {
+            "prefill_workers": prefill_workers,
+            "prefill_gpus_per_worker": min_gpus,
+            "decode_workers": decode_workers,
+            "decode_gpus_per_worker": min_gpus,
         }
+        worker_config = _deep_merge_dicts(worker_config, _section_override(overrides, "WorkerConfig"))
+
+        from .aggregators import collect_generator_params
+
+        params = collect_generator_params(
+            service=service,
+            k8s=k8s,
+            prefill_params=prefill_params,
+            decode_params=decode_params,
+            prefill_workers=int(worker_config.get("prefill_workers", prefill_workers)),
+            decode_workers=int(worker_config.get("decode_workers", decode_workers)),
+            num_gpus_per_node=int(node_config.get("num_gpus_per_node", gpus_per_node)),
+            sla=sla,
+            bench=bench_config,
+            sflow=sflow_config,
+            dyn_config=dyn_config,
+            backend=backend_name,
+            generator_dynamo_version=effective_dynamo_version,
+        )
     else:
         # Aggregated: single worker type
         agg_workers = total_gpus // min_gpus
-        params = {
-            "ServiceConfig": {
-                "model_name": model_name,
-                "served_model_name": model_name,
-                "model_path": model_name,
-                "include_frontend": True,
-            },
-            "K8sConfig": {
-                "system_name": system_name,
-                "name_prefix": name_prefix,
-            },
-            "params": {
-                "agg": dict(worker_params),
-            },
-            "DynConfig": {
-                "mode": "agg",
-            },
-            "SlaConfig": {
-                "isl": default_isl,
-                "osl": default_osl,
-            },
-            "NodeConfig": {
-                "num_gpus_per_node": gpus_per_node,
-            },
-            "WorkerConfig": {
-                "agg_workers": agg_workers,
-                "agg_gpus_per_worker": min_gpus,
-            },
-            "ModelConfig": {
-                "is_moe": is_moe,
-                "fits_in_memory": fits,
-                "required_tp": required_tp,
-            },
-            "backend": backend_name,
+        agg_params = _deep_merge_dicts(dict(worker_params), _role_override(worker_overrides, "agg"))
+        agg_params = _deep_merge_dicts(agg_params, _role_override(params_overrides, "agg"))
+        worker_config = {
+            "agg_workers": agg_workers,
+            "agg_gpus_per_worker": min_gpus,
         }
+        worker_config = _deep_merge_dicts(worker_config, _section_override(overrides, "WorkerConfig"))
+
+        from .aggregators import collect_generator_params
+
+        params = collect_generator_params(
+            service=service,
+            k8s=k8s,
+            agg_params=agg_params,
+            agg_workers=int(worker_config.get("agg_workers", agg_workers)),
+            num_gpus_per_node=int(node_config.get("num_gpus_per_node", gpus_per_node)),
+            sla=sla,
+            bench=bench_config,
+            sflow=sflow_config,
+            dyn_config=dyn_config,
+            backend=backend_name,
+            generator_dynamo_version=effective_dynamo_version,
+        )
+
+    params["ModelConfig"] = model_config
+    if llmd_config:
+        params["LlmdConfig"] = llmd_config
+    params["backend"] = backend_name
+    if effective_dynamo_version:
+        params["generator_dynamo_version"] = effective_dynamo_version
+    _drop_empty_worker_roles(params)
 
     return params
