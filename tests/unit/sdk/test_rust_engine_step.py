@@ -159,7 +159,7 @@ def test_is_rust_core_available_handles_missing_extension(monkeypatch) -> None:
 @pytest.mark.skipif(
     not rust_engine_step.is_rust_core_available(),
     reason="Rust core PyO3 extension is not importable "
-    "(install with `pip install -e .` or `maturin develop --release`)",
+           "(install with `pip install -e \".[rust]\"` or `maturin develop --release`)"
 )
 def test_real_rust_core_returns_expected_latency(tmp_path, monkeypatch) -> None:
     systems_root = tmp_path / "systems"
