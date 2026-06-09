@@ -158,3 +158,64 @@ class BaseModel:
         """KV cache bytes for one sequence on one GPU."""
         seq_len = max(0, seq_len)
         return seq_len * self.config.kvcache_quant_mode.value.memory * self.get_kvcache_elements_per_token()
+
+    def get_kvcache_max_tokens(self, kv_budget_bytes: float) -> int:
+        """Largest single-sequence length whose KV cache fits in ``kv_budget_bytes``.
+
+        The capacity-sizing inverse of :meth:`get_kvcache_bytes_per_sequence`. The
+        base model's KV grows linearly -- a constant number of bytes per token --
+        so the inverse is exact floor-division by that per-token size.
+
+        Models whose KV growth is non-linear -- hybrid sliding-window attention
+        (SWA layers cap at the window while global layers keep growing) or
+        compressed / sparse attention (the per-token rate drops past a window, plus
+        fixed decode-state buffers) -- override :meth:`get_kvcache_bytes_per_sequence`
+        and also override this method (delegating to
+        :meth:`_binary_search_kvcache_max_tokens`) so capacity follows their true piecewise
+        curve instead of extrapolating the ``seq_len=1`` slope.
+        """
+        budget = float(kv_budget_bytes)
+        per_token = self.get_kvcache_bytes_per_sequence(1)
+        if budget <= 0.0 or per_token <= 0.0:
+            return 0
+        return int(budget // per_token)
+
+    def _binary_search_kvcache_max_tokens(self, kv_budget_bytes: float) -> int:
+        """Monotonic-search inverse of :meth:`get_kvcache_bytes_per_sequence`.
+
+        For non-linear-growth models, where a single per-token constant cannot
+        describe the curve, so :meth:`get_kvcache_max_tokens` cannot floor-divide.
+        ``get_kvcache_bytes_per_sequence`` is monotonic non-decreasing, so this
+        doubles the trial length until its KV exceeds the budget, then binary
+        searches for the largest length that still fits.
+        """
+        budget = float(kv_budget_bytes)
+        if budget <= 0.0:
+            return 0
+
+        # The equal-size guard handles a model whose KV stops growing with length
+        # (a cache fully capped by its window): once doubling the length leaves the
+        # KV size unchanged it has saturated, every longer length fits too, and the
+        # budget would never be exceeded -- so the loop would not otherwise stop.
+        hi, hi_bytes = 1, self.get_kvcache_bytes_per_sequence(1)
+        if hi_bytes <= 0.0:
+            return 0
+        while hi_bytes <= budget:
+            nxt = hi * 2
+            nxt_bytes = self.get_kvcache_bytes_per_sequence(nxt)
+            if nxt_bytes == hi_bytes:
+                # KV saturated (a fully window-capped cache): memory never binds, so
+                # the real limit is the model's context length. Fall back to the
+                # current step only when the context length is unknown.
+                return int(self._context_length) if self._context_length > 0 else nxt
+            hi, hi_bytes = nxt, nxt_bytes
+
+        # bytes(hi // 2) <= budget < bytes(hi); binary search the boundary.
+        lo = hi // 2
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            if self.get_kvcache_bytes_per_sequence(mid) <= budget:
+                lo = mid
+            else:
+                hi = mid
+        return lo
