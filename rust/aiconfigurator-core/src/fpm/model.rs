@@ -1,70 +1,26 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
-use std::path::Path;
+//! Forward-pass perf model: native AIC estimate with optional online correction
+//! and regression fallback, plus readiness/diagnostics.
+//!
+//! The `Native` variant holds an `Arc<Engine>` and the native estimate routes
+//! through [`crate::engine::Engine::forward_pass_time_ms`]. The online
+//! correction / regression / diagnostics / readiness logic is engine-agnostic.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    create_engine_step_estimator, validate_forward_pass_metrics, AicError, EngineConfig,
-    EngineStepEstimator, ForwardPassMetrics,
-};
+use crate::engine::Engine;
+use crate::{AicError, EngineConfig, ForwardPassMetrics};
 
-const DEFAULT_MAX_OBSERVATIONS: usize = 64;
-const DEFAULT_MIN_OBSERVATIONS: usize = 5;
-const DEFAULT_BUCKET_COUNT: usize = 16;
-const DEFAULT_MAX_NUM_TOKENS: u32 = 8192;
-const DEFAULT_MAX_BATCH_SIZE: u32 = 512;
-const DEFAULT_MAX_KV_TOKENS: u32 = 2_000_000;
-const RELAXABLE_NEG_TOLERANCE: f64 = 1e-6;
-
-/// In-memory tuning controls for `ForwardPassPerfModel`.
-///
-/// These defaults match the current planner regression behavior: retain a
-/// bounded sliding sample set, wait for enough observations before predicting
-/// from learned data, and bucket observations by workload kind.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ForwardPassPerfOptions {
-    /// Maximum retained observations across all buckets for each inferred workload kind.
-    #[serde(default = "default_max_observations")]
-    pub max_observations: usize,
-    /// Minimum retained observations required before a regression fit or native
-    /// correction is used for an inferred workload kind.
-    #[serde(default = "default_min_observations")]
-    pub min_observations: usize,
-    /// Target bucket count for workload-specific sample retirement and correction lookup.
-    #[serde(default = "default_bucket_count")]
-    pub bucket_count: usize,
-    /// Upper bound for the `sum_prefill_tokens` correction axis.
-    ///
-    /// Used by prefill and mixed/agg workload kinds. The lower bound is always `0`.
-    #[serde(default = "default_max_num_tokens")]
-    pub max_num_tokens: u32,
-    /// Upper bound for the `num_decode_requests` correction axis.
-    ///
-    /// Used by the decode workload kind. The lower bound is always `0`.
-    #[serde(default = "default_max_batch_size")]
-    pub max_batch_size: u32,
-    /// Upper bound for the `sum_decode_kv_tokens` correction axis.
-    ///
-    /// Used by decode and mixed/agg workload kinds. The lower bound is always `0`.
-    #[serde(default = "default_max_kv_tokens")]
-    pub max_kv_tokens: u32,
-}
-
-impl Default for ForwardPassPerfOptions {
-    fn default() -> Self {
-        Self {
-            max_observations: DEFAULT_MAX_OBSERVATIONS,
-            min_observations: DEFAULT_MIN_OBSERVATIONS,
-            bucket_count: DEFAULT_BUCKET_COUNT,
-            max_num_tokens: DEFAULT_MAX_NUM_TOKENS,
-            max_batch_size: DEFAULT_MAX_BATCH_SIZE,
-            max_kv_tokens: DEFAULT_MAX_KV_TOKENS,
-        }
-    }
-}
+use super::correction::CorrectionBuckets;
+use super::metrics::validate_forward_pass_metrics;
+use super::options::{validate_options, ForwardPassPerfOptions};
+use super::regression::BucketedRegression;
+use super::samples::{AxisRange, StoreStats, WithOptions};
 
 /// Current readiness and tuning state for a `ForwardPassPerfModel`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -152,7 +108,10 @@ pub struct ForwardPassPerfModel {
 #[derive(Clone, Debug)]
 enum ForwardPassPerfMode {
     Native {
-        estimator: EngineStepEstimator,
+        /// Compiled engine. `Arc` so `ForwardPassPerfModel` stays `Clone`
+        /// (the `Engine` itself is not `Clone`); cheap clones share the loaded
+        /// op lists + perf-database tree.
+        engine: Arc<Engine>,
         corrections: WorkloadStores<CorrectionBuckets>,
     },
     Regression {
@@ -166,50 +125,52 @@ impl ForwardPassPerfModel {
     ///
     /// Description: create a strict native AIC forward-pass model.
     ///
-    /// This constructor fails if `config` cannot be served by the native AIC
-    /// estimator. Use `best_available` when unsupported native configs should
+    /// Compiles `config` into an [`Engine`] by crossing into Python once
+    /// (mirroring [`crate::build_aic_engine`]): `compile_engine` walks the model
+    /// and returns bincoded spec bytes, then [`Engine::from_spec_bytes`] loads
+    /// the matching perf database. This constructor fails if `config` cannot be
+    /// compiled. Use `best_available` when unsupported native configs should
     /// fall back to the learned regression model.
     pub fn from_native(
         config: EngineConfig,
         options: ForwardPassPerfOptions,
     ) -> Result<Self, AicError> {
         validate_options(&options)?;
-        let estimator = create_engine_step_estimator(config)?;
-        Ok(Self {
-            mode: ForwardPassPerfMode::Native {
-                estimator,
-                corrections: WorkloadStores::with_options(&options),
-            },
-            options,
-            last_warning: None,
-        })
+        let engine = build_engine_via_python(&config, None)?;
+        Ok(Self::from_engine(Arc::new(engine), options))
     }
 
     /// API:
-    /// `ForwardPassPerfModel::from_native_with_roots(config, options, systems_root, model_configs_root) -> Result<Self, AicError>`
+    /// `ForwardPassPerfModel::from_native_with_roots(config, options, systems_root) -> Result<Self, AicError>`
     ///
-    /// Description: create a strict native AIC forward-pass model with explicit
-    /// data roots.
-    ///
-    /// This is the testable/root-overridable variant of `from_native` and has
-    /// the same tuning and failure behavior.
+    /// Description: create a strict native AIC forward-pass model with an
+    /// explicit `systems/` data root (forwarded to `compile_engine` and used to
+    /// load the perf database). Same tuning and failure behavior as
+    /// `from_native`.
     pub fn from_native_with_roots(
         config: EngineConfig,
         options: ForwardPassPerfOptions,
         systems_root: impl AsRef<Path>,
-        model_configs_root: impl AsRef<Path>,
     ) -> Result<Self, AicError> {
         validate_options(&options)?;
-        let estimator =
-            EngineStepEstimator::from_config_with_roots(config, systems_root, model_configs_root)?;
-        Ok(Self {
+        let engine = build_engine_via_python(&config, Some(systems_root.as_ref()))?;
+        Ok(Self::from_engine(Arc::new(engine), options))
+    }
+
+    /// Internal: build a native model directly from an already-compiled
+    /// [`Engine`]. Holds the actual native-mode logic; the public `from_native`
+    /// constructors compile the `Engine` (crossing into Python) and call this.
+    /// Used by the `#[cfg(test)]` suite to construct a native model from a
+    /// hand-built fixture `Engine` without Python.
+    pub(crate) fn from_engine(engine: Arc<Engine>, options: ForwardPassPerfOptions) -> Self {
+        Self {
             mode: ForwardPassPerfMode::Native {
-                estimator,
+                engine,
                 corrections: WorkloadStores::with_options(&options),
             },
             options,
             last_warning: None,
-        })
+        }
     }
 
     /// API:
@@ -255,21 +216,16 @@ impl ForwardPassPerfModel {
     }
 
     /// API:
-    /// `ForwardPassPerfModel::best_available_with_roots(config, options, systems_root, model_configs_root) -> Result<Self, AicError>`
+    /// `ForwardPassPerfModel::best_available_with_roots(config, options, systems_root) -> Result<Self, AicError>`
     ///
-    /// Description: create a `best_available` model with explicit data roots.
+    /// Description: create a `best_available` model with an explicit `systems/`
+    /// data root.
     pub fn best_available_with_roots(
         config: EngineConfig,
         options: ForwardPassPerfOptions,
         systems_root: impl AsRef<Path>,
-        model_configs_root: impl AsRef<Path>,
     ) -> Result<Self, AicError> {
-        match Self::from_native_with_roots(
-            config,
-            options.clone(),
-            systems_root,
-            model_configs_root,
-        ) {
+        match Self::from_native_with_roots(config, options.clone(), systems_root) {
             Ok(model) => Ok(model),
             Err(err) if can_fallback_to_regression(&err) => {
                 Self::regression_with_warning(options, err)
@@ -307,6 +263,8 @@ impl ForwardPassPerfModel {
     /// configured correction bounds in `ForwardPassPerfOptions`. Regression
     /// models return `Ok(None)` until the matching inferred workload kind has
     /// enough tuning samples. Empty scheduled work returns `Ok(Some(0.0))`.
+    ///
+    /// Pure Rust over the `Engine` — no Python re-entry.
     pub fn estimate_forward_pass_time_ms(
         &self,
         metrics_by_rank: &[ForwardPassMetrics],
@@ -318,10 +276,10 @@ impl ForwardPassPerfModel {
 
         match &self.mode {
             ForwardPassPerfMode::Native {
-                estimator,
+                engine,
                 corrections,
             } => {
-                let native = estimator.forward_pass_time_ms(metrics_by_rank)?;
+                let native = engine.forward_pass_time_ms(metrics_by_rank)?;
                 let corrected = native
                     * corrections
                         .store(feature.workload_kind)
@@ -354,6 +312,8 @@ impl ForwardPassPerfModel {
     /// empty regions keep the default factor `1.0`. Observations outside the
     /// configured correction bounds are ignored by native correction models.
     /// Regression models learn a workload-specific linear fit.
+    ///
+    /// Pure Rust over the `Engine` — no Python re-entry.
     pub fn tune_with_fpms(
         &mut self,
         iterations: &[Vec<ForwardPassMetrics>],
@@ -366,10 +326,10 @@ impl ForwardPassPerfModel {
 
             match &mut self.mode {
                 ForwardPassPerfMode::Native {
-                    estimator,
+                    engine,
                     corrections,
                 } => {
-                    let native = estimator.forward_pass_time_ms(metrics_by_rank)?;
+                    let native = engine.forward_pass_time_ms(metrics_by_rank)?;
                     corrections
                         .store_mut(observation.feature.workload_kind)
                         .add_observation(observation.feature.x, observation.wall_time_ms, native);
@@ -485,21 +445,55 @@ impl ForwardPassPerfModel {
     }
 }
 
+/// Build a compiled [`Engine`] from an [`EngineConfig`] by crossing into Python
+/// once to run `aiconfigurator.sdk.engine.compile_engine`, then loading the
+/// matching perf database via [`Engine::from_spec_bytes`]. Mirrors
+/// [`crate::build_aic_engine`] but takes an `EngineConfig` (mapping its
+/// modular fields onto the flat `compile_engine` kwargs).
+///
+/// `systems_root` overrides the bundled `systems/` dir for BOTH the
+/// `compile_engine` call (`systems_path` kwarg) and the Rust-side perf-DB load.
+fn build_engine_via_python(
+    config: &EngineConfig,
+    systems_root: Option<&Path>,
+) -> Result<Engine, AicError> {
+    // `compile_engine`'s `systems_path` kwarg: explicit override -> config's
+    // own `systems_path` -> None (Python resolves it).
+    let systems_path: Option<PathBuf> = systems_root
+        .map(PathBuf::from)
+        .or_else(|| config.systems_path.clone());
+    // A non-UTF-8 override path cannot be passed through the Python kwarg; fail
+    // loudly rather than silently dropping the override.
+    let systems_path_str = match systems_path.as_ref() {
+        Some(p) => Some(p.to_str().ok_or_else(|| {
+            AicError::InvalidEngineConfig(format!(
+                "systems_path is not valid UTF-8: {}",
+                p.display()
+            ))
+        })?),
+        None => None,
+    };
+
+    crate::py::compile_engine_to_engine(config, systems_path_str)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum WorkloadKind {
+pub(crate) enum WorkloadKind {
     Prefill,
     Decode,
     Mixed,
 }
 
 #[derive(Clone, Debug)]
-struct IterationFeatures {
-    workload_kind: WorkloadKind,
-    x: Vec<f64>,
+pub(crate) struct IterationFeatures {
+    pub(crate) workload_kind: WorkloadKind,
+    pub(crate) x: Vec<f64>,
 }
 
 impl IterationFeatures {
-    fn from_metrics(metrics_by_rank: &[ForwardPassMetrics]) -> Result<Option<Self>, AicError> {
+    pub(crate) fn from_metrics(
+        metrics_by_rank: &[ForwardPassMetrics],
+    ) -> Result<Option<Self>, AicError> {
         if metrics_by_rank.is_empty() {
             return Err(AicError::InvalidForwardPassMetrics(
                 "at least one attention-DP rank metric is required".to_string(),
@@ -553,13 +547,15 @@ impl IterationFeatures {
 }
 
 #[derive(Clone, Debug)]
-struct IterationObservation {
-    feature: IterationFeatures,
-    wall_time_ms: f64,
+pub(crate) struct IterationObservation {
+    pub(crate) feature: IterationFeatures,
+    pub(crate) wall_time_ms: f64,
 }
 
 impl IterationObservation {
-    fn from_metrics(metrics_by_rank: &[ForwardPassMetrics]) -> Result<Option<Self>, AicError> {
+    pub(crate) fn from_metrics(
+        metrics_by_rank: &[ForwardPassMetrics],
+    ) -> Result<Option<Self>, AicError> {
         let Some(feature) = IterationFeatures::from_metrics(metrics_by_rank)? else {
             return Ok(None);
         };
@@ -579,7 +575,7 @@ impl IterationObservation {
 }
 
 #[derive(Clone, Debug)]
-struct WorkloadStores<T> {
+pub(crate) struct WorkloadStores<T> {
     prefill: T,
     decode: T,
     mixed: T,
@@ -658,537 +654,16 @@ impl<T> WorkloadStores<T> {
     }
 }
 
-trait WithOptions {
-    fn with_options(
-        options: &ForwardPassPerfOptions,
-        axis_ranges: &[AxisRange],
-        relaxable: &[usize],
-    ) -> Self;
-}
-
-trait StoreStats {
-    fn observation_count(&self) -> usize;
-    fn is_ready(&self) -> bool;
-}
-
-#[derive(Clone, Debug)]
-struct BucketedRegression {
-    samples: BucketedSamples<f64>,
-    ndim: usize,
-    min_observations: usize,
-    relaxable: Vec<usize>,
-    fit: Option<LinearFit>,
-}
-
-impl WithOptions for BucketedRegression {
-    fn with_options(
-        options: &ForwardPassPerfOptions,
-        axis_ranges: &[AxisRange],
-        relaxable: &[usize],
-    ) -> Self {
-        let ndim = axis_ranges.len();
-        Self {
-            samples: BucketedSamples::new_dynamic(options, ndim),
-            ndim,
-            min_observations: options.min_observations,
-            relaxable: relaxable.to_vec(),
-            fit: None,
-        }
-    }
-}
-
-impl StoreStats for BucketedRegression {
-    fn observation_count(&self) -> usize {
-        self.samples.total_observations
-    }
-
-    fn is_ready(&self) -> bool {
-        self.fit.is_some()
-    }
-}
-
-impl BucketedRegression {
-    fn add_observation(&mut self, x: Vec<f64>, y: f64) {
-        if self.samples.add(x, y) {
-            self.fit = fit_linear(
-                self.samples.observations(),
-                self.ndim,
-                self.min_observations,
-                &self.relaxable,
-            );
-        }
-    }
-
-    fn predict(&self, x: &[f64]) -> Option<f64> {
-        self.fit.as_ref().map(|fit| fit.predict(x).max(1e-6))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct CorrectionBuckets {
-    samples: BucketedSamples<CorrectionObservation>,
-    min_observations: usize,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct CorrectionObservation {
-    observed_ms: f64,
-    native_ms: f64,
-}
-
-impl WithOptions for CorrectionBuckets {
-    fn with_options(
-        options: &ForwardPassPerfOptions,
-        axis_ranges: &[AxisRange],
-        _relaxable: &[usize],
-    ) -> Self {
-        Self {
-            samples: BucketedSamples::new_fixed(options, axis_ranges),
-            min_observations: options.min_observations,
-        }
-    }
-}
-
-impl StoreStats for CorrectionBuckets {
-    fn observation_count(&self) -> usize {
-        self.samples.total_observations
-    }
-
-    fn is_ready(&self) -> bool {
-        // Match planner's regression readiness semantics: min_observations is
-        // checked across the whole inferred workload kind, not per region.
-        // Regions only decide which correction factor to apply once the
-        // workload kind is ready.
-        self.samples.total_observations >= self.min_observations
-    }
-}
-
-impl CorrectionBuckets {
-    fn add_observation(&mut self, x: Vec<f64>, observed_ms: f64, native_ms: f64) {
-        if native_ms.is_finite() && native_ms > 0.0 && observed_ms.is_finite() && observed_ms > 0.0
-        {
-            self.samples.add(
-                x,
-                CorrectionObservation {
-                    observed_ms,
-                    native_ms,
-                },
-            );
-        }
-    }
-
-    fn correction_factor_for(&self, x: &[f64]) -> f64 {
-        if !self.is_ready() {
-            return 1.0;
-        }
-        // Every region has an implicit correction factor of 1.0. A populated
-        // in-range region overrides that default with its local median
-        // observed/native ratio after the workload-kind-wide readiness gate passes.
-        let Some(key) = self.samples.bucket_key_if_in_bounds(x) else {
-            return 1.0;
-        };
-        let Some(bucket) = self.samples.buckets.get(&key) else {
-            return 1.0;
-        };
-        median_ratio(
-            bucket
-                .iter()
-                .map(|(_, obs)| obs.observed_ms / obs.native_ms),
-        )
-        .unwrap_or(1.0)
-    }
-
-    fn ready_bucket_count(&self) -> usize {
-        if self.is_ready() {
-            self.samples.buckets.len()
-        } else {
-            0
-        }
-    }
-
-    fn correction_factors(&self) -> Vec<f64> {
-        if !self.is_ready() {
-            return Vec::new();
-        }
-        self.samples
-            .buckets
-            .values()
-            .filter_map(|bucket| {
-                median_ratio(
-                    bucket
-                        .iter()
-                        .map(|(_, obs)| obs.observed_ms / obs.native_ms),
-                )
-            })
-            .collect()
-    }
-}
-
-#[derive(Clone, Debug)]
-struct BucketedSamples<T> {
-    buckets: HashMap<Vec<usize>, Vec<(Vec<f64>, T)>>,
-    total_observations: usize,
-    axis_min: Vec<f64>,
-    axis_max: Vec<f64>,
-    fixed_bounds: bool,
-    buckets_per_axis: usize,
-    max_observations: usize,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct AxisRange {
-    min: f64,
-    max: f64,
-}
-
-impl AxisRange {
-    fn from_zero_to(max: u32) -> Self {
-        Self {
-            min: 0.0,
-            max: f64::from(max),
-        }
-    }
-}
-
-impl<T: Clone> BucketedSamples<T> {
-    fn new_dynamic(options: &ForwardPassPerfOptions, ndim: usize) -> Self {
-        let buckets_per_axis = if ndim == 1 {
-            options.bucket_count
-        } else {
-            integer_sqrt(options.bucket_count)
-        };
-        Self {
-            buckets: HashMap::new(),
-            total_observations: 0,
-            axis_min: vec![f64::INFINITY; ndim],
-            axis_max: vec![f64::NEG_INFINITY; ndim],
-            fixed_bounds: false,
-            buckets_per_axis: buckets_per_axis.max(1),
-            max_observations: options.max_observations,
-        }
-    }
-
-    fn new_fixed(options: &ForwardPassPerfOptions, axis_ranges: &[AxisRange]) -> Self {
-        let mut samples = Self::new_dynamic(options, axis_ranges.len());
-        samples.axis_min = axis_ranges.iter().map(|range| range.min).collect();
-        samples.axis_max = axis_ranges.iter().map(|range| range.max).collect();
-        samples.fixed_bounds = true;
-        samples
-    }
-
-    fn add(&mut self, x: Vec<f64>, y: T) -> bool {
-        if x.len() != self.axis_min.len() || !x.iter().all(|value| value.is_finite()) {
-            return false;
-        }
-
-        if self.fixed_bounds {
-            if !self.is_in_bounds(&x) {
-                return false;
-            }
-        } else {
-            let bounds_changed = self.update_axis_bounds(&x);
-            if bounds_changed && self.total_observations > 0 {
-                self.rebuild_buckets();
-            }
-        }
-
-        let key = self.bucket_key(&x);
-        self.buckets.entry(key).or_default().push((x, y));
-        self.total_observations += 1;
-
-        if self.total_observations > self.max_observations {
-            self.retire_from_fattest_bucket();
-        }
-        true
-    }
-
-    fn observations(&self) -> Vec<(Vec<f64>, T)> {
-        self.buckets
-            .values()
-            .flat_map(|bucket| bucket.iter().cloned())
-            .collect()
-    }
-
-    fn bucket_key(&self, x: &[f64]) -> Vec<usize> {
-        x.iter()
-            .enumerate()
-            .map(|(i, value)| {
-                let lo = self.axis_min[i];
-                let hi = self.axis_max[i];
-                if hi <= lo {
-                    0
-                } else {
-                    let idx = ((*value - lo) / (hi - lo) * self.buckets_per_axis as f64) as isize;
-                    idx.clamp(0, self.buckets_per_axis as isize - 1) as usize
-                }
-            })
-            .collect()
-    }
-
-    fn bucket_key_if_in_bounds(&self, x: &[f64]) -> Option<Vec<usize>> {
-        if self.total_observations == 0 || x.len() != self.axis_min.len() {
-            return None;
-        }
-
-        // Estimation must not clamp outside configured correction bounds into
-        // edge regions.
-        let mut key = Vec::with_capacity(x.len());
-        for (i, value) in x.iter().enumerate() {
-            let lo = self.axis_min[i];
-            let hi = self.axis_max[i];
-            if !value.is_finite() || !lo.is_finite() || !hi.is_finite() {
-                return None;
-            }
-            if hi <= lo {
-                if *value != lo {
-                    return None;
-                }
-                key.push(0);
-                continue;
-            }
-            if *value < lo || *value > hi {
-                return None;
-            }
-
-            let idx = ((*value - lo) / (hi - lo) * self.buckets_per_axis as f64) as isize;
-            key.push(idx.clamp(0, self.buckets_per_axis as isize - 1) as usize);
-        }
-        Some(key)
-    }
-
-    fn is_in_bounds(&self, x: &[f64]) -> bool {
-        if x.len() != self.axis_min.len() {
-            return false;
-        }
-        x.iter().enumerate().all(|(i, value)| {
-            value.is_finite()
-                && self.axis_min[i].is_finite()
-                && self.axis_max[i].is_finite()
-                && *value >= self.axis_min[i]
-                && *value <= self.axis_max[i]
-        })
-    }
-
-    fn update_axis_bounds(&mut self, x: &[f64]) -> bool {
-        let mut changed = false;
-        for (i, value) in x.iter().enumerate() {
-            if *value < self.axis_min[i] {
-                self.axis_min[i] = *value;
-                changed = true;
-            }
-            if *value > self.axis_max[i] {
-                self.axis_max[i] = *value;
-                changed = true;
-            }
-        }
-        changed
-    }
-
-    fn rebuild_buckets(&mut self) {
-        let observations = self.observations();
-        self.buckets.clear();
-        for (x, y) in observations {
-            let key = self.bucket_key(&x);
-            self.buckets.entry(key).or_default().push((x, y));
-        }
-    }
-
-    fn retire_from_fattest_bucket(&mut self) {
-        // Eviction removes samples only. Dynamic regression bounds remain
-        // monotonic; fixed correction bounds are configured at model creation.
-        let Some(key) = self
-            .buckets
-            .iter()
-            .max_by_key(|(_, bucket)| bucket.len())
-            .map(|(key, _)| key.clone())
-        else {
-            return;
-        };
-
-        if let Some(bucket) = self.buckets.get_mut(&key) {
-            if !bucket.is_empty() {
-                bucket.remove(0);
-                self.total_observations -= 1;
-            }
-            if bucket.is_empty() {
-                self.buckets.remove(&key);
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct LinearFit {
-    intercept: f64,
-    coefficients: Vec<f64>,
-}
-
-impl LinearFit {
-    fn predict(&self, x: &[f64]) -> f64 {
-        self.intercept
-            + self
-                .coefficients
-                .iter()
-                .zip(x.iter())
-                .map(|(coef, value)| coef * value)
-                .sum::<f64>()
-    }
-}
-
-fn fit_linear(
-    observations: Vec<(Vec<f64>, f64)>,
-    ndim: usize,
-    min_observations: usize,
-    relaxable: &[usize],
-) -> Option<LinearFit> {
-    if observations.len() < min_observations {
-        return None;
-    }
-    let size = ndim + 1;
-    let mut lhs = vec![vec![0.0_f64; size]; size];
-    let mut rhs = vec![0.0_f64; size];
-
-    for (x, y) in observations {
-        let mut row = Vec::with_capacity(size);
-        row.push(1.0);
-        row.extend(x.into_iter().take(ndim));
-        for i in 0..size {
-            rhs[i] += row[i] * y;
-            for j in 0..size {
-                lhs[i][j] += row[i] * row[j];
-            }
-        }
-    }
-
-    let solution = solve_linear_system(lhs.clone(), rhs.clone())
-        .or_else(|| solve_regularized_linear_system(lhs, rhs))?;
-    let mut coefficients = solution[1..].to_vec();
-    let mut has_non_relaxable_negative = false;
-    for (idx, coef) in coefficients.iter_mut().enumerate() {
-        if *coef < 0.0 {
-            if relaxable.contains(&idx) {
-                if *coef < -RELAXABLE_NEG_TOLERANCE {
-                    *coef = 0.0;
-                }
-            } else {
-                has_non_relaxable_negative = true;
-            }
-        }
-    }
-    if has_non_relaxable_negative {
-        return None;
-    }
-    Some(LinearFit {
-        intercept: solution[0],
-        coefficients,
-    })
-}
-
-fn solve_regularized_linear_system(mut lhs: Vec<Vec<f64>>, rhs: Vec<f64>) -> Option<Vec<f64>> {
-    let scale = lhs
-        .iter()
-        .enumerate()
-        .map(|(idx, row)| row[idx].abs())
-        .sum::<f64>()
-        .max(1.0);
-    let ridge = scale * 1e-9;
-    for (idx, row) in lhs.iter_mut().enumerate().skip(1) {
-        row[idx] += ridge;
-    }
-    solve_linear_system(lhs, rhs)
-}
-
-fn solve_linear_system(mut lhs: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Option<Vec<f64>> {
-    let n = rhs.len();
-    for col in 0..n {
-        let pivot = (col..n).max_by(|a, b| {
-            lhs[*a][col]
-                .abs()
-                .partial_cmp(&lhs[*b][col].abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })?;
-        if lhs[pivot][col].abs() < 1e-12 {
-            return None;
-        }
-        lhs.swap(col, pivot);
-        rhs.swap(col, pivot);
-
-        let divisor = lhs[col][col];
-        for j in col..n {
-            lhs[col][j] /= divisor;
-        }
-        rhs[col] /= divisor;
-
-        for row in 0..n {
-            if row == col {
-                continue;
-            }
-            let factor = lhs[row][col];
-            if factor == 0.0 {
-                continue;
-            }
-            for j in col..n {
-                lhs[row][j] -= factor * lhs[col][j];
-            }
-            rhs[row] -= factor * rhs[col];
-        }
-    }
-    Some(rhs)
-}
-
-fn median_ratio(values: impl Iterator<Item = f64>) -> Option<f64> {
-    let mut values = values
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let mid = values.len() / 2;
-    if values.len() % 2 == 0 {
-        Some((values[mid - 1] + values[mid]) / 2.0)
-    } else {
-        Some(values[mid])
-    }
-}
-
-fn validate_options(options: &ForwardPassPerfOptions) -> Result<(), AicError> {
-    if options.max_observations == 0 {
-        return Err(invalid_perf_options("max_observations must be >= 1"));
-    }
-    if options.min_observations == 0 {
-        return Err(invalid_perf_options("min_observations must be >= 1"));
-    }
-    if options.bucket_count == 0 {
-        return Err(invalid_perf_options("bucket_count must be >= 1"));
-    }
-    if options.max_num_tokens == 0 {
-        return Err(invalid_perf_options("max_num_tokens must be >= 1"));
-    }
-    if options.max_batch_size == 0 {
-        return Err(invalid_perf_options("max_batch_size must be >= 1"));
-    }
-    if options.max_kv_tokens == 0 {
-        return Err(invalid_perf_options("max_kv_tokens must be >= 1"));
-    }
-    if options.min_observations > options.max_observations {
-        return Err(invalid_perf_options(
-            "min_observations must be <= max_observations",
-        ));
-    }
-    let sqrt = integer_sqrt(options.bucket_count);
-    if sqrt * sqrt != options.bucket_count {
-        return Err(invalid_perf_options(
-            "bucket_count must be a perfect square",
-        ));
-    }
-    Ok(())
-}
-
-fn invalid_perf_options(message: &str) -> AicError {
-    AicError::InvalidEngineConfig(format!("invalid forward pass perf options: {message}"))
-}
-
+/// Decide whether `best_available` should fall back to regression instead of
+/// propagating `err`. Covers the unsupported-model / data-availability errors
+/// that mean "this model can't be served natively". A failed native build via
+/// Python `compile_engine` surfaces as [`AicError::UnsupportedModel`] (see
+/// `py::compile_engine_from_flat`), which is covered here.
+///
+/// [`AicError::InvalidEngineConfig`] is deliberately NOT fallback-safe: it is
+/// used for hard caller/config errors (e.g. a non-UTF-8 `systems_path`, invalid
+/// FPM options, a malformed spec). Those must surface rather than silently
+/// degrade `best_available` to regression mode.
 fn can_fallback_to_regression(err: &AicError) -> bool {
     matches!(
         err,
@@ -1197,34 +672,6 @@ fn can_fallback_to_regression(err: &AicError) -> bool {
             | AicError::ModelConfig(_)
             | AicError::PerfDatabase(_)
             | AicError::Io { .. }
-            | AicError::Csv { .. }
+            | AicError::Parquet { .. }
     )
-}
-
-fn integer_sqrt(value: usize) -> usize {
-    (value as f64).sqrt() as usize
-}
-
-fn default_max_observations() -> usize {
-    DEFAULT_MAX_OBSERVATIONS
-}
-
-fn default_min_observations() -> usize {
-    DEFAULT_MIN_OBSERVATIONS
-}
-
-fn default_bucket_count() -> usize {
-    DEFAULT_BUCKET_COUNT
-}
-
-fn default_max_num_tokens() -> u32 {
-    DEFAULT_MAX_NUM_TOKENS
-}
-
-fn default_max_batch_size() -> u32 {
-    DEFAULT_MAX_BATCH_SIZE
-}
-
-fn default_max_kv_tokens() -> u32 {
-    DEFAULT_MAX_KV_TOKENS
 }

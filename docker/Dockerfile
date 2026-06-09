@@ -15,10 +15,16 @@ RUN mkdir /opt/aiconfigurator && \
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV MPLCONFIGDIR=/tmp/matplotlib
 
-FROM rust:1-slim-bookworm AS rust-toolchain
-
 FROM base AS build
+# The `aiconfigurator_core` extension is compiled into the wheel by maturin
+# during `uv build`. maturin needs the Rust crate sources, a C linker (gcc),
+# and ca-certificates so cargo can fetch crates from crates.io over TLS. Rust
+# itself is bootstrapped by maturin's build backend.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
+    rm -rf /var/lib/apt/lists/*
 COPY src/ /workspace/src/
+COPY rust/ /workspace/rust/
 COPY LICENSE pyproject.toml README.md /workspace/
 # Fail fast if Git LFS content wasn't materialized before the build — otherwise
 # the wheel ships pointer stubs in place of perf data (see DYN-2725).
@@ -40,23 +46,12 @@ RUN WHL=$(ls -d /wheelhouse/*) && \
 
 FROM runtime AS test
 
-COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
-COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
-ENV CARGO_HOME=/usr/local/cargo
-ENV RUSTUP_HOME=/usr/local/rustup
-ENV PATH="${CARGO_HOME}/bin:${PATH}"
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
-    rm -rf /var/lib/apt/lists/*
-
+# The `aiconfigurator_core` extension ships inside the wheel built in the
+# `build` stage, so the test stage only needs the dev extras and test sources.
 COPY --from=build /workspace/dist /wheelhouse
 RUN WHL=$(ls -d /wheelhouse/*) && \
     uv pip install "$WHL[dev]" && \
     rm -rf /wheelhouse
-
-COPY rust/ /workspace/rust/
-RUN cargo build --release --manifest-path /workspace/rust/aiconfigurator-core/Cargo.toml
-ENV AICONFIGURATOR_RUST_CORE_LIB=/workspace/rust/aiconfigurator-core/target/release/libaiconfigurator_core.so
 
 COPY pytest.ini /workspace/
 COPY tests/ /workspace/tests/

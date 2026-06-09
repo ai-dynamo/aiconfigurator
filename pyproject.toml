@@ -86,11 +86,57 @@ GitHub = "https://github.com/ai-dynamo/aiconfigurator"
 Repository = "https://github.com/ai-dynamo/aiconfigurator.git"
 
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
 
 [project.scripts]
 aiconfigurator = "aiconfigurator.main:main"
+
+[tool.maturin]
+# The Rust crate lives in a subdirectory; pyproject.toml is at repo root.
+manifest-path = "rust/aiconfigurator-core/Cargo.toml"
+# The compiled extension is a submodule of the top-level `aiconfigurator_core`
+# package (src/aiconfigurator_core/), placed as
+# `_aiconfigurator_core.<abi>.so`. The package `__init__.py` re-exports the
+# public names so callers `import aiconfigurator_core`. The last component
+# must match the `#[pymodule]` function name in src/py.rs.
+module-name = "aiconfigurator_core._aiconfigurator_core"
+# Pure-Python sources live under src/ (src-layout).
+python-source = "src"
+# Build an abi3 wheel (single wheel valid across Py 3.9+, matching the
+# pyo3 `abi3-py39` feature).
+abi3 = true
+# Enable the extension-module feature ONLY for the maturin/wheel build.
+# `cargo build`/`cargo test` keep linking libpython (auto-initialize) for the
+# Rust->Python embedding path; this feature is what lets the built `.so` skip
+# libpython linkage. It is NOT a default Cargo feature (see Cargo.toml).
+features = ["pyo3/extension-module"]
+# Bundle the Python data files (parquet/yaml/csv/json/templates) that the
+# legacy setuptools package-data globs shipped, into BOTH the sdist and the
+# wheel, so non-editable installs keep finding the perf databases and config
+# templates. (Editable `maturin develop` resolves these in-place from src/;
+# these globs cover the wheel/sdist case mirrored from the old package-data.)
+include = [
+    # maturin auto-packages only the `aiconfigurator_core` package (the one the
+    # extension's module-name lives in). The pure-Python `aiconfigurator`
+    # package is a second top-level package under `src/`, so its modules must be
+    # included explicitly or the non-editable wheel ships without them.
+    "src/aiconfigurator/**/*.py",
+    "src/aiconfigurator/cli/*.yaml",
+    "src/aiconfigurator/cli/exps/*.yaml",
+    "src/aiconfigurator/generator/config/**/*.yaml",
+    "src/aiconfigurator/generator/config/backend_templates/**/*.j2",
+    "src/aiconfigurator/generator/rule_plugin/**/*.rule",
+    "src/aiconfigurator/systems/*.yaml",
+    "src/aiconfigurator/systems/*.csv",
+    "src/aiconfigurator/systems/**/*.csv",
+    "src/aiconfigurator/systems/**/*.json",
+    "src/aiconfigurator/systems/**/*.txt",
+    "src/aiconfigurator/systems/**/*.parquet",
+    "src/aiconfigurator/model_configs/*.json",
+    "src/aiconfigurator/webapp/components/profiling/styles.css",
+    "src/aiconfigurator/webapp/components/profiling/js/*.js",
+]
 
 [tool.setuptools.package-data]
 "aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
