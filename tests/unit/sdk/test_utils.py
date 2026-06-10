@@ -692,6 +692,42 @@ class TestGemma4MixModelBuilder:
         expected = 25 * 1024 * 1024 + 5 * 2048 * seq_len
         assert model.get_kvcache_bytes_per_sequence(seq_len) == expected
 
+    def test_get_kvcache_max_tokens_follows_window_capped_curve(self):
+        """The capacity inverse caps SWA layers at the window instead of using the
+        (larger) seq_len=1 slope, so it fits far more tokens past the window."""
+        model = self._make_model(self._make_model_config())
+        budget = model.get_kvcache_bytes_per_sequence(65536)  # >> 1024 window
+        tokens = model.get_kvcache_max_tokens(budget)
+        # Exact monotonic inverse: `tokens` fits, one more token does not.
+        assert tokens == 65536
+        assert model.get_kvcache_bytes_per_sequence(tokens) <= budget
+        assert model.get_kvcache_bytes_per_sequence(tokens + 1) > budget
+        # The seq_len=1 extrapolation under-counts: SWA layers are charged forever.
+        per_token = model.get_kvcache_bytes_per_sequence(1)
+        assert tokens > int(budget // per_token)
+
+    def test_get_kvcache_max_tokens_linear_below_window(self):
+        """Below the window every layer still grows, so the inverse is plain
+        floor-division by the per-token size."""
+        model = self._make_model(self._make_model_config())
+        per_token = model.get_kvcache_bytes_per_sequence(1)
+        budget = model.get_kvcache_bytes_per_sequence(512)  # < 1024 window
+        assert model.get_kvcache_max_tokens(budget) == int(budget // per_token) == 512
+
+    def test_get_kvcache_max_tokens_saturated_caps_at_context_length(self):
+        """A fully window-capped cache (all SWA, no global layers) saturates: KV
+        stops growing past the window, so memory never binds and capacity is
+        bounded by the model context length -- not an arbitrary doubling step."""
+        # No full_attention layer -> every layer caps at the 1024 window.
+        model = self._make_model(self._make_model_config(), layer_types=["sliding_attention"] * 6)
+        # KV is flat past the window: confirm we are actually in the saturated regime.
+        assert model.get_kvcache_bytes_per_sequence(2048) == model.get_kvcache_bytes_per_sequence(1024)
+        saturated = model.get_kvcache_bytes_per_sequence(model._context_length)
+        # Any budget at/above the saturated size returns the context length, and is
+        # stable across wildly different (large) budgets rather than tracking 2^k.
+        assert model.get_kvcache_max_tokens(saturated) == model._context_length == 262144
+        assert model.get_kvcache_max_tokens(saturated * 1000) == model._context_length
+
     def test_set_gemma4_config_rejects_wrong_type(self):
         """Passing a HybridMoEConfig (or any non-Gemma4MixConfig) raises."""
         model = Gemma4MixModel(

@@ -589,8 +589,28 @@ let num_gpu_blocks_per_rank = estimate.total_kv_size_tokens / scheduler_block_si
 ```
 
 `dynamo._internal.aic.estimate_num_gpu_blocks()` becomes a thin
-Python wrapper that calls `estimate_kv_cache` via PyO3 and applies
-the same conversion.
+Python wrapper that calls `estimate_kv_cache` and applies the same
+conversion. **As of K3 that Dynamo-side rewrite is a DEFERRED
+downstream PR in the `ai-dynamo/dynamo` repo** (it is NOT done in
+`aiconfigurator`). K3 ships the in-repo surface it consumes: the Rust
+`aiconfigurator_core::estimate_kv_cache(req)` forwarder (for the
+embedded Mocker) plus the AIC-side reference
+`aiconfigurator.sdk.memory.estimate_num_gpu_blocks` helper (the same
+`floor(tokens / scheduler_block_size)` conversion). See
+`phase-1.5-capacity-followup.md`.
+
+> **Post-K3 design change.** The capacity API moved out of `sdk/engine.py` into
+> a dedicated `sdk/memory.py`. The redundant Python-callable
+> `aiconfigurator_core.estimate_kv_cache` `#[pyfunction]` was dropped, and the
+> tolerance validation + `tolerance_adjusted` margin moved out of Rust into the
+> Python `sdk.memory.estimate_kv_cache` (the single source of truth). The Rust
+> `estimate_kv_cache(req)` is now a pure forwarder; `estimate_num_gpu_blocks`
+> calls the Python estimate directly (no Rust hop). The naive fallback reuses the
+> SDK's existing HF-config loaders + `_parse_hf_config_json` (with a raw-key read
+> for unsupported architectures) and its reservation fraction is a caller arg
+> (`naive_kv_reservation`, default 0.80). The illustrative Rust snippet above uses
+> the raw token count; a tolerance-aware Mocker reads
+> `tolerance_adjusted.total_kv_size_tokens` when a tolerance is set.
 
 ## The crux: OpSpec wire format
 
@@ -656,7 +676,7 @@ audit table that gates E1.
 | **E8** | Perf gate | Benchmark `engine.run_static` / `engine.run_agg` against Phase 1's ctypes path on the smoke set. Exit criterion: **≥3× p50 speedup** on small-graph families that today regress below 1× (MiniMax-M2.5 gen, NemotronNas gen, DSv3.2 ctx) by eliminating the per-call Python op-walking. Big-graph families stay at or above Phase 1 speedup. Numbers land in `parity_tests/benchmarks.md`. | **GATE** |
 | **K1** | `estimate_kv_cache` native path | Top-level Rust function in `src/capacity.rs`. **PyO3 → Python `BaseBackend._get_memory_usage`** for the breakdown, then Rust math. Returns `KvCacheEstimate` with `EstimateSource::Native` and a populated `MemoryBreakdown`. Validates `KvCacheMemoryFraction` against `engine.backend` (TRT-LLM ↔ `OfFree`; vLLM / SGLang ↔ `OfTotal`). | unit |
 | **K2** | `estimate_kv_cache` naive fallback | **Pure Rust** — no PyO3 hop. HF-config parsing for KV bytes per token (MLA-aware via `kv_lora_rank + qk_rope_head_dim`), 80%-of-post-weight reservation, `allow_hf_config_download` honoured. Returns `EstimateSource::NaiveFallback` with `memory_breakdown: None`. | unit |
-| **K3** | Tolerance + Dynamo replacement | `tolerance_adjusted` field populated when `tolerance_fraction` is set. Rewrite `dynamo._internal.aic.estimate_num_gpu_blocks` as a thin PyO3 wrapper that calls `estimate_kv_cache` and applies `floor(total_kv_size_tokens / scheduler_block_size)` locally. | integration |
+| **K3** | Tolerance + capacity surface | `tolerance_adjusted` field populated when `tolerance_fraction` is set (native AND naive; `BadConfig` if `t ∉ [0,1)`). Tolerance validation and margin handling live in Python `aiconfigurator.sdk.memory.estimate_kv_cache` (the single source of truth); Rust `aiconfigurator_core::estimate_kv_cache` is a pure forwarder with no math of its own (the earlier `#[pyfunction]` re-export was dropped as redundant — see the "Post-K3 design change" note above). Add the AIC-side reference `aiconfigurator.sdk.memory.estimate_num_gpu_blocks` helper (`floor(total_kv_size_tokens / scheduler_block_size)`). The Dynamo-side rewrite of `dynamo._internal.aic.estimate_num_gpu_blocks` into a thin wrapper over this surface is a **DEFERRED downstream PR** in `ai-dynamo/dynamo` (out of scope here); documented in `phase-1.5-capacity-followup.md`. | integration |
 
 ## Commit dependencies
 

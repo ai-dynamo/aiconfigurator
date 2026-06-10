@@ -32,7 +32,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::common::error::AicError;
-use crate::engine::runtime::{Engine, RuntimeConfig, StaticMode, StaticResult, DEFAULT_STATIC_STRIDE};
+use crate::engine::runtime::{
+    Engine, RuntimeConfig, StaticMode, StaticResult, DEFAULT_STATIC_STRIDE,
+};
 use crate::{DataType, EngineConfig, ENGINE_CONFIG_SCHEMA_VERSION};
 
 /// Trivial smoke export: returns the engine-config schema version so callers
@@ -201,7 +203,13 @@ impl AicEngine {
     /// `mode=Context` (osl is irrelevant for the context phase, so it is fixed
     /// at 1). Returns the total ms (== context_ms in this mode).
     #[pyo3(signature = (bs, isl, prefix=0))]
-    fn predict_prefill_latency(&self, py: Python<'_>, bs: u32, isl: u32, prefix: u32) -> PyResult<f64> {
+    fn predict_prefill_latency(
+        &self,
+        py: Python<'_>,
+        bs: u32,
+        isl: u32,
+        prefix: u32,
+    ) -> PyResult<f64> {
         py.allow_threads(|| self.inner.predict_prefill_latency(bs, isl, prefix))
             .map_err(aic_to_py)
     }
@@ -229,8 +237,11 @@ impl AicEngine {
         osl: u32,
         prefix: u32,
     ) -> PyResult<f64> {
-        py.allow_threads(|| self.inner.mixed_step_latency(ctx_tokens, gen_tokens, isl, osl, prefix))
-            .map_err(aic_to_py)
+        py.allow_threads(|| {
+            self.inner
+                .mixed_step_latency(ctx_tokens, gen_tokens, isl, osl, prefix)
+        })
+        .map_err(aic_to_py)
     }
 
     /// One generation-only engine-step latency in ms. Binds
@@ -373,7 +384,11 @@ fn compile_engine_from_flat(
         kwargs.set_item("kv_block_size", kv_block_size)?;
         kwargs.set_item("systems_path", systems_path)?;
         engine_mod
-            .call_method("compile_engine", (model_path, system, backend), Some(&kwargs))?
+            .call_method(
+                "compile_engine",
+                (model_path, system, backend),
+                Some(&kwargs),
+            )?
             .extract::<Vec<u8>>()
     })
     // PyErr → AicError inline (keeps error.rs pyo3-free). A `compile_engine`
@@ -553,8 +568,7 @@ impl PyForwardPassPerfModel {
         let config: EngineConfig = serde_json::from_str(config_json)
             .map_err(|e| PyValueError::new_err(format!("invalid engine config JSON: {e}")))?;
         let options = parse_fpm_options(options_json)?;
-        let inner =
-            crate::ForwardPassPerfModel::from_native(config, options).map_err(aic_to_py)?;
+        let inner = crate::ForwardPassPerfModel::from_native(config, options).map_err(aic_to_py)?;
         Ok(Self { inner })
     }
 
@@ -657,9 +671,7 @@ mod tests {
     use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
     use crate::engine::spec::EngineSpec;
     use crate::operators::op::Op;
-    use crate::operators::{
-        ContextAttentionOp, ElementwiseOp, GemmOp, GenerationAttentionOp,
-    };
+    use crate::operators::{ContextAttentionOp, ElementwiseOp, GemmOp, GenerationAttentionOp};
     use crate::{BackendKind, EngineConfig, ParallelMapping, QuantizationConfig};
 
     fn systems_root() -> PathBuf {
@@ -783,7 +795,18 @@ mod tests {
             .unwrap();
         // Positional order: (bs, beam, isl, osl, prefix, seq_corr, gen_seq_corr, mode, stride).
         let (ctx, gen, total) = Python::with_gil(|py| {
-            aic.run_static(py, 1, 1, 1024, 8, 0, 1.0, 1.0, "static", DEFAULT_STATIC_STRIDE)
+            aic.run_static(
+                py,
+                1,
+                1,
+                1024,
+                8,
+                0,
+                1.0,
+                1.0,
+                "static",
+                DEFAULT_STATIC_STRIDE,
+            )
         })
         .unwrap();
         assert!((ctx - raw_static.context_ms).abs() < 1e-12);
@@ -836,12 +859,14 @@ mod tests {
 
         // Positional order: (bs, beam, isl, osl, prefix, seq_corr, gen_seq_corr, mode, stride).
         Python::with_gil(|py| {
-            let ctx_only =
-                aic.run_static(py, 1, 1, 1024, 8, 0, 1.0, 1.0, "static_ctx", 32).unwrap();
+            let ctx_only = aic
+                .run_static(py, 1, 1, 1024, 8, 0, 1.0, 1.0, "static_ctx", 32)
+                .unwrap();
             assert!(ctx_only.0 > 0.0 && ctx_only.1 == 0.0);
 
-            let gen_only =
-                aic.run_static(py, 1, 1, 1024, 8, 0, 1.0, 1.0, "static_gen", 32).unwrap();
+            let gen_only = aic
+                .run_static(py, 1, 1, 1024, 8, 0, 1.0, 1.0, "static_gen", 32)
+                .unwrap();
             assert!(gen_only.0 == 0.0 && gen_only.1 > 0.0);
 
             assert!(aic

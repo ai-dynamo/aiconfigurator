@@ -10,7 +10,7 @@ exports the compiled-engine pyclass ``AicEngine``
 (``from_spec`` / ``run_static`` / ``predict_prefill_latency`` /
 ``predict_decode_latency`` / ``mixed_step_latency`` / ``decode_step_latency``),
 the op-transfer ``#[pyfunction]`` ``engine_spec_bincode_from_json`` (JSON
-``EngineSpec`` -> bincode bytes, the Python -> Rust op-transfer wire), plus the
+``EngineSpec`` -> bincode bytes, the Python -> Rust op-transfer wire), and the
 build smoke check ``_build_smoke``.
 
 It also exports the forward-pass perf model pyclass
@@ -18,9 +18,10 @@ It also exports the forward-pass perf model pyclass
 tuned/fallback forward-pass latency model with online correction, regression
 fallback, and diagnostics.
 
-``build_aic_engine`` is intentionally NOT re-exported: it is a Rust-only entry
-point for embedded callers (e.g. the Dynamo Mocker), not part of the Python
-surface.
+KV-cache capacity estimation is not exported here: it is computed in Python
+(``aiconfigurator.sdk.memory``), and the Rust
+``aiconfigurator_core::memory::estimate_kv_cache`` is a Rust-only forwarder for
+embedded callers (e.g. the Dynamo Mocker), like ``build_aic_engine``.
 """
 
 from ._aiconfigurator_core import (
