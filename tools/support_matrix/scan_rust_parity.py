@@ -761,6 +761,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         workers=args.workers,
         per_entry_timeout=args.per_entry_timeout_sec,
         status_interval=args.status_interval_sec,
+        max_tasks_per_child=args.max_tasks_per_child,
     )
 
 
@@ -786,6 +787,7 @@ def _run_pool(
     workers: int,
     per_entry_timeout: int,
     status_interval: int,
+    max_tasks_per_child: int | None = None,
 ) -> int:
     counters = {"PASS": 0, "DRIFT": 0, "REGRESSION": 0, "ERROR": 0, "TIMEOUT": 0, "OTHER": 0}
     completed = 0
@@ -796,7 +798,15 @@ def _run_pool(
     # WAL allows multiple readers but a single writer ought to own commits.
     conn = _connect(db_path)
     try:
-        with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init) as pool:
+        # max_tasks_per_child recycles each worker process after N entries so the
+        # per-process SupportMatrix / perf-DB cache (see _worker_matrix) is freed
+        # instead of growing unbounded -> avoids OOM on long full-matrix runs.
+        # macOS/Windows default to the "spawn" start method, which this requires
+        # (it is incompatible with "fork"); None keeps workers alive for the whole run.
+        pool_kwargs: dict = {"max_workers": workers, "initializer": _worker_init}
+        if max_tasks_per_child and max_tasks_per_child > 0:
+            pool_kwargs["max_tasks_per_child"] = max_tasks_per_child
+        with ProcessPoolExecutor(**pool_kwargs) as pool:
             future_to_entry: dict = {pool.submit(_run_one_entry, (entry, scan_mode)): entry for entry in work}
             try:
                 while future_to_entry:
@@ -1189,6 +1199,17 @@ def _build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--limit", type=int, default=None, help="Cap pending entries (smoke testing).")
     scan.add_argument("--per-entry-timeout-sec", type=int, default=DEFAULT_PER_ENTRY_TIMEOUT_SEC)
     scan.add_argument("--status-interval-sec", type=int, default=30)
+    scan.add_argument(
+        "--max-tasks-per-child",
+        type=int,
+        default=0,
+        help=(
+            "Recycle each worker process after this many entries to bound memory "
+            "(the per-process perf-DB cache grows otherwise). 0 = never recycle "
+            "(workers live for the whole run). Recommended ~25 for memory-constrained "
+            "hosts. Requires the 'spawn' start method (default on macOS/Windows)."
+        ),
+    )
     scan.add_argument(
         "--continue-across-commits",
         action="store_true",
