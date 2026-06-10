@@ -166,8 +166,19 @@ uv run python tools/support_matrix/scan_rust_parity.py \
     --probe-atol  0.001 \
     --pareto-strict-rtol 0.01 \
     --pareto-envelope-rtol 0.05 \
-    --per-entry-timeout-sec 900
+    --per-entry-timeout-sec 900 \
+    --max-tasks-per-child 25
 ```
+
+**Memory note.** Each worker holds a per-process `SupportMatrix` that caches
+the perf DB + models for every `(model, system, backend, version)` it touches;
+without recycling this grows unbounded and OOM-kills the run (manifests as
+`BrokenExecutor` / silent worker death, not a `TIMEOUT`). `--max-tasks-per-child N`
+recycles each worker after `N` entries to free that cache (`0` = never recycle,
+the legacy behaviour). On memory-constrained hosts also drop `--workers` — each
+worker loads a full perf DB, so 2–3 workers + `--max-tasks-per-child 25` is the
+safe profile; high `--workers` is only for large-RAM machines. This flag
+requires the `spawn` start method (default on macOS/Windows).
 
 `--scan-mode {probe_only,pareto_only,both}` so a fast probe-only scan
 can run first (filters obvious regressions; ~17 min on a 16-worker
