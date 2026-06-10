@@ -253,7 +253,7 @@ def test_forward_pass_perf_model_returns_none_before_tuning(monkeypatch) -> None
 @pytest.mark.skipif(
     not rust_engine_step.is_rust_core_available(),
     reason="Rust core PyO3 extension is not importable "
-           "(install with `pip install -e \".[rust]\"` or `maturin develop --release`)"
+    '(install with `pip install -e ".[rust]"` or `maturin develop --release`)',
 )
 def test_real_rust_core_returns_expected_latency(tmp_path, monkeypatch) -> None:
     systems_root = tmp_path / "systems"
@@ -349,7 +349,7 @@ def test_real_rust_core_returns_expected_latency(tmp_path, monkeypatch) -> None:
 @pytest.mark.skipif(
     not rust_engine_step.is_rust_core_available(),
     reason="Rust core PyO3 extension is not importable "
-           "(install with `pip install -e \".[rust]\"` or `maturin develop --release`)"
+    '(install with `pip install -e ".[rust]"` or `maturin develop --release`)',
 )
 def test_real_forward_pass_perf_model_regression(monkeypatch) -> None:
     """A real regression-only FPM model needs no perf data and reports diagnostics."""
