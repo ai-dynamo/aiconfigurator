@@ -4,15 +4,50 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "collector" / "layerwise" / "common"))
-sys.path.insert(0, str(ROOT / "collector" / "layerwise" / "vllm"))
 
-import collect_layerwise as cl
 import parallel_config_patch as pcp
+from collector.layerwise.vllm import collect as public_collect
+from collector.layerwise.vllm import datapoint_generator as dpg
+from collector.layerwise.vllm import engine
+from collector.layerwise.vllm import nsys
+from collector.layerwise.vllm import scheduler
+from collector.layerwise.vllm import worker
+from collector.layerwise.vllm.data import DataPoint, RepresentativeLayer, WorkUnit
 from random_prompt_tokens import load_random_prompt_token_config
+
+cl = SimpleNamespace(
+    CTX_MAX_NUM_BATCHED_TOKENS_FLOOR=dpg.CTX_MAX_NUM_BATCHED_TOKENS_FLOOR,
+    DataPoint=DataPoint,
+    RandomPromptTokenConfig=worker.RandomPromptTokenConfig,
+    RepresentativeLayer=RepresentativeLayer,
+    Scheduler=scheduler.Scheduler,
+    StatusIndex=scheduler.StatusIndex,
+    StatusStore=scheduler.StatusStore,
+    VLLM_DEFAULT_BLOCK_SIZE=dpg.VLLM_DEFAULT_BLOCK_SIZE,
+    WorkUnit=WorkUnit,
+    _aggregate_step_rows=nsys._aggregate_step_rows,
+    _build_arg_parser=public_collect._build_arg_parser,
+    _ctx_cache_salt_prefix=worker._ctx_cache_salt_prefix,
+    _ctx_marker_iteration=worker._ctx_marker_iteration,
+    _ctx_prefix_request_index_offset=worker._ctx_prefix_request_index_offset,
+    _ctx_suffix_request_index_offset=worker._ctx_suffix_request_index_offset,
+    _deterministic_prefix_suffix_prompts=worker._deterministic_prefix_suffix_prompts,
+    _dummy_prompts=worker._dummy_prompts,
+    _engine_tokens=engine._engine_tokens,
+    _filter_datapoints_for_model_max_len=dpg._filter_datapoints_for_model_max_len,
+    _gen_cache_salt_prefix=worker._gen_cache_salt_prefix,
+    _gen_prompt_request_index_offset=worker._gen_prompt_request_index_offset,
+    _latency_us_from_agg=nsys._latency_us_from_agg,
+    _lookup_aggs=nsys._lookup_aggs,
+    _reduce_agg_latency=nsys._reduce_agg_latency,
+    build_work_units=dpg.build_work_units,
+    oom_dominates=scheduler.oom_dominates,
+)
 
 
 def _unit(tmp_path, datapoints):
@@ -681,8 +716,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             )
 
             with (
-                mock.patch.object(cl, "_load_original_config", return_value=dense_config),
-                mock.patch.object(cl, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
+                mock.patch.object(dpg, "_load_original_config", return_value=dense_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
             ):
                 units = cl.build_work_units(args)
 
@@ -707,8 +742,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             args = _build_args(tmp_path, tp_sizes="1,2,4", moe_tp=2, num_slots=288)
 
             with (
-                mock.patch.object(cl, "_load_original_config", return_value=dense_config),
-                mock.patch.object(cl, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
+                mock.patch.object(dpg, "_load_original_config", return_value=dense_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
             ):
                 units = cl.build_work_units(args)
 
@@ -736,8 +771,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             args = _build_args(tmp_path, phases="ctx", target_layer_count=4)
 
             with (
-                mock.patch.object(cl, "_load_original_config", return_value=dense_config),
-                mock.patch.object(cl, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
+                mock.patch.object(dpg, "_load_original_config", return_value=dense_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
             ):
                 units = cl.build_work_units(args)
 
@@ -759,8 +794,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             args = _build_args(tmp_path, phases="ctx", target_layer_count=1)
 
             with (
-                mock.patch.object(cl, "_load_original_config", return_value=dense_config),
-                mock.patch.object(cl, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
+                mock.patch.object(dpg, "_load_original_config", return_value=dense_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
             ):
                 units = cl.build_work_units(args)
 
@@ -780,8 +815,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             args = _build_args(tmp_path, phases="ctx", target_layers="1")
 
             with (
-                mock.patch.object(cl, "_load_original_config", return_value=dense_config),
-                mock.patch.object(cl, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
+                mock.patch.object(dpg, "_load_original_config", return_value=dense_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
             ):
                 units = cl.build_work_units(args)
 
@@ -808,8 +843,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             )
 
             with (
-                mock.patch.object(cl, "_load_original_config", return_value=dense_config),
-                mock.patch.object(cl, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
+                mock.patch.object(dpg, "_load_original_config", return_value=dense_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
             ):
                 units = cl.build_work_units(args)
 
@@ -829,8 +864,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             args = _build_args(tmp_path, tp_sizes="2,4", moe_tp=2, num_slots=8)
 
             with (
-                mock.patch.object(cl, "_load_original_config", return_value=moe_config),
-                mock.patch.object(cl, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
+                mock.patch.object(dpg, "_load_original_config", return_value=moe_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
             ):
                 units = cl.build_work_units(args)
 
@@ -860,8 +895,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             args = _build_args(tmp_path, tp_sizes="2,4", moe_tp=2, num_slots=8)
 
             with (
-                mock.patch.object(cl, "_load_original_config", return_value=moe_config),
-                mock.patch.object(cl, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
+                mock.patch.object(dpg, "_load_original_config", return_value=moe_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
             ):
                 units = cl.build_work_units(args)
 
@@ -890,8 +925,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             args = _build_args(tmp_path, tp_sizes="2,4", moe_tp=1, moe_noop=True)
 
             with (
-                mock.patch.object(cl, "_load_original_config", return_value=moe_config),
-                mock.patch.object(cl, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
+                mock.patch.object(dpg, "_load_original_config", return_value=moe_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
             ):
                 units = cl.build_work_units(args)
 

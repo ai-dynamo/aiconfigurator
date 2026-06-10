@@ -9,7 +9,8 @@ description: Collect Dynamo/vLLM ForwardPassMetrics ground-truth latency data fo
 
 Work from the `aiconfigurator` repo unless the user points elsewhere. Use:
 
-- Collector: `collector/layerwise/fpm_ground_truth/collect_fpm_metrics.sh`
+- Collector: `python -m collector.layerwise.fpm.collect --model <model>`
+- Internal shell wrapper: `collector/layerwise/fpm_ground_truth/collect_fpm_metrics.sh`
 - Dynamo image: `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0`
 - Expected vLLM: `0.20.1`; do not allow version mismatch unless explicitly accepted.
 - HF token: export `HF_TOKEN` directly, or set `HF_TOKEN_FILE` and export `HF_TOKEN="$(tr -d '\n' < "$HF_TOKEN_FILE")"`.
@@ -18,9 +19,9 @@ Work from the `aiconfigurator` repo unless the user points elsewhere. Use:
 
 Prefer one deployment per sweep. For layerwise gap closure, collect `context,decode` first and add `mixed` only after those phases are understood. Always preserve `*_phase.csv`, `*_detail.csv`, and `*_workload.csv`; partial runs can still be valid for phases that finished.
 
-Read [references/fpm-commands.md](references/fpm-commands.md) for the canonical TP=2 command, output interpretation, and failure handling.
+Read [references/fpm-commands.md](references/fpm-commands.md) for the smoke command, canonical TP=2 command, output interpretation, and failure handling.
 
-The normal CLI should be compact: provide `--run-dir`, `--model`, and `--tp-size`/`--ep-size` when needed. The wrapper infers Docker GPUs from TP/EP unless `--gpus` is explicitly supplied. Standard output files are created under `--run-dir`; use explicit output-path flags only for unusual plumbing.
+The normal CLI should be compact: provide `--model`, optional `--run-dir`, and `--tp-sizes`/`--ep-sizes` when needed. The wrapper infers Docker GPUs from TP/EP unless `--gpus` is explicitly supplied. Standard output files are created under `--run-dir`; use explicit output-path flags only for unusual plumbing.
 
 ## Important Defaults
 
@@ -32,6 +33,10 @@ The normal CLI should be compact: provide `--run-dir`, `--model`, and `--tp-size
 - For context repeats, use medians or trimmed means and inspect first-pass cold outliers before tuning against them.
 - For decode, compare pure decode-only FPM rows by `decode_requests` and `mean_decode_kv_tokens`. Prefer the longest consecutive full-batch block where `decode_tokens == decode_requests`; exclude tail rows after requests finish.
 - For 16k context with vLLM chunked prefill, FPM appears as `8192 @ ctx_kv=0` plus `8192 @ ctx_kv=8192`, not a single `ctx_tokens=16384` row.
+
+## Smoke Validation
+
+Use the reference smoke command after FPM wrapper changes. A passing Qwen3-32B TP1 smoke writes `fpm_metrics.csv`, `fpm_metrics_detail.csv`, `fpm_metrics_phase.csv`, request/warmup workload CSVs, and vLLM metadata/config JSON files. Expect both context and decode rows in `fpm_metrics_phase.csv`; cold first context rows can be much slower than subsequent rows.
 
 ## After Collection
 

@@ -8,7 +8,7 @@ Use the Dynamo vLLM runtime plus host Nsight:
 export AIC_REPO="${AIC_REPO:-$PWD}"
 export AIC_LAYERWISE_ARTIFACTS="${AIC_LAYERWISE_ARTIFACTS:-$AIC_REPO/.tmp/layerwise-artifacts}"
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
-export NSYS_VERSION="${NSYS_VERSION:-2025.3.2}"
+export NSYS_VERSION="${NSYS_VERSION:-2025.6.3}"
 # export HF_TOKEN="$(tr -d '\n' < "$HF_TOKEN_FILE")"
 mkdir -p "$AIC_LAYERWISE_ARTIFACTS" "$HF_HOME"
 
@@ -29,78 +29,95 @@ docker run --rm --ipc=host --network=host \
 Smoke check:
 
 ```bash
-export NSYS_VERSION="${NSYS_VERSION:-2025.3.2}"
+export NSYS_VERSION="${NSYS_VERSION:-2025.6.3}"
 docker run --rm --network none \
   -v /opt/nvidia/nsight-systems:/opt/nvidia/nsight-systems:ro \
   nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0 \
   bash -lc 'export PATH=/opt/nvidia/nsight-systems/'"$NSYS_VERSION"'/target-linux-x64:$PATH; python3 -c "import vllm; print(vllm.__version__)"; nsys --version'
 ```
 
-## TP=2 Decode
+## Smoke Collection
 
-Collect batch sizes `1,2,4,8,16,32,64` at KV 1024. Use deployment parity/default compile for FPM comparisons:
+Run this before a production sweep. It measures Qwen3-32B TP1 with two context
+points and two decode points:
 
 ```bash
-python3 collector/layerwise/vllm/collect_layerwise.py \
-  --model Qwen/Qwen3-32B \
-  --output /results/qwen3_32b_tp2_vllm_decode_b1_64_past1024_span.csv \
-  --work-dir /results/profiles/vllm_decode_qwen32b_tp2_b1_64_past1024_span \
-  --config-cache-dir /results/profiles/config_cache \
-  --tp-sizes 2 \
-  --phases gen \
-  --gen-batch-sizes 1,2,4,8,16,32,64 \
-  --gen-past-kv 1024 \
-  --target-layer-count 1 \
-  --rank-reduce max \
-  --latency-source span \
-  --gpus 0 \
-  --max-workers 1
+export AIC_REPO="${AIC_REPO:-$PWD}"
+export HF_TOKEN="${HF_TOKEN:-$(tr -d '\n' < ~/hf.token)}"
+export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+export NSYS_VERSION="${NSYS_VERSION:-2025.6.3}"
+export RUN_DIR="$AIC_REPO/.tmp/smoke-layerwise-$(date -u +%Y%m%d_%H%M%S)"
+mkdir -p "$RUN_DIR" "$HF_HOME"
+
+docker run --rm --ipc=host --network=host \
+  --gpus '"device=0"' \
+  -v /opt/nvidia/nsight-systems:/opt/nvidia/nsight-systems:ro \
+  -v "$AIC_REPO:/workspace" \
+  -v "$RUN_DIR:/results" \
+  -v "$HF_HOME:/hf-cache" \
+  -e HF_HOME=/hf-cache \
+  -e HF_HUB_CACHE=/hf-cache/hub \
+  -e HF_TOKEN="$HF_TOKEN" \
+  -w /workspace \
+  nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0 \
+  bash -lc 'export PATH=/opt/nvidia/nsight-systems/'"$NSYS_VERSION"'/target-linux-x64:$PATH; python3 -m collector.layerwise.vllm.collect --run-dir /results --models Qwen/Qwen3-32B --tp-sizes 1 --phases both --run-preset smoke --gpus 0 --max-workers 1'
 ```
 
-## TP=2 Context
+Expected output:
 
-Use 16 layers for the production AIC context table. Collect both axes and let the collector skip points beyond model max length:
+- `layerwise.csv` has four rows: two `ctx`, two `gen`.
+- `profiles/status.jsonl` contains one `nsys_parse_succeeded` event and four
+  `success` events.
+- `profiles/nsys/` contains one `.nsys-rep` and one exported `.sqlite`.
+
+For the default `--latency-source span`, `meta.attribution_source=nvtx_span` is
+acceptable as long as the parser reports nonzero `attributed_kernels` and each
+success row has nonzero `kernel_count`. For `--latency-source gpu` or
+`gpu_capped`, require CUPTI-backed kernel attribution.
+
+## Public CLI
+
+The default public entrypoint collects the registered production model set, currently dense Qwen3-32B and the Qwen MoE model. `--run-dir` is optional; when omitted the collector writes to a timestamped directory under `.tmp/layerwise-artifacts/runs/`.
 
 ```bash
-python3 collector/layerwise/vllm/collect_layerwise.py \
-  --model Qwen/Qwen3-32B \
-  --output /results/qwen3_32b_tp2_vllm_context_b300_gpu_capped_w2m6_trimmed_16layers.csv \
-  --work-dir /results/profiles/vllm_context_qwen32b_tp2_gpu_capped_w2m6_trimmed_16layers \
-  --config-cache-dir /results/profiles/config_cache \
-  --tp-sizes 2 \
-  --phases ctx \
-  --ctx-new-tokens 1,64,256,1024,2048,4096,8192 \
-  --ctx-past-kv 0,1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536 \
-  --target-layer-count 16 \
-  --rank-reduce max \
-  --latency-source gpu_capped \
-  --ctx-warmup-runs 2 \
-  --ctx-measured-runs 6 \
-  --ctx-repeat-aggregation trimmed_mean \
-  --gpus 0 \
-  --max-workers 1
+python3 -m collector.layerwise.vllm.collect
 ```
 
-If running a small sanity check instead of the full grid, include at least `8192,0` and `8192,8192`:
+Collect one model over TP 1/2/4/8:
 
 ```bash
-python3 collector/layerwise/vllm/collect_layerwise.py \
-  --model Qwen/Qwen3-32B \
-  --output /results/qwen3_32b_tp2_vllm_context_8192past8192_gpu_capped_w2m6_trimmed_16layers.csv \
-  --work-dir /results/profiles/vllm_context_qwen32b_tp2_8192past8192_gpu_capped_w2m6_trimmed_16layers \
-  --config-cache-dir /results/profiles/config_cache \
+python3 -m collector.layerwise.vllm.collect \
+  --models Qwen/Qwen3-32B \
+  --tp-sizes 1,2,4,8
+```
+
+Collect MoE TP/EP points. `--ep-sizes auto` keeps EP at 1 for dense models and uses supported registry EP sizes for MoE models:
+
+```bash
+python3 -m collector.layerwise.vllm.collect \
+  --models Qwen/Qwen3.6-35B-A3B \
+  --tp-sizes 1,2,4,8 \
+  --ep-sizes auto
+```
+
+Run a small smoke sweep before committing to the full grid:
+
+```bash
+python3 -m collector.layerwise.vllm.collect \
+  --models Qwen/Qwen3-32B \
+  --tp-sizes 2 \
+  --run-preset smoke
+```
+
+Use optional shape overrides only when narrowing or expanding a sweep:
+
+```bash
+python3 -m collector.layerwise.vllm.collect \
+  --models Qwen/Qwen3-32B \
   --tp-sizes 2 \
   --phases ctx \
   --ctx-new-tokens 8192 \
-  --ctx-past-kv 8192 \
-  --target-layer-count 16 \
-  --rank-reduce max \
-  --latency-source gpu_capped \
-  --ctx-warmup-runs 2 \
-  --ctx-measured-runs 6 \
-  --ctx-repeat-aggregation trimmed_mean \
-  --gpus 0 \
-  --max-workers 1
+  --ctx-past-kv 0,8192
 ```
 
 ## AIC Comparison Notes

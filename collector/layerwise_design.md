@@ -398,5 +398,5 @@ Status: planned future work, sequenced after layerwise is producing data and PoC
 Notes:
 
 - Op-level sunset. Op-level stays alive as fallback throughout the rollout. Explicit sunset decision deferred until Phase 4 completes successfully — we want both data sources working before retiring either.
-- Why vLLM first. vLLM's layerwise prototype is the most mature in the aic-layerwise repo (working `vllm_layer_skip_patch.py`, `vllm_step_marker.py`, packaged plugin entry point under `vllm_plugin/`). SGLang comes second easily (similar pattern); TRT-LLM has more groundwork to lay (NVTX hooks need adding, multi-layer-indices in `collect_layerwise.py`).
+- Why vLLM first. vLLM's layerwise prototype is the most mature in the aic-layerwise repo (working `vllm_layer_skip_patch.py`, `vllm_step_marker.py`, packaged plugin entry point under `vllm_plugin/`). SGLang comes second easily (similar pattern); TRT-LLM has more groundwork to lay (NVTX hooks need adding, multi-layer-indices in the framework collector).
 - Why exclude MoE from vLLM layerwise. The dummy-weight gate output collapses routing to a few experts → ~10× MoE under-estimate. SGLang has a working power-law routing patch (`moe_topk_hack_patch.py`); vLLM does not, and building it is more work than the rollout has scope for. Hybrid (layerwise + op-level MoE) is the pragmatic choice for vLLM.

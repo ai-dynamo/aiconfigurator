@@ -242,6 +242,8 @@ def _install_patch():
     targets = _parse_targets()
 
     def patched(self, *args, **kwargs):
+        """Wrapped load_model that prunes non-target transformer blocks."""
+
         ret = orig(self, *args, **kwargs)
         try:
             # After CUDAGraphWrapper wrapping (load_model tail), `self.model`

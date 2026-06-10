@@ -70,6 +70,8 @@ def set_forced_step_meta(step=None, bs=None, past=None, run=None):
 
 
 def clear_forced_step_meta():
+    """Clear any per-process marker label override."""
+
     _FORCED_STEP_META.update({"step": None, "bs": None, "past": None, "run": None})
 
 
@@ -273,6 +275,8 @@ def _install():
     skip_starts = int(os.environ.get("LAYERWISE_BENCH_SKIP_STARTS", "0"))
 
     def patched(self, scheduler_output, intermediate_tensors=None):
+        """Wrapped execute_model that emits NVTX markers for selected steps."""
+
         control = _read_control()
         if control.get("trigger") == "decode_only":
             matched, step, batch_size, past_kv = _decode_only_match(
