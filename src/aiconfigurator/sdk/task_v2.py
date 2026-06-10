@@ -52,6 +52,20 @@ ParallelChoice = tuple[int, int, int, int, int]  # (tp, pp, dp, moe_tp, moe_ep)
 
 _DEFAULT_NEXTN_ACCEPT_RATES: list[float] = [0.85, 0.8, 0.6, 0.0, 0.0]
 
+# Families that natively ship MTP (nextn=1) -- used only as a fallback when the
+# checkpoint's HF config does NOT declare ``num_nextn_predict_layers`` at all.
+# A config that explicitly states the field (including 0, e.g. Kimi-K2.5) wins.
+_MTP_DEFAULT_FAMILIES = {"DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25", "QWEN35"}
+
+# Legacy V1 TaskRunner swept TPOT over this fixed grid to build the latency/throughput
+# Pareto frontier. Used when ``pareto_sweep=True`` (the default) so v2 matches v1.
+_LEGACY_TPOT_SWEEP: list[int] = list(range(1, 20, 1)) + list(range(20, 300, 5))
+
+# DeepSeek-V3.2 / V4 MoE on Blackwell get extra large-pipeline-parallel configs
+# (PP=2/TP=8/16-GPU). Mirrors v1 _LARGE_PIPELINE_PARALLEL_MODEL_FAMILIES (backends were
+# all three, i.e. unrestricted).
+_LARGE_PIPELINE_PARALLEL_MODEL_FAMILIES = {"DEEPSEEKV32", "DEEPSEEKV4"}
+
 QUANT_PRESETS: dict[str, dict[str, str]] = {
     "fp8": {
         "gemm_quant_mode": "fp8",
@@ -145,6 +159,28 @@ def _is_hopper_system(system_name: str | None) -> bool:
     if not system_name:
         return False
     return system_name.startswith(("h100", "h200", "gh200"))
+
+
+# SGLang MegaMoE (DeepSeek-V4) — only these checkpoints have packaged perf data.
+_DEEPSEEK_V4_MEGAMOE_SUPPORTED_MODELS = {
+    "deepseek-ai/DeepSeek-V4-Pro",
+    "sgl-project/DeepSeek-V4-Pro-FP8",
+}
+
+
+def _sglang_megamoe_parallel_lists(system_name: str, should_enable_pp: bool = False) -> dict[str, list[int]]:
+    """SGLang MegaMoE parallel search lists; rack-NVL aware. Mirrors v1 (initial support)."""
+    spec = load_system_spec(system_name)
+    has_rack_nvl = int(spec.get("node", {}).get("num_gpus_per_rack", 0) or 0) >= 32
+    ep_list = [4, 8, 16, 32] if has_rack_nvl else [8]
+    return {
+        "num_gpu_per_worker": ep_list,
+        "tp_list": [1, 2, 4, 8],
+        "pp_list": ep_list if should_enable_pp else [1],
+        "dp_list": [1, 2, 4, 8, 16, 32] if has_rack_nvl else [1, 2, 4, 8],
+        "moe_tp_list": [1],
+        "moe_ep_list": ep_list,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +288,9 @@ def build_disagg_parallel_lists(
                 "moe_tp_list": [1],
                 "moe_ep_list": [8, 16, 32, 64],
             }
+        elif moe_backend == "megamoe":
+            prefill_cfg = _sglang_megamoe_parallel_lists(prefill_system, should_enable_pp)
+            decode_cfg = _sglang_megamoe_parallel_lists(decode_system, should_enable_pp)
         elif moe_backend == "deepep_moe":
             x = [1, 2, 4, 8]
             for cfg in (prefill_cfg, decode_cfg):
@@ -329,6 +368,10 @@ class Task:
     num_images_per_request: int = 1
     ttft: float = 1000.0
     tpot: float = 50.0
+    # When True (default), sweep TPOT over the legacy grid to build the full Pareto
+    # frontier (matches v1). Set False to evaluate only the single ``tpot`` target --
+    # used by the Planner, where Pareto selection happens elsewhere.
+    pareto_sweep: bool = True
     request_latency: float | None = None
     total_gpus: int | None = None
     database_mode: str | None = None
@@ -532,6 +575,34 @@ class Task:
         self._resolve_backend_version()
         self._resolve_quant_modes()
         self._resolve_search_space()
+        self._validate_megamoe_backend_support()
+
+    def _validate_megamoe_backend_support(self) -> None:
+        """v1 _validate_megamoe_backend_support: megamoe is sglang + DeepSeek-V4-Pro + Blackwell only."""
+        if self.moe_backend != "megamoe":
+            return
+        roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
+        if self._role_attr(roles[0], "backend_name") != "sglang":
+            raise ValueError("moe_backend='megamoe' is currently supported only for the SGLang backend.")
+        if self._model_family != "DEEPSEEKV4":
+            raise ValueError("moe_backend='megamoe' is currently supported only for DeepSeek-V4 models.")
+        model = self._role_attr(roles[0], "model_path")
+        if model not in _DEEPSEEK_V4_MEGAMOE_SUPPORTED_MODELS:
+            raise ValueError(
+                "moe_backend='megamoe' currently has packaged performance data only for "
+                f"DeepSeek-V4-Pro; got model_path={model!r}."
+            )
+        non_blackwell = sorted(
+            {
+                self._role_attr(r, "system_name")
+                for r in roles
+                if not _is_blackwell_system(self._role_attr(r, "system_name"))
+            }
+        )
+        if non_blackwell:
+            raise ValueError(
+                f"moe_backend='megamoe' requires Blackwell-class systems (SM >= 100); non-Blackwell: {non_blackwell}."
+            )
 
     def _validate_deepseek_v4_hardware(self) -> None:
         """Reject native DeepSeek-V4 FP4-expert checkpoints on Hopper (use the FP8 build)."""
@@ -589,11 +660,24 @@ class Task:
 
         text_key = common.MULTIMODAL_TEXT_CONFIG_KEY.get(self._architecture)
         cfg = self._raw_config[text_key] if text_key and text_key in self._raw_config else self._raw_config
-        hf_nextn = cfg.get("num_nextn_predict_layers", 0)
-        if self.nextn is None:
+        # ``None`` distinguishes "field absent" from an explicit 0 (e.g. Kimi-K2.5).
+        hf_nextn = cfg.get("num_nextn_predict_layers")
+        if self.nextn is not None:
+            # User-supplied value wins. Warn when it diverges from the checkpoint --
+            # nextn can stack extra MTP layers beyond what the checkpoint ships, so
+            # an override is a deliberate choice worth surfacing.
+            if hf_nextn is not None and self.nextn != hf_nextn:
+                logger.warning(
+                    "nextn=%d overrides the checkpoint's num_nextn_predict_layers=%d (stacking additional MTP layers).",
+                    self.nextn,
+                    hf_nextn,
+                )
+        elif hf_nextn is not None:
+            # Checkpoint declares it explicitly (including 0) -- respect it.
             self.nextn = hf_nextn
-        elif self.nextn != hf_nextn:
-            logger.debug("nextn overridden: HF config=%d, using user value=%d", hf_nextn, self.nextn)
+        else:
+            # Field absent -> fall back to family-based default inference.
+            self.nextn = 1 if self._model_family in _MTP_DEFAULT_FAMILIES else 0
 
     def _resolve_backend_version(self) -> None:
         def _resolve(system: str, backend: str, current: str | None) -> str | None:
@@ -651,6 +735,20 @@ class Task:
                 explicit = self._role_attr(role, key)
                 from_preset = preset_overrides.get(key)
                 from_hf = base.get(key)
+                # DeepSeek-V4-Pro on sglang uses arch-specific MoE kernels. This acts at
+                # the HF-base layer so preset/explicit still override it. Skip megamoe,
+                # which keys its own quant table. Mirrors legacy V1 dsv4pro-moe-arch.
+                if (
+                    key == "moe_quant_mode"
+                    and self._role_attr(role, "backend_name") == "sglang"
+                    and self._role_attr(role, "model_path") == "deepseek-ai/DeepSeek-V4-Pro"
+                    and self.moe_backend != "megamoe"
+                ):
+                    sysn = self._role_attr(role, "system_name")
+                    if _is_blackwell_system(sysn):
+                        from_hf = common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+                    elif _is_hopper_system(sysn):
+                        from_hf = common.MoEQuantMode.w4a16_mxfp4_cutlass
                 fallback = _QUANT_FALLBACKS[key]
 
                 if explicit is not None:
@@ -658,23 +756,111 @@ class Task:
                 resolved = from_preset if from_preset is not None else (from_hf if from_hf is not None else fallback)
                 self._set_role_attr(role, key, resolved)
 
-        # Backend / architecture fixups
+        # Backend / architecture FMHA fp8->bf16 fixups (mirror v1: the V3/Kimi rule
+        # lives in validate_context => context-only; the V3.2/GLM-DSA, V4 and vLLM
+        # rules live in _apply_model_quant_defaults => every role incl. decode).
         for role in roles:
+            backend_name = self._role_attr(role, "backend_name")
             fmha = self._role_attr(role, "fmha_quant_mode")
+            # DeepSeek-V3/Kimi context attention (MLA prefill) does not support fp8 FMHA,
+            # so downgrade to bfloat16 -- but ONLY for context-attention roles (agg, prefill).
+            # The decode role uses generation attention, which keeps fp8.
             if (
-                self._architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
+                role != "decode"
+                and self._architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
                 and fmha == common.FMHAQuantMode.fp8
             ):
                 self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
-            backend_name = self._role_attr(role, "backend_name")
+            # DSA module (DeepSeek-V3.2 / GLM-5): DSA perf tables only carry bf16 FMHA.
+            if (
+                self._architecture in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM")
+                and backend_name in ("trtllm", "sglang")
+                and self._role_attr(role, "fmha_quant_mode") == common.FMHAQuantMode.fp8
+            ):
+                self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
+            # DeepSeek-V4 compressed attention is recorded as bf16 in the perf tables.
+            if (
+                self._architecture == "DeepseekV4ForCausalLM"
+                and self._role_attr(role, "fmha_quant_mode") == common.FMHAQuantMode.fp8
+            ):
+                self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
+            # vLLM perf tables only include bf16 FMHA.
             if backend_name == "vllm" and self._role_attr(role, "fmha_quant_mode") == common.FMHAQuantMode.fp8:
                 self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
 
     def _resolve_search_space(self) -> None:
+        roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
+        # Candidate fields the user did NOT supply are eligible for default augmentation
+        # (large-PP). User-supplied candidates win, matching v1's yaml-over-defaults order.
+        defaulted = {
+            f"{role}_{dim}_candidates"
+            for role in roles
+            for dim in ("num_gpu", "tp", "pp", "dp", "moe_tp", "moe_ep")
+            if getattr(self, f"{role}_{dim}_candidates") is None
+        }
         if self.serving_mode == "agg":
             self._resolve_agg_search()
         else:
             self._resolve_disagg_search()
+        self._apply_large_pipeline_parallel(defaulted)
+        self._apply_total_gpus_budget()
+
+    def _large_pipeline_parallel_applies(self) -> bool:
+        """v1 _large_pipeline_parallel_worker_defaults_apply: DeepSeek-V3.2/V4 MoE on
+        Blackwell, non-wideep, total_gpus>=16 get extra PP=2 / TP=8 / 16-GPU configs."""
+        if not self._is_moe or self._model_family not in _LARGE_PIPELINE_PARALLEL_MODEL_FAMILIES:
+            return False
+        if self.serving_mode == "agg":
+            wideep = self.enable_wideep
+            systems = [self.system_name]
+        else:
+            wideep = self.prefill_enable_wideep or self.decode_enable_wideep
+            systems = [self.prefill_system_name, self.decode_system_name]
+        if wideep or self.moe_backend in ("deepep_moe", "megamoe"):
+            return False
+        if self.total_gpus is None or self.total_gpus < 16:
+            return False
+        try:
+            return all(_is_blackwell_system(s) for s in systems)
+        except Exception:
+            return False
+
+    def _apply_large_pipeline_parallel(self, defaulted: set[str]) -> None:
+        if not self._large_pipeline_parallel_applies():
+            return
+        roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
+        merges = {
+            "num_gpu": [16],
+            "tp": [8],
+            "pp": [2],
+            "dp": [1],
+            "moe_tp": [1, 2, 4, 8],
+            "moe_ep": [1, 2, 4, 8],
+        }
+        for role in roles:
+            for dim, add in merges.items():
+                attr = f"{role}_{dim}_candidates"
+                if attr not in defaulted:
+                    continue  # user supplied this explicitly; v1 yaml override wins
+                cur = getattr(self, attr) or []
+                setattr(self, attr, sorted(set(cur) | set(add)))
+
+    def _apply_total_gpus_budget(self) -> None:
+        """Clamp the per-worker GPU-count search space to the total_gpus budget and
+        validate it. Mirrors v1 _finalize_agg / _finalize_disagg."""
+        if self.total_gpus is None:
+            return
+        if self.serving_mode == "agg":
+            if self.total_gpus < 0:
+                raise ValueError(f"total_gpus of agg must be no smaller than 0, got {self.total_gpus}")
+            self.agg_num_gpu_candidates = [n for n in self.agg_num_gpu_candidates if n <= self.total_gpus]
+        else:
+            if self.total_gpus < 2:
+                raise ValueError(f"total_gpus must be greater than 2 for disagg, got {self.total_gpus}")
+            if self.max_gpu_per_replica is not None:
+                self.max_gpu_per_replica = min(self.total_gpus, self.max_gpu_per_replica)
+            self.prefill_num_gpu_candidates = [n for n in self.prefill_num_gpu_candidates if n <= self.total_gpus]
+            self.decode_num_gpu_candidates = [n for n in self.decode_num_gpu_candidates if n <= self.total_gpus]
 
     def _resolve_agg_search(self) -> None:
         def _set(name: str, values: list[int]) -> None:
@@ -692,7 +878,15 @@ class Task:
             _set("agg_moe_ep_candidates", [1])
             return
 
-        if self.backend_name == "trtllm" and self.enable_wideep:
+        if self.backend_name == "sglang" and self.moe_backend == "megamoe":
+            mm = _sglang_megamoe_parallel_lists(self.system_name)
+            _set("agg_num_gpu_candidates", mm["num_gpu_per_worker"])
+            _set("agg_tp_candidates", mm["tp_list"])
+            _set("agg_pp_candidates", mm["pp_list"])
+            _set("agg_dp_candidates", mm["dp_list"])
+            _set("agg_moe_tp_candidates", mm["moe_tp_list"])
+            _set("agg_moe_ep_candidates", mm["moe_ep_list"])
+        elif self.backend_name == "trtllm" and self.enable_wideep:
             _set("agg_num_gpu_candidates", [2, 4, 8, 16, 32, 64])
             _set("agg_tp_candidates", [1, 2, 4, 8])
             _set("agg_pp_candidates", [1])
@@ -812,6 +1006,11 @@ class Task:
             nextn_accept_rates=self.nextn_accept_rates,
             enable_wideep=self._role_attr(role, "enable_wideep"),
             enable_eplb=self._role_attr(role, "enable_eplb"),
+            # moe_backend is shared across roles (Task has no per-role variant);
+            # v1 passed it into ModelConfig so get_model selects the right MoE kernel
+            # (deepep_moe / megamoe) and perf tables. attention_backend / workload_distribution
+            # are not configurable in v2 and ModelConfig's defaults match v1's.
+            moe_backend=self.moe_backend,
         )
 
     def iter_parallel(self, role: Literal["agg", "prefill", "decode"]) -> Iterator[ParallelChoice]:
@@ -1098,9 +1297,12 @@ class Task:
         if self.serving_mode != "agg":
             raise ValueError(f"sweep_agg_kwargs requires serving_mode='agg', got {self.serving_mode!r}")
         parallel_config_list = list(self.iter_parallel("agg"))
+        runtime_config = self.build_runtime_config()
+        if self.pareto_sweep:
+            runtime_config.tpot = _LEGACY_TPOT_SWEEP
         return {
             "model_path": self.model_path,
-            "runtime_config": self.build_runtime_config(),
+            "runtime_config": runtime_config,
             "database": database,
             "backend_name": self.backend_name,
             "model_config": self.build_model_config(role="agg"),
@@ -1120,9 +1322,17 @@ class Task:
         prefill_worker_list = list(range(1, (self.max_prefill_workers or 32) + 1))
         decode_worker_list = list(range(1, (self.max_decode_workers or 32) + 1))
         num_gpu_list = self.num_gpu_per_replica if self.num_gpu_per_replica else None
+        # SGLang non-wideep disaggregated serving requires prefill/decode TP to match
+        # (KV transfer layout constraint, ai-dynamo/dynamo#5870). WideEP relaxes it.
+        require_same_tp = self.prefill_backend_name == "sglang" and not (
+            self.prefill_enable_wideep or self.decode_enable_wideep
+        )
+        runtime_config = self.build_runtime_config()
+        if self.pareto_sweep:
+            runtime_config.tpot = _LEGACY_TPOT_SWEEP
         return {
             "model_path": self.prefill_model_path,
-            "runtime_config": self.build_runtime_config(),
+            "runtime_config": runtime_config,
             "prefill_database": prefill_database,
             "prefill_backend_name": self.prefill_backend_name,
             "prefill_model_config": self.build_model_config(role="prefill"),
@@ -1141,6 +1351,7 @@ class Task:
             "rate_matching_prefill_degradation": self.rate_match_prefill_degradation,
             "rate_matching_decode_degradation": self.rate_match_decode_degradation,
             "autoscale_ttft_correction_factor": self.autoscale_ttft_correction_factor,
+            "require_same_tp": require_same_tp,
         }
 
     # =====================================================================
