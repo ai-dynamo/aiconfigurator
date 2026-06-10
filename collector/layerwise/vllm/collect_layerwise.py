@@ -20,7 +20,6 @@ import gc
 import hashlib
 import json
 import os
-import shlex
 import statistics
 import subprocess
 import sys
@@ -79,7 +78,7 @@ CTX_PAST_KV = [
 GEN_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 GEN_PAST_KV = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
 VLLM_DEFAULT_BLOCK_SIZE = 16
-PREFILL_DECODE_MAX_NUM_BATCHED_TOKENS = 16384
+CTX_MAX_NUM_BATCHED_TOKENS_FLOOR = 8192
 DEFAULT_EXTRA_VLLM_ARGS = (
     ("flag", "--skip-mm-profiling", ("--no-skip-mm-profiling",)),
     ("pair", "--limit-mm-per-prompt", '{"image":0,"video":0}'),
@@ -103,17 +102,18 @@ CSV_COLUMNS = [
     "batch_size",
     "new_tokens",
     "past_kv",
+    "layer_type",
+    "layer_index",
+    "measured_layer_count",
+    "layer_multiplier",
     "latency_ms",
     "rms_latency_ms",
     "rms_kernel_count",
-    "measurement_mode",
-    "attribution_target",
     "includes_moe",
     "vllm_config_hash",
 ]
 
-DEFAULT_ATTRIBUTION_ROLLUP = r"layers\.(\d+)\.(self_attn|mlp|input_layernorm|post_attention_layernorm)"
-DEFAULT_PARITY_ROLLUP = r"^(CUDAGraphWrapper)$"
+DEFAULT_ROLLUP = r"^(CUDAGraphWrapper)$"
 
 TERMINAL_EVENTS = {
     "success",
@@ -184,10 +184,25 @@ class DataPoint:
 
 
 @dataclass(frozen=True)
+class RepresentativeLayer:
+    layer_index: int
+    layer_type: str
+    measured_layer_count: int
+    layer_multiplier: int
+    target_layers: tuple[int, ...] = ()
+
+    def kept_layers(self) -> list[int]:
+        if self.target_layers:
+            return list(self.target_layers)
+        return list(range(self.layer_index, self.layer_index + self.measured_layer_count))
+
+
+@dataclass(frozen=True)
 class WorkUnit:
     work_unit_id: str
     model_dir: str
     row_base: dict[str, Any]
+    representative: RepresentativeLayer
     target_layers: list[int]
     datapoints: list[DataPoint]
     moe_noop: bool = False
@@ -200,6 +215,7 @@ class WorkUnit:
                 "work_unit_id": self.work_unit_id,
                 "datapoint_id": dp.datapoint_id(self.work_unit_id),
                 **self.row_base,
+                **asdict(self.representative),
                 "moe_noop": self.moe_noop,
                 "includes_moe": self.includes_moe,
                 "phase": dp.phase,
@@ -390,11 +406,10 @@ def _detect_gpus(gpus_arg: str | None) -> list[str]:
 
 def _detect_layer_schedule(
     config: dict[str, Any],
-    include_moe_layer: bool,
     target_layer_count: int = 1,
     target_layers: list[int] | None = None,
     target_layer_config_depth: int | None = None,
-) -> tuple[list[dict[str, Any]], int, dict[str, Any] | None]:
+) -> tuple[list[RepresentativeLayer], int, dict[str, Any] | None]:
     config = _decoder_config_view(config)
     max_config_layers = int(config.get("num_hidden_layers") or 0)
     if target_layers is not None:
@@ -411,7 +426,7 @@ def _detect_layer_schedule(
         if is_moe and not _is_all_moe_config(config):
             raise ValueError(
                 "explicit target_layers for hybrid MoE configs is not supported; "
-                "use --include-moe-layer for the dense+MoE schedule"
+                "hybrid representative collection is not implemented yet"
             )
         sorted_layers = sorted(set(target_layers))
         num_hidden_layers = max(sorted_layers) + 1
@@ -425,11 +440,16 @@ def _detect_layer_schedule(
                 raise ValueError(
                     f"target_layer_config_depth={target_layer_config_depth} exceeds "
                     f"config num_hidden_layers={max_config_layers}"
-                )
+            )
             num_hidden_layers = target_layer_config_depth
         return [
-            {"layer_index": i, "layer_type": "moe" if is_moe else "dense"}
-            for i in sorted_layers
+            RepresentativeLayer(
+                layer_index=sorted_layers[0],
+                layer_type="moe" if is_moe else "dense",
+                measured_layer_count=len(sorted_layers),
+                layer_multiplier=len(sorted_layers),
+                target_layers=tuple(sorted_layers),
+            )
         ], num_hidden_layers, _layer_types_override(config, num_hidden_layers)
 
     if target_layer_count < 1:
@@ -449,8 +469,13 @@ def _detect_layer_schedule(
                 )
             num_hidden_layers = target_layer_config_depth
         return [
-            {"layer_index": i, "layer_type": "dense"}
-            for i in range(target_layer_count)
+            RepresentativeLayer(
+                layer_index=0,
+                layer_type="dense",
+                measured_layer_count=target_layer_count,
+                layer_multiplier=max_config_layers or target_layer_count,
+                target_layers=tuple(range(target_layer_count)),
+            )
         ], num_hidden_layers, _layer_types_override(config, num_hidden_layers)
 
     if _is_all_moe_config(config):
@@ -468,29 +493,20 @@ def _detect_layer_schedule(
                 )
             num_hidden_layers = target_layer_config_depth
         return [
-            {"layer_index": i, "layer_type": "moe"}
-            for i in range(target_layer_count)
+            RepresentativeLayer(
+                layer_index=0,
+                layer_type="moe",
+                measured_layer_count=target_layer_count,
+                layer_multiplier=max_config_layers or target_layer_count,
+                target_layers=tuple(range(target_layer_count)),
+            )
         ], num_hidden_layers, _layer_types_override(config, num_hidden_layers)
 
-    # Hybrid vLLM MoE is opt-in because dummy-weight routing still underestimates MoE.
-    if target_layer_count != 1:
-        raise ValueError(
-            "target_layer_count > 1 is currently only supported for dense models"
-        )
-    layer_schedule = [{"layer_index": 0, "layer_type": "dense"}]
-    num_hidden_layers = 1
-    if include_moe_layer:
-        layer_schedule.append({"layer_index": 1, "layer_type": "moe"})
-        num_hidden_layers = 2
-
-    overrides = {"first_k_dense_replace": 1}
-    if "decoder_sparse_step" in config:
-        overrides["decoder_sparse_step"] = 1
-        overrides["mlp_only_layers"] = []
-    layer_type_overrides = _layer_types_override(config, num_hidden_layers)
-    if layer_type_overrides:
-        overrides.update(layer_type_overrides)
-    return layer_schedule, num_hidden_layers, overrides
+    raise ValueError(
+        "hybrid dense+MoE layerwise collection is not implemented yet; "
+        "the collector schema supports representative layer metadata, but "
+        "hybrid scheduling needs separate dense and MoE work units"
+    )
 
 
 def _layer_types_override(
@@ -539,30 +555,17 @@ def _work_unit_id(
     row_base: dict[str, Any],
     target_layers: list[int],
     num_hidden_layers: int,
+    representative: RepresentativeLayer,
     moe_noop: bool = False,
 ) -> str:
     payload = {
         **row_base,
         "target_layers": target_layers,
         "num_hidden_layers": num_hidden_layers,
+        "representative": asdict(representative),
         "moe_noop": moe_noop,
     }
     return "wu_" + _stable_hash(payload)
-
-
-def _filter_rows_to_target_layers(
-    rows: list[dict[str, Any]],
-    target_layers: Iterable[int],
-) -> list[dict[str, Any]]:
-    targets = {int(x) for x in target_layers}
-    if not targets:
-        return rows
-    out = []
-    for row in rows:
-        parts = row.get("rollup_parts") or ()
-        if parts and int(parts[0]) in targets:
-            out.append(row)
-    return out
 
 
 def _build_datapoints(
@@ -587,22 +590,20 @@ def _build_datapoints(
 
 def _max_num_batched_tokens_for_datapoints(
     datapoints: list[DataPoint],
-    min_max_num_batched_tokens: int = 1,
-    *,
-    gen_driver: str = "prefix_cache",
 ) -> int:
     ctx_points = [dp for dp in datapoints if dp.phase == "ctx"]
     gen_points = [dp for dp in datapoints if dp.phase == "gen"]
     ctx_max_new = max((dp.new_tokens for dp in ctx_points), default=0)
     gen_batch_sizes = sorted({dp.batch_size for dp in gen_points})
     min_budget = 1
-    if gen_driver == "prefix_cache" and gen_points:
+    if ctx_points:
+        min_budget = CTX_MAX_NUM_BATCHED_TOKENS_FLOOR
+    if gen_points:
         # vLLM's prefix-cache path can use Mamba cache align mode, which
         # requires the token budget to be at least one KV block.
-        min_budget = VLLM_DEFAULT_BLOCK_SIZE
+        min_budget = max(min_budget, VLLM_DEFAULT_BLOCK_SIZE)
     return max(
         min_budget,
-        min_max_num_batched_tokens,
         ctx_max_new,
         max(gen_batch_sizes, default=0),
     )
@@ -636,7 +637,7 @@ def _filter_datapoints_for_model_max_len(
     for dp in datapoints:
         if dp.phase == "ctx":
             # The ctx driver uses max_tokens=1 to force vLLM to execute the
-            # measured prefill, so max_model_len must fit the prompt plus that
+            # measured context suffix, so max_model_len must fit the prompt plus that
             # generated token.
             required_len = dp.past_kv + dp.new_tokens + 1
         else:
@@ -661,15 +662,10 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
         _parse_ints(args.target_layers) if getattr(args, "target_layers", None) else None
     )
     layer_schedule, num_hidden_layers, extra_overrides = _detect_layer_schedule(
-        orig_config, args.include_moe_layer, args.target_layer_count,
+        orig_config, args.target_layer_count,
         explicit_target_layers, args.target_layer_config_depth,
     )
-    target_layers = [int(x["layer_index"]) for x in layer_schedule]
     moe_noop = bool(getattr(args, "moe_noop", False) and is_moe)
-    includes_moe = (not moe_noop) and any(
-        str(layer.get("layer_type", "")).lower() == "moe"
-        for layer in layer_schedule
-    )
 
     work_dir = Path(args.work_dir).resolve()
     config_cache_dir = None if args.no_config_cache else (args.config_cache_dir or str(work_dir / "config_cache"))
@@ -728,20 +724,28 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
             "attn_quant": args.attn_quant,
             "kv_quant": args.kv_quant,
         }
-        work_units.append(WorkUnit(
-            work_unit_id=_work_unit_id(
-                row_base,
-                target_layers,
-                num_hidden_layers,
-                moe_noop,
-            ),
-            model_dir=model_dir,
-            row_base=row_base,
-            target_layers=target_layers,
-            datapoints=datapoints,
-            moe_noop=moe_noop,
-            includes_moe=includes_moe,
-        ))
+        for representative in layer_schedule:
+            target_layers = representative.kept_layers()
+            includes_moe = (
+                not moe_noop
+                and representative.layer_type.lower() == "moe"
+            )
+            work_units.append(WorkUnit(
+                work_unit_id=_work_unit_id(
+                    row_base,
+                    target_layers,
+                    num_hidden_layers,
+                    representative,
+                    moe_noop,
+                ),
+                model_dir=model_dir,
+                row_base=row_base,
+                representative=representative,
+                target_layers=target_layers,
+                datapoints=datapoints,
+                moe_noop=moe_noop,
+                includes_moe=includes_moe,
+            ))
     return work_units
 
 
@@ -915,21 +919,7 @@ def _append_success_row(path: Path, row: dict[str, Any]) -> None:
 def _effective_rollup(args: argparse.Namespace) -> str:
     if args.rollup:
         return str(args.rollup)
-    if args.measurement_mode == "deployment-parity":
-        return DEFAULT_PARITY_ROLLUP
-    return DEFAULT_ATTRIBUTION_ROLLUP
-
-
-def _should_filter_target_layers(args: argparse.Namespace) -> bool:
-    if args.no_filter_target_layers:
-        return False
-    return args.measurement_mode != "deployment-parity"
-
-
-def _attribution_target(args: argparse.Namespace) -> str:
-    if args.measurement_mode == "deployment-parity":
-        return "cudagraph_wrapper"
-    return "module_nvtx"
+    return DEFAULT_ROLLUP
 
 
 def _work_unit_includes_moe(work_unit: WorkUnit) -> bool:
@@ -1064,18 +1054,14 @@ class Scheduler:
         extra_vllm_args = []
         if unit.row_base["kv_quant"] == "fp8":
             extra_vllm_args.extend(["--kv-cache-dtype", "fp8"])
-        extra_vllm_args.extend(shlex.split(self.args.extra_vllm_args))
         extra_vllm_args.extend(self.args.extra_vllm_arg)
         _append_default_vllm_args(extra_vllm_args)
         has_ctx = any(dp.phase == "ctx" for dp in pending)
-        has_gen_prefix_cache = (
-            any(dp.phase == "gen" for dp in pending)
-            and self.args.gen_driver == "prefix_cache"
-        )
+        has_gen = any(dp.phase == "gen" for dp in pending)
         runtime_defaults = gpt_oss_runtime_defaults(
             model=unit.row_base["model"],
             system=unit.row_base["system"],
-            disable_prefix_caching=not (has_ctx or has_gen_prefix_cache),
+            disable_prefix_caching=not (has_ctx or has_gen),
             extra_args=tuple(extra_vllm_args),
         )
         extra_vllm_args = list(runtime_defaults.extra_args)
@@ -1089,7 +1075,7 @@ class Scheduler:
             extra_vllm_args, "--no-enable-prefix-caching"
         ):
             extra_vllm_args.append("--no-enable-prefix-caching")
-        if (has_ctx or has_gen_prefix_cache) and not has_cli_flag(
+        if (has_ctx or has_gen) and not has_cli_flag(
             extra_vllm_args, "--enable-prefix-caching", "--no-enable-prefix-caching"
         ):
             extra_vllm_args.append("--enable-prefix-caching")
@@ -1102,14 +1088,9 @@ class Scheduler:
             "moe_noop": unit.moe_noop,
             "datapoints": [asdict(dp) for dp in pending],
             "status_path": str(self.store.status_path),
-            "restrict_cudagraph_sizes": not self.args.no_restrict_cudagraph_sizes,
             "extra_vllm_args": extra_vllm_args,
-            "min_max_num_batched_tokens": self.args.min_max_num_batched_tokens,
-            "measurement_mode": self.args.measurement_mode,
-            "compilation_config_json": self.args.compilation_config_json,
             "ctx_warmup_runs": self.args.ctx_warmup_runs,
             "ctx_measured_runs": self.args.ctx_measured_runs,
-            "gen_driver": self.args.gen_driver,
             "gen_warmup_runs": self.args.gen_warmup_runs,
             "gen_measured_runs": self.args.gen_measured_runs,
             "nsys_capture": self.args.nsys_capture,
@@ -1232,12 +1213,10 @@ class Scheduler:
                 layer=None,
                 rank_reduce=self.args.rank_reduce,
                 force_nvtx_span=(
-                    _effective_rollup(self.args) == DEFAULT_PARITY_ROLLUP
+                    _effective_rollup(self.args) == DEFAULT_ROLLUP
                     and self.args.latency_source == "span"
                 ),
             )
-            if _should_filter_target_layers(self.args):
-                rows = _filter_rows_to_target_layers(rows, attempt.work_unit.target_layers)
         except Exception as exc:
             self.store.append_event(
                 "nsys_parse_failed",
@@ -1277,11 +1256,10 @@ class Scheduler:
                 "batch_size": dp.batch_size,
                 "new_tokens": dp.new_tokens,
                 "past_kv": dp.past_kv,
+                **asdict(attempt.work_unit.representative),
                 "latency_ms": latency_us / 1000.0,
                 "rms_latency_ms": rms_us / 1000.0,
                 "rms_kernel_count": rms_kernel_count,
-                "measurement_mode": self.args.measurement_mode,
-                "attribution_target": _attribution_target(self.args),
                 "includes_moe": _work_unit_includes_moe(attempt.work_unit),
                 "vllm_config_hash": _attempt_config_hash(attempt, self.store),
             }
@@ -1560,12 +1538,7 @@ def _engine_tokens(
     *,
     model_dir: str,
     datapoints: list[DataPoint],
-    restrict_cudagraph_sizes: bool,
     extra_vllm_args: list[str],
-    min_max_num_batched_tokens: int = 1,
-    measurement_mode: str = "deployment-parity",
-    compilation_config_json: str | None = None,
-    gen_driver: str = "prefix_cache",
 ) -> list[str]:
     ctx_points = [dp for dp in datapoints if dp.phase == "ctx"]
     gen_points = [dp for dp in datapoints if dp.phase == "gen"]
@@ -1579,67 +1552,16 @@ def _engine_tokens(
     )
     max_num_batched_tokens = _max_num_batched_tokens_for_datapoints(
         datapoints,
-        min_max_num_batched_tokens,
-        gen_driver=gen_driver,
     )
-    engine_max_num_batched_tokens: int | None = max_num_batched_tokens
-    if gen_driver == "prefill" and gen_points and not ctx_points:
-        max_batch_size = max(gen_batch_sizes)
-        normal_prefill_budget = max(
-            PREFILL_DECODE_MAX_NUM_BATCHED_TOKENS,
-            128 * max_batch_size,
-        )
-        uniform_decode_budget = max(
-            (dp.batch_size * dp.past_kv for dp in gen_points),
-            default=0,
-        )
-        if min_max_num_batched_tokens <= 1:
-            engine_max_num_batched_tokens = max(
-                normal_prefill_budget,
-                uniform_decode_budget,
-            )
-        else:
-            engine_max_num_batched_tokens = max(
-                engine_max_num_batched_tokens,
-                128 * max_batch_size,
-                uniform_decode_budget,
-            )
 
     tokens = build_engine_args(
         VllmDeploymentConfig(
             model=model_dir,
             max_model_len=max_seq_len,
             max_num_seqs=max(gen_batch_sizes) if gen_batch_sizes else None,
-            max_num_batched_tokens=engine_max_num_batched_tokens,
+            max_num_batched_tokens=max_num_batched_tokens,
         )
     )
-
-    if compilation_config_json == "default":
-        compilation_config = None
-    elif compilation_config_json is not None:
-        compilation_config = json.loads(compilation_config_json)
-    elif measurement_mode == "deployment-parity":
-        compilation_config = None
-    elif measurement_mode == "attribution" and gen_batch_sizes:
-        # Match real vLLM deployment shape: one engine.  FULL_DECODE_ONLY lets
-        # vLLM use full CUDA graphs for uniform decode batches while running
-        # prefill/mixed batches through its normal non-full-graph path.
-        compilation_config: dict[str, Any] = {
-            "mode": 0,
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-        }
-        if restrict_cudagraph_sizes:
-            compilation_config.update({
-                "cudagraph_capture_sizes": gen_batch_sizes,
-                "max_cudagraph_capture_size": max(gen_batch_sizes),
-            })
-    elif measurement_mode == "attribution":
-        compilation_config = {"mode": 0, "cudagraph_mode": "NONE"}
-    else:
-        raise ValueError(f"unsupported measurement mode: {measurement_mode}")
-
-    if compilation_config is not None:
-        tokens.extend(["--compilation-config", json.dumps(compilation_config)])
     tokens.extend(extra_vllm_args)
     return tokens
 
@@ -1790,8 +1712,6 @@ def run_worker(spec_path: Path) -> None:
         os.environ.pop("LAYERWISE_MOE_NOOP", None)
     max_num_batched_tokens = _max_num_batched_tokens_for_datapoints(
         datapoints,
-        int(spec.get("min_max_num_batched_tokens", 1)),
-        gen_driver=str(spec.get("gen_driver", "prefix_cache")),
     )
     iterations = {1}
     iterations.update(
@@ -1850,12 +1770,7 @@ def run_worker(spec_path: Path) -> None:
     engine_tokens = _engine_tokens(
         model_dir=spec["model_dir"],
         datapoints=datapoints,
-        restrict_cudagraph_sizes=spec["restrict_cudagraph_sizes"],
         extra_vllm_args=spec["extra_vllm_args"],
-        min_max_num_batched_tokens=spec.get("min_max_num_batched_tokens", 1),
-        measurement_mode=str(spec.get("measurement_mode", "deployment-parity")),
-        compilation_config_json=spec.get("compilation_config_json"),
-        gen_driver=str(spec.get("gen_driver", "prefix_cache")),
     )
     _worker_append_event(status_path, "engine_args_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
     _worker_append_event(status_path, "engine_create_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
@@ -1865,12 +1780,8 @@ def run_worker(spec_path: Path) -> None:
     effective_config = None
     runtime_vllm_config = find_runtime_vllm_config(llm)
     has_ctx = any(dp.phase == "ctx" for dp in datapoints)
-    has_gen_prefix_cache = any(dp.phase == "gen" for dp in datapoints) and str(
-        spec.get("gen_driver", "prefix_cache")
-    ) == "prefix_cache"
-    if (
-        has_ctx or has_gen_prefix_cache
-    ) and runtime_vllm_config is not None:
+    has_gen = any(dp.phase == "gen" for dp in datapoints)
+    if (has_ctx or has_gen) and runtime_vllm_config is not None:
         cache_config = getattr(runtime_vllm_config, "cache_config", None)
         if getattr(cache_config, "enable_prefix_caching", None) is False:
             raise RuntimeError("prefix-cache ctx/gen driver requires vLLM prefix caching")
@@ -1878,7 +1789,7 @@ def run_worker(spec_path: Path) -> None:
         effective_config = summarize_vllm_config(runtime_vllm_config)
     metadata = make_metadata(
         artifact_kind="layerwise",
-        measurement_mode=str(spec.get("measurement_mode", "deployment-parity")),
+        measurement_mode="deployment-parity",
         engine_args=engine_tokens,
         effective_config=effective_config,
         extra={
@@ -1886,11 +1797,6 @@ def run_worker(spec_path: Path) -> None:
             "attempt_id": spec["attempt_id"],
             "target_layers": spec["target_layers"],
             "moe_noop": bool(spec.get("moe_noop")),
-            "attribution_target": (
-                "cudagraph_wrapper"
-                if str(spec.get("measurement_mode", "deployment-parity")) == "deployment-parity"
-                else "module_nvtx"
-            ),
         },
     )
     if spec.get("metadata_path"):
@@ -1946,7 +1852,6 @@ def run_worker(spec_path: Path) -> None:
                     vllm_step_marker,
                     gen_points,
                     prompt_token_config=prompt_token_config,
-                    driver=str(spec.get("gen_driver", "prefix_cache")),
                     warmup_runs=int(spec.get("gen_warmup_runs", 0)),
                     measured_runs=int(spec.get("gen_measured_runs", 1)),
                 )
@@ -2195,7 +2100,7 @@ def _run_prefix_cached_gen_iteration(
     fill_cache: bool,
 ) -> None:
     if dp.past_kv <= 0:
-        raise ValueError("gen_driver=prefix_cache requires past_kv > 0")
+        raise ValueError("prefix-cache decode requires past_kv > 0")
     request_index_offset = _gen_prompt_request_index_offset(dp)
     cache_salt_prefix = _gen_cache_salt_prefix(os.environ.get("LAYERWISE_WORK_UNIT_ID", ""), dp)
     if fill_cache:
@@ -2229,7 +2134,6 @@ def _worker_run_gen(
     datapoints: list[DataPoint],
     *,
     prompt_token_config: RandomPromptTokenConfig,
-    driver: str = "prefix_cache",
     warmup_runs: int = 0,
     measured_runs: int = 1,
 ) -> None:
@@ -2241,8 +2145,6 @@ def _worker_run_gen(
     for dp in datapoints:
         by_batch.setdefault(dp.batch_size, []).append(dp)
     max_past = max(dp.past_kv for dp in datapoints)
-    if driver not in {"prefill", "prefix_cache"}:
-        raise ValueError(f"unsupported gen driver: {driver}")
     sampling_params = sampling_cls(
         temperature=1.0,
         top_p=1.0,
@@ -2257,18 +2159,17 @@ def _worker_run_gen(
         max_tokens=1,
         detokenize=False,
     )
-    if driver == "prefix_cache":
-        max_batch_size = max(by_batch)
-        fill_dp = DataPoint("gen", max_batch_size, 1, max_past)
-        _set_marker_state(marker_mod, active_iterations="", phase="gen")
-        _run_prefix_cached_gen_iteration(
-            llm,
-            fill_sampling_params,
-            sampling_params,
-            fill_dp,
-            token_config=prompt_token_config,
-            fill_cache=True,
-        )
+    max_batch_size = max(by_batch)
+    fill_dp = DataPoint("gen", max_batch_size, 1, max_past)
+    _set_marker_state(marker_mod, active_iterations="", phase="gen")
+    _run_prefix_cached_gen_iteration(
+        llm,
+        fill_sampling_params,
+        sampling_params,
+        fill_dp,
+        token_config=prompt_token_config,
+        fill_cache=True,
+    )
     for batch_size in sorted(by_batch):
         _set_marker_state(marker_mod, active_iterations="", phase="gen")
         _worker_append_event(
@@ -2278,78 +2179,42 @@ def _worker_run_gen(
             batch_size=batch_size,
             max_past_kv=max_past,
         )
-        if driver == "prefix_cache":
-            try:
-                for dp in sorted(by_batch[batch_size], key=lambda item: item.past_kv):
-                    _set_marker_state(marker_mod, active_iterations="", phase="gen")
-                    for _ in range(warmup_runs):
-                        _set_marker_state(marker_mod, active_iterations="", phase="gen")
-                        _run_prefix_cached_gen_iteration(
-                            llm,
-                            fill_sampling_params,
-                            sampling_params,
-                            dp,
-                            token_config=prompt_token_config,
-                            fill_cache=False,
-                        )
-                    for run_idx in range(measured_runs):
-                        _set_marker_state(
-                            marker_mod,
-                            active_iterations="",
-                            trigger="decode_only",
-                            allow_new_cached=True,
-                            phase="gen",
-                            step=dp.past_kv + 1,
-                            bs=batch_size,
-                            past=dp.past_kv,
-                            run=run_idx,
-                        )
-                        _run_prefix_cached_gen_iteration(
-                            llm,
-                            fill_sampling_params,
-                            sampling_params,
-                            dp,
-                            token_config=prompt_token_config,
-                            fill_cache=False,
-                        )
-            finally:
+        try:
+            for dp in sorted(by_batch[batch_size], key=lambda item: item.past_kv):
                 _set_marker_state(marker_mod, active_iterations="", phase="gen")
-            _worker_append_event(status_path, "batch_finished", work_unit_id=work_unit_id, batch_size=batch_size)
-            continue
-        if driver == "prefill":
-            try:
-                for dp in sorted(by_batch[batch_size], key=lambda item: item.past_kv):
+                for _ in range(warmup_runs):
                     _set_marker_state(marker_mod, active_iterations="", phase="gen")
-                    for _ in range(warmup_runs):
-                        _run_generate(
-                            llm,
-                            sampling_params,
-                            batch_size=batch_size,
-                            input_len=dp.past_kv,
-                            token_config=prompt_token_config,
-                        )
-                    for run_idx in range(measured_runs):
-                        _set_marker_state(
-                            marker_mod,
-                            active_iterations="",
-                            trigger="decode_only",
-                            phase="gen",
-                            step=dp.past_kv + 1,
-                            bs=batch_size,
-                            past=dp.past_kv,
-                            run=run_idx,
-                        )
-                        _run_generate(
-                            llm,
-                            sampling_params,
-                            batch_size=batch_size,
-                            input_len=dp.past_kv,
-                            token_config=prompt_token_config,
-                        )
-            finally:
-                _set_marker_state(marker_mod, active_iterations="", phase="gen")
-            _worker_append_event(status_path, "batch_finished", work_unit_id=work_unit_id, batch_size=batch_size)
-            continue
+                    _run_prefix_cached_gen_iteration(
+                        llm,
+                        fill_sampling_params,
+                        sampling_params,
+                        dp,
+                        token_config=prompt_token_config,
+                        fill_cache=False,
+                    )
+                for run_idx in range(measured_runs):
+                    _set_marker_state(
+                        marker_mod,
+                        active_iterations="",
+                        trigger="decode_only",
+                        allow_new_cached=True,
+                        phase="gen",
+                        step=dp.past_kv + 1,
+                        bs=batch_size,
+                        past=dp.past_kv,
+                        run=run_idx,
+                    )
+                    _run_prefix_cached_gen_iteration(
+                        llm,
+                        fill_sampling_params,
+                        sampling_params,
+                        dp,
+                        token_config=prompt_token_config,
+                        fill_cache=False,
+                    )
+        finally:
+            _set_marker_state(marker_mod, active_iterations="", phase="gen")
+        _worker_append_event(status_path, "batch_finished", work_unit_id=work_unit_id, batch_size=batch_size)
 
 
 def _worker_empty_cache() -> None:
@@ -2435,12 +2300,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--work-dir", default="profiles/vllm_layerwise")
     parser.add_argument("--config-cache-dir", default=None)
     parser.add_argument("--no-config-cache", action="store_true")
-    parser.add_argument("--system", default=None)
-    parser.add_argument("--framework-version", default=None)
     parser.add_argument("--tp-sizes", default="1,2,4,8")
     parser.add_argument("--moe-tp", type=int, default=1)
-    parser.add_argument("--num-slots", type=int, default=None)
-    parser.add_argument("--include-moe-layer", action="store_true")
+    parser.add_argument(
+        "--num-slots",
+        type=int,
+        default=None,
+        help=(
+            "MoE/EPLB expert slot count. When set for MoE models, expert "
+            "parallelism divides this slot count instead of the original "
+            "expert count; ignored for dense models."
+        ),
+    )
     parser.add_argument(
         "--moe-noop",
         action="store_true",
@@ -2456,23 +2327,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=1,
         help="Number of initial dense layers to keep in the patched model.",
     )
-    parser.add_argument(
-        "--target-layers",
-        default=None,
-        help=(
-            "Comma-separated explicit dense layer indices to keep. Overrides "
-            "--target-layer-count and patches num_hidden_layers to max(index)+1."
-        ),
-    )
-    parser.add_argument(
-        "--target-layer-config-depth",
-        type=int,
-        default=None,
-        help=(
-            "Dense config depth to instantiate when using layer skipping. "
-            "Defaults to the minimum depth needed for the kept layers."
-        ),
-    )
     parser.add_argument("--phases", choices=("ctx", "gen", "both"), default="both")
     parser.add_argument("--ctx-new-tokens", default=",".join(map(str, CTX_NEW_TOKENS)))
     parser.add_argument("--ctx-past-kv", default=",".join(map(str, CTX_PAST_KV)))
@@ -2487,23 +2341,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--moe-quant", default="bf16")
     parser.add_argument("--attn-quant", default="bf16")
     parser.add_argument("--kv-quant", default="bf16")
-    parser.add_argument(
-        "--measurement-mode",
-        choices=("deployment-parity", "attribution"),
-        default="deployment-parity",
-        help=(
-            "deployment-parity omits vLLM compile/CUDA graph overrides and is comparable to default FPM; "
-            "attribution forces the old compile-off/module-NVTX path and is for decomposition only."
-        ),
-    )
-    parser.add_argument(
-        "--rollup",
-        default=None,
-        help=(
-            "Module rollup regex. Defaults to CUDAGraphWrapper in deployment-parity mode "
-            "and layer module groups in attribution mode."
-        ),
-    )
     parser.add_argument("--rank-reduce", choices=("sum", "max"), default="sum")
     parser.add_argument(
         "--latency-source",
@@ -2512,15 +2349,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Write latency_ms from attributed kernel wall span, summed GPU time, or GPU time capped by span. "
             "Default matches decode span collection."
-        ),
-    )
-    parser.add_argument(
-        "--min-max-num-batched-tokens",
-        type=int,
-        default=1,
-        help=(
-            "Floor for vLLM --max-num-batched-tokens; useful for context-only grids that need "
-            "FlashInfer warmup headroom."
         ),
     )
     parser.add_argument(
@@ -2548,15 +2376,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Unmarked generation runs to execute per batch before measurement.",
     )
     parser.add_argument(
-        "--gen-driver",
-        choices=("prefill", "prefix_cache"),
-        default="prefix_cache",
-        help=(
-            "Generation driver. prefill measures the first decode after a prompt of length past_kv; prefix_cache "
-            "initializes KV through vLLM prefix caching and then measures the first cached decode."
-        ),
-    )
-    parser.add_argument(
         "--gen-measured-runs",
         type=int,
         default=6,
@@ -2580,26 +2399,44 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "region using cudaProfilerStart/Stop; full traces the entire worker process."
         ),
     )
-    parser.add_argument("--no-restrict-cudagraph-sizes", action="store_true")
-    parser.add_argument(
-        "--no-filter-target-layers",
-        action="store_true",
-        help=(
-            "Do not filter parsed rows by target layer index. Useful for default-compile runs "
-            "where layer modules collapse into CUDAGraphWrapper."
-        ),
+    debug = parser.add_argument_group("debug options")
+    debug.add_argument(
+        "--system",
+        default=None,
+        help="Debug override for the system label. Defaults to nvidia-smi GPU name.",
     )
-    parser.add_argument(
-        "--compilation-config-json",
+    debug.add_argument(
+        "--framework-version",
+        default=None,
+        help="Debug override for the framework version label. Defaults to importing vLLM and using vllm.__version__.",
+    )
+    debug.add_argument(
+        "--target-layers",
         default=None,
         help=(
-            "Override the collector's vLLM compilation config JSON. Use 'default' to omit "
-            "the flag and request vLLM's default compilation behavior; '{}' is equivalent "
-            "for vLLM 0.20.1."
+            "Debug-only comma-separated explicit dense layer indices to keep. "
+            "Overrides --target-layer-count and patches num_hidden_layers to "
+            "max(index)+1."
+        ),
+    )
+    debug.add_argument(
+        "--target-layer-config-depth",
+        type=int,
+        default=None,
+        help=(
+            "Debug-only dense config depth to instantiate when using layer "
+            "skipping. Defaults to the minimum depth needed for the kept layers."
+        ),
+    )
+    debug.add_argument(
+        "--rollup",
+        default=None,
+        help=(
+            "Debug override for the Nsight module rollup regex. "
+            "Normal collection uses CUDAGraphWrapper."
         ),
     )
     parser.add_argument("--extra-vllm-arg", action="append", default=[])
-    parser.add_argument("--extra-vllm-args", default="")
     return parser
 
 

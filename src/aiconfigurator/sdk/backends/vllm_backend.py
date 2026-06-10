@@ -148,6 +148,10 @@ class VLLMBackend(BaseBackend):
                 "energy": sum(float(detail.get("energy", 0.0)) for detail in chunk_details),
                 "rms_latency": sum(float(detail.get("rms_latency", 0.0)) for detail in chunk_details),
                 "includes_moe": all(bool(detail.get("includes_moe", False)) for detail in chunk_details),
+                "layer_type": chunk_details[0].get("layer_type", ""),
+                "layer_index": float(chunk_details[0].get("layer_index", 0.0)),
+                "measured_layer_count": float(chunk_details[0].get("measured_layer_count", 1.0)),
+                "layer_multiplier": float(chunk_details[0].get("layer_multiplier", 0.0)),
             }
         except (PerfDataNotAvailableError, ValueError):
             # Older layerwise datasets have a direct 16k CTX row but no
@@ -194,6 +198,21 @@ class VLLMBackend(BaseBackend):
             "energy": 0.0,
             "rms_latency": 0.0,
         }
+
+    def _layerwise_detail_scale(self, detail: dict, fallback_num_layers: int) -> float:
+        """Scale a measured representative row to this model stage."""
+        raw_multiplier = float(detail.get("layer_multiplier", 0.0) or 0.0)
+        if raw_multiplier <= 0.0:
+            return float(fallback_num_layers)
+        measured = max(float(detail.get("measured_layer_count", 1.0) or 1.0), 1.0)
+        represented = min(raw_multiplier, float(fallback_num_layers))
+        return represented / measured
+
+    def _layerwise_detail_represented_layers(self, detail: dict, fallback_num_layers: int) -> int:
+        raw_multiplier = float(detail.get("layer_multiplier", 0.0) or 0.0)
+        if raw_multiplier <= 0.0:
+            return fallback_num_layers
+        return max(0, int(round(min(raw_multiplier, float(fallback_num_layers)))))
 
     def _layerwise_tp_allreduce_rms_ms(
         self,
@@ -282,7 +301,8 @@ class VLLMBackend(BaseBackend):
         layer_detail = self._layerwise_context_layer_detail(
             database, model_name, tp_size, batch_size, effective_isl, prefix
         )
-        layer_ms = float(layer_detail["latency"]) * num_layers
+        layer_scale = self._layerwise_detail_scale(layer_detail, num_layers)
+        layer_ms = float(layer_detail["latency"]) * layer_scale
         allreduce_ms = (
             self._layerwise_tp_allreduce_ms(model, database, tp_size, batch_size * effective_isl) * 2 * num_layers
         )
@@ -292,7 +312,7 @@ class VLLMBackend(BaseBackend):
                 model,
                 database,
                 token_count=batch_size * effective_isl,
-                num_layers=num_layers,
+                num_layers=self._layerwise_detail_represented_layers(layer_detail, num_layers),
                 is_context=True,
             )
 
@@ -341,8 +361,9 @@ class VLLMBackend(BaseBackend):
                 effective_bs,
                 kv_len,
             )
-            layer_step_ms = float(layer_detail["latency"]) * num_layers
-            rms_step_ms = float(layer_detail.get("rms_latency", 0.0)) * num_layers
+            layer_scale = self._layerwise_detail_scale(layer_detail, num_layers)
+            layer_step_ms = float(layer_detail["latency"]) * layer_scale
+            rms_step_ms = float(layer_detail.get("rms_latency", 0.0)) * layer_scale
             allreduce_rms_step_ms = 0.0
             if tp_size > 1 and rms_step_ms > 0.0:
                 try:
@@ -372,7 +393,7 @@ class VLLMBackend(BaseBackend):
                     model,
                     database,
                     token_count=effective_bs,
-                    num_layers=num_layers,
+                    num_layers=self._layerwise_detail_represented_layers(layer_detail, num_layers),
                     is_context=False,
                 )
             moe_ms_total += moe_step_ms * repeat_count
@@ -427,7 +448,9 @@ class VLLMBackend(BaseBackend):
         combined_tokens = max(ctx_tokens + gen_tokens, 1)
 
         combined_detail = self._layerwise_context_layer_detail(database, model_name, tp_size, 1, combined_tokens)
-        combined_ctx_ms = float(combined_detail["latency"]) * num_layers
+        combined_ctx_ms = float(combined_detail["latency"]) * self._layerwise_detail_scale(
+            combined_detail, num_layers
+        )
         combined_allreduce_ms = (
             self._layerwise_tp_allreduce_ms(model, database, tp_size, combined_tokens) * 2 * num_layers
         )
@@ -435,12 +458,22 @@ class VLLMBackend(BaseBackend):
         if gen_tokens > 0:
             avg_decode_kv = isl + osl // 2
             try:
+                gen_detail = self._query_layerwise_detail(
+                    database,
+                    model_name,
+                    "GEN",
+                    tp_size,
+                    gen_tokens,
+                    avg_decode_kv,
+                )
                 gen_step_ms = (
-                    float(database.query_layerwise(model_name, "GEN", tp_size, gen_tokens, avg_decode_kv))
-                    * num_layers
+                    float(gen_detail["latency"])
+                    * self._layerwise_detail_scale(gen_detail, num_layers)
                 )
                 gen_as_ctx_detail = self._layerwise_context_layer_detail(database, model_name, tp_size, 1, gen_tokens)
-                gen_as_ctx_ms = float(gen_as_ctx_detail["latency"]) * num_layers
+                gen_as_ctx_ms = float(gen_as_ctx_detail["latency"]) * self._layerwise_detail_scale(
+                    gen_as_ctx_detail, num_layers
+                )
                 decode_delta_ms = max(0.0, gen_step_ms - gen_as_ctx_ms)
             except (PerfDataNotAvailableError, ValueError):
                 logger.debug(
@@ -458,7 +491,7 @@ class VLLMBackend(BaseBackend):
                 model,
                 database,
                 token_count=combined_tokens,
-                num_layers=num_layers,
+                num_layers=self._layerwise_detail_represented_layers(combined_detail, num_layers),
                 is_context=ctx_tokens > 0,
             )
         latency_ms = combined_ctx_ms + combined_allreduce_ms + decode_delta_ms

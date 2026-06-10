@@ -34,6 +34,13 @@ def _unit(tmp_path, datapoints):
         work_unit_id="wu_test",
         model_dir=str(tmp_path / "model"),
         row_base=row_base,
+        representative=cl.RepresentativeLayer(
+            layer_index=0,
+            layer_type="dense",
+            measured_layer_count=1,
+            layer_multiplier=1,
+            target_layers=(0,),
+        ),
         target_layers=[0],
         datapoints=datapoints,
     )
@@ -47,23 +54,16 @@ def _args(tmp_path):
         max_workers=None,
         timeout=30,
         nsys_capture="cuda_profiler_api",
-        no_restrict_cudagraph_sizes=False,
-        extra_vllm_args="",
         extra_vllm_arg=[],
         latency_source="span",
-        min_max_num_batched_tokens=1,
         ctx_warmup_runs=0,
         ctx_measured_runs=1,
         ctx_repeat_aggregation="median",
-        gen_driver="prefix_cache",
         gen_warmup_runs=0,
         gen_measured_runs=1,
         gen_repeat_aggregation="median",
-        compilation_config_json=None,
         rollup=r"layers\.(\d+)\.(self_attn|mlp)",
         rank_reduce="sum",
-        measurement_mode="attribution",
-        no_filter_target_layers=False,
     )
 
 
@@ -78,7 +78,6 @@ def _build_args(tmp_path, **overrides):
         tp_sizes="1,2,4",
         moe_tp=1,
         num_slots=None,
-        include_moe_layer=False,
         moe_noop=False,
         target_layer_count=1,
         target_layers=None,
@@ -93,8 +92,6 @@ def _build_args(tmp_path, **overrides):
         moe_quant="bf16",
         attn_quant="bf16",
         kv_quant="bf16",
-        min_max_num_batched_tokens=1,
-        measurement_mode="deployment-parity",
     )
     for key, value in overrides.items():
         setattr(args, key, value)
@@ -109,7 +106,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(args.ctx_repeat_aggregation, "trimmed_mean")
         self.assertEqual(args.gen_measured_runs, 6)
         self.assertEqual(args.gen_repeat_aggregation, "trimmed_mean")
-        self.assertEqual(args.gen_driver, "prefix_cache")
+        self.assertFalse(hasattr(args, "gen_driver"))
         self.assertFalse(hasattr(args, "ctx_driver"))
         self.assertEqual(args.nsys_capture, "cuda_profiler_api")
 
@@ -181,17 +178,6 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             cl._latency_us_from_agg({"gpu_us": 100.0, "span_us": 129.0}, "gpu_capped"),
             100.0,
         )
-
-    def test_filter_rows_to_target_layers_excludes_skipped_layer_kernels(self):
-        rows = [
-            {"rollup_parts": ("0", "mlp"), "gpu_us": 100.0},
-            {"rollup_parts": ("1", "mlp"), "gpu_us": 200.0},
-            {"rollup_parts": ("2", "mlp"), "gpu_us": 300.0},
-        ]
-
-        filtered = cl._filter_rows_to_target_layers(rows, [1])
-
-        self.assertEqual(filtered, [rows[1]])
 
     def test_repeat_aggregation_selects_median_latency(self):
         parsed = cl._aggregate_step_rows([
@@ -428,9 +414,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             unit = _unit(tmp_path, [cl.DataPoint("gen", 4, 1, 4096)])
             unit.row_base["model"] = "openai/gpt-oss-120b"
             unit.row_base["system"] = "b300_sxm"
-            args_obj = _args(tmp_path)
-            args_obj.gen_driver = "prefill"
-            scheduler = cl.Scheduler(args_obj, [unit])
+            scheduler = cl.Scheduler(_args(tmp_path), [unit])
 
             spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
             args = spec["extra_vllm_args"]
@@ -438,11 +422,12 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertEqual(args[args.index("--kv-cache-dtype") + 1], "fp8")
             self.assertEqual(args[args.index("--max-cudagraph-capture-size") + 1], "2048")
             self.assertEqual(args[args.index("--stream-interval") + 1], "20")
-            self.assertIn("--no-enable-prefix-caching", args)
+            self.assertIn("--enable-prefix-caching", args)
+            self.assertNotIn("--no-enable-prefix-caching", args)
             self.assertNotIn("--tensor-parallel-size", args)
             self.assertNotIn("--enable-expert-parallel", args)
 
-    def test_scheduler_enables_prefix_cache_for_gen_prefix_cache_driver(self):
+    def test_scheduler_enables_prefix_cache_for_gen(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             unit = _unit(tmp_path, [cl.DataPoint("gen", 4, 1, 4096)])
@@ -506,8 +491,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             tmp_path = Path(td)
             unit = _unit(tmp_path, [cl.DataPoint("gen", 4, 1, 4096)])
             args = _args(tmp_path)
-            args.extra_vllm_args = "--generation-config auto"
             args.extra_vllm_arg = [
+                "--generation-config=auto",
                 "--limit-mm-per-prompt={\"image\":1}",
                 "--no-skip-mm-profiling",
             ]
@@ -518,8 +503,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             self.assertNotIn("--skip-mm-profiling", extra)
             self.assertIn("--no-skip-mm-profiling", extra)
-            self.assertEqual(extra.count("--generation-config"), 1)
-            self.assertEqual(extra[extra.index("--generation-config") + 1], "auto")
+            self.assertNotIn("--generation-config", extra)
+            self.assertIn("--generation-config=auto", extra)
             self.assertNotIn("--limit-mm-per-prompt", extra)
             self.assertIn("--limit-mm-per-prompt={\"image\":1}", extra)
 
@@ -553,14 +538,19 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             unit.row_base["model"] = "openai/gpt-oss-120b"
             unit.row_base["system"] = "b300_sxm"
             args = _args(tmp_path)
-            args.extra_vllm_args = "--kv-cache-dtype bf16 --stream-interval=7"
-            args.extra_vllm_arg = ["--max-cudagraph-capture-size=1024", "--enable-prefix-caching"]
+            args.extra_vllm_arg = [
+                "--kv-cache-dtype=bf16",
+                "--stream-interval=7",
+                "--max-cudagraph-capture-size=1024",
+                "--enable-prefix-caching",
+            ]
             scheduler = cl.Scheduler(args, [unit])
 
             spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
             extra = spec["extra_vllm_args"]
 
-            self.assertEqual(extra.count("--kv-cache-dtype"), 1)
+            self.assertNotIn("--kv-cache-dtype", extra)
+            self.assertIn("--kv-cache-dtype=bf16", extra)
             self.assertNotIn("--stream-interval", extra)
             self.assertIn("--stream-interval=7", extra)
             self.assertNotIn("--max-cudagraph-capture-size", extra)
@@ -575,147 +565,55 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 cl.DataPoint("gen", 4, 1, 16),
                 cl.DataPoint("gen", 2, 1, 32),
             ],
-            restrict_cudagraph_sizes=True,
             extra_vllm_args=[],
         )
 
         self.assertNotIn("--compilation-config", tokens)
         self.assertEqual(tokens[tokens.index("--max-model-len") + 1], "129")
-        self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "128")
+        self.assertEqual(
+            tokens[tokens.index("--max-num-batched-tokens") + 1],
+            str(cl.CTX_MAX_NUM_BATCHED_TOKENS_FLOOR),
+        )
         self.assertEqual(tokens[tokens.index("--max-num-seqs") + 1], "4")
 
     def test_engine_tokens_do_not_enable_runtime_tensor_parallel(self):
         tokens = cl._engine_tokens(
             model_dir="/model",
             datapoints=[cl.DataPoint("ctx", 1, 128, 0)],
-            restrict_cudagraph_sizes=True,
             extra_vllm_args=[],
         )
 
         self.assertNotIn("--tensor-parallel-size", tokens)
         self.assertNotIn("--worker-extension-cls", tokens)
 
-    def test_engine_tokens_use_one_decode_graph_engine_for_attribution_mode(self):
-        tokens = cl._engine_tokens(
-            model_dir="/model",
-            datapoints=[
-                cl.DataPoint("ctx", 1, 128, 0),
-                cl.DataPoint("gen", 4, 1, 16),
-                cl.DataPoint("gen", 2, 1, 32),
-            ],
-            restrict_cudagraph_sizes=True,
-            extra_vllm_args=[],
-            measurement_mode="attribution",
-        )
-
-        config = json.loads(tokens[tokens.index("--compilation-config") + 1])
-        self.assertEqual(config["mode"], 0)
-        self.assertEqual(config["cudagraph_mode"], "FULL_DECODE_ONLY")
-        self.assertEqual(config["cudagraph_capture_sizes"], [2, 4])
-        self.assertEqual(tokens[tokens.index("--max-model-len") + 1], "129")
-        self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "128")
-        self.assertEqual(tokens[tokens.index("--max-num-seqs") + 1], "4")
-
-    def test_engine_tokens_can_omit_compilation_config_for_vllm_defaults(self):
-        tokens = cl._engine_tokens(
-            model_dir="/model",
-            datapoints=[cl.DataPoint("gen", 4, 1, 1024)],
-            restrict_cudagraph_sizes=True,
-            extra_vllm_args=[],
-            compilation_config_json="default",
-        )
-
-        self.assertNotIn("--compilation-config", tokens)
-        self.assertEqual(tokens[tokens.index("--max-num-seqs") + 1], "4")
-
-    def test_measurement_mode_selects_default_rollup_and_filtering(self):
-        parity_args = argparse.Namespace(
-            measurement_mode="deployment-parity",
-            rollup=None,
-            no_filter_target_layers=False,
-        )
-        attribution_args = argparse.Namespace(
-            measurement_mode="attribution",
-            rollup=None,
-            no_filter_target_layers=False,
-        )
-
-        self.assertEqual(cl._effective_rollup(parity_args), cl.DEFAULT_PARITY_ROLLUP)
-        self.assertEqual(cl._effective_rollup(attribution_args), cl.DEFAULT_ATTRIBUTION_ROLLUP)
-        self.assertFalse(cl._should_filter_target_layers(parity_args))
-        self.assertTrue(cl._should_filter_target_layers(attribution_args))
-
-    def test_engine_tokens_can_floor_max_num_batched_tokens(self):
+    def test_engine_tokens_context_uses_automatic_token_budget_floor(self):
         tokens = cl._engine_tokens(
             model_dir="/model",
             datapoints=[cl.DataPoint("ctx", 1, 3, 0)],
-            restrict_cudagraph_sizes=True,
             extra_vllm_args=[],
-            min_max_num_batched_tokens=4096,
-        )
-
-        self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "4096")
-
-    def test_engine_tokens_prefill_driver_uses_normal_budget_when_prompt_batch_fits(self):
-        tokens = cl._engine_tokens(
-            model_dir="/model",
-            datapoints=[cl.DataPoint("gen", 4, 1, 4096)],
-            restrict_cudagraph_sizes=True,
-            extra_vllm_args=[],
-            gen_driver="prefill",
         )
 
         self.assertEqual(
             tokens[tokens.index("--max-num-batched-tokens") + 1],
-            str(cl.PREFILL_DECODE_MAX_NUM_BATCHED_TOKENS),
-        )
-        self.assertNotIn("--max-num-partial-prefills", tokens)
-        self.assertNotIn("--max-long-partial-prefills", tokens)
-        self.assertNotIn("--long-prefill-token-threshold", tokens)
-
-    def test_engine_tokens_prefill_driver_expands_budget_for_uniform_decode_batch(self):
-        tokens = cl._engine_tokens(
-            model_dir="/model",
-            datapoints=[cl.DataPoint("gen", 8, 1, 4096)],
-            restrict_cudagraph_sizes=True,
-            extra_vllm_args=[],
-            gen_driver="prefill",
+            str(cl.CTX_MAX_NUM_BATCHED_TOKENS_FLOOR),
         )
 
-        self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], str(8 * 4096))
-
-    def test_engine_tokens_prefill_driver_preserves_explicit_token_budget_floor(self):
-        tokens = cl._engine_tokens(
-            model_dir="/model",
-            datapoints=[cl.DataPoint("gen", 8, 1, 4096)],
-            restrict_cudagraph_sizes=True,
-            extra_vllm_args=[],
-            min_max_num_batched_tokens=32768,
-            gen_driver="prefill",
-        )
-
-        self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "32768")
-
-    def test_engine_tokens_prefix_cache_driver_keeps_decode_budget_small(self):
+    def test_engine_tokens_prefix_cache_keeps_decode_budget_small(self):
         tokens = cl._engine_tokens(
             model_dir="/model",
             datapoints=[cl.DataPoint("gen", 32, 1, 65536)],
-            restrict_cudagraph_sizes=True,
             extra_vllm_args=[],
-            gen_driver="prefix_cache",
         )
 
         self.assertEqual(tokens[tokens.index("--max-model-len") + 1], "65538")
         self.assertEqual(tokens[tokens.index("--max-num-seqs") + 1], "32")
         self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "32")
 
-    def test_engine_tokens_prefix_cache_driver_uses_at_least_one_block(self):
+    def test_engine_tokens_prefix_cache_uses_at_least_one_block(self):
         tokens = cl._engine_tokens(
             model_dir="/model",
             datapoints=[cl.DataPoint("gen", 1, 1, 128)],
-            restrict_cudagraph_sizes=True,
             extra_vllm_args=[],
-            gen_driver="prefix_cache",
         )
 
         self.assertEqual(
@@ -727,9 +625,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         tokens = cl._engine_tokens(
             model_dir="/model",
             datapoints=[cl.DataPoint("ctx", 1, 8192, 8192)],
-            restrict_cudagraph_sizes=True,
             extra_vllm_args=[],
-            min_max_num_batched_tokens=1,
         )
 
         self.assertEqual(tokens[tokens.index("--max-model-len") + 1], "16385")
@@ -846,7 +742,31 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 units = cl.build_work_units(args)
 
             self.assertEqual(units[0].target_layers, [0, 1, 2, 3])
+            self.assertEqual(units[0].representative.layer_type, "dense")
+            self.assertEqual(units[0].representative.measured_layer_count, 4)
+            self.assertEqual(units[0].representative.layer_multiplier, 4)
             self.assertEqual(patcher.mock_calls[0].kwargs["num_hidden_layers"], 4)
+
+    def test_dense_representative_layer_scales_to_model_layer_count(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            dense_config = {
+                "num_attention_heads": 8,
+                "num_key_value_heads": 8,
+                "intermediate_size": 1024,
+                "num_hidden_layers": 64,
+            }
+            args = _build_args(tmp_path, phases="ctx", target_layer_count=1)
+
+            with (
+                mock.patch.object(cl, "_load_original_config", return_value=dense_config),
+                mock.patch.object(cl, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
+            ):
+                units = cl.build_work_units(args)
+
+            self.assertEqual(units[0].representative.layer_type, "dense")
+            self.assertEqual(units[0].representative.measured_layer_count, 1)
+            self.assertEqual(units[0].representative.layer_multiplier, 64)
 
     def test_dense_build_work_units_can_keep_explicit_target_layer(self):
         with tempfile.TemporaryDirectory() as td:
@@ -866,6 +786,9 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 units = cl.build_work_units(args)
 
             self.assertEqual(units[0].target_layers, [1])
+            self.assertEqual(units[0].representative.layer_index, 1)
+            self.assertEqual(units[0].representative.measured_layer_count, 1)
+            self.assertEqual(units[0].representative.layer_multiplier, 1)
             self.assertEqual(patcher.mock_calls[0].kwargs["num_hidden_layers"], 2)
 
     def test_dense_build_work_units_can_keep_explicit_layer_with_deeper_config(self):
@@ -973,6 +896,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 units = cl.build_work_units(args)
 
             self.assertEqual([u.target_layers for u in units], [[0], [0]])
+            self.assertEqual([u.representative.layer_type for u in units], ["moe", "moe"])
+            self.assertEqual([u.representative.layer_multiplier for u in units], [1, 1])
             self.assertEqual([u.moe_noop for u in units], [True, True])
             self.assertEqual(
                 [call.kwargs["extra_overrides"] for call in patcher.mock_calls],
@@ -990,6 +915,13 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 work_unit_id="wu_moe",
                 model_dir=str(tmp_path / "model"),
                 row_base=_unit(tmp_path, []).row_base,
+                representative=cl.RepresentativeLayer(
+                    layer_index=0,
+                    layer_type="moe",
+                    measured_layer_count=1,
+                    layer_multiplier=1,
+                    target_layers=(0,),
+                ),
                 target_layers=[0],
                 datapoints=[cl.DataPoint("gen", 1, 1, 16)],
                 moe_noop=True,

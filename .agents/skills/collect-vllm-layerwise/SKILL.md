@@ -29,7 +29,7 @@ Read [references/layerwise-commands.md](references/layerwise-commands.md) for th
 - Context collection used for AIC should use the established 16-layer path unless the user explicitly prioritizes speed over accuracy. Use `--latency-source gpu_capped`, `--ctx-warmup-runs 2`, `--ctx-measured-runs 6`, and `--ctx-repeat-aggregation trimmed_mean`.
 - Context should be a 2D grid: `new_tokens` up to 8192 and `past_kv` up to 65536, filtered by model max length. Include `new_tokens=8192,past_kv=8192` for vLLM chunked 16k behavior.
 - For FP8 checkpoints, do not force KV FP8 unless that is the experiment. `--kv-quant fp8` forces `--kv-cache-dtype fp8`; default vLLM FP8 checkpoint behavior is measured with `--kv-quant bf16` so KV dtype remains `auto`.
-- GPT-OSS layerwise specs automatically mirror vLLM's GPT-OSS runtime defaults for FP8 KV cache, CUDA graph capture size, and stream interval. Do not pass real `--tensor-parallel-size` or `--enable-expert-parallel` through layerwise; TP/EP are simulated/added analytically. Context collection always uses prefix caching to create arbitrary `past_kv` points; decode-only `--gen-driver prefill` may disable prefix caching when no context points are present.
+- GPT-OSS layerwise specs automatically mirror vLLM's GPT-OSS runtime defaults for FP8 KV cache, CUDA graph capture size, and stream interval. Do not pass real `--tensor-parallel-size` or `--enable-expert-parallel` through layerwise; TP/EP are simulated/added analytically. Context and decode collection use prefix caching to create arbitrary `past_kv` points.
 
 ## Convert To AIC Data
 
@@ -41,8 +41,7 @@ Map collector CSV rows into AIC `layerwise_perf.csv`:
 - `new_tokens` -> `seq_len_q`
 - `past_kv` -> `seq_len_kv_cache`
 - Preserve the actual model path in AIC data, e.g. keep `Qwen/Qwen3-32B-FP8` distinct from `Qwen/Qwen3-32B`.
-- Divide `latency_ms` by `target_layer_count` for multi-layer context collection, exactly once. One-layer decode rows are already per layer.
-- Divide `rms_latency_ms` by `target_layer_count` with the same rule as `latency_ms`.
+- New collector CSVs include `layer_type`, `measured_layer_count`, and `layer_multiplier`. Treat `latency_ms` as the raw measured representative span; scale by `layer_multiplier / measured_layer_count` when consuming it. Do not separately divide by `target_layer_count` when those metadata columns are present.
 - If a full-depth sanity point still leaves a repeatable FPM-vs-layerwise gap, identify a model-general missing component or collector mismatch. Do not add target-model FPM deltas as layerwise prediction inputs.
 
 Run focused tests after code changes:

@@ -26,6 +26,12 @@ def _parse_bool(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "t", "yes", "y"}
 
 
+def _parse_optional_float(value) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
+
+
 def _cache_key(database: PerfDatabase) -> tuple:
     return (
         database.systems_root,
@@ -60,6 +66,12 @@ def load_layerwise_data(layerwise_file):
             entry["rms_latency"] = float(row["rms_latency_ms"])
         if row.get("rms_kernel_count") not in (None, ""):
             entry["rms_kernel_count"] = int(float(row["rms_kernel_count"]))
+        if row.get("layer_type") not in (None, ""):
+            entry["layer_type"] = str(row["layer_type"])
+        for metric in ("layer_index", "measured_layer_count", "layer_multiplier"):
+            value = _parse_optional_float(row.get(metric))
+            if value is not None:
+                entry[metric] = value
         if _parse_bool(row.get("includes_moe")):
             entry["includes_moe"] = True
         if phase == "CTX":
@@ -92,6 +104,42 @@ def _uniform_bool_metric(data: dict, metric: str, default: bool = False) -> bool
     def _walk(value) -> None:
         if isinstance(value, dict) and ("latency" in value or "power" in value):
             values.add(bool(value.get(metric, default)))
+            return
+        if isinstance(value, dict):
+            for child in value.values():
+                _walk(child)
+
+    _walk(data)
+    if len(values) == 1:
+        return values.pop()
+    return default
+
+
+def _uniform_float_metric(data: dict, metric: str, default: float = 0.0) -> float:
+    values: set[float] = set()
+
+    def _walk(value) -> None:
+        if isinstance(value, dict) and ("latency" in value or "power" in value):
+            if metric in value:
+                values.add(float(value[metric]))
+            return
+        if isinstance(value, dict):
+            for child in value.values():
+                _walk(child)
+
+    _walk(data)
+    if len(values) == 1:
+        return values.pop()
+    return default
+
+
+def _uniform_str_metric(data: dict, metric: str, default: str = "") -> str:
+    values: set[str] = set()
+
+    def _walk(value) -> None:
+        if isinstance(value, dict) and ("latency" in value or "power" in value):
+            if metric in value:
+                values.add(str(value[metric]))
             return
         if isinstance(value, dict):
             for child in value.values():
@@ -179,6 +227,10 @@ class Layerwise(Operation):
                     database._extracted_metrics_cache,
                 )
                 result["includes_moe"] = _uniform_bool_metric(tp_data, "includes_moe")
+                result["layer_type"] = _uniform_str_metric(tp_data, "layer_type")
+                result["layer_index"] = _uniform_float_metric(tp_data, "layer_index")
+                result["measured_layer_count"] = _uniform_float_metric(tp_data, "measured_layer_count", 1.0)
+                result["layer_multiplier"] = _uniform_float_metric(tp_data, "layer_multiplier")
         elif batch_size in tp_data and seq_len in tp_data[batch_size]:
             result = tp_data[batch_size][seq_len]
         else:
@@ -191,16 +243,26 @@ class Layerwise(Operation):
                 database._extracted_metrics_cache,
             )
             result["includes_moe"] = _uniform_bool_metric(tp_data, "includes_moe")
+            result["layer_type"] = _uniform_str_metric(tp_data, "layer_type")
+            result["layer_index"] = _uniform_float_metric(tp_data, "layer_index")
+            result["measured_layer_count"] = _uniform_float_metric(tp_data, "measured_layer_count", 1.0)
+            result["layer_multiplier"] = _uniform_float_metric(tp_data, "layer_multiplier")
 
         if not isinstance(result, dict):
             result = {"latency": float(result), "energy": 0.0}
-        return {
+        out = {
             "latency": float(result["latency"]),
             "energy": float(result.get("energy", 0.0)),
             "rms_latency": float(result.get("rms_latency", 0.0)),
             "rms_kernel_count": float(result.get("rms_kernel_count", 0.0)),
             "includes_moe": bool(result.get("includes_moe", False)),
         }
+        if result.get("layer_type") not in (None, ""):
+            out["layer_type"] = str(result["layer_type"])
+        for metric in ("layer_index", "measured_layer_count", "layer_multiplier"):
+            if result.get(metric) not in (None, ""):
+                out[metric] = float(result[metric])
+        return out
 
     @classmethod
     def _query_layerwise_table(

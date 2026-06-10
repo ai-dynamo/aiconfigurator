@@ -181,7 +181,7 @@ New default-compile GEN artifacts:
 
 Collector/backend changes in this working tree:
 
-- `collect_layerwise.py` can omit `--compilation-config` with `--compilation-config-json default`, keep unfiltered wrapper rows via `--no-filter-target-layers`, and run repeated GEN warmup/measured passes.
+- `collect_layerwise.py` now uses default vLLM compilation and `CUDAGraphWrapper` rollup directly, with repeated GEN warmup/measured passes.
 - `vllm_step_marker.py` tags repeated GEN runs with `::runN`.
 - `vllm_backend.py` falls back for sparse GEN KV rows in mixed estimates and for missing chunked CTX nonzero-KV rows when a direct long-context row exists.
 
@@ -223,10 +223,11 @@ Avoid adding Python-level NVTX markers around attention for default-compile attr
 Implemented the deployment-parity hardening items:
 
 - Added shared vLLM deployment metadata/config helpers in `collector/layerwise/common/vllm_deployment.py`.
-- `collect_layerwise.py` now has `--measurement-mode {deployment-parity,attribution}`. Deployment parity leaves vLLM compile/CUDA graph defaults intact and uses `CUDAGraphWrapper` for GEN; attribution remains available for module NVTX work.
+- `collect_layerwise.py` now uses the deployment-parity path only: vLLM compile/CUDA graph defaults with `CUDAGraphWrapper` rollup.
+- New `collect_layerwise.py` output rows include representative layer metadata: `layer_type`, `layer_index`, `measured_layer_count`, and `layer_multiplier`. `latency_ms` remains the raw measured representative span; AIC scales by `layer_multiplier / measured_layer_count` when those columns are present and falls back to old full-layer-count scaling for legacy rows.
 - FPM collection now uses the same vLLM arg helper, writes requested/effective vLLM config metadata, and can optionally start the worker under Nsight Systems with delayed start/stop around measured traffic.
 - Added `collector/layerwise/diagnostics/analyze_nsys_comm_overlap.py` for Nsight SQLite comm/compute overlap summaries.
-- `layerwise_perf.csv` now carries measurement metadata columns: `measurement_mode` and `attribution_target`.
+- `layerwise_perf.csv` no longer needs separate measurement-mode columns for new collector output.
 - `VLLMBackend` now treats pure `GEN` deployment-parity rows as the decode prediction and no longer adds the inherited standalone custom-allreduce table to pure decode. Context and mixed estimates still keep explicit TP allreduce because those paths use CTX layer attribution rows.
 
 Targeted worker Nsight runs were decode-focused. Each run still contains context/mixed/decode FPM phase rows because that is how vLLM reaches steady decode, but the overlap analysis isolates the steady full-batch decode windows:

@@ -28,10 +28,11 @@ misc:
         "\n".join(
             [
                 "framework,framework_version,system,model,phase,tp_size,batch_size,seq_len_q,seq_len_kv_cache,"
-                "latency_ms,rms_latency_ms,rms_kernel_count,includes_moe",
+                "latency_ms,rms_latency_ms,rms_kernel_count,includes_moe,layer_type,layer_index,"
+                "measured_layer_count,layer_multiplier",
                 "vLLM,0.20.1,test,Qwen/Qwen3-32B,CTX,1,1,8192,0,7.00",
                 "vLLM,0.20.1,test,Qwen/Qwen3-32B,CTX,1,1,8192,8192,9.00",
-                "vLLM,0.20.1,test,Qwen/Qwen3-32B,GEN,1,4,1,1024,0.25,0.03,3,true",
+                "vLLM,0.20.1,test,Qwen/Qwen3-32B,GEN,1,4,1,1024,0.25,0.03,3,true,moe,0,1,64",
                 "",
             ]
         )
@@ -46,3 +47,6 @@ misc:
     assert detail["rms_latency"] == pytest.approx(0.03)
     assert detail["rms_kernel_count"] == pytest.approx(3)
     assert detail["includes_moe"] is True
+    assert detail["layer_type"] == "moe"
+    assert detail["measured_layer_count"] == pytest.approx(1)
+    assert detail["layer_multiplier"] == pytest.approx(64)

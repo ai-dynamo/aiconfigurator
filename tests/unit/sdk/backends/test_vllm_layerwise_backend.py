@@ -355,6 +355,54 @@ def test_vllm_layerwise_context_skips_moe_compute_when_layer_includes_moe(monkey
     assert sources == {"context_layerwise": "silicon", "context_tp_allreduce": "silicon"}
 
 
+def test_vllm_layerwise_context_scales_representative_metadata(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+
+    class _Model:
+        model_path = "Qwen/Qwen3-32B"
+        config = _Config()
+        _num_layers = 64
+        _hidden_size = 5120
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0):
+            assert (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache) == (
+                "Qwen/Qwen3-32B",
+                "CTX",
+                1,
+                1,
+                128,
+                0,
+            )
+            return {
+                "latency": 4.0,
+                "energy": 0.0,
+                "rms_latency": 0.0,
+                "layer_type": "dense",
+                "measured_layer_count": 16,
+                "layer_multiplier": 64,
+            }
+
+    latency, energy, sources = VLLMBackend()._run_context_phase(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        batch_size=1,
+        isl=128,
+        prefix=0,
+    )
+
+    assert latency == {"context_layerwise": pytest.approx(16.0), "context_tp_allreduce": 0.0}
+    assert energy == {"context_layerwise": 0.0, "context_tp_allreduce": 0.0}
+    assert sources == {"context_layerwise": "silicon", "context_tp_allreduce": "silicon"}
+
+
 def test_vllm_layerwise_generation_adds_moe_compute(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 
