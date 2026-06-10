@@ -522,6 +522,7 @@ def test_total_gpus_budget_filters_and_validates():
     assert td.max_gpu_per_replica == 8  # min(8, 128)
     assert all(n <= 8 for n in td.prefill_num_gpu_candidates)
     assert all(n <= 8 for n in td.decode_num_gpu_candidates)
+    assert all(n <= 8 for n in td.num_gpu_per_replica)  # replica-size list also capped to budget
 
 
 def test_large_pipeline_parallel_augments_dsv32_blackwell_defaults():
@@ -595,6 +596,24 @@ def test_megamoe_sglang_parallel_lists_and_validation():
             backend_name="sglang",
             moe_backend="megamoe",
         )
+
+
+def test_sglang_agg_default_moe_ep_search():
+    """SGLang non-wideep MoE agg DEFAULT search must include moe_ep>1 (standard comm) /
+    EP-only for deepep_moe (v1 standard vs deepep_moe branches). Was moe_ep=[1] — a bug
+    masked by always passing explicit candidates, caught by default-path parity."""
+    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", backend_name="sglang")
+    assert t.agg_moe_tp_candidates == [1, 2, 4, 8]
+    assert t.agg_moe_ep_candidates == [1, 2, 4, 8]
+    t2 = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        moe_backend="deepep_moe",
+    )
+    assert t2.agg_moe_tp_candidates == [1]
+    assert t2.agg_moe_ep_candidates == [1, 2, 4, 8]
 
 
 def test_disagg_calibration_overrides_flow_into_sweep_kwargs():

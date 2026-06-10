@@ -859,6 +859,12 @@ class Task:
                 raise ValueError(f"total_gpus must be greater than 2 for disagg, got {self.total_gpus}")
             if self.max_gpu_per_replica is not None:
                 self.max_gpu_per_replica = min(self.total_gpus, self.max_gpu_per_replica)
+            # v1 enforces max_gpu_per_replica as a sweep ceiling; v2's sweep gates replica
+            # size by num_gpu_per_replica membership only, so filter that list to the cap so
+            # no replica exceeds the budget (else num_total_gpus can run past total_gpus).
+            if self.num_gpu_per_replica is not None:
+                cap = self.max_gpu_per_replica if self.max_gpu_per_replica is not None else self.total_gpus
+                self.num_gpu_per_replica = [n for n in self.num_gpu_per_replica if n <= cap]
             self.prefill_num_gpu_candidates = [n for n in self.prefill_num_gpu_candidates if n <= self.total_gpus]
             self.decode_num_gpu_candidates = [n for n in self.decode_num_gpu_candidates if n <= self.total_gpus]
 
@@ -905,8 +911,14 @@ class Task:
             _set("agg_tp_candidates", [1, 2, 4, 8])
             _set("agg_pp_candidates", [1])
             _set("agg_dp_candidates", [1, 2, 4, 8])
-            _set("agg_moe_tp_candidates", [1, 2, 4, 8])
-            _set("agg_moe_ep_candidates", [1])
+            if self.moe_backend == "deepep_moe":
+                # Intra-node DeepEP (ep 1-8, NVLink): EP-only
+                _set("agg_moe_tp_candidates", [1])
+                _set("agg_moe_ep_candidates", [1, 2, 4, 8])
+            else:
+                # Standard comm (fused_moe + allgather/RS)
+                _set("agg_moe_tp_candidates", [1, 2, 4, 8])
+                _set("agg_moe_ep_candidates", [1, 2, 4, 8])
         elif self.backend_name in ("trtllm", "vllm"):
             x = [1, 2, 4, 8]
             _set("agg_num_gpu_candidates", x)
