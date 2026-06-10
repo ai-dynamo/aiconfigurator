@@ -48,6 +48,8 @@ from vllm_deployment import (
     VllmDeploymentConfig,
     build_engine_args,
     find_runtime_vllm_config,
+    gpt_oss_runtime_defaults,
+    has_cli_flag,
     make_metadata,
     summarize_vllm_config,
     write_metadata,
@@ -76,6 +78,13 @@ CTX_PAST_KV = [
 ]
 GEN_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 GEN_PAST_KV = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+VLLM_DEFAULT_BLOCK_SIZE = 16
+PREFILL_DECODE_MAX_NUM_BATCHED_TOKENS = 16384
+DEFAULT_EXTRA_VLLM_ARGS = (
+    ("flag", "--skip-mm-profiling", ("--no-skip-mm-profiling",)),
+    ("pair", "--limit-mm-per-prompt", '{"image":0,"video":0}'),
+    ("pair", "--generation-config", "vllm"),
+)
 
 CSV_COLUMNS = [
     "framework",
@@ -99,6 +108,7 @@ CSV_COLUMNS = [
     "rms_kernel_count",
     "measurement_mode",
     "attribution_target",
+    "includes_moe",
     "vllm_config_hash",
 ]
 
@@ -129,6 +139,16 @@ def _stable_hash(payload: Any, *, n: int = 16) -> str:
 
 def _parse_ints(raw: str) -> list[int]:
     return [int(x) for x in raw.split(",") if x.strip()]
+
+
+def _append_default_vllm_args(extra_vllm_args: list[str]) -> None:
+    for kind, flag, value_or_aliases in DEFAULT_EXTRA_VLLM_ARGS:
+        if kind == "flag":
+            aliases = tuple(value_or_aliases)
+            if not has_cli_flag(extra_vllm_args, flag, *aliases):
+                extra_vllm_args.append(flag)
+        elif not has_cli_flag(extra_vllm_args, flag):
+            extra_vllm_args.extend([flag, value_or_aliases])
 
 
 def _json_dump(path: Path, payload: Any) -> None:
@@ -171,6 +191,7 @@ class WorkUnit:
     target_layers: list[int]
     datapoints: list[DataPoint]
     moe_noop: bool = False
+    includes_moe: bool = False
 
     def manifest_rows(self) -> list[dict[str, Any]]:
         rows = []
@@ -180,6 +201,7 @@ class WorkUnit:
                 "datapoint_id": dp.datapoint_id(self.work_unit_id),
                 **self.row_base,
                 "moe_noop": self.moe_noop,
+                "includes_moe": self.includes_moe,
                 "phase": dp.phase,
                 "batch_size": dp.batch_size,
                 "new_tokens": dp.new_tokens,
@@ -373,6 +395,7 @@ def _detect_layer_schedule(
     target_layers: list[int] | None = None,
     target_layer_config_depth: int | None = None,
 ) -> tuple[list[dict[str, Any]], int, dict[str, Any] | None]:
+    config = _decoder_config_view(config)
     max_config_layers = int(config.get("num_hidden_layers") or 0)
     if target_layers is not None:
         if not target_layers:
@@ -384,8 +407,12 @@ def _detect_layer_schedule(
                 f"target_layers {target_layers} exceed config num_hidden_layers="
                 f"{max_config_layers}"
             )
-        if _is_moe_config(config):
-            raise ValueError("explicit target_layers is currently supported for dense models only")
+        is_moe = _is_moe_config(config)
+        if is_moe and not _is_all_moe_config(config):
+            raise ValueError(
+                "explicit target_layers for hybrid MoE configs is not supported; "
+                "use --include-moe-layer for the dense+MoE schedule"
+            )
         sorted_layers = sorted(set(target_layers))
         num_hidden_layers = max(sorted_layers) + 1
         if target_layer_config_depth is not None:
@@ -401,7 +428,7 @@ def _detect_layer_schedule(
                 )
             num_hidden_layers = target_layer_config_depth
         return [
-            {"layer_index": i, "layer_type": "dense"}
+            {"layer_index": i, "layer_type": "moe" if is_moe else "dense"}
             for i in sorted_layers
         ], num_hidden_layers, _layer_types_override(config, num_hidden_layers)
 
@@ -481,11 +508,20 @@ def _layer_types_override(
     return {"layer_types": list(layer_types[:num_hidden_layers])}
 
 
+def _decoder_config_view(config: dict[str, Any]) -> dict[str, Any]:
+    text_config = config.get("text_config")
+    if isinstance(text_config, dict) and "num_attention_heads" in text_config:
+        return text_config
+    return config
+
+
 def _is_moe_config(config: dict[str, Any]) -> bool:
+    config = _decoder_config_view(config)
     return any((config.get(k, 0) or 0) > 0 for k in EXPERT_COUNT_KEYS)
 
 
 def _is_all_moe_config(config: dict[str, Any]) -> bool:
+    config = _decoder_config_view(config)
     model_type = str(config.get("model_type") or "").lower()
     architectures = [str(x) for x in config.get("architectures") or []]
     if model_type == "gpt_oss" or "GptOssForCausalLM" in architectures:
@@ -552,13 +588,20 @@ def _build_datapoints(
 def _max_num_batched_tokens_for_datapoints(
     datapoints: list[DataPoint],
     min_max_num_batched_tokens: int = 1,
+    *,
+    gen_driver: str = "prefix_cache",
 ) -> int:
     ctx_points = [dp for dp in datapoints if dp.phase == "ctx"]
     gen_points = [dp for dp in datapoints if dp.phase == "gen"]
     ctx_max_new = max((dp.new_tokens for dp in ctx_points), default=0)
     gen_batch_sizes = sorted({dp.batch_size for dp in gen_points})
+    min_budget = 1
+    if gen_driver == "prefix_cache" and gen_points:
+        # vLLM's prefix-cache path can use Mamba cache align mode, which
+        # requires the token budget to be at least one KV block.
+        min_budget = VLLM_DEFAULT_BLOCK_SIZE
     return max(
-        1,
+        min_budget,
         min_max_num_batched_tokens,
         ctx_max_new,
         max(gen_batch_sizes, default=0),
@@ -586,6 +629,7 @@ def _validate_ctx_past_kv(
 
 
 def _model_max_position_embeddings(config: dict[str, Any]) -> int | None:
+    config = _decoder_config_view(config)
     for key in ("max_position_embeddings", "model_max_length", "seq_length", "n_positions"):
         raw = config.get(key)
         if isinstance(raw, bool) or raw is None:
@@ -642,6 +686,10 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
     )
     target_layers = [int(x["layer_index"]) for x in layer_schedule]
     moe_noop = bool(getattr(args, "moe_noop", False) and is_moe)
+    includes_moe = (not moe_noop) and any(
+        str(layer.get("layer_type", "")).lower() == "moe"
+        for layer in layer_schedule
+    )
 
     work_dir = Path(args.work_dir).resolve()
     config_cache_dir = None if args.no_config_cache else (args.config_cache_dir or str(work_dir / "config_cache"))
@@ -667,7 +715,11 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
             raise ValueError("all datapoints exceed the model's configured max length")
     _validate_ctx_past_kv(
         datapoints,
-        _max_num_batched_tokens_for_datapoints(datapoints, args.min_max_num_batched_tokens),
+        _max_num_batched_tokens_for_datapoints(
+            datapoints,
+            args.min_max_num_batched_tokens,
+            gen_driver=getattr(args, "gen_driver", "prefix_cache"),
+        ),
         ctx_driver=getattr(args, "ctx_driver", "prefix_cache"),
     )
 
@@ -718,6 +770,7 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
             target_layers=target_layers,
             datapoints=datapoints,
             moe_noop=moe_noop,
+            includes_moe=includes_moe,
         ))
     return work_units
 
@@ -909,6 +962,10 @@ def _attribution_target(args: argparse.Namespace) -> str:
     return "module_nvtx"
 
 
+def _work_unit_includes_moe(work_unit: WorkUnit) -> bool:
+    return bool(work_unit.includes_moe)
+
+
 def _attempt_config_hash(attempt: Attempt, store: StatusStore) -> str:
     for event in reversed(store.index().events):
         if event.get("event") != "engine_metadata_written":
@@ -1039,6 +1096,37 @@ class Scheduler:
             extra_vllm_args.extend(["--kv-cache-dtype", "fp8"])
         extra_vllm_args.extend(shlex.split(self.args.extra_vllm_args))
         extra_vllm_args.extend(self.args.extra_vllm_arg)
+        _append_default_vllm_args(extra_vllm_args)
+        has_ctx = any(dp.phase == "ctx" for dp in pending)
+        has_gen_prefix_cache = (
+            any(dp.phase == "gen" for dp in pending)
+            and self.args.gen_driver == "prefix_cache"
+        )
+        runtime_defaults = gpt_oss_runtime_defaults(
+            model=unit.row_base["model"],
+            system=unit.row_base["system"],
+            disable_prefix_caching=not (
+                (has_ctx and self.args.ctx_driver == "prefix_cache")
+                or has_gen_prefix_cache
+            ),
+            extra_args=tuple(extra_vllm_args),
+        )
+        extra_vllm_args = list(runtime_defaults.extra_args)
+        if runtime_defaults.kv_cache_dtype:
+            extra_vllm_args = [
+                "--kv-cache-dtype",
+                runtime_defaults.kv_cache_dtype,
+                *extra_vllm_args,
+            ]
+        if runtime_defaults.disable_prefix_caching and not has_cli_flag(
+            extra_vllm_args, "--no-enable-prefix-caching"
+        ):
+            extra_vllm_args.append("--no-enable-prefix-caching")
+        if (
+            ((has_ctx and self.args.ctx_driver == "prefix_cache") or has_gen_prefix_cache)
+            and not has_cli_flag(extra_vllm_args, "--enable-prefix-caching", "--no-enable-prefix-caching")
+        ):
+            extra_vllm_args.append("--enable-prefix-caching")
 
         return {
             "attempt_id": attempt_id,
@@ -1059,11 +1147,12 @@ class Scheduler:
             "gen_driver": self.args.gen_driver,
             "gen_warmup_runs": self.args.gen_warmup_runs,
             "gen_measured_runs": self.args.gen_measured_runs,
+            "nsys_capture": self.args.nsys_capture,
         }
 
     def _worker_cmd(self, spec_path: Path, report_base: Path) -> list[str]:
         worker_cmd = [sys.executable, str(Path(__file__).resolve()), "worker", "--spec", str(spec_path)]
-        return [
+        cmd = [
             "nsys",
             "profile",
             "--trace=cuda,nvtx",
@@ -1071,10 +1160,16 @@ class Scheduler:
             "--cpuctxsw=none",
             "--cuda-graph-trace=node",
             "--force-overwrite=true",
-            "-o",
-            str(report_base),
-            *worker_cmd,
         ]
+        if self.args.nsys_capture == "cuda_profiler_api":
+            cmd.extend([
+                "--capture-range=cudaProfilerApi",
+                "--capture-range-end=stop",
+            ])
+        elif self.args.nsys_capture != "full":
+            raise ValueError(f"unsupported nsys capture mode: {self.args.nsys_capture}")
+        cmd.extend(["-o", str(report_base), *worker_cmd])
+        return cmd
 
     def _finish_attempt(self, attempt: Attempt, returncode: int) -> bool:
         attempt.stdout_handle.close()
@@ -1109,6 +1204,13 @@ class Scheduler:
         rep_path = attempt.report_base.with_suffix(".nsys-rep")
         if not rep_path.exists() or rep_path.stat().st_size == 0:
             return 0
+        self.store.append_event(
+            "nsys_export_started",
+            work_unit_id=attempt.work_unit.work_unit_id,
+            attempt_id=attempt.attempt_id,
+            rep=str(rep_path),
+            rep_bytes=rep_path.stat().st_size,
+        )
         export_cmd = [
             "nsys",
             "export",
@@ -1145,12 +1247,29 @@ class Scheduler:
             )
             return 0
 
+        self.store.append_event(
+            "nsys_export_succeeded",
+            work_unit_id=attempt.work_unit.work_unit_id,
+            attempt_id=attempt.attempt_id,
+            sqlite=str(sqlite_path),
+            sqlite_bytes=sqlite_path.stat().st_size if sqlite_path.exists() else 0,
+        )
+        self.store.append_event(
+            "nsys_parse_started",
+            work_unit_id=attempt.work_unit.work_unit_id,
+            attempt_id=attempt.attempt_id,
+            sqlite=str(sqlite_path),
+        )
         try:
             rows, meta = parse_step_sweep(
                 str(sqlite_path),
                 rollup=_effective_rollup(self.args),
                 layer=None,
                 rank_reduce=self.args.rank_reduce,
+                force_nvtx_span=(
+                    _effective_rollup(self.args) == DEFAULT_PARITY_ROLLUP
+                    and self.args.latency_source == "span"
+                ),
             )
             if _should_filter_target_layers(self.args):
                 rows = _filter_rows_to_target_layers(rows, attempt.work_unit.target_layers)
@@ -1198,6 +1317,7 @@ class Scheduler:
                 "rms_kernel_count": rms_kernel_count,
                 "measurement_mode": self.args.measurement_mode,
                 "attribution_target": _attribution_target(self.args),
+                "includes_moe": _work_unit_includes_moe(attempt.work_unit),
                 "vllm_config_hash": _attempt_config_hash(attempt, self.store),
             }
             _append_success_row(self.output_path, row)
@@ -1385,6 +1505,37 @@ def _deterministic_token_prompts(
     return prompts
 
 
+def _deterministic_prefix_suffix_prompts(
+    batch_size: int,
+    prefix_len: int,
+    suffix_len: int,
+    token_config: RandomPromptTokenConfig,
+    *,
+    prefix_request_index_offset: int,
+    suffix_request_index_offset: int,
+    cache_salt_prefix: str | None = None,
+) -> list[dict[str, Any]]:
+    prompts: list[dict[str, Any]] = []
+    for request_idx in range(batch_size):
+        prefix = make_prompt_token_ids(
+            prompt_token_seed=0,
+            token_count=prefix_len,
+            request_index=prefix_request_index_offset + request_idx,
+            token_config=token_config,
+        )
+        suffix = make_prompt_token_ids(
+            prompt_token_seed=0,
+            token_count=suffix_len,
+            request_index=suffix_request_index_offset + request_idx,
+            token_config=token_config,
+        )
+        prompt: dict[str, Any] = {"prompt_token_ids": [*prefix, *suffix]}
+        if cache_salt_prefix is not None:
+            prompt["cache_salt"] = f"{cache_salt_prefix}:req{request_idx}"
+        prompts.append(prompt)
+    return prompts
+
+
 def _run_generate(
     llm,
     sampling_params,
@@ -1412,6 +1563,34 @@ def _run_generate(
     )
 
 
+def _run_generate_prefix_suffix(
+    llm,
+    sampling_params,
+    *,
+    batch_size: int,
+    prefix_len: int,
+    suffix_len: int,
+    token_config: RandomPromptTokenConfig,
+    prefix_request_index_offset: int,
+    suffix_request_index_offset: int,
+    cache_salt_prefix: str | None = None,
+) -> None:
+    prompts = _deterministic_prefix_suffix_prompts(
+        batch_size,
+        prefix_len,
+        suffix_len,
+        token_config,
+        prefix_request_index_offset=prefix_request_index_offset,
+        suffix_request_index_offset=suffix_request_index_offset,
+        cache_salt_prefix=cache_salt_prefix,
+    )
+    llm.generate(
+        prompts,
+        sampling_params=sampling_params,
+        use_tqdm=False,
+    )
+
+
 def _engine_tokens(
     *,
     model_dir: str,
@@ -1421,6 +1600,7 @@ def _engine_tokens(
     min_max_num_batched_tokens: int = 1,
     measurement_mode: str = "deployment-parity",
     compilation_config_json: str | None = None,
+    gen_driver: str = "prefix_cache",
 ) -> list[str]:
     ctx_points = [dp for dp in datapoints if dp.phase == "ctx"]
     gen_points = [dp for dp in datapoints if dp.phase == "gen"]
@@ -1435,14 +1615,37 @@ def _engine_tokens(
     max_num_batched_tokens = _max_num_batched_tokens_for_datapoints(
         datapoints,
         min_max_num_batched_tokens,
+        gen_driver=gen_driver,
     )
+    engine_max_num_batched_tokens: int | None = max_num_batched_tokens
+    if gen_driver == "prefill" and gen_points and not ctx_points:
+        max_batch_size = max(gen_batch_sizes)
+        normal_prefill_budget = max(
+            PREFILL_DECODE_MAX_NUM_BATCHED_TOKENS,
+            128 * max_batch_size,
+        )
+        uniform_decode_budget = max(
+            (dp.batch_size * dp.past_kv for dp in gen_points),
+            default=0,
+        )
+        if min_max_num_batched_tokens <= 1:
+            engine_max_num_batched_tokens = max(
+                normal_prefill_budget,
+                uniform_decode_budget,
+            )
+        else:
+            engine_max_num_batched_tokens = max(
+                engine_max_num_batched_tokens,
+                128 * max_batch_size,
+                uniform_decode_budget,
+            )
 
     tokens = build_engine_args(
         VllmDeploymentConfig(
             model=model_dir,
             max_model_len=max_seq_len,
             max_num_seqs=max(gen_batch_sizes) if gen_batch_sizes else None,
-            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_batched_tokens=engine_max_num_batched_tokens,
         )
     )
 
@@ -1507,7 +1710,85 @@ def _worker_datapoint_id(work_unit_id: str, dp: DataPoint) -> str:
     return dp.datapoint_id(work_unit_id)
 
 
-def _ctx_marker_milestone(
+def _write_marker_control(
+    *,
+    active_iterations: str | Iterable[int] = "",
+    trigger: str | None = None,
+    phase: str | None = None,
+    step: int | None = None,
+    bs: int | None = None,
+    past: int | None = None,
+    run: int | None = None,
+    **extras: Any,
+) -> None:
+    raw_path = os.environ.get("LAYERWISE_CONTROL_FILE")
+    if not raw_path:
+        return
+    if isinstance(active_iterations, str):
+        active = [int(x) for x in active_iterations.split(",") if x.strip()]
+    else:
+        active = [int(x) for x in active_iterations]
+    payload = {
+        "active_iterations": active,
+        "trigger": trigger,
+        "phase": phase,
+        "step": step,
+        "bs": bs,
+        "past": past,
+        "run": run,
+    }
+    payload.update(extras)
+    path = Path(raw_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w") as f:
+        json.dump(payload, f, sort_keys=True, separators=(",", ":"))
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def _set_marker_state(
+    marker_mod,
+    *,
+    active_iterations: str | Iterable[int] = "",
+    trigger: str | None = None,
+    phase: str | None = None,
+    step: int | None = None,
+    bs: int | None = None,
+    past: int | None = None,
+    run: int | None = None,
+    **extras: Any,
+) -> None:
+    if isinstance(active_iterations, str):
+        active_text = active_iterations
+    else:
+        active_text = ",".join(str(int(x)) for x in active_iterations)
+    os.environ["LAYERWISE_ACTIVE_ITERATIONS"] = active_text
+    if phase is not None:
+        os.environ["LAYERWISE_PROGRESS_PHASE"] = phase
+    else:
+        phase = os.environ.get("LAYERWISE_PROGRESS_PHASE")
+    if run is None:
+        os.environ.pop("LAYERWISE_MEASURE_RUN", None)
+    else:
+        os.environ["LAYERWISE_MEASURE_RUN"] = str(run)
+    if step is None and bs is None and past is None and run is None:
+        marker_mod.clear_forced_step_meta()
+    else:
+        marker_mod.set_forced_step_meta(step=step, bs=bs, past=past, run=run)
+    _write_marker_control(
+        active_iterations=active_iterations,
+        trigger=trigger,
+        phase=phase,
+        step=step,
+        bs=bs,
+        past=past,
+        run=run,
+        **extras,
+    )
+
+
+def _ctx_marker_iteration(
     dp: DataPoint,
     max_num_batched_tokens: int,
     *,
@@ -1529,9 +1810,21 @@ def run_worker(spec_path: Path) -> None:
     status_path = Path(spec["status_path"])
     work_unit_id = spec["work_unit_id"]
     datapoints = [DataPoint(**raw) for raw in spec["datapoints"]]
+    _worker_append_event(
+        status_path,
+        "worker_entered",
+        work_unit_id=work_unit_id,
+        attempt_id=spec["attempt_id"],
+    )
 
-    # Physical GPU allocation is deliberately one GPU regardless of simulated
-    # TP/EP.  The parent sets CUDA_VISIBLE_DEVICES to the slot assigned here.
+    # Layerwise simulates TP/EP by patching the model config; the runtime engine
+    # itself stays single-process on one physical GPU.
+    _worker_append_event(
+        status_path,
+        "worker_environment_started",
+        work_unit_id=work_unit_id,
+        attempt_id=spec["attempt_id"],
+    )
     os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     os.environ["LAYERWISE_TARGET_LAYERS"] = ",".join(str(x) for x in spec["target_layers"])
     if spec.get("moe_noop"):
@@ -1541,21 +1834,32 @@ def run_worker(spec_path: Path) -> None:
     max_num_batched_tokens = _max_num_batched_tokens_for_datapoints(
         datapoints,
         int(spec.get("min_max_num_batched_tokens", 1)),
+        gen_driver=str(spec.get("gen_driver", "prefix_cache")),
     )
     ctx_driver = str(spec.get("ctx_driver", "chunked"))
-    milestones = {1}
-    milestones.update(
-        _ctx_marker_milestone(dp, max_num_batched_tokens, ctx_driver=ctx_driver)
+    iterations = {1}
+    iterations.update(
+        _ctx_marker_iteration(dp, max_num_batched_tokens, ctx_driver=ctx_driver)
         for dp in datapoints
         if dp.phase == "ctx"
     )
-    milestones.update(dp.past_kv + 1 for dp in datapoints if dp.phase == "gen")
-    os.environ["LAYERWISE_STEP_MILESTONES"] = ",".join(str(x) for x in sorted(milestones))
+    iterations.update(dp.past_kv + 1 for dp in datapoints if dp.phase == "gen")
+    os.environ["LAYERWISE_STEP_ITERATIONS"] = ",".join(str(x) for x in sorted(iterations))
     os.environ["LAYERWISE_BENCH_MIN_NEW"] = "1"
     os.environ["LAYERWISE_PROGRESS_FILE"] = str(status_path)
     os.environ["LAYERWISE_WORK_UNIT_ID"] = work_unit_id
+    os.environ["LAYERWISE_CONTROL_FILE"] = str(
+        status_path.parent / "marker_control" / f"{work_unit_id}_a{spec['attempt_id']}.json"
+    )
     # Keep the marker installed but inactive during vLLM profile/capture work.
-    os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ""
+    os.environ["LAYERWISE_ACTIVE_ITERATIONS"] = ""
+    _write_marker_control(active_iterations="")
+    _worker_append_event(
+        status_path,
+        "worker_environment_finished",
+        work_unit_id=work_unit_id,
+        attempt_id=spec["attempt_id"],
+    )
 
     sys.path.insert(0, str(_THIS_DIR))
     import multiprocessing as mp
@@ -1567,12 +1871,25 @@ def run_worker(spec_path: Path) -> None:
 
     # These patches install vLLM hooks at import time.  Keep them inside worker
     # mode so scheduler/test imports remain vLLM-free.
+    _worker_append_event(
+        status_path,
+        "worker_imports_started",
+        work_unit_id=work_unit_id,
+        attempt_id=spec["attempt_id"],
+    )
     import vllm_layer_skip_patch  # noqa: F401
     import vllm_step_marker
     from vllm import SamplingParams
+    _worker_append_event(
+        status_path,
+        "worker_imports_finished",
+        work_unit_id=work_unit_id,
+        attempt_id=spec["attempt_id"],
+    )
 
     _worker_append_event(status_path, "work_unit_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
     _worker_append_event(status_path, "engine_started", work_unit_id=work_unit_id)
+    _worker_append_event(status_path, "engine_args_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
     prompt_token_config = load_random_prompt_token_config(spec["model_dir"])
     engine_tokens = _engine_tokens(
         model_dir=spec["model_dir"],
@@ -1582,14 +1899,25 @@ def run_worker(spec_path: Path) -> None:
         min_max_num_batched_tokens=spec.get("min_max_num_batched_tokens", 1),
         measurement_mode=str(spec.get("measurement_mode", "deployment-parity")),
         compilation_config_json=spec.get("compilation_config_json"),
+        gen_driver=str(spec.get("gen_driver", "prefix_cache")),
     )
+    _worker_append_event(status_path, "engine_args_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
+    _worker_append_event(status_path, "engine_create_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
     llm = _create_llm(engine_tokens)
+    _worker_append_event(status_path, "engine_create_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
+    _worker_append_event(status_path, "engine_metadata_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
     effective_config = None
     runtime_vllm_config = find_runtime_vllm_config(llm)
-    if ctx_driver == "prefix_cache" and runtime_vllm_config is not None:
+    has_ctx = any(dp.phase == "ctx" for dp in datapoints)
+    has_gen_prefix_cache = any(dp.phase == "gen" for dp in datapoints) and str(
+        spec.get("gen_driver", "prefix_cache")
+    ) == "prefix_cache"
+    if (
+        (has_ctx and ctx_driver == "prefix_cache") or has_gen_prefix_cache
+    ) and runtime_vllm_config is not None:
         cache_config = getattr(runtime_vllm_config, "cache_config", None)
         if getattr(cache_config, "enable_prefix_caching", None) is False:
-            raise RuntimeError("ctx_driver=prefix_cache requires vLLM prefix caching")
+            raise RuntimeError("prefix-cache ctx/gen driver requires vLLM prefix caching")
     if runtime_vllm_config is not None:
         effective_config = summarize_vllm_config(runtime_vllm_config)
     metadata = make_metadata(
@@ -1611,6 +1939,7 @@ def run_worker(spec_path: Path) -> None:
     )
     if spec.get("metadata_path"):
         write_metadata(spec["metadata_path"], metadata)
+    _worker_append_event(status_path, "engine_metadata_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
     _worker_append_event(
         status_path,
         "engine_metadata_written",
@@ -1620,43 +1949,63 @@ def run_worker(spec_path: Path) -> None:
         vllm_config_hash=metadata["vllm_config_hash"],
     )
     _worker_append_event(status_path, "engine_ready", work_unit_id=work_unit_id)
+    cuda_profiler_capture = str(spec.get("nsys_capture", "cuda_profiler_api")) == "cuda_profiler_api"
     try:
-        ctx_points = [dp for dp in datapoints if dp.phase == "ctx"]
-        if ctx_points:
-            os.environ["LAYERWISE_PROGRESS_PHASE"] = "ctx"
-            os.environ["LAYERWISE_ACTIVE_MILESTONES"] = "1"
-            _worker_run_ctx(
-                status_path,
-                work_unit_id,
-                llm,
-                SamplingParams,
-                vllm_step_marker,
-                ctx_points,
-                prompt_token_config=prompt_token_config,
-                warmup_runs=int(spec.get("ctx_warmup_runs", 0)),
-                measured_runs=int(spec.get("ctx_measured_runs", 1)),
-                max_num_batched_tokens=max_num_batched_tokens,
-                driver=ctx_driver,
-            )
+        _worker_append_event(status_path, "measurement_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
+        _worker_set_cuda_profiler_capture(
+            status_path=status_path,
+            work_unit_id=work_unit_id,
+            attempt_id=spec["attempt_id"],
+            enabled=cuda_profiler_capture,
+            action="start",
+        )
+        try:
+            ctx_points = [dp for dp in datapoints if dp.phase == "ctx"]
+            if ctx_points:
+                os.environ["LAYERWISE_PROGRESS_PHASE"] = "ctx"
+                os.environ["LAYERWISE_ACTIVE_ITERATIONS"] = "1"
+                _worker_run_ctx(
+                    status_path,
+                    work_unit_id,
+                    llm,
+                    SamplingParams,
+                    vllm_step_marker,
+                    ctx_points,
+                    prompt_token_config=prompt_token_config,
+                    warmup_runs=int(spec.get("ctx_warmup_runs", 0)),
+                    measured_runs=int(spec.get("ctx_measured_runs", 1)),
+                    max_num_batched_tokens=max_num_batched_tokens,
+                    driver=ctx_driver,
+                )
 
-        gen_points = [dp for dp in datapoints if dp.phase == "gen"]
-        if gen_points:
-            gen_milestones = sorted({dp.past_kv + 1 for dp in gen_points})
-            os.environ["LAYERWISE_PROGRESS_PHASE"] = "gen"
-            os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ",".join(str(x) for x in gen_milestones)
-            _worker_run_gen(
-                status_path,
-                work_unit_id,
-                llm,
-                SamplingParams,
-                vllm_step_marker,
-                gen_points,
-                prompt_token_config=prompt_token_config,
-                driver=str(spec.get("gen_driver", "decode_sweep")),
-                warmup_runs=int(spec.get("gen_warmup_runs", 0)),
-                measured_runs=int(spec.get("gen_measured_runs", 1)),
+            gen_points = [dp for dp in datapoints if dp.phase == "gen"]
+            if gen_points:
+                gen_iterations = sorted({dp.past_kv + 1 for dp in gen_points})
+                os.environ["LAYERWISE_PROGRESS_PHASE"] = "gen"
+                os.environ["LAYERWISE_ACTIVE_ITERATIONS"] = ",".join(str(x) for x in gen_iterations)
+                _worker_run_gen(
+                    status_path,
+                    work_unit_id,
+                    llm,
+                    SamplingParams,
+                    vllm_step_marker,
+                    gen_points,
+                    prompt_token_config=prompt_token_config,
+                    driver=str(spec.get("gen_driver", "prefix_cache")),
+                    warmup_runs=int(spec.get("gen_warmup_runs", 0)),
+                    measured_runs=int(spec.get("gen_measured_runs", 1)),
+                )
+        finally:
+            _worker_set_cuda_profiler_capture(
+                status_path=status_path,
+                work_unit_id=work_unit_id,
+                attempt_id=spec["attempt_id"],
+                enabled=cuda_profiler_capture,
+                action="stop",
             )
+        _worker_append_event(status_path, "measurement_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
     finally:
+        _worker_append_event(status_path, "worker_cleanup_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
         del llm
         gc.collect()
         try:
@@ -1667,7 +2016,8 @@ def run_worker(spec_path: Path) -> None:
                 torch.cuda.empty_cache()
         except Exception:
             pass
-        os.environ.pop("LAYERWISE_ACTIVE_MILESTONES", None)
+        os.environ.pop("LAYERWISE_ACTIVE_ITERATIONS", None)
+        _worker_append_event(status_path, "worker_cleanup_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
     _worker_append_event(status_path, "work_unit_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
 
 
@@ -1699,20 +2049,30 @@ def _worker_run_ctx(
         detokenize=False,
     )
     pruned: set[str] = set()
+    filled_prefixes: set[tuple[int, int]] = set()
     for dp in datapoints:
         dpid = _worker_datapoint_id(work_unit_id, dp)
         if dpid in pruned:
             continue
         input_len = dp.past_kv + dp.new_tokens
-        marker_milestone = _ctx_marker_milestone(
+        marker_iteration = _ctx_marker_iteration(
             dp,
             max_num_batched_tokens,
             ctx_driver=driver,
         )
-        marker_mod.set_forced_step_meta(step=dp.new_tokens, bs=dp.batch_size, past=dp.past_kv)
+        _set_marker_state(
+            marker_mod,
+            active_iterations="",
+            phase="ctx",
+            step=dp.new_tokens,
+            bs=dp.batch_size,
+            past=dp.past_kv,
+        )
         try:
             if driver == "prefix_cache":
+                prefix_key = (int(dp.batch_size), int(dp.past_kv))
                 for run_idx in range(warmup_runs):
+                    fill_prefix = dp.past_kv > 0 and prefix_key not in filled_prefixes
                     _run_prefix_cached_ctx_iteration(
                         llm,
                         sampling_params,
@@ -1720,11 +2080,19 @@ def _worker_run_ctx(
                         work_unit_id=work_unit_id,
                         run_idx=run_idx,
                         warmup=True,
+                        fill_prefix=fill_prefix,
                         token_config=prompt_token_config,
-                        active_milestone="",
+                        active_iteration="",
+                        marker_mod=marker_mod,
                     )
+                    if fill_prefix:
+                        filled_prefixes.add(prefix_key)
                 for run_idx in range(measured_runs):
-                    marker_mod.set_forced_step_meta(
+                    fill_prefix = dp.past_kv > 0 and prefix_key not in filled_prefixes
+                    _set_marker_state(
+                        marker_mod,
+                        active_iterations=str(marker_iteration),
+                        phase="ctx",
                         step=dp.new_tokens,
                         bs=dp.batch_size,
                         past=dp.past_kv,
@@ -1737,11 +2105,15 @@ def _worker_run_ctx(
                         work_unit_id=work_unit_id,
                         run_idx=run_idx,
                         warmup=False,
+                        fill_prefix=fill_prefix,
                         token_config=prompt_token_config,
-                        active_milestone=str(marker_milestone),
+                        active_iteration=str(marker_iteration),
+                        marker_mod=marker_mod,
                     )
+                    if fill_prefix:
+                        filled_prefixes.add(prefix_key)
             else:
-                os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ""
+                _set_marker_state(marker_mod, active_iterations="", phase="ctx")
                 for _ in range(warmup_runs):
                     _run_generate(
                         llm,
@@ -1750,9 +2122,11 @@ def _worker_run_ctx(
                         input_len=input_len,
                         token_config=prompt_token_config,
                     )
-                os.environ["LAYERWISE_ACTIVE_MILESTONES"] = str(marker_milestone)
                 for run_idx in range(measured_runs):
-                    marker_mod.set_forced_step_meta(
+                    _set_marker_state(
+                        marker_mod,
+                        active_iterations=str(marker_iteration),
+                        phase="ctx",
                         step=dp.new_tokens,
                         bs=dp.batch_size,
                         past=dp.past_kv,
@@ -1807,10 +2181,14 @@ def _worker_run_ctx(
             )
             _worker_empty_cache()
         finally:
-            marker_mod.clear_forced_step_meta()
+            _set_marker_state(marker_mod, active_iterations="", phase="ctx")
 
 
-def _ctx_prompt_request_index_offset(dp: DataPoint, run_idx: int, *, warmup: bool) -> int:
+def _ctx_prefix_request_index_offset(dp: DataPoint) -> int:
+    return int(dp.past_kv) * 1_000_003 + int(dp.batch_size) * 101
+
+
+def _ctx_suffix_request_index_offset(dp: DataPoint, run_idx: int, *, warmup: bool) -> int:
     phase_offset = 0 if warmup else 100_000_000
     return (
         phase_offset
@@ -1824,15 +2202,8 @@ def _ctx_prompt_request_index_offset(dp: DataPoint, run_idx: int, *, warmup: boo
 def _ctx_cache_salt_prefix(
     work_unit_id: str,
     dp: DataPoint,
-    run_idx: int,
-    *,
-    warmup: bool,
 ) -> str:
-    phase = "warmup" if warmup else "measure"
-    return (
-        f"layerwise-ctx:{work_unit_id}:new{dp.new_tokens}:past{dp.past_kv}:"
-        f"{phase}{run_idx}"
-    )
+    return f"layerwise-ctx:{work_unit_id}:bs{dp.batch_size}:past{dp.past_kv}"
 
 
 def _run_prefix_cached_ctx_iteration(
@@ -1843,28 +2214,84 @@ def _run_prefix_cached_ctx_iteration(
     work_unit_id: str,
     run_idx: int,
     warmup: bool,
+    fill_prefix: bool,
     token_config: RandomPromptTokenConfig,
-    active_milestone: str,
+    active_iteration: str,
+    marker_mod,
 ) -> None:
-    request_index_offset = _ctx_prompt_request_index_offset(dp, run_idx, warmup=warmup)
-    cache_salt_prefix = _ctx_cache_salt_prefix(work_unit_id, dp, run_idx, warmup=warmup)
-    if dp.past_kv > 0:
-        os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ""
+    prefix_request_index_offset = _ctx_prefix_request_index_offset(dp)
+    suffix_request_index_offset = _ctx_suffix_request_index_offset(dp, run_idx, warmup=warmup)
+    cache_salt_prefix = _ctx_cache_salt_prefix(work_unit_id, dp)
+    if fill_prefix and dp.past_kv > 0:
+        _set_marker_state(marker_mod, active_iterations="", phase="ctx")
         _run_generate(
             llm,
             sampling_params,
             batch_size=dp.batch_size,
             input_len=dp.past_kv,
             token_config=token_config,
-            request_index_offset=request_index_offset,
+            request_index_offset=prefix_request_index_offset,
             cache_salt_prefix=cache_salt_prefix,
         )
-    os.environ["LAYERWISE_ACTIVE_MILESTONES"] = active_milestone
-    _run_generate(
+    _set_marker_state(
+        marker_mod,
+        active_iterations=active_iteration,
+        phase="ctx",
+        step=dp.new_tokens,
+        bs=dp.batch_size,
+        past=dp.past_kv,
+        run=run_idx if not warmup else None,
+    )
+    _run_generate_prefix_suffix(
         llm,
         sampling_params,
         batch_size=dp.batch_size,
-        input_len=dp.past_kv + dp.new_tokens,
+        prefix_len=dp.past_kv,
+        suffix_len=dp.new_tokens,
+        token_config=token_config,
+        prefix_request_index_offset=prefix_request_index_offset,
+        suffix_request_index_offset=suffix_request_index_offset,
+        cache_salt_prefix=cache_salt_prefix,
+    )
+
+
+def _gen_prompt_request_index_offset(dp: DataPoint) -> int:
+    return 0
+
+
+def _gen_cache_salt_prefix(work_unit_id: str, dp: DataPoint) -> str:
+    return f"layerwise-gen:{work_unit_id}"
+
+
+def _run_prefix_cached_gen_iteration(
+    llm,
+    fill_sampling_params,
+    measure_sampling_params,
+    dp: DataPoint,
+    *,
+    token_config: RandomPromptTokenConfig,
+    fill_cache: bool,
+) -> None:
+    if dp.past_kv <= 0:
+        raise ValueError("gen_driver=prefix_cache requires past_kv > 0")
+    request_index_offset = _gen_prompt_request_index_offset(dp)
+    cache_salt_prefix = _gen_cache_salt_prefix(os.environ.get("LAYERWISE_WORK_UNIT_ID", ""), dp)
+    if fill_cache:
+        _run_generate(
+            llm,
+            fill_sampling_params,
+            batch_size=dp.batch_size,
+            input_len=dp.past_kv,
+            token_config=token_config,
+            request_index_offset=request_index_offset,
+            cache_salt_prefix=cache_salt_prefix,
+        )
+        return
+    _run_generate(
+        llm,
+        measure_sampling_params,
+        batch_size=dp.batch_size,
+        input_len=dp.past_kv,
         token_config=token_config,
         request_index_offset=request_index_offset,
         cache_salt_prefix=cache_salt_prefix,
@@ -1880,7 +2307,7 @@ def _worker_run_gen(
     datapoints: list[DataPoint],
     *,
     prompt_token_config: RandomPromptTokenConfig,
-    driver: str = "decode_sweep",
+    driver: str = "prefill",
     warmup_runs: int = 0,
     measured_runs: int = 1,
 ) -> None:
@@ -1896,13 +2323,32 @@ def _worker_run_gen(
         temperature=1.0,
         top_p=1.0,
         ignore_eos=True,
-        max_tokens=2 if driver == "prefill" else max_past + 1,
+        max_tokens=2 if driver in {"prefill", "prefix_cache"} else max_past + 1,
         detokenize=False,
     )
-    if driver not in {"decode_sweep", "prefill"}:
+    fill_sampling_params = sampling_cls(
+        temperature=1.0,
+        top_p=1.0,
+        ignore_eos=True,
+        max_tokens=1,
+        detokenize=False,
+    )
+    if driver not in {"decode_sweep", "prefill", "prefix_cache"}:
         raise ValueError(f"unsupported gen driver: {driver}")
+    if driver == "prefix_cache":
+        max_batch_size = max(by_batch)
+        fill_dp = DataPoint("gen", max_batch_size, 1, max_past)
+        _set_marker_state(marker_mod, active_iterations="", phase="gen")
+        _run_prefix_cached_gen_iteration(
+            llm,
+            fill_sampling_params,
+            sampling_params,
+            fill_dp,
+            token_config=prompt_token_config,
+            fill_cache=True,
+        )
     for batch_size in sorted(by_batch):
-        os.environ["LAYERWISE_PROGRESS_PHASE"] = "gen"
+        _set_marker_state(marker_mod, active_iterations="", phase="gen")
         _worker_append_event(
             status_path,
             "batch_started",
@@ -1910,11 +2356,48 @@ def _worker_run_gen(
             batch_size=batch_size,
             max_past_kv=max_past,
         )
+        if driver == "prefix_cache":
+            try:
+                for dp in sorted(by_batch[batch_size], key=lambda item: item.past_kv):
+                    _set_marker_state(marker_mod, active_iterations="", phase="gen")
+                    for _ in range(warmup_runs):
+                        _set_marker_state(marker_mod, active_iterations="", phase="gen")
+                        _run_prefix_cached_gen_iteration(
+                            llm,
+                            fill_sampling_params,
+                            sampling_params,
+                            dp,
+                            token_config=prompt_token_config,
+                            fill_cache=False,
+                        )
+                    for run_idx in range(measured_runs):
+                        _set_marker_state(
+                            marker_mod,
+                            active_iterations="",
+                            trigger="decode_only",
+                            allow_new_cached=True,
+                            phase="gen",
+                            step=dp.past_kv + 1,
+                            bs=batch_size,
+                            past=dp.past_kv,
+                            run=run_idx,
+                        )
+                        _run_prefix_cached_gen_iteration(
+                            llm,
+                            fill_sampling_params,
+                            sampling_params,
+                            dp,
+                            token_config=prompt_token_config,
+                            fill_cache=False,
+                        )
+            finally:
+                _set_marker_state(marker_mod, active_iterations="", phase="gen")
+            _worker_append_event(status_path, "batch_finished", work_unit_id=work_unit_id, batch_size=batch_size)
+            continue
         if driver == "prefill":
             try:
                 for dp in sorted(by_batch[batch_size], key=lambda item: item.past_kv):
-                    os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ""
-                    marker_mod.clear_forced_step_meta()
+                    _set_marker_state(marker_mod, active_iterations="", phase="gen")
                     for _ in range(warmup_runs):
                         _run_generate(
                             llm,
@@ -1924,13 +2407,16 @@ def _worker_run_gen(
                             token_config=prompt_token_config,
                         )
                     for run_idx in range(measured_runs):
-                        marker_mod.set_forced_step_meta(
+                        _set_marker_state(
+                            marker_mod,
+                            active_iterations="",
+                            trigger="decode_only",
+                            phase="gen",
                             step=dp.past_kv + 1,
                             bs=batch_size,
                             past=dp.past_kv,
                             run=run_idx,
                         )
-                        os.environ["LAYERWISE_ACTIVE_MILESTONES"] = "2"
                         _run_generate(
                             llm,
                             sampling_params,
@@ -1939,14 +2425,13 @@ def _worker_run_gen(
                             token_config=prompt_token_config,
                         )
             finally:
-                os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ""
-                marker_mod.clear_forced_step_meta()
+                _set_marker_state(marker_mod, active_iterations="", phase="gen")
             _worker_append_event(status_path, "batch_finished", work_unit_id=work_unit_id, batch_size=batch_size)
             continue
         # Gen datapoint starts/completions are emitted by vllm_step_marker at
-        # each milestone.  One generate call intentionally covers many past_kv
+        # each target iteration.  One generate call intentionally covers many past_kv
         # datapoints for the same batch size.
-        os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ""
+        _set_marker_state(marker_mod, active_iterations="", phase="gen")
         try:
             for _ in range(warmup_runs):
                 _run_generate(
@@ -1957,9 +2442,11 @@ def _worker_run_gen(
                     token_config=prompt_token_config,
                 )
             for run_idx in range(measured_runs):
-                os.environ["LAYERWISE_MEASURE_RUN"] = str(run_idx)
-                os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ",".join(
-                    str(x) for x in sorted({dp.past_kv + 1 for dp in by_batch[batch_size]})
+                _set_marker_state(
+                    marker_mod,
+                    active_iterations=sorted({dp.past_kv + 1 for dp in by_batch[batch_size]}),
+                    phase="gen",
+                    run=run_idx,
                 )
                 _run_generate(
                     llm,
@@ -1969,8 +2456,7 @@ def _worker_run_gen(
                     token_config=prompt_token_config,
                 )
         finally:
-            os.environ["LAYERWISE_ACTIVE_MILESTONES"] = ""
-            os.environ.pop("LAYERWISE_MEASURE_RUN", None)
+            _set_marker_state(marker_mod, active_iterations="", phase="gen")
         _worker_append_event(status_path, "batch_finished", work_unit_id=work_unit_id, batch_size=batch_size)
 
 
@@ -1982,6 +2468,72 @@ def _worker_empty_cache() -> None:
             torch.cuda.empty_cache()
     except Exception:
         pass
+
+
+def _cuda_profiler_call(action: str) -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            cudart = torch.cuda.cudart()
+            if action == "start":
+                cudart.cudaProfilerStart()
+            elif action == "stop":
+                cudart.cudaProfilerStop()
+            else:
+                raise ValueError(f"unsupported cuda profiler action: {action}")
+            return
+    except Exception:
+        pass
+
+    try:
+        from cuda.bindings import runtime as cuda_runtime
+
+        if action == "start":
+            cuda_runtime.cudaProfilerStart()
+        elif action == "stop":
+            cuda_runtime.cudaProfilerStop()
+        else:
+            raise ValueError(f"unsupported cuda profiler action: {action}")
+    except Exception as exc:
+        raise RuntimeError(f"cudaProfiler{action.title()} failed") from exc
+
+
+def _worker_set_cuda_profiler_capture(
+    *,
+    status_path: Path,
+    work_unit_id: str,
+    attempt_id: int,
+    enabled: bool,
+    action: str,
+) -> None:
+    if not enabled:
+        return
+    event_prefix = f"cuda_profiler_{action}"
+    _worker_append_event(
+        status_path,
+        f"{event_prefix}_started",
+        work_unit_id=work_unit_id,
+        attempt_id=attempt_id,
+    )
+    try:
+        _cuda_profiler_call(action)
+    except Exception as exc:
+        _worker_append_event(
+            status_path,
+            f"{event_prefix}_failed",
+            work_unit_id=work_unit_id,
+            attempt_id=attempt_id,
+            error=repr(exc),
+        )
+        raise
+    _worker_append_event(
+        status_path,
+        f"{event_prefix}_finished",
+        work_unit_id=work_unit_id,
+        attempt_id=attempt_id,
+    )
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -2098,13 +2650,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ctx-measured-runs",
         type=int,
-        default=1,
+        default=6,
         help="Marked context runs to execute per datapoint and aggregate.",
     )
     parser.add_argument(
         "--ctx-repeat-aggregation",
         choices=("median", "mean", "trimmed_mean", "min"),
-        default="median",
+        default="trimmed_mean",
         help="Aggregation for repeated context measurements.",
     )
     parser.add_argument(
@@ -2115,28 +2667,38 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--gen-driver",
-        choices=("decode_sweep", "prefill"),
-        default="decode_sweep",
+        choices=("decode_sweep", "prefill", "prefix_cache"),
+        default="prefix_cache",
         help=(
             "Generation driver. decode_sweep reaches past_kv by generating from a 1-token prompt; "
-            "prefill measures the first decode after a prompt of length past_kv."
+            "prefill measures the first decode after a prompt of length past_kv; prefix_cache "
+            "initializes KV through vLLM prefix caching and then measures the first cached decode."
         ),
     )
     parser.add_argument(
         "--gen-measured-runs",
         type=int,
-        default=1,
+        default=6,
         help="Marked generation runs to execute per batch and aggregate.",
     )
     parser.add_argument(
         "--gen-repeat-aggregation",
         choices=("median", "mean", "trimmed_mean", "min"),
-        default="median",
+        default="trimmed_mean",
         help="Aggregation for repeated generation measurements.",
     )
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--gpus", default=None, help="Comma-separated physical GPU IDs. Defaults to visible GPUs.")
     parser.add_argument("--max-workers", type=int, default=None, help="Limit concurrent one-GPU workers.")
+    parser.add_argument(
+        "--nsys-capture",
+        choices=("cuda_profiler_api", "full"),
+        default="cuda_profiler_api",
+        help=(
+            "Nsight Systems capture mode. cuda_profiler_api records only the worker measurement "
+            "region using cudaProfilerStart/Stop; full traces the entire worker process."
+        ),
+    )
     parser.add_argument("--no-restrict-cudagraph-sizes", action="store_true")
     parser.add_argument(
         "--no-filter-target-layers",

@@ -18,6 +18,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _parse_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return False
+    return str(value).strip().lower() in {"1", "true", "t", "yes", "y"}
+
+
 def _cache_key(database: PerfDatabase) -> tuple:
     return (
         database.systems_root,
@@ -52,6 +60,8 @@ def load_layerwise_data(layerwise_file):
             entry["rms_latency"] = float(row["rms_latency_ms"])
         if row.get("rms_kernel_count") not in (None, ""):
             entry["rms_kernel_count"] = int(float(row["rms_kernel_count"]))
+        if _parse_bool(row.get("includes_moe")):
+            entry["includes_moe"] = True
         if phase == "CTX":
             data[model][phase][tp_size][seq_len_q][seq_len_kv_cache] = entry
         else:
@@ -74,6 +84,23 @@ def _interpolate_metric_2d(x: int, y: int, data: dict, metric: str, extracted_me
     if not has_metric:
         return 0.0
     return float(interpolation.interp_2d_linear(x, y, metric_data, extracted_metrics_cache)["latency"])
+
+
+def _uniform_bool_metric(data: dict, metric: str, default: bool = False) -> bool:
+    values: set[bool] = set()
+
+    def _walk(value) -> None:
+        if isinstance(value, dict) and ("latency" in value or "power" in value):
+            values.add(bool(value.get(metric, default)))
+            return
+        if isinstance(value, dict):
+            for child in value.values():
+                _walk(child)
+
+    _walk(data)
+    if len(values) == 1:
+        return values.pop()
+    return default
 
 
 class Layerwise(Operation):
@@ -151,6 +178,7 @@ class Layerwise(Operation):
                     "rms_latency",
                     database._extracted_metrics_cache,
                 )
+                result["includes_moe"] = _uniform_bool_metric(tp_data, "includes_moe")
         elif batch_size in tp_data and seq_len in tp_data[batch_size]:
             result = tp_data[batch_size][seq_len]
         else:
@@ -162,6 +190,7 @@ class Layerwise(Operation):
                 "rms_latency",
                 database._extracted_metrics_cache,
             )
+            result["includes_moe"] = _uniform_bool_metric(tp_data, "includes_moe")
 
         if not isinstance(result, dict):
             result = {"latency": float(result), "energy": 0.0}
@@ -170,6 +199,7 @@ class Layerwise(Operation):
             "energy": float(result.get("energy", 0.0)),
             "rms_latency": float(result.get("rms_latency", 0.0)),
             "rms_kernel_count": float(result.get("rms_kernel_count", 0.0)),
+            "includes_moe": bool(result.get("includes_moe", False)),
         }
 
     @classmethod

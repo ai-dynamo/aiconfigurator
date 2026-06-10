@@ -46,6 +46,7 @@ def _args(tmp_path):
         gpus="0",
         max_workers=None,
         timeout=30,
+        nsys_capture="cuda_profiler_api",
         no_restrict_cudagraph_sizes=False,
         extra_vllm_args="",
         extra_vllm_arg=[],
@@ -55,7 +56,7 @@ def _args(tmp_path):
         ctx_warmup_runs=0,
         ctx_measured_runs=1,
         ctx_repeat_aggregation="median",
-        gen_driver="decode_sweep",
+        gen_driver="prefix_cache",
         gen_warmup_runs=0,
         gen_measured_runs=1,
         gen_repeat_aggregation="median",
@@ -103,6 +104,16 @@ def _build_args(tmp_path, **overrides):
 
 
 class VllmCollectLayerwiseTests(unittest.TestCase):
+    def test_repeat_defaults_use_six_run_trimmed_mean(self):
+        args = cl._build_arg_parser().parse_args(["--model", "model"])
+
+        self.assertEqual(args.ctx_measured_runs, 6)
+        self.assertEqual(args.ctx_repeat_aggregation, "trimmed_mean")
+        self.assertEqual(args.gen_measured_runs, 6)
+        self.assertEqual(args.gen_repeat_aggregation, "trimmed_mean")
+        self.assertEqual(args.gen_driver, "prefix_cache")
+        self.assertEqual(args.nsys_capture, "cuda_profiler_api")
+
     def test_datapoint_ids_and_parse_keys_are_stable(self):
         ctx = cl.DataPoint("ctx", 1, 128, 0)
         gen = cl.DataPoint("gen", 4, 1, 16)
@@ -297,6 +308,69 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertEqual(token_config.vocab_size, 16)
             self.assertEqual(token_config.excluded_token_ids, frozenset({1, 2, 3}))
 
+    def test_prefix_suffix_prompts_reuse_prefix_and_vary_suffix(self):
+        token_config = cl.RandomPromptTokenConfig(
+            vocab_size=128,
+            excluded_token_ids=frozenset({0, 1, 2, 127}),
+        )
+
+        first = cl._deterministic_prefix_suffix_prompts(
+            1,
+            prefix_len=16,
+            suffix_len=4,
+            token_config=token_config,
+            prefix_request_index_offset=10,
+            suffix_request_index_offset=100,
+            cache_salt_prefix="ctx-prefix",
+        )[0]
+        second = cl._deterministic_prefix_suffix_prompts(
+            1,
+            prefix_len=16,
+            suffix_len=4,
+            token_config=token_config,
+            prefix_request_index_offset=10,
+            suffix_request_index_offset=200,
+            cache_salt_prefix="ctx-prefix",
+        )[0]
+
+        self.assertEqual(first["prompt_token_ids"][:16], second["prompt_token_ids"][:16])
+        self.assertNotEqual(first["prompt_token_ids"][16:], second["prompt_token_ids"][16:])
+        self.assertEqual(first["cache_salt"], second["cache_salt"])
+
+    def test_ctx_prefix_cache_key_is_shared_across_new_tokens_and_runs(self):
+        first = cl.DataPoint("ctx", 1, 16, 4096)
+        second = cl.DataPoint("ctx", 1, 128, 4096)
+
+        self.assertEqual(
+            cl._ctx_prefix_request_index_offset(first),
+            cl._ctx_prefix_request_index_offset(second),
+        )
+        self.assertEqual(
+            cl._ctx_cache_salt_prefix("wu", first),
+            cl._ctx_cache_salt_prefix("wu", second),
+        )
+        self.assertNotEqual(
+            cl._ctx_suffix_request_index_offset(first, 0, warmup=False),
+            cl._ctx_suffix_request_index_offset(second, 0, warmup=False),
+        )
+        self.assertNotEqual(
+            cl._ctx_suffix_request_index_offset(first, 0, warmup=False),
+            cl._ctx_suffix_request_index_offset(first, 1, warmup=False),
+        )
+
+    def test_gen_prefix_cache_key_is_shared_across_batch_and_past(self):
+        first = cl.DataPoint("gen", 1, 1, 128)
+        second = cl.DataPoint("gen", 4, 1, 4096)
+
+        self.assertEqual(
+            cl._gen_prompt_request_index_offset(first),
+            cl._gen_prompt_request_index_offset(second),
+        )
+        self.assertEqual(
+            cl._gen_cache_salt_prefix("wu", first),
+            cl._gen_cache_salt_prefix("wu", second),
+        )
+
     def test_oom_pruning_is_phase_local_and_monotonic(self):
         failed_ctx = cl.DataPoint("ctx", 1, 128, 0)
         self.assertTrue(cl.oom_dominates(failed_ctx, cl.DataPoint("ctx", 1, 256, 0)))
@@ -349,6 +423,169 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertNotIn(failed_id, pending_ids)
             self.assertNotIn(dps[2].datapoint_id(unit.work_unit_id), pending_ids)
 
+    def test_scheduler_adds_gpt_oss_runtime_defaults_for_decode_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            unit = _unit(tmp_path, [cl.DataPoint("gen", 4, 1, 4096)])
+            unit.row_base["model"] = "openai/gpt-oss-120b"
+            unit.row_base["system"] = "b300_sxm"
+            args_obj = _args(tmp_path)
+            args_obj.gen_driver = "prefill"
+            scheduler = cl.Scheduler(args_obj, [unit])
+
+            spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
+            args = spec["extra_vllm_args"]
+
+            self.assertEqual(args[args.index("--kv-cache-dtype") + 1], "fp8")
+            self.assertEqual(args[args.index("--max-cudagraph-capture-size") + 1], "2048")
+            self.assertEqual(args[args.index("--stream-interval") + 1], "20")
+            self.assertIn("--no-enable-prefix-caching", args)
+            self.assertNotIn("--tensor-parallel-size", args)
+            self.assertNotIn("--enable-expert-parallel", args)
+
+    def test_scheduler_enables_prefix_cache_for_gen_prefix_cache_driver(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            unit = _unit(tmp_path, [cl.DataPoint("gen", 4, 1, 4096)])
+            scheduler = cl.Scheduler(_args(tmp_path), [unit])
+
+            spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
+
+            self.assertIn("--enable-prefix-caching", spec["extra_vllm_args"])
+            self.assertNotIn("--no-enable-prefix-caching", spec["extra_vllm_args"])
+
+    def test_scheduler_spec_keeps_simulated_tp_out_of_runtime_engine(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            unit = _unit(tmp_path, [cl.DataPoint("ctx", 1, 128, 0)])
+            unit.row_base["attn_tp"] = 2
+            unit.row_base["moe_tp"] = 2
+            scheduler = cl.Scheduler(_args(tmp_path), [unit])
+
+            spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
+
+            self.assertNotIn("tensor_parallel_size", spec)
+            self.assertNotIn("--tensor-parallel-size", spec["extra_vllm_args"])
+
+    def test_worker_cmd_defaults_to_cuda_profiler_capture(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            scheduler = cl.Scheduler(_args(tmp_path), [_unit(tmp_path, [])])
+
+            cmd = scheduler._worker_cmd(tmp_path / "spec.json", tmp_path / "report")
+
+            self.assertIn("--capture-range=cudaProfilerApi", cmd)
+            self.assertIn("--capture-range-end=stop", cmd)
+
+    def test_worker_cmd_can_trace_full_process(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            args = _args(tmp_path)
+            args.nsys_capture = "full"
+            scheduler = cl.Scheduler(args, [_unit(tmp_path, [])])
+
+            cmd = scheduler._worker_cmd(tmp_path / "spec.json", tmp_path / "report")
+
+            self.assertNotIn("--capture-range=cudaProfilerApi", cmd)
+            self.assertNotIn("--capture-range-end=stop", cmd)
+
+    def test_scheduler_adds_default_vllm_extra_args(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            unit = _unit(tmp_path, [cl.DataPoint("gen", 4, 1, 4096)])
+            scheduler = cl.Scheduler(_args(tmp_path), [unit])
+
+            spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
+            extra = spec["extra_vllm_args"]
+
+            self.assertIn("--skip-mm-profiling", extra)
+            self.assertEqual(extra[extra.index("--limit-mm-per-prompt") + 1], '{"image":0,"video":0}')
+            self.assertEqual(extra[extra.index("--generation-config") + 1], "vllm")
+
+    def test_scheduler_preserves_explicit_default_vllm_extra_arg_overrides(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            unit = _unit(tmp_path, [cl.DataPoint("gen", 4, 1, 4096)])
+            args = _args(tmp_path)
+            args.extra_vllm_args = "--generation-config auto"
+            args.extra_vllm_arg = [
+                "--limit-mm-per-prompt={\"image\":1}",
+                "--no-skip-mm-profiling",
+            ]
+            scheduler = cl.Scheduler(args, [unit])
+
+            spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
+            extra = spec["extra_vllm_args"]
+
+            self.assertNotIn("--skip-mm-profiling", extra)
+            self.assertIn("--no-skip-mm-profiling", extra)
+            self.assertEqual(extra.count("--generation-config"), 1)
+            self.assertEqual(extra[extra.index("--generation-config") + 1], "auto")
+            self.assertNotIn("--limit-mm-per-prompt", extra)
+            self.assertIn("--limit-mm-per-prompt={\"image\":1}", extra)
+
+    def test_scheduler_keeps_prefix_cache_for_gpt_oss_prefix_context(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            unit = _unit(tmp_path, [cl.DataPoint("ctx", 1, 128, 4096)])
+            unit.row_base["model"] = "openai/gpt-oss-120b"
+            unit.row_base["system"] = "b300_sxm"
+            args = _args(tmp_path)
+            args.ctx_driver = "prefix_cache"
+            scheduler = cl.Scheduler(args, [unit])
+
+            spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
+
+            self.assertNotIn("--no-enable-prefix-caching", spec["extra_vllm_args"])
+            self.assertIn("--enable-prefix-caching", spec["extra_vllm_args"])
+
+    def test_scheduler_enables_prefix_cache_for_prefix_context(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            unit = _unit(tmp_path, [cl.DataPoint("ctx", 1, 128, 0)])
+            args = _args(tmp_path)
+            args.ctx_driver = "prefix_cache"
+            scheduler = cl.Scheduler(args, [unit])
+
+            spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
+
+            self.assertIn("--enable-prefix-caching", spec["extra_vllm_args"])
+
+    def test_scheduler_disables_prefix_cache_for_gpt_oss_chunked_context(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            unit = _unit(tmp_path, [cl.DataPoint("ctx", 1, 128, 0)])
+            unit.row_base["model"] = "openai/gpt_oss_120b"
+            unit.row_base["system"] = "b300_sxm"
+            args = _args(tmp_path)
+            args.ctx_driver = "chunked"
+            scheduler = cl.Scheduler(args, [unit])
+
+            spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
+
+            self.assertIn("--no-enable-prefix-caching", spec["extra_vllm_args"])
+
+    def test_scheduler_preserves_explicit_gpt_oss_vllm_overrides(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            unit = _unit(tmp_path, [cl.DataPoint("gen", 4, 1, 4096)])
+            unit.row_base["model"] = "openai/gpt-oss-120b"
+            unit.row_base["system"] = "b300_sxm"
+            args = _args(tmp_path)
+            args.extra_vllm_args = "--kv-cache-dtype bf16 --stream-interval=7"
+            args.extra_vllm_arg = ["--max-cudagraph-capture-size=1024", "--enable-prefix-caching"]
+            scheduler = cl.Scheduler(args, [unit])
+
+            spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
+            extra = spec["extra_vllm_args"]
+
+            self.assertEqual(extra.count("--kv-cache-dtype"), 1)
+            self.assertNotIn("--stream-interval", extra)
+            self.assertIn("--stream-interval=7", extra)
+            self.assertNotIn("--max-cudagraph-capture-size", extra)
+            self.assertIn("--max-cudagraph-capture-size=1024", extra)
+            self.assertNotIn("--no-enable-prefix-caching", extra)
+
     def test_engine_tokens_default_to_vllm_deployment_parity(self):
         tokens = cl._engine_tokens(
             model_dir="/model",
@@ -365,6 +602,17 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(tokens[tokens.index("--max-model-len") + 1], "129")
         self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "128")
         self.assertEqual(tokens[tokens.index("--max-num-seqs") + 1], "4")
+
+    def test_engine_tokens_do_not_enable_runtime_tensor_parallel(self):
+        tokens = cl._engine_tokens(
+            model_dir="/model",
+            datapoints=[cl.DataPoint("ctx", 1, 128, 0)],
+            restrict_cudagraph_sizes=True,
+            extra_vllm_args=[],
+        )
+
+        self.assertNotIn("--tensor-parallel-size", tokens)
+        self.assertNotIn("--worker-extension-cls", tokens)
 
     def test_engine_tokens_use_one_decode_graph_engine_for_attribution_mode(self):
         tokens = cl._engine_tokens(
@@ -427,6 +675,84 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
         self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "4096")
 
+    def test_engine_tokens_prefill_driver_uses_normal_budget_when_prompt_batch_fits(self):
+        tokens = cl._engine_tokens(
+            model_dir="/model",
+            datapoints=[cl.DataPoint("gen", 4, 1, 4096)],
+            restrict_cudagraph_sizes=True,
+            extra_vllm_args=[],
+            gen_driver="prefill",
+        )
+
+        self.assertEqual(
+            tokens[tokens.index("--max-num-batched-tokens") + 1],
+            str(cl.PREFILL_DECODE_MAX_NUM_BATCHED_TOKENS),
+        )
+        self.assertNotIn("--max-num-partial-prefills", tokens)
+        self.assertNotIn("--max-long-partial-prefills", tokens)
+        self.assertNotIn("--long-prefill-token-threshold", tokens)
+
+    def test_engine_tokens_prefill_driver_expands_budget_for_uniform_decode_batch(self):
+        tokens = cl._engine_tokens(
+            model_dir="/model",
+            datapoints=[cl.DataPoint("gen", 8, 1, 4096)],
+            restrict_cudagraph_sizes=True,
+            extra_vllm_args=[],
+            gen_driver="prefill",
+        )
+
+        self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], str(8 * 4096))
+
+    def test_engine_tokens_prefill_driver_preserves_explicit_token_budget_floor(self):
+        tokens = cl._engine_tokens(
+            model_dir="/model",
+            datapoints=[cl.DataPoint("gen", 8, 1, 4096)],
+            restrict_cudagraph_sizes=True,
+            extra_vllm_args=[],
+            min_max_num_batched_tokens=32768,
+            gen_driver="prefill",
+        )
+
+        self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "32768")
+
+    def test_engine_tokens_keep_decode_sweep_budget_small(self):
+        tokens = cl._engine_tokens(
+            model_dir="/model",
+            datapoints=[cl.DataPoint("gen", 8, 1, 4096)],
+            restrict_cudagraph_sizes=True,
+            extra_vllm_args=[],
+            gen_driver="decode_sweep",
+        )
+
+        self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "8")
+
+    def test_engine_tokens_prefix_cache_driver_keeps_decode_budget_small(self):
+        tokens = cl._engine_tokens(
+            model_dir="/model",
+            datapoints=[cl.DataPoint("gen", 32, 1, 65536)],
+            restrict_cudagraph_sizes=True,
+            extra_vllm_args=[],
+            gen_driver="prefix_cache",
+        )
+
+        self.assertEqual(tokens[tokens.index("--max-model-len") + 1], "65538")
+        self.assertEqual(tokens[tokens.index("--max-num-seqs") + 1], "32")
+        self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "32")
+
+    def test_engine_tokens_prefix_cache_driver_uses_at_least_one_block(self):
+        tokens = cl._engine_tokens(
+            model_dir="/model",
+            datapoints=[cl.DataPoint("gen", 1, 1, 128)],
+            restrict_cudagraph_sizes=True,
+            extra_vllm_args=[],
+            gen_driver="prefix_cache",
+        )
+
+        self.assertEqual(
+            tokens[tokens.index("--max-num-batched-tokens") + 1],
+            str(cl.VLLM_DEFAULT_BLOCK_SIZE),
+        )
+
     def test_engine_tokens_include_context_past_kv_in_model_len(self):
         tokens = cl._engine_tokens(
             model_dir="/model",
@@ -439,9 +765,9 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(tokens[tokens.index("--max-model-len") + 1], "16385")
         self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "8192")
 
-    def test_context_marker_milestone_selects_later_prefill_chunk(self):
+    def test_context_marker_iteration_selects_later_prefill_chunk(self):
         self.assertEqual(
-            cl._ctx_marker_milestone(
+            cl._ctx_marker_iteration(
                 cl.DataPoint("ctx", 1, 8192, 0),
                 8192,
                 ctx_driver="chunked",
@@ -449,7 +775,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
-            cl._ctx_marker_milestone(
+            cl._ctx_marker_iteration(
                 cl.DataPoint("ctx", 1, 8192, 8192),
                 8192,
                 ctx_driver="chunked",
@@ -457,7 +783,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             2,
         )
         self.assertEqual(
-            cl._ctx_marker_milestone(
+            cl._ctx_marker_iteration(
                 cl.DataPoint("ctx", 1, 8192, 8192),
                 8192,
                 ctx_driver="prefix_cache",

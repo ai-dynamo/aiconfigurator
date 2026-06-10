@@ -86,6 +86,7 @@ except Exception:
 # This lets vLLM handle backend selection (FlashInfer/Triton/Marlin) and
 # weight swizzle internally, so one code path works on all GPUs.
 _mxfp4_available = False
+_MXFP4_MOE_TYPES = {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
 try:
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
@@ -269,7 +270,7 @@ def run_moe_torch(
     # looks up the module in static_forward_context.  FusedMoE registers
     # itself there during __init__, so we must pass the *same* config to
     # set_forward_context() at benchmark time.
-    use_mxfp4 = moe_type == "w4a16_mxfp4"
+    use_mxfp4 = moe_type in _MXFP4_MOE_TYPES
     moe_module = None
     mxfp4_vllm_cfg = None
 

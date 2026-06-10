@@ -100,44 +100,60 @@ class VLLMBackend(BaseBackend):
         seq_len: int,
         prefix: int = 0,
     ) -> float:
+        return float(
+            self._layerwise_context_layer_detail(database, model_name, tp_size, batch_size, seq_len, prefix)["latency"]
+        )
+
+    def _layerwise_context_layer_detail(
+        self,
+        database: PerfDatabase,
+        model_name: str,
+        tp_size: int,
+        batch_size: int,
+        seq_len: int,
+        prefix: int = 0,
+    ) -> dict[str, float | bool]:
         if seq_len <= _VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS:
-            return float(
-                database.query_layerwise(
-                    model_name,
-                    "CTX",
-                    tp_size,
-                    batch_size,
-                    seq_len,
-                    seq_len_kv_cache=max(prefix, 0),
-                )
+            return self._query_layerwise_detail(
+                database,
+                model_name,
+                "CTX",
+                tp_size,
+                batch_size,
+                seq_len,
+                seq_len_kv_cache=max(prefix, 0),
             )
 
-        chunk_latencies = []
+        chunk_details = []
         remaining = seq_len
         past_kv = max(prefix, 0)
         try:
             while remaining > 0:
                 chunk_tokens = min(_VLLM_DEFAULT_MAX_NUM_BATCHED_TOKENS, remaining)
-                chunk_latencies.append(
-                    float(
-                        database.query_layerwise(
-                            model_name,
-                            "CTX",
-                            tp_size,
-                            batch_size,
-                            chunk_tokens,
-                            seq_len_kv_cache=past_kv,
-                        )
+                chunk_details.append(
+                    self._query_layerwise_detail(
+                        database,
+                        model_name,
+                        "CTX",
+                        tp_size,
+                        batch_size,
+                        chunk_tokens,
+                        seq_len_kv_cache=past_kv,
                     )
                 )
                 past_kv += chunk_tokens
                 remaining -= chunk_tokens
-            return sum(chunk_latencies)
+            return {
+                "latency": sum(float(detail["latency"]) for detail in chunk_details),
+                "energy": sum(float(detail.get("energy", 0.0)) for detail in chunk_details),
+                "rms_latency": sum(float(detail.get("rms_latency", 0.0)) for detail in chunk_details),
+                "includes_moe": all(bool(detail.get("includes_moe", False)) for detail in chunk_details),
+            }
         except (PerfDataNotAvailableError, ValueError):
             # Older layerwise datasets have a direct 16k CTX row but no
             # nonzero-context-KV chunk rows. Use that row until chunked data
             # exists for the requested TP.
-            return float(database.query_layerwise(model_name, "CTX", tp_size, batch_size, seq_len))
+            return self._query_layerwise_detail(database, model_name, "CTX", tp_size, batch_size, seq_len)
 
     def _layerwise_tp_allreduce_ms(
         self,
@@ -263,20 +279,22 @@ class VLLMBackend(BaseBackend):
         model_name = getattr(model, "model_path", "")
         tp_size = model.config.tp_size
         num_layers = model._num_layers // model.config.pp_size
-        layer_ms = (
-            self._layerwise_context_layer_ms(database, model_name, tp_size, batch_size, effective_isl, prefix)
-            * num_layers
+        layer_detail = self._layerwise_context_layer_detail(
+            database, model_name, tp_size, batch_size, effective_isl, prefix
         )
+        layer_ms = float(layer_detail["latency"]) * num_layers
         allreduce_ms = (
             self._layerwise_tp_allreduce_ms(model, database, tp_size, batch_size * effective_isl) * 2 * num_layers
         )
-        moe_ms, moe_energy, moe_source = self._layerwise_moe_compute(
-            model,
-            database,
-            token_count=batch_size * effective_isl,
-            num_layers=num_layers,
-            is_context=True,
-        )
+        moe_ms, moe_energy, moe_source = 0.0, 0.0, "silicon"
+        if not bool(layer_detail.get("includes_moe", False)):
+            moe_ms, moe_energy, moe_source = self._layerwise_moe_compute(
+                model,
+                database,
+                token_count=batch_size * effective_isl,
+                num_layers=num_layers,
+                is_context=True,
+            )
 
         latency_dict = defaultdict(float, {"context_layerwise": layer_ms, "context_tp_allreduce": allreduce_ms})
         energy_dict = defaultdict(float, {"context_layerwise": 0.0, "context_tp_allreduce": 0.0})
@@ -348,13 +366,15 @@ class VLLMBackend(BaseBackend):
             repeat_count = min(stride, osl - 1 - i)
             layer_ms_total += max(0.0, layer_step_ms - rms_step_ms) * repeat_count
             fused_allreduce_rms_total += allreduce_rms_step_ms * repeat_count
-            moe_step_ms, moe_step_energy, moe_step_source = self._layerwise_moe_compute(
-                model,
-                database,
-                token_count=effective_bs,
-                num_layers=num_layers,
-                is_context=False,
-            )
+            moe_step_ms, moe_step_energy, moe_step_source = 0.0, 0.0, "silicon"
+            if not bool(layer_detail.get("includes_moe", False)):
+                moe_step_ms, moe_step_energy, moe_step_source = self._layerwise_moe_compute(
+                    model,
+                    database,
+                    token_count=effective_bs,
+                    num_layers=num_layers,
+                    is_context=False,
+                )
             moe_ms_total += moe_step_ms * repeat_count
             moe_energy_total += moe_step_energy * repeat_count
             if moe_source is None or moe_source == moe_step_source:
@@ -406,9 +426,8 @@ class VLLMBackend(BaseBackend):
         gen_tokens = max(int(gen_tokens), 0)
         combined_tokens = max(ctx_tokens + gen_tokens, 1)
 
-        combined_ctx_ms = (
-            self._layerwise_context_layer_ms(database, model_name, tp_size, 1, combined_tokens) * num_layers
-        )
+        combined_detail = self._layerwise_context_layer_detail(database, model_name, tp_size, 1, combined_tokens)
+        combined_ctx_ms = float(combined_detail["latency"]) * num_layers
         combined_allreduce_ms = (
             self._layerwise_tp_allreduce_ms(model, database, tp_size, combined_tokens) * 2 * num_layers
         )
@@ -420,9 +439,8 @@ class VLLMBackend(BaseBackend):
                     float(database.query_layerwise(model_name, "GEN", tp_size, gen_tokens, avg_decode_kv))
                     * num_layers
                 )
-                gen_as_ctx_ms = (
-                    self._layerwise_context_layer_ms(database, model_name, tp_size, 1, gen_tokens) * num_layers
-                )
+                gen_as_ctx_detail = self._layerwise_context_layer_detail(database, model_name, tp_size, 1, gen_tokens)
+                gen_as_ctx_ms = float(gen_as_ctx_detail["latency"]) * num_layers
                 decode_delta_ms = max(0.0, gen_step_ms - gen_as_ctx_ms)
             except (PerfDataNotAvailableError, ValueError):
                 logger.debug(
@@ -434,14 +452,16 @@ class VLLMBackend(BaseBackend):
                     avg_decode_kv,
                 )
 
+        moe_ms, moe_energy, moe_source = 0.0, 0.0, "silicon"
+        if not bool(combined_detail.get("includes_moe", False)):
+            moe_ms, moe_energy, moe_source = self._layerwise_moe_compute(
+                model,
+                database,
+                token_count=combined_tokens,
+                num_layers=num_layers,
+                is_context=ctx_tokens > 0,
+            )
         latency_ms = combined_ctx_ms + combined_allreduce_ms + decode_delta_ms
-        moe_ms, moe_energy, moe_source = self._layerwise_moe_compute(
-            model,
-            database,
-            token_count=combined_tokens,
-            num_layers=num_layers,
-            is_context=ctx_tokens > 0,
-        )
         per_ops = {
             "mixed_layerwise_context_combined": combined_ctx_ms,
             "mixed_layerwise_context_tp_allreduce": combined_allreduce_ms,

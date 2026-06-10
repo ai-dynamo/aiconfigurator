@@ -2,7 +2,7 @@
 
 Wraps `vllm.benchmarks.latency` with three monkey-patches:
   1. `vllm_layer_skip_patch` — identity forward on non-target DecoderLayers
-  2. `vllm_step_marker`      — NVTX outer range at milestone step numbers
+  2. `vllm_step_marker`      — NVTX outer range at target iteration numbers
   3. `config_patch`          — HF config.json dotted-key override + aux-file pull
 
 Canonical run (GLM-5-FP8 decode, bs=128, past_kv sweep):

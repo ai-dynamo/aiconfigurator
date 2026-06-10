@@ -1,10 +1,10 @@
-"""Per-step-milestone kernel attribution from an nsys sqlite.
+"""Per-step-iteration kernel attribution from an nsys sqlite.
 
 Designed for runs produced by `vllm_step_marker.py`:
   outer NVTX range:  `bench_step::N<nnnnnnn>::bs<B>::past<pppppp>`
   inner NVTX ranges: `{'Module': '<dotted.module.path>'}` (PytHooks layerwise)
 
-Output: one row per milestone step x Module (rollup-regex optional), showing
+Output: one row per target iteration x Module (rollup-regex optional), showing
 per-step kernel GPU time and kernel count.
 
 Attribution approach (matches TensorRT-LLM's layer_wise_benchmarks/parse.py):
@@ -124,6 +124,14 @@ def _query_kernels(cur):
     params = (_GLOBAL_PID_MASK,) * (2 if has_graph else 1)
     cur.execute(query, params)
     return cur.fetchall()
+
+
+def _has_table(cur, table):
+    cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    )
+    return cur.fetchone() is not None
 
 
 def _build_nvtx_lookups(cur):
@@ -323,6 +331,25 @@ def _sum_kernels(cur, kernel_drop_re):
         span_end_ns[out_key] = max(span_end_ns.get(out_key, ke), ke)
         n_k[out_key] += 1
 
+    # Deployment-parity traces use CUDAGraphWrapper as the measured unit. Some
+    # TP chunked-prefill windows have valid step ranges but no kernel with a
+    # recoverable wrapper module. Keep those shapes usable by falling back to
+    # the full step NVTX span for only the missing wrapper rows.
+    wrapper_steps = {
+        (step_meta, tid)
+        for (step_meta, mod, tid) in gpu_ns
+        if mod == "CUDAGraphWrapper"
+    }
+    for tid, wins in step_wins.items():
+        for step_s, step_e, step in wins:
+            if (step, tid) in wrapper_steps:
+                continue
+            out_key = (step, "CUDAGraphWrapper", tid)
+            gpu_ns[out_key] += step_e - step_s
+            span_start_ns[out_key] = min(span_start_ns.get(out_key, step_s), step_s)
+            span_end_ns[out_key] = max(span_end_ns.get(out_key, step_e), step_e)
+            n_k[out_key] += 1
+
     return gpu_ns, rms_ns, span_start_ns, span_end_ns, n_k, n_rms_k, (
         unmatched_step,
         unmatched_module,
@@ -330,6 +357,47 @@ def _sum_kernels(cur, kernel_drop_re):
         step_pid_fallback,
         step_global_fallback,
     )
+
+
+def _sum_nvtx_ranges(cur):
+    """Fallback attribution from NVTX span duration when CUPTI rows are absent."""
+    step_wins, mod_ivs = _build_nvtx_lookups(cur)
+
+    gpu_ns = defaultdict(int)
+    rms_ns = defaultdict(int)
+    span_start_ns = {}
+    span_end_ns = {}
+    n_k = defaultdict(int)
+    n_rms_k = defaultdict(int)
+
+    for tid, wins in step_wins.items():
+        modules = mod_ivs.get(tid, [])
+        module_starts = [s for s, _, _ in modules]
+        for step_s, step_e, step in wins:
+            emitted = False
+            hi = bisect.bisect_right(module_starts, step_e)
+            for i in range(hi):
+                mod_s, mod_e, mod = modules[i]
+                if mod_s < step_s or mod_e is None or mod_e > step_e:
+                    continue
+                out_key = (step, mod, tid)
+                gpu_ns[out_key] += mod_e - mod_s
+                span_start_ns[out_key] = min(span_start_ns.get(out_key, mod_s), mod_s)
+                span_end_ns[out_key] = max(span_end_ns.get(out_key, mod_e), mod_e)
+                n_k[out_key] += 1
+                if mod == "CUDAGraphWrapper":
+                    emitted = True
+            if not emitted:
+                # Some decode CUDA graph replays only expose child/output
+                # module ranges. Keep deployment-parity rows usable by
+                # attributing the full measured step to the wrapper.
+                out_key = (step, "CUDAGraphWrapper", tid)
+                gpu_ns[out_key] += step_e - step_s
+                span_start_ns[out_key] = min(span_start_ns.get(out_key, step_s), step_s)
+                span_end_ns[out_key] = max(span_end_ns.get(out_key, step_e), step_e)
+                n_k[out_key] += 1
+
+    return gpu_ns, rms_ns, span_start_ns, span_end_ns, n_k, n_rms_k
 
 
 def _innermost_module_at_with_start(mod_ivs_for_tid, capture_start, capture_end):
@@ -453,6 +521,7 @@ def parse_step_sweep(
     keep_comm=False,
     per_rank=False,
     rank_reduce="sum",
+    force_nvtx_span=False,
 ):
     """Parse an nsys sqlite into structured per-step rollup rows.
 
@@ -475,15 +544,25 @@ def parse_step_sweep(
     con = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
     cur = con.cursor()
     nvtx_step_ranges, nvtx_module_ranges = _count_nvtx_ranges(cur)
-    (
-        gpu_ns,
-        rms_ns,
-        span_start_ns,
-        span_end_ns,
-        n_k,
-        n_rms_k,
-        (miss_step, miss_mod, dropped, step_pid_fallback, step_global_fallback),
-    ) = _sum_kernels(cur, kernel_drop_re)
+    if (
+        not force_nvtx_span
+        and _has_table(cur, "CUPTI_ACTIVITY_KIND_KERNEL")
+        and _has_table(cur, "CUPTI_ACTIVITY_KIND_RUNTIME")
+    ):
+        (
+            gpu_ns,
+            rms_ns,
+            span_start_ns,
+            span_end_ns,
+            n_k,
+            n_rms_k,
+            (miss_step, miss_mod, dropped, step_pid_fallback, step_global_fallback),
+        ) = _sum_kernels(cur, kernel_drop_re)
+        attribution_source = "cupti"
+    else:
+        gpu_ns, rms_ns, span_start_ns, span_end_ns, n_k, n_rms_k = _sum_nvtx_ranges(cur)
+        miss_step = miss_mod = dropped = step_pid_fallback = step_global_fallback = 0
+        attribution_source = "nvtx_span"
     con.close()
 
     rows, n_ranks = _rollup_rows(
@@ -492,7 +571,7 @@ def parse_step_sweep(
     )
     metadata = {
         "attributed_kernels": sum(n_k.values()),
-        "outside_milestone_window": miss_step,
+        "outside_iteration_window": miss_step,
         "no_module_nvtx": miss_mod,
         "dropped_comm": dropped,
         "step_pid_fallback": step_pid_fallback,
@@ -502,6 +581,7 @@ def parse_step_sweep(
         "per_rank": per_rank,
         "nvtx_step_ranges": nvtx_step_ranges,
         "nvtx_module_ranges": nvtx_module_ranges,
+        "attribution_source": attribution_source,
     }
     return rows, metadata
 
@@ -534,7 +614,7 @@ def main():
         rank_reduce=args.rank_reduce,
     )
     print(f"[parse] kernels attributed: {meta['attributed_kernels']}, "
-          f"outside milestone window: {meta['outside_milestone_window']}, "
+          f"outside iteration window: {meta['outside_iteration_window']}, "
           f"no Module NVTX: {meta['no_module_nvtx']}, "
           f"dropped (comm): {meta['dropped_comm']}, "
           f"step pid fallback: {meta['step_pid_fallback']}, "

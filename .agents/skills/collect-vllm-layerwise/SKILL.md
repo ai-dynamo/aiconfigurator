@@ -17,18 +17,19 @@ Work from the `aiconfigurator` repo. Use:
 - Model cache: set `HF_HOME`; default to `$HOME/.cache/huggingface` when unspecified.
 
 The local Python env may not have vLLM installed. If so, run the collector inside `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0` and bind-mount host Nsight Systems from `/opt/nvidia/nsight-systems`.
-Prefer `NSYS_VERSION=2025.3.2` or newer on B300. Older Nsight builds can export NVTX ranges without CUDA kernel tables, producing zero parsed layerwise rows.
+Prefer `NSYS_VERSION=2025.3.2` or newer on B300. If host `/opt` has an older Nsight, check for a newer local install such as `/home/shadeform/tools/nsight-systems-2025.6.3/opt/nvidia/nsight-systems`. Older Nsight builds can export NVTX ranges without CUDA kernel tables, producing zero parsed layerwise rows.
 
 Read [references/layerwise-commands.md](references/layerwise-commands.md) for the canonical Docker wrapper, TP=2 decode/context commands, conversion rules, and AIC comparison notes.
 
 ## Collection Rules
 
-- The vLLM collector simulates TP on one physical GPU by patching model dimensions. It is not a real multi-rank TP deployment.
+- The vLLM collector simulates TP on one physical GPU by patching model dimensions. It is not a real multi-rank TP deployment, and AIC adds TP communication analytically.
 - For TP>1, keep `--rank-reduce max`. Context rows are per simulated rank; AIC adds generic TP allreduce. Decode rows should keep `rms_latency_ms` so AIC can subtract RMS and add fused allreduce+rms when data exists.
 - Decode collection is fast and should use one transformer layer, `--latency-source span`, default compile/deployment parity, and batch sizes `1,2,4,8,16,32,64` at KV 1024.
 - Context collection used for AIC should use the established 16-layer path unless the user explicitly prioritizes speed over accuracy. Use `--latency-source gpu_capped`, `--ctx-warmup-runs 2`, `--ctx-measured-runs 6`, and `--ctx-repeat-aggregation trimmed_mean`.
 - Context should be a 2D grid: `new_tokens` up to 8192 and `past_kv` up to 65536, filtered by model max length. Include `new_tokens=8192,past_kv=8192` for vLLM chunked 16k behavior.
 - For FP8 checkpoints, do not force KV FP8 unless that is the experiment. `--kv-quant fp8` forces `--kv-cache-dtype fp8`; default vLLM FP8 checkpoint behavior is measured with `--kv-quant bf16` so KV dtype remains `auto`.
+- GPT-OSS layerwise specs automatically mirror vLLM's GPT-OSS runtime defaults for FP8 KV cache, CUDA graph capture size, and stream interval. Do not pass real `--tensor-parallel-size` or `--enable-expert-parallel` through layerwise; TP/EP are simulated/added analytically. Prefix caching is disabled only for decode-only or `ctx_driver=chunked` runs, because the default `ctx_driver=prefix_cache` needs prefix caching to create arbitrary `past_kv` context points.
 
 ## Convert To AIC Data
 
@@ -40,8 +41,9 @@ Map collector CSV rows into AIC `layerwise_perf.csv`:
 - `new_tokens` -> `seq_len_q`
 - `past_kv` -> `seq_len_kv_cache`
 - Preserve the actual model path in AIC data, e.g. keep `Qwen/Qwen3-32B-FP8` distinct from `Qwen/Qwen3-32B`.
-- Divide `latency_ms` by `target_layer_count` for multi-layer context collection. One-layer decode rows are already per layer.
+- Divide `latency_ms` by `target_layer_count` for multi-layer context collection, exactly once. One-layer decode rows are already per layer.
 - Divide `rms_latency_ms` by `target_layer_count` with the same rule as `latency_ms`.
+- If a full-depth sanity point still leaves a repeatable FPM-vs-layerwise gap, identify a model-general missing component or collector mismatch. Do not add target-model FPM deltas as layerwise prediction inputs.
 
 Run focused tests after code changes:
 

@@ -9,6 +9,7 @@ from vllm_deployment import (  # noqa: E402
     VllmDeploymentConfig,
     build_engine_args,
     compare_metadata,
+    gpt_oss_runtime_defaults,
     make_metadata,
 )
 
@@ -79,3 +80,47 @@ def test_metadata_is_json_serializable() -> None:
 
     json.dumps(metadata)
     assert metadata["vllm_config_hash"]
+
+
+def test_gpt_oss_runtime_defaults_use_fp8_kv_on_blackwell() -> None:
+    defaults = gpt_oss_runtime_defaults(
+        model="openai/gpt-oss-120b",
+        system="b300_sxm",
+        disable_prefix_caching=True,
+    )
+
+    assert defaults.kv_cache_dtype == "fp8"
+    assert defaults.disable_prefix_caching is True
+    assert defaults.extra_args == (
+        "--max-cudagraph-capture-size",
+        "2048",
+        "--stream-interval",
+        "20",
+    )
+
+
+def test_gpt_oss_runtime_defaults_do_not_infer_fp8_kv_without_blackwell() -> None:
+    defaults = gpt_oss_runtime_defaults(
+        model="openai/gpt-oss-120b",
+        system="h100",
+        disable_prefix_caching=True,
+    )
+
+    assert defaults.kv_cache_dtype is None
+    assert defaults.disable_prefix_caching is True
+    assert "--max-cudagraph-capture-size" in defaults.extra_args
+
+
+def test_gpt_oss_runtime_defaults_preserve_explicit_overrides() -> None:
+    defaults = gpt_oss_runtime_defaults(
+        model="openai/gpt-oss-120b",
+        system="b300_sxm",
+        disable_prefix_caching=True,
+        kv_cache_dtype="bf16",
+        extra_args=("--stream-interval=7", "--enable-prefix-caching"),
+    )
+
+    assert defaults.kv_cache_dtype == "bf16"
+    assert defaults.disable_prefix_caching is False
+    assert "--stream-interval" not in defaults.extra_args
+    assert "--stream-interval=7" in defaults.extra_args

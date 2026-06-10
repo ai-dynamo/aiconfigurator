@@ -64,6 +64,9 @@ def load_random_prompt_token_config(
     config = read_json_if_exists(model_path / "config.json")
     generation_config = read_json_if_exists(model_path / "generation_config.json")
     tokenizer_config = read_json_if_exists(model_path / "tokenizer_config.json")
+    text_config = config.get("text_config")
+    if not isinstance(text_config, dict):
+        text_config = {}
 
     if allow_transformers_fallback and not config and not tokenizer_config:
         try:
@@ -79,7 +82,11 @@ def load_random_prompt_token_config(
                 f"could not determine random prompt token vocabulary for {model!r}"
             ) from exc
 
-    raw_vocab_size = config.get("vocab_size") or tokenizer_config.get("vocab_size")
+    raw_vocab_size = (
+        config.get("vocab_size")
+        or text_config.get("vocab_size")
+        or tokenizer_config.get("vocab_size")
+    )
     if raw_vocab_size is None:
         raise ValueError(f"could not determine vocab_size for {model!r}")
     vocab_size = int(raw_vocab_size)
@@ -87,7 +94,7 @@ def load_random_prompt_token_config(
         raise ValueError(f"invalid vocab_size for random prompt IDs: {vocab_size}")
 
     excluded: set[int] = set()
-    for payload in (config, generation_config, tokenizer_config):
+    for payload in (config, text_config, generation_config, tokenizer_config):
         for key in SPECIAL_TOKEN_ID_KEYS:
             excluded.update(iter_token_ids(payload.get(key)))
     excluded.update(iter_token_ids(tokenizer_config.get("special_token_ids")))

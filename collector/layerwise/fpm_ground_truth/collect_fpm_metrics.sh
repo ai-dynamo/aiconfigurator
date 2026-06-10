@@ -35,25 +35,35 @@ MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}"
 FPM_PORT="${DYN_FORWARDPASS_METRIC_PORT:-20380}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-6144}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-64}"
-GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
-GPUS="${GPUS:-all}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.9}"
+GPUS="${GPUS:-}"
+TP_SIZE="${TP_SIZE:-}"
+EP_SIZE="${EP_SIZE:-1}"
+ENABLE_EXPERT_PARALLEL="${ENABLE_EXPERT_PARALLEL:-0}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
+if [[ -v DISABLE_PREFIX_CACHING ]]; then
+    PREFIX_CACHING_EXPLICIT=1
+else
+    PREFIX_CACHING_EXPLICIT=0
+fi
 DISABLE_PREFIX_CACHING="${DISABLE_PREFIX_CACHING:-0}"
+KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-}"
 FILE_DISCOVERY_TOUCH_SECONDS="${FILE_DISCOVERY_TOUCH_SECONDS:-2}"
 
 REQUESTS="${REQUESTS:-16}"
 CONCURRENCY="${CONCURRENCY:-32}"
 WORKLOAD_PLAN="${WORKLOAD_PLAN:-sweep}"
-MEASURED_PHASES="${MEASURED_PHASES:-context,decode,mixed}"
-CONTEXT_ISL_VALUES="${CONTEXT_ISL_VALUES:-1,64,256,1024,2048,4096}"
+MEASURED_PHASES="${MEASURED_PHASES:-context,decode}"
+CONTEXT_ISL_VALUES="${CONTEXT_ISL_VALUES:-128,1024,4096}"
 CONTEXT_OSL="${CONTEXT_OSL:-1}"
-CONTEXT_REPEATS="${CONTEXT_REPEATS:-1}"
+CONTEXT_REPEATS="${CONTEXT_REPEATS:-2}"
 CONTEXT_CONCURRENCY="${CONTEXT_CONCURRENCY:-1}"
-DECODE_BATCH_SIZES="${DECODE_BATCH_SIZES:-1,2,4,8,16,32,64}"
-DECODE_PAST_KV="${DECODE_PAST_KV:-1024}"
-DECODE_OSL="${DECODE_OSL:-32}"
+DECODE_BATCH_SIZES="${DECODE_BATCH_SIZES:-1,4,16}"
+DECODE_PAST_KV="${DECODE_PAST_KV:-4096}"
+DECODE_OSL="${DECODE_OSL:-8}"
 DECODE_REPEATS="${DECODE_REPEATS:-1}"
 MIX_REQUESTS="${MIX_REQUESTS:-64}"
 MIX_CONCURRENCY="${MIX_CONCURRENCY:-32}"
@@ -94,7 +104,7 @@ NSYS_SESSION_NAME="${NSYS_SESSION_NAME:-fpm_worker}"
 RUN_ID="${RUN_ID:-dynamo-fpm-$(date +%Y%m%d-%H%M%S)-$$}"
 NAME_PREFIX="${NAME_PREFIX:-${RUN_ID}}"
 RUN_DIR="${RUN_DIR:-/tmp/${RUN_ID}}"
-OUTPUT_CSV="${OUTPUT_CSV:-${RUN_DIR}/fpm_metrics.csv}"
+OUTPUT_CSV="${OUTPUT_CSV:-}"
 DETAIL_OUTPUT_CSV="${DETAIL_OUTPUT_CSV:-}"
 PHASE_OUTPUT_CSV="${PHASE_OUTPUT_CSV:-}"
 WORKLOAD_OUTPUT_CSV="${WORKLOAD_OUTPUT_CSV:-}"
@@ -125,14 +135,24 @@ Options:
   --fpm-port PORT               Raw FPM ZMQ PUB port (default: ${FPM_PORT})
   --max-model-len N             vLLM --max-model-len (default: ${MAX_MODEL_LEN})
   --max-num-seqs N              vLLM --max-num-seqs (default: ${MAX_NUM_SEQS})
+  --max-num-batched-tokens N    vLLM --max-num-batched-tokens (default: ${MAX_NUM_BATCHED_TOKENS})
   --gpu-memory-utilization X    vLLM --gpu-memory-utilization (default: ${GPU_MEMORY_UTILIZATION})
-  --gpus SPEC                   Docker --gpus value for worker (default: ${GPUS})
+  --gpus SPEC                   Docker --gpus value for worker (default: inferred from TP/EP, else device=0)
+  --tp-size N                   Tensor parallel size for this deployment
+  --tp-sizes N                  Alias for --tp-size. Comma lists are not supported by one invocation.
+  --ep-size N                   Expert parallel size. Values >1 enable vLLM expert parallel.
+  --ep-sizes N                  Alias for --ep-size. Comma lists are not supported by one invocation.
+  --enable-expert-parallel      Pass vLLM --enable-expert-parallel
   --enforce-eager               Force vLLM eager mode instead of standard compile/graph behavior
+  --kv-cache-dtype DTYPE        vLLM --kv-cache-dtype. GPT-OSS defaults to fp8 on Blackwell if unset.
   --disable-prefix-caching      Pass --no-enable-prefix-caching instead of standard vLLM behavior
   --file-discovery-touch-seconds N
                                 Host-side mtime refresh interval for local file discovery (default: ${FILE_DISCOVERY_TOUCH_SECONDS})
-  --workload-plan sweep|legacy  Measured request plan (default: ${WORKLOAD_PLAN})
-  --measured-phases CSV         Sweep phases to send: context,decode,mixed (default: ${MEASURED_PHASES})
+  --phases CSV                  Phases to send: context,decode,mixed (default: ${MEASURED_PHASES})
+  --contexts CSV                Context target ISLs (default: ${CONTEXT_ISL_VALUES})
+  --decode-batches CSV          Decode batch sizes/concurrency values (default: ${DECODE_BATCH_SIZES})
+  --workload-plan sweep|legacy  Advanced: measured request plan (default: ${WORKLOAD_PLAN})
+  --measured-phases CSV         Advanced alias for --phases
   --context-isl-values CSV      Context sweep target ISLs (default: ${CONTEXT_ISL_VALUES})
   --context-osl N               Context sweep max_tokens (default: ${CONTEXT_OSL})
   --context-repeats N           Context sweep repetitions (default: ${CONTEXT_REPEATS})
@@ -175,14 +195,14 @@ Options:
   --request-retries N           Retries per request for transient HTTP errors (default: ${REQUEST_RETRIES})
   --request-retry-backoff N     Base seconds between request retries (default: ${REQUEST_RETRY_BACKOFF_SECONDS})
   --request-allow-failures N    Continue if at most N requests fail after retries (default: ${REQUEST_ALLOW_FAILURES})
-  --output PATH                 CSV output path (default: ${OUTPUT_CSV})
-  --detail-output PATH          Full FPM detail CSV path (default: OUTPUT_detail.csv)
-  --phase-output PATH           Classified step CSV path (default: OUTPUT_phase.csv)
-  --workload-output PATH        Request workload CSV path (default: OUTPUT_workload.csv)
-  --warmup-workload-output PATH Warmup workload CSV path (default: OUTPUT_warmup_workload.csv)
-  --metadata-output PATH        Requested/effective vLLM metadata JSON (default: OUTPUT_metadata.json)
+  --output PATH                 Advanced: compact CSV output path (default: RUN_DIR/fpm_metrics.csv)
+  --detail-output PATH          Advanced: full FPM detail CSV path (default: RUN_DIR/fpm_metrics_detail.csv)
+  --phase-output PATH           Advanced: classified step CSV path (default: RUN_DIR/fpm_metrics_phase.csv)
+  --workload-output PATH        Advanced: request workload CSV path (default: RUN_DIR/request_workload.csv)
+  --warmup-workload-output PATH Advanced: warmup workload CSV path (default: RUN_DIR/warmup_workload.csv)
+  --metadata-output PATH        Advanced: requested/effective vLLM metadata JSON (default: RUN_DIR/vllm_metadata.json)
   --effective-config-output PATH
-                                Effective vLLM config JSON (default: OUTPUT_effective_vllm_config.json)
+                                Advanced: effective vLLM config JSON (default: RUN_DIR/effective_vllm_config.json)
   --run-dir DIR                 Shared host run dir (default: ${RUN_DIR})
   --name-prefix NAME            Docker container name prefix (default: ${NAME_PREFIX})
   --skip-requests               Start stack and collector, but do not send sample requests
@@ -194,8 +214,8 @@ Environment aliases:
   DYNAMO_VLLM_IMAGE, MODEL, REQUESTS, CONCURRENCY, MAX_TOKENS, GPUS,
   WARMUP_REQUESTS, WARMUP_CONCURRENCY, WARMUP_ISL_VALUES,
   WARMUP_OSL_VALUES, POST_WARMUP_SECONDS,
-  WORKLOAD_PLAN, MEASURED_PHASES, CONTEXT_ISL_VALUES, CONTEXT_REPEATS,
-  DECODE_BATCH_SIZES, DECODE_PAST_KV, DECODE_OSL, MIX_ISL_VALUES,
+  TP_SIZE, EP_SIZE, ENABLE_EXPERT_PARALLEL, WORKLOAD_PLAN, MEASURED_PHASES,
+  CONTEXT_ISL_VALUES, CONTEXT_REPEATS, DECODE_BATCH_SIZES, DECODE_PAST_KV, DECODE_OSL, MIX_ISL_VALUES,
   MIX_OSL_VALUES, REQUEST_RETRIES, REQUEST_RETRY_BACKOFF_SECONDS,
   REQUEST_ALLOW_FAILURES,
   VARY_ISL_OSL, REQUEST_ENDPOINT, ISL_MIN, ISL_MAX, OSL_MIN, OSL_MAX,
@@ -280,9 +300,112 @@ csv_max() {
     echo "${max_value}"
 }
 
+single_parallel_size() {
+    local flag="$1"
+    local raw="$2"
+    raw="${raw//[[:space:]]/}"
+    if [[ -z "${raw}" ]]; then
+        die "${flag} must not be empty"
+    fi
+    if [[ "${raw}" == *,* ]]; then
+        die "${flag} runs one deployment at a time; use one value, not '${raw}'"
+    fi
+    if ! [[ "${raw}" =~ ^[0-9]+$ ]] || (( raw < 1 )); then
+        die "${flag} must be a positive integer, got '${raw}'"
+    fi
+    echo "${raw}"
+}
+
+infer_docker_gpus() {
+    local count="$1"
+    local idx
+    local devices=()
+    if (( count < 1 )); then
+        die "cannot infer GPUs for non-positive parallel size: ${count}"
+    fi
+    for ((idx = 0; idx < count; idx++)); do
+        devices+=("${idx}")
+    done
+    local joined
+    joined="$(IFS=,; echo "${devices[*]}")"
+    echo "device=${joined}"
+}
+
+is_gpt_oss_model() {
+    local model_lower="${MODEL,,}"
+    [[ "${model_lower}" == *"gpt-oss"* || "${model_lower}" == *"gpt_oss"* ]]
+}
+
+worker_extra_has_flag() {
+    local flag="$1"
+    local extra
+    for extra in "${WORKER_EXTRA_ARGS[@]}"; do
+        if [[ "${extra}" == "${flag}" || "${extra}" == "${flag}="* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 phase_enabled() {
     local phase="$1"
     [[ ",${MEASURED_PHASES}," == *",${phase},"* ]]
+}
+
+detect_system_hint() {
+    if [[ -n "${AIC_SYSTEM:-}" ]]; then
+        printf '%s\n' "${AIC_SYSTEM}"
+        return
+    fi
+    local gpu_name=""
+    local compute_cap=""
+    gpu_name="$(nvidia-smi -i 0 --query-gpu=name --format=csv,noheader 2>/dev/null | head -n 1 || true)"
+    compute_cap="$(nvidia-smi -i 0 --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null | head -n 1 || true)"
+    gpu_name="${gpu_name//[$'\t\r\n']}"
+    compute_cap="${compute_cap//[[:space:]]/}"
+    if [[ -n "${gpu_name}" || -n "${compute_cap}" ]]; then
+        printf '%s compute-cap=%s\n' "${gpu_name}" "${compute_cap}"
+    fi
+}
+
+apply_vllm_runtime_defaults() {
+    local disable_prefix_requested="${DISABLE_PREFIX_CACHING}"
+    if is_gpt_oss_model && [[ "${PREFIX_CACHING_EXPLICIT}" != "1" ]] && ! worker_extra_has_flag "--enable-prefix-caching"; then
+        disable_prefix_requested=1
+    fi
+
+    local helper_args=(
+        runtime-defaults
+        --model "${MODEL}"
+        --system "$(detect_system_hint)"
+    )
+    if [[ -n "${KV_CACHE_DTYPE}" ]]; then
+        helper_args+=(--kv-cache-dtype "${KV_CACHE_DTYPE}")
+    fi
+    if [[ "${disable_prefix_requested}" == "1" ]]; then
+        helper_args+=(--disable-prefix-caching)
+    fi
+    local extra
+    for extra in "${WORKER_EXTRA_ARGS[@]}"; do
+        helper_args+=("--extra-arg=${extra}")
+    done
+
+    local defaults=()
+    local defaults_output
+    if ! defaults_output="$(python3 "${COMMON_DIR}/vllm_deployment.py" "${helper_args[@]}" --format lines)"; then
+        die "failed to resolve shared vLLM runtime defaults"
+    fi
+    mapfile -t defaults <<< "${defaults_output}"
+    WORKER_EXTRA_ARGS=()
+    local key value
+    for line in "${defaults[@]}"; do
+        IFS=$'\t' read -r key value <<< "${line}"
+        case "${key}" in
+            KV_CACHE_DTYPE) KV_CACHE_DTYPE="${value}" ;;
+            DISABLE_PREFIX_CACHING) DISABLE_PREFIX_CACHING="${value}" ;;
+            EXTRA_ARG) WORKER_EXTRA_ARGS+=("${value}") ;;
+        esac
+    done
 }
 
 cleanup() {
@@ -327,19 +450,31 @@ while [[ $# -gt 0 ]]; do
         --fpm-port) FPM_PORT="$2"; shift 2 ;;
         --max-model-len) MAX_MODEL_LEN="$2"; shift 2 ;;
         --max-num-seqs) MAX_NUM_SEQS="$2"; shift 2 ;;
+        --max-num-batched-tokens) MAX_NUM_BATCHED_TOKENS="$2"; shift 2 ;;
         --gpu-memory-utilization) GPU_MEMORY_UTILIZATION="$2"; shift 2 ;;
         --gpus) GPUS="$2"; shift 2 ;;
+        --tp-size) TP_SIZE="$(single_parallel_size "$1" "$2")"; shift 2 ;;
+        --tp-sizes) TP_SIZE="$(single_parallel_size "$1" "$2")"; shift 2 ;;
+        --ep-size) EP_SIZE="$(single_parallel_size "$1" "$2")"; shift 2 ;;
+        --ep-sizes) EP_SIZE="$(single_parallel_size "$1" "$2")"; shift 2 ;;
+        --enable-expert-parallel) ENABLE_EXPERT_PARALLEL=1; shift ;;
         --enforce-eager) ENFORCE_EAGER=1; shift ;;
         --no-enforce-eager) ENFORCE_EAGER=0; shift ;;
-        --disable-prefix-caching) DISABLE_PREFIX_CACHING=1; shift ;;
-        --enable-prefix-caching) DISABLE_PREFIX_CACHING=0; shift ;;
+        --kv-cache-dtype) KV_CACHE_DTYPE="$2"; shift 2 ;;
+        --disable-prefix-caching) DISABLE_PREFIX_CACHING=1; PREFIX_CACHING_EXPLICIT=1; shift ;;
+        --enable-prefix-caching) DISABLE_PREFIX_CACHING=0; PREFIX_CACHING_EXPLICIT=1; shift ;;
         --file-discovery-touch-seconds) FILE_DISCOVERY_TOUCH_SECONDS="$2"; shift 2 ;;
         --workload-plan) WORKLOAD_PLAN="$2"; shift 2 ;;
+        --phases) MEASURED_PHASES="$2"; shift 2 ;;
         --measured-phases) MEASURED_PHASES="$2"; shift 2 ;;
+        --contexts) CONTEXT_ISL_VALUES="$2"; shift 2 ;;
+        --context-values) CONTEXT_ISL_VALUES="$2"; shift 2 ;;
+        --ctx-values) CONTEXT_ISL_VALUES="$2"; shift 2 ;;
         --context-isl-values) CONTEXT_ISL_VALUES="$2"; shift 2 ;;
         --context-osl) CONTEXT_OSL="$2"; shift 2 ;;
         --context-repeats) CONTEXT_REPEATS="$2"; shift 2 ;;
         --context-concurrency) CONTEXT_CONCURRENCY="$2"; shift 2 ;;
+        --decode-batches) DECODE_BATCH_SIZES="$2"; shift 2 ;;
         --decode-batch-sizes) DECODE_BATCH_SIZES="$2"; shift 2 ;;
         --decode-past-kv) DECODE_PAST_KV="$2"; shift 2 ;;
         --decode-osl) DECODE_OSL="$2"; shift 2 ;;
@@ -402,65 +537,43 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "${OUTPUT_CSV}" != /* ]]; then
+if [[ "${RUN_DIR}" != /* ]]; then
+    RUN_DIR="${PWD}/${RUN_DIR}"
+fi
+if [[ -z "${OUTPUT_CSV}" ]]; then
+    OUTPUT_CSV="${RUN_DIR}/fpm_metrics.csv"
+elif [[ "${OUTPUT_CSV}" != /* ]]; then
     OUTPUT_CSV="${PWD}/${OUTPUT_CSV}"
 fi
 if [[ -z "${DETAIL_OUTPUT_CSV}" ]]; then
-    if [[ "${OUTPUT_CSV}" == *.csv ]]; then
-        DETAIL_OUTPUT_CSV="${OUTPUT_CSV%.csv}_detail.csv"
-    else
-        DETAIL_OUTPUT_CSV="${OUTPUT_CSV}.detail.csv"
-    fi
+    DETAIL_OUTPUT_CSV="${RUN_DIR}/fpm_metrics_detail.csv"
 elif [[ "${DETAIL_OUTPUT_CSV}" != /* ]]; then
     DETAIL_OUTPUT_CSV="${PWD}/${DETAIL_OUTPUT_CSV}"
 fi
 if [[ -z "${PHASE_OUTPUT_CSV}" ]]; then
-    if [[ "${OUTPUT_CSV}" == *.csv ]]; then
-        PHASE_OUTPUT_CSV="${OUTPUT_CSV%.csv}_phase.csv"
-    else
-        PHASE_OUTPUT_CSV="${OUTPUT_CSV}.phase.csv"
-    fi
+    PHASE_OUTPUT_CSV="${RUN_DIR}/fpm_metrics_phase.csv"
 elif [[ "${PHASE_OUTPUT_CSV}" != /* ]]; then
     PHASE_OUTPUT_CSV="${PWD}/${PHASE_OUTPUT_CSV}"
 fi
 if [[ -z "${WORKLOAD_OUTPUT_CSV}" ]]; then
-    if [[ "${OUTPUT_CSV}" == *.csv ]]; then
-        WORKLOAD_OUTPUT_CSV="${OUTPUT_CSV%.csv}_workload.csv"
-    else
-        WORKLOAD_OUTPUT_CSV="${OUTPUT_CSV}.workload.csv"
-    fi
+    WORKLOAD_OUTPUT_CSV="${RUN_DIR}/request_workload.csv"
 elif [[ "${WORKLOAD_OUTPUT_CSV}" != /* ]]; then
     WORKLOAD_OUTPUT_CSV="${PWD}/${WORKLOAD_OUTPUT_CSV}"
 fi
 if [[ -z "${WARMUP_WORKLOAD_OUTPUT_CSV}" ]]; then
-    if [[ "${OUTPUT_CSV}" == *.csv ]]; then
-        WARMUP_WORKLOAD_OUTPUT_CSV="${OUTPUT_CSV%.csv}_warmup_workload.csv"
-    else
-        WARMUP_WORKLOAD_OUTPUT_CSV="${OUTPUT_CSV}.warmup_workload.csv"
-    fi
+    WARMUP_WORKLOAD_OUTPUT_CSV="${RUN_DIR}/warmup_workload.csv"
 elif [[ "${WARMUP_WORKLOAD_OUTPUT_CSV}" != /* ]]; then
     WARMUP_WORKLOAD_OUTPUT_CSV="${PWD}/${WARMUP_WORKLOAD_OUTPUT_CSV}"
 fi
 if [[ -z "${METADATA_OUTPUT_JSON}" ]]; then
-    if [[ "${OUTPUT_CSV}" == *.csv ]]; then
-        METADATA_OUTPUT_JSON="${OUTPUT_CSV%.csv}_metadata.json"
-    else
-        METADATA_OUTPUT_JSON="${OUTPUT_CSV}.metadata.json"
-    fi
+    METADATA_OUTPUT_JSON="${RUN_DIR}/vllm_metadata.json"
 elif [[ "${METADATA_OUTPUT_JSON}" != /* ]]; then
     METADATA_OUTPUT_JSON="${PWD}/${METADATA_OUTPUT_JSON}"
 fi
 if [[ -z "${EFFECTIVE_CONFIG_OUTPUT_JSON}" ]]; then
-    if [[ "${OUTPUT_CSV}" == *.csv ]]; then
-        EFFECTIVE_CONFIG_OUTPUT_JSON="${OUTPUT_CSV%.csv}_effective_vllm_config.json"
-    else
-        EFFECTIVE_CONFIG_OUTPUT_JSON="${OUTPUT_CSV}.effective_vllm_config.json"
-    fi
+    EFFECTIVE_CONFIG_OUTPUT_JSON="${RUN_DIR}/effective_vllm_config.json"
 elif [[ "${EFFECTIVE_CONFIG_OUTPUT_JSON}" != /* ]]; then
     EFFECTIVE_CONFIG_OUTPUT_JSON="${PWD}/${EFFECTIVE_CONFIG_OUTPUT_JSON}"
-fi
-if [[ "${RUN_DIR}" != /* ]]; then
-    RUN_DIR="${PWD}/${RUN_DIR}"
 fi
 if [[ -z "${HF_HOME_HOST}" ]]; then
     HF_HOME_HOST="${RUN_DIR}/hf-home"
@@ -554,6 +667,24 @@ if (( REQUEST_ALLOW_FAILURES < 0 )); then
 fi
 if (( FILE_DISCOVERY_TOUCH_SECONDS < 0 )); then
     die "invalid file discovery touch interval: ${FILE_DISCOVERY_TOUCH_SECONDS}"
+fi
+if [[ -n "${TP_SIZE}" ]]; then
+    TP_SIZE="$(single_parallel_size "TP_SIZE" "${TP_SIZE}")"
+fi
+EP_SIZE="$(single_parallel_size "EP_SIZE" "${EP_SIZE}")"
+if (( EP_SIZE > 1 )); then
+    ENABLE_EXPERT_PARALLEL=1
+    if [[ -z "${TP_SIZE}" ]]; then
+        TP_SIZE="${EP_SIZE}"
+    fi
+fi
+if [[ -z "${GPUS}" ]]; then
+    gpu_count="${TP_SIZE:-1}"
+    GPUS="$(infer_docker_gpus "${gpu_count}")"
+fi
+apply_vllm_runtime_defaults
+if [[ "${ENABLE_EXPERT_PARALLEL}" == "1" ]]; then
+    WORKER_EXTRA_ARGS+=(--enable-expert-parallel)
 fi
 
 case "${WORKLOAD_PLAN}" in
@@ -700,8 +831,15 @@ deployment_helper_args() {
         --model "${MODEL}"
         --max-model-len "${MAX_MODEL_LEN}"
         --max-num-seqs "${MAX_NUM_SEQS}"
+        --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}"
         --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
     )
+    if [[ -n "${TP_SIZE}" ]]; then
+        args+=(--tensor-parallel-size "${TP_SIZE}")
+    fi
+    if [[ -n "${KV_CACHE_DTYPE}" ]]; then
+        args+=(--kv-cache-dtype "${KV_CACHE_DTYPE}")
+    fi
     if [[ "${ENFORCE_EAGER}" == "1" ]]; then
         args+=(--enforce-eager)
     fi
@@ -806,7 +944,15 @@ send_request_workload() {
     fi
     if [[ "${VARY_ISL_OSL}" == "1" || "${WORKLOAD_PLAN}" == "sweep" ]]; then
         request_driver_cmd+=(--vary-isl-osl)
-        log "Sending ${request_count} ${phase} variable ISL/OSL requests at concurrency ${concurrency_count} (ISL ${ISL_MIN}..${ISL_MAX}, OSL ${OSL_MIN}..${OSL_MAX})"
+        local isl_desc="${ISL_MIN}..${ISL_MAX}"
+        local osl_desc="${OSL_MIN}..${OSL_MAX}"
+        if [[ -n "${isl_values}" ]]; then
+            isl_desc="${isl_values}"
+        fi
+        if [[ -n "${osl_values}" ]]; then
+            osl_desc="${osl_values}"
+        fi
+        log "Sending ${request_count} ${phase} variable ISL/OSL requests at concurrency ${concurrency_count} (ISL ${isl_desc}, OSL ${osl_desc})"
     else
         log "Sending ${request_count} ${phase} fixed requests at concurrency ${concurrency_count}"
     fi
@@ -858,7 +1004,10 @@ log "vLLM effective config JSON: ${EFFECTIVE_CONFIG_OUTPUT_JSON}"
 if [[ "${NSYS_PROFILE_WORKER}" == "1" ]]; then
     log "Nsight worker profile: ${NSYS_WORKER_OUTPUT_BASE}.nsys-rep"
 fi
-log "Workload plan: ${WORKLOAD_PLAN} (${MEASURED_PHASES})"
+log "Measured phases: ${MEASURED_PHASES}"
+if [[ "${WORKLOAD_PLAN}" != "sweep" ]]; then
+    log "Advanced workload plan: ${WORKLOAD_PLAN}"
+fi
 if [[ "${WARMUP_REQUESTS}" != "0" ]]; then
     log "Warmup workload CSV: ${WARMUP_WORKLOAD_OUTPUT_CSV}"
 fi

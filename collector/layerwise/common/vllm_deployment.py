@@ -48,6 +48,107 @@ class VllmDeploymentConfig:
     extra_args: tuple[str, ...] = ()
 
 
+@dataclasses.dataclass(frozen=True)
+class VllmRuntimeDefaults:
+    kv_cache_dtype: str | None = None
+    disable_prefix_caching: bool = False
+    extra_args: tuple[str, ...] = ()
+
+
+def is_gpt_oss_model(model: str) -> bool:
+    normalized = str(model).lower().replace("_", "-")
+    return "gpt-oss" in normalized
+
+
+def is_blackwell_system(system: str | None) -> bool:
+    if not system:
+        return False
+    normalized = str(system).lower().replace("_", "-")
+    return any(
+        marker in normalized
+        for marker in (
+            "blackwell",
+            "b200",
+            "b300",
+            "gb200",
+            "gb300",
+            "sm100",
+            "sm120",
+            "compute-cap-10",
+            "compute-cap=10",
+            "compute-cap:10",
+            "compute-cap-12",
+            "compute-cap=12",
+            "compute-cap:12",
+        )
+    )
+
+
+def has_cli_flag(args: tuple[str, ...] | list[str], *flags: str) -> bool:
+    for arg in args:
+        for flag in flags:
+            if arg == flag or arg.startswith(f"{flag}="):
+                return True
+    return False
+
+
+def _append_default_flag(args: list[str], flag: str, *aliases: str) -> None:
+    if not has_cli_flag(args, flag, *aliases):
+        args.append(flag)
+
+
+def _append_default_pair(args: list[str], flag: str, value: str) -> None:
+    if not has_cli_flag(args, flag):
+        args.extend([flag, value])
+
+
+def gpt_oss_runtime_defaults(
+    *,
+    model: str,
+    system: str | None = None,
+    kv_cache_dtype: str | None = None,
+    disable_prefix_caching: bool = False,
+    extra_args: tuple[str, ...] | list[str] = (),
+) -> VllmRuntimeDefaults:
+    """Return vLLM recipe defaults that must match across FPM/layerwise.
+
+    vLLM's GPT-OSS Blackwell recipe explicitly opts into FP8 KV cache.  vLLM
+    itself does not infer that from the GPT-OSS checkpoint, so collectors must
+    add the same flag when modeling Blackwell runs.
+    """
+
+    normalized_extra = list(extra_args)
+    resolved_kv_cache_dtype = kv_cache_dtype
+    resolved_disable_prefix_caching = disable_prefix_caching
+    if not is_gpt_oss_model(model):
+        return VllmRuntimeDefaults(
+            kv_cache_dtype=resolved_kv_cache_dtype,
+            disable_prefix_caching=resolved_disable_prefix_caching,
+            extra_args=tuple(normalized_extra),
+        )
+
+    if (
+        not resolved_kv_cache_dtype
+        and not has_cli_flag(normalized_extra, "--kv-cache-dtype")
+        and is_blackwell_system(system)
+    ):
+        resolved_kv_cache_dtype = "fp8"
+
+    _append_default_pair(normalized_extra, "--max-cudagraph-capture-size", "2048")
+    _append_default_pair(normalized_extra, "--stream-interval", "20")
+
+    if resolved_disable_prefix_caching and has_cli_flag(
+        normalized_extra, "--enable-prefix-caching"
+    ):
+        resolved_disable_prefix_caching = False
+
+    return VllmRuntimeDefaults(
+        kv_cache_dtype=resolved_kv_cache_dtype,
+        disable_prefix_caching=resolved_disable_prefix_caching,
+        extra_args=tuple(normalized_extra),
+    )
+
+
 def build_engine_args(config: VllmDeploymentConfig) -> list[str]:
     """Build explicit deployment/workload vLLM args.
 
@@ -304,6 +405,14 @@ def main(argv: list[str] | None = None) -> int:
     cmp_parser.add_argument("--left", required=True)
     cmp_parser.add_argument("--right", required=True)
 
+    runtime = sub.add_parser("runtime-defaults")
+    runtime.add_argument("--model", required=True)
+    runtime.add_argument("--system")
+    runtime.add_argument("--kv-cache-dtype")
+    runtime.add_argument("--disable-prefix-caching", action="store_true")
+    runtime.add_argument("--extra-arg", action="append", default=[])
+    runtime.add_argument("--format", choices=("json", "lines"), default="json")
+
     args = parser.parse_args(argv)
     if args.cmd == "build-args":
         tokens = build_engine_args(_config_from_args(args))
@@ -342,6 +451,23 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"mismatches": mismatches}, indent=2, sort_keys=True), file=sys.stderr)
             return 1
         print("vllm metadata parity: ok")
+        return 0
+    if args.cmd == "runtime-defaults":
+        defaults = gpt_oss_runtime_defaults(
+            model=args.model,
+            system=args.system,
+            kv_cache_dtype=args.kv_cache_dtype,
+            disable_prefix_caching=args.disable_prefix_caching,
+            extra_args=tuple(args.extra_arg or ()),
+        )
+        payload = dataclasses.asdict(defaults)
+        if args.format == "lines":
+            print(f"KV_CACHE_DTYPE\t{defaults.kv_cache_dtype or ''}")
+            print(f"DISABLE_PREFIX_CACHING\t{1 if defaults.disable_prefix_caching else 0}")
+            for extra in defaults.extra_args:
+                print(f"EXTRA_ARG\t{extra}")
+        else:
+            print(json.dumps(_safe_json(payload), indent=2, sort_keys=True))
         return 0
     raise AssertionError(args.cmd)
 

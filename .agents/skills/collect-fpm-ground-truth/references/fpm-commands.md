@@ -19,34 +19,11 @@ DYNAMO_VLLM_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0 \
 POST_REQUEST_COLLECT_SECONDS=5 \
 bash collector/layerwise/fpm_ground_truth/collect_fpm_metrics.sh \
   --model Qwen/Qwen3-32B \
-  --max-model-len 40960 \
-  --max-num-seqs 64 \
-  --gpu-memory-utilization 0.85 \
-  --gpus '"device=0,1"' \
+  --tp-size 2 \
   --run-dir "$RUN_DIR" \
-  --output "$RUN_DIR/fpm_metrics.csv" \
-  --detail-output "$RUN_DIR/fpm_metrics_detail.csv" \
-  --phase-output "$RUN_DIR/fpm_metrics_phase.csv" \
-  --workload-output "$RUN_DIR/request_workload.csv" \
-  --warmup-workload-output "$RUN_DIR/warmup_workload.csv" \
-  --metadata-output "$RUN_DIR/vllm_metadata.json" \
-  --effective-config-output "$RUN_DIR/effective_vllm_config.json" \
-  --workload-plan sweep \
-  --measured-phases context,decode \
-  --context-isl-values 1,64,256,1024,2048,4096,8192,16384 \
-  --context-osl 1 \
-  --context-repeats 8 \
-  --context-concurrency 1 \
-  --decode-batch-sizes 1,2,4,8,16,32,64 \
-  --decode-past-kv 1024 \
-  --decode-osl 32 \
-  --decode-repeats 1 \
   --warmup-requests 4 \
-  --warmup-concurrency 1 \
   --warmup-isl-values 8192,16384,1024,64 \
-  --warmup-osl-values 1 \
-  --post-warmup-seconds 2 \
-  -- --tensor-parallel-size 2
+  --warmup-osl-values 1
 ```
 
 Expected outputs under `$RUN_DIR`:
@@ -60,6 +37,10 @@ Expected outputs under `$RUN_DIR`:
 - `effective_vllm_config.json`
 
 For FP8, set `--model Qwen/Qwen3-32B-FP8`. Keep vLLM defaults unless the experiment explicitly requires an override.
+
+Default measured phases are `context,decode`. Default context shapes are `128,1024,4096`; default decode batches are `1,4,16` at `past_kv=4096`, `osl=8`. Docker GPUs are inferred from `--tp-size`/`--ep-size` (`--tp-size 2` uses `device=0,1`). Use `--phases`, `--contexts`, `--decode-batches`, `--decode-past-kv`, and `--decode-osl` only when narrowing or expanding the default sweep. Add `mixed` to `--phases` only when you specifically need scheduler mixed-step rows.
+
+For `openai/gpt-oss-*`, the wrapper automatically applies the vLLM synthetic-benchmark defaults used by the GPT-OSS recipe: `--kv-cache-dtype fp8` if unset, `--no-enable-prefix-caching` unless explicitly overridden, `--max-cudagraph-capture-size 2048`, and `--stream-interval 20`.
 
 ## Summarize Rows
 

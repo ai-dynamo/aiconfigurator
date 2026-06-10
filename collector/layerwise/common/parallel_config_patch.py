@@ -30,6 +30,13 @@ from config_patch import patch_model_path
 EXPERT_COUNT_KEYS = ("n_routed_experts", "num_experts", "num_local_experts")
 
 
+def _decoder_config_view(config: dict) -> tuple[dict, str]:
+    text_config = config.get("text_config")
+    if isinstance(text_config, dict) and "num_attention_heads" in text_config:
+        return text_config, "text_config."
+    return config, ""
+
+
 def _load_original_config(model_id: str) -> dict:
     """Load the original HF config.json without patching."""
     if os.path.isdir(model_id):
@@ -88,7 +95,8 @@ def patch_for_parallelism(
     if ep is None:
         ep = tp_size
 
-    config = original_config or _load_original_config(model_id)
+    root_config = original_config or _load_original_config(model_id)
+    config, override_prefix = _decoder_config_view(root_config)
     is_moe = any((config.get(k, 0) or 0) > 0 for k in EXPERT_COUNT_KEYS)
 
     if is_moe and attn_tp != moe_tp * ep:
@@ -96,10 +104,16 @@ def patch_for_parallelism(
             f"Constraint violated: attn_tp ({attn_tp}) != moe_tp ({moe_tp}) * ep ({ep})"
         )
 
+    uses_intermediate_as_moe = (
+        is_moe
+        and config.get("model_type") == "gpt_oss"
+        and (config.get("moe_intermediate_size", 0) or 0) <= 0
+    )
+
     # --- Attention / dense MLP ---
     orig_heads = config["num_attention_heads"]
     orig_kv_heads = config.get("num_key_value_heads", orig_heads)
-    orig_inter = config["intermediate_size"]
+    orig_inter = config.get("intermediate_size", 0) or 0
 
     if orig_heads % attn_tp != 0:
         raise ValueError(
@@ -107,11 +121,12 @@ def patch_for_parallelism(
         )
 
     overrides = {
-        "num_attention_heads": orig_heads // attn_tp,
-        "num_key_value_heads": math.ceil(orig_kv_heads / attn_tp),
-        "intermediate_size": orig_inter // attn_tp,
-        "num_hidden_layers": num_hidden_layers,
+        f"{override_prefix}num_attention_heads": orig_heads // attn_tp,
+        f"{override_prefix}num_key_value_heads": math.ceil(orig_kv_heads / attn_tp),
+        f"{override_prefix}num_hidden_layers": num_hidden_layers,
     }
+    if not uses_intermediate_as_moe and orig_inter > 0:
+        overrides[f"{override_prefix}intermediate_size"] = orig_inter // attn_tp
 
     # --- MoE expert parallelism (EP) ---
     for expert_key in EXPERT_COUNT_KEYS:
@@ -122,23 +137,28 @@ def patch_for_parallelism(
                 raise ValueError(
                     f"{expert_key} source={source_experts} not divisible by ep={ep}"
                 )
-            overrides[expert_key] = source_experts // ep
+            overrides[f"{override_prefix}{expert_key}"] = source_experts // ep
 
     # --- MoE tensor parallelism (moe_tp) ---
-    if moe_tp > 1:
-        orig_moe_inter = config.get("moe_intermediate_size", 0)
+    if moe_tp > 1 or uses_intermediate_as_moe:
+        moe_inter_key = "intermediate_size" if uses_intermediate_as_moe else "moe_intermediate_size"
+        orig_moe_inter = config.get(moe_inter_key, 0)
         if orig_moe_inter <= 0:
             raise ValueError(
-                f"moe_tp={moe_tp} but config has no moe_intermediate_size"
+                f"moe_tp={moe_tp} but config has no {moe_inter_key}"
             )
         if orig_moe_inter % moe_tp != 0:
             raise ValueError(
-                f"moe_intermediate_size={orig_moe_inter} not divisible by moe_tp={moe_tp}"
+                f"{moe_inter_key}={orig_moe_inter} not divisible by moe_tp={moe_tp}"
             )
-        overrides["moe_intermediate_size"] = orig_moe_inter // moe_tp
+        overrides[f"{override_prefix}{moe_inter_key}"] = orig_moe_inter // moe_tp
 
     if extra_overrides:
-        overrides.update(extra_overrides)
+        for key, value in extra_overrides.items():
+            if override_prefix and "." not in key:
+                overrides[f"{override_prefix}{key}"] = value
+            else:
+                overrides[key] = value
 
     return patch_model_path(
         model_id,

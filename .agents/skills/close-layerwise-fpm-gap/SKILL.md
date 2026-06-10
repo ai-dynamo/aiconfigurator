@@ -11,6 +11,8 @@ Treat FPM as the ground truth for complete vLLM forward-pass iterations. Treat l
 
 Do not recollect FPM until existing artifacts have been checked. FPM is slow and partial runs can still contain useful `*_phase.csv`, `*_detail.csv`, and `*_workload.csv` rows.
 
+Use raw AIC-vs-FPM error as the accuracy metric. Post-hoc scaled/multiplier columns are diagnostics only; do not report them as predictive accuracy, hide calibration inside a global multiplier, or add target-model FPM deltas as prediction inputs.
+
 Read [references/today-learnings.md](references/today-learnings.md) when working on Qwen3-32B/B300/vLLM 0.20.1, FP8, TP1/TP2/TP8, fused allreduce RMS, or context/decode mismatch analysis.
 
 ## Workflow
@@ -41,11 +43,12 @@ Read [references/today-learnings.md](references/today-learnings.md) when working
    - Map `attn_tp` to `tp_size`.
    - Map `new_tokens` to `seq_len_q`.
    - Map `past_kv` to `seq_len_kv_cache`.
-   - Divide multi-layer context rows by the collected `target_layer_count` before loading into AIC.
+   - Divide multi-layer context rows by the collected `target_layer_count` before loading into AIC, exactly once.
    - Do not divide one-layer decode rows.
    - Keep `rms_latency_ms` with the same division as `latency_ms`.
 
 4. **Compare through AIC, not a hand formula, unless debugging a single component.**
+   - Set `AIC_VLLM_USE_LAYERWISE=1` before importing/running AIC comparison code.
    - If the repo AIC CSV does not yet contain the target rows, create a temporary systems root under the artifact directory and load `PerfDatabase(..., systems_root=temp_root)`.
    - Use AIC’s vLLM layerwise backend so context chunking, per-layer scaling, and fused RMS logic follow the code under test.
    - For TP1, comm should be zero; any gap is compute/runtime/collector/deployment parity.
@@ -68,7 +71,7 @@ Read [references/today-learnings.md](references/today-learnings.md) when working
    - If metadata differs, first run a small targeted layerwise sanity pass matching FPM defaults.
    - If multi-layer extrapolation is suspicious, run a small full-depth or larger-slice point before broad recollection.
    - If FPM failed after preserving output, use complete phases that finished; rerun only the missing phase if needed.
-   - If FPM and layerwise configs match and the gap persists, update AIC modeling or collector normalization before collecting a large grid.
+   - If FPM and layerwise configs match and the gap persists, update AIC modeling or collector normalization before collecting a large grid. Do not "fix" a target model by feeding its own FPM residual back into the prediction.
 
 ## Reporting
 

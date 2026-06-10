@@ -508,6 +508,7 @@ DefaultHFModels = {
     "Qwen/Qwen3.5-27B",
     "Qwen/Qwen3.5-35B-A3B",
     "Qwen/Qwen3.5-397B-A17B",
+    "Qwen/Qwen3.6-35B-A3B",
     # MiMo Models
     "XiaomiMiMo/MiMo-V2-Flash",
     "XiaomiMiMo/MiMo-7B-Base",

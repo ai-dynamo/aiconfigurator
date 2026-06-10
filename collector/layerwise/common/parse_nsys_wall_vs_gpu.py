@@ -1,4 +1,4 @@
-"""Per-milestone step: wall time (host NVTX) vs GPU kernel sum.
+"""Per-target-iteration step: wall time (host NVTX) vs GPU kernel sum.
 
 Wall time = `bench_step::*` NVTX range `end - start` (host timestamps) —
 time from entering `GPUModelRunner.execute_model` to returning.

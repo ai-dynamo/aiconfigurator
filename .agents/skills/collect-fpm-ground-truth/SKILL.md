@@ -20,12 +20,15 @@ Prefer one deployment per sweep. For layerwise gap closure, collect `context,dec
 
 Read [references/fpm-commands.md](references/fpm-commands.md) for the canonical TP=2 command, output interpretation, and failure handling.
 
+The normal CLI should be compact: provide `--run-dir`, `--model`, and `--tp-size`/`--ep-size` when needed. The wrapper infers Docker GPUs from TP/EP unless `--gpus` is explicitly supplied. Standard output files are created under `--run-dir`; use explicit output-path flags only for unusual plumbing.
+
 ## Important Defaults
 
 - Use random prompt token IDs through the completions API. Do not use constant token IDs.
 - Keep `ignore_eos=true` unless the user asks for OSL-as-cap behavior.
 - Use local file-discovery heartbeat. `--file-discovery-touch-seconds 2` fixed prior discovery expiry/503 failures.
-- Quote Docker device selectors as `--gpus '"device=0,1"'`; unquoted `--gpus device=0,1` is rejected by Docker.
+- Omit `--gpus` for the common case. If overriding devices, quote Docker device selectors as `--gpus '"device=0,1"'`; unquoted `--gpus device=0,1` is rejected by Docker.
+- GPT-OSS FPM synthetic sweeps use vLLM's recommended benchmark defaults automatically: FP8 KV cache when unset, prefix caching disabled unless explicitly overridden, `max-cudagraph-capture-size=2048`, and `stream-interval=20`. Treat prefix-cache disablement as a measurement consistency default, not a generic GPT-OSS correctness rule.
 - For context repeats, use medians or trimmed means and inspect first-pass cold outliers before tuning against them.
 - For decode, compare pure decode-only FPM rows by `decode_requests` and `mean_decode_kv_tokens`. Prefer the longest consecutive full-batch block where `decode_tokens == decode_requests`; exclude tail rows after requests finish.
 - For 16k context with vLLM chunked prefill, FPM appears as `8192 @ ctx_kv=0` plus `8192 @ ctx_kv=8192`, not a single `ctx_tokens=16384` row.

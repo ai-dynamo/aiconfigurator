@@ -124,7 +124,7 @@ Step C — Sweep forward pass. For each shape in the sweep matrix, the framework
 - Context (prefill) — workload is `(num_tokens, past_kv)`, with `batch_size = 1`. `num_tokens` is the prefill chunk length. The default vLLM grid is `num_tokens ∈ {1, 2, 4, …, 8192}` × `past_kv ∈ {0, 1, 2, 4, …, 65536}`, filtered by the model's max length. Sweeping `past_kv` matters because chunked prefill produces context iterations with non-zero `past_kv`; modelling only `past_kv = 0` would miss those. Run eager instead of cuda-graph.
 - Generation (decode) — workload is `(num_tokens, past_kv)`, where `num_tokens` is the number of one-token decode requests in the iteration. In the current vLLM collector this is stored as `batch_size = num_tokens` and `new_tokens = 1`. The default vLLM grid is `num_tokens ∈ {1, 2, 4, …, 1024}` × `past_kv ∈ {1, 2, 4, …, 8192}`, subject to a product budget so the run fits in GPU memory. Run under cuda-graph.
 
-Per-framework entrypoint specifics — e.g. vLLM's milestone-step capture under one bench run vs TRT-LLM's separate `config_ctx.yaml` / `config_gen.yaml` invocations — are in Appendix A.
+Per-framework entrypoint specifics — e.g. vLLM's target-iteration capture under one bench run vs TRT-LLM's separate `config_ctx.yaml` / `config_gen.yaml` invocations — are in Appendix A.
 
 #### Caveats currently in the prototype
 
