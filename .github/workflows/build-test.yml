@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Install and run cargo-deny
         working-directory: rust/aiconfigurator-core
         # Default log level (warn) surfaces "license inferred from file" notes
@@ -132,28 +132,40 @@ jobs:
         run: git lfs pull
 
       # --- Docker-based Linux builds -----------------------------------------
+      # build-push-action drives buildx through a docker-container builder
+      # (from setup-buildx-action) so the GitHub Actions cache backend can
+      # store the multi-stage layers — chiefly the rust-toolchain stage, which
+      # otherwise re-compiles cargo-cyclonedx from source on every run.
+      - name: Set up Docker Buildx
+        if: matrix.build_method == 'docker'
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+
       - name: Build aiconfigurator-core wheel (Docker)
         if: matrix.build_method == 'docker'
-        run: |
-          mkdir -p dist
-          docker buildx build \
-            --platform ${{ matrix.platform }} \
-            --build-arg WHEEL_BUILD_BASE=${{ matrix.wheel_base }} \
-            --target wheel-out-rust \
-            --output type=local,dest=./dist \
-            -f docker/Dockerfile \
-            .
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          target: wheel-out-rust
+          build-args: |
+            WHEEL_BUILD_BASE=${{ matrix.wheel_base }}
+          outputs: type=local,dest=./dist
+          # mode=max caches the intermediate rust-toolchain + rust-build stages
+          # (not just the scratch output). scope is per matrix row so the
+          # concurrent rows don't clobber each other's cache.
+          cache-from: type=gha,scope=${{ matrix.tag_label }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.tag_label }}
 
       - name: Build pure-Python aiconfigurator wheel (Docker)
         if: matrix.build_method == 'docker' && matrix.combined_test
-        run: |
-          docker buildx build \
-            --platform ${{ matrix.platform }} \
-            --target wheel-out-pure \
-            --output type=local,dest=./dist \
-            -f docker/Dockerfile \
-            .
-          ls -la dist/
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          target: wheel-out-pure
+          outputs: type=local,dest=./dist
 
       - name: Unified combined-install smoke (rust + python fallback)
         # combined-test installs both wheels into one venv, runs the CLI
@@ -162,13 +174,18 @@ jobs:
         # Linux baseline rows; manylinux2014 / musllinux / macOS / Windows
         # produce their wheel as a deliverable artifact only.
         if: matrix.build_method == 'docker' && matrix.combined_test
-        run: |
-          docker buildx build \
-            --platform ${{ matrix.platform }} \
-            --build-arg WHEEL_BUILD_BASE=${{ matrix.wheel_base }} \
-            --target combined-test \
-            -f docker/Dockerfile \
-            .
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          target: combined-test
+          build-args: |
+            WHEEL_BUILD_BASE=${{ matrix.wheel_base }}
+          # Reuse the cached rust-toolchain layer; no cache-to here so the
+          # smoke-test RUN layers always execute and the scope cache stays
+          # focused on the expensive toolchain build.
+          cache-from: type=gha,scope=${{ matrix.tag_label }}
 
       # --- Native macOS / Windows builds -------------------------------------
       # Rust installed via the official rustup script (no third-party actions).
@@ -241,7 +258,7 @@ jobs:
           PY
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-aiconfigurator-core-${{ matrix.tag_label }}
           path: sbom/sbom-aiconfigurator-core-${{ matrix.tag_label }}.cdx.json
