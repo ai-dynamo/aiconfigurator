@@ -391,7 +391,28 @@ def _deepseek_v4_attention_sol(
         * (hidden_size + q_lora_rank + num_heads * head_dim + head_dim + local_groups * o_lora_rank)
         * gemm_quant_mode.value.memory
     )
-    kv_cache_bytes = attention_pairs * num_heads * head_dim * kvcache_quant_mode.value.memory
+    # DeepSeek-V4 attention uses compressed (MLA / MQA-equivalent) KV cache: each
+    # cache entry stores a single ``head_dim``-sized vector that is shared by all
+    # ``num_heads`` query heads (see ``DeepSeekV4Model.get_kvcache_bytes_per_sequence``
+    # which derives storage as ``head_dim * kvcache_quant_mode.value.memory``).
+    # The previous formula multiplied by ``num_heads``, which double-counted KV
+    # traffic by a factor of ``num_heads`` (128x for DSv4-Pro). The inflated
+    # ``sol_mem`` pinned SOL TPOT above HYBRID at non-trivial decode batch sizes,
+    # reproducible with a single CLI invocation:
+    #
+    #   aiconfigurator cli estimate \
+    #     --model-path deepseek-ai/DeepSeek-V4-Pro --system gb300 \
+    #     --backend sglang --estimate-mode static_gen \
+    #     --isl 8192 --osl 1024 --batch-size 570 --tp 1 --dp 12 --ep 12 \
+    #     --database-mode HYBRID --detail all
+    #
+    # whose "Latency Summary" reported HYBRID at 99.3 ms vs SOL at 216.7 ms
+    # (HYBRID ~2.2x faster than SOL) and the ``generation_attention`` op alone
+    # at HYBRID 52.0 s vs SOL 197.8 s (3.8x violation), an impossible ordering
+    # since SOL is the per-op roofline lower bound. The corrected formula reads
+    # each KV entry once (pairs * head_dim), matching the storage layout and
+    # the underlying kernel's MQA broadcast pattern.
+    kv_cache_bytes = attention_pairs * head_dim * kvcache_quant_mode.value.memory
     rope_bytes = tokens * num_heads * rope_head_dim * fmha_quant_mode.value.memory
 
     sol_math = (
