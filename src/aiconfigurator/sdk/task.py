@@ -15,6 +15,7 @@ import yaml
 from munch import DefaultMunch, Munch
 
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import _apply_model_quant_defaults, check_is_moe, get_model_family
 from aiconfigurator.sdk.pareto_analysis import get_pareto_front
@@ -58,6 +59,23 @@ def _lookup_num_gpus_per_node(system_name: str) -> int | None:
         if isinstance(node, dict) and isinstance(node.get("num_gpus_per_node"), int):
             return int(node["num_gpus_per_node"])
     return None
+
+
+def _effective_prefill_isl(model_path: str, runtime_config: config.RuntimeConfig) -> int:
+    """Text ISL plus VL post-merge image tokens, when the model has a vision encoder."""
+    if runtime_config.num_images_per_request <= 0:
+        return runtime_config.isl
+    try:
+        model_info = get_model_config_from_model_path(model_path)
+    except Exception:
+        logger.debug("Could not resolve model config for VL effective ISL; using text ISL", exc_info=True)
+        return runtime_config.isl
+
+    enc_cfg = model_info.get("extra_params")
+    if not isinstance(enc_cfg, common.VisionEncoderConfig):
+        return runtime_config.isl
+
+    return runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config)
 
 
 class UnsupportedWideepConfigError(ValueError):
@@ -1876,6 +1894,7 @@ class TaskRunner:
             )
 
         logger.info("Task %s: Running disagg pareto", task_config.task_name)
+        prefill_effective_isl = _effective_prefill_isl(task_config.model_path, runtime_config)
         result_df = pa.disagg_pareto(
             model_path=task_config.model_path,
             runtime_config=runtime_config,
@@ -1893,8 +1912,7 @@ class TaskRunner:
             decode_max_num_worker=task_config.replica_config.max_decode_worker,
             max_prefill_gpus=task_config.replica_config.get("max_prefill_gpus"),
             max_decode_gpus=task_config.replica_config.get("max_decode_gpus"),
-            prefill_max_num_tokens=task_config.advanced_tuning_config.prefill_max_batch_size
-            * task_config.runtime_config.isl,
+            prefill_max_num_tokens=task_config.advanced_tuning_config.prefill_max_batch_size * prefill_effective_isl,
             decode_max_num_tokens=task_config.advanced_tuning_config.decode_max_batch_size,
             prefill_latency_correction_scale=task_config.advanced_tuning_config.prefill_latency_correction_scale,
             decode_latency_correction_scale=task_config.advanced_tuning_config.decode_latency_correction_scale,

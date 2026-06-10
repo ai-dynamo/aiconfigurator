@@ -89,7 +89,9 @@ def format_estimate_detail_report(
         section_lines: list[str] = []
         if section == "time":
             section_lines = _format_time_detail(result, sol_result, width=width, top_n_ops=top_n_ops)
-        elif result.summary is not None:
+        elif result.summary is not None and (
+            section == "memory" or result.mode in ("static", "static_ctx", "static_gen")
+        ):
             section_lines = format_summary_detail_report(
                 result.summary,
                 detail=section,
@@ -117,13 +119,23 @@ def _format_raw_summary(result: EstimateResult) -> list[str]:
         ("ttft", "ttft"),
         ("tpot", "tpot"),
         ("request latency", "request_latency"),
+        ("encoder latency", "encoder_latency"),
+        ("encoder memory", "encoder_memory"),
+        ("encoder memory", "(e)memory"),
         ("throughput", "tokens/s"),
         ("seq/s", "seq/s"),
     ):
         value = raw.get(key)
         if value is None:
             continue
-        unit = " ms" if key in {"ttft", "tpot", "request_latency"} else ""
+        if key in {"encoder_latency", "encoder_memory", "(e)memory"} and float(value) <= 0.0:
+            continue
+        if key in {"ttft", "tpot", "request_latency", "encoder_latency"}:
+            unit = " ms"
+        elif key in {"encoder_memory", "(e)memory"}:
+            unit = " GB"
+        else:
+            unit = ""
         lines.append(f"  {label:<16s} {float(value):>12.3f}{unit}")
     return lines
 
@@ -178,13 +190,19 @@ def _format_op_bars(
 
 
 def _format_summary_section(summary: InferenceSummary) -> list[str]:
+    enc_ms = sum(summary._encoder_latency_dict.values())
     ctx_ms = sum(summary._context_latency_dict.values())
     gen_ms = sum(summary._generation_latency_dict.values())
-    total_ms = ctx_ms + gen_ms
+    total_ms = enc_ms + ctx_ms + gen_ms
     rc = summary._runtime_config
     lines = ["Performance Summary"]
     lines.append(f"  total latency       {total_ms:>12.3f} ms")
-    if ctx_ms > 0:
+    if enc_ms > 0:
+        lines.append(f"  encoder            {enc_ms:>12.3f} ms")
+    if ctx_ms > 0 and enc_ms > 0:
+        lines.append(f"  context            {ctx_ms:>12.3f} ms")
+        lines.append(f"  ttft               {enc_ms + ctx_ms:>12.3f} ms")
+    elif ctx_ms > 0:
         lines.append(f"  context (TTFT)      {ctx_ms:>12.3f} ms")
     if gen_ms > 0:
         tpot = 0.0
@@ -246,6 +264,18 @@ def _format_memory_section(summary: InferenceSummary, bar_width: int) -> list[st
         f"{_ascii_bar(total_frac, width=bar_width)}  {total_frac * 100.0:>5.1f}%{free_suffix}"
     )
 
+    if summary._encoder_memory:
+        lines.append("")
+        lines.append("Encoder Memory (included in prefill worker)")
+        enc_total = float(summary._encoder_memory.get("total", 0.0) or 0.0)
+        enc_denom = max(enc_total, 1e-9)
+        for key, value in summary._encoder_memory.items():
+            gib = float(value)
+            frac = gib / enc_denom if key != "total" else 1.0
+            lines.append(
+                f"  {key:<{name_w}s}  {gib:>8.3f} GiB  {_ascii_bar(frac, width=bar_width)}  {frac * 100.0:>5.1f}%"
+            )
+
     if summary._kv_bytes_per_seq is not None and summary._kv_bytes_per_seq > 0:
         kv_per_seq_gib = summary._kv_bytes_per_seq / (1 << 30)
         seq_len_str = f" (seq_len={summary._kv_seq_len_used})" if summary._kv_seq_len_used is not None else ""
@@ -273,11 +303,26 @@ def _format_memory_section(summary: InferenceSummary, bar_width: int) -> list[st
 
 def _format_summary_time_section(summary: InferenceSummary, bar_width: int, top_n: int) -> list[str]:
     lines: list[str] = []
+    enc_total = sum(summary._encoder_latency_dict.values())
     ctx_total = sum(summary._context_latency_dict.values())
     gen_total = sum(summary._generation_latency_dict.values())
 
+    if enc_total > 0:
+        lines.append(f"Encoder phase (total = {enc_total:.3f} ms)")
+        lines.extend(
+            _format_op_bars(
+                summary._encoder_latency_dict,
+                top_n=top_n,
+                bar_width=bar_width,
+                unit="ms",
+                source_dict=summary._encoder_source_dict or None,
+            )
+        )
     if ctx_total > 0:
-        lines.append(f"Context phase (TTFT = {ctx_total:.3f} ms)")
+        if enc_total > 0:
+            lines.append("")
+        ctx_label = "TTFT(+encoder)" if enc_total > 0 else "TTFT"
+        lines.append(f"Context phase ({ctx_label} = {ctx_total:.3f} ms)")
         lines.extend(
             _format_op_bars(
                 summary._context_latency_dict,
@@ -288,7 +333,7 @@ def _format_summary_time_section(summary: InferenceSummary, bar_width: int, top_
             )
         )
     if gen_total > 0:
-        if ctx_total > 0:
+        if enc_total > 0 or ctx_total > 0:
             lines.append("")
         lines.append(f"Generation phase (total = {gen_total:.3f} ms)")
         lines.extend(
@@ -300,25 +345,32 @@ def _format_summary_time_section(summary: InferenceSummary, bar_width: int, top_
                 source_dict=summary._generation_source_dict or None,
             )
         )
-    if ctx_total == 0 and gen_total == 0:
+    if enc_total == 0 and ctx_total == 0 and gen_total == 0:
         lines.append("Time Breakdown")
         lines.append("  <no per-op latency data>")
     return lines
 
 
 def _format_energy_section(summary: InferenceSummary, bar_width: int, top_n: int) -> list[str]:
+    enc = summary._encoder_energy_wms_dict or {}
     ctx = summary._context_energy_wms_dict or {}
     gen = summary._generation_energy_wms_dict or {}
-    if not ctx and not gen:
+    if not enc and not ctx and not gen:
         return ["Energy Breakdown", "  <no energy data>"]
 
     lines: list[str] = []
+    if enc:
+        total_enc = sum(enc.values())
+        lines.append(f"Encoder energy (total = {total_enc:.3f} W·ms, avg P = {summary._encoder_power_avg:.1f} W)")
+        lines.extend(_format_op_bars(enc, top_n=top_n, bar_width=bar_width, unit="W·ms"))
     if ctx:
+        if enc:
+            lines.append("")
         total_ctx = sum(ctx.values())
         lines.append(f"Context energy (total = {total_ctx:.3f} W·ms, avg P = {summary._context_power_avg:.1f} W)")
         lines.extend(_format_op_bars(ctx, top_n=top_n, bar_width=bar_width, unit="W·ms"))
     if gen:
-        if ctx:
+        if enc or ctx:
             lines.append("")
         total_gen = sum(gen.values())
         lines.append(f"Generation energy (total = {total_gen:.3f} W·ms, avg P = {summary._generation_power_avg:.1f} W)")
@@ -327,12 +379,17 @@ def _format_energy_section(summary: InferenceSummary, bar_width: int, top_n: int
 
 
 def _format_source_section(summary: InferenceSummary) -> list[str]:
+    enc = summary._encoder_source_dict or {}
     ctx = summary._context_source_dict or {}
     gen = summary._generation_source_dict or {}
-    if not ctx and not gen:
+    if not enc and not ctx and not gen:
         return ["Data Source Breakdown", "  <no source data>"]
 
     lines = ["Data Source Breakdown (per-op)"]
+    if enc:
+        lines.append(f"  encoder     {_summarize_source_dict(enc)}")
+        for op, src in sorted(enc.items()):
+            lines.append(f"    {op:<30s} {src}")
     if ctx:
         lines.append(f"  context     {_summarize_source_dict(ctx)}")
         for op, src in sorted(ctx.items()):
@@ -349,6 +406,7 @@ def _format_raw_source_from_per_ops(per_ops_source: dict) -> list[str]:
         return ["Data Source Breakdown", "  <no source data>"]
 
     phase_titles = {
+        "encoder": "Encoder (colocated prefill)",
         "mix_step": "Mix Step",
         "genonly_step": "Gen-Only Step",
         "prefill": "Prefill (static_ctx)",
@@ -450,7 +508,7 @@ def _time_sections(
     result: EstimateResult,
     sol_result: EstimateResult | None,
 ) -> list[tuple[str, dict[str, float], dict[str, float] | None, dict[str, str] | None]]:
-    if result.summary is not None:
+    if result.summary is not None and result.mode in ("static", "static_ctx", "static_gen"):
         static_sections = _static_time_sections(result, sol_result)
         if static_sections:
             return static_sections
@@ -461,6 +519,7 @@ def _time_sections(
     sections: list[tuple[str, dict[str, float], dict[str, float] | None, dict[str, str] | None]] = []
 
     for key, title in (
+        ("encoder", "Encoder (colocated prefill)"),
         ("mix_step", "Mix Step"),
         ("genonly_step", "Gen-Only Step"),
         ("prefill", "Prefill (static_ctx)"),
@@ -486,6 +545,18 @@ def _static_time_sections(
 
     sol_summary = sol_result.summary if sol_result is not None else None
     sections: list[tuple[str, dict[str, float], dict[str, float] | None, dict[str, str] | None]] = []
+
+    enc = summary.get_encoder_latency_dict()
+    if enc:
+        sol_enc = sol_summary.get_encoder_latency_dict() if sol_summary is not None else None
+        sections.append(
+            (
+                "Encoder phase",
+                dict(enc),
+                dict(sol_enc) if sol_enc else None,
+                dict(summary.get_encoder_source_dict() or {}),
+            )
+        )
 
     ctx = summary.get_context_latency_dict()
     if ctx:

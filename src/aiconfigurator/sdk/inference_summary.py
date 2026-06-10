@@ -58,7 +58,7 @@ class InferenceSummary:
 
         # raw data dict
         self._memory = {}
-        self._encoder_memory = {}  # encoder-node memory breakdown (VL models only)
+        self._encoder_memory = {}  # colocated encoder memory component breakdown (VL models only)
         self._encoder_latency_dict = {}  # ms
         self._context_latency_dict = {}  # ms
         self._generation_latency_dict = {}  # ms
@@ -67,6 +67,7 @@ class InferenceSummary:
         self._generation_energy_wms_dict = {}  # RENAMED from _generation_power_dict, W·ms
         # Per-op data source ("silicon", "empirical", "sol", or "mixed") populated by
         # base_backend phase helpers from PerformanceResult.source.
+        self._encoder_source_dict: dict[str, str] = {}
         self._context_source_dict: dict[str, str] = {}
         self._generation_source_dict: dict[str, str] = {}
         self._is_oom = None
@@ -164,11 +165,11 @@ class InferenceSummary:
         self._is_kv_cache_oom = kv_gib > kv_budget
 
     def set_encoder_memory(self, memory_dict: dict) -> None:
-        """Set encoder-node memory breakdown (VL models only)."""
+        """Set colocated encoder memory component breakdown (VL models only)."""
         self._encoder_memory = memory_dict
 
     def get_encoder_memory(self) -> dict:
-        """Get encoder-node memory breakdown. Empty dict for text-only models."""
+        """Get colocated encoder memory component breakdown. Empty dict for text-only models."""
         return self._encoder_memory
 
     def set_oom(self, is_oom: bool) -> None:
@@ -413,7 +414,7 @@ class InferenceSummary:
 
         # summary string for display
         perf_info = "Performance Summary:\n"
-        perf_info += f"total latency        {(context_latency + generation_latency):>17.5f} ms\n"
+        perf_info += f"total latency        {(encoder_latency + context_latency + generation_latency):>17.5f} ms\n"
         if encoder_latency != 0:
             perf_info += f"encoder latency:{encoder_latency:>19.5f} ms\n"
         perf_info += f"context latency (ttft):{context_latency:>16.5f} ms\n"
@@ -462,6 +463,14 @@ class InferenceSummary:
     def get_per_ops_source(self) -> dict | None:
         """Get per-operation data-source breakdown, parallel to per_ops_data."""
         return self._per_ops_source
+
+    def set_encoder_source_dict(self, encoder_source_dict: dict) -> None:
+        """Set the per-op data source dict for the encoder phase."""
+        self._encoder_source_dict = encoder_source_dict
+
+    def get_encoder_source_dict(self) -> dict:
+        """Get the per-op data source dict for the encoder phase."""
+        return self._encoder_source_dict
 
     def set_context_source_dict(self, context_source_dict: dict) -> None:
         """Set the per-op data source dict for the context (prefill) phase."""

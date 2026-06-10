@@ -83,6 +83,8 @@ def _build_disagg_summary_dict(
     tokens_s = seq_s * osl
     tokens_s_gpu = tokens_s / num_total_gpus if num_total_gpus > 0 else 0.0
     request_latency = prefill_summary_dict["ttft"] + decode_summary_dict["tpot"] * max(osl - 1, 0)
+    encoder_latency = float(prefill_summary_dict.get("encoder_latency", 0.0))
+    encoder_memory = float(prefill_summary_dict.get("encoder_memory", 0.0))
 
     # Weighted average power
     ttft = prefill_summary_dict["ttft"]
@@ -109,6 +111,7 @@ def _build_disagg_summary_dict(
         "ttft": ttft,
         "tpot": tpot,
         "request_latency": request_latency,
+        "encoder_latency": encoder_latency,
         "seq/s": seq_s,
         "seq/s/gpu": seq_s_gpu,
         "tokens/s": tokens_s,
@@ -151,7 +154,7 @@ def _build_disagg_summary_dict(
         "(e)tp": 0,
         "(e)pp": 0,
         "(e)parallel": "",
-        "(e)memory": 0.0,
+        "(e)memory": encoder_memory,
         "power_w": disagg_power_avg,
     }
 
