@@ -184,20 +184,6 @@ def _count_nvtx_ranges(cur):
     return int(step_count or 0), int(module_count or 0)
 
 
-def _step_of(step_wins_for_tid, host_time):
-    """Binary search host_time against per-tid step windows."""
-    if not step_wins_for_tid:
-        return None
-    starts = [s for s, _, _ in step_wins_for_tid]
-    idx = bisect.bisect_right(starts, host_time) - 1
-    if idx < 0:
-        return None
-    s, e, step = step_wins_for_tid[idx]
-    if s <= host_time < e:
-        return step
-    return None
-
-
 def _step_of_with_starts(step_wins_for_tid, starts, host_time):
     """Binary search host_time against precomputed step-window starts."""
     if not step_wins_for_tid:
@@ -209,26 +195,6 @@ def _step_of_with_starts(step_wins_for_tid, starts, host_time):
     if s <= host_time < e:
         return step
     return None
-
-
-def _innermost_module_at(mod_ivs_for_tid, capture_start, capture_end):
-    """Find innermost Module NVTX range enclosing [capture_start, capture_end].
-
-    "Innermost" = the one with the latest `start` among those enclosing the
-    kernel's capture interval.
-    """
-    best = None
-    best_start = -1
-    # Linear scan; O(N) per kernel. N is typically small (~200-300 intervals).
-    # Binary-search prune on start <= capture_start.
-    starts = [s for s, _, _ in mod_ivs_for_tid]
-    hi = bisect.bisect_right(starts, capture_start)
-    for i in range(hi):
-        s, e, name = mod_ivs_for_tid[i]
-        if s <= capture_start and capture_end <= e and s > best_start:
-            best = name
-            best_start = s
-    return best
 
 
 def _sum_kernels(cur, kernel_drop_re):
@@ -401,7 +367,7 @@ def _sum_nvtx_ranges(cur):
 
 
 def _innermost_module_at_with_start(mod_ivs_for_tid, capture_start, capture_end):
-    """Like _innermost_module_at but returns (start, name) tuple."""
+    """Return the innermost Module NVTX range enclosing the capture interval."""
     best = None
     best_start = -1
     starts = [s for s, _, _ in mod_ivs_for_tid]

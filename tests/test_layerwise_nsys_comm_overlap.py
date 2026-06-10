@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "collector" / "layerwise" / "common"))
+sys.path.insert(0, str(ROOT / "collector" / "layerwise" / "diagnostics"))
 
 from analyze_nsys_comm_overlap import _merge_intervals_ns, _overlap_ns, _union_ns  # noqa: E402
 

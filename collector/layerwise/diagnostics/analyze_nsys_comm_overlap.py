@@ -17,6 +17,9 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Iterable
 
+_COMMON_DIR = Path(__file__).resolve().parents[1] / "common"
+sys.path.insert(0, str(_COMMON_DIR))
+
 from parse_nsys_step_sweep import (
     _DEFAULT_KERNEL_DROP,
     _GLOBAL_PID_MASK,

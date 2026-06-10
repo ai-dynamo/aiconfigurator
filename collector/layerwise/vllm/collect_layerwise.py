@@ -608,26 +608,6 @@ def _max_num_batched_tokens_for_datapoints(
     )
 
 
-def _validate_ctx_past_kv(
-    datapoints: list[DataPoint],
-    max_num_batched_tokens: int,
-    *,
-    ctx_driver: str,
-) -> None:
-    if ctx_driver not in {"chunked", "prefix_cache"}:
-        raise ValueError(f"unsupported ctx driver: {ctx_driver}")
-    if ctx_driver == "prefix_cache":
-        return
-    for dp in datapoints:
-        if dp.phase != "ctx" or dp.past_kv == 0:
-            continue
-        if dp.past_kv % max_num_batched_tokens != 0:
-            raise ValueError(
-                "ctx past_kv measurements must start on a chunk boundary: "
-                f"past_kv={dp.past_kv}, max_num_batched_tokens={max_num_batched_tokens}"
-            )
-
-
 def _model_max_position_embeddings(config: dict[str, Any]) -> int | None:
     config = _decoder_config_view(config)
     for key in ("max_position_embeddings", "model_max_length", "seq_length", "n_positions"):
@@ -713,16 +693,6 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
             )
         if not datapoints:
             raise ValueError("all datapoints exceed the model's configured max length")
-    _validate_ctx_past_kv(
-        datapoints,
-        _max_num_batched_tokens_for_datapoints(
-            datapoints,
-            args.min_max_num_batched_tokens,
-            gen_driver=getattr(args, "gen_driver", "prefix_cache"),
-        ),
-        ctx_driver=getattr(args, "ctx_driver", "prefix_cache"),
-    )
-
     work_units: list[WorkUnit] = []
     for tp in tp_sizes:
         if is_moe and tp % args.moe_tp != 0:
@@ -1105,10 +1075,7 @@ class Scheduler:
         runtime_defaults = gpt_oss_runtime_defaults(
             model=unit.row_base["model"],
             system=unit.row_base["system"],
-            disable_prefix_caching=not (
-                (has_ctx and self.args.ctx_driver == "prefix_cache")
-                or has_gen_prefix_cache
-            ),
+            disable_prefix_caching=not (has_ctx or has_gen_prefix_cache),
             extra_args=tuple(extra_vllm_args),
         )
         extra_vllm_args = list(runtime_defaults.extra_args)
@@ -1122,9 +1089,8 @@ class Scheduler:
             extra_vllm_args, "--no-enable-prefix-caching"
         ):
             extra_vllm_args.append("--no-enable-prefix-caching")
-        if (
-            ((has_ctx and self.args.ctx_driver == "prefix_cache") or has_gen_prefix_cache)
-            and not has_cli_flag(extra_vllm_args, "--enable-prefix-caching", "--no-enable-prefix-caching")
+        if (has_ctx or has_gen_prefix_cache) and not has_cli_flag(
+            extra_vllm_args, "--enable-prefix-caching", "--no-enable-prefix-caching"
         ):
             extra_vllm_args.append("--enable-prefix-caching")
 
@@ -1141,7 +1107,6 @@ class Scheduler:
             "min_max_num_batched_tokens": self.args.min_max_num_batched_tokens,
             "measurement_mode": self.args.measurement_mode,
             "compilation_config_json": self.args.compilation_config_json,
-            "ctx_driver": self.args.ctx_driver,
             "ctx_warmup_runs": self.args.ctx_warmup_runs,
             "ctx_measured_runs": self.args.ctx_measured_runs,
             "gen_driver": self.args.gen_driver,
@@ -1791,18 +1756,10 @@ def _set_marker_state(
 def _ctx_marker_iteration(
     dp: DataPoint,
     max_num_batched_tokens: int,
-    *,
-    ctx_driver: str = "chunked",
 ) -> int:
-    if ctx_driver not in {"chunked", "prefix_cache"}:
-        raise ValueError(f"unsupported ctx driver: {ctx_driver}")
     if max_num_batched_tokens < 1:
         raise ValueError(f"max_num_batched_tokens must be >= 1, got {max_num_batched_tokens}")
-    if ctx_driver == "prefix_cache":
-        return 1
-    if dp.past_kv == 0:
-        return 1
-    return int(dp.past_kv // max_num_batched_tokens) + 1
+    return 1
 
 
 def run_worker(spec_path: Path) -> None:
@@ -1836,10 +1793,9 @@ def run_worker(spec_path: Path) -> None:
         int(spec.get("min_max_num_batched_tokens", 1)),
         gen_driver=str(spec.get("gen_driver", "prefix_cache")),
     )
-    ctx_driver = str(spec.get("ctx_driver", "chunked"))
     iterations = {1}
     iterations.update(
-        _ctx_marker_iteration(dp, max_num_batched_tokens, ctx_driver=ctx_driver)
+        _ctx_marker_iteration(dp, max_num_batched_tokens)
         for dp in datapoints
         if dp.phase == "ctx"
     )
@@ -1913,7 +1869,7 @@ def run_worker(spec_path: Path) -> None:
         spec.get("gen_driver", "prefix_cache")
     ) == "prefix_cache"
     if (
-        (has_ctx and ctx_driver == "prefix_cache") or has_gen_prefix_cache
+        has_ctx or has_gen_prefix_cache
     ) and runtime_vllm_config is not None:
         cache_config = getattr(runtime_vllm_config, "cache_config", None)
         if getattr(cache_config, "enable_prefix_caching", None) is False:
@@ -1975,7 +1931,6 @@ def run_worker(spec_path: Path) -> None:
                     warmup_runs=int(spec.get("ctx_warmup_runs", 0)),
                     measured_runs=int(spec.get("ctx_measured_runs", 1)),
                     max_num_batched_tokens=max_num_batched_tokens,
-                    driver=ctx_driver,
                 )
 
             gen_points = [dp for dp in datapoints if dp.phase == "gen"]
@@ -2033,14 +1988,11 @@ def _worker_run_ctx(
     warmup_runs: int = 0,
     measured_runs: int = 1,
     max_num_batched_tokens: int = 1,
-    driver: str = "chunked",
 ) -> None:
     if warmup_runs < 0:
         raise ValueError(f"warmup_runs must be >= 0, got {warmup_runs}")
     if measured_runs < 1:
         raise ValueError(f"measured_runs must be >= 1, got {measured_runs}")
-    if driver not in {"chunked", "prefix_cache"}:
-        raise ValueError(f"unsupported ctx driver: {driver}")
     sampling_params = sampling_cls(
         temperature=1.0,
         top_p=1.0,
@@ -2054,11 +2006,9 @@ def _worker_run_ctx(
         dpid = _worker_datapoint_id(work_unit_id, dp)
         if dpid in pruned:
             continue
-        input_len = dp.past_kv + dp.new_tokens
         marker_iteration = _ctx_marker_iteration(
             dp,
             max_num_batched_tokens,
-            ctx_driver=driver,
         )
         _set_marker_state(
             marker_mod,
@@ -2069,76 +2019,48 @@ def _worker_run_ctx(
             past=dp.past_kv,
         )
         try:
-            if driver == "prefix_cache":
-                prefix_key = (int(dp.batch_size), int(dp.past_kv))
-                for run_idx in range(warmup_runs):
-                    fill_prefix = dp.past_kv > 0 and prefix_key not in filled_prefixes
-                    _run_prefix_cached_ctx_iteration(
-                        llm,
-                        sampling_params,
-                        dp,
-                        work_unit_id=work_unit_id,
-                        run_idx=run_idx,
-                        warmup=True,
-                        fill_prefix=fill_prefix,
-                        token_config=prompt_token_config,
-                        active_iteration="",
-                        marker_mod=marker_mod,
-                    )
-                    if fill_prefix:
-                        filled_prefixes.add(prefix_key)
-                for run_idx in range(measured_runs):
-                    fill_prefix = dp.past_kv > 0 and prefix_key not in filled_prefixes
-                    _set_marker_state(
-                        marker_mod,
-                        active_iterations=str(marker_iteration),
-                        phase="ctx",
-                        step=dp.new_tokens,
-                        bs=dp.batch_size,
-                        past=dp.past_kv,
-                        run=run_idx,
-                    )
-                    _run_prefix_cached_ctx_iteration(
-                        llm,
-                        sampling_params,
-                        dp,
-                        work_unit_id=work_unit_id,
-                        run_idx=run_idx,
-                        warmup=False,
-                        fill_prefix=fill_prefix,
-                        token_config=prompt_token_config,
-                        active_iteration=str(marker_iteration),
-                        marker_mod=marker_mod,
-                    )
-                    if fill_prefix:
-                        filled_prefixes.add(prefix_key)
-            else:
-                _set_marker_state(marker_mod, active_iterations="", phase="ctx")
-                for _ in range(warmup_runs):
-                    _run_generate(
-                        llm,
-                        sampling_params,
-                        batch_size=dp.batch_size,
-                        input_len=input_len,
-                        token_config=prompt_token_config,
-                    )
-                for run_idx in range(measured_runs):
-                    _set_marker_state(
-                        marker_mod,
-                        active_iterations=str(marker_iteration),
-                        phase="ctx",
-                        step=dp.new_tokens,
-                        bs=dp.batch_size,
-                        past=dp.past_kv,
-                        run=run_idx,
-                    )
-                    _run_generate(
-                        llm,
-                        sampling_params,
-                        batch_size=dp.batch_size,
-                        input_len=input_len,
-                        token_config=prompt_token_config,
-                    )
+            prefix_key = (int(dp.batch_size), int(dp.past_kv))
+            for run_idx in range(warmup_runs):
+                fill_prefix = dp.past_kv > 0 and prefix_key not in filled_prefixes
+                _run_prefix_cached_ctx_iteration(
+                    llm,
+                    sampling_params,
+                    dp,
+                    work_unit_id=work_unit_id,
+                    run_idx=run_idx,
+                    warmup=True,
+                    fill_prefix=fill_prefix,
+                    token_config=prompt_token_config,
+                    active_iteration="",
+                    marker_mod=marker_mod,
+                )
+                if fill_prefix:
+                    filled_prefixes.add(prefix_key)
+            for run_idx in range(measured_runs):
+                fill_prefix = dp.past_kv > 0 and prefix_key not in filled_prefixes
+                _set_marker_state(
+                    marker_mod,
+                    active_iterations=str(marker_iteration),
+                    phase="ctx",
+                    step=dp.new_tokens,
+                    bs=dp.batch_size,
+                    past=dp.past_kv,
+                    run=run_idx,
+                )
+                _run_prefix_cached_ctx_iteration(
+                    llm,
+                    sampling_params,
+                    dp,
+                    work_unit_id=work_unit_id,
+                    run_idx=run_idx,
+                    warmup=False,
+                    fill_prefix=fill_prefix,
+                    token_config=prompt_token_config,
+                    active_iteration=str(marker_iteration),
+                    marker_mod=marker_mod,
+                )
+                if fill_prefix:
+                    filled_prefixes.add(prefix_key)
         except Exception as exc:
             kind = _classify_exception(exc)
             if kind == "oom":
@@ -2307,7 +2229,7 @@ def _worker_run_gen(
     datapoints: list[DataPoint],
     *,
     prompt_token_config: RandomPromptTokenConfig,
-    driver: str = "prefill",
+    driver: str = "prefix_cache",
     warmup_runs: int = 0,
     measured_runs: int = 1,
 ) -> None:
@@ -2319,11 +2241,13 @@ def _worker_run_gen(
     for dp in datapoints:
         by_batch.setdefault(dp.batch_size, []).append(dp)
     max_past = max(dp.past_kv for dp in datapoints)
+    if driver not in {"prefill", "prefix_cache"}:
+        raise ValueError(f"unsupported gen driver: {driver}")
     sampling_params = sampling_cls(
         temperature=1.0,
         top_p=1.0,
         ignore_eos=True,
-        max_tokens=2 if driver in {"prefill", "prefix_cache"} else max_past + 1,
+        max_tokens=2,
         detokenize=False,
     )
     fill_sampling_params = sampling_cls(
@@ -2333,8 +2257,6 @@ def _worker_run_gen(
         max_tokens=1,
         detokenize=False,
     )
-    if driver not in {"decode_sweep", "prefill", "prefix_cache"}:
-        raise ValueError(f"unsupported gen driver: {driver}")
     if driver == "prefix_cache":
         max_batch_size = max(by_batch)
         fill_dp = DataPoint("gen", max_batch_size, 1, max_past)
@@ -2428,36 +2350,6 @@ def _worker_run_gen(
                 _set_marker_state(marker_mod, active_iterations="", phase="gen")
             _worker_append_event(status_path, "batch_finished", work_unit_id=work_unit_id, batch_size=batch_size)
             continue
-        # Gen datapoint starts/completions are emitted by vllm_step_marker at
-        # each target iteration.  One generate call intentionally covers many past_kv
-        # datapoints for the same batch size.
-        _set_marker_state(marker_mod, active_iterations="", phase="gen")
-        try:
-            for _ in range(warmup_runs):
-                _run_generate(
-                    llm,
-                    sampling_params,
-                    batch_size=batch_size,
-                    input_len=1,
-                    token_config=prompt_token_config,
-                )
-            for run_idx in range(measured_runs):
-                _set_marker_state(
-                    marker_mod,
-                    active_iterations=sorted({dp.past_kv + 1 for dp in by_batch[batch_size]}),
-                    phase="gen",
-                    run=run_idx,
-                )
-                _run_generate(
-                    llm,
-                    sampling_params,
-                    batch_size=batch_size,
-                    input_len=1,
-                    token_config=prompt_token_config,
-                )
-        finally:
-            _set_marker_state(marker_mod, active_iterations="", phase="gen")
-        _worker_append_event(status_path, "batch_finished", work_unit_id=work_unit_id, batch_size=batch_size)
 
 
 def _worker_empty_cache() -> None:
@@ -2585,16 +2477,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ctx-new-tokens", default=",".join(map(str, CTX_NEW_TOKENS)))
     parser.add_argument("--ctx-past-kv", default=",".join(map(str, CTX_PAST_KV)))
     parser.add_argument(
-        "--ctx-driver",
-        choices=("chunked", "prefix_cache"),
-        default="prefix_cache",
-        help=(
-            "Context measurement driver. chunked marks later chunks in one long prefill and "
-            "requires past_kv to be a max_num_batched_tokens boundary; prefix_cache replays "
-            "a cached prefix so arbitrary past_kv grid points can be requested."
-        ),
-    )
-    parser.add_argument(
         "--no-filter-model-max-len",
         action="store_true",
         help="Do not skip datapoints that exceed the model config's max sequence length.",
@@ -2667,11 +2549,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--gen-driver",
-        choices=("decode_sweep", "prefill", "prefix_cache"),
+        choices=("prefill", "prefix_cache"),
         default="prefix_cache",
         help=(
-            "Generation driver. decode_sweep reaches past_kv by generating from a 1-token prompt; "
-            "prefill measures the first decode after a prompt of length past_kv; prefix_cache "
+            "Generation driver. prefill measures the first decode after a prompt of length past_kv; prefix_cache "
             "initializes KV through vLLM prefix caching and then measures the first cached decode."
         ),
     )

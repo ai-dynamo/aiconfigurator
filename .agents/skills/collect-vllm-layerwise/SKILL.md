@@ -29,7 +29,7 @@ Read [references/layerwise-commands.md](references/layerwise-commands.md) for th
 - Context collection used for AIC should use the established 16-layer path unless the user explicitly prioritizes speed over accuracy. Use `--latency-source gpu_capped`, `--ctx-warmup-runs 2`, `--ctx-measured-runs 6`, and `--ctx-repeat-aggregation trimmed_mean`.
 - Context should be a 2D grid: `new_tokens` up to 8192 and `past_kv` up to 65536, filtered by model max length. Include `new_tokens=8192,past_kv=8192` for vLLM chunked 16k behavior.
 - For FP8 checkpoints, do not force KV FP8 unless that is the experiment. `--kv-quant fp8` forces `--kv-cache-dtype fp8`; default vLLM FP8 checkpoint behavior is measured with `--kv-quant bf16` so KV dtype remains `auto`.
-- GPT-OSS layerwise specs automatically mirror vLLM's GPT-OSS runtime defaults for FP8 KV cache, CUDA graph capture size, and stream interval. Do not pass real `--tensor-parallel-size` or `--enable-expert-parallel` through layerwise; TP/EP are simulated/added analytically. Prefix caching is disabled only for decode-only or `ctx_driver=chunked` runs, because the default `ctx_driver=prefix_cache` needs prefix caching to create arbitrary `past_kv` context points.
+- GPT-OSS layerwise specs automatically mirror vLLM's GPT-OSS runtime defaults for FP8 KV cache, CUDA graph capture size, and stream interval. Do not pass real `--tensor-parallel-size` or `--enable-expert-parallel` through layerwise; TP/EP are simulated/added analytically. Context collection always uses prefix caching to create arbitrary `past_kv` points; decode-only `--gen-driver prefill` may disable prefix caching when no context points are present.
 
 ## Convert To AIC Data
 

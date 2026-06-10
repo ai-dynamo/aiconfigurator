@@ -92,11 +92,6 @@ def has_cli_flag(args: tuple[str, ...] | list[str], *flags: str) -> bool:
     return False
 
 
-def _append_default_flag(args: list[str], flag: str, *aliases: str) -> None:
-    if not has_cli_flag(args, flag, *aliases):
-        args.append(flag)
-
-
 def _append_default_pair(args: list[str], flag: str, value: str) -> None:
     if not has_cli_flag(args, flag):
         args.extend([flag, value])

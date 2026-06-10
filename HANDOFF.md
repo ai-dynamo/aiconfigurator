@@ -225,7 +225,7 @@ Implemented the deployment-parity hardening items:
 - Added shared vLLM deployment metadata/config helpers in `collector/layerwise/common/vllm_deployment.py`.
 - `collect_layerwise.py` now has `--measurement-mode {deployment-parity,attribution}`. Deployment parity leaves vLLM compile/CUDA graph defaults intact and uses `CUDAGraphWrapper` for GEN; attribution remains available for module NVTX work.
 - FPM collection now uses the same vLLM arg helper, writes requested/effective vLLM config metadata, and can optionally start the worker under Nsight Systems with delayed start/stop around measured traffic.
-- Added `collector/layerwise/common/analyze_nsys_comm_overlap.py` for Nsight SQLite comm/compute overlap summaries.
+- Added `collector/layerwise/diagnostics/analyze_nsys_comm_overlap.py` for Nsight SQLite comm/compute overlap summaries.
 - `layerwise_perf.csv` now carries measurement metadata columns: `measurement_mode` and `attribution_target`.
 - `VLLMBackend` now treats pure `GEN` deployment-parity rows as the decode prediction and no longer adds the inherited standalone custom-allreduce table to pure decode. Context and mixed estimates still keep explicit TP allreduce because those paths use CTX layer attribution rows.
 

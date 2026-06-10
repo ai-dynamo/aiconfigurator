@@ -52,7 +52,6 @@ def _args(tmp_path):
         extra_vllm_arg=[],
         latency_source="span",
         min_max_num_batched_tokens=1,
-        ctx_driver="prefix_cache",
         ctx_warmup_runs=0,
         ctx_measured_runs=1,
         ctx_repeat_aggregation="median",
@@ -87,7 +86,6 @@ def _build_args(tmp_path, **overrides):
         phases="both",
         ctx_new_tokens="1",
         ctx_past_kv="0",
-        ctx_driver="prefix_cache",
         no_filter_model_max_len=False,
         gen_batch_sizes="1",
         gen_past_kv="1",
@@ -112,6 +110,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(args.gen_measured_runs, 6)
         self.assertEqual(args.gen_repeat_aggregation, "trimmed_mean")
         self.assertEqual(args.gen_driver, "prefix_cache")
+        self.assertFalse(hasattr(args, "ctx_driver"))
         self.assertEqual(args.nsys_capture, "cuda_profiler_api")
 
     def test_datapoint_ids_and_parse_keys_are_stable(self):
@@ -530,9 +529,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             unit = _unit(tmp_path, [cl.DataPoint("ctx", 1, 128, 4096)])
             unit.row_base["model"] = "openai/gpt-oss-120b"
             unit.row_base["system"] = "b300_sxm"
-            args = _args(tmp_path)
-            args.ctx_driver = "prefix_cache"
-            scheduler = cl.Scheduler(args, [unit])
+            scheduler = cl.Scheduler(_args(tmp_path), [unit])
 
             spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
 
@@ -543,27 +540,11 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             unit = _unit(tmp_path, [cl.DataPoint("ctx", 1, 128, 0)])
-            args = _args(tmp_path)
-            args.ctx_driver = "prefix_cache"
-            scheduler = cl.Scheduler(args, [unit])
+            scheduler = cl.Scheduler(_args(tmp_path), [unit])
 
             spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
 
             self.assertIn("--enable-prefix-caching", spec["extra_vllm_args"])
-
-    def test_scheduler_disables_prefix_cache_for_gpt_oss_chunked_context(self):
-        with tempfile.TemporaryDirectory() as td:
-            tmp_path = Path(td)
-            unit = _unit(tmp_path, [cl.DataPoint("ctx", 1, 128, 0)])
-            unit.row_base["model"] = "openai/gpt_oss_120b"
-            unit.row_base["system"] = "b300_sxm"
-            args = _args(tmp_path)
-            args.ctx_driver = "chunked"
-            scheduler = cl.Scheduler(args, [unit])
-
-            spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
-
-            self.assertIn("--no-enable-prefix-caching", spec["extra_vllm_args"])
 
     def test_scheduler_preserves_explicit_gpt_oss_vllm_overrides(self):
         with tempfile.TemporaryDirectory() as td:
@@ -715,17 +696,6 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
         self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "32768")
 
-    def test_engine_tokens_keep_decode_sweep_budget_small(self):
-        tokens = cl._engine_tokens(
-            model_dir="/model",
-            datapoints=[cl.DataPoint("gen", 8, 1, 4096)],
-            restrict_cudagraph_sizes=True,
-            extra_vllm_args=[],
-            gen_driver="decode_sweep",
-        )
-
-        self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "8")
-
     def test_engine_tokens_prefix_cache_driver_keeps_decode_budget_small(self):
         tokens = cl._engine_tokens(
             model_dir="/model",
@@ -765,12 +735,11 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(tokens[tokens.index("--max-model-len") + 1], "16385")
         self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "8192")
 
-    def test_context_marker_iteration_selects_later_prefill_chunk(self):
+    def test_context_marker_iteration_uses_prefix_cache_measure_step(self):
         self.assertEqual(
             cl._ctx_marker_iteration(
                 cl.DataPoint("ctx", 1, 8192, 0),
                 8192,
-                ctx_driver="chunked",
             ),
             1,
         )
@@ -778,31 +747,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             cl._ctx_marker_iteration(
                 cl.DataPoint("ctx", 1, 8192, 8192),
                 8192,
-                ctx_driver="chunked",
-            ),
-            2,
-        )
-        self.assertEqual(
-            cl._ctx_marker_iteration(
-                cl.DataPoint("ctx", 1, 8192, 8192),
-                8192,
-                ctx_driver="prefix_cache",
             ),
             1,
-        )
-
-    def test_context_past_kv_must_start_on_chunk_boundary(self):
-        with self.assertRaisesRegex(ValueError, "chunk boundary"):
-            cl._validate_ctx_past_kv(
-                [cl.DataPoint("ctx", 1, 512, 1024)],
-                8192,
-                ctx_driver="chunked",
-            )
-
-        cl._validate_ctx_past_kv(
-            [cl.DataPoint("ctx", 1, 512, 1024)],
-            8192,
-            ctx_driver="prefix_cache",
         )
 
     def test_model_max_len_filter_accounts_for_generated_token(self):
