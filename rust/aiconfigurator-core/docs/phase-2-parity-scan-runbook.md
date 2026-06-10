@@ -77,31 +77,64 @@ results are checkpointed per-entry into the SQLite file, and re-running skips
 completed rows. Run **probe-only first** (fast, catches regressions/large
 drift), triage, then run the slow **pareto** phase.
 
-### 4.0 Memory safety (the flag that prevents OOM)
+### 4.0 Memory safety: recycle at the PROCESS boundary, not in the pool
 
-`--max-tasks-per-child N` recycles each worker process after `N` entries, so
-the per-process perf-DB cache is freed instead of growing unbounded. **Always
-set it.** Tune workers to RAM (each worker ≈ a few GB once warm):
+Long-lived workers leak RSS even though the perf DB is tiny (~76 MB total):
+the pareto `cli_default` sweep produces large pandas/numpy intermediates, and
+multi-threaded BLAS/rayon code inflates **glibc malloc arenas** that are never
+returned to the OS while the process lives. On a long pareto run this climbs
+until it can OOM or even shut the host down. So you DO need to recycle — but
+do it the right way.
 
-| Host RAM | Probe phase | Pareto phase (heavier) |
+> **WARNING — do NOT use a finite `--max-tasks-per-child`.** This workload is
+> homogeneous, so all `W` workers reach the `W × N` task boundary at the same
+> instant and try to recycle simultaneously, triggering a CPython
+> `ProcessPoolExecutor` recycle **deadlock** (main thread parks in
+> `futex_do_wait`, all workers gone, frozen indefinitely). It is deterministic
+> and memory-independent (observed at 5 GB used / 0 swap / load 0.07). Lowering
+> `--workers` does NOT fix it — it just moves the boundary. **Always pass
+> `--max-tasks-per-child 0`** (the documented "never recycle in-pool" mode).
+
+Recycle at the **process boundary** instead: run the scan in `--limit N`
+shards. Each shard runs a fresh process that exits after `N` entries, returning
+**all** memory to the OS — worker arenas, main-process accumulation, everything
+— which is more thorough than in-pool recycling and cannot deadlock. The DB is
+checkpointed, so the next shard resumes from where the last stopped.
+
+Also cap library threads — 16 workers already saturate the cores, so per-worker
+BLAS/rayon threads are pure oversubscription and the main arena-bloat driver:
+
+```bash
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+       RAYON_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+```
+
+Tune workers + shard size to RAM (always with `--max-tasks-per-child 0`):
+
+| Host RAM | Probe (one shot) | Pareto (`--limit` shard loop) |
 |---|---|---|
-| 48 GB | `--workers 4 --max-tasks-per-child 25` | `--workers 3 --max-tasks-per-child 15` |
-| 64 GB | `--workers 8 --max-tasks-per-child 25` | `--workers 6 --max-tasks-per-child 20` |
-| 128 GB | `--workers 16 --max-tasks-per-child 50` | `--workers 12 --max-tasks-per-child 25` |
+| 48 GB | `--workers 4` | `--workers 4 --limit 100` |
+| 64 GB | `--workers 8` | `--workers 8 --limit 150` |
+| 128 GB | `--workers 16` | `--workers 12 --limit 200` |
 
-If you ever see workers hang with no progress in the status line, or
-`BrokenExecutor` in the log: you are OOM/swapping — halve `--workers` and
-lower `--max-tasks-per-child`, then re-run (it resumes).
+If a shard's RSS still climbs toward the limit, lower `--limit` (recycle more
+often) and/or `--workers`. See §5 for how to tell a deadlock-hang from real
+memory pressure.
 
 ### 4.1 Probe-only phase (fast)
 
+Probe is light (single-point `cli_estimate`), so it runs in one shot — no
+shard loop needed. Set the thread caps from §4.0 first.
+
 ```bash
 DB=rust/aiconfigurator-core/parity_tests/scan.sqlite
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+       RAYON_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 
 uv run python tools/support_matrix/scan_rust_parity.py \
     --db-path "$DB" \
     scan --scan-mode probe_only \
-    --workers 8 --max-tasks-per-child 25
+    --workers 16 --max-tasks-per-child 0
 ```
 
 - ~2,158 entries. On a 16-vCPU/64GB host expect well under an hour.
@@ -112,17 +145,32 @@ uv run python tools/support_matrix/scan_rust_parity.py \
 ### 4.2 Pareto phase (slow, end-to-end)
 
 After probe triage, run the `cli_default` Pareto comparison on the **same DB**
-(it fills the `pareto_results` table; probe rows are untouched):
+(it fills the `pareto_results` table; probe rows are untouched). This is the
+heavy phase — run it as a `--limit` shard loop so each process exits and frees
+memory between shards (§4.0). `--limit` caps *pending* entries, so each shard
+picks up where the last stopped:
 
 ```bash
-uv run python tools/support_matrix/scan_rust_parity.py \
-    --db-path "$DB" \
-    scan --scan-mode pareto_only \
-    --workers 6 --max-tasks-per-child 20
+# Thread caps from §4.0 must already be exported.
+prev=-1
+while :; do
+  uv run python tools/support_matrix/scan_rust_parity.py \
+      --db-path "$DB" \
+      scan --scan-mode pareto_only \
+      --workers 12 --max-tasks-per-child 0 --limit 200
+  cur=$(sqlite3 "$DB" "SELECT COUNT(*) FROM pareto_results;")
+  echo "pareto rows so far: $cur"
+  # Stop when a shard adds no new rows (no pending left, or only runner-skipped
+  # entries remain). Robust — does not depend on the runner's internal pending
+  # definition.
+  [ "$cur" -eq "$prev" ] && { echo "no new progress -> done"; break; }
+  prev=$cur
+done
 ```
 
 - Hours-scale. Per-entry timeout default 900s; timeouts are recorded and
-  retried on re-run.
+  retried on re-run. ~2,158 / 200 ≈ 11 shards; the ~15s per-shard startup
+  (import + Rust core load) is negligible.
 - Pareto verdicts: `STRICT_PASS` (per-row rtol ≤ 1%) / `ENVELOPE_PASS`
   (frontier rtol ≤ 5% when row-selection differs) / `DRIFT` / `REGRESSION`.
 
@@ -146,9 +194,22 @@ sqlite3 "$DB" "SELECT COUNT(*) FROM probe_results;"
 sqlite3 "$DB" "SELECT status, COUNT(*) FROM probe_results GROUP BY status;"
 sqlite3 "$DB" "SELECT comparison_outcome, COUNT(*) FROM pareto_results GROUP BY comparison_outcome;"
 
-# Healthy = the done count keeps climbing. If it stalls for minutes while the
-# process is alive, you are swapping (see 4.0).
+# Healthy = the done count keeps climbing.
 ```
+
+Watch total worker RSS to catch real memory pressure before it shuts the host
+down:
+
+```bash
+watch -n30 'ps -o rss= -p $(pgrep -f scan_rust_parity | tr "\n" "," | sed "s/,$//") | awk "{s+=\$1} END {print s/1048576 \" GB RSS\"}"'
+```
+
+**Stall vs. memory pressure** — two different failures, do not confuse them:
+- **Deadlock** (done count frozen, process alive, **low** RSS / no swap): you
+  used a finite `--max-tasks-per-child` and hit the recycle deadlock (§4.0).
+  Fix: `--max-tasks-per-child 0` + the shard loop. Re-running resumes.
+- **Memory pressure** (RSS climbing toward host RAM, swap growing): lower
+  `--limit` and/or `--workers`, then resume.
 
 ## 6. Triage
 
@@ -204,8 +265,10 @@ worker/recycle settings used.
 
 - [ ] `git lfs pull` actually fetched the perf DBs (not LFS pointer stubs).
 - [ ] `import aiconfigurator_core` succeeds (Rust core built).
-- [ ] `--max-tasks-per-child` set on **both** phases (OOM guard).
-- [ ] Workers sized to RAM; if status stalls → swapping → reduce and re-run.
+- [ ] `--max-tasks-per-child 0` on both phases (a finite value DEADLOCKS — §4.0).
+- [ ] Library thread caps exported (`OMP_NUM_THREADS=1` etc.) before each phase.
+- [ ] Pareto run as a `--limit` shard loop (process-boundary recycle, §4.2).
+- [ ] Workers/`--limit` sized to RAM; distinguish deadlock-hang from swap (§5).
 - [ ] `commit_sha` recorded; don't mix commits without `--continue-across-commits`.
 - [ ] `HF_HOME` set if the host needs a writable HF cache for config fetches.
 - [ ] Don't run on the 36GB laptop — that's what sent this scan to the cloud.
