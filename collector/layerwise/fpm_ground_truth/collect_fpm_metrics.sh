@@ -328,7 +328,7 @@ infer_docker_gpus() {
     done
     local joined
     joined="$(IFS=,; echo "${devices[*]}")"
-    echo "device=${joined}"
+    echo "\"device=${joined}\""
 }
 
 is_gpt_oss_model() {
