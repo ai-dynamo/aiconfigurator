@@ -9,13 +9,13 @@ from aiconfigurator.sdk.pareto_analysis import (
     get_pareto_front,
 )
 from aiconfigurator.sdk.picking import pick_default, pick_load_match
-from aiconfigurator.sdk.task import TaskConfig
+from aiconfigurator.sdk.task_v2 import Task
 
 logger = logging.getLogger(__name__)
 
 
 def process_experiment_result(
-    task_config: TaskConfig,
+    task_config: Task,
     result: dict[str, pd.DataFrame],
     top_n: int = 5,
     target_request_rate: float | None = None,
@@ -58,9 +58,8 @@ def process_experiment_result(
     load_match = target_request_rate is not None or target_concurrency is not None
 
     pareto_df = result["pareto_df"]
-    runtime_cfg = task_config.config.runtime_config
-    target_tpot = runtime_cfg.tpot
-    target_request_latency = runtime_cfg.request_latency
+    target_tpot = task_config.tpot
+    target_request_latency = task_config.request_latency
     use_request_latency = target_request_latency is not None and target_request_latency > 0
     total_gpus = getattr(task_config, "total_gpus", None) or 0
     serving_mode = task_config.serving_mode
@@ -99,7 +98,7 @@ def process_experiment_result(
 
 def _merge_into_top_n(
     exps: list[str],
-    task_configs: dict[str, TaskConfig],
+    task_configs: dict[str, Task],
     best_configs: dict[str, pd.DataFrame],
     pareto_fronts: dict[str, pd.DataFrame],
     pareto_x_axis: dict[str, str],
@@ -151,7 +150,7 @@ def _merge_into_top_n(
 
 
 def merge_experiment_results_by_mode(
-    task_configs: dict[str, TaskConfig],
+    task_configs: dict[str, Task],
     best_configs: dict[str, pd.DataFrame],
     pareto_fronts: dict[str, pd.DataFrame],
     pareto_x_axis: dict[str, str],

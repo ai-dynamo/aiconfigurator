@@ -31,6 +31,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import logging
+import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -41,7 +42,7 @@ from aiconfigurator.sdk.models import (
     check_is_moe,
     get_model_family,
 )
-from aiconfigurator.sdk.perf_database import get_latest_database_version
+from aiconfigurator.sdk.perf_database import get_latest_database_version, load_system_spec
 from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -120,12 +121,38 @@ def _resolve_quant_str(key: str, value: Any) -> Any:
     return value
 
 
+# Models that get a Blackwell MoE-quant promotion on the TRT-LLM backend.
+_GPTOSS_BLACKWELL_MODELS = frozenset({"openai/gpt-oss-120b", "openai/gpt-oss-20b"})
+
+# Native FP4 routed-expert DeepSeek-V4 checkpoints and their FP8 replacements.
+# The native FP4 weights are unsupported on Hopper.
+_DEEPSEEK_V4_NATIVE_FP4_TO_FP8_MODEL = {
+    "deepseek-ai/DeepSeek-V4-Flash": "sgl-project/DeepSeek-V4-Flash-FP8",
+    "deepseek-ai/DeepSeek-V4-Pro": "sgl-project/DeepSeek-V4-Pro-FP8",
+}
+
+
+def _is_blackwell_system(system_name: str | None) -> bool:
+    """True for Blackwell-class systems (SM >= 100, e.g. b200_sxm / gb200 / b300 / gb300)."""
+    if not system_name:
+        return False
+    spec = load_system_spec(system_name)
+    return int(spec.get("gpu", {}).get("sm_version", -1)) >= 100
+
+
+def _is_hopper_system(system_name: str | None) -> bool:
+    """True for Hopper-class systems (h100 / h200 / gh200)."""
+    if not system_name:
+        return False
+    return system_name.startswith(("h100", "h200", "gh200"))
+
+
 # ---------------------------------------------------------------------------
 # Default disagg search space (mirror of legacy build_disagg_parallel_lists)
 # ---------------------------------------------------------------------------
 
 
-def _default_disagg_search(
+def build_disagg_parallel_lists(
     *,
     backend_name: str,
     is_moe: bool,
@@ -296,6 +323,10 @@ class Task:
     isl: int = 4000
     osl: int = 1000
     prefix: int = 0
+    # Multimodal image inputs (folded into the effective ISL by RuntimeConfig).
+    image_height: int = 0
+    image_width: int = 0
+    num_images_per_request: int = 1
     ttft: float = 1000.0
     tpot: float = 50.0
     request_latency: float | None = None
@@ -428,7 +459,23 @@ class Task:
         Strategy fields like ``predictor`` cannot be expressed in YAML
         (they're Python objects); pass them via ``overrides`` or assign
         after construction.
+
+        Legacy V1 YAML (nested ``config:`` / ``mode`` / ``profiles``) is
+        auto-detected and converted to the flat V2 schema, emitting a
+        ``DeprecationWarning``.
         """
+        from aiconfigurator.sdk.task_v1_compat import convert_v1_to_v2, is_v1_config
+
+        if is_v1_config(yaml_data):
+            warnings.warn(
+                "Legacy V1 task YAML detected; auto-converting to the flat V2 schema. "
+                "This compatibility path is deprecated -- migrate to the flat format "
+                "(see cli/exps/example_new.yaml).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            logger.warning("from_yaml: legacy V1 YAML auto-converted to V2 (deprecated; migrate to the flat format).")
+            yaml_data = convert_v1_to_v2(yaml_data)
         valid_keys = {f.name for f in dataclasses.fields(cls) if f.init and not f.name.startswith("_")}
         # YAML cannot construct strategy objects; ignore them here even if
         # they're valid fields.
@@ -451,15 +498,52 @@ class Task:
         return cls(**{k: v for k, v in kwargs.items() if v is not None})
 
     # =====================================================================
+    # Convenience read-only views (primary = prefill side in disagg)
+    # =====================================================================
+    # Disagg has no shared top-level worker fields (prefix discipline), so
+    # callers that just want "the model / system / backend for this task"
+    # (display, identity, file naming) read the prefill side. These never
+    # set state, so they don't violate the discipline.
+
+    @property
+    def primary_model_path(self) -> str:
+        return self.model_path if self.serving_mode == "agg" else self.prefill_model_path
+
+    @property
+    def primary_system_name(self) -> str:
+        return self.system_name if self.serving_mode == "agg" else self.prefill_system_name
+
+    @property
+    def primary_backend_name(self) -> str:
+        return self.backend_name if self.serving_mode == "agg" else self.prefill_backend_name
+
+    @property
+    def primary_backend_version(self) -> str | None:
+        return self.backend_version if self.serving_mode == "agg" else self.prefill_backend_version
+
+    # =====================================================================
     # __post_init__
     # =====================================================================
 
     def __post_init__(self) -> None:
         self._check_prefix_discipline()
+        self._validate_deepseek_v4_hardware()
         self._resolve_model_identity()
         self._resolve_backend_version()
         self._resolve_quant_modes()
         self._resolve_search_space()
+
+    def _validate_deepseek_v4_hardware(self) -> None:
+        """Reject native DeepSeek-V4 FP4-expert checkpoints on Hopper (use the FP8 build)."""
+        roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
+        for role in roles:
+            model = self._role_attr(role, "model_path")
+            replacement = _DEEPSEEK_V4_NATIVE_FP4_TO_FP8_MODEL.get(model)
+            if replacement and _is_hopper_system(self._role_attr(role, "system_name")):
+                raise ValueError(
+                    f"{model} uses native FP4 routed-expert weights and is not supported on "
+                    f"Hopper systems. Use {replacement} instead."
+                )
 
     def _check_prefix_discipline(self) -> None:
         """In disagg mode, top-level worker-spec fields must be at their defaults.
@@ -537,6 +621,20 @@ class Task:
         """
         roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
         base = _infer_quant_modes_from_raw_config(self._raw_config)
+
+        # GPT-OSS on Blackwell (trtllm): default MoE to w4a8_mxfp4_mxfp8 for higher
+        # tensor-core throughput, unless moe_quant_mode was set explicitly.  Applied
+        # before the resolution loop so the explicit-wins check below preserves it.
+        # (Mirrors the legacy V1 TaskConfigFactory gpt-oss-blackwell promotion; each
+        # disagg role is promoted independently based on its own system.)
+        for role in roles:
+            if (
+                self._role_attr(role, "moe_quant_mode") is None
+                and self._role_attr(role, "backend_name") == "trtllm"
+                and self._role_attr(role, "model_path") in _GPTOSS_BLACKWELL_MODELS
+                and _is_blackwell_system(self._role_attr(role, "system_name"))
+            ):
+                self._set_role_attr(role, "moe_quant_mode", common.MoEQuantMode.w4a8_mxfp4_mxfp8)
 
         for role in roles:
             preset_name = self._role_attr(role, "quant_preset")
@@ -627,7 +725,7 @@ class Task:
             raise ValueError(f"Unsupported backend: {self.backend_name}")
 
     def _resolve_disagg_search(self) -> None:
-        prefill_cfg, decode_cfg = _default_disagg_search(
+        prefill_cfg, decode_cfg = build_disagg_parallel_lists(
             backend_name=self.prefill_backend_name,
             is_moe=self._is_moe,
             prefill_system=self.prefill_system_name,
@@ -685,6 +783,9 @@ class Task:
             isl=self.isl,
             osl=self.osl,
             prefix=self.prefix,
+            image_height=self.image_height,
+            image_width=self.image_width,
+            num_images_per_request=self.num_images_per_request,
             ttft=self.ttft,
             tpot=self.tpot,
             request_latency=self.request_latency,

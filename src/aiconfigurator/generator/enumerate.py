@@ -28,7 +28,7 @@ from aiconfigurator.generator.naive import (
 from aiconfigurator.generator.rendering.engine import render_backend_templates
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.models import check_is_moe
-from aiconfigurator.sdk.task import build_disagg_parallel_lists
+from aiconfigurator.sdk.task_v2 import build_disagg_parallel_lists
 from aiconfigurator.sdk.utils import (
     enumerate_parallel_config,
     get_model_config_from_model_path,
@@ -491,10 +491,12 @@ def enumerate_profiling_configs(
     # ------------------------------------------------------------------
     prefill_wc, decode_wc = build_disagg_parallel_lists(
         backend_name=backend,
+        is_moe=is_moe,
         prefill_system=system,
         decode_system=system,
-        is_moe=is_moe,
-        enable_wideep=enable_wideep,
+        prefill_enable_wideep=enable_wideep,
+        decode_enable_wideep=enable_wideep,
+        moe_backend=None,
     )
 
     # Determine max GPUs for real_silicon_sweep filtering
@@ -565,10 +567,12 @@ def enumerate_profiling_configs(
     if is_moe and allow_moe_pure_tp and enable_wideep:
         prefill_wc_tp, decode_wc_tp = build_disagg_parallel_lists(
             backend_name=backend,
+            is_moe=is_moe,
             prefill_system=system,
             decode_system=system,
-            is_moe=is_moe,
-            enable_wideep=False,
+            prefill_enable_wideep=False,
+            decode_enable_wideep=False,
+            moe_backend=None,
         )
         for label, wc, max_gpus, config_list in [
             ("prefill", prefill_wc_tp, prefill_max_gpus, prefill_parallel_configs),

@@ -833,6 +833,12 @@ If you want to customize your experiment apart from simple command which only co
 ```bash
 aiconfigurator cli exp --yaml-path example.yaml
 ```
+> **YAML format (V2):** The canonical format is the flat `Task` schema — every
+> key maps 1:1 to a field, with no `mode:` selector and no `config:` /
+> `worker_config:` nesting. See `src/aiconfigurator/cli/exps/example_new.yaml`
+> for the template. The legacy nested format shown below is still accepted and
+> auto-converted to the flat schema with a `DeprecationWarning`.
+
 An example yaml file looks like this, the template is [here](../src/aiconfigurator/cli/example.yaml)  
 Let's split the yaml file into several sections.  
 1. exps

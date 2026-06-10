@@ -90,10 +90,10 @@ def test_log_final_summary(caplog, use_ansi):
 
     model_path = "unit-test-model"
     tc = MagicMock()
-    tc.config.model_path = model_path
-    tc.config.is_moe = False
-    tc.config.runtime_config.tpot = 50.0
-    tc.config.runtime_config.request_latency = None
+    tc.primary_model_path = model_path
+    tc.is_moe = False
+    tc.tpot = 50.0
+    tc.request_latency = None
     tc.backend_name = "trtllm"
     tc.total_gpus = 8
 
@@ -163,10 +163,10 @@ def test_log_final_summary_no_disagg_results():
     must skip 'disagg' rather than crashing.
     """
     tc = MagicMock()
-    tc.config.model_path = "unit-test-model"
-    tc.config.is_moe = False
-    tc.config.runtime_config.tpot = 50.0
-    tc.config.runtime_config.request_latency = None
+    tc.primary_model_path = "unit-test-model"
+    tc.is_moe = False
+    tc.tpot = 50.0
+    tc.request_latency = None
     tc.backend_name = "trtllm"
     tc.total_gpus = 8
 

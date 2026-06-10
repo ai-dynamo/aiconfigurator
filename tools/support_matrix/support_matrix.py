@@ -29,7 +29,7 @@ from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk import config as sdk_config
 from aiconfigurator.sdk.models import _get_model_info
 from aiconfigurator.sdk.models.helpers import _apply_model_quant_defaults
-from aiconfigurator.sdk.task import TaskConfig, TaskRunner
+from aiconfigurator.sdk.task_v2 import Task
 
 logger = logging.getLogger(__name__)
 
@@ -682,13 +682,8 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         engine_step_backend: str | None,
-    ) -> TaskConfig:
-        task_config_kwargs = {
-            "serving_mode": mode,
-            "model_path": model,
-            "system_name": system,
-            "backend_name": backend,
-            "backend_version": version,
+    ) -> Task:
+        common_kwargs = {
             "total_gpus": constraints.total_gpus,
             "isl": constraints.isl,
             "osl": constraints.osl,
@@ -698,8 +693,27 @@ class SupportMatrix:
             "engine_step_backend": engine_step_backend,
         }
         if mode == "disagg":
-            task_config_kwargs["decode_system_name"] = system
-        return TaskConfig(**task_config_kwargs)
+            # v2 disagg forbids shared top-level worker fields; fan out to both roles.
+            return Task(
+                serving_mode="disagg",
+                prefill_model_path=model,
+                decode_model_path=model,
+                prefill_system_name=system,
+                decode_system_name=system,
+                prefill_backend_name=backend,
+                decode_backend_name=backend,
+                prefill_backend_version=version,
+                decode_backend_version=version,
+                **common_kwargs,
+            )
+        return Task(
+            serving_mode="agg",
+            model_path=model,
+            system_name=system,
+            backend_name=backend,
+            backend_version=version,
+            **common_kwargs,
+        )
 
     @staticmethod
     def _run_mode(
@@ -721,8 +735,7 @@ class SupportMatrix:
             constraints=constraints,
             engine_step_backend=engine_step_backend,
         )
-        result = TaskRunner().run(task_config)
-        return result.get("pareto_df")
+        return task_config.run()
 
     @staticmethod
     def run_single_test(

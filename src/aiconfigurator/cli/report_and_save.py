@@ -22,7 +22,7 @@ from aiconfigurator.generator.module_bridge import task_config_to_generator_conf
 from aiconfigurator.logging_utils import _cli_bold, _cli_underline
 from aiconfigurator.sdk import pareto_analysis
 from aiconfigurator.sdk.pareto_analysis import draw_pareto_to_string
-from aiconfigurator.sdk.task import TaskConfig
+from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import safe_mkdir
 
 logger = logging.getLogger(__name__)
@@ -290,7 +290,7 @@ def log_final_summary(
     best_throughputs: dict[str, float],
     best_configs: dict[str, pd.DataFrame],
     pareto_fronts: dict[str, pd.DataFrame | None],
-    task_configs: dict[str, TaskConfig],
+    task_configs: dict[str, Task],
     mode: str,
     pareto_x_axis: dict[str, str] | None = None,
     top_n: int = 5,
@@ -334,9 +334,7 @@ def log_final_summary(
     else:
         chosen_task_config = task_configs[chosen_exp]
 
-    summary_box.append(
-        f"    Model: {chosen_task_config.config.model_path} (is_moe: {chosen_task_config.config.is_moe})"
-    )
+    summary_box.append(f"    Model: {chosen_task_config.primary_model_path} (is_moe: {chosen_task_config.is_moe})")
     summary_box.append(f"    Total GPUs: {chosen_task_config.total_gpus}")
 
     if load_match:
@@ -419,7 +417,7 @@ def log_final_summary(
                 "label": f"{chosen_exp} best",
             }
         pareto_plot_buf = draw_pareto_to_string(
-            f"{chosen_task_config.config.model_path} Pareto Frontier",
+            f"{chosen_task_config.primary_model_path} Pareto Frontier",
             series_payload,
             highlight=highlight_series,
             x_label=target_x_axis,
@@ -466,18 +464,18 @@ def log_final_summary(
 
         if not config_df.empty and "backend" not in config_df.columns:
             config_df = config_df.copy()
-            config_df["backend"] = task_configs[task_config_key].backend_name
+            config_df["backend"] = task_configs[task_config_key].primary_backend_name
 
-        exp_task_config = task_configs[task_config_key].config
-        total_gpus = getattr(task_configs[task_config_key], "total_gpus", None) or 0
+        exp_task_config = task_configs[task_config_key]
+        total_gpus = getattr(exp_task_config, "total_gpus", None) or 0
         table_buf = _plot_worker_setup_table(
             exp_name,
             config_df,
             total_gpus,
-            exp_task_config.runtime_config.tpot,
+            exp_task_config.tpot,
             top_n,
             exp_task_config.is_moe,
-            exp_task_config.runtime_config.request_latency,
+            exp_task_config.request_latency,
             show_power,
         )
         summary_box.append(table_buf)
@@ -490,7 +488,7 @@ def save_results(
     args,
     best_configs: dict[str, pd.DataFrame],
     pareto_fronts: dict[str, pd.DataFrame | None],
-    task_configs: dict[str, TaskConfig],
+    task_configs: dict[str, Task],
     save_dir: str,
     generated_backend_version: str | None = None,
     backend: str | None = None,
@@ -509,9 +507,8 @@ def save_results(
 
     first_exp_name = list(task_configs.keys())[0]
     first_task = task_configs[first_exp_name]
-    first_task_config = first_task.config
 
-    backend_str = backend or first_task.backend_name
+    backend_str = backend or first_task.primary_backend_name
 
     # Get a safe model name for directory naming:
     # - For local paths: use basename (e.g., "/data/models/my_model" -> "my_model")
@@ -527,12 +524,12 @@ def save_results(
         # Otherwise treat as HuggingFace model ID
         return path
 
-    safe_model_name = get_safe_model_name(first_task_config.model_path)
+    safe_model_name = get_safe_model_name(first_task.primary_model_path)
 
     result_prefix = (
-        f"{safe_model_name}_{first_task.system_name}_{backend_str}_"
-        f"isl{first_task_config.runtime_config.isl}_osl{first_task_config.runtime_config.osl}_"
-        f"ttft{int(first_task_config.runtime_config.ttft)}_tpot{int(first_task_config.runtime_config.tpot)}"
+        f"{safe_model_name}_{first_task.primary_system_name}_{backend_str}_"
+        f"isl{first_task.isl}_osl{first_task.osl}_"
+        f"ttft{int(first_task.ttft)}_tpot{int(first_task.tpot)}"
     )
     result_dir_path = os.path.join(save_dir, f"{result_prefix}_{random.randint(0, 1000000)}")
 
@@ -545,15 +542,14 @@ def save_results(
         fig, ax = plt.subplots(1, 1, figsize=(8, 5))
         pareto_axis = {}
         for exp_name, cfg in task_configs.items():
-            runtime_cfg = cfg.config.runtime_config
-            if runtime_cfg.request_latency is not None and runtime_cfg.request_latency > 0:
+            if cfg.request_latency is not None and cfg.request_latency > 0:
                 pareto_axis[exp_name] = "request_latency"
             else:
                 pareto_axis[exp_name] = "tokens/s/user"
         all_request_latency = bool(pareto_axis) and all(axis == "request_latency" for axis in pareto_axis.values())
         global_x_axis = "request_latency" if all_request_latency else "tokens/s/user"
         maximize_x = not all_request_latency
-        plt.title(f"{first_task_config.model_path} tokens/s/gpu vs {global_x_axis}")
+        plt.title(f"{first_task.primary_model_path} tokens/s/gpu vs {global_x_axis}")
 
         # Define markers for backends and colors for serving modes
         backend_markers = {
@@ -652,11 +648,12 @@ def save_results(
             # 3. Save the config for this experiment
             if backend != "auto":
                 exp_task_config = task_configs[exp_name]
-                backend_version_str = exp_task_config.backend_version
+                backend_version_str = exp_task_config.primary_backend_version
             else:
                 # There could be multiple backends in the same experiment if backend == "auto" as the result is merged
                 actual_backend_versions = {
-                    task_config.backend_name: task_config.backend_version for task_config in task_configs.values()
+                    task_config.primary_backend_name: task_config.primary_backend_version
+                    for task_config in task_configs.values()
                 }
                 backend_version_str = ", ".join(
                     f"({backend_name}){backend_version}"
@@ -690,9 +687,9 @@ def save_results(
                     try:
                         effective_generated_version = resolve_backend_version_for_dynamo(
                             dynamo_version,
-                            exp_task_config.backend_name,
+                            exp_task_config.primary_backend_name,
                         )
-                        backend_version_str = f"({exp_task_config.backend_name}){effective_generated_version}"
+                        backend_version_str = f"({exp_task_config.primary_backend_name}){effective_generated_version}"
                     except ValueError as exc:
                         logger.exception(
                             "Failed to resolve backend version for generator_dynamo_version=%s.",
@@ -723,13 +720,13 @@ def save_results(
                 deployment_target = getattr(args, "deployment_target", "dynamo-j2")
                 default_dynamo_version, default_backend_versions = get_default_dynamo_version_mapping()
                 if backend != "auto":
-                    effective_generated_version = default_backend_versions.get(exp_task_config.backend_name)
+                    effective_generated_version = default_backend_versions.get(exp_task_config.primary_backend_name)
                     if effective_generated_version is None:
                         raise ValueError(
                             "No default backend version mapping for backend "
-                            f"'{exp_task_config.backend_name}' in dynamo '{default_dynamo_version}'."
+                            f"'{exp_task_config.primary_backend_name}' in dynamo '{default_dynamo_version}'."
                         )
-                    backend_version_str = f"({exp_task_config.backend_name}){effective_generated_version}"
+                    backend_version_str = f"({exp_task_config.primary_backend_name}){effective_generated_version}"
                 else:
                     generated_backend_versions = dict(default_backend_versions)
                     backend_version_str = ", ".join(
@@ -763,7 +760,8 @@ def save_results(
                     f.write(exp_task_config.to_yaml())
             else:
                 for exp_task_config in exp_task_configs.values():
-                    with open(os.path.join(exp_dir, f"{exp_task_config.backend_name}_exp_config.yaml"), "w") as f:
+                    exp_cfg_name = f"{exp_task_config.primary_backend_name}_exp_config.yaml"
+                    with open(os.path.join(exp_dir, exp_cfg_name), "w") as f:
                         f.write(exp_task_config.to_yaml())
 
             # 4. Save the generated config for this experiment, sub-directory for each best config
@@ -777,7 +775,7 @@ def save_results(
                         row_task_config_key = f"{exp_name}_{row_backend}"
                         row_task_config = task_configs[row_task_config_key]
                         row_backend_version = generated_backend_versions.get(
-                            row_backend, row_task_config.backend_version
+                            row_backend, row_task_config.primary_backend_version
                         )
                     else:
                         row_task_config = exp_task_config
@@ -806,7 +804,7 @@ def save_results(
                         deployment_target = getattr(args, "deployment_target", "dynamo-j2")
                         generate_backend_artifacts(
                             params=cfg,
-                            backend=row_task_config.backend_name,
+                            backend=row_task_config.primary_backend_name,
                             backend_version=row_backend_version,
                             output_dir=top_config_dir,
                             deployment_target=deployment_target,

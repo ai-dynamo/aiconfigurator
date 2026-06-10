@@ -16,7 +16,7 @@ import yaml
 from aiconfigurator.cli.main import _execute_task_configs, build_default_task_configs
 from aiconfigurator.generator.api import generate_backend_artifacts
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
-from aiconfigurator.sdk.task import TaskConfig, TaskRunner
+from aiconfigurator.sdk.task_v2 import Task
 
 pytestmark = pytest.mark.integration
 
@@ -57,8 +57,8 @@ def _save_chosen_dgd(best_configs, task_configs, chosen_exp, output_dir):
     try:
         generate_backend_artifacts(
             params=cfg,
-            backend=tc.backend_name,
-            backend_version=tc.backend_version,
+            backend=tc.primary_backend_name,
+            backend_version=tc.primary_backend_version,
             output_dir=exp_dir,
         )
     except Exception:
@@ -181,20 +181,21 @@ class TestAutoscalePicking:
 
     def test_autoscale(self, tmp_path):
         """Relaxed SLA: should find valid P and D engines."""
-        task = TaskConfig(
+        task = Task(
             serving_mode="disagg",
-            model_path=MODEL,
-            system_name=SYSTEM,
-            backend_name=BACKEND,
+            prefill_model_path=MODEL,
+            decode_model_path=MODEL,
+            prefill_system_name=SYSTEM,
+            decode_system_name=SYSTEM,
+            prefill_backend_name=BACKEND,
+            decode_backend_name=BACKEND,
             total_gpus=8,
             isl=4000,
             osl=1000,
             ttft=2000,
             tpot=50,
         )
-        runner = TaskRunner()
-        result = runner.run(task, autoscale=True)
-        pareto_df = result["pareto_df"]
+        pareto_df = task.run(autoscale=True)
         assert pareto_df is not None and not pareto_df.empty
         assert (pareto_df["(p)workers"] == 1).all()
         assert (pareto_df["(d)workers"] == 1).all()
@@ -208,20 +209,21 @@ class TestAutoscalePicking:
 
     def test_autoscale_tight_sla(self):
         """Tight SLA: should still return closest-match configs (not empty)."""
-        task = TaskConfig(
+        task = Task(
             serving_mode="disagg",
-            model_path=MODEL,
-            system_name=SYSTEM,
-            backend_name=BACKEND,
+            prefill_model_path=MODEL,
+            decode_model_path=MODEL,
+            prefill_system_name=SYSTEM,
+            decode_system_name=SYSTEM,
+            prefill_backend_name=BACKEND,
+            decode_backend_name=BACKEND,
             total_gpus=8,
             isl=4000,
             osl=1000,
             ttft=600,
             tpot=25,
         )
-        runner = TaskRunner()
-        result = runner.run(task, autoscale=True)
-        pareto_df = result["pareto_df"]
+        pareto_df = task.run(autoscale=True)
         # With closest-match fallback, should always return something
         assert pareto_df is not None and not pareto_df.empty
         assert (pareto_df["(p)workers"] == 1).all()

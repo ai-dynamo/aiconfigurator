@@ -26,8 +26,8 @@ class TestProcessExperimentResult:
         """Test processing result with TPOT constraint."""
         # Create mock task config
         mock_task_config = MagicMock()
-        mock_task_config.config.runtime_config.tpot = 30.0
-        mock_task_config.config.runtime_config.request_latency = None
+        mock_task_config.tpot = 30.0
+        mock_task_config.request_latency = None
         mock_task_config.serving_mode = "agg"
         mock_task_config.total_gpus = 32
 
@@ -59,8 +59,8 @@ class TestProcessExperimentResult:
         """Test processing result with request_latency constraint."""
         # Create mock task config
         mock_task_config = MagicMock()
-        mock_task_config.config.runtime_config.tpot = None
-        mock_task_config.config.runtime_config.request_latency = 1200.0
+        mock_task_config.tpot = None
+        mock_task_config.request_latency = 1200.0
         mock_task_config.serving_mode = "disagg"
         mock_task_config.total_gpus = 32
 
@@ -90,8 +90,8 @@ class TestProcessExperimentResult:
     def test_process_result_with_empty_pareto_df(self):
         """Test processing result with empty pareto_df."""
         mock_task_config = MagicMock()
-        mock_task_config.config.runtime_config.tpot = 30.0
-        mock_task_config.config.runtime_config.request_latency = None
+        mock_task_config.tpot = 30.0
+        mock_task_config.request_latency = None
         mock_task_config.serving_mode = "agg"
         mock_task_config.total_gpus = 32
 
@@ -110,8 +110,8 @@ class TestProcessExperimentResult:
     def test_process_result_with_none_pareto_df(self):
         """Test processing result with None pareto_df."""
         mock_task_config = MagicMock()
-        mock_task_config.config.runtime_config.tpot = 30.0
-        mock_task_config.config.runtime_config.request_latency = None
+        mock_task_config.tpot = 30.0
+        mock_task_config.request_latency = None
         mock_task_config.serving_mode = "agg"
         mock_task_config.total_gpus = 32
 
@@ -129,8 +129,8 @@ class TestProcessExperimentResult:
     def test_process_result_disagg_mode_uses_correct_group_by(self):
         """Test that disagg mode uses (d)parallel as group_by key."""
         mock_task_config = MagicMock()
-        mock_task_config.config.runtime_config.tpot = 30.0
-        mock_task_config.config.runtime_config.request_latency = None
+        mock_task_config.tpot = 30.0
+        mock_task_config.request_latency = None
         mock_task_config.serving_mode = "disagg"
         mock_task_config.total_gpus = 32
 
@@ -154,8 +154,8 @@ class TestProcessExperimentResult:
     def test_process_result_top_n_limiting(self):
         """Test that top_n correctly limits the number of returned configs."""
         mock_task_config = MagicMock()
-        mock_task_config.config.runtime_config.tpot = 30.0
-        mock_task_config.config.runtime_config.request_latency = None
+        mock_task_config.tpot = 30.0
+        mock_task_config.request_latency = None
         mock_task_config.serving_mode = "agg"
         mock_task_config.total_gpus = 32
 
@@ -180,8 +180,8 @@ class TestProcessExperimentResult:
     def test_process_result_computes_tokens_per_gpu_cluster(self):
         """Test that tokens/s/gpu_cluster is correctly computed."""
         mock_task_config = MagicMock()
-        mock_task_config.config.runtime_config.tpot = 30.0
-        mock_task_config.config.runtime_config.request_latency = None
+        mock_task_config.tpot = 30.0
+        mock_task_config.request_latency = None
         mock_task_config.serving_mode = "agg"
         mock_task_config.total_gpus = 32
 

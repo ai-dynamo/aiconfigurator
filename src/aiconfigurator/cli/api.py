@@ -25,11 +25,12 @@ from aiconfigurator.cli.main import (
 from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.models import check_is_moe
-from aiconfigurator.sdk.task import (
-    DEFAULT_DECODE_LATENCY_CORRECTION_SCALE,
-    DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE,
-    TaskConfig,
-)
+from aiconfigurator.sdk.task_v2 import Task
+
+# Default per-phase latency-correction scales for single-point disagg estimates.
+# (Migrated from the legacy V1 task module; same values as Task's field defaults.)
+DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE = 1.1
+DEFAULT_DECODE_LATENCY_CORRECTION_SCALE = 1.08
 
 
 def cli_support(
@@ -88,7 +89,7 @@ class CLIResult:
     best_throughputs: dict[str, float]
     """Best throughput (tokens/s/gpu_cluster) per experiment."""
 
-    task_configs: dict[str, TaskConfig]
+    task_configs: dict[str, Task]
     """TaskConfig objects used for each experiment."""
 
     best_latencies: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -106,7 +107,7 @@ class CLIResult:
 
 
 def _execute_and_wrap_result(
-    task_configs: dict[str, TaskConfig],
+    task_configs: dict[str, Task],
     mode: str,
     top_n: int = 5,
     strict_sla: bool = False,
