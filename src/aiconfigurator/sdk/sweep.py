@@ -118,9 +118,10 @@ def _rate_match_dict(
     seq_s_gpu = seq_s / num_total_gpus if num_total_gpus > 0 else 0.0
     tokens_s = seq_s * osl
     tokens_s_gpu = tokens_s / num_total_gpus if num_total_gpus > 0 else 0.0
-    request_latency = p["ttft"] + d["tpot"] * max(osl - 1, 0)
     encoder_latency = float(p.get("encoder_latency", 0.0))
     encoder_memory = float(p.get("encoder_memory", 0.0))
+    # static_ctx ttft already includes colocated encoder latency.
+    request_latency = p["ttft"] + d["tpot"] * max(osl - 1, 0)
 
     # Weighted average power across prefill and decode phases.
     ttft = p["ttft"]

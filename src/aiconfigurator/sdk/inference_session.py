@@ -343,7 +343,9 @@ class DisaggInferenceSession:
                 disagg_summary.set_encoder_memory(dict(encoder_memory))
         prefill_encoder_source = prefill_summary.get_encoder_source_dict()
         if prefill_encoder_source:
-            per_ops_source["encoder"] = dict(prefill_encoder_source)
+            encoder_source = dict(prefill_encoder_source)
+            disagg_summary.set_encoder_source_dict(encoder_source)
+            per_ops_source["encoder"] = encoder_source
         prefill_ctx_latency = prefill_summary.get_context_latency_dict()
         if prefill_ctx_latency:
             per_ops_data["prefill"] = dict(prefill_ctx_latency)

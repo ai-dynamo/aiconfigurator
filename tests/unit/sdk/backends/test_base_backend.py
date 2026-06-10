@@ -49,6 +49,7 @@ class _TestBackend(BaseBackend):
         osl,
         num_tokens=0,
         prefix=0,
+        encoder_memory=None,
     ) -> dict[str, float]:
         return {"total": 1.0}
 
