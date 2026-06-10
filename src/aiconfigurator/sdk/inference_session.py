@@ -308,7 +308,6 @@ class DisaggInferenceSession:
         decode_runtime_config = copy.deepcopy(runtime_config)
         decode_runtime_config.batch_size = decode_batch_size
 
-        BaseBackend._fold_visual_context_into_isl(decode_runtime_config, decode_model)
         decode_summary = decode_sess.run_static(
             mode="static_gen",
             runtime_config=decode_runtime_config,
@@ -428,8 +427,6 @@ class DisaggInferenceSession:
                 for b in b_list:
                     overwritten_runtime_config = copy.deepcopy(runtime_config)
                     overwritten_runtime_config.batch_size = b
-                    if mode == "static_gen":
-                        BaseBackend._fold_visual_context_into_isl(overwritten_runtime_config, model)
                     summary = sess.run_static(
                         mode=mode,
                         runtime_config=overwritten_runtime_config,

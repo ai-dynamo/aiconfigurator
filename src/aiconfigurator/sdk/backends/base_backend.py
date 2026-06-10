@@ -124,25 +124,6 @@ class BaseBackend:
         return (isl, osl, b, ctx_tokens, engine_step_backend_key)
 
     @staticmethod
-    def _visual_context_tokens(model: BaseModel, runtime_config: RuntimeConfig) -> int:
-        enc_cfg = getattr(model, "encoder_config", None)
-        if enc_cfg is None or runtime_config.num_images_per_request <= 0:
-            return 0
-        post_merge, _ = BaseBackend._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
-        return post_merge * runtime_config.num_images_per_request
-
-    @staticmethod
-    def _fold_visual_context_into_isl(runtime_config: RuntimeConfig, model: BaseModel) -> int:
-        img_ctx_tokens = BaseBackend._visual_context_tokens(model, runtime_config)
-        if img_ctx_tokens > 0:
-            runtime_config.isl += img_ctx_tokens
-        runtime_config.image_height = 0
-        runtime_config.image_width = 0
-        runtime_config.num_images_per_request = 0
-        runtime_config.num_image_tokens = 0
-        return img_ctx_tokens
-
-    @staticmethod
     def _runtime_config_for_agg_candidate(runtime_config: RuntimeConfig, batch_size: int) -> RuntimeConfig:
         candidate = copy.deepcopy(runtime_config)
         candidate.batch_size = batch_size
@@ -167,6 +148,14 @@ class BaseBackend:
         return {}
 
     # ============== STATIC INFERENCE (shared) ==========================
+
+    @staticmethod
+    def _visual_context_tokens(model: BaseModel, runtime_config: RuntimeConfig) -> int:
+        enc_cfg = getattr(model, "encoder_config", None)
+        if enc_cfg is None or runtime_config.num_images_per_request <= 0:
+            return 0
+        post_merge, _ = BaseBackend._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
+        return post_merge * runtime_config.num_images_per_request
 
     @staticmethod
     def _encoder_pre_merge_per_visual(
