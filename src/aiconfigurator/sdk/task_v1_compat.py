@@ -240,7 +240,8 @@ def convert_v1_to_v2(v1: dict) -> dict:
 
     if unmapped:
         logger.warning(
-            "convert_v1_to_v2: %d V1 field(s) have no V2 equivalent and were dropped: %s",
+            "convert_v1_to_v2: %d V1 field(s) have no V2 equivalent and were IGNORED -- if your "
+            "config relied on them, V2 results may differ from V1. Fields: %s",
             len(unmapped),
             ", ".join(unmapped),
         )
