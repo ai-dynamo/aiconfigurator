@@ -683,6 +683,44 @@ def test_explicit_or_preset_fmha_fp8_not_downgraded():
     )  # explicit -> kept
 
 
+def test_database_mode_switches_db_default_mode(monkeypatch):
+    """database_mode != SILICON must switch the db's DEFAULT mode (so predictions use
+    SOL/empirical), not merely pass the loader flag -- mirrors v1 set_default_database_mode.
+    Without this, SILICON/HYBRID/EMPIRICAL all produced identical results."""
+    from aiconfigurator.sdk import common
+
+    captured = {}
+
+    class _FakeDB:
+        def get_default_database_mode(self):
+            return common.DatabaseMode.SILICON
+
+        def set_default_database_mode(self, mode):
+            captured["mode"] = mode
+
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", lambda *a, **k: _FakeDB())
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        database_mode="EMPIRICAL",
+    )
+    t._load_database("h200_sxm", "trtllm", "1.3.0rc10")
+    assert captured.get("mode") == common.DatabaseMode.EMPIRICAL
+    # SILICON (the default) must NOT call set_default_database_mode (no-op / no copy churn)
+    captured.clear()
+    t2 = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        database_mode="SILICON",
+    )
+    t2._load_database("h200_sxm", "trtllm", "1.3.0rc10")
+    assert "mode" not in captured
+
+
 def test_disagg_calibration_overrides_flow_into_sweep_kwargs():
     """Overriding the new Task fields propagates to sweep_disagg_kwargs."""
     t = Task(
@@ -722,7 +760,7 @@ def test_run_dispatches_to_sweep_agg(monkeypatch):
 
     captured: dict = {}
 
-    def fake_get_database(system, backend, version):
+    def fake_get_database(system, backend, version, **kwargs):
         captured.setdefault("dbs", []).append((system, backend, version))
         return f"db-{system}-{backend}-{version}"
 
@@ -752,7 +790,7 @@ def test_run_dispatches_to_sweep_disagg_with_two_dbs(monkeypatch):
 
     captured: dict = {}
 
-    def fake_get_database(system, backend, version):
+    def fake_get_database(system, backend, version, **kwargs):
         captured.setdefault("dbs", []).append((system, backend, version))
         return f"db-{system}"
 

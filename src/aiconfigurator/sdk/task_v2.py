@@ -1178,7 +1178,6 @@ class Task:
         from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
         from aiconfigurator.sdk.perf_database import (
             PerfDataNotAvailableError,
-            get_database,
             has_perf_data_not_available_cause,
         )
 
@@ -1189,7 +1188,7 @@ class Task:
             return  # nothing to validate against
 
         try:
-            database = get_database(system, backend, version)
+            database = self._load_database(system, backend, version)
         except (PerfDataNotAvailableError, FileNotFoundError) as exc:
             # DB unavailable; let sweep surface the real error later.
             logger.debug("validate: skipping DB-side quant check (DB unavailable): %s", exc)
@@ -1397,6 +1396,24 @@ class Task:
     # Optimization entry point
     # =====================================================================
 
+    def _load_database(self, system: str, backend: str, version: str):
+        """Load the perf DB honoring database_mode (SILICON/HYBRID/EMPIRICAL). Non-SILICON
+        modes allow missing measured data; the db's DEFAULT mode is also switched so
+        predictions actually use SOL/empirical (the get_database arg only drives shared-layer
+        loading -- the prediction behaviour is set via set_default_database_mode). Mirrors
+        v1 _get_database."""
+        from aiconfigurator.sdk.perf_database import get_database
+
+        allow_missing = self.database_mode is not None and self.database_mode != common.DatabaseMode.SILICON.name
+        db = get_database(system, backend, version, allow_missing_data=allow_missing, database_mode=self.database_mode)
+        if db is not None and self.database_mode is not None:
+            mode = common.DatabaseMode[self.database_mode]
+            if mode != db.get_default_database_mode():
+                # set_default_database_mode mutates; copy so the module-cached db isn't polluted.
+                db = copy.deepcopy(db)
+                db.set_default_database_mode(mode)
+        return db
+
     def run(self, *, autoscale: bool = False, validate: bool = True):
         """Run the sweep and return a feasible-candidate DataFrame.
 
@@ -1423,22 +1440,21 @@ class Task:
         """
         if validate:
             self.validate()
-        from aiconfigurator.sdk.perf_database import get_database
         from aiconfigurator.sdk.sweep import sweep_agg, sweep_disagg
 
         if self.serving_mode == "agg":
             if autoscale:
                 raise ValueError("autoscale is only supported in disagg mode")
-            database = get_database(self.system_name, self.backend_name, self.backend_version)
+            database = self._load_database(self.system_name, self.backend_name, self.backend_version)
             return sweep_agg(
                 **self.sweep_agg_kwargs(database=database),
                 predictor=self.predictor,
             )
         if self.serving_mode == "disagg":
-            prefill_database = get_database(
+            prefill_database = self._load_database(
                 self.prefill_system_name, self.prefill_backend_name, self.prefill_backend_version
             )
-            decode_database = get_database(
+            decode_database = self._load_database(
                 self.decode_system_name, self.decode_backend_name, self.decode_backend_version
             )
             return sweep_disagg(
@@ -1494,7 +1510,6 @@ class Task:
             )
         from aiconfigurator.sdk.backends.factory import get_backend
         from aiconfigurator.sdk.models import get_model
-        from aiconfigurator.sdk.perf_database import get_database
         from aiconfigurator.sdk.predict import predict_agg_worker
 
         model_config = self.build_model_config(role="agg")
@@ -1505,7 +1520,7 @@ class Task:
         model_config.moe_ep_size = moe_ep
 
         runtime_config = self.build_runtime_config(batch_size=batch_size)
-        database = get_database(self.system_name, self.backend_name, self.backend_version)
+        database = self._load_database(self.system_name, self.backend_name, self.backend_version)
         backend = get_backend(self.backend_name)
         model = get_model(self.model_path, model_config, self.backend_name)
 
@@ -1574,7 +1589,6 @@ class Task:
             )
         from aiconfigurator.sdk.backends.factory import get_backend
         from aiconfigurator.sdk.models import get_model
-        from aiconfigurator.sdk.perf_database import get_database
         from aiconfigurator.sdk.predict import predict_disagg_worker
         from aiconfigurator.sdk.sweep import _rate_match_dict
 
@@ -1587,7 +1601,7 @@ class Task:
         p_mc.moe_ep_size = prefill_moe_ep
 
         p_rt = self.build_runtime_config(batch_size=prefill_batch_size)
-        p_db = get_database(self.prefill_system_name, self.prefill_backend_name, self.prefill_backend_version)
+        p_db = self._load_database(self.prefill_system_name, self.prefill_backend_name, self.prefill_backend_version)
         p_backend = get_backend(self.prefill_backend_name)
         p_model = get_model(self.prefill_model_path, p_mc, self.prefill_backend_name)
 
@@ -1615,7 +1629,7 @@ class Task:
         d_mc.moe_ep_size = decode_moe_ep
 
         d_rt = self.build_runtime_config(batch_size=decode_batch_size)
-        d_db = get_database(self.decode_system_name, self.decode_backend_name, self.decode_backend_version)
+        d_db = self._load_database(self.decode_system_name, self.decode_backend_name, self.decode_backend_version)
         d_backend = get_backend(self.decode_backend_name)
         d_model = get_model(self.decode_model_path, d_mc, self.decode_backend_name)
 
