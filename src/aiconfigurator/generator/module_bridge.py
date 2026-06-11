@@ -84,7 +84,7 @@ def task_config_to_generator_config(
     """Convert a task config/result row into unified generator parameters.
 
     Args:
-        task_config: The TaskConfig that produced the result.
+        task_config: The Task that produced the result.
         result_df: A single row (pd.Series) from the best_configs DataFrame.
         generator_overrides: Optional overrides dict from CLI flags.
         num_gpus_per_node: If set, overrides the NodeConfig.num_gpus_per_node

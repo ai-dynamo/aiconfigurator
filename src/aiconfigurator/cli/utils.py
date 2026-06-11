@@ -28,10 +28,10 @@ def process_experiment_result(
 
     This is a thin wrapper around :func:`picking.pick_default` and
     :func:`picking.pick_load_match` that extracts parameters from the
-    ``TaskConfig``.
+    ``Task``.
 
     Args:
-        task_config: TaskConfig object for the experiment.
+        task_config: Task object for the experiment.
         result: Dictionary containing the pareto_df result of the experiment.
         top_n: Number of top configurations to return.
         target_request_rate: If set, activates load-match picking (minimize

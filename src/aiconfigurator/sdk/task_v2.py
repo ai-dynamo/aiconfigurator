@@ -4,10 +4,9 @@
 """
 Task — flat user-facing config for sweep_agg / sweep_disagg.
 
-Replaces the legacy ``sdk.task.TaskConfig`` (still present alongside
-this module until V1 callers — chiefly ``cli/api.py:cli_estimate`` — are
-migrated).  The legacy YAML format is NOT supported; new YAML uses field
-names that map 1:1 to this dataclass.
+Replaces the legacy ``sdk.task.TaskConfig`` (now deleted).  Legacy V1 YAML is
+auto-detected and converted on load (see ``task_v1_compat``); the canonical new
+YAML uses field names that map 1:1 to this dataclass.
 
 Design:
 - Flat dataclass, SGLang-style.  No nested DefaultMunch, no deep_merge.

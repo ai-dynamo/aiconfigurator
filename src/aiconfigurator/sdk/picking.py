@@ -5,7 +5,7 @@
 Standalone picking functions for selecting engine configurations.
 
 These functions operate on perf DataFrames directly (ColumnsAgg, ColumnsDisagg,
-or ColumnsStatic schemas) without requiring a TaskConfig.  They can be called
+or ColumnsStatic schemas) without requiring a Task.  They can be called
 from either AIC's internal CLI pipeline or from an external real-GPU sweep.
 
 Three picking modes are supported:

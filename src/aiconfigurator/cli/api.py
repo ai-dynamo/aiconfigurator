@@ -90,7 +90,7 @@ class CLIResult:
     """Best throughput (tokens/s/gpu_cluster) per experiment."""
 
     task_configs: dict[str, Task]
-    """TaskConfig objects used for each experiment."""
+    """Task objects used for each experiment."""
 
     best_latencies: dict[str, dict[str, float]] = field(default_factory=dict)
     """Estimated latencies (ttft, tpot, request_latency) from the rank-1 config per experiment."""

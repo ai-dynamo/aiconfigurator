@@ -1097,7 +1097,7 @@ def build_default_task_configs(
         engine_step_backend: Experimental static latency backend ("python" or "rust").
 
     Returns:
-        Dict with TaskConfig objects. When backend='auto', returns 6 configs
+        Dict with Task objects. When backend='auto', returns 6 configs
         (agg_trtllm, agg_vllm, agg_sglang, disagg_trtllm, disagg_vllm, disagg_sglang).
         Otherwise returns 2 configs ('agg' and 'disagg').
     """
@@ -1321,7 +1321,7 @@ def build_experiment_task_configs(
             Per-experiment ``engine_step_backend`` entries take precedence.
 
     Returns:
-        Dict mapping experiment names to TaskConfig objects.
+        Dict mapping experiment names to Task objects.
 
     Raises:
         ValueError: If both or neither of yaml_path/config provided, or YAML load fails.
@@ -1414,7 +1414,7 @@ def _execute_task_configs(
     throughputs, and estimated latencies.
 
     Args:
-        task_configs: Dictionary mapping experiment names to TaskConfig objects to execute.
+        task_configs: Dictionary mapping experiment names to Task objects to execute.
         mode: Execution mode ('default' or 'exp').
         top_n: Number of top configurations to return for each experiment.
         target_request_rate: If set, activates load-match picking (minimize
