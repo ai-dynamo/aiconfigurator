@@ -20,11 +20,25 @@ from parallel_config_patch import EXPERT_COUNT_KEYS, _load_original_config, patc
 try:
     from .data import DataPoint, RepresentativeLayer, WorkUnit
     from .registry import LayerwiseModel
-    from .runtime import _get_system_name, _get_vllm_version, _parse_ints, _stable_hash
+    from .runtime import (
+        _get_system_name,
+        _get_vllm_default_max_num_seqs,
+        _get_vllm_version,
+        _infer_default_max_num_seqs_from_system,
+        _parse_ints,
+        _stable_hash,
+    )
 except ImportError:  # pragma: no cover - direct script compatibility
     from data import DataPoint, RepresentativeLayer, WorkUnit
     from registry import LayerwiseModel
-    from runtime import _get_system_name, _get_vllm_version, _parse_ints, _stable_hash
+    from runtime import (
+        _get_system_name,
+        _get_vllm_default_max_num_seqs,
+        _get_vllm_version,
+        _infer_default_max_num_seqs_from_system,
+        _parse_ints,
+        _stable_hash,
+    )
 
 
 CTX_NEW_TOKENS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
@@ -42,13 +56,26 @@ VLLM_DEFAULT_BLOCK_SIZE = 16
 CTX_MAX_NUM_BATCHED_TOKENS_FLOOR = 8192
 
 
-def values_for_preset(preset: str) -> dict[str, str]:
+def _batch_sizes_up_to(max_batch_size: int) -> list[int]:
+    """Return the canonical power-of-two decode batch grid up to a max."""
+
+    sizes = [value for value in GEN_BATCH_SIZES if value <= max_batch_size]
+    if max_batch_size > 0 and max_batch_size not in sizes:
+        sizes.append(max_batch_size)
+    return sorted(set(sizes))
+
+
+def values_for_preset(preset: str, *, max_decode_batch_size: int | None = None) -> dict[str, str]:
     """Return CSV shape defaults for the named public run preset."""
     if preset == "production":
+        gen_batch_sizes = (
+            _batch_sizes_up_to(max_decode_batch_size)
+            if max_decode_batch_size is not None else GEN_BATCH_SIZES
+        )
         return {
             "ctx_new_tokens": ",".join(map(str, CTX_NEW_TOKENS)),
             "ctx_past_kv": ",".join(map(str, CTX_PAST_KV)),
-            "gen_batch_sizes": ",".join(map(str, GEN_BATCH_SIZES)),
+            "gen_batch_sizes": ",".join(map(str, gen_batch_sizes)),
             "gen_past_kv": ",".join(map(str, GEN_PAST_KV)),
         }
     if preset == "smoke":
@@ -59,6 +86,20 @@ def values_for_preset(preset: str) -> dict[str, str]:
             "gen_past_kv": ",".join(map(str, SMOKE_GEN_PAST_KV)),
         }
     raise ValueError(f"unknown run preset: {preset}")
+
+
+def resolve_max_decode_batch_size(raw: str, *, system: str | None, tp_size: int) -> int:
+    """Resolve the public max decode batch setting to an integer."""
+
+    if raw != "auto":
+        value = int(raw)
+        if value < 1:
+            raise ValueError(f"max decode batch size must be >= 1, got {value}")
+        return value
+    detected = _get_vllm_default_max_num_seqs(world_size=tp_size)
+    if detected is not None:
+        return detected
+    return _infer_default_max_num_seqs_from_system(system)
 
 
 def parse_csv_ints_or_auto(raw: str) -> list[int] | str:
@@ -91,14 +132,25 @@ def make_legacy_args(
     ep_size: int,
 ) -> argparse.Namespace:
     """Convert public CLI args into the lower-level work-unit args."""
-    preset_values = values_for_preset(public_args.run_preset)
+    system = public_args.system or _get_system_name()
+    max_decode_batch_size = None
+    if public_args.phases in ("gen", "both"):
+        max_decode_batch_size = resolve_max_decode_batch_size(
+            public_args.max_decode_batch_size,
+            system=system,
+            tp_size=tp_size,
+        )
+    preset_values = values_for_preset(
+        public_args.run_preset,
+        max_decode_batch_size=max_decode_batch_size,
+    )
     moe_tp = tp_size // ep_size if model.is_moe else 1
     return argparse.Namespace(
         model=model.model,
         work_dir=str(public_args.run_dir / "profiles"),
         config_cache_dir=str(public_args.run_dir / "config_cache"),
         no_config_cache=public_args.no_config_cache,
-        system=public_args.system,
+        system=system,
         framework_version=public_args.framework_version,
         tp_sizes=str(tp_size),
         moe_tp=moe_tp,
@@ -317,9 +369,7 @@ def _max_num_batched_tokens_for_datapoints(
     gen_points = [dp for dp in datapoints if dp.phase == "gen"]
     ctx_max_new = max((dp.new_tokens for dp in ctx_points), default=0)
     gen_batch_sizes = sorted({dp.batch_size for dp in gen_points})
-    min_budget = 1
-    if ctx_points:
-        min_budget = CTX_MAX_NUM_BATCHED_TOKENS_FLOOR
+    min_budget = CTX_MAX_NUM_BATCHED_TOKENS_FLOOR if (ctx_points or gen_points) else 1
     if gen_points:
         # vLLM's prefix-cache path can use Mamba cache align mode, which
         # requires the token budget to be at least one KV block.

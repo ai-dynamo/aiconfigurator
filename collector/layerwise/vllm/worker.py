@@ -406,7 +406,7 @@ def run_worker(spec_path: Path) -> None:
         vllm_config_hash=metadata["vllm_config_hash"],
     )
     _worker_append_event(status_path, "engine_ready", work_unit_id=work_unit_id)
-    cuda_profiler_capture = str(spec.get("nsys_capture", "cuda_profiler_api")) == "cuda_profiler_api"
+    cuda_profiler_capture = str(spec.get("nsys_capture", "full")) == "cuda_profiler_api"
     try:
         _worker_append_event(status_path, "measurement_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
         _worker_set_cuda_profiler_capture(

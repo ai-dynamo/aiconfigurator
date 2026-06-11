@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -28,14 +29,14 @@ try:
     from .data import DataPoint, WorkUnit
     from .datapoint_generator import _max_num_batched_tokens_for_datapoints
     from .engine import _append_default_vllm_args
-    from .nsys import DEFAULT_ROLLUP, _aggregate_step_rows, _effective_rollup, _lookup_aggs, _reduce_agg_latency
+    from .nsys import _aggregate_step_rows, _effective_rollup, _lookup_aggs, _reduce_agg_latency
     from .results import _append_success_row, _write_csv_header_if_needed, _work_unit_includes_moe
     from .runtime import _detect_gpus, _json_dump, _tail, _utc_now
 except ImportError:  # pragma: no cover - direct script compatibility
     from data import DataPoint, WorkUnit
     from datapoint_generator import _max_num_batched_tokens_for_datapoints
     from engine import _append_default_vllm_args
-    from nsys import DEFAULT_ROLLUP, _aggregate_step_rows, _effective_rollup, _lookup_aggs, _reduce_agg_latency
+    from nsys import _aggregate_step_rows, _effective_rollup, _lookup_aggs, _reduce_agg_latency
     from results import _append_success_row, _write_csv_header_if_needed, _work_unit_includes_moe
     from runtime import _detect_gpus, _json_dump, _tail, _utc_now
 
@@ -155,6 +156,18 @@ class StatusStore:
                     events.append(json.loads(line))
         return events
 
+    def max_attempt_id(self) -> int:
+        """Return the largest attempt ID already recorded in the status log."""
+
+        max_id = 0
+        for event in self.load_events():
+            try:
+                attempt_id = int(event.get("attempt_id", 0))
+            except (TypeError, ValueError):
+                continue
+            max_id = max(max_id, attempt_id)
+        return max_id
+
     def index(self) -> StatusIndex:
         """Return a reconstructed status index from the append-only log."""
 
@@ -197,7 +210,15 @@ def _attempt_signature(returncode: int, stderr_tail: str) -> str:
         return "oom"
     if _is_fatal_cuda_text(stderr_tail):
         return "fatal_cuda"
-    return f"exit_{returncode}"
+    error_lines = [
+        line.strip() for line in stderr_tail.splitlines()
+        if any(marker in line for marker in ("Error:", "Exception:", "RuntimeError", "ValueError"))
+    ]
+    detail = error_lines[-1] if error_lines else stderr_tail.strip().splitlines()[-1:]
+    if isinstance(detail, list):
+        detail = detail[0] if detail else ""
+    fingerprint = hashlib.sha1(str(detail).encode()).hexdigest()[:12]
+    return f"exit_{returncode}:{fingerprint}:{str(detail)[:160]}"
 
 def oom_dominates(failed: DataPoint, candidate: DataPoint) -> bool:
     """Return whether a failed OOM point should prune a candidate.
@@ -255,7 +276,7 @@ class Scheduler:
             self.gpus = self.gpus[: args.max_workers]
         if not self.gpus:
             raise RuntimeError("No GPU slots available")
-        self.attempt_counter = 0
+        self.attempt_counter = self.store.max_attempt_id()
         self.fatal_streak: dict[tuple[str, str], int] = {}
 
     def run(self) -> None:
@@ -517,10 +538,6 @@ class Scheduler:
                 rollup=_effective_rollup(self.args),
                 layer=None,
                 rank_reduce=self.args.rank_reduce,
-                force_nvtx_span=(
-                    _effective_rollup(self.args) == DEFAULT_ROLLUP
-                    and self.args.latency_source == "span"
-                ),
             )
         except Exception as exc:
             self.store.append_event(
@@ -613,7 +630,12 @@ class Scheduler:
         active = index.active_started(attempt.work_unit.work_unit_id, attempt.pending_ids)
 
         if active and not index.is_terminal(active):
-            event = "failed_oom" if signature == "oom" else "failed_fatal_cuda"
+            if signature == "oom":
+                event = "failed_oom"
+            elif signature == "fatal_cuda":
+                event = "failed_fatal_cuda"
+            else:
+                event = "failed_error"
             self.store.append_event(
                 event,
                 work_unit_id=attempt.work_unit.work_unit_id,
@@ -648,6 +670,15 @@ class Scheduler:
         streak_key = (attempt.work_unit.work_unit_id, signature)
         self.fatal_streak[streak_key] = self.fatal_streak.get(streak_key, 0) + 1
         if self.fatal_streak[streak_key] >= FATAL_STREAK_LIMIT:
+            self.store.append_event(
+                "work_unit_omitted",
+                work_unit_id=attempt.work_unit.work_unit_id,
+                attempt_id=attempt.attempt_id,
+                signature=signature,
+                message=f"{FATAL_STREAK_LIMIT} consecutive crashes with no parsed success",
+                stderr_tail=stderr_tail[-4000:],
+                row_base=attempt.work_unit.row_base,
+            )
             index = self.store.index()
             for dp in attempt.work_unit.datapoints:
                 dpid = dp.datapoint_id(attempt.work_unit.work_unit_id)

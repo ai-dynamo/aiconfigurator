@@ -21,6 +21,7 @@ from collector.layerwise.vllm.data import DataPoint, RepresentativeLayer, WorkUn
 from random_prompt_tokens import load_random_prompt_token_config
 
 cl = SimpleNamespace(
+    Attempt=scheduler.Attempt,
     CTX_MAX_NUM_BATCHED_TOKENS_FLOOR=dpg.CTX_MAX_NUM_BATCHED_TOKENS_FLOOR,
     DataPoint=DataPoint,
     RandomPromptTokenConfig=worker.RandomPromptTokenConfig,
@@ -47,6 +48,7 @@ cl = SimpleNamespace(
     _reduce_agg_latency=nsys._reduce_agg_latency,
     build_work_units=dpg.build_work_units,
     oom_dominates=scheduler.oom_dominates,
+    _attempt_signature=scheduler._attempt_signature,
 )
 
 
@@ -88,7 +90,7 @@ def _args(tmp_path):
         gpus="0",
         max_workers=None,
         timeout=30,
-        nsys_capture="cuda_profiler_api",
+        nsys_capture="full",
         extra_vllm_arg=[],
         latency_source="span",
         ctx_warmup_runs=0,
@@ -143,7 +145,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(args.gen_repeat_aggregation, "trimmed_mean")
         self.assertFalse(hasattr(args, "gen_driver"))
         self.assertFalse(hasattr(args, "ctx_driver"))
-        self.assertEqual(args.nsys_capture, "cuda_profiler_api")
+        self.assertEqual(args.nsys_capture, "full")
 
     def test_datapoint_ids_and_parse_keys_are_stable(self):
         ctx = cl.DataPoint("ctx", 1, 128, 0)
@@ -443,6 +445,73 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertNotIn(failed_id, pending_ids)
             self.assertNotIn(dps[2].datapoint_id(unit.work_unit_id), pending_ids)
 
+    def test_generic_crash_marks_failed_error_not_fatal_cuda(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            dps = [cl.DataPoint("gen", 1, 1, 16)]
+            unit = _unit(tmp_path, dps)
+            scheduler = cl.Scheduler(_args(tmp_path), [unit])
+            dpid = dps[0].datapoint_id(unit.work_unit_id)
+            scheduler.store.append_event("started", work_unit_id=unit.work_unit_id, datapoint_id=dpid)
+            attempt = cl.Attempt(
+                work_unit=unit,
+                gpu="0",
+                attempt_id=1,
+                spec_path=tmp_path / "spec.json",
+                report_base=tmp_path / "report",
+                stdout_path=tmp_path / "out",
+                stderr_path=tmp_path / "err",
+                process=None,
+                stdout_handle=None,
+                stderr_handle=None,
+                pending_ids={dpid},
+            )
+
+            scheduler._mark_crashed_attempt(
+                attempt,
+                1,
+                "RuntimeError: Check failed: args->intermediate_size % 128 == 0",
+                successes=0,
+            )
+
+            events = scheduler.store.load_events()
+            self.assertTrue(any(event["event"] == "failed_error" for event in events))
+            self.assertFalse(any(event["event"] == "failed_fatal_cuda" for event in events))
+
+    def test_repeated_identical_crash_omits_work_unit_with_error_log(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            dps = [
+                cl.DataPoint("gen", 1, 1, 16),
+                cl.DataPoint("gen", 2, 1, 16),
+            ]
+            unit = _unit(tmp_path, dps)
+            scheduler = cl.Scheduler(_args(tmp_path), [unit])
+            pending_ids = {dp.datapoint_id(unit.work_unit_id) for dp in dps}
+            stderr_tail = "RuntimeError: Check failed: args->intermediate_size % 128 == 0"
+            for attempt_id in range(1, 4):
+                attempt = cl.Attempt(
+                    work_unit=unit,
+                    gpu="0",
+                    attempt_id=attempt_id,
+                    spec_path=tmp_path / f"spec{attempt_id}.json",
+                    report_base=tmp_path / f"report{attempt_id}",
+                    stdout_path=tmp_path / f"out{attempt_id}",
+                    stderr_path=tmp_path / f"err{attempt_id}",
+                    process=None,
+                    stdout_handle=None,
+                    stderr_handle=None,
+                    pending_ids=pending_ids,
+                )
+                scheduler._mark_crashed_attempt(attempt, 1, stderr_tail, successes=0)
+
+            events = scheduler.store.load_events()
+            omitted = [event for event in events if event["event"] == "work_unit_omitted"]
+            skipped = [event for event in events if event["event"] == "skipped_same_error"]
+            self.assertEqual(len(omitted), 1)
+            self.assertIn("intermediate_size", omitted[0]["stderr_tail"])
+            self.assertEqual({event["datapoint_id"] for event in skipped}, pending_ids)
+
     def test_scheduler_adds_gpt_oss_runtime_defaults_for_decode_only(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
@@ -486,27 +555,27 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertNotIn("tensor_parallel_size", spec)
             self.assertNotIn("--tensor-parallel-size", spec["extra_vllm_args"])
 
-    def test_worker_cmd_defaults_to_cuda_profiler_capture(self):
+    def test_worker_cmd_defaults_to_full_capture(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             scheduler = cl.Scheduler(_args(tmp_path), [_unit(tmp_path, [])])
 
             cmd = scheduler._worker_cmd(tmp_path / "spec.json", tmp_path / "report")
 
-            self.assertIn("--capture-range=cudaProfilerApi", cmd)
-            self.assertIn("--capture-range-end=stop", cmd)
+            self.assertNotIn("--capture-range=cudaProfilerApi", cmd)
+            self.assertNotIn("--capture-range-end=stop", cmd)
 
-    def test_worker_cmd_can_trace_full_process(self):
+    def test_worker_cmd_can_use_cuda_profiler_capture(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = _args(tmp_path)
-            args.nsys_capture = "full"
+            args.nsys_capture = "cuda_profiler_api"
             scheduler = cl.Scheduler(args, [_unit(tmp_path, [])])
 
             cmd = scheduler._worker_cmd(tmp_path / "spec.json", tmp_path / "report")
 
-            self.assertNotIn("--capture-range=cudaProfilerApi", cmd)
-            self.assertNotIn("--capture-range-end=stop", cmd)
+            self.assertIn("--capture-range=cudaProfilerApi", cmd)
+            self.assertIn("--capture-range-end=stop", cmd)
 
     def test_scheduler_adds_default_vllm_extra_args(self):
         with tempfile.TemporaryDirectory() as td:
@@ -633,7 +702,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             str(cl.CTX_MAX_NUM_BATCHED_TOKENS_FLOOR),
         )
 
-    def test_engine_tokens_prefix_cache_keeps_decode_budget_small(self):
+    def test_engine_tokens_prefix_cache_keeps_decode_budget_in_parity_regime(self):
         tokens = cl._engine_tokens(
             model_dir="/model",
             datapoints=[cl.DataPoint("gen", 32, 1, 65536)],
@@ -642,7 +711,10 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
         self.assertEqual(tokens[tokens.index("--max-model-len") + 1], "65538")
         self.assertEqual(tokens[tokens.index("--max-num-seqs") + 1], "32")
-        self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "32")
+        self.assertEqual(
+            tokens[tokens.index("--max-num-batched-tokens") + 1],
+            str(cl.CTX_MAX_NUM_BATCHED_TOKENS_FLOOR),
+        )
 
     def test_engine_tokens_prefix_cache_uses_at_least_one_block(self):
         tokens = cl._engine_tokens(
@@ -653,7 +725,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
         self.assertEqual(
             tokens[tokens.index("--max-num-batched-tokens") + 1],
-            str(cl.VLLM_DEFAULT_BLOCK_SIZE),
+            str(cl.CTX_MAX_NUM_BATCHED_TOKENS_FLOOR),
         )
 
     def test_engine_tokens_include_context_past_kv_in_model_len(self):
@@ -966,6 +1038,17 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=1)
 
             self.assertTrue(spec["moe_noop"])
+
+    def test_scheduler_resumes_after_existing_attempt_ids(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            args = _args(tmp_path)
+            store = cl.StatusStore(Path(args.work_dir))
+            store.append_event("attempt_started", work_unit_id="wu_old", attempt_id=7)
+
+            scheduler = cl.Scheduler(args, [_unit(tmp_path, [cl.DataPoint("gen", 1, 1, 16)])])
+
+            self.assertEqual(scheduler.attempt_counter, 7)
 
     def test_parallel_config_patch_treats_num_local_experts_as_moe(self):
         config = {

@@ -63,6 +63,53 @@ def _get_vllm_version() -> str:
         pass
     return "unknown"
 
+def _get_vllm_default_max_num_seqs(world_size: int = 1) -> int | None:
+    """Return vLLM's hardware-dependent LLM default max_num_seqs if available."""
+
+    code = f"""
+from vllm.engine.arg_utils import EngineArgs
+from vllm.usage.usage_lib import UsageContext
+_, default_max_num_seqs = EngineArgs.get_batch_defaults({int(world_size)})
+print(default_max_num_seqs.get(UsageContext.LLM_CLASS))
+"""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        if result.returncode == 0:
+            raw = result.stdout.strip()
+            return int(raw) if raw else None
+    except Exception:
+        pass
+    return None
+
+def _infer_default_max_num_seqs_from_system(system: str | None) -> int:
+    """Fallback approximation for vLLM's hardware-dependent max_num_seqs."""
+
+    normalized = str(system or "").lower()
+    high_memory_markers = (
+        "h100",
+        "h200",
+        "b100",
+        "b200",
+        "b300",
+        "gb200",
+        "gb300",
+        "mi300",
+        "mi325",
+        "80gb",
+        "96gb",
+        "141gb",
+        "192gb",
+    )
+    if "a100" not in normalized and any(marker in normalized for marker in high_memory_markers):
+        return 1024
+    return 256
+
 def _detect_gpus(gpus_arg: str | None) -> list[str]:
     if gpus_arg:
         return [x.strip() for x in gpus_arg.split(",") if x.strip()]

@@ -47,6 +47,21 @@ docker run --rm --ipc=host --network=host \
 Expected layerwise smoke output is `layerwise.csv` with four rows: two `ctx`
 rows and two `gen` rows. Nsight artifacts are under `profiles/nsys/`.
 
+The layerwise CLI defaults to full Nsight capture. This is intentional: vLLM
+captures CUDA graphs during engine setup/warmup, and the parser needs those
+graph-node records to attribute decode replay kernels back to the measured
+layer. `--nsys-capture cuda_profiler_api` is a diagnostic speed mode and should
+not be used for AIC-quality layerwise data.
+
+Production decode batch sizes default up to vLLM's hardware-dependent
+`max_num_seqs` default (`--max-decode-batch-size auto`). On B300/H100-class
+systems this currently resolves to 1024; on smaller default systems it usually
+resolves to 256. Use `--gen-batch-sizes` to request an exact decode grid.
+
+If a work unit crashes repeatedly with the same error and no parsed successes,
+the scheduler records a `work_unit_omitted` event in `profiles/status.jsonl`
+with the stderr tail and marks the remaining datapoints `skipped_same_error`.
+
 The FPM smoke uses the public Python wrapper around the lower-level shell
 collector:
 

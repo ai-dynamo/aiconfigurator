@@ -57,6 +57,7 @@ def test_layerwise_public_cli_defaults_to_all_registry_models(tmp_path):
     with (
         mock.patch.object(vllm_datapoints, "_load_original_config", side_effect=fake_config),
         mock.patch.object(vllm_datapoints, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
+        mock.patch.object(vllm_datapoints, "resolve_max_decode_batch_size", return_value=64),
     ):
         units = vllm_datapoints.build_public_work_units(args, select_models(args.models))
 
@@ -100,6 +101,7 @@ def test_layerwise_auto_ep_sizes_skip_intermediate_moe_tp(tmp_path):
     with (
         mock.patch.object(vllm_datapoints, "_load_original_config", return_value=fake_config),
         mock.patch.object(vllm_datapoints, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
+        mock.patch.object(vllm_datapoints, "resolve_max_decode_batch_size", return_value=64),
     ):
         units = vllm_datapoints.build_public_work_units(args, select_models(args.models))
 
@@ -109,6 +111,18 @@ def test_layerwise_auto_ep_sizes_skip_intermediate_moe_tp(tmp_path):
         (8, 1),
         (8, 8),
     ]
+
+
+def test_layerwise_production_decode_default_uses_requested_max_batch_size():
+    values = vllm_datapoints.values_for_preset("production", max_decode_batch_size=1024)
+
+    assert values["gen_batch_sizes"] == "1,2,4,8,16,32,64,128,256,512,1024"
+
+
+def test_layerwise_production_decode_default_can_follow_smaller_vllm_default():
+    values = vllm_datapoints.values_for_preset("production", max_decode_batch_size=256)
+
+    assert values["gen_batch_sizes"] == "1,2,4,8,16,32,64,128,256"
 
 
 def test_layerwise_public_cli_supports_single_ad_hoc_model():

@@ -43,6 +43,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ctx-past-kv", default=None, help="Override context past-KV grid.")
     parser.add_argument("--gen-batch-sizes", default=None, help="Override decode batch-size grid.")
     parser.add_argument("--gen-past-kv", default=None, help="Override decode past-KV grid.")
+    parser.add_argument(
+        "--max-decode-batch-size",
+        default="auto",
+        help="Maximum default decode batch size for production presets. "
+        "'auto' uses vLLM's hardware-dependent default max_num_seqs.",
+    )
     parser.add_argument("--max-workers", type=int, default=None, help="Limit concurrent one-GPU workers.")
 
     advanced = parser.add_argument_group("advanced/debug options")
@@ -70,7 +76,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     advanced.add_argument("--gen-measured-runs", type=int, default=6)
     advanced.add_argument("--gen-repeat-aggregation", choices=("median", "mean", "trimmed_mean", "min"), default="trimmed_mean")
     advanced.add_argument("--timeout", type=int, default=1800)
-    advanced.add_argument("--nsys-capture", choices=("cuda_profiler_api", "full"), default="cuda_profiler_api")
+    advanced.add_argument("--nsys-capture", choices=("full", "cuda_profiler_api"), default="full")
     advanced.add_argument("--rollup", default=None)
     advanced.add_argument("--extra-vllm-arg", action="append", default=[])
     return parser
