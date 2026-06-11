@@ -8,14 +8,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-PRODUCTION_CONTEXTS = "128,1024,4096"
-PRODUCTION_DECODE_BATCHES = "1,4,16"
-PRODUCTION_DECODE_PAST_KV = "4096"
-PRODUCTION_DECODE_OSL = "8"
-SMOKE_CONTEXTS = "128"
-SMOKE_DECODE_BATCHES = "1"
-SMOKE_DECODE_PAST_KV = "1024"
-SMOKE_DECODE_OSL = "2"
+FULL_CONTEXTS = "128,1024,4096"
+FULL_CONTEXT_REPEATS = "6"
+FULL_DECODE_BATCHES = "1,4,16"
+FULL_DECODE_PAST_KV = "4096"
+FULL_DECODE_OSL = "8"
+FULL_DECODE_REPEATS = "6"
+REAL_WORKLOAD_REQUESTS = 128
+REAL_WORKLOAD_CONCURRENCY = 32
+REAL_WORKLOAD_DATASET = "OpenAssistant/oasst1"
+REAL_WORKLOAD_SHAPE_SOURCE = "scaled_dataset"
+REAL_WORKLOAD_ISL_MIN = 100
+REAL_WORKLOAD_ISL_MAX = 16384
+REAL_WORKLOAD_ISL_MEAN = 4096
+REAL_WORKLOAD_OSL_MIN = 100
+REAL_WORKLOAD_OSL_MAX = 4096
+REAL_WORKLOAD_OSL_MEAN = 1024
 
 
 @dataclass(frozen=True)
@@ -37,23 +45,26 @@ def parse_int_csv(raw: str) -> list[int]:
     return [int(part) for part in raw.split(",") if part.strip()]
 
 
-def preset_defaults(preset: str) -> dict[str, str]:
-    """Return public FPM shape defaults for a run preset."""
-    if preset == "production":
-        return {
-            "contexts": PRODUCTION_CONTEXTS,
-            "decode_batches": PRODUCTION_DECODE_BATCHES,
-            "decode_past_kv": PRODUCTION_DECODE_PAST_KV,
-            "decode_osl": PRODUCTION_DECODE_OSL,
-        }
-    if preset == "smoke":
-        return {
-            "contexts": SMOKE_CONTEXTS,
-            "decode_batches": SMOKE_DECODE_BATCHES,
-            "decode_past_kv": SMOKE_DECODE_PAST_KV,
-            "decode_osl": SMOKE_DECODE_OSL,
-        }
-    raise ValueError(f"unknown FPM preset: {preset}")
+def default_shapes() -> dict[str, str]:
+    """Return the default FPM shape set."""
+    return {
+        "contexts": FULL_CONTEXTS,
+        "context_repeats": FULL_CONTEXT_REPEATS,
+        "decode_batches": FULL_DECODE_BATCHES,
+        "decode_past_kv": FULL_DECODE_PAST_KV,
+        "decode_osl": FULL_DECODE_OSL,
+        "decode_repeats": FULL_DECODE_REPEATS,
+        "real_workload_requests": str(REAL_WORKLOAD_REQUESTS),
+        "real_workload_concurrency": str(REAL_WORKLOAD_CONCURRENCY),
+        "real_workload_dataset": REAL_WORKLOAD_DATASET,
+        "real_workload_shape_source": REAL_WORKLOAD_SHAPE_SOURCE,
+        "real_workload_isl_min": str(REAL_WORKLOAD_ISL_MIN),
+        "real_workload_isl_max": str(REAL_WORKLOAD_ISL_MAX),
+        "real_workload_isl_mean": str(REAL_WORKLOAD_ISL_MEAN),
+        "real_workload_osl_min": str(REAL_WORKLOAD_OSL_MIN),
+        "real_workload_osl_max": str(REAL_WORKLOAD_OSL_MAX),
+        "real_workload_osl_mean": str(REAL_WORKLOAD_OSL_MEAN),
+    }
 
 
 def generate_fpm_cases(tp_sizes: str, ep_sizes: str, decode_past_kv: str) -> list[FpmCase]:

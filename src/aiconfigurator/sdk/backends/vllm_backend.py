@@ -165,13 +165,27 @@ class VLLMBackend(BaseBackend):
         database: PerfDatabase,
         tp_size: int,
         token_count: int,
+        execution_mode: str | None = None,
     ) -> float:
         if tp_size <= 1 or token_count <= 0:
             return 0.0
         hidden_size = int(getattr(model, "_hidden_size", 0))
         if hidden_size <= 0:
             return 0.0
-        return float(database.query_custom_allreduce(common.CommQuantMode.half, tp_size, token_count * hidden_size))
+        query_kwargs = {}
+        if execution_mode is not None:
+            query_kwargs["execution_mode"] = execution_mode
+        try:
+            return float(
+                database.query_custom_allreduce(
+                    common.CommQuantMode.half,
+                    tp_size,
+                    token_count * hidden_size,
+                    **query_kwargs,
+                )
+            )
+        except TypeError:
+            return float(database.query_custom_allreduce(common.CommQuantMode.half, tp_size, token_count * hidden_size))
 
     def _query_layerwise_detail(
         self,
@@ -212,7 +226,125 @@ class VLLMBackend(BaseBackend):
         raw_multiplier = float(detail.get("layer_multiplier", 0.0) or 0.0)
         if raw_multiplier <= 0.0:
             return fallback_num_layers
-        return max(0, int(round(min(raw_multiplier, float(fallback_num_layers)))))
+        return max(0, round(min(raw_multiplier, float(fallback_num_layers))))
+
+    def _layerwise_detail_represented_moe_layers(self, detail: dict, fallback_num_layers: int) -> int:
+        """Return the number of MoE layers represented by a layerwise detail row."""
+
+        components = detail.get("components")
+        if isinstance(components, list):
+            total = 0
+            for component in components:
+                if isinstance(component, dict) and bool(component.get("includes_moe", False)):
+                    total += self._layerwise_detail_represented_layers(component, fallback_num_layers)
+            if total > 0:
+                return min(total, fallback_num_layers)
+        if bool(detail.get("includes_moe", False)):
+            return self._layerwise_detail_represented_layers(detail, fallback_num_layers)
+        return 0
+
+    def _layerwise_structural_moe_context_ms(self, detail: dict, num_layers: int) -> float | None:
+        """Estimate MoE context from no-op baseline plus measured MoE delta."""
+
+        components = detail.get("components")
+        if not isinstance(components, list) or len(components) < 2:
+            return None
+
+        def _has_scale_metadata(component: dict) -> bool:
+            has_measured_count = component.get("measured_layer_count") not in (None, "")
+            has_multiplier = component.get("layer_multiplier") not in (None, "")
+            return has_measured_count and has_multiplier
+
+        def _scaled(component: dict) -> float:
+            return float(component.get("latency", 0.0) or 0.0) * self._layerwise_detail_scale(component, num_layers)
+
+        def _latency_source(component: dict) -> str:
+            return str(component.get("latency_source") or "")
+
+        def _pick_source_components(
+            candidates: list[dict],
+            preferred_sources: tuple[str, ...],
+            *,
+            require_source_match: bool = True,
+        ) -> list[dict]:
+            """Choose one latency-source family from a component set."""
+
+            if not candidates:
+                return []
+            available_sources = {_latency_source(component) for component in candidates}
+            for source in preferred_sources:
+                if source not in available_sources:
+                    continue
+                picked = [component for component in candidates if _latency_source(component) == source]
+                if picked or not require_source_match:
+                    return picked
+            if available_sources == {""}:
+                return candidates
+            return []
+
+        baseline_components = []
+        moe_components = []
+        noop_delta_components = []
+        for component in components:
+            if not isinstance(component, dict) or not _has_scale_metadata(component):
+                continue
+            if bool(component.get("includes_moe", False)):
+                moe_components.append(component)
+                continue
+            represented_layers = self._layerwise_detail_represented_layers(component, num_layers)
+            scale = self._layerwise_detail_scale(component, num_layers)
+            if represented_layers >= num_layers and scale <= 1.0:
+                baseline_components.append(component)
+            else:
+                noop_delta_components.append(component)
+
+        if not baseline_components or not moe_components:
+            return None
+
+        baseline_components = _pick_source_components(
+            baseline_components,
+            ("schedule_to_update", "fpm_wall", "span", "gpu", ""),
+        )
+        moe_components = _pick_source_components(
+            moe_components,
+            ("critical_path", "gpu", "span", ""),
+        )
+        if not moe_components:
+            return None
+        delta_source = _latency_source(moe_components[0])
+        if delta_source:
+            noop_delta_components = [
+                component for component in noop_delta_components
+                if _latency_source(component) in {delta_source, ""}
+            ]
+            noop_delta_components = _pick_source_components(
+                noop_delta_components,
+                (delta_source, ""),
+            )
+        else:
+            # Legacy layerwise rows did not always carry latency_source. If the
+            # matching no-op representative rows all have one source family, use
+            # that family instead of abandoning the structural MoE path.
+            noop_sources = {
+                _latency_source(component)
+                for component in noop_delta_components
+                if _latency_source(component)
+            }
+            if len(noop_sources) == 1:
+                inferred_source = next(iter(noop_sources))
+                noop_delta_components = _pick_source_components(
+                    noop_delta_components,
+                    (inferred_source, ""),
+                )
+            else:
+                noop_delta_components = _pick_source_components(noop_delta_components, ("",))
+        if not baseline_components or not noop_delta_components:
+            return None
+
+        baseline_ms = sum(_scaled(component) for component in baseline_components)
+        moe_ms = sum(_scaled(component) for component in moe_components)
+        noop_delta_ms = sum(_scaled(component) for component in noop_delta_components)
+        return baseline_ms + max(0.0, moe_ms - noop_delta_ms)
 
     def _layerwise_tp_allreduce_rms_ms(
         self,
@@ -234,6 +366,34 @@ class VLLMBackend(BaseBackend):
                 hidden_size,
             )
         )
+
+    def _layerwise_moe_ep_alltoall_ms(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        ep_size: int,
+        token_count: int,
+        *,
+        exchange_count: float = 2.0,
+    ) -> float:
+        """Return vLLM MoE EP communication latency for one represented layer."""
+
+        if ep_size <= 1 or token_count <= 0:
+            return 0.0
+        hidden_size = int(getattr(model, "_hidden_size", 0) or 0)
+        topk = int(getattr(model, "_topk", 0) or 0)
+        if hidden_size <= 0 or topk <= 0:
+            return 0.0
+
+        message_size = max(1, int(token_count * hidden_size * topk / ep_size))
+        return float(
+            database.query_nccl(
+                common.CommQuantMode.half,
+                ep_size,
+                "alltoall",
+                message_size,
+            )
+        ) * exchange_count
 
     def _layerwise_moe_compute(
         self,
@@ -301,24 +461,106 @@ class VLLMBackend(BaseBackend):
         layer_detail = self._layerwise_context_layer_detail(
             database, model_name, tp_size, batch_size, effective_isl, prefix
         )
-        layer_scale = self._layerwise_detail_scale(layer_detail, num_layers)
-        layer_ms = float(layer_detail["latency"]) * layer_scale
-        allreduce_ms = (
-            self._layerwise_tp_allreduce_ms(model, database, tp_size, batch_size * effective_isl) * 2 * num_layers
-        )
+        structural_moe_context_ms = self._layerwise_structural_moe_context_ms(layer_detail, num_layers)
+        if structural_moe_context_ms is None:
+            layer_scale = self._layerwise_detail_scale(layer_detail, num_layers)
+            layer_ms = float(layer_detail["latency"]) * layer_scale
+        else:
+            layer_ms = structural_moe_context_ms
+        context_source = str(layer_detail.get("latency_source") or "")
+        token_count = batch_size * effective_isl
+        layer_includes_moe = bool(layer_detail.get("includes_moe", False))
+        physical_gpus = int(float(layer_detail.get("physical_gpus", 1.0) or 1.0))
+        context_source_covers_tp = physical_gpus >= tp_size
+        if (
+            context_source in {"schedule_to_update", "fpm_wall"}
+            and context_source_covers_tp
+        ) or (
+            context_source == "worker_wall"
+            and (not layer_includes_moe or context_source_covers_tp)
+        ):
+            allreduce_ms = 0.0
+        else:
+            allreduce_ms = (
+                self._layerwise_tp_allreduce_ms(
+                    model,
+                    database,
+                    tp_size,
+                    token_count,
+                    execution_mode="eager",
+                )
+                * 2
+                * num_layers
+            )
+        moe_tp_allreduce_ms = 0.0
+        moe_tp_size = int(getattr(model.config, "moe_tp_size", 1) or 1)
+        moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
+        represented_moe_layers = self._layerwise_detail_represented_moe_layers(layer_detail, num_layers)
+        if represented_moe_layers > 0 and moe_tp_size > 1 and physical_gpus < moe_tp_size:
+            try:
+                moe_tp_allreduce_ms = (
+                    self._layerwise_tp_allreduce_ms(
+                        model,
+                        database,
+                        moe_tp_size,
+                        token_count,
+                        execution_mode="eager",
+                    )
+                    * represented_moe_layers
+                )
+            except (AttributeError, PerfDataNotAvailableError, ValueError):
+                logger.debug(
+                    "Falling back to no explicit vLLM CTX MoE-TP allreduce for model=%s, moe_tp_size=%s, "
+                    "token_count=%s because allreduce data is unavailable",
+                    model_name,
+                    moe_tp_size,
+                    token_count,
+                )
         moe_ms, moe_energy, moe_source = 0.0, 0.0, "silicon"
-        if not bool(layer_detail.get("includes_moe", False)):
+        if structural_moe_context_ms is None and not layer_includes_moe:
             moe_ms, moe_energy, moe_source = self._layerwise_moe_compute(
                 model,
                 database,
-                token_count=batch_size * effective_isl,
+                token_count=token_count,
                 num_layers=self._layerwise_detail_represented_layers(layer_detail, num_layers),
                 is_context=True,
             )
+        moe_ep_alltoall_layers = represented_moe_layers
+        if moe_ep_alltoall_layers <= 0 and moe_ms > 0.0:
+            moe_ep_alltoall_layers = self._layerwise_detail_represented_layers(layer_detail, num_layers)
+        moe_ep_alltoall_ms = 0.0
+        if moe_ep_alltoall_layers > 0 and moe_ep_size > 1 and physical_gpus < moe_ep_size:
+            try:
+                moe_ep_alltoall_ms = (
+                    self._layerwise_moe_ep_alltoall_ms(
+                        model,
+                        database,
+                        moe_ep_size,
+                        token_count,
+                        exchange_count=1.0,
+                    )
+                    * moe_ep_alltoall_layers
+                )
+            except (AttributeError, PerfDataNotAvailableError, ValueError):
+                logger.debug(
+                    "Falling back to no explicit vLLM CTX MoE-EP all-to-all for model=%s, moe_ep_size=%s, "
+                    "token_count=%s because NCCL data is unavailable",
+                    model_name,
+                    moe_ep_size,
+                    token_count,
+                )
 
         latency_dict = defaultdict(float, {"context_layerwise": layer_ms, "context_tp_allreduce": allreduce_ms})
         energy_dict = defaultdict(float, {"context_layerwise": 0.0, "context_tp_allreduce": 0.0})
         source_dict = {"context_layerwise": "silicon", "context_tp_allreduce": "silicon"}
+        if moe_tp_allreduce_ms > 0.0:
+            latency_dict["context_moe_tp_allreduce"] = moe_tp_allreduce_ms
+            energy_dict["context_moe_tp_allreduce"] = 0.0
+            source_dict["context_moe_tp_allreduce"] = "silicon"
+        if moe_ep_alltoall_ms > 0.0:
+            latency_dict["context_moe_ep_alltoall"] = moe_ep_alltoall_ms
+            energy_dict["context_moe_ep_alltoall"] = 0.0
+            source_dict["context_moe_ep_alltoall"] = "silicon"
         if moe_ms > 0.0:
             latency_dict["context_moe"] = moe_ms
             energy_dict["context_moe"] = moe_energy
@@ -347,6 +589,9 @@ class VLLMBackend(BaseBackend):
         effective_bs = batch_size * beam_width * (model._nextn + 1)
 
         layer_ms_total = 0.0
+        tp_allreduce_total = 0.0
+        moe_tp_allreduce_total = 0.0
+        moe_ep_alltoall_total = 0.0
         fused_allreduce_rms_total = 0.0
         moe_ms_total = 0.0
         moe_energy_total = 0.0
@@ -363,32 +608,87 @@ class VLLMBackend(BaseBackend):
             )
             layer_scale = self._layerwise_detail_scale(layer_detail, num_layers)
             layer_step_ms = float(layer_detail["latency"]) * layer_scale
-            rms_step_ms = float(layer_detail.get("rms_latency", 0.0)) * layer_scale
+            layer_includes_moe = bool(layer_detail.get("includes_moe", False))
+            moe_tp_size = int(getattr(model.config, "moe_tp_size", 1) or 1)
+            moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
+            physical_gpus = int(float(layer_detail.get("physical_gpus", 1.0) or 1.0))
+            represented_moe_layers = self._layerwise_detail_represented_moe_layers(layer_detail, num_layers)
+            # vLLM layerwise GEN rows measure the transformer block execution
+            # envelope. The block already contains RMS work, so adding a
+            # separate fused all-reduce+RMS term double-counts decode latency.
+            rms_step_ms = 0.0
             allreduce_rms_step_ms = 0.0
-            if tp_size > 1 and rms_step_ms > 0.0:
+            try:
+                standalone_allreduce_ms = self._layerwise_tp_allreduce_ms(model, database, tp_size, effective_bs)
                 try:
-                    allreduce_rms_step_ms = (
-                        self._layerwise_tp_allreduce_rms_ms(model, database, tp_size, effective_bs) * 2 * num_layers
+                    fused_allreduce_ms = self._layerwise_tp_allreduce_rms_ms(
+                        model, database, tp_size, effective_bs
                     )
-                    if allreduce_rms_step_ms <= 0.0:
-                        rms_step_ms = 0.0
-                except (PerfDataNotAvailableError, ValueError):
+                except (AttributeError, PerfDataNotAvailableError, ValueError):
+                    # vLLM decode has two TP collectives per transformer block.
+                    # When fused allreduce+RMS data is available, use it for the
+                    # residual/RMS collective; otherwise preserve the legacy
+                    # two-standalone-allreduce estimate.
+                    fused_allreduce_ms = standalone_allreduce_ms
+                if layer_includes_moe and moe_tp_size <= 1 and moe_ep_size > 1:
+                    # Pure expert parallel MoE does not tensor-parallelize the
+                    # expert MLP, so only the attention TP collective is exposed.
+                    tp_allreduce_step_ms = standalone_allreduce_ms * num_layers
+                else:
+                    tp_allreduce_step_ms = (standalone_allreduce_ms + fused_allreduce_ms) * num_layers
+            except (AttributeError, PerfDataNotAvailableError, ValueError):
+                logger.debug(
+                    "Falling back to no explicit vLLM GEN TP allreduce for model=%s, tp_size=%s, "
+                    "batch_size=%s because allreduce data is unavailable",
+                    model_name,
+                    tp_size,
+                    effective_bs,
+                )
+                tp_allreduce_step_ms = 0.0
+            moe_tp_allreduce_step_ms = 0.0
+            if layer_includes_moe and moe_tp_size > 1:
+                try:
+                    moe_tp_allreduce_step_ms = (
+                        self._layerwise_tp_allreduce_ms(model, database, moe_tp_size, effective_bs)
+                        * represented_moe_layers
+                    )
+                except (AttributeError, PerfDataNotAvailableError, ValueError):
                     logger.debug(
-                        "Falling back to unadjusted vLLM GEN layerwise row for model=%s, tp_size=%s, "
-                        "batch_size=%s, kv_len=%s because allreduce_rms data is unavailable",
+                        "Falling back to no explicit vLLM GEN MoE-TP allreduce for model=%s, moe_tp_size=%s, "
+                        "batch_size=%s because allreduce data is unavailable",
                         model_name,
-                        tp_size,
+                        moe_tp_size,
                         effective_bs,
-                        kv_len,
                     )
-                    rms_step_ms = 0.0
-            else:
-                rms_step_ms = 0.0
+                    moe_tp_allreduce_step_ms = 0.0
+            moe_ep_alltoall_step_ms = 0.0
+            if (
+                not layer_includes_moe
+                and represented_moe_layers > 0
+                and moe_ep_size > 1
+                and physical_gpus < moe_ep_size
+            ):
+                try:
+                    moe_ep_alltoall_step_ms = (
+                        self._layerwise_moe_ep_alltoall_ms(model, database, moe_ep_size, effective_bs)
+                        * represented_moe_layers
+                    )
+                except (AttributeError, PerfDataNotAvailableError, ValueError):
+                    logger.debug(
+                        "Falling back to no explicit vLLM GEN MoE-EP all-to-all for model=%s, moe_ep_size=%s, "
+                        "batch_size=%s because NCCL data is unavailable",
+                        model_name,
+                        moe_ep_size,
+                        effective_bs,
+                    )
+                    moe_ep_alltoall_step_ms = 0.0
             repeat_count = min(stride, osl - 1 - i)
             layer_ms_total += max(0.0, layer_step_ms - rms_step_ms) * repeat_count
+            tp_allreduce_total += tp_allreduce_step_ms * repeat_count
+            moe_tp_allreduce_total += moe_tp_allreduce_step_ms * repeat_count
             fused_allreduce_rms_total += allreduce_rms_step_ms * repeat_count
             moe_step_ms, moe_step_energy, moe_step_source = 0.0, 0.0, "silicon"
-            if not bool(layer_detail.get("includes_moe", False)):
+            if not layer_includes_moe:
                 moe_step_ms, moe_step_energy, moe_step_source = self._layerwise_moe_compute(
                     model,
                     database,
@@ -396,6 +696,22 @@ class VLLMBackend(BaseBackend):
                     num_layers=self._layerwise_detail_represented_layers(layer_detail, num_layers),
                     is_context=False,
                 )
+                if moe_step_ms > 0.0 and moe_ep_size > 1 and physical_gpus < moe_ep_size:
+                    try:
+                        moe_ep_alltoall_step_ms = (
+                            self._layerwise_moe_ep_alltoall_ms(model, database, moe_ep_size, effective_bs)
+                            * self._layerwise_detail_represented_layers(layer_detail, num_layers)
+                        )
+                    except (AttributeError, PerfDataNotAvailableError, ValueError):
+                        logger.debug(
+                            "Falling back to no explicit vLLM GEN MoE-EP all-to-all for model=%s, "
+                            "moe_ep_size=%s, batch_size=%s because NCCL data is unavailable",
+                            model_name,
+                            moe_ep_size,
+                            effective_bs,
+                        )
+                        moe_ep_alltoall_step_ms = 0.0
+            moe_ep_alltoall_total += moe_ep_alltoall_step_ms * repeat_count
             moe_ms_total += moe_step_ms * repeat_count
             moe_energy_total += moe_step_energy * repeat_count
             if moe_source is None or moe_source == moe_step_source:
@@ -406,6 +722,18 @@ class VLLMBackend(BaseBackend):
         latency_dict = defaultdict(float, {"generation_layerwise": layer_ms_total})
         energy_dict = defaultdict(float, {"generation_layerwise": 0.0})
         source_dict = {"generation_layerwise": "silicon"}
+        if tp_allreduce_total > 0.0:
+            latency_dict["generation_tp_allreduce"] = tp_allreduce_total
+            energy_dict["generation_tp_allreduce"] = 0.0
+            source_dict["generation_tp_allreduce"] = "silicon"
+        if moe_tp_allreduce_total > 0.0:
+            latency_dict["generation_moe_tp_allreduce"] = moe_tp_allreduce_total
+            energy_dict["generation_moe_tp_allreduce"] = 0.0
+            source_dict["generation_moe_tp_allreduce"] = "silicon"
+        if moe_ep_alltoall_total > 0.0:
+            latency_dict["generation_moe_ep_alltoall"] = moe_ep_alltoall_total
+            energy_dict["generation_moe_ep_alltoall"] = 0.0
+            source_dict["generation_moe_ep_alltoall"] = "silicon"
         if fused_allreduce_rms_total > 0.0:
             latency_dict["generation_tp_allreduce_rms"] = fused_allreduce_rms_total
             energy_dict["generation_tp_allreduce_rms"] = 0.0

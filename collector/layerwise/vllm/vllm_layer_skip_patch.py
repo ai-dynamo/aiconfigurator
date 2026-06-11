@@ -16,9 +16,12 @@ Env:
   LAYERWISE_SKIP_ENABLE=1       # set 0 to disable
   LAYERWISE_MOE_NOOP=1          # replace target-layer MoE MLPs with identity
 """
+import json
 import logging
 import os
+import re
 import types
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +199,108 @@ def _apply_moe_noop(model, target_layers: set[int]) -> int:
     return len(patched)
 
 
+def _load_safetensor_weights(model_id: str, keys: set[str]) -> dict:
+    """Load selected tensors from an HF safetensors checkpoint."""
+
+    if not keys:
+        return {}
+
+    if os.path.isdir(model_id):
+        model_dir = Path(model_id)
+        index_path = model_dir / "model.safetensors.index.json"
+
+        def resolve_file(filename: str) -> Path:
+            return model_dir / filename
+    else:
+        from huggingface_hub import hf_hub_download
+
+        index_path = Path(hf_hub_download(model_id, "model.safetensors.index.json"))
+
+        def resolve_file(filename: str) -> Path:
+            return Path(hf_hub_download(model_id, filename))
+
+    index = json.loads(index_path.read_text())
+    weight_map = index.get("weight_map", {})
+    missing = sorted(key for key in keys if key not in weight_map)
+    if missing:
+        raise RuntimeError(f"router checkpoint keys missing: {missing[:5]}")
+
+    from safetensors import safe_open
+
+    by_file: dict[str, list[str]] = {}
+    for key in keys:
+        by_file.setdefault(weight_map[key], []).append(key)
+
+    tensors = {}
+    for filename, file_keys in by_file.items():
+        with safe_open(str(resolve_file(filename)), framework="pt", device="cpu") as f:
+            for key in file_keys:
+                tensors[key] = f.get_tensor(key)
+    return tensors
+
+
+def _apply_router_weights(model, source_model: str, target_layers: set[int]) -> int:
+    """Copy real MoE router tensors into target layers inside this rank."""
+
+    import torch
+
+    sorted_targets = sorted(target_layers)
+    key_suffixes = {
+        "gate": "gate.weight",
+        "shared_expert_gate": "shared_expert_gate.weight",
+    }
+    needed: set[str] = set()
+    assignments = []
+    for module_name, module in model.named_modules():
+        match = re.search(r"(?:^|\.)layers\.(\d+)\.mlp$", module_name)
+        if match is None:
+            continue
+        layer_position = int(match.group(1))
+        source_layer = (
+            int(sorted_targets[layer_position])
+            if layer_position < len(sorted_targets)
+            else layer_position
+        )
+        for attr, suffix in key_suffixes.items():
+            linear = getattr(module, attr, None)
+            param = getattr(linear, "weight", None)
+            if param is None:
+                continue
+            source_key = f"model.language_model.layers.{source_layer}.mlp.{suffix}"
+            needed.add(source_key)
+            assignments.append((param, source_key, attr))
+
+    tensors = _load_safetensor_weights(source_model, needed)
+    loaded = 0
+    with torch.no_grad():
+        for param, source_key, attr in assignments:
+            tensor = tensors[source_key]
+            if tuple(param.shape) != tuple(tensor.shape):
+                param_shape = tuple(param.shape)
+                tensor_shape = tuple(tensor.shape)
+                if (
+                    len(param_shape) == len(tensor_shape)
+                    and len(param_shape) >= 1
+                    and tensor_shape[0] > param_shape[0]
+                    and tensor_shape[0] % param_shape[0] == 0
+                    and tensor_shape[1:] == param_shape[1:]
+                ):
+                    tensor = tensor.narrow(0, 0, param_shape[0]).contiguous()
+            if tuple(param.shape) != tuple(tensor.shape):
+                raise RuntimeError(
+                    f"router tensor shape mismatch for {source_key} ({attr}): "
+                    f"checkpoint={tuple(tensor.shape)} param={tuple(param.shape)}"
+                )
+            param.copy_(tensor.to(device=param.device, dtype=param.dtype))
+            loaded += 1
+    logger.warning(
+        "[vllm-layer-skip] loaded %s router tensors from %s",
+        loaded,
+        source_model,
+    )
+    return loaded
+
+
 def _apply_skip(model, target_layers: set[int]) -> int:
     layers, path = _find_layers(model)
     if layers is None:
@@ -255,6 +360,9 @@ def _install_patch():
             _apply_skip(root, targets)
             if os.environ.get("LAYERWISE_MOE_NOOP", "0") == "1":
                 _apply_moe_noop(root, targets)
+            router_weight_model = os.environ.get("LAYERWISE_ROUTER_WEIGHT_MODEL", "").strip()
+            if router_weight_model:
+                _apply_router_weights(root, router_weight_model, targets)
             # Register PytHooks EARLY only when compile is disabled; under
             # VLLM_COMPILE mode dynamo can't trace `"{}".format(marker_dict)`
             # inside `construct_marker_dict_and_push` and the first forward

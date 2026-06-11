@@ -118,6 +118,7 @@ class CustomAllReduce(Operation):
         tp_size: int,
         size: int,
         database_mode: common.DatabaseMode | None = None,
+        execution_mode: str | None = None,
     ):
         """Query custom_allreduce table. Verbatim port of the legacy body."""
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
@@ -167,7 +168,10 @@ class CustomAllReduce(Operation):
             effective_tp = min(tp_size, database.system_spec["node"]["num_gpus_per_node"])
             by_tp = data_wrapper.get(quant_mode, {})
             strategy_dict = by_tp.get(effective_tp, {})
-            comm_dict = strategy_dict.get("AUTO", {})
+            strategy = (execution_mode or "AUTO").upper()
+            comm_dict = strategy_dict.get(strategy, {})
+            if not comm_dict and strategy != "AUTO":
+                comm_dict = strategy_dict.get("AUTO", {})
             if not comm_dict:
                 raise PerfDataNotAvailableError(
                     f"No custom_allreduce silicon data for quant_mode={quant_mode.value.name}, "
@@ -692,8 +696,9 @@ def load_custom_allreduce_data(custom_allreduce_file):
     - TRTLLM: kernel_source="TRTLLM", last column="implementation"
     - vLLM/SGLang: kernel_source="*_graph" or "*_eager", last column="backend"
 
-    For vLLM/SGLang with both graph and eager modes, only graph mode data is kept
-    (better performance for decode phase).
+    For vLLM/SGLang with both graph and eager modes, graph mode remains the
+    default ``AUTO`` strategy for decode callers, while eager rows are retained
+    under the ``EAGER`` strategy for prefill/context callers.
 
     Returns:
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
@@ -719,11 +724,13 @@ def load_custom_allreduce_data(custom_allreduce_file):
         kernel_source = row.get("kernel_source", "")
         backend = row.get("backend", "")
 
-        # For vLLM/SGLang format: only keep graph mode data (skip eager mode)
-        # kernel_source patterns: "vLLM_custom_graph", "SGLang_CustomAllReduce_graph", etc.
-        # backend patterns: "vllm_graph", "sglang_graph", etc.
-        if (kernel_source.endswith("_eager") or backend.endswith("_eager")) and not is_b60:
-            continue  # Skip eager mode, use graph mode only
+        is_eager = kernel_source.endswith("_eager") or backend.endswith("_eager")
+        is_graph = kernel_source.endswith("_graph") or backend.endswith("_graph")
+        strategy = "AUTO"
+        if is_eager and not is_b60:
+            strategy = "EAGER"
+        elif is_graph:
+            strategy = "GRAPH"
 
         dtype, tp_size, message_size, latency = (
             row["allreduce_dtype"],
@@ -745,17 +752,24 @@ def load_custom_allreduce_data(custom_allreduce_file):
 
         try:
             # Check for conflict
-            custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size]
-            logger.debug(
-                f"value conflict in custom allreduce data: {dtype} {tp_size} {allreduce_strategy} {message_size}"
-            )
+            custom_allreduce_data[dtype][tp_size][strategy][message_size]
+            logger.debug(f"value conflict in custom allreduce data: {dtype} {tp_size} {strategy} {message_size}")
         except KeyError:
             # Store all three values
-            custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size] = {
+            custom_allreduce_data[dtype][tp_size][strategy][message_size] = {
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
             }
+        if strategy == "GRAPH" or (strategy == "AUTO" and allreduce_strategy == "AUTO"):
+            try:
+                custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size]
+            except KeyError:
+                custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size] = {
+                    "latency": latency,
+                    "power": power,
+                    "energy": energy,
+                }
 
     return custom_allreduce_data
 

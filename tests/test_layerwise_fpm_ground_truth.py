@@ -1,5 +1,6 @@
 import argparse
 import csv
+import random
 import sys
 from pathlib import Path
 
@@ -25,6 +26,7 @@ def _send_args(tmp_path, **overrides):
         requests=3,
         max_tokens=1,
         prompt_token_seed=0,
+        prompt_rng=random.Random(0),
         prompt_token_config=RandomPromptTokenConfig(100, frozenset({0, 1})),
         workload_output=str(tmp_path / "workload.csv"),
         workload_label="context",
@@ -55,6 +57,69 @@ def test_send_requests_labels_and_appends_workload_csv(tmp_path):
     assert [row["workload_label"] for row in rows] == ["context", "context", "context", "decode_b1"]
     assert [int(row["request_index"]) for row in rows] == [10, 11, 12, 20]
     assert [int(row["target_isl"]) for row in rows] == [4, 8, 4, 16]
+
+
+def test_send_requests_prompt_seed_is_optional_and_reproducible_when_set(tmp_path):
+    seeded_first = _send_args(tmp_path, prompt_token_seed=123, prompt_rng=random.Random(999))
+    seeded_second = _send_args(tmp_path, prompt_token_seed=123, prompt_rng=random.Random(111))
+    unseeded = _send_args(tmp_path, prompt_token_seed=None, prompt_rng=random.Random(123))
+
+    assert send_requests.make_token_ids(seeded_first, 16, 10) == send_requests.make_token_ids(
+        seeded_second,
+        16,
+        10,
+    )
+    assert send_requests.make_token_ids(seeded_first, 16, 10) != send_requests.make_token_ids(
+        unseeded,
+        16,
+        10,
+    )
+
+
+def test_send_requests_real_workload_uses_fallback_shapes_when_dataset_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(send_requests, "load_openassistant_shapes", lambda *args, **kwargs: [])
+    args = _send_args(
+        tmp_path,
+        real_workload=True,
+        requests=5,
+        max_model_len=2048,
+        real_workload_dataset="missing/dataset",
+        real_workload_max_rows=10,
+    )
+
+    specs = send_requests.build_specs(args)
+
+    rows = list(csv.DictReader((tmp_path / "workload.csv").open()))
+    assert len(specs) == 5
+    assert len({int(row["target_isl"]) for row in rows}) > 1
+    assert all(int(row["target_isl"]) + int(row["target_osl"]) <= 2048 for row in rows)
+    assert {row["shape_source"] for row in rows} == {"synthetic_large_shape_distribution"}
+
+
+def test_send_requests_real_workload_scales_dataset_shapes_to_large_distribution(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        send_requests,
+        "load_openassistant_shapes",
+        lambda *args, **kwargs: [(5, 10), (100, 20), (20, 100), (300, 30)],
+    )
+    args = _send_args(
+        tmp_path,
+        real_workload=True,
+        requests=4,
+        max_model_len=32768,
+        real_workload_dataset="OpenAssistant/oasst1",
+        real_workload_max_rows=10,
+        real_workload_shape_source="scaled_dataset",
+    )
+
+    specs = send_requests.build_specs(args)
+
+    isls = [spec["target_isl"] for spec in specs]
+    osls = [spec["target_osl"] for spec in specs]
+    assert min(isls) >= 100
+    assert max(isls) == 16384
+    assert min(osls) >= 100
+    assert max(osls) == 4096
 
 
 def test_summarize_fpm_classifies_context_decode_and_mixed_rows(tmp_path):

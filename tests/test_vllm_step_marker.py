@@ -6,7 +6,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "collector" / "layerwise" / "vllm"))
 os.environ["LAYERWISE_STEP_MARKER"] = "0"
@@ -24,7 +23,7 @@ def _scheduler_output(*, req_ids, computed, scheduled, new_reqs=(), scheduled_re
             req_ids=list(req_ids),
             num_computed_tokens=list(computed),
         ),
-        num_scheduled_tokens=dict(zip(scheduled_ids, scheduled)),
+        num_scheduled_tokens=dict(zip(scheduled_ids, scheduled, strict=False)),
     )
 
 

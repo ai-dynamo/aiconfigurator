@@ -9,10 +9,15 @@ import fcntl
 import gc
 import json
 import os
+import random
+import re
 import sys
+import time
 import traceback
+from contextlib import contextmanager
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 _THIS_DIR = Path(__file__).resolve().parent
 _COMMON_DIR = _THIS_DIR.parent / "common"
@@ -21,20 +26,19 @@ sys.path.insert(0, str(_COMMON_DIR))
 from random_prompt_tokens import (
     RandomPromptTokenConfig,
     load_random_prompt_token_config,
-    make_prompt_token_ids,
     sample_prompt_token_ids,
 )
 from vllm_deployment import find_runtime_vllm_config, make_metadata, summarize_vllm_config, write_metadata
 
 try:
     from .data import DataPoint
-    from .datapoint_generator import _max_num_batched_tokens_for_datapoints
+    from .datapoint_generator import LIVE_DECODE_OUTPUT_TOKENS
     from .engine import _create_llm, _engine_tokens
     from .runtime import _utc_now
     from .scheduler import _is_fatal_cuda_text, _is_oom_text, oom_dominates
 except ImportError:  # pragma: no cover - direct script compatibility
     from data import DataPoint
-    from datapoint_generator import _max_num_batched_tokens_for_datapoints
+    from datapoint_generator import LIVE_DECODE_OUTPUT_TOKENS
     from engine import _create_llm, _engine_tokens
     from runtime import _utc_now
     from scheduler import _is_fatal_cuda_text, _is_oom_text, oom_dominates
@@ -69,60 +73,141 @@ def _dummy_prompts(
     input_len: int,
     token_config: RandomPromptTokenConfig,
 ):
-    import random
-
+    rng = random.Random()
     return [
-        {"prompt_token_ids": sample_prompt_token_ids(random, input_len, token_config)}
+        {"prompt_token_ids": sample_prompt_token_ids(rng, input_len, token_config)}
         for _ in range(batch_size)
     ]
 
-def _deterministic_token_prompts(
+class PromptTokenFactory:
+    """Sample synthetic prompt tokens, optionally reproducibly from a seed."""
+
+    def __init__(self, seed: int | None):
+        self.rng = random.Random(seed)
+        self.streams: dict[tuple[Any, ...], list[int]] = {}
+
+    def sample(self, token_count: int, token_config: RandomPromptTokenConfig) -> list[int]:
+        """Return one fresh random token-id sequence."""
+
+        return sample_prompt_token_ids(self.rng, int(token_count), token_config)
+
+    def stream(
+        self,
+        key: tuple[Any, ...],
+        token_count: int,
+        token_config: RandomPromptTokenConfig,
+    ) -> list[int]:
+        """Return a stable token stream prefix for prefix-cache reuse."""
+
+        token_count = int(token_count)
+        tokens = self.streams.setdefault(key, [])
+        while len(tokens) < token_count:
+            tokens.extend(sample_prompt_token_ids(self.rng, token_count - len(tokens), token_config))
+        return list(tokens[:token_count])
+
+class PromptBatchCache:
+    """Reuse large prompt-token batches across repeated decode measurements."""
+
+    def __init__(self) -> None:
+        self._token_prompts: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+
+    def get_token_prompts(
+        self,
+        key: tuple[Any, ...],
+        *,
+        batch_size: int,
+        input_len: int,
+        token_config: RandomPromptTokenConfig,
+        prompt_factory: PromptTokenFactory,
+        stream_key_prefix: tuple[Any, ...],
+        cache_salt_prefix: str,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Return cached prefix-cache prompts and whether this was a cache hit."""
+
+        cached = self._token_prompts.get(key)
+        hit = cached is not None
+        if cached is None:
+            cached = _token_prompts(
+                batch_size,
+                input_len,
+                token_config,
+                prompt_factory=prompt_factory,
+                stream_key_prefix=stream_key_prefix,
+                cache_salt_prefix=cache_salt_prefix,
+            )
+            self._token_prompts[key] = cached
+        return [dict(prompt) for prompt in cached], hit
+
+    def clear(self) -> None:
+        """Drop cached prompt batches while keeping token streams elsewhere."""
+
+        self._token_prompts.clear()
+
+def _token_prompts(
     batch_size: int,
     input_len: int,
     token_config: RandomPromptTokenConfig,
     *,
-    request_index_offset: int,
+    prompt_factory: PromptTokenFactory,
+    stream_key_prefix: tuple[Any, ...] | None = None,
     cache_salt_prefix: str | None = None,
 ) -> list[dict[str, Any]]:
     prompts: list[dict[str, Any]] = []
     for request_idx in range(batch_size):
+        if stream_key_prefix is None:
+            token_ids = prompt_factory.sample(input_len, token_config)
+        else:
+            token_ids = prompt_factory.stream((*stream_key_prefix, request_idx), input_len, token_config)
         prompt: dict[str, Any] = {
-            "prompt_token_ids": make_prompt_token_ids(
-                prompt_token_seed=0,
-                token_count=input_len,
-                request_index=request_index_offset + request_idx,
-                token_config=token_config,
-            )
+            "prompt_token_ids": token_ids
         }
         if cache_salt_prefix is not None:
             prompt["cache_salt"] = f"{cache_salt_prefix}:req{request_idx}"
         prompts.append(prompt)
     return prompts
 
-def _deterministic_prefix_suffix_prompts(
+def _variable_token_prompts(
+    input_lens: list[int],
+    token_config: RandomPromptTokenConfig,
+    *,
+    prompt_factory: PromptTokenFactory,
+    stream_key_prefix: tuple[Any, ...] | None = None,
+    cache_salt_prefix: str | None = None,
+) -> list[dict[str, Any]]:
+    """Build prompts when requests in one batch have different input lengths."""
+
+    prompts: list[dict[str, Any]] = []
+    for request_idx, input_len in enumerate(input_lens):
+        if stream_key_prefix is None:
+            token_ids = prompt_factory.sample(input_len, token_config)
+        else:
+            token_ids = prompt_factory.stream((*stream_key_prefix, request_idx), input_len, token_config)
+        prompt: dict[str, Any] = {
+            "prompt_token_ids": token_ids
+        }
+        if cache_salt_prefix is not None:
+            prompt["cache_salt"] = f"{cache_salt_prefix}:req{request_idx}"
+        prompts.append(prompt)
+    return prompts
+
+def _prefix_suffix_prompts(
     batch_size: int,
     prefix_len: int,
     suffix_len: int,
     token_config: RandomPromptTokenConfig,
     *,
-    prefix_request_index_offset: int,
-    suffix_request_index_offset: int,
+    prompt_factory: PromptTokenFactory,
+    prefix_stream_key_prefix: tuple[Any, ...],
     cache_salt_prefix: str | None = None,
 ) -> list[dict[str, Any]]:
     prompts: list[dict[str, Any]] = []
     for request_idx in range(batch_size):
-        prefix = make_prompt_token_ids(
-            prompt_token_seed=0,
-            token_count=prefix_len,
-            request_index=prefix_request_index_offset + request_idx,
-            token_config=token_config,
+        prefix = prompt_factory.stream(
+            (*prefix_stream_key_prefix, request_idx),
+            prefix_len,
+            token_config,
         )
-        suffix = make_prompt_token_ids(
-            prompt_token_seed=0,
-            token_count=suffix_len,
-            request_index=suffix_request_index_offset + request_idx,
-            token_config=token_config,
-        )
+        suffix = prompt_factory.sample(suffix_len, token_config)
         prompt: dict[str, Any] = {"prompt_token_ids": [*prefix, *suffix]}
         if cache_salt_prefix is not None:
             prompt["cache_salt"] = f"{cache_salt_prefix}:req{request_idx}"
@@ -136,19 +221,151 @@ def _run_generate(
     batch_size: int,
     input_len: int,
     token_config: RandomPromptTokenConfig,
-    request_index_offset: int | None = None,
+    prompt_factory: PromptTokenFactory,
+    stream_key_prefix: tuple[Any, ...] | None = None,
     cache_salt_prefix: str | None = None,
+    prompt_cache: PromptBatchCache | None = None,
+    prompt_cache_key: tuple[Any, ...] | None = None,
+    status_path: Path | None = None,
+    work_unit_id: str | None = None,
+    datapoint_id: str | None = None,
+    timing_phase: str | None = None,
+    timing_batch_size: int | None = None,
+    timing_past_kv: int | None = None,
+    timing_run: int | None = None,
 ) -> None:
-    if request_index_offset is None and cache_salt_prefix is None:
-        prompts = _dummy_prompts(batch_size, input_len, token_config)
+    build_start = time.perf_counter()
+    prompt_cache_hit: bool | None = None
+    if (
+        prompt_cache is not None
+        and prompt_cache_key is not None
+        and stream_key_prefix is not None
+        and cache_salt_prefix is not None
+    ):
+        prompts, prompt_cache_hit = prompt_cache.get_token_prompts(
+            prompt_cache_key,
+            batch_size=batch_size,
+            input_len=input_len,
+            token_config=token_config,
+            prompt_factory=prompt_factory,
+            stream_key_prefix=stream_key_prefix,
+            cache_salt_prefix=cache_salt_prefix,
+        )
     else:
-        prompts = _deterministic_token_prompts(
+        prompts = _token_prompts(
             batch_size,
             input_len,
             token_config,
-            request_index_offset=0 if request_index_offset is None else request_index_offset,
+            prompt_factory=prompt_factory,
+            stream_key_prefix=stream_key_prefix,
             cache_salt_prefix=cache_salt_prefix,
         )
+    prompt_build_ms = (time.perf_counter() - build_start) * 1000.0
+    generate_start = time.perf_counter()
+    profile_paths = _profile_generate_call(
+        lambda: llm.generate(
+            prompts,
+            sampling_params=sampling_params,
+            use_tqdm=False,
+        ),
+        status_path=status_path,
+        work_unit_id=work_unit_id,
+        datapoint_id=datapoint_id,
+        phase=timing_phase,
+        batch_size=timing_batch_size,
+        past_kv=timing_past_kv,
+        run=timing_run,
+    )
+    generate_ms = (time.perf_counter() - generate_start) * 1000.0
+    if status_path is not None and work_unit_id is not None and timing_phase is not None:
+        _worker_append_event(
+            status_path,
+            "generate_wall_time",
+            work_unit_id=work_unit_id,
+            datapoint_id=datapoint_id,
+            phase=timing_phase,
+            batch_size=timing_batch_size,
+            past_kv=timing_past_kv,
+            run=timing_run,
+            prompt_build_ms=prompt_build_ms,
+            generate_ms=generate_ms,
+            prompt_cache_hit=prompt_cache_hit,
+            profile_stats=profile_paths.get("stats"),
+            profile_text=profile_paths.get("text"),
+        )
+
+def _profile_generate_call(
+    func,
+    *,
+    status_path: Path | None,
+    work_unit_id: str | None,
+    datapoint_id: str | None,
+    phase: str | None,
+    batch_size: int | None,
+    past_kv: int | None,
+    run: int | None,
+) -> dict[str, str]:
+    """Run ``func`` with optional cProfile output for generate diagnostics."""
+
+    if os.environ.get("LAYERWISE_PROFILE_GENERATE", "0") != "1":
+        func()
+        return {}
+    min_bs = int(os.environ.get("LAYERWISE_PROFILE_GENERATE_MIN_BS", "0"))
+    if batch_size is None or int(batch_size) < min_bs:
+        func()
+        return {}
+    import cProfile
+    import io
+    import pstats
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    try:
+        func()
+    finally:
+        profiler.disable()
+    base_dir = Path(
+        os.environ.get(
+            "LAYERWISE_PROFILE_GENERATE_DIR",
+            str((status_path.parent if status_path is not None else Path.cwd()) / "generate_profiles"),
+        )
+    )
+    base_dir.mkdir(parents=True, exist_ok=True)
+    safe_dpid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", datapoint_id or "unknown")
+    label = f"{work_unit_id or 'wu'}_{phase or 'phase'}_bs{batch_size}_past{past_kv}_run{run}"
+    label = re.sub(r"[^A-Za-z0-9_.:-]+", "_", label)
+    stats_path = base_dir / f"{label}.pstats"
+    text_path = base_dir / f"{label}.txt"
+    profiler.dump_stats(str(stats_path))
+    stream = io.StringIO()
+    stats = pstats.Stats(profiler, stream=stream).strip_dirs().sort_stats("cumtime")
+    stats.print_stats(80)
+    text_path.write_text(
+        f"datapoint_id={safe_dpid}\n"
+        f"phase={phase} batch_size={batch_size} past_kv={past_kv} run={run}\n\n"
+        + stream.getvalue()
+    )
+    return {"stats": str(stats_path), "text": str(text_path)}
+
+def _run_generate_variable_lengths(
+    llm,
+    sampling_params,
+    *,
+    input_lens: list[int],
+    token_config: RandomPromptTokenConfig,
+    prompt_factory: PromptTokenFactory,
+    stream_key_prefix: tuple[Any, ...] | None = None,
+    cache_salt_prefix: str | None = None,
+) -> None:
+    """Run generation for one batch with per-request prompt lengths."""
+
+    prompts = _variable_token_prompts(
+        input_lens,
+        token_config,
+        prompt_factory=prompt_factory,
+        stream_key_prefix=stream_key_prefix,
+        cache_salt_prefix=cache_salt_prefix,
+    )
     llm.generate(
         prompts,
         sampling_params=sampling_params,
@@ -163,17 +380,17 @@ def _run_generate_prefix_suffix(
     prefix_len: int,
     suffix_len: int,
     token_config: RandomPromptTokenConfig,
-    prefix_request_index_offset: int,
-    suffix_request_index_offset: int,
+    prompt_factory: PromptTokenFactory,
+    prefix_stream_key_prefix: tuple[Any, ...],
     cache_salt_prefix: str | None = None,
 ) -> None:
-    prompts = _deterministic_prefix_suffix_prompts(
+    prompts = _prefix_suffix_prompts(
         batch_size,
         prefix_len,
         suffix_len,
         token_config,
-        prefix_request_index_offset=prefix_request_index_offset,
-        suffix_request_index_offset=suffix_request_index_offset,
+        prompt_factory=prompt_factory,
+        prefix_stream_key_prefix=prefix_stream_key_prefix,
         cache_salt_prefix=cache_salt_prefix,
     )
     llm.generate(
@@ -181,6 +398,114 @@ def _run_generate_prefix_suffix(
         sampling_params=sampling_params,
         use_tqdm=False,
     )
+
+def _use_live_step_driver(dp: DataPoint) -> bool:
+    """Return whether one measured step drifts by at most 1% of past KV."""
+
+    if dp.past_kv <= 0:
+        return False
+    if dp.phase == "gen" and dp.past_kv >= 32768:
+        return False
+    return int(dp.new_tokens) * 100 <= int(dp.past_kv)
+
+def _make_final_only_sampling_params(sampling_cls, **kwargs):
+    """Build sampling params matching ``LLM.generate`` output processing."""
+
+    params = sampling_cls(**kwargs)
+    try:
+        from vllm.sampling_params import RequestOutputKind
+
+        params.output_kind = RequestOutputKind.FINAL_ONLY
+    except Exception:
+        pass
+    return params
+
+def _engine_core_scheduler(llm):
+    """Return the in-process vLLM scheduler used by ``LLMEngine.step``."""
+
+    engine_core = getattr(llm.llm_engine.engine_core, "engine_core", None)
+    scheduler = getattr(engine_core, "scheduler", None)
+    if scheduler is None:
+        raise RuntimeError("live LLMEngine driver requires an in-process vLLM scheduler")
+    return scheduler
+
+@contextmanager
+def _temporary_scheduler_token_budget(llm, token_budget: int):
+    """Temporarily cap scheduler tokens per step without resizing engine buffers."""
+
+    scheduler = _engine_core_scheduler(llm)
+    old_budget = getattr(scheduler, "max_num_scheduled_tokens")
+    scheduler.max_num_scheduled_tokens = int(token_budget)
+    try:
+        yield
+    finally:
+        scheduler.max_num_scheduled_tokens = old_budget
+
+def _engine_requests_by_id(llm, request_ids: list[str]) -> dict[str, Any]:
+    """Return currently known scheduler request objects for the given IDs."""
+
+    scheduler = _engine_core_scheduler(llm)
+    requests = dict(getattr(scheduler, "requests", {}))
+    for req in getattr(scheduler, "running", []):
+        req_id = getattr(req, "request_id", getattr(req, "req_id", None))
+        if req_id is not None:
+            requests[str(req_id)] = req
+    return {request_id: requests[request_id] for request_id in request_ids if request_id in requests}
+
+def _all_requests_computed_at_least(llm, request_ids: list[str], token_count: int) -> bool:
+    """Return whether all live requests have computed at least ``token_count`` tokens."""
+
+    requests = _engine_requests_by_id(llm, request_ids)
+    if len(requests) != len(request_ids):
+        return False
+    return all(int(getattr(req, "num_computed_tokens", 0)) >= token_count for req in requests.values())
+
+def _add_engine_requests(llm, prompts: list[dict[str, Any]], sampling_params, *, request_prefix: str) -> list[str]:
+    """Submit prompts directly to the lower-level vLLM engine."""
+
+    request_ids = []
+    for idx, prompt in enumerate(prompts):
+        request_id = f"{request_prefix}:{idx}:{time.time_ns()}"
+        request_ids.append(llm.llm_engine.add_request(request_id, prompt, sampling_params))
+    return request_ids
+
+def _abort_engine_requests(llm, request_ids: list[str]) -> None:
+    """Abort live engine requests, ignoring already-finished IDs."""
+
+    if not request_ids:
+        return
+    try:
+        llm.llm_engine.abort_request(request_ids, internal=True)
+    except Exception:
+        pass
+
+def _step_engine_until(
+    llm,
+    predicate,
+    *,
+    max_steps: int,
+    status_path: Path | None = None,
+    work_unit_id: str | None = None,
+    datapoint_id: str | None = None,
+    event: str = "live_step_wait",
+) -> int:
+    """Step the engine until ``predicate`` is true or ``max_steps`` is exceeded."""
+
+    steps = 0
+    while not predicate():
+        if steps >= max_steps:
+            raise RuntimeError(f"timed out waiting for live LLMEngine state after {steps} steps")
+        llm.llm_engine.step()
+        steps += 1
+    if status_path is not None and work_unit_id is not None:
+        _worker_append_event(
+            status_path,
+            event,
+            work_unit_id=work_unit_id,
+            datapoint_id=datapoint_id,
+            steps=steps,
+        )
+    return steps
 
 def _classify_exception(exc: BaseException) -> str:
     text = f"{type(exc).__name__}: {exc}"
@@ -277,6 +602,164 @@ def _ctx_marker_iteration(
         raise ValueError(f"max_num_batched_tokens must be >= 1, got {max_num_batched_tokens}")
     return 1
 
+def _resolve_attr_path(obj: Any, path: str) -> Any | None:
+    """Return a nested attribute path if every segment exists."""
+
+    current = obj
+    for part in path.split("."):
+        current = getattr(current, part, None)
+        if current is None:
+            return None
+    return current
+
+def _find_torch_model(llm: Any) -> Any:
+    """Find the inner torch module inside a vLLM ``LLM`` instance."""
+
+    candidate_paths = (
+        "llm_engine.model_executor.driver_worker.model_runner.model",
+        "llm_engine.model_executor.model_runner.model",
+        "llm_engine.engine_core.model_executor.driver_worker.model_runner.model",
+        "engine_core.model_executor.driver_worker.model_runner.model",
+    )
+    for path in candidate_paths:
+        candidate = _resolve_attr_path(llm, path)
+        if hasattr(candidate, "named_modules"):
+            return candidate
+
+    queue: list[tuple[Any, int]] = [(llm, 0)]
+    seen: set[int] = set()
+    attrs = (
+        "llm_engine",
+        "engine_core",
+        "model_executor",
+        "driver_worker",
+        "worker",
+        "model_runner",
+        "model",
+    )
+    while queue:
+        current, depth = queue.pop(0)
+        ident = id(current)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if depth > 6:
+            continue
+        if hasattr(current, "named_modules"):
+            names = [name for name, _ in current.named_modules()]
+            if any(".mlp" in name or name.endswith("mlp") for name in names):
+                return current
+        for attr in attrs:
+            child = getattr(current, attr, None)
+            if child is not None:
+                queue.append((child, depth + 1))
+    raise RuntimeError("could not locate inner torch model for router weight loading")
+
+def _load_safetensor_weights(model_id: str, keys: set[str]) -> dict[str, Any]:
+    """Load selected tensors from an HF safetensors checkpoint."""
+
+    if not keys:
+        return {}
+
+    if os.path.isdir(model_id):
+        model_dir = Path(model_id)
+        index_path = model_dir / "model.safetensors.index.json"
+
+        def resolve_file(filename: str) -> Path:
+            return model_dir / filename
+    else:
+        from huggingface_hub import hf_hub_download
+
+        index_path = Path(hf_hub_download(model_id, "model.safetensors.index.json"))
+
+        def resolve_file(filename: str) -> Path:
+            return Path(hf_hub_download(model_id, filename))
+
+    index = json.loads(index_path.read_text())
+    weight_map = index.get("weight_map", {})
+    missing = sorted(key for key in keys if key not in weight_map)
+    if missing:
+        raise RuntimeError(f"router checkpoint keys missing: {missing[:5]}")
+
+    from safetensors import safe_open
+
+    by_file: dict[str, list[str]] = {}
+    for key in keys:
+        by_file.setdefault(weight_map[key], []).append(key)
+
+    tensors: dict[str, Any] = {}
+    for filename, file_keys in by_file.items():
+        with safe_open(str(resolve_file(filename)), framework="pt", device="cpu") as f:
+            for key in file_keys:
+                tensors[key] = f.get_tensor(key)
+    return tensors
+
+def _install_router_weights(
+    llm: Any,
+    *,
+    source_model: str,
+    target_layers: list[int],
+) -> int:
+    """Copy compatible real MoE router tensors into a dummy-weight vLLM model."""
+
+    import torch
+
+    model = _find_torch_model(llm)
+    layer_modules: list[tuple[int, int, str, Any]] = []
+    key_suffixes = {
+        "gate": "gate.weight",
+        "shared_expert_gate": "shared_expert_gate.weight",
+    }
+    for module_name, module in model.named_modules():
+        match = re.search(r"(?:^|\.)layers\.(\d+)\.mlp$", module_name)
+        if match is None:
+            continue
+        layer_position = int(match.group(1))
+        source_layer = (
+            int(target_layers[layer_position])
+            if layer_position < len(target_layers)
+            else layer_position
+        )
+        if any(hasattr(module, attr) for attr in key_suffixes):
+            layer_modules.append((layer_position, source_layer, module_name, module))
+
+    needed: set[str] = set()
+    assignments: list[tuple[Any, str, str]] = []
+    for _layer_position, source_layer, _module_name, module in layer_modules:
+        for attr, suffix in key_suffixes.items():
+            linear = getattr(module, attr, None)
+            param = getattr(linear, "weight", None)
+            if param is None:
+                continue
+            source_key = f"model.language_model.layers.{source_layer}.mlp.{suffix}"
+            needed.add(source_key)
+            assignments.append((param, source_key, attr))
+
+    tensors = _load_safetensor_weights(source_model, needed)
+    loaded = 0
+    with torch.no_grad():
+        for param, source_key, attr in assignments:
+            tensor = tensors[source_key]
+            if tuple(param.shape) != tuple(tensor.shape):
+                param_shape = tuple(param.shape)
+                tensor_shape = tuple(tensor.shape)
+                if (
+                    len(param_shape) == len(tensor_shape)
+                    and len(param_shape) >= 1
+                    and tensor_shape[0] > param_shape[0]
+                    and tensor_shape[0] % param_shape[0] == 0
+                    and tensor_shape[1:] == param_shape[1:]
+                ):
+                    tensor = tensor.narrow(0, 0, param_shape[0]).contiguous()
+            if tuple(param.shape) != tuple(tensor.shape):
+                raise RuntimeError(
+                    f"router tensor shape mismatch for {source_key} ({attr}): "
+                    f"checkpoint={tuple(tensor.shape)} param={tuple(param.shape)}"
+                )
+            param.copy_(tensor.to(device=param.device, dtype=param.dtype))
+            loaded += 1
+    return loaded
+
 def run_worker(spec_path: Path) -> None:
     """Execute one worker spec inside an nsys-profiled subprocess."""
 
@@ -299,15 +782,27 @@ def run_worker(spec_path: Path) -> None:
         work_unit_id=work_unit_id,
         attempt_id=spec["attempt_id"],
     )
-    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    if int(spec.get("physical_gpus") or 1) <= 1:
+        os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     os.environ["LAYERWISE_TARGET_LAYERS"] = ",".join(str(x) for x in spec["target_layers"])
+    if spec.get("enable_layer_patch", True):
+        os.environ["LAYERWISE_SKIP_ENABLE"] = "1"
+    else:
+        os.environ["LAYERWISE_SKIP_ENABLE"] = "0"
+    if spec.get("enable_step_marker", True):
+        os.environ["LAYERWISE_STEP_MARKER"] = "1"
+    else:
+        os.environ["LAYERWISE_STEP_MARKER"] = "0"
     if spec.get("moe_noop"):
         os.environ["LAYERWISE_MOE_NOOP"] = "1"
     else:
         os.environ.pop("LAYERWISE_MOE_NOOP", None)
-    max_num_batched_tokens = _max_num_batched_tokens_for_datapoints(
-        datapoints,
-    )
+    physical_gpus = int(spec.get("physical_gpus") or 1)
+    if spec.get("router_weight_model") and physical_gpus > 1:
+        os.environ["LAYERWISE_ROUTER_WEIGHT_MODEL"] = str(spec["router_weight_model"])
+    else:
+        os.environ.pop("LAYERWISE_ROUTER_WEIGHT_MODEL", None)
+    max_num_batched_tokens = spec.get("max_num_batched_tokens") or 1
     iterations = {1}
     iterations.update(
         _ctx_marker_iteration(dp, max_num_batched_tokens)
@@ -333,6 +828,10 @@ def run_worker(spec_path: Path) -> None:
     )
 
     sys.path.insert(0, str(_THIS_DIR))
+    pythonpath_parts = [str(_THIS_DIR)]
+    if os.environ.get("PYTHONPATH"):
+        pythonpath_parts.append(os.environ["PYTHONPATH"])
+    os.environ["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
     import multiprocessing as mp
 
     try:
@@ -349,8 +848,10 @@ def run_worker(spec_path: Path) -> None:
         attempt_id=spec["attempt_id"],
     )
     import vllm_layer_skip_patch  # noqa: F401
+    import vllm_scheduler_timing_patch  # noqa: F401
     import vllm_step_marker
     from vllm import SamplingParams
+
     _worker_append_event(
         status_path,
         "worker_imports_finished",
@@ -362,23 +863,65 @@ def run_worker(spec_path: Path) -> None:
     _worker_append_event(status_path, "engine_started", work_unit_id=work_unit_id)
     _worker_append_event(status_path, "engine_args_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
     prompt_token_config = load_random_prompt_token_config(spec["model_dir"])
+    prompt_factory = PromptTokenFactory(spec.get("prompt_seed"))
     engine_tokens = _engine_tokens(
         model_dir=spec["model_dir"],
         datapoints=datapoints,
         extra_vllm_args=spec["extra_vllm_args"],
+        max_num_seqs=spec.get("max_num_seqs"),
+        max_num_batched_tokens=spec.get("max_num_batched_tokens"),
+        max_model_len=spec.get("max_model_len"),
+        gen_driver=spec.get("gen_driver", "prefix_cache"),
     )
     _worker_append_event(status_path, "engine_args_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
     _worker_append_event(status_path, "engine_create_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
-    llm = _create_llm(engine_tokens)
-    _worker_append_event(status_path, "engine_create_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
-    _worker_append_event(status_path, "engine_metadata_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
+    llm = _create_llm(
+        engine_tokens,
+        enable_layerwise_nvtx_tracing=bool(
+            spec.get("enable_layerwise_nvtx_tracing", True)
+        ),
+    )
+    _worker_append_event(
+        status_path,
+        "engine_create_finished",
+        work_unit_id=work_unit_id,
+        attempt_id=spec["attempt_id"],
+    )
+    if spec.get("router_weight_model") and physical_gpus <= 1:
+        _worker_append_event(
+            status_path,
+            "router_weights_started",
+            work_unit_id=work_unit_id,
+            attempt_id=spec["attempt_id"],
+            source_model=spec.get("router_weight_model"),
+        )
+        loaded_router_tensors = _install_router_weights(
+            llm,
+            source_model=str(spec["router_weight_model"]),
+            target_layers=[int(x) for x in spec["target_layers"]],
+        )
+        _worker_append_event(
+            status_path,
+            "router_weights_finished",
+            work_unit_id=work_unit_id,
+            attempt_id=spec["attempt_id"],
+            loaded_tensors=loaded_router_tensors,
+        )
+    _worker_append_event(
+        status_path,
+        "engine_metadata_started",
+        work_unit_id=work_unit_id,
+        attempt_id=spec["attempt_id"],
+    )
     effective_config = None
     runtime_vllm_config = find_runtime_vllm_config(llm)
     has_ctx = any(dp.phase == "ctx" for dp in datapoints)
     has_gen = any(dp.phase == "gen" for dp in datapoints)
+    gen_driver = str(spec.get("gen_driver", "prefix_cache"))
     if (has_ctx or has_gen) and runtime_vllm_config is not None:
         cache_config = getattr(runtime_vllm_config, "cache_config", None)
-        if getattr(cache_config, "enable_prefix_caching", None) is False:
+        needs_prefix_cache = has_ctx or (has_gen and gen_driver == "prefix_cache")
+        if needs_prefix_cache and getattr(cache_config, "enable_prefix_caching", None) is False:
             raise RuntimeError("prefix-cache ctx/gen driver requires vLLM prefix caching")
     if runtime_vllm_config is not None:
         effective_config = summarize_vllm_config(runtime_vllm_config)
@@ -391,12 +934,23 @@ def run_worker(spec_path: Path) -> None:
             "work_unit_id": work_unit_id,
             "attempt_id": spec["attempt_id"],
             "target_layers": spec["target_layers"],
+            "model_layer_count": spec.get("model_layer_count"),
+            "enable_layer_patch": bool(spec.get("enable_layer_patch", True)),
+            "enable_step_marker": bool(spec.get("enable_step_marker", True)),
             "moe_noop": bool(spec.get("moe_noop")),
+            "gen_driver": gen_driver,
+            "router_weight_model": spec.get("router_weight_model") or "",
+            "physical_gpus": int(spec.get("physical_gpus") or 1),
         },
     )
     if spec.get("metadata_path"):
         write_metadata(spec["metadata_path"], metadata)
-    _worker_append_event(status_path, "engine_metadata_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
+    _worker_append_event(
+        status_path,
+        "engine_metadata_finished",
+        work_unit_id=work_unit_id,
+        attempt_id=spec["attempt_id"],
+    )
     _worker_append_event(
         status_path,
         "engine_metadata_written",
@@ -408,7 +962,12 @@ def run_worker(spec_path: Path) -> None:
     _worker_append_event(status_path, "engine_ready", work_unit_id=work_unit_id)
     cuda_profiler_capture = str(spec.get("nsys_capture", "full")) == "cuda_profiler_api"
     try:
-        _worker_append_event(status_path, "measurement_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
+        _worker_append_event(
+            status_path,
+            "measurement_started",
+            work_unit_id=work_unit_id,
+            attempt_id=spec["attempt_id"],
+        )
         _worker_set_cuda_profiler_capture(
             status_path=status_path,
             work_unit_id=work_unit_id,
@@ -429,6 +988,7 @@ def run_worker(spec_path: Path) -> None:
                     vllm_step_marker,
                     ctx_points,
                     prompt_token_config=prompt_token_config,
+                    prompt_factory=prompt_factory,
                     warmup_runs=int(spec.get("ctx_warmup_runs", 0)),
                     measured_runs=int(spec.get("ctx_measured_runs", 1)),
                     max_num_batched_tokens=max_num_batched_tokens,
@@ -447,8 +1007,11 @@ def run_worker(spec_path: Path) -> None:
                     vllm_step_marker,
                     gen_points,
                     prompt_token_config=prompt_token_config,
+                    prompt_factory=prompt_factory,
                     warmup_runs=int(spec.get("gen_warmup_runs", 0)),
                     measured_runs=int(spec.get("gen_measured_runs", 1)),
+                    gen_driver=gen_driver,
+                    max_num_seqs=spec.get("max_num_seqs"),
                 )
         finally:
             _worker_set_cuda_profiler_capture(
@@ -458,9 +1021,19 @@ def run_worker(spec_path: Path) -> None:
                 enabled=cuda_profiler_capture,
                 action="stop",
             )
-        _worker_append_event(status_path, "measurement_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
+        _worker_append_event(
+            status_path,
+            "measurement_finished",
+            work_unit_id=work_unit_id,
+            attempt_id=spec["attempt_id"],
+        )
     finally:
-        _worker_append_event(status_path, "worker_cleanup_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
+        _worker_append_event(
+            status_path,
+            "worker_cleanup_started",
+            work_unit_id=work_unit_id,
+            attempt_id=spec["attempt_id"],
+        )
         del llm
         gc.collect()
         try:
@@ -472,7 +1045,12 @@ def run_worker(spec_path: Path) -> None:
         except Exception:
             pass
         os.environ.pop("LAYERWISE_ACTIVE_ITERATIONS", None)
-        _worker_append_event(status_path, "worker_cleanup_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
+        _worker_append_event(
+            status_path,
+            "worker_cleanup_finished",
+            work_unit_id=work_unit_id,
+            attempt_id=spec["attempt_id"],
+        )
     _worker_append_event(status_path, "work_unit_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
 
 def _worker_run_ctx(
@@ -484,6 +1062,7 @@ def _worker_run_ctx(
     datapoints: list[DataPoint],
     *,
     prompt_token_config: RandomPromptTokenConfig,
+    prompt_factory: PromptTokenFactory,
     warmup_runs: int = 0,
     measured_runs: int = 1,
     max_num_batched_tokens: int = 1,
@@ -493,18 +1072,25 @@ def _worker_run_ctx(
     if measured_runs < 1:
         raise ValueError(f"measured_runs must be >= 1, got {measured_runs}")
     sampling_params = sampling_cls(
-        temperature=1.0,
-        top_p=1.0,
+        temperature=0.0,
+        ignore_eos=True,
+        max_tokens=1,
+        detokenize=True,
+    )
+    live_sampling_params = _make_final_only_sampling_params(
+        sampling_cls,
+        temperature=0.0,
         ignore_eos=True,
         max_tokens=1,
         detokenize=False,
     )
     pruned: set[str] = set()
     filled_prefixes: set[tuple[int, int]] = set()
-    for dp in datapoints:
+
+    def run_one(dp: DataPoint, run_idx: int, *, warmup: bool) -> None:
         dpid = _worker_datapoint_id(work_unit_id, dp)
         if dpid in pruned:
-            continue
+            return
         marker_iteration = _ctx_marker_iteration(
             dp,
             max_num_batched_tokens,
@@ -519,8 +1105,60 @@ def _worker_run_ctx(
         )
         try:
             prefix_key = (int(dp.batch_size), int(dp.past_kv))
-            for run_idx in range(warmup_runs):
-                fill_prefix = dp.past_kv > 0 and prefix_key not in filled_prefixes
+            fill_prefix = dp.past_kv > 0 and prefix_key not in filled_prefixes
+            if _use_live_step_driver(dp):
+                if fill_prefix:
+                    _set_marker_state(marker_mod, active_iterations="", phase="ctx")
+                    _run_generate(
+                        llm,
+                        sampling_params,
+                        batch_size=dp.batch_size,
+                        input_len=dp.past_kv,
+                        token_config=prompt_token_config,
+                        prompt_factory=prompt_factory,
+                        stream_key_prefix=_ctx_prefix_stream_key(work_unit_id, dp),
+                        cache_salt_prefix=_ctx_cache_salt_prefix(work_unit_id, dp),
+                    )
+                    filled_prefixes.add(prefix_key)
+                wall_start = time.perf_counter()
+                _run_live_ctx_iteration(
+                    llm,
+                    live_sampling_params,
+                    dp,
+                    work_unit_id=work_unit_id,
+                    run_idx=run_idx,
+                    warmup=warmup,
+                    token_config=prompt_token_config,
+                    prompt_factory=prompt_factory,
+                    marker_mod=marker_mod,
+                    status_path=status_path,
+                    datapoint_id=dpid,
+                )
+                if not warmup:
+                    _worker_append_event(
+                        status_path,
+                        "measurement_wall_time",
+                        work_unit_id=work_unit_id,
+                        datapoint_id=dpid,
+                        phase="ctx",
+                        batch_size=dp.batch_size,
+                        new_tokens=dp.new_tokens,
+                        past_kv=dp.past_kv,
+                        run=run_idx,
+                        live_step_driver=True,
+                        wall_latency_ms=(time.perf_counter() - wall_start) * 1000.0,
+                    )
+            elif warmup:
+                active_iteration = ""
+                _set_marker_state(
+                    marker_mod,
+                    active_iterations="",
+                    phase="ctx",
+                    step=dp.new_tokens,
+                    bs=dp.batch_size,
+                    past=dp.past_kv,
+                    run=None,
+                )
                 _run_prefix_cached_ctx_iteration(
                     llm,
                     sampling_params,
@@ -530,22 +1168,22 @@ def _worker_run_ctx(
                     warmup=True,
                     fill_prefix=fill_prefix,
                     token_config=prompt_token_config,
-                    active_iteration="",
+                    prompt_factory=prompt_factory,
+                    active_iteration=active_iteration,
                     marker_mod=marker_mod,
                 )
-                if fill_prefix:
-                    filled_prefixes.add(prefix_key)
-            for run_idx in range(measured_runs):
-                fill_prefix = dp.past_kv > 0 and prefix_key not in filled_prefixes
+            else:
+                active_iteration = str(marker_iteration)
                 _set_marker_state(
                     marker_mod,
-                    active_iterations=str(marker_iteration),
+                    active_iterations=active_iteration,
                     phase="ctx",
                     step=dp.new_tokens,
                     bs=dp.batch_size,
                     past=dp.past_kv,
                     run=run_idx,
                 )
+                wall_start = time.perf_counter()
                 _run_prefix_cached_ctx_iteration(
                     llm,
                     sampling_params,
@@ -555,11 +1193,24 @@ def _worker_run_ctx(
                     warmup=False,
                     fill_prefix=fill_prefix,
                     token_config=prompt_token_config,
+                    prompt_factory=prompt_factory,
                     active_iteration=str(marker_iteration),
                     marker_mod=marker_mod,
                 )
-                if fill_prefix:
-                    filled_prefixes.add(prefix_key)
+                _worker_append_event(
+                    status_path,
+                    "measurement_wall_time",
+                    work_unit_id=work_unit_id,
+                    datapoint_id=dpid,
+                    phase="ctx",
+                    batch_size=dp.batch_size,
+                    new_tokens=dp.new_tokens,
+                    past_kv=dp.past_kv,
+                    run=run_idx,
+                    wall_latency_ms=(time.perf_counter() - wall_start) * 1000.0,
+                )
+            if fill_prefix:
+                filled_prefixes.add(prefix_key)
         except Exception as exc:
             kind = _classify_exception(exc)
             if kind == "oom":
@@ -582,7 +1233,7 @@ def _worker_run_ctx(
                             datapoint_id=cid,
                             caused_by=dpid,
                         )
-                continue
+                return
             if kind == "fatal_cuda":
                 _worker_append_event(
                     status_path,
@@ -604,24 +1255,23 @@ def _worker_run_ctx(
         finally:
             _set_marker_state(marker_mod, active_iterations="", phase="ctx")
 
-def _ctx_prefix_request_index_offset(dp: DataPoint) -> int:
-    return int(dp.past_kv) * 1_000_003 + int(dp.batch_size) * 101
-
-def _ctx_suffix_request_index_offset(dp: DataPoint, run_idx: int, *, warmup: bool) -> int:
-    phase_offset = 0 if warmup else 100_000_000
-    return (
-        phase_offset
-        + int(dp.past_kv) * 1_000_003
-        + int(dp.new_tokens) * 10_007
-        + int(dp.batch_size) * 101
-        + int(run_idx) * 10_000
-    )
+    for run_idx in range(warmup_runs):
+        for dp in datapoints:
+            run_one(dp, run_idx, warmup=True)
+    for run_idx in range(measured_runs):
+        for dp in datapoints:
+            run_one(dp, run_idx, warmup=False)
 
 def _ctx_cache_salt_prefix(
     work_unit_id: str,
     dp: DataPoint,
 ) -> str:
     return f"layerwise-ctx:{work_unit_id}:bs{dp.batch_size}:past{dp.past_kv}"
+
+def _ctx_prefix_stream_key(work_unit_id: str, dp: DataPoint) -> tuple[Any, ...]:
+    """Return the token stream key shared by context prefix-cache prompts."""
+
+    return ("ctx-prefix", work_unit_id, int(dp.batch_size), int(dp.past_kv))
 
 def _run_prefix_cached_ctx_iteration(
     llm,
@@ -633,12 +1283,12 @@ def _run_prefix_cached_ctx_iteration(
     warmup: bool,
     fill_prefix: bool,
     token_config: RandomPromptTokenConfig,
+    prompt_factory: PromptTokenFactory,
     active_iteration: str,
     marker_mod,
 ) -> None:
-    prefix_request_index_offset = _ctx_prefix_request_index_offset(dp)
-    suffix_request_index_offset = _ctx_suffix_request_index_offset(dp, run_idx, warmup=warmup)
     cache_salt_prefix = _ctx_cache_salt_prefix(work_unit_id, dp)
+    prefix_stream_key = _ctx_prefix_stream_key(work_unit_id, dp)
     if fill_prefix and dp.past_kv > 0:
         _set_marker_state(marker_mod, active_iterations="", phase="ctx")
         _run_generate(
@@ -647,7 +1297,8 @@ def _run_prefix_cached_ctx_iteration(
             batch_size=dp.batch_size,
             input_len=dp.past_kv,
             token_config=token_config,
-            request_index_offset=prefix_request_index_offset,
+            prompt_factory=prompt_factory,
+            stream_key_prefix=prefix_stream_key,
             cache_salt_prefix=cache_salt_prefix,
         )
     _set_marker_state(
@@ -666,16 +1317,116 @@ def _run_prefix_cached_ctx_iteration(
         prefix_len=dp.past_kv,
         suffix_len=dp.new_tokens,
         token_config=token_config,
-        prefix_request_index_offset=prefix_request_index_offset,
-        suffix_request_index_offset=suffix_request_index_offset,
+        prompt_factory=prompt_factory,
+        prefix_stream_key_prefix=prefix_stream_key,
         cache_salt_prefix=cache_salt_prefix,
     )
 
-def _gen_prompt_request_index_offset(dp: DataPoint) -> int:
-    return 0
+def _run_live_ctx_iteration(
+    llm,
+    sampling_params,
+    dp: DataPoint,
+    *,
+    work_unit_id: str,
+    run_idx: int,
+    warmup: bool,
+    token_config: RandomPromptTokenConfig,
+    prompt_factory: PromptTokenFactory,
+    marker_mod,
+    status_path: Path | None = None,
+    datapoint_id: str | None = None,
+) -> None:
+    """Measure a ctx row by stepping one live chunked-prefill request."""
+
+    if dp.batch_size != 1:
+        raise ValueError("live ctx driver currently supports batch_size=1 only")
+    cache_salt_prefix = _ctx_cache_salt_prefix(work_unit_id, dp)
+    prefix_stream_key = _ctx_prefix_stream_key(work_unit_id, dp)
+    prompts = _prefix_suffix_prompts(
+        dp.batch_size,
+        dp.past_kv,
+        dp.new_tokens,
+        token_config,
+        prompt_factory=prompt_factory,
+        prefix_stream_key_prefix=prefix_stream_key,
+        cache_salt_prefix=cache_salt_prefix,
+    )
+    request_ids = _add_engine_requests(
+        llm,
+        prompts,
+        sampling_params,
+        request_prefix=f"ctx-live:{work_unit_id}:run{run_idx}",
+    )
+    try:
+        with _temporary_scheduler_token_budget(llm, dp.new_tokens):
+            if warmup:
+                _set_marker_state(marker_mod, active_iterations="", phase="ctx")
+            else:
+                _set_marker_state(
+                    marker_mod,
+                    active_iterations="",
+                    trigger="ctx_chunk",
+                    phase="ctx",
+                    step=dp.new_tokens,
+                    bs=dp.batch_size,
+                    past=dp.past_kv,
+                    run=run_idx,
+                    allow_variable_past=True,
+                    past_tolerance=max(1.0, float(dp.past_kv) * 0.01),
+                    match_once=True,
+                )
+            live_start = time.perf_counter()
+            marker_mod._LAST_CTX_MATCH_META = {}
+            max_steps = max(8, dp.past_kv // max(1, dp.new_tokens) + 8)
+            for step_idx in range(max_steps):
+                llm.llm_engine.step()
+                if warmup:
+                    return
+                matched_after = dict(getattr(marker_mod, "_LAST_CTX_MATCH_META", {}))
+                if matched_after:
+                    _worker_append_event(
+                        status_path,
+                        "live_step_wall_time",
+                        work_unit_id=work_unit_id,
+                        datapoint_id=datapoint_id,
+                        phase="ctx",
+                        batch_size=dp.batch_size,
+                        new_tokens=dp.new_tokens,
+                        past_kv=dp.past_kv,
+                        run=run_idx,
+                        steps=step_idx + 1,
+                        wall_latency_ms=(time.perf_counter() - live_start) * 1000.0,
+                    )
+                    return
+            raise RuntimeError(f"live ctx driver did not capture target chunk for {dp.shape_key}")
+    finally:
+        _set_marker_state(marker_mod, active_iterations="", phase="ctx")
+        _abort_engine_requests(llm, request_ids)
+
+def _live_decode_past_lengths(dp: DataPoint) -> list[int]:
+    """Return per-request past lengths for live-decode diagnostics."""
+
+    raw_offsets = os.environ.get("LAYERWISE_LIVE_DECODE_PAST_OFFSETS", "").strip()
+    if not raw_offsets:
+        return [dp.past_kv] * dp.batch_size
+    offsets = [int(part.strip()) for part in raw_offsets.split(",") if part.strip()]
+    if len(offsets) != dp.batch_size:
+        raise ValueError(
+            "LAYERWISE_LIVE_DECODE_PAST_OFFSETS must contain exactly "
+            f"{dp.batch_size} values for batch_size={dp.batch_size}, got {len(offsets)}"
+        )
+    input_lens = [dp.past_kv + offset for offset in offsets]
+    if any(length < 1 for length in input_lens):
+        raise ValueError(f"live decode input lengths must be positive, got {input_lens}")
+    return input_lens
 
 def _gen_cache_salt_prefix(work_unit_id: str, dp: DataPoint) -> str:
     return f"layerwise-gen:{work_unit_id}"
+
+def _gen_prefix_stream_key(work_unit_id: str) -> tuple[Any, ...]:
+    """Return the token stream key shared by prefix-cache decode prompts."""
+
+    return ("gen-prefix", work_unit_id)
 
 def _run_prefix_cached_gen_iteration(
     llm,
@@ -684,12 +1435,19 @@ def _run_prefix_cached_gen_iteration(
     dp: DataPoint,
     *,
     token_config: RandomPromptTokenConfig,
+    prompt_factory: PromptTokenFactory,
     fill_cache: bool,
+    prompt_cache: PromptBatchCache | None = None,
+    status_path: Path | None = None,
+    datapoint_id: str | None = None,
+    run_idx: int | None = None,
 ) -> None:
     if dp.past_kv <= 0:
         raise ValueError("prefix-cache decode requires past_kv > 0")
-    request_index_offset = _gen_prompt_request_index_offset(dp)
-    cache_salt_prefix = _gen_cache_salt_prefix(os.environ.get("LAYERWISE_WORK_UNIT_ID", ""), dp)
+    work_unit_id = os.environ.get("LAYERWISE_WORK_UNIT_ID", "")
+    cache_salt_prefix = _gen_cache_salt_prefix(work_unit_id, dp)
+    stream_key_prefix = _gen_prefix_stream_key(work_unit_id)
+    prompt_cache_key = ("gen", int(dp.batch_size), int(dp.past_kv), cache_salt_prefix)
     if fill_cache:
         _run_generate(
             llm,
@@ -697,8 +1455,18 @@ def _run_prefix_cached_gen_iteration(
             batch_size=dp.batch_size,
             input_len=dp.past_kv,
             token_config=token_config,
-            request_index_offset=request_index_offset,
+            prompt_factory=prompt_factory,
+            stream_key_prefix=stream_key_prefix,
             cache_salt_prefix=cache_salt_prefix,
+            prompt_cache=prompt_cache,
+            prompt_cache_key=prompt_cache_key,
+            status_path=status_path,
+            work_unit_id=work_unit_id,
+            datapoint_id=datapoint_id,
+            timing_phase="gen_fill",
+            timing_batch_size=dp.batch_size,
+            timing_past_kv=dp.past_kv,
+            timing_run=run_idx,
         )
         return
     _run_generate(
@@ -707,8 +1475,18 @@ def _run_prefix_cached_gen_iteration(
         batch_size=dp.batch_size,
         input_len=dp.past_kv,
         token_config=token_config,
-        request_index_offset=request_index_offset,
+        prompt_factory=prompt_factory,
+        stream_key_prefix=stream_key_prefix,
         cache_salt_prefix=cache_salt_prefix,
+        prompt_cache=prompt_cache,
+        prompt_cache_key=prompt_cache_key,
+        status_path=status_path,
+        work_unit_id=work_unit_id,
+        datapoint_id=datapoint_id,
+        timing_phase="gen",
+        timing_batch_size=dp.batch_size,
+        timing_past_kv=dp.past_kv,
+        timing_run=run_idx,
     )
 
 def _worker_run_gen(
@@ -720,42 +1498,70 @@ def _worker_run_gen(
     datapoints: list[DataPoint],
     *,
     prompt_token_config: RandomPromptTokenConfig,
+    prompt_factory: PromptTokenFactory,
     warmup_runs: int = 0,
     measured_runs: int = 1,
+    gen_driver: str = "prefix_cache",
+    max_num_seqs: int | None = None,
 ) -> None:
     if warmup_runs < 0:
         raise ValueError(f"warmup_runs must be >= 0, got {warmup_runs}")
     if measured_runs < 1:
         raise ValueError(f"measured_runs must be >= 1, got {measured_runs}")
+    if gen_driver == "live_decode":
+        _worker_run_gen_live_decode(
+            status_path,
+            work_unit_id,
+            llm,
+            sampling_cls,
+            marker_mod,
+            datapoints,
+            prompt_token_config=prompt_token_config,
+            prompt_factory=prompt_factory,
+            warmup_runs=warmup_runs,
+            measured_runs=measured_runs,
+            max_num_seqs=max_num_seqs,
+        )
+        return
+    if gen_driver != "prefix_cache":
+        raise ValueError(f"unsupported gen_driver: {gen_driver}")
+
     by_batch: dict[int, list[DataPoint]] = {}
     for dp in datapoints:
         by_batch.setdefault(dp.batch_size, []).append(dp)
     max_past = max(dp.past_kv for dp in datapoints)
     sampling_params = sampling_cls(
-        temperature=1.0,
-        top_p=1.0,
+        temperature=0.0,
         ignore_eos=True,
-        max_tokens=2,
+        max_tokens=LIVE_DECODE_OUTPUT_TOKENS,
         detokenize=False,
     )
     fill_sampling_params = sampling_cls(
-        temperature=1.0,
-        top_p=1.0,
+        temperature=0.0,
         ignore_eos=True,
         max_tokens=1,
         detokenize=False,
     )
-    max_batch_size = max(by_batch)
-    fill_dp = DataPoint("gen", max_batch_size, 1, max_past)
-    _set_marker_state(marker_mod, active_iterations="", phase="gen")
-    _run_prefix_cached_gen_iteration(
-        llm,
-        fill_sampling_params,
-        sampling_params,
-        fill_dp,
-        token_config=prompt_token_config,
-        fill_cache=True,
-    )
+    prompt_cache = PromptBatchCache()
+    prefix_cached_points = [dp for dp in datapoints if not _use_live_step_driver(dp)]
+    if prefix_cached_points:
+        max_batch_size = max(dp.batch_size for dp in prefix_cached_points)
+        max_prefix_past = max(dp.past_kv for dp in prefix_cached_points)
+        fill_dp = DataPoint("gen", max_batch_size, 1, max_prefix_past)
+        _set_marker_state(marker_mod, active_iterations="", phase="gen")
+        _run_prefix_cached_gen_iteration(
+            llm,
+            fill_sampling_params,
+            sampling_params,
+            fill_dp,
+            token_config=prompt_token_config,
+            prompt_factory=prompt_factory,
+            fill_cache=True,
+            prompt_cache=prompt_cache,
+            status_path=status_path,
+            datapoint_id=_worker_datapoint_id(work_unit_id, fill_dp),
+        )
+        prompt_cache.clear()
     for batch_size in sorted(by_batch):
         _set_marker_state(marker_mod, active_iterations="", phase="gen")
         _worker_append_event(
@@ -767,6 +1573,32 @@ def _worker_run_gen(
         )
         try:
             for dp in sorted(by_batch[batch_size], key=lambda item: item.past_kv):
+                if _use_live_step_driver(dp):
+                    _worker_append_event(
+                        status_path,
+                        "live_step_driver_started",
+                        work_unit_id=work_unit_id,
+                        datapoint_id=_worker_datapoint_id(work_unit_id, dp),
+                        phase="gen",
+                        batch_size=dp.batch_size,
+                        past_kv=dp.past_kv,
+                        measured_runs=measured_runs,
+                    )
+                    _run_live_gen_datapoint(
+                        llm,
+                        sampling_cls,
+                        marker_mod,
+                        dp,
+                        work_unit_id=work_unit_id,
+                        token_config=prompt_token_config,
+                        prompt_factory=prompt_factory,
+                        warmup_runs=warmup_runs,
+                        measured_runs=measured_runs,
+                        status_path=status_path,
+                        datapoint_id=_worker_datapoint_id(work_unit_id, dp),
+                    )
+                    prompt_cache.clear()
+                    continue
                 _set_marker_state(marker_mod, active_iterations="", phase="gen")
                 for _ in range(warmup_runs):
                     _set_marker_state(marker_mod, active_iterations="", phase="gen")
@@ -776,7 +1608,11 @@ def _worker_run_gen(
                         sampling_params,
                         dp,
                         token_config=prompt_token_config,
+                        prompt_factory=prompt_factory,
                         fill_cache=False,
+                        prompt_cache=prompt_cache,
+                        status_path=status_path,
+                        datapoint_id=_worker_datapoint_id(work_unit_id, dp),
                     )
                 for run_idx in range(measured_runs):
                     _set_marker_state(
@@ -784,6 +1620,7 @@ def _worker_run_gen(
                         active_iterations="",
                         trigger="decode_only",
                         allow_new_cached=True,
+                        allow_partial_decode=os.environ.get("LAYERWISE_ALLOW_PARTIAL_DECODE", "0") == "1",
                         phase="gen",
                         step=dp.past_kv + 1,
                         bs=batch_size,
@@ -796,11 +1633,214 @@ def _worker_run_gen(
                         sampling_params,
                         dp,
                         token_config=prompt_token_config,
+                        prompt_factory=prompt_factory,
                         fill_cache=False,
+                        prompt_cache=prompt_cache,
+                        status_path=status_path,
+                        datapoint_id=_worker_datapoint_id(work_unit_id, dp),
+                        run_idx=run_idx,
                     )
+                prompt_cache.clear()
         finally:
             _set_marker_state(marker_mod, active_iterations="", phase="gen")
         _worker_append_event(status_path, "batch_finished", work_unit_id=work_unit_id, batch_size=batch_size)
+
+def _run_live_gen_datapoint(
+    llm,
+    sampling_cls,
+    marker_mod,
+    dp: DataPoint,
+    *,
+    work_unit_id: str,
+    token_config: RandomPromptTokenConfig,
+    prompt_factory: PromptTokenFactory,
+    warmup_runs: int,
+    measured_runs: int,
+    status_path: Path | None = None,
+    datapoint_id: str | None = None,
+) -> None:
+    """Measure decode rows by keeping one vLLM request batch live."""
+
+    total_decode_steps = int(warmup_runs) + int(measured_runs)
+    if total_decode_steps < 1:
+        return
+    decode_headroom = 64 if int(dp.past_kv) <= 16384 else 1
+    sampling_params = _make_final_only_sampling_params(
+        sampling_cls,
+        temperature=0.0,
+        ignore_eos=True,
+        max_tokens=total_decode_steps + decode_headroom,
+        detokenize=False,
+    )
+    prompts = _token_prompts(
+        dp.batch_size,
+        dp.past_kv,
+        token_config,
+        prompt_factory=prompt_factory,
+        stream_key_prefix=("gen-live", work_unit_id, dp.batch_size, dp.past_kv),
+    )
+    request_ids = _add_engine_requests(
+        llm,
+        prompts,
+        sampling_params,
+        request_prefix=f"gen-live:{work_unit_id}:bs{dp.batch_size}:past{dp.past_kv}",
+    )
+    try:
+        _set_marker_state(marker_mod, active_iterations="", phase="gen")
+        prefill_start = time.perf_counter()
+        _step_engine_until(
+            llm,
+            lambda: _all_requests_computed_at_least(llm, request_ids, dp.past_kv),
+            max_steps=max(8, dp.past_kv + total_decode_steps + 8),
+            status_path=status_path,
+            work_unit_id=work_unit_id,
+            datapoint_id=datapoint_id,
+            event="live_gen_prefill_finished",
+        )
+        if status_path is not None and work_unit_id is not None:
+            _worker_append_event(
+                status_path,
+                "live_step_wall_time",
+                work_unit_id=work_unit_id,
+                datapoint_id=datapoint_id,
+                phase="gen_prefill",
+                batch_size=dp.batch_size,
+                past_kv=dp.past_kv,
+                wall_latency_ms=(time.perf_counter() - prefill_start) * 1000.0,
+            )
+
+        for _ in range(warmup_runs):
+            _set_marker_state(marker_mod, active_iterations="", phase="gen")
+            llm.llm_engine.step()
+
+        past_tolerance = max(
+            1.0,
+            float(dp.past_kv) * 0.01,
+            float((total_decode_steps + decode_headroom) * max(1, dp.new_tokens)),
+        )
+        for run_idx in range(measured_runs):
+            _set_marker_state(
+                marker_mod,
+                active_iterations="",
+                trigger="decode_only",
+                allow_new_cached=False,
+                allow_partial_decode=os.environ.get("LAYERWISE_ALLOW_PARTIAL_DECODE", "0") == "1",
+                allow_variable_past=True,
+                past_tolerance=past_tolerance,
+                match_once=True,
+                phase="gen",
+                step=dp.past_kv + 1,
+                bs=dp.batch_size,
+                past=dp.past_kv,
+                run=run_idx,
+            )
+            live_start = time.perf_counter()
+            marker_mod._LAST_DECODE_MATCH_META = {}
+            max_steps = max(4, total_decode_steps + 4)
+            for step_idx in range(max_steps):
+                llm.llm_engine.step()
+                matched_after = dict(getattr(marker_mod, "_LAST_DECODE_MATCH_META", {}))
+                if matched_after:
+                    _worker_append_event(
+                        status_path,
+                        "live_step_wall_time",
+                        work_unit_id=work_unit_id,
+                        datapoint_id=datapoint_id,
+                        phase="gen",
+                        batch_size=dp.batch_size,
+                        past_kv=dp.past_kv,
+                        run=run_idx,
+                        steps=step_idx + 1,
+                        wall_latency_ms=(time.perf_counter() - live_start) * 1000.0,
+                    )
+                    break
+            else:
+                raise RuntimeError(f"live gen driver did not capture target decode step for {dp.shape_key}")
+    finally:
+        _set_marker_state(marker_mod, active_iterations="", phase="gen")
+        _abort_engine_requests(llm, request_ids)
+
+def _worker_run_gen_live_decode(
+    status_path: Path,
+    work_unit_id: str,
+    llm,
+    sampling_cls,
+    marker_mod,
+    datapoints: list[DataPoint],
+    *,
+    prompt_token_config: RandomPromptTokenConfig,
+    prompt_factory: PromptTokenFactory,
+    warmup_runs: int = 0,
+    measured_runs: int = 1,
+    max_num_seqs: int | None = None,
+) -> None:
+    """Measure decode from a live generation stream without prefix caching."""
+
+    sampling_params = sampling_cls(
+        temperature=0.0,
+        ignore_eos=True,
+        max_tokens=LIVE_DECODE_OUTPUT_TOKENS,
+        detokenize=False,
+    )
+    sorted_datapoints = sorted(datapoints, key=lambda item: (item.batch_size, item.past_kv))
+    for dp in sorted_datapoints:
+        live_batch_size = dp.batch_size
+        live_input_lens = _live_decode_past_lengths(dp)
+        _set_marker_state(marker_mod, active_iterations="", phase="gen")
+        _worker_append_event(
+            status_path,
+            "batch_started",
+            work_unit_id=work_unit_id,
+            batch_size=dp.batch_size,
+            live_batch_size=live_batch_size,
+            max_past_kv=dp.past_kv,
+            live_past_min=min(live_input_lens),
+            live_past_max=max(live_input_lens),
+            live_past_mean=sum(live_input_lens) / len(live_input_lens),
+            gen_driver="live_decode",
+        )
+        try:
+            for run_idx in range(warmup_runs):
+                _set_marker_state(marker_mod, active_iterations="", phase="gen")
+                _run_generate_variable_lengths(
+                    llm,
+                    sampling_params,
+                    input_lens=live_input_lens,
+                    token_config=prompt_token_config,
+                    prompt_factory=prompt_factory,
+                )
+            for run_idx in range(measured_runs):
+                _set_marker_state(
+                    marker_mod,
+                    active_iterations="",
+                    trigger="decode_only",
+                    allow_new_cached=False,
+                    allow_partial_decode=os.environ.get("LAYERWISE_ALLOW_PARTIAL_DECODE", "0") == "1",
+                    allow_variable_past=True,
+                    past_tolerance=4.0,
+                    match_once=True,
+                    phase="gen",
+                    step=dp.past_kv + 1,
+                    bs=dp.batch_size,
+                    past=dp.past_kv,
+                    run=run_idx,
+                )
+                _run_generate_variable_lengths(
+                    llm,
+                    sampling_params,
+                    input_lens=live_input_lens,
+                    token_config=prompt_token_config,
+                    prompt_factory=prompt_factory,
+                )
+        finally:
+            _set_marker_state(marker_mod, active_iterations="", phase="gen")
+        _worker_append_event(
+            status_path,
+            "batch_finished",
+            work_unit_id=work_unit_id,
+            batch_size=dp.batch_size,
+            gen_driver="live_decode",
+        )
 
 def _worker_empty_cache() -> None:
     try:

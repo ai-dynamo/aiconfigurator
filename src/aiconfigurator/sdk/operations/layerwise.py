@@ -32,6 +32,58 @@ def _parse_optional_float(value) -> float | None:
     return float(value)
 
 
+def _entry_scale(entry: dict) -> float:
+    raw_multiplier = float(entry.get("layer_multiplier", 0.0) or 0.0)
+    if raw_multiplier <= 0.0:
+        return 1.0
+    measured = max(float(entry.get("measured_layer_count", 1.0) or 1.0), 1.0)
+    return raw_multiplier / measured
+
+
+def _entry_component(entry: dict) -> dict:
+    """Return the unscaled component row used to build a merged entry."""
+
+    component = {key: value for key, value in entry.items() if key != "components"}
+    component.setdefault("includes_moe", False)
+    return component
+
+
+def _entry_components(entry: dict) -> list[dict]:
+    """Return raw component rows for an exact layerwise entry."""
+
+    components = entry.get("components")
+    if isinstance(components, list):
+        return [dict(component) for component in components if isinstance(component, dict)]
+    return [_entry_component(entry)]
+
+
+def _merge_layerwise_entries(existing: dict | None, entry: dict) -> dict:
+    """Merge representative rows for the same public layerwise query shape."""
+
+    if existing is None:
+        result = dict(entry)
+        result["components"] = [_entry_component(entry)]
+        return result
+
+    def _scaled(value: dict, metric: str) -> float:
+        return float(value.get(metric, 0.0) or 0.0) * _entry_scale(value)
+
+    components = _entry_components(existing) + [_entry_component(entry)]
+
+    return {
+        "latency": sum(_scaled(component, "latency") for component in components),
+        "energy": sum(_scaled(component, "energy") for component in components),
+        "rms_latency": sum(_scaled(component, "rms_latency") for component in components),
+        "rms_kernel_count": sum(int(component.get("rms_kernel_count", 0) or 0) for component in components),
+        "includes_moe": any(bool(component.get("includes_moe", False)) for component in components),
+        "layer_type": "combined",
+        "layer_index": 0.0,
+        "measured_layer_count": 1.0,
+        "layer_multiplier": 1.0,
+        "components": components,
+    }
+
+
 def _cache_key(database: PerfDatabase) -> tuple:
     return (
         database.systems_root,
@@ -52,7 +104,7 @@ def load_layerwise_data(layerwise_file):
     for row in rows:
         model = str(row["model"]).lower()
         phase = str(row["phase"]).upper()
-        tp_size = int(row["tp_size"])
+        tp_size = int(row.get("tp_size") or row.get("attn_tp") or row.get("moe_tp") or 1)
         batch_size = int(row["batch_size"])
         seq_len_q = int(row.get("seq_len_q") or row.get("new_tokens") or 1)
         seq_len_kv_cache = int(row.get("seq_len_kv_cache") or row.get("past_kv") or 0)
@@ -72,12 +124,19 @@ def load_layerwise_data(layerwise_file):
             value = _parse_optional_float(row.get(metric))
             if value is not None:
                 entry[metric] = value
-        if _parse_bool(row.get("includes_moe")):
-            entry["includes_moe"] = True
+        value = _parse_optional_float(row.get("physical_gpus"))
+        if value is not None:
+            entry["physical_gpus"] = value
+        entry["includes_moe"] = _parse_bool(row.get("includes_moe"))
+        for metric in ("latency_source", "measurement_mode", "attribution_target", "vllm_config_hash"):
+            if row.get(metric) not in (None, ""):
+                entry[metric] = str(row[metric])
         if phase == "CTX":
-            data[model][phase][tp_size][seq_len_q][seq_len_kv_cache] = entry
+            existing = data[model][phase][tp_size][seq_len_q].get(seq_len_kv_cache)
+            data[model][phase][tp_size][seq_len_q][seq_len_kv_cache] = _merge_layerwise_entries(existing, entry)
         else:
-            data[model][phase][tp_size][batch_size][seq_len_kv_cache] = entry
+            existing = data[model][phase][tp_size][batch_size].get(seq_len_kv_cache)
+            data[model][phase][tp_size][batch_size][seq_len_kv_cache] = _merge_layerwise_entries(existing, entry)
 
     return data
 
@@ -262,6 +321,13 @@ class Layerwise(Operation):
         for metric in ("layer_index", "measured_layer_count", "layer_multiplier"):
             if result.get(metric) not in (None, ""):
                 out[metric] = float(result[metric])
+        if result.get("physical_gpus") not in (None, ""):
+            out["physical_gpus"] = float(result["physical_gpus"])
+        for metric in ("latency_source", "measurement_mode", "attribution_target", "vllm_config_hash"):
+            if result.get(metric) not in (None, ""):
+                out[metric] = str(result[metric])
+        if isinstance(result.get("components"), list):
+            out["components"] = [dict(component) for component in result["components"] if isinstance(component, dict)]
         return out
 
     @classmethod

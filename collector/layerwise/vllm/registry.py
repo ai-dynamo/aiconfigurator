@@ -21,6 +21,7 @@ class LayerwiseModel:
     attn_quant: str = "bf16"
     kv_quant: str = "bf16"
     num_slots: int | None = None
+    gen_driver: str = "prefix_cache"
 
     @property
     def is_moe(self) -> bool:

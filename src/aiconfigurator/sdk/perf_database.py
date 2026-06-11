@@ -1874,12 +1874,15 @@ class PerfDatabase:
         tp_size: int,
         size: int,
         database_mode: common.DatabaseMode | None = None,
+        execution_mode: str | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Query custom AllReduce latency. Delegates to
         ``CustomAllReduce._query_custom_allreduce_table``."""
         from aiconfigurator.sdk.operations.communication import CustomAllReduce
 
-        return CustomAllReduce._query_custom_allreduce_table(self, quant_mode, tp_size, size, database_mode)
+        return CustomAllReduce._query_custom_allreduce_table(
+            self, quant_mode, tp_size, size, database_mode, execution_mode
+        )
 
     @functools.lru_cache(maxsize=32768)
     def query_allreduce_rms(

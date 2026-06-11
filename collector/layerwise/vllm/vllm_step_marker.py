@@ -44,6 +44,9 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_ITERATIONS = "1,16,32,64,128,256,512,1024,2048,4096,8192"
 _FORCED_STEP_META = {"step": None, "bs": None, "past": None, "run": None}
+_MATCHED_ONCE_KEYS = set()
+_LAST_DECODE_MATCH_META: dict[str, object] = {}
+_LAST_CTX_MATCH_META: dict[str, object] = {}
 
 
 def _read_control() -> dict:
@@ -80,7 +83,7 @@ def _progress_datapoint_id(work_unit_id, phase, batch_size, step, past_kv):
     return f"{work_unit_id}:{phase}:bs{batch_size}:new{new_tokens}:past{past_kv}"
 
 
-def _write_progress(event, *, step, batch_size, past_kv, phase=None):
+def _write_progress(event, *, step, batch_size, past_kv, phase=None, **extra):
     """Append scheduler progress for iteration-level crash attribution.
 
     Generation intentionally runs many past_kv datapoints in one generate()
@@ -104,12 +107,53 @@ def _write_progress(event, *, step, batch_size, past_kv, phase=None):
         "past_kv": int(past_kv),
         "ts": datetime.now(timezone.utc).isoformat(),
     }
+    row.update(extra)
     with open(path, "a") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         f.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
         f.flush()
         os.fsync(f.fileno())
         fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _write_decode_debug(control: dict, scheduler_output, past_values: list[int]) -> None:
+    if os.environ.get("LAYERWISE_DECODE_MATCH_DEBUG") != "1":
+        return
+    path = os.environ.get("LAYERWISE_PROGRESS_FILE")
+    work_unit_id = os.environ.get("LAYERWISE_WORK_UNIT_ID")
+    if not path or not work_unit_id:
+        return
+    try:
+        scheduled = scheduler_output.num_scheduled_tokens
+        past_var = None
+        if past_values:
+            past_mean = sum(past_values) / len(past_values)
+            past_var = sum((value - past_mean) ** 2 for value in past_values) / len(past_values)
+        row = {
+            "event": "decode_match_candidate",
+            "work_unit_id": work_unit_id,
+            "phase": control.get("phase") or os.environ.get("LAYERWISE_PROGRESS_PHASE"),
+            "run": control.get("run"),
+            "target_bs": control.get("bs"),
+            "target_past": control.get("past"),
+            "scheduled_reqs": len(scheduled),
+            "scheduled_tokens": sorted(int(v) for v in scheduled.values()),
+            "scheduled_new_reqs": len(scheduler_output.scheduled_new_reqs),
+            "past_min": min(past_values) if past_values else None,
+            "past_max": max(past_values) if past_values else None,
+            "past_mean": (sum(past_values) / len(past_values)) if past_values else None,
+            "past_var": past_var,
+            "past_values": past_values,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        with open(path, "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            f.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+            fcntl.flock(f, fcntl.LOCK_UN)
+    except Exception:
+        logger.exception("[step-marker] failed to write decode debug")
 
 
 def _parse_iterations() -> set[int]:
@@ -147,7 +191,7 @@ def _cached_num_computed_tokens(scheduler_output) -> dict[str, int]:
     cached = scheduler_output.scheduled_cached_reqs
     return {
         req_id: int(num_computed)
-        for req_id, num_computed in zip(cached.req_ids, cached.num_computed_tokens)
+        for req_id, num_computed in zip(cached.req_ids, cached.num_computed_tokens, strict=False)
     }
 
 
@@ -160,16 +204,25 @@ def _decode_only_match(runner, scheduler_output, control: dict) -> tuple[bool, i
     step starts.
     """
 
+    global _LAST_DECODE_MATCH_META
+    _LAST_DECODE_MATCH_META = {}
     scheduled = scheduler_output.num_scheduled_tokens
     allow_new_cached = bool(control.get("allow_new_cached"))
     if not scheduled:
+        _write_decode_debug(control, scheduler_output, [])
         return False, 0, 0, 0
     if scheduler_output.scheduled_new_reqs and not allow_new_cached:
+        _write_decode_debug(control, scheduler_output, [])
         return False, 0, 0, 0
 
     target_bs = control.get("bs")
     target_past = control.get("past")
-    if target_bs is not None and len(scheduled) != int(target_bs):
+    allow_partial_decode = bool(control.get("allow_partial_decode"))
+    allow_variable_past = bool(control.get("allow_variable_past"))
+    past_tolerance = float(control.get("past_tolerance", 0.0) or 0.0)
+    if target_bs is not None and not allow_partial_decode and len(scheduled) != int(target_bs):
+        return False, 0, 0, 0
+    if target_bs is not None and allow_partial_decode and len(scheduled) > int(target_bs):
         return False, 0, 0, 0
 
     computed_by_req = _cached_num_computed_tokens(scheduler_output)
@@ -186,7 +239,86 @@ def _decode_only_match(runner, scheduler_output, control: dict) -> tuple[bool, i
     past_values = []
     for req_id, num_tokens in scheduled.items():
         if int(num_tokens) != 1:
+            _write_decode_debug(control, scheduler_output, past_values)
             return False, 0, 0, 0
+        req = request_by_req.get(req_id)
+        if req is None:
+            _write_decode_debug(control, scheduler_output, past_values)
+            return False, 0, 0, 0
+        prompt_len = _request_prompt_len(req)
+        if prompt_len is None:
+            _write_decode_debug(control, scheduler_output, past_values)
+            return False, 0, 0, 0
+        computed = computed_by_req.get(req_id, getattr(req, "num_computed_tokens", None))
+        if computed is None:
+            _write_decode_debug(control, scheduler_output, past_values)
+            return False, 0, 0, 0
+        computed = int(computed)
+        if target_past is not None and not allow_variable_past and computed != int(target_past):
+            return False, 0, 0, 0
+        if computed < int(prompt_len):
+            return False, 0, 0, 0
+        past_values.append(computed)
+
+    if not past_values:
+        _write_decode_debug(control, scheduler_output, past_values)
+        return False, 0, 0, 0
+    _write_decode_debug(control, scheduler_output, past_values)
+    if target_past is not None and allow_variable_past:
+        mean_past = sum(past_values) / len(past_values)
+        if abs(mean_past - int(target_past)) > past_tolerance:
+            return False, 0, 0, 0
+    elif len(set(past_values)) != 1:
+        return False, 0, 0, 0
+    past_mean = sum(past_values) / len(past_values)
+    past_var = sum((value - past_mean) ** 2 for value in past_values) / len(past_values)
+    _LAST_DECODE_MATCH_META = {
+        "actual_past_min": min(past_values),
+        "actual_past_max": max(past_values),
+        "actual_past_mean": past_mean,
+        "actual_past_var": past_var,
+        "actual_past_values": past_values,
+    }
+    past_kv = past_values[0] if target_past is None else int(target_past)
+    batch_size = len(scheduled)
+    step = past_kv + 1
+    return True, step, batch_size, past_kv
+
+
+def _ctx_chunk_match(runner, scheduler_output, control: dict) -> tuple[bool, int, int, int]:
+    """Return whether this scheduler iteration is the target context chunk."""
+
+    global _LAST_CTX_MATCH_META
+    _LAST_CTX_MATCH_META = {}
+    scheduled = scheduler_output.num_scheduled_tokens
+    if not scheduled:
+        return False, 0, 0, 0
+
+    target_bs = control.get("bs")
+    target_new = control.get("step")
+    target_past = control.get("past")
+    if target_bs is not None and len(scheduled) != int(target_bs):
+        return False, 0, 0, 0
+    if target_new is None:
+        return False, 0, 0, 0
+    if any(int(num_tokens) != int(target_new) for num_tokens in scheduled.values()):
+        return False, 0, 0, 0
+
+    computed_by_req = _cached_num_computed_tokens(scheduler_output)
+    request_by_req = dict(getattr(runner, "requests", {}))
+    for new_req in scheduler_output.scheduled_new_reqs:
+        req_id = getattr(new_req, "req_id", None)
+        if req_id is None:
+            continue
+        request_by_req[req_id] = new_req
+        computed_by_req.setdefault(
+            req_id, int(getattr(new_req, "num_computed_tokens", 0))
+        )
+
+    allow_variable_past = bool(control.get("allow_variable_past"))
+    past_tolerance = float(control.get("past_tolerance", 0.0) or 0.0)
+    past_values = []
+    for req_id in scheduled:
         req = request_by_req.get(req_id)
         if req is None:
             return False, 0, 0, 0
@@ -197,18 +329,32 @@ def _decode_only_match(runner, scheduler_output, control: dict) -> tuple[bool, i
         if computed is None:
             return False, 0, 0, 0
         computed = int(computed)
-        if target_past is not None and computed != int(target_past):
+        if computed >= int(prompt_len):
             return False, 0, 0, 0
-        if computed < int(prompt_len):
+        if target_past is not None and not allow_variable_past and computed != int(target_past):
             return False, 0, 0, 0
         past_values.append(computed)
 
-    if not past_values or len(set(past_values)) != 1:
+    if not past_values:
         return False, 0, 0, 0
+    if target_past is not None and allow_variable_past:
+        mean_past = sum(past_values) / len(past_values)
+        if abs(mean_past - int(target_past)) > past_tolerance:
+            return False, 0, 0, 0
+    elif len(set(past_values)) != 1:
+        return False, 0, 0, 0
+
+    past_mean = sum(past_values) / len(past_values)
+    past_var = sum((value - past_mean) ** 2 for value in past_values) / len(past_values)
+    _LAST_CTX_MATCH_META = {
+        "actual_past_min": min(past_values),
+        "actual_past_max": max(past_values),
+        "actual_past_mean": past_mean,
+        "actual_past_var": past_var,
+        "actual_past_values": past_values,
+    }
     past_kv = past_values[0] if target_past is None else int(target_past)
-    batch_size = len(scheduled)
-    step = past_kv + 1
-    return True, step, batch_size, past_kv
+    return True, int(target_new), len(scheduled), past_kv
 
 
 def _run_marked_step(
@@ -229,6 +375,25 @@ def _run_marked_step(
     if forced_run is None and os.environ.get("LAYERWISE_MEASURE_RUN") is not None:
         forced_run = int(os.environ["LAYERWISE_MEASURE_RUN"])
     forced_phase = control.get("phase")
+    progress_extra = {}
+    if control.get("trigger") == "decode_only":
+        progress_extra.update(_LAST_DECODE_MATCH_META)
+        progress_extra.update(
+            {
+                "actual_step": int(step),
+                "actual_batch_size": int(batch_size),
+                "actual_past_kv": int(past_kv),
+            }
+        )
+    elif control.get("trigger") == "ctx_chunk":
+        progress_extra.update(_LAST_CTX_MATCH_META)
+        progress_extra.update(
+            {
+                "actual_step": int(step),
+                "actual_batch_size": int(batch_size),
+                "actual_past_kv": int(past_kv),
+            }
+        )
     label_step = step if forced_step is None else int(forced_step)
     label_bs = batch_size if forced_bs is None else int(forced_bs)
     label_past = past_kv if forced_past is None else int(forced_past)
@@ -241,6 +406,7 @@ def _run_marked_step(
         batch_size=label_bs,
         past_kv=label_past,
         phase=forced_phase,
+        **progress_extra,
     )
     nvtx.range_push(label)
     try:
@@ -251,6 +417,7 @@ def _run_marked_step(
             batch_size=label_bs,
             past_kv=label_past,
             phase=forced_phase,
+            **progress_extra,
         )
         return ret
     finally:
@@ -284,6 +451,43 @@ def _install():
             )
             if not matched:
                 return orig(self, scheduler_output, intermediate_tensors)
+            if control.get("match_once"):
+                once_key = (
+                    control.get("phase"),
+                    control.get("run"),
+                    control.get("bs"),
+                    control.get("past"),
+                )
+                if once_key in _MATCHED_ONCE_KEYS:
+                    return orig(self, scheduler_output, intermediate_tensors)
+                _MATCHED_ONCE_KEYS.add(once_key)
+            return _run_marked_step(
+                orig,
+                self,
+                scheduler_output,
+                intermediate_tensors,
+                step=step,
+                batch_size=batch_size,
+                past_kv=past_kv,
+                control=control,
+            )
+        if control.get("trigger") == "ctx_chunk":
+            matched, step, batch_size, past_kv = _ctx_chunk_match(
+                self, scheduler_output, control
+            )
+            if not matched:
+                return orig(self, scheduler_output, intermediate_tensors)
+            if control.get("match_once"):
+                once_key = (
+                    control.get("phase"),
+                    control.get("run"),
+                    control.get("bs"),
+                    control.get("step"),
+                    control.get("past"),
+                )
+                if once_key in _MATCHED_ONCE_KEYS:
+                    return orig(self, scheduler_output, intermediate_tensors)
+                _MATCHED_ONCE_KEYS.add(once_key)
             return _run_marked_step(
                 orig,
                 self,

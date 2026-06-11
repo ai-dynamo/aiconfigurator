@@ -14,6 +14,7 @@ from typing import Any
 
 CRITICAL_CONFIG_KEYS = (
     "vllm_version",
+    "model_config.max_model_len",
     "model_config.dtype",
     "cache_config.cache_dtype",
     "cache_config.enable_prefix_caching",
@@ -97,6 +98,22 @@ def _append_default_pair(args: list[str], flag: str, value: str) -> None:
         args.extend([flag, value])
 
 
+def _append_default_flag(args: list[str], flag: str, *aliases: str) -> None:
+    if not has_cli_flag(args, flag, *aliases):
+        args.append(flag)
+
+
+def _apply_common_runtime_defaults(args: list[str]) -> None:
+    """Add vLLM defaults that should be shared by FPM and layerwise runs."""
+    # mm = multimodal. Skip multimodal setup
+    _append_default_flag(args, "--skip-mm-profiling", "--no-skip-mm-profiling")
+    _append_default_pair(args, "--limit-mm-per-prompt", '{"image":0,"video":0}')
+
+    # Ignore HF generation_config.json and use vllm values instead.
+    # doesn't impact latency, only generation output settings.
+    _append_default_pair(args, "--generation-config", "vllm")
+
+
 def gpt_oss_runtime_defaults(
     *,
     model: str,
@@ -113,6 +130,7 @@ def gpt_oss_runtime_defaults(
     """
 
     normalized_extra = list(extra_args)
+    _apply_common_runtime_defaults(normalized_extra)
     resolved_kv_cache_dtype = kv_cache_dtype
     resolved_disable_prefix_caching = disable_prefix_caching
     if not is_gpt_oss_model(model):

@@ -17,10 +17,8 @@ from vllm_deployment import VllmDeploymentConfig, build_engine_args, has_cli_fla
 
 try:
     from .data import DataPoint
-    from .datapoint_generator import _max_num_batched_tokens_for_datapoints
 except ImportError:  # pragma: no cover - direct script compatibility
     from data import DataPoint
-    from datapoint_generator import _max_num_batched_tokens_for_datapoints
 
 
 DEFAULT_EXTRA_VLLM_ARGS = (
@@ -44,33 +42,25 @@ def _engine_tokens(
     model_dir: str,
     datapoints: list[DataPoint],
     extra_vllm_args: list[str],
+    max_num_seqs: int | None = None,
+    max_num_batched_tokens: int | None = None,
+    max_model_len: int | None = None,
+    gen_driver: str = "prefix_cache",
 ) -> list[str]:
-    ctx_points = [dp for dp in datapoints if dp.phase == "ctx"]
-    gen_points = [dp for dp in datapoints if dp.phase == "gen"]
-    ctx_max_total = max((dp.new_tokens + dp.past_kv for dp in ctx_points), default=0)
-    gen_max_past = max((dp.past_kv for dp in gen_points), default=0)
-    gen_batch_sizes = sorted({dp.batch_size for dp in gen_points})
-    max_seq_len = max(
-        2,
-        ctx_max_total + 1 if ctx_points else 0,
-        gen_max_past + 2 if gen_points else 0,
-    )
-    max_num_batched_tokens = _max_num_batched_tokens_for_datapoints(
-        datapoints,
-    )
-
     tokens = build_engine_args(
         VllmDeploymentConfig(
             model=model_dir,
-            max_model_len=max_seq_len,
-            max_num_seqs=max(gen_batch_sizes) if gen_batch_sizes else None,
+            max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
+            gpu_memory_utilization=0.9,
         )
     )
     tokens.extend(extra_vllm_args)
     return tokens
 
-def _create_llm(engine_tokens: list[str]):
+def _create_llm(engine_tokens: list[str], *, enable_layerwise_nvtx_tracing: bool = True):
+    """Create a vLLM LLM instance with collector-specific parser defaults."""
     from vllm.engine.arg_utils import EngineArgs
 
     parser = argparse.ArgumentParser(add_help=False)
@@ -78,7 +68,7 @@ def _create_llm(engine_tokens: list[str]):
     parser.set_defaults(
         load_format="dummy",
         trust_remote_code=True,
-        enable_layerwise_nvtx_tracing=True,
+        enable_layerwise_nvtx_tracing=enable_layerwise_nvtx_tracing,
         skip_tokenizer_init=True,
     )
     args = parser.parse_args(engine_tokens)

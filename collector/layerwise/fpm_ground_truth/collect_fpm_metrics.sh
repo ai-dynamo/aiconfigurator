@@ -35,7 +35,7 @@ MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}"
 FPM_PORT="${DYN_FORWARDPASS_METRIC_PORT:-20380}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-64}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.9}"
@@ -57,14 +57,26 @@ REQUESTS="${REQUESTS:-16}"
 CONCURRENCY="${CONCURRENCY:-32}"
 WORKLOAD_PLAN="${WORKLOAD_PLAN:-sweep}"
 MEASURED_PHASES="${MEASURED_PHASES:-context,decode}"
+REAL_WORKLOAD="${REAL_WORKLOAD:-1}"
+REAL_WORKLOAD_REQUESTS="${REAL_WORKLOAD_REQUESTS:-128}"
+REAL_WORKLOAD_CONCURRENCY="${REAL_WORKLOAD_CONCURRENCY:-32}"
+REAL_WORKLOAD_DATASET="${REAL_WORKLOAD_DATASET:-OpenAssistant/oasst1}"
+REAL_WORKLOAD_MAX_ROWS="${REAL_WORKLOAD_MAX_ROWS:-5000}"
+REAL_WORKLOAD_SHAPE_SOURCE="${REAL_WORKLOAD_SHAPE_SOURCE:-scaled_dataset}"
+REAL_WORKLOAD_ISL_MIN="${REAL_WORKLOAD_ISL_MIN:-100}"
+REAL_WORKLOAD_ISL_MAX="${REAL_WORKLOAD_ISL_MAX:-16384}"
+REAL_WORKLOAD_ISL_MEAN="${REAL_WORKLOAD_ISL_MEAN:-4096}"
+REAL_WORKLOAD_OSL_MIN="${REAL_WORKLOAD_OSL_MIN:-100}"
+REAL_WORKLOAD_OSL_MAX="${REAL_WORKLOAD_OSL_MAX:-4096}"
+REAL_WORKLOAD_OSL_MEAN="${REAL_WORKLOAD_OSL_MEAN:-1024}"
 CONTEXT_ISL_VALUES="${CONTEXT_ISL_VALUES:-128,1024,4096}"
 CONTEXT_OSL="${CONTEXT_OSL:-1}"
-CONTEXT_REPEATS="${CONTEXT_REPEATS:-2}"
+CONTEXT_REPEATS="${CONTEXT_REPEATS:-6}"
 CONTEXT_CONCURRENCY="${CONTEXT_CONCURRENCY:-1}"
 DECODE_BATCH_SIZES="${DECODE_BATCH_SIZES:-1,4,16}"
 DECODE_PAST_KV="${DECODE_PAST_KV:-4096}"
 DECODE_OSL="${DECODE_OSL:-8}"
-DECODE_REPEATS="${DECODE_REPEATS:-1}"
+DECODE_REPEATS="${DECODE_REPEATS:-6}"
 MIX_REQUESTS="${MIX_REQUESTS:-64}"
 MIX_CONCURRENCY="${MIX_CONCURRENCY:-32}"
 MIX_ISL_VALUES="${MIX_ISL_VALUES:-1024,2048,4096}"
@@ -76,7 +88,7 @@ WARMUP_ISL_VALUES="${WARMUP_ISL_VALUES:-}"
 WARMUP_OSL_VALUES="${WARMUP_OSL_VALUES:-}"
 POST_WARMUP_SECONDS="${POST_WARMUP_SECONDS:-1}"
 MAX_TOKENS="${MAX_TOKENS:-64}"
-PROMPT_TOKEN_SEED="${PROMPT_TOKEN_SEED:-0}"
+PROMPT_TOKEN_SEED="${PROMPT_TOKEN_SEED:-}"
 REQUEST_TIMEOUT_SECONDS="${REQUEST_TIMEOUT_SECONDS:-900}"
 REQUEST_RETRIES="${REQUEST_RETRIES:-3}"
 REQUEST_RETRY_BACKOFF_SECONDS="${REQUEST_RETRY_BACKOFF_SECONDS:-2}"
@@ -133,7 +145,7 @@ Options:
   --http-port PORT              Dynamo frontend port (default: ${HTTP_PORT})
   --system-port PORT            Worker health/metrics port (default: ${SYSTEM_PORT})
   --fpm-port PORT               Raw FPM ZMQ PUB port (default: ${FPM_PORT})
-  --max-model-len N             vLLM --max-model-len (default: ${MAX_MODEL_LEN})
+  --max-model-len N             vLLM --max-model-len override (default: vLLM model default)
   --max-num-seqs N              vLLM --max-num-seqs (default: ${MAX_NUM_SEQS})
   --max-num-batched-tokens N    vLLM --max-num-batched-tokens (default: ${MAX_NUM_BATCHED_TOKENS})
   --gpu-memory-utilization X    vLLM --gpu-memory-utilization (default: ${GPU_MEMORY_UTILIZATION})
@@ -149,6 +161,20 @@ Options:
   --file-discovery-touch-seconds N
                                 Host-side mtime refresh interval for local file discovery (default: ${FILE_DISCOVERY_TOUCH_SECONDS})
   --phases CSV                  Phases to send: context,decode,mixed (default: ${MEASURED_PHASES})
+  --real-workload               Send dataset-shaped mixed request traffic (default)
+  --no-real-workload            Use the static context/decode/mixed sweep instead
+  --real-workload-requests N    Dataset-shaped request count (default: ${REAL_WORKLOAD_REQUESTS})
+  --real-workload-concurrency N Dataset-shaped request concurrency (default: ${REAL_WORKLOAD_CONCURRENCY})
+  --real-workload-dataset NAME  HF dataset for shape sampling (default: ${REAL_WORKLOAD_DATASET})
+  --real-workload-max-rows N    Max dataset rows to scan for shape sampling (default: ${REAL_WORKLOAD_MAX_ROWS})
+  --real-workload-shape-source scaled_dataset|synthetic
+                                Shape source mode (default: ${REAL_WORKLOAD_SHAPE_SOURCE})
+  --real-workload-isl-min N     Real workload min ISL (default: ${REAL_WORKLOAD_ISL_MIN})
+  --real-workload-isl-max N     Real workload max ISL (default: ${REAL_WORKLOAD_ISL_MAX})
+  --real-workload-isl-mean N    Real workload approximate mean ISL (default: ${REAL_WORKLOAD_ISL_MEAN})
+  --real-workload-osl-min N     Real workload min OSL (default: ${REAL_WORKLOAD_OSL_MIN})
+  --real-workload-osl-max N     Real workload max OSL (default: ${REAL_WORKLOAD_OSL_MAX})
+  --real-workload-osl-mean N    Real workload approximate mean OSL (default: ${REAL_WORKLOAD_OSL_MEAN})
   --contexts CSV                Context target ISLs (default: ${CONTEXT_ISL_VALUES})
   --decode-batches CSV          Decode batch sizes/concurrency values (default: ${DECODE_BATCH_SIZES})
   --workload-plan sweep|legacy  Advanced: measured request plan (default: ${WORKLOAD_PLAN})
@@ -191,7 +217,7 @@ Options:
   --nsys-cuda-graph-trace MODE  nsys --cuda-graph-trace value when profiling worker (default: ${NSYS_CUDA_GRAPH_TRACE})
   --nsys-full-worker            Profile from worker start instead of only measured traffic
   --max-tokens N                Fixed-workload max_tokens (default: ${MAX_TOKENS})
-  --prompt-token-seed N         Seed for deterministic random prompt token IDs (default: ${PROMPT_TOKEN_SEED})
+  --prompt-token-seed N         Seed for reproducible random prompt token IDs (default: random)
   --request-retries N           Retries per request for transient HTTP errors (default: ${REQUEST_RETRIES})
   --request-retry-backoff N     Base seconds between request retries (default: ${REQUEST_RETRY_BACKOFF_SECONDS})
   --request-allow-failures N    Continue if at most N requests fail after retries (default: ${REQUEST_ALLOW_FAILURES})
@@ -215,6 +241,8 @@ Environment aliases:
   WARMUP_REQUESTS, WARMUP_CONCURRENCY, WARMUP_ISL_VALUES,
   WARMUP_OSL_VALUES, POST_WARMUP_SECONDS,
   TP_SIZE, EP_SIZE, ENABLE_EXPERT_PARALLEL, WORKLOAD_PLAN, MEASURED_PHASES,
+  REAL_WORKLOAD, REAL_WORKLOAD_REQUESTS, REAL_WORKLOAD_CONCURRENCY,
+  REAL_WORKLOAD_DATASET,
   CONTEXT_ISL_VALUES, CONTEXT_REPEATS, DECODE_BATCH_SIZES, DECODE_PAST_KV, DECODE_OSL, MIX_ISL_VALUES,
   MIX_OSL_VALUES, REQUEST_RETRIES, REQUEST_RETRY_BACKOFF_SECONDS,
   REQUEST_ALLOW_FAILURES,
@@ -233,8 +261,8 @@ Output:
   and preserves scheduled ctx/decode token counts for AIC validation.
   The request workload CSV records per-request target_isl, target_osl, and
   prompt_tokens so the aggregate FPM rows can be interpreted against the mix.
-  Generated requests always use deterministic random prompt token IDs through
-  the completions API.
+  Generated requests use random prompt token IDs through the completions API;
+  pass --prompt-token-seed for reproducible token IDs.
 
 Notes:
   The script uses file discovery across containers by mounting RUN_DIR at /work
@@ -467,6 +495,19 @@ while [[ $# -gt 0 ]]; do
         --workload-plan) WORKLOAD_PLAN="$2"; shift 2 ;;
         --phases) MEASURED_PHASES="$2"; shift 2 ;;
         --measured-phases) MEASURED_PHASES="$2"; shift 2 ;;
+        --real-workload) REAL_WORKLOAD=1; shift ;;
+        --no-real-workload) REAL_WORKLOAD=0; shift ;;
+        --real-workload-requests) REAL_WORKLOAD_REQUESTS="$2"; shift 2 ;;
+        --real-workload-concurrency) REAL_WORKLOAD_CONCURRENCY="$2"; shift 2 ;;
+        --real-workload-dataset) REAL_WORKLOAD_DATASET="$2"; shift 2 ;;
+        --real-workload-max-rows) REAL_WORKLOAD_MAX_ROWS="$2"; shift 2 ;;
+        --real-workload-shape-source) REAL_WORKLOAD_SHAPE_SOURCE="$2"; shift 2 ;;
+        --real-workload-isl-min) REAL_WORKLOAD_ISL_MIN="$2"; shift 2 ;;
+        --real-workload-isl-max) REAL_WORKLOAD_ISL_MAX="$2"; shift 2 ;;
+        --real-workload-isl-mean) REAL_WORKLOAD_ISL_MEAN="$2"; shift 2 ;;
+        --real-workload-osl-min) REAL_WORKLOAD_OSL_MIN="$2"; shift 2 ;;
+        --real-workload-osl-max) REAL_WORKLOAD_OSL_MAX="$2"; shift 2 ;;
+        --real-workload-osl-mean) REAL_WORKLOAD_OSL_MEAN="$2"; shift 2 ;;
         --contexts) CONTEXT_ISL_VALUES="$2"; shift 2 ;;
         --context-values) CONTEXT_ISL_VALUES="$2"; shift 2 ;;
         --ctx-values) CONTEXT_ISL_VALUES="$2"; shift 2 ;;
@@ -703,47 +744,70 @@ for phase in ${MEASURED_PHASES//,/ }; do
 done
 
 if [[ "${WORKLOAD_PLAN}" == "sweep" ]]; then
-    if (( CONTEXT_REPEATS < 1 || CONTEXT_CONCURRENCY < 1 )); then
-        die "context repeats/concurrency must be >= 1"
-    fi
-    if (( DECODE_REPEATS < 1 || DECODE_PAST_KV < 1 || DECODE_OSL < 1 )); then
-        die "decode repeats, past_kv, and OSL must be >= 1"
-    fi
-    if (( MIX_REPEATS < 1 || MIX_REQUESTS < 1 || MIX_CONCURRENCY < 1 )); then
-        die "mixed repeats, requests, and concurrency must be >= 1"
-    fi
-    if phase_enabled context; then
-        context_max_isl=$(csv_max "${CONTEXT_ISL_VALUES}")
-        if (( context_max_isl < 1 )); then
-            die "context ISL list must not be empty"
+    if [[ "${REAL_WORKLOAD}" == "1" ]]; then
+        if ! [[ "${REAL_WORKLOAD_REQUESTS}" =~ ^[0-9]+$ ]] || (( REAL_WORKLOAD_REQUESTS < 1 )); then
+            die "real workload requests must be >= 1"
         fi
-        if (( context_max_isl + CONTEXT_OSL > MAX_MODEL_LEN )); then
-            die "context max ISL + OSL (${context_max_isl} + ${CONTEXT_OSL}) exceeds --max-model-len ${MAX_MODEL_LEN}"
+        if ! [[ "${REAL_WORKLOAD_CONCURRENCY}" =~ ^[0-9]+$ ]] || (( REAL_WORKLOAD_CONCURRENCY < 1 )); then
+            die "real workload concurrency must be >= 1"
         fi
-    fi
-    if phase_enabled decode; then
-        decode_max_batch=$(csv_max "${DECODE_BATCH_SIZES}")
-        if (( decode_max_batch < 1 )); then
-            die "decode batch-size list must not be empty"
+        if (( REAL_WORKLOAD_CONCURRENCY > MAX_NUM_SEQS )); then
+            die "real workload concurrency ${REAL_WORKLOAD_CONCURRENCY} exceeds --max-num-seqs ${MAX_NUM_SEQS}"
         fi
-        if (( decode_max_batch > MAX_NUM_SEQS )); then
-            die "decode max batch size ${decode_max_batch} exceeds --max-num-seqs ${MAX_NUM_SEQS}"
+        case "${REAL_WORKLOAD_SHAPE_SOURCE}" in
+            scaled_dataset|synthetic) ;;
+            *) die "invalid real workload shape source: ${REAL_WORKLOAD_SHAPE_SOURCE}" ;;
+        esac
+        if (( REAL_WORKLOAD_ISL_MIN < 1 || REAL_WORKLOAD_ISL_MAX < REAL_WORKLOAD_ISL_MIN )); then
+            die "invalid real workload ISL range: ${REAL_WORKLOAD_ISL_MIN}..${REAL_WORKLOAD_ISL_MAX}"
         fi
-        if (( DECODE_PAST_KV + DECODE_OSL > MAX_MODEL_LEN )); then
-            die "decode past_kv + OSL (${DECODE_PAST_KV} + ${DECODE_OSL}) exceeds --max-model-len ${MAX_MODEL_LEN}"
+        if (( REAL_WORKLOAD_OSL_MIN < 1 || REAL_WORKLOAD_OSL_MAX < REAL_WORKLOAD_OSL_MIN )); then
+            die "invalid real workload OSL range: ${REAL_WORKLOAD_OSL_MIN}..${REAL_WORKLOAD_OSL_MAX}"
         fi
     fi
-    if phase_enabled mixed; then
-        mixed_max_isl=$(csv_max "${MIX_ISL_VALUES}")
-        mixed_max_osl=$(csv_max "${MIX_OSL_VALUES}")
-        if (( mixed_max_isl < 1 || mixed_max_osl < 1 )); then
-            die "mixed ISL/OSL lists must not be empty"
+    if [[ "${REAL_WORKLOAD}" != "1" ]]; then
+        if (( CONTEXT_REPEATS < 1 || CONTEXT_CONCURRENCY < 1 )); then
+            die "context repeats/concurrency must be >= 1"
         fi
-        if (( MIX_CONCURRENCY > MAX_NUM_SEQS )); then
-            die "mixed concurrency ${MIX_CONCURRENCY} exceeds --max-num-seqs ${MAX_NUM_SEQS}"
+        if (( DECODE_REPEATS < 1 || DECODE_PAST_KV < 1 || DECODE_OSL < 1 )); then
+            die "decode repeats, past_kv, and OSL must be >= 1"
         fi
-        if (( mixed_max_isl + mixed_max_osl > MAX_MODEL_LEN )); then
-            die "mixed max ISL + OSL (${mixed_max_isl} + ${mixed_max_osl}) exceeds --max-model-len ${MAX_MODEL_LEN}"
+        if (( MIX_REPEATS < 1 || MIX_REQUESTS < 1 || MIX_CONCURRENCY < 1 )); then
+            die "mixed repeats, requests, and concurrency must be >= 1"
+        fi
+        if phase_enabled context; then
+            context_max_isl=$(csv_max "${CONTEXT_ISL_VALUES}")
+            if (( context_max_isl < 1 )); then
+                die "context ISL list must not be empty"
+            fi
+            if [[ -n "${MAX_MODEL_LEN}" ]] && (( context_max_isl + CONTEXT_OSL > MAX_MODEL_LEN )); then
+                die "context max ISL + OSL (${context_max_isl} + ${CONTEXT_OSL}) exceeds --max-model-len ${MAX_MODEL_LEN}"
+            fi
+        fi
+        if phase_enabled decode; then
+            decode_max_batch=$(csv_max "${DECODE_BATCH_SIZES}")
+            if (( decode_max_batch < 1 )); then
+                die "decode batch-size list must not be empty"
+            fi
+            if (( decode_max_batch > MAX_NUM_SEQS )); then
+                die "decode max batch size ${decode_max_batch} exceeds --max-num-seqs ${MAX_NUM_SEQS}"
+            fi
+            if [[ -n "${MAX_MODEL_LEN}" ]] && (( DECODE_PAST_KV + DECODE_OSL > MAX_MODEL_LEN )); then
+                die "decode past_kv + OSL (${DECODE_PAST_KV} + ${DECODE_OSL}) exceeds --max-model-len ${MAX_MODEL_LEN}"
+            fi
+        fi
+        if phase_enabled mixed; then
+            mixed_max_isl=$(csv_max "${MIX_ISL_VALUES}")
+            mixed_max_osl=$(csv_max "${MIX_OSL_VALUES}")
+            if (( mixed_max_isl < 1 || mixed_max_osl < 1 )); then
+                die "mixed ISL/OSL lists must not be empty"
+            fi
+            if (( MIX_CONCURRENCY > MAX_NUM_SEQS )); then
+                die "mixed concurrency ${MIX_CONCURRENCY} exceeds --max-num-seqs ${MAX_NUM_SEQS}"
+            fi
+            if [[ -n "${MAX_MODEL_LEN}" ]] && (( mixed_max_isl + mixed_max_osl > MAX_MODEL_LEN )); then
+                die "mixed max ISL + OSL (${mixed_max_isl} + ${mixed_max_osl}) exceeds --max-model-len ${MAX_MODEL_LEN}"
+            fi
         fi
     fi
 fi
@@ -755,7 +819,7 @@ if [[ "${VARY_ISL_OSL}" == "1" && "${WORKLOAD_PLAN}" == "legacy" ]]; then
     if (( OSL_MIN < 1 || OSL_MAX < OSL_MIN )); then
         die "invalid OSL range: ${OSL_MIN}..${OSL_MAX}"
     fi
-    if (( ISL_MAX + OSL_MAX > MAX_MODEL_LEN )); then
+    if [[ -n "${MAX_MODEL_LEN}" ]] && (( ISL_MAX + OSL_MAX > MAX_MODEL_LEN )); then
         die "ISL_MAX + OSL_MAX (${ISL_MAX} + ${OSL_MAX}) exceeds --max-model-len ${MAX_MODEL_LEN}. Increase --max-model-len."
     fi
 fi
@@ -829,11 +893,13 @@ start_file_discovery_touch_loop() {
 deployment_helper_args() {
     local args=(
         --model "${MODEL}"
-        --max-model-len "${MAX_MODEL_LEN}"
         --max-num-seqs "${MAX_NUM_SEQS}"
         --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}"
         --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
     )
+    if [[ -n "${MAX_MODEL_LEN}" ]]; then
+        args+=(--max-model-len "${MAX_MODEL_LEN}")
+    fi
     if [[ -n "${TP_SIZE}" ]]; then
         args+=(--tensor-parallel-size "${TP_SIZE}")
     fi
@@ -903,6 +969,26 @@ snapshot_effective_vllm_config() {
     fi
 }
 
+resolved_max_model_len() {
+    if [[ -n "${MAX_MODEL_LEN}" ]]; then
+        printf '%s\n' "${MAX_MODEL_LEN}"
+        return
+    fi
+    if [[ ! -f "${RUN_EFFECTIVE_CONFIG_JSON}" ]]; then
+        return
+    fi
+    python3 - "${RUN_EFFECTIVE_CONFIG_JSON}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+value = data.get("model_config.max_model_len")
+if value is not None:
+    print(value)
+PY
+}
+
 send_request_workload() {
     local phase="$1"
     local container_suffix="$2"
@@ -913,7 +999,7 @@ send_request_workload() {
     local osl_values="$7"
     local append_workload="${8:-0}"
     local seed_offset="${9:-0}"
-    local prompt_token_seed="$((PROMPT_TOKEN_SEED + seed_offset))"
+    local real_workload="${10:-0}"
     local request_rc=0
 
     local request_driver_cmd=(
@@ -923,7 +1009,6 @@ send_request_workload() {
         --requests "${request_count}"
         --concurrency "${concurrency_count}"
         --max-tokens "${MAX_TOKENS}"
-        --prompt-token-seed "${prompt_token_seed}"
         --endpoint "${REQUEST_ENDPOINT}"
         --isl-min "${ISL_MIN}"
         --isl-max "${ISL_MAX}"
@@ -939,6 +1024,29 @@ send_request_workload() {
         --retry-backoff "${REQUEST_RETRY_BACKOFF_SECONDS}"
         --allow-failures "${REQUEST_ALLOW_FAILURES}"
     )
+    if [[ -n "${PROMPT_TOKEN_SEED}" ]]; then
+        local prompt_token_seed="$((PROMPT_TOKEN_SEED + seed_offset))"
+        request_driver_cmd+=(--prompt-token-seed "${prompt_token_seed}")
+    fi
+    if [[ "${real_workload}" == "1" ]]; then
+        request_driver_cmd+=(
+            --real-workload
+            --real-workload-dataset "${REAL_WORKLOAD_DATASET}"
+            --real-workload-max-rows "${REAL_WORKLOAD_MAX_ROWS}"
+            --real-workload-shape-source "${REAL_WORKLOAD_SHAPE_SOURCE}"
+            --real-workload-isl-min "${REAL_WORKLOAD_ISL_MIN}"
+            --real-workload-isl-max "${REAL_WORKLOAD_ISL_MAX}"
+            --real-workload-isl-mean "${REAL_WORKLOAD_ISL_MEAN}"
+            --real-workload-osl-min "${REAL_WORKLOAD_OSL_MIN}"
+            --real-workload-osl-max "${REAL_WORKLOAD_OSL_MAX}"
+            --real-workload-osl-mean "${REAL_WORKLOAD_OSL_MEAN}"
+        )
+        local request_max_model_len
+        request_max_model_len="$(resolved_max_model_len)"
+        if [[ -n "${request_max_model_len}" ]]; then
+            request_driver_cmd+=(--max-model-len "${request_max_model_len}")
+        fi
+    fi
     if [[ "${append_workload}" == "1" ]]; then
         request_driver_cmd+=(--append-workload)
     fi
@@ -952,7 +1060,11 @@ send_request_workload() {
         if [[ -n "${osl_values}" ]]; then
             osl_desc="${osl_values}"
         fi
-        log "Sending ${request_count} ${phase} variable ISL/OSL requests at concurrency ${concurrency_count} (ISL ${isl_desc}, OSL ${osl_desc})"
+        if [[ "${real_workload}" == "1" ]]; then
+            log "Sending ${request_count} real-workload requests at concurrency ${concurrency_count} (dataset ${REAL_WORKLOAD_DATASET})"
+        else
+            log "Sending ${request_count} ${phase} variable ISL/OSL requests at concurrency ${concurrency_count} (ISL ${isl_desc}, OSL ${osl_desc})"
+        fi
     else
         log "Sending ${request_count} ${phase} fixed requests at concurrency ${concurrency_count}"
     fi
@@ -1005,6 +1117,9 @@ if [[ "${NSYS_PROFILE_WORKER}" == "1" ]]; then
     log "Nsight worker profile: ${NSYS_WORKER_OUTPUT_BASE}.nsys-rep"
 fi
 log "Measured phases: ${MEASURED_PHASES}"
+if [[ "${REAL_WORKLOAD}" == "1" ]]; then
+    log "Real workload: dataset=${REAL_WORKLOAD_DATASET}, shape_source=${REAL_WORKLOAD_SHAPE_SOURCE}, requests=${REAL_WORKLOAD_REQUESTS}, concurrency=${REAL_WORKLOAD_CONCURRENCY}, ISL=${REAL_WORKLOAD_ISL_MIN}..${REAL_WORKLOAD_ISL_MAX} mean~${REAL_WORKLOAD_ISL_MEAN}, OSL=${REAL_WORKLOAD_OSL_MIN}..${REAL_WORKLOAD_OSL_MAX} mean~${REAL_WORKLOAD_OSL_MEAN}"
+fi
 if [[ "${WORKLOAD_PLAN}" != "sweep" ]]; then
     log "Advanced workload plan: ${WORKLOAD_PLAN}"
 fi
@@ -1187,9 +1302,26 @@ send_sweep_workloads() {
     return "${sweep_rc}"
 }
 
+send_real_workload() {
+    rm -f "${REQUEST_WORKLOAD_CSV}"
+    send_request_workload \
+        "real" \
+        "request-driver-real" \
+        "${REAL_WORKLOAD_REQUESTS}" \
+        "${REAL_WORKLOAD_CONCURRENCY}" \
+        "${REQUEST_WORKLOAD_IN_CONTAINER}" \
+        "" \
+        "" \
+        1 \
+        2000000000 \
+        1
+}
+
 REQUEST_SEND_RC=0
 if [[ "${SKIP_REQUESTS}" == "1" ]]; then
     log "Skipping sample requests. Collector is running; send traffic to http://127.0.0.1:${HTTP_PORT}."
+elif [[ "${WORKLOAD_PLAN}" == "sweep" && "${REAL_WORKLOAD}" == "1" ]]; then
+    send_real_workload || REQUEST_SEND_RC=$?
 elif [[ "${WORKLOAD_PLAN}" == "sweep" ]]; then
     send_sweep_workloads || REQUEST_SEND_RC=$?
 else

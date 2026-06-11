@@ -6,7 +6,7 @@ import pytest
 
 from collector.layerwise.common.paths import default_run_dir, slugify
 from collector.layerwise.fpm import collect as fpm_collect
-from collector.layerwise.fpm.datapoint_generator import generate_fpm_cases
+from collector.layerwise.fpm.datapoint_generator import default_shapes, generate_fpm_cases
 from collector.layerwise.fpm.docker import build_collect_command
 from collector.layerwise.vllm import collect as vllm_collect
 from collector.layerwise.vllm import datapoint_generator as vllm_datapoints
@@ -113,14 +113,17 @@ def test_layerwise_auto_ep_sizes_skip_intermediate_moe_tp(tmp_path):
     ]
 
 
-def test_layerwise_production_decode_default_uses_requested_max_batch_size():
-    values = vllm_datapoints.values_for_preset("production", max_decode_batch_size=1024)
+def test_layerwise_full_decode_default_uses_requested_max_batch_size():
+    values = vllm_datapoints.values_for_preset("full", max_decode_batch_size=1024)
 
+    assert values["ctx_new_tokens"] == "1,16,128,256,512,1024,2048,4096,8192"
+    assert values["ctx_past_kv"] == "0,16,128,256,512,1024,2048,4096,8192,16384,32768"
     assert values["gen_batch_sizes"] == "1,2,4,8,16,32,64,128,256,512,1024"
+    assert values["gen_past_kv"] == "1,16,128,256,512,1024,2048,4096,8192,16384,32768"
 
 
-def test_layerwise_production_decode_default_can_follow_smaller_vllm_default():
-    values = vllm_datapoints.values_for_preset("production", max_decode_batch_size=256)
+def test_layerwise_full_decode_default_can_follow_smaller_vllm_default():
+    values = vllm_datapoints.values_for_preset("full", max_decode_batch_size=256)
 
     assert values["gen_batch_sizes"] == "1,2,4,8,16,32,64,128,256"
 
@@ -154,13 +157,77 @@ def test_fpm_public_cli_requires_model():
         fpm_collect._build_arg_parser().parse_args([])
 
 
+def test_fpm_public_cli_has_no_smoke_preset():
+    with pytest.raises(SystemExit):
+        fpm_collect._build_arg_parser().parse_args([
+            "--model",
+            "Qwen/Qwen3-32B",
+            "--run-preset",
+            "smoke",
+        ])
+
+
+def test_fpm_default_shapes_are_full_sweep():
+    assert default_shapes() == {
+        "contexts": "128,1024,4096",
+        "context_repeats": "6",
+        "decode_batches": "1,4,16",
+        "decode_past_kv": "4096",
+        "decode_osl": "8",
+        "decode_repeats": "6",
+        "real_workload_requests": "128",
+        "real_workload_concurrency": "32",
+        "real_workload_dataset": "OpenAssistant/oasst1",
+        "real_workload_shape_source": "scaled_dataset",
+        "real_workload_isl_min": "100",
+        "real_workload_isl_max": "16384",
+        "real_workload_isl_mean": "4096",
+        "real_workload_osl_min": "100",
+        "real_workload_osl_max": "4096",
+        "real_workload_osl_mean": "1024",
+    }
+
+
+def test_fpm_public_cli_defaults_to_real_workload():
+    args = fpm_collect._build_arg_parser().parse_args([
+        "--model",
+        "Qwen/Qwen3-32B",
+    ])
+    fpm_collect._apply_shape_defaults(args)
+
+    assert args.real_workload is True
+    assert args.real_workload_requests == 128
+    assert args.real_workload_concurrency == 32
+    assert args.real_workload_dataset == "OpenAssistant/oasst1"
+    assert args.real_workload_shape_source == "scaled_dataset"
+    assert args.real_workload_isl_min == 100
+    assert args.real_workload_isl_max == 16384
+    assert args.real_workload_isl_mean == 4096
+    assert args.real_workload_osl_min == 100
+    assert args.real_workload_osl_max == 4096
+    assert args.real_workload_osl_mean == 1024
+
+
 def test_fpm_case_generation_and_shell_command(tmp_path):
     args = argparse.Namespace(
         model="Qwen/Qwen3-32B",
         phases="context,decode",
         contexts="128",
+        context_repeats="6",
         decode_batches="1,4",
         decode_osl="8",
+        decode_repeats=6,
+        real_workload=True,
+        real_workload_requests=128,
+        real_workload_concurrency=32,
+        real_workload_dataset="OpenAssistant/oasst1",
+        real_workload_shape_source="scaled_dataset",
+        real_workload_isl_min=100,
+        real_workload_isl_max=16384,
+        real_workload_isl_mean=4096,
+        real_workload_osl_min=100,
+        real_workload_osl_max=4096,
+        real_workload_osl_mean=1024,
         image="image",
         warmup_requests=None,
         gpus=None,
@@ -180,6 +247,17 @@ def test_fpm_case_generation_and_shell_command(tmp_path):
     assert cmd.argv[:2] == ["bash", "collector/layerwise/fpm_ground_truth/collect_fpm_metrics.sh"]
     assert ["--tp-size", "2"] == cmd.argv[cmd.argv.index("--tp-size"): cmd.argv.index("--tp-size") + 2]
     assert ["--ep-size", "2"] == cmd.argv[cmd.argv.index("--ep-size"): cmd.argv.index("--ep-size") + 2]
+    assert "--real-workload" in cmd.argv
+    assert "--max-model-len" not in cmd.argv
+    assert ["--real-workload-requests", "128"] == cmd.argv[
+        cmd.argv.index("--real-workload-requests"): cmd.argv.index("--real-workload-requests") + 2
+    ]
+    assert ["--real-workload-isl-max", "16384"] == cmd.argv[
+        cmd.argv.index("--real-workload-isl-max"): cmd.argv.index("--real-workload-isl-max") + 2
+    ]
+    assert ["--real-workload-osl-mean", "1024"] == cmd.argv[
+        cmd.argv.index("--real-workload-osl-mean"): cmd.argv.index("--real-workload-osl-mean") + 2
+    ]
     assert "--dry-run" in cmd.argv
     assert cmd.argv[-3:] == ["--", "--foo", "bar"]
 

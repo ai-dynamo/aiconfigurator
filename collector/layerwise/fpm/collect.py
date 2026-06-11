@@ -14,13 +14,13 @@ from pathlib import Path
 
 try:
     from collector.layerwise.fpm.artifacts import case_run_dir, resolve_run_dir
-    from collector.layerwise.fpm.datapoint_generator import generate_fpm_cases, preset_defaults
+    from collector.layerwise.fpm.datapoint_generator import default_shapes, generate_fpm_cases
     from collector.layerwise.fpm.docker import DEFAULT_IMAGE, build_collect_command
 except ModuleNotFoundError:  # pragma: no cover - direct script compatibility
     _REPO_ROOT = Path(__file__).resolve().parents[3]
     sys.path.insert(0, str(_REPO_ROOT))
     from collector.layerwise.fpm.artifacts import case_run_dir, resolve_run_dir
-    from collector.layerwise.fpm.datapoint_generator import generate_fpm_cases, preset_defaults
+    from collector.layerwise.fpm.datapoint_generator import default_shapes, generate_fpm_cases
     from collector.layerwise.fpm.docker import DEFAULT_IMAGE, build_collect_command
 
 
@@ -32,11 +32,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tp-sizes", default="1", help="Comma-separated TP sizes to collect.")
     parser.add_argument("--ep-sizes", default="1", help="Comma-separated EP sizes to collect.")
     parser.add_argument("--phases", default="context,decode", help="Comma-separated phases: context,decode,mixed.")
-    parser.add_argument("--run-preset", choices=("production", "smoke"), default="production")
     parser.add_argument("--contexts", default=None, help="Override context ISL values.")
+    parser.add_argument("--context-repeats", type=int, default=None, help="Context repeats per ISL.")
     parser.add_argument("--decode-batches", default=None, help="Override decode batch sizes.")
     parser.add_argument("--decode-past-kv", default=None, help="Override decode past-KV values.")
     parser.add_argument("--decode-osl", default=None, help="Override decode output token count.")
+    parser.add_argument("--decode-repeats", type=int, default=None, help="Decode repeats per batch size.")
+    parser.add_argument("--real-workload", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--real-workload-requests", type=int, default=None)
+    parser.add_argument("--real-workload-concurrency", type=int, default=None)
+    parser.add_argument("--real-workload-dataset", default=None)
+    parser.add_argument("--real-workload-shape-source", choices=["scaled_dataset", "synthetic"], default=None)
+    parser.add_argument("--real-workload-isl-min", type=int, default=None)
+    parser.add_argument("--real-workload-isl-max", type=int, default=None)
+    parser.add_argument("--real-workload-isl-mean", type=float, default=None)
+    parser.add_argument("--real-workload-osl-min", type=int, default=None)
+    parser.add_argument("--real-workload-osl-max", type=int, default=None)
+    parser.add_argument("--real-workload-osl-mean", type=float, default=None)
     parser.add_argument("--image", default=DEFAULT_IMAGE, help="Dynamo vLLM runtime image.")
 
     advanced = parser.add_argument_group("advanced/debug options")
@@ -48,20 +60,32 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _apply_preset_defaults(args: argparse.Namespace) -> None:
-    """Fill omitted shape args from the selected preset."""
-    defaults = preset_defaults(args.run_preset)
+def _apply_shape_defaults(args: argparse.Namespace) -> None:
+    """Fill omitted shape args from the default FPM shape set."""
+    defaults = default_shapes()
     args.contexts = args.contexts or defaults["contexts"]
+    args.context_repeats = args.context_repeats or int(defaults["context_repeats"])
     args.decode_batches = args.decode_batches or defaults["decode_batches"]
     args.decode_past_kv = args.decode_past_kv or defaults["decode_past_kv"]
     args.decode_osl = args.decode_osl or defaults["decode_osl"]
+    args.decode_repeats = args.decode_repeats or int(defaults["decode_repeats"])
+    args.real_workload_requests = args.real_workload_requests or int(defaults["real_workload_requests"])
+    args.real_workload_concurrency = args.real_workload_concurrency or int(defaults["real_workload_concurrency"])
+    args.real_workload_dataset = args.real_workload_dataset or defaults["real_workload_dataset"]
+    args.real_workload_shape_source = args.real_workload_shape_source or defaults["real_workload_shape_source"]
+    args.real_workload_isl_min = args.real_workload_isl_min or int(defaults["real_workload_isl_min"])
+    args.real_workload_isl_max = args.real_workload_isl_max or int(defaults["real_workload_isl_max"])
+    args.real_workload_isl_mean = args.real_workload_isl_mean or float(defaults["real_workload_isl_mean"])
+    args.real_workload_osl_min = args.real_workload_osl_min or int(defaults["real_workload_osl_min"])
+    args.real_workload_osl_max = args.real_workload_osl_max or int(defaults["real_workload_osl_max"])
+    args.real_workload_osl_mean = args.real_workload_osl_mean or float(defaults["real_workload_osl_mean"])
 
 
 def main() -> None:
     """Run FPM collection for each requested TP/EP/KV case."""
     parser = _build_arg_parser()
     args = parser.parse_args()
-    _apply_preset_defaults(args)
+    _apply_shape_defaults(args)
     root = resolve_run_dir(args.run_dir, args.model)
     cases = generate_fpm_cases(args.tp_sizes, args.ep_sizes, args.decode_past_kv)
     if not cases:

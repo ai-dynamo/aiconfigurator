@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Send deterministic random-token completion workloads to a Dynamo frontend."""
+"""Send synthetic-token completion workloads to a Dynamo frontend."""
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
 import csv
+import gzip
 import json
 import math
+import random
+import re
 import sys
 import time
 import urllib.error
@@ -16,8 +19,13 @@ from pathlib import Path
 
 _THIS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_THIS_DIR / "common"))
+sys.path.insert(0, str(_THIS_DIR.parent / "common"))
 
-from random_prompt_tokens import load_random_prompt_token_config, make_prompt_token_ids
+from random_prompt_tokens import (
+    load_random_prompt_token_config,
+    make_prompt_token_ids,
+    sample_prompt_token_ids,
+)
 
 
 def post_json(url, payload, timeout):
@@ -79,7 +87,302 @@ def target_values(explicit, lo, hi, count):
     return logspace_ints(lo, hi, count)
 
 
+def estimate_token_count(text):
+    """Estimate token count from dataset text without binding to a model tokenizer."""
+    text = (text or "").strip()
+    if not text:
+        return 1
+    words = len(re.findall(r"\S+", text))
+    char_estimate = math.ceil(len(text) / 4)
+    word_estimate = math.ceil(words * 1.35)
+    return max(1, min(32768, max(char_estimate, word_estimate)))
+
+
+def bounded_power_law_values(lo, hi, mean, count, *, seed):
+    """Return shuffled bounded values with an approximate target mean."""
+
+    if count <= 0:
+        return []
+    lo = int(lo)
+    hi = int(hi)
+    mean = float(mean)
+    if lo > hi:
+        raise ValueError(f"invalid range: {lo}..{hi}")
+    if lo == hi or count == 1:
+        return [lo] * count
+    if not (lo <= mean <= hi):
+        raise ValueError(f"mean {mean} must be within range {lo}..{hi}")
+
+    mean_fraction = (mean - lo) / (hi - lo)
+    exponent = max(0.001, (1.0 / max(mean_fraction, 1e-9)) - 1.0)
+    values = []
+    for index in range(count):
+        q = index / (count - 1)
+        values.append(round(lo + (hi - lo) * (q**exponent)))
+    rng = random.Random(seed)
+    rng.shuffle(values)
+    return values
+
+
+def clamp_shape_to_model_len(isl, osl, max_model_len):
+    """Clamp a request shape so ISL+OSL fits the vLLM model length."""
+
+    isl = max(1, int(isl))
+    osl = max(1, int(osl))
+    if max_model_len is None or isl + osl <= max_model_len:
+        return isl, osl
+    overflow = isl + osl - max_model_len
+    if osl > overflow:
+        return isl, osl - overflow
+    return max(1, max_model_len - 1), 1
+
+
+def synthetic_real_workload_shapes(
+    count,
+    *,
+    seed,
+    max_model_len,
+    isl_min,
+    isl_max,
+    isl_mean,
+    osl_min,
+    osl_max,
+    osl_mean,
+):
+    """Return deterministic large serving-style ISL/OSL request shapes."""
+
+    isls = bounded_power_law_values(isl_min, isl_max, isl_mean, count, seed=seed)
+    osls = bounded_power_law_values(osl_min, osl_max, osl_mean, count, seed=(seed or 0) + 17)
+    shapes = [clamp_shape_to_model_len(isl, osl, max_model_len) for isl, osl in zip(isls, osls, strict=True)]
+    return shapes
+
+
+def fallback_real_workload_shapes(count, *, seed, max_model_len):
+    """Return deterministic large serving-style ISL/OSL pairs when dataset loading fails."""
+
+    return synthetic_real_workload_shapes(
+        count,
+        seed=seed,
+        max_model_len=max_model_len,
+        isl_min=100,
+        isl_max=16384,
+        isl_mean=4096,
+        osl_min=100,
+        osl_max=4096,
+        osl_mean=1024,
+    )
+
+
+def scale_real_workload_shapes(shapes, *, seed, max_model_len, isl_min, isl_max, isl_mean, osl_min, osl_max, osl_mean):
+    """Map dataset request ordering onto a configured large-shape distribution."""
+
+    if not shapes:
+        return []
+    count = len(shapes)
+    target_isls = bounded_power_law_values(isl_min, isl_max, isl_mean, count, seed=seed)
+    target_osls = bounded_power_law_values(osl_min, osl_max, osl_mean, count, seed=(seed or 0) + 17)
+    ordering = sorted(range(count), key=lambda i: (shapes[i][0], shapes[i][1]))
+    scaled = [None] * count
+    for rank, index in enumerate(ordering):
+        scaled[index] = clamp_shape_to_model_len(target_isls[rank], target_osls[rank], max_model_len)
+    return scaled
+
+
+def load_openassistant_shapes(dataset_name, *, count, seed, max_model_len, max_rows):
+    """Sample ISL/OSL pairs from OpenAssistant-style prompt/assistant rows."""
+    shapes = load_openassistant_shapes_with_datasets(
+        dataset_name,
+        count=count,
+        seed=seed,
+        max_model_len=max_model_len,
+        max_rows=max_rows,
+    )
+    if shapes:
+        return shapes
+    return load_openassistant_shapes_with_hub_jsonl(
+        dataset_name,
+        count=count,
+        seed=seed,
+        max_model_len=max_model_len,
+        max_rows=max_rows,
+    )
+
+
+def _append_openassistant_shape(row, prompts_by_id, shapes, max_model_len):
+    role = str(row.get("role", "")).lower()
+    text = str(row.get("text", "") or "")
+    message_id = row.get("message_id")
+    parent_id = row.get("parent_id")
+    if role in {"prompter", "user"} and message_id:
+        prompts_by_id[message_id] = text
+        return
+    if role != "assistant" or parent_id not in prompts_by_id:
+        return
+
+    isl = estimate_token_count(prompts_by_id[parent_id])
+    osl = estimate_token_count(text)
+    shapes.append(clamp_shape_to_model_len(isl, osl, max_model_len))
+
+
+def load_openassistant_shapes_with_datasets(dataset_name, *, count, seed, max_model_len, max_rows):
+    """Sample OASST shapes through the optional datasets package."""
+    try:
+        from datasets import load_dataset
+    except Exception as exc:
+        print(f"real_workload_dataset_unavailable reason={type(exc).__name__}", flush=True)
+        return []
+
+    try:
+        dataset = load_dataset(dataset_name, split="train", streaming=True)
+    except Exception as exc:
+        print(f"real_workload_dataset_load_failed dataset={dataset_name!r} error={exc!r}", flush=True)
+        return []
+
+    prompts_by_id = {}
+    shapes = []
+    rng = random.Random(seed)
+    for idx, row in enumerate(dataset):
+        if idx >= max_rows or len(shapes) >= max(count * 4, count):
+            break
+        if row.get("lang") not in (None, "", "en"):
+            continue
+        _append_openassistant_shape(row, prompts_by_id, shapes, max_model_len)
+
+    if not shapes:
+        return []
+    rng.shuffle(shapes)
+    while len(shapes) < count:
+        shapes.extend(shapes[: count - len(shapes)])
+    return shapes[:count]
+
+
+def _flatten_tree_messages(node):
+    if not isinstance(node, dict):
+        return
+    yield node
+    for reply in node.get("replies") or []:
+        yield from _flatten_tree_messages(reply)
+
+
+def _oasst_rows_from_jsonl(path):
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            obj = json.loads(line)
+            if "prompt" in obj:
+                yield from _flatten_tree_messages(obj["prompt"])
+            else:
+                yield obj
+
+
+def load_openassistant_shapes_with_hub_jsonl(dataset_name, *, count, seed, max_model_len, max_rows):
+    """Sample OASST shapes from HF Hub JSONL exports without datasets."""
+    try:
+        from huggingface_hub import hf_hub_download, list_repo_files
+    except Exception as exc:
+        print(f"real_workload_hub_unavailable reason={type(exc).__name__}", flush=True)
+        return []
+
+    try:
+        files = list_repo_files(dataset_name, repo_type="dataset")
+        candidates = [
+            name
+            for name in files
+            if name.endswith(".jsonl.gz") and ("messages" in name or "trees" in name)
+        ]
+        if not candidates:
+            print(f"real_workload_hub_no_jsonl dataset={dataset_name!r}", flush=True)
+            return []
+        preferred = sorted(candidates, key=lambda name: ("ready" not in name, "messages" not in name, name))[0]
+        path = hf_hub_download(dataset_name, preferred, repo_type="dataset")
+    except Exception as exc:
+        print(f"real_workload_hub_load_failed dataset={dataset_name!r} error={exc!r}", flush=True)
+        return []
+
+    prompts_by_id = {}
+    shapes = []
+    rng = random.Random(seed)
+    try:
+        for idx, row in enumerate(_oasst_rows_from_jsonl(path)):
+            if idx >= max_rows or len(shapes) >= max(count * 4, count):
+                break
+            if row.get("lang") not in (None, "", "en"):
+                continue
+            _append_openassistant_shape(row, prompts_by_id, shapes, max_model_len)
+    except Exception as exc:
+        print(f"real_workload_hub_parse_failed path={path!r} error={exc!r}", flush=True)
+        return []
+
+    if not shapes:
+        return []
+    rng.shuffle(shapes)
+    while len(shapes) < count:
+        shapes.extend(shapes[: count - len(shapes)])
+    return shapes[:count]
+
+
+def real_workload_values(args):
+    """Return realistic ISL/OSL pairs for the requested number of requests."""
+    max_model_len = getattr(args, "max_model_len", None)
+    if max_model_len is not None:
+        max_model_len = max(2, int(max_model_len))
+    count = int(args.requests)
+    dataset_name = getattr(args, "real_workload_dataset", "OpenAssistant/oasst1")
+    max_rows = int(getattr(args, "real_workload_max_rows", 5000))
+    shape_source = getattr(args, "real_workload_shape_source", "scaled_dataset")
+    range_kwargs = {
+        "isl_min": int(getattr(args, "real_workload_isl_min", 100)),
+        "isl_max": int(getattr(args, "real_workload_isl_max", 16384)),
+        "isl_mean": float(getattr(args, "real_workload_isl_mean", 4096)),
+        "osl_min": int(getattr(args, "real_workload_osl_min", 100)),
+        "osl_max": int(getattr(args, "real_workload_osl_max", 4096)),
+        "osl_mean": float(getattr(args, "real_workload_osl_mean", 1024)),
+    }
+    if shape_source == "synthetic":
+        shapes = synthetic_real_workload_shapes(
+            count,
+            seed=args.prompt_token_seed,
+            max_model_len=max_model_len,
+            **range_kwargs,
+        )
+        source = "synthetic_large_shape_distribution"
+        print(f"real_workload_shapes source={source!r} count={len(shapes)}", flush=True)
+        return shapes, source
+
+    shapes = load_openassistant_shapes(
+        dataset_name,
+        count=count,
+        seed=args.prompt_token_seed,
+        max_model_len=max_model_len,
+        max_rows=max_rows,
+    )
+    source = f"{dataset_name}:scaled_large_shape_distribution"
+    shapes = scale_real_workload_shapes(
+        shapes,
+        seed=args.prompt_token_seed,
+        max_model_len=max_model_len,
+        **range_kwargs,
+    )
+    if not shapes:
+        shapes = synthetic_real_workload_shapes(
+            count,
+            seed=args.prompt_token_seed,
+            max_model_len=max_model_len,
+            **range_kwargs,
+        )
+        source = "synthetic_large_shape_distribution"
+    print(f"real_workload_shapes source={source!r} count={len(shapes)}", flush=True)
+    return shapes, source
+
+
 def make_token_ids(args, target_tokens, request_index):
+    if args.prompt_token_seed is None:
+        return sample_prompt_token_ids(
+            args.prompt_rng,
+            int(target_tokens),
+            args.prompt_token_config,
+        )
     return make_prompt_token_ids(
         prompt_token_seed=args.prompt_token_seed,
         token_count=int(target_tokens),
@@ -92,7 +395,13 @@ def build_specs(args):
     if args.endpoint != "completions":
         raise ValueError("random token-id prompts require endpoint=completions")
 
-    if args.vary_isl_osl:
+    real_workload = bool(getattr(args, "real_workload", False))
+    real_source = ""
+    if real_workload:
+        shapes, real_source = real_workload_values(args)
+        isls = [shape[0] for shape in shapes]
+        osls = [shape[1] for shape in shapes]
+    elif args.vary_isl_osl:
         isls = target_values(args.isl_values, args.isl_min, args.isl_max, args.requests)
         osls = target_values(args.osl_values, args.osl_min, args.osl_max, args.requests)
     else:
@@ -133,6 +442,7 @@ def build_specs(args):
                     "prompt_tokens",
                     "max_tokens",
                     "prompt_token_mode",
+                    "shape_source",
                 ]
             )
         for spec in specs:
@@ -146,6 +456,7 @@ def build_specs(args):
                     spec["prompt_tokens"],
                     spec["target_osl"],
                     "random_vocab_excluding_special",
+                    real_source if real_workload else "explicit_or_logspace_shape_grid",
                 ]
             )
 
@@ -212,13 +523,24 @@ def main() -> int:
     parser.add_argument("--requests", type=int, required=True)
     parser.add_argument("--concurrency", type=int, required=True)
     parser.add_argument("--max-tokens", type=int, required=True)
-    parser.add_argument("--prompt-token-seed", type=int, default=0)
+    parser.add_argument("--prompt-token-seed", type=int, default=None)
     parser.add_argument("--vary-isl-osl", action="store_true")
+    parser.add_argument("--real-workload", action="store_true")
+    parser.add_argument("--real-workload-dataset", default="OpenAssistant/oasst1")
+    parser.add_argument("--real-workload-max-rows", type=int, default=5000)
+    parser.add_argument("--real-workload-shape-source", choices=["scaled_dataset", "synthetic"], default="scaled_dataset")
+    parser.add_argument("--real-workload-isl-min", type=int, default=100)
+    parser.add_argument("--real-workload-isl-max", type=int, default=16384)
+    parser.add_argument("--real-workload-isl-mean", type=float, default=4096)
+    parser.add_argument("--real-workload-osl-min", type=int, default=100)
+    parser.add_argument("--real-workload-osl-max", type=int, default=4096)
+    parser.add_argument("--real-workload-osl-mean", type=float, default=1024)
     parser.add_argument("--endpoint", choices=["completions"], default="completions")
     parser.add_argument("--isl-min", type=int, default=1)
     parser.add_argument("--isl-max", type=int, default=4096)
     parser.add_argument("--osl-min", type=int, default=1)
     parser.add_argument("--osl-max", type=int, default=1024)
+    parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--isl-values", default="")
     parser.add_argument("--osl-values", default="")
     parser.add_argument("--ignore-eos", action="store_true")
@@ -231,6 +553,7 @@ def main() -> int:
     parser.add_argument("--retry-backoff", type=float, default=2.0)
     parser.add_argument("--allow-failures", type=int, default=0)
     args = parser.parse_args()
+    args.prompt_rng = random.Random(args.prompt_token_seed)
     args.prompt_token_config = load_random_prompt_token_config(
         args.model,
         allow_transformers_fallback=True,

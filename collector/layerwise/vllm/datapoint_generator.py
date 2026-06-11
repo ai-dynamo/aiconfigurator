@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -15,6 +16,7 @@ _THIS_DIR = Path(__file__).resolve().parent
 _COMMON_DIR = _THIS_DIR.parent / "common"
 sys.path.insert(0, str(_COMMON_DIR))
 
+from config_patch import patch_model_path
 from parallel_config_patch import EXPERT_COUNT_KEYS, _load_original_config, patch_for_parallelism
 
 try:
@@ -41,19 +43,16 @@ except ImportError:  # pragma: no cover - direct script compatibility
     )
 
 
-CTX_NEW_TOKENS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
-CTX_PAST_KV = [
-    0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096,
-    8192, 16384, 32768, 65536,
-]
+CTX_NEW_TOKENS = [1, 16, 128, 256, 512, 1024, 2048, 4096, 8192]
+PAST_KV_TOKENS = [16, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+CTX_PAST_KV = [0, *PAST_KV_TOKENS]
 GEN_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-GEN_PAST_KV = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
-SMOKE_CTX_NEW_TOKENS = [128, 1024]
+GEN_PAST_KV = [1, *PAST_KV_TOKENS]
+SMOKE_CTX_NEW_TOKENS = [1024, 4096]
 SMOKE_CTX_PAST_KV = [0]
 SMOKE_GEN_BATCH_SIZES = [1, 8]
 SMOKE_GEN_PAST_KV = [1024]
-VLLM_DEFAULT_BLOCK_SIZE = 16
-CTX_MAX_NUM_BATCHED_TOKENS_FLOOR = 8192
+LIVE_DECODE_OUTPUT_TOKENS = 2
 
 
 def _batch_sizes_up_to(max_batch_size: int) -> list[int]:
@@ -67,7 +66,7 @@ def _batch_sizes_up_to(max_batch_size: int) -> list[int]:
 
 def values_for_preset(preset: str, *, max_decode_batch_size: int | None = None) -> dict[str, str]:
     """Return CSV shape defaults for the named public run preset."""
-    if preset == "production":
+    if preset in {"full", "production"}:
         gen_batch_sizes = (
             _batch_sizes_up_to(max_decode_batch_size)
             if max_decode_batch_size is not None else GEN_BATCH_SIZES
@@ -109,6 +108,16 @@ def parse_csv_ints_or_auto(raw: str) -> list[int] | str:
     return _parse_ints(raw)
 
 
+def _resolve_real_weight_model_dir(model: str) -> str:
+    """Return a local model directory suitable for real-weight loading."""
+
+    if os.path.isdir(model):
+        return model
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(model)
+
+
 def ep_sizes_for_model(model: LayerwiseModel, raw_ep_sizes: str, tp: int) -> list[int]:
     """Resolve vLLM-parity EP sizes for one registry model and TP size.
 
@@ -124,25 +133,35 @@ def ep_sizes_for_model(model: LayerwiseModel, raw_ep_sizes: str, tp: int) -> lis
     return [ep for ep in candidates if ep == 1 or ep == tp]
 
 
-def make_legacy_args(
+def make_work_unit_args(
     public_args: argparse.Namespace,
     model: LayerwiseModel,
     *,
     tp_size: int,
     ep_size: int,
+    phase: str | None = None,
 ) -> argparse.Namespace:
-    """Convert public CLI args into the lower-level work-unit args."""
+    """Convert public CLI args into lower-level work-unit generator args."""
+    phases = phase or public_args.phases
+    if public_args.target_layer_count is not None:
+        target_layer_count = public_args.target_layer_count
+    elif phases == "ctx":
+        target_layer_count = public_args.ctx_target_layer_count
+    else:
+        target_layer_count = public_args.gen_target_layer_count
     system = public_args.system or _get_system_name()
-    max_decode_batch_size = None
-    if public_args.phases in ("gen", "both"):
-        max_decode_batch_size = resolve_max_decode_batch_size(
-            public_args.max_decode_batch_size,
-            system=system,
-            tp_size=tp_size,
-        )
-    preset_values = values_for_preset(
+    max_decode_batch_size = resolve_max_decode_batch_size(
+        public_args.max_decode_batch_size,
+        system=system,
+        tp_size=tp_size,
+    )
+    shared_preset_values = values_for_preset(
         public_args.run_preset,
         max_decode_batch_size=max_decode_batch_size,
+    )
+    preset_values = values_for_preset(
+        public_args.run_preset,
+        max_decode_batch_size=max_decode_batch_size if phases in ("gen", "both") else None,
     )
     moe_tp = tp_size // ep_size if model.is_moe else 1
     return argparse.Namespace(
@@ -155,20 +174,28 @@ def make_legacy_args(
         tp_sizes=str(tp_size),
         moe_tp=moe_tp,
         num_slots=model.num_slots,
-        moe_noop=public_args.moe_noop,
-        target_layer_count=public_args.target_layer_count,
+        moe_noop=public_args.moe_noop or (model.is_moe and not public_args.moe_real_router),
+        target_layer_count=target_layer_count,
         target_layers=public_args.target_layers,
         target_layer_config_depth=public_args.target_layer_config_depth,
-        phases=public_args.phases,
+        phases=phases,
         ctx_new_tokens=public_args.ctx_new_tokens or preset_values["ctx_new_tokens"],
         ctx_past_kv=public_args.ctx_past_kv or preset_values["ctx_past_kv"],
         no_filter_model_max_len=public_args.no_filter_model_max_len,
         gen_batch_sizes=public_args.gen_batch_sizes or preset_values["gen_batch_sizes"],
         gen_past_kv=public_args.gen_past_kv or preset_values["gen_past_kv"],
+        max_num_seqs=public_args.max_num_seqs,
+        max_num_batched_tokens=public_args.max_num_batched_tokens,
+        max_model_len=public_args.max_model_len,
+        gen_driver=model.gen_driver,
+        latency_source=public_args.latency_source,
         gemm_quant=model.gemm_quant,
         moe_quant=model.moe_quant,
         attn_quant=model.attn_quant,
         kv_quant=model.kv_quant,
+        moe_real_router=bool(public_args.moe_real_router),
+        physical_tp=public_args.physical_tp,
+        physical_tp_real_weights=public_args.physical_tp_real_weights,
     )
 
 
@@ -176,12 +203,16 @@ def build_public_work_units(public_args: argparse.Namespace, models: list[Layerw
     """Expand public model and TP/EP filters into scheduler work units."""
     work_units: list[WorkUnit] = []
     requested_tp_sizes = _parse_ints(public_args.tp_sizes)
+    phases = ("ctx", "gen") if public_args.phases == "both" else (public_args.phases,)
     for model in models:
         for tp in requested_tp_sizes:
             if tp not in model.tp_sizes:
                 continue
             for ep in ep_sizes_for_model(model, public_args.ep_sizes, tp):
-                work_units.extend(build_work_units(make_legacy_args(public_args, model, tp_size=tp, ep_size=ep)))
+                for phase in phases:
+                    work_units.extend(
+                        build_work_units(make_work_unit_args(public_args, model, tp_size=tp, ep_size=ep, phase=phase))
+                    )
     return work_units
 
 
@@ -190,6 +221,7 @@ def _detect_layer_schedule(
     target_layer_count: int = 1,
     target_layers: list[int] | None = None,
     target_layer_config_depth: int | None = None,
+    expand_layer_types: bool = True,
 ) -> tuple[list[RepresentativeLayer], int, dict[str, Any] | None]:
     config = _decoder_config_view(config)
     max_config_layers = int(config.get("num_hidden_layers") or 0)
@@ -236,6 +268,13 @@ def _detect_layer_schedule(
     if target_layer_count < 1:
         raise ValueError(f"target_layer_count must be >= 1, got {target_layer_count}")
     if not _is_moe_config(config):
+        typed_representatives = (
+            _representatives_from_layer_types(config, suffix="dense")
+            if expand_layer_types
+            else None
+        )
+        if typed_representatives is not None:
+            return typed_representatives
         num_hidden_layers = target_layer_count
         if target_layer_config_depth is not None:
             if target_layer_config_depth < target_layer_count:
@@ -260,6 +299,9 @@ def _detect_layer_schedule(
         ], num_hidden_layers, _layer_types_override(config, num_hidden_layers)
 
     if _is_all_moe_config(config):
+        typed_representatives = _representatives_from_layer_types(config, suffix="moe") if expand_layer_types else None
+        if typed_representatives is not None:
+            return typed_representatives
         num_hidden_layers = target_layer_count
         if target_layer_config_depth is not None:
             if target_layer_config_depth < target_layer_count:
@@ -303,6 +345,35 @@ def _layer_types_override(
         )
     return {"layer_types": list(layer_types[:num_hidden_layers])}
 
+def _representatives_from_layer_types(
+    config: dict[str, Any],
+    *,
+    suffix: str,
+) -> tuple[list[RepresentativeLayer], int, dict[str, Any] | None] | None:
+    """Return one representative layer per distinct config ``layer_types`` value."""
+
+    layer_types = config.get("layer_types")
+    if not isinstance(layer_types, list) or not layer_types:
+        return None
+    positions_by_type: dict[str, list[int]] = {}
+    for index, raw_layer_type in enumerate(layer_types):
+        positions_by_type.setdefault(str(raw_layer_type), []).append(index)
+    if len(positions_by_type) <= 1:
+        return None
+
+    representatives = [
+        RepresentativeLayer(
+            layer_index=positions[0],
+            layer_type=f"{layer_type}_{suffix}" if suffix else layer_type,
+            measured_layer_count=1,
+            layer_multiplier=len(positions),
+            target_layers=(positions[0],),
+        )
+        for layer_type, positions in positions_by_type.items()
+    ]
+    num_hidden_layers = max(rep.layer_index for rep in representatives) + 1
+    return representatives, num_hidden_layers, _layer_types_override(config, num_hidden_layers)
+
 def _decoder_config_view(config: dict[str, Any]) -> dict[str, Any]:
     text_config = config.get("text_config")
     if isinstance(text_config, dict) and "num_attention_heads" in text_config:
@@ -333,6 +404,7 @@ def _work_unit_id(
     num_hidden_layers: int,
     representative: RepresentativeLayer,
     moe_noop: bool = False,
+    physical_tp: bool = False,
 ) -> str:
     payload = {
         **row_base,
@@ -340,8 +412,37 @@ def _work_unit_id(
         "num_hidden_layers": num_hidden_layers,
         "representative": asdict(representative),
         "moe_noop": moe_noop,
+        "physical_tp": physical_tp,
     }
     return "wu_" + _stable_hash(payload)
+
+
+def _patch_for_layerwise_depth(
+    model_id: str,
+    *,
+    root_config: dict[str, Any],
+    num_hidden_layers: int,
+    extra_overrides: dict[str, Any] | None,
+    cache_dir: str | None,
+) -> str:
+    """Patch only layerwise depth/type metadata, leaving TP dimensions intact."""
+
+    config = _decoder_config_view(root_config)
+    override_prefix = "text_config." if config is not root_config else ""
+    overrides: dict[str, Any] = {f"{override_prefix}num_hidden_layers": num_hidden_layers}
+    if extra_overrides:
+        for key, value in extra_overrides.items():
+            if override_prefix and "." not in key:
+                overrides[f"{override_prefix}{key}"] = value
+            else:
+                overrides[key] = value
+    return patch_model_path(
+        model_id,
+        overrides=overrides,
+        strip_auto_map=True,
+        model_type_rewrites={"glm_moe_dsa": "deepseek_v3"},
+        cache_dir=cache_dir,
+    )
 
 def _build_datapoints(
     *,
@@ -361,24 +462,6 @@ def _build_datapoints(
             for past_kv in gen_past_kv:
                 datapoints.append(DataPoint("gen", batch_size, 1, past_kv))
     return datapoints
-
-def _max_num_batched_tokens_for_datapoints(
-    datapoints: list[DataPoint],
-) -> int:
-    ctx_points = [dp for dp in datapoints if dp.phase == "ctx"]
-    gen_points = [dp for dp in datapoints if dp.phase == "gen"]
-    ctx_max_new = max((dp.new_tokens for dp in ctx_points), default=0)
-    gen_batch_sizes = sorted({dp.batch_size for dp in gen_points})
-    min_budget = CTX_MAX_NUM_BATCHED_TOKENS_FLOOR if (ctx_points or gen_points) else 1
-    if gen_points:
-        # vLLM's prefix-cache path can use Mamba cache align mode, which
-        # requires the token budget to be at least one KV block.
-        min_budget = max(min_budget, VLLM_DEFAULT_BLOCK_SIZE)
-    return max(
-        min_budget,
-        ctx_max_new,
-        max(gen_batch_sizes, default=0),
-    )
 
 def _model_max_position_embeddings(config: dict[str, Any]) -> int | None:
     config = _decoder_config_view(config)
@@ -426,17 +509,33 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
     gen_batch_sizes = _parse_ints(args.gen_batch_sizes)
     gen_past_kv = _parse_ints(args.gen_past_kv)
     tp_sizes = _parse_ints(args.tp_sizes)
+    max_num_seqs = getattr(args, "max_num_seqs", None)
+    max_num_batched_tokens = getattr(args, "max_num_batched_tokens", None)
+    max_model_len = getattr(args, "max_model_len", None)
 
     orig_config = _load_original_config(args.model)
+    orig_decoder_config = _decoder_config_view(orig_config)
+    orig_layer_count = int(orig_decoder_config.get("num_hidden_layers") or 0)
+    target_layer_count = args.target_layer_count
+    if target_layer_count == 0:
+        if orig_layer_count < 1:
+            raise ValueError("target_layer_count=0 requires config num_hidden_layers")
+        target_layer_count = orig_layer_count
     is_moe = _is_moe_config(orig_config)
     explicit_target_layers = (
         _parse_ints(args.target_layers) if getattr(args, "target_layers", None) else None
     )
-    layer_schedule, num_hidden_layers, extra_overrides = _detect_layer_schedule(
-        orig_config, args.target_layer_count,
-        explicit_target_layers, args.target_layer_config_depth,
-    )
     moe_noop = bool(getattr(args, "moe_noop", False) and is_moe)
+    requested_latency_source = str(getattr(args, "latency_source", "span"))
+    context_schedule_envelope = (
+        args.phases == "ctx"
+        and requested_latency_source in {"schedule_to_update", "worker_wall"}
+    )
+    layer_schedule, num_hidden_layers, extra_overrides = _detect_layer_schedule(
+        orig_config, target_layer_count,
+        explicit_target_layers, args.target_layer_config_depth,
+        expand_layer_types=not moe_noop and not context_schedule_envelope,
+    )
 
     work_dir = Path(args.work_dir).resolve()
     config_cache_dir = None if args.no_config_cache else (args.config_cache_dir or str(work_dir / "config_cache"))
@@ -449,6 +548,11 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
         ctx_past_kv=ctx_past_kv,
         gen_batch_sizes=gen_batch_sizes,
         gen_past_kv=gen_past_kv,
+    )
+    gen_driver = str(
+        getattr(args, "gen_driver", "")
+        or os.environ.get("LAYERWISE_GEN_DRIVER")
+        or "prefix_cache"
     )
     if not getattr(args, "no_filter_model_max_len", False):
         model_max_len = _model_max_position_embeddings(orig_config)
@@ -465,22 +569,76 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
         if is_moe and tp % args.moe_tp != 0:
             print(f"[skip] tp={tp} not divisible by moe_tp={args.moe_tp}")
             continue
+        physical_tp = bool(getattr(args, "physical_tp", False))
         attn_tp = tp
         moe_tp = args.moe_tp if is_moe else 1
         ep = (tp // moe_tp) if is_moe else 1
+        if physical_tp and ep != 1:
+            print(f"[skip] physical TP diagnostic currently supports ep=1 only, got tp={tp}, ep={ep}")
+            continue
+        physical_tp_real_weights = bool(getattr(args, "physical_tp_real_weights", False))
+        if physical_tp_real_weights and not physical_tp:
+            raise ValueError("physical_tp_real_weights requires physical_tp")
+        if physical_tp_real_weights and target_layer_count != orig_layer_count:
+            raise ValueError("physical_tp_real_weights requires full-depth target_layer_count")
         num_slots = args.num_slots if is_moe else None
-        model_dir = patch_for_parallelism(
-            args.model,
-            attn_tp=attn_tp,
-            moe_tp=moe_tp,
-            ep=ep,
-            num_slots=num_slots,
-            num_hidden_layers=num_hidden_layers,
-            extra_overrides=extra_overrides,
-            model_type_rewrites={"glm_moe_dsa": "deepseek_v3"},
-            cache_dir=config_cache_dir,
-            original_config=orig_config,
+        use_real_moe_router = (
+            is_moe
+            and attn_tp == 1
+            and moe_tp == 1
+            and ep == 1
+            and bool(getattr(args, "moe_real_router", False))
+            and not moe_noop
         )
+        router_weight_model = None
+        if use_real_moe_router:
+            model_dir = _resolve_real_weight_model_dir(args.model)
+            work_unit_extra_vllm_args = ("--load-format", "auto")
+        else:
+            if physical_tp:
+                if physical_tp_real_weights:
+                    model_dir = _resolve_real_weight_model_dir(args.model)
+                else:
+                    model_dir = _patch_for_layerwise_depth(
+                        args.model,
+                        root_config=orig_config,
+                        num_hidden_layers=num_hidden_layers,
+                        extra_overrides=extra_overrides,
+                        cache_dir=config_cache_dir,
+                    )
+                work_unit_extra_vllm_args = (
+                    "--tensor-parallel-size",
+                    str(tp),
+                    "--worker-extension-cls",
+                    "vllm_worker_extension.LayerwiseWorkerExtension",
+                )
+                if physical_tp_real_weights:
+                    work_unit_extra_vllm_args = (
+                        *work_unit_extra_vllm_args,
+                        "--load-format",
+                        "auto",
+                    )
+            else:
+                model_dir = patch_for_parallelism(
+                    args.model,
+                    attn_tp=attn_tp,
+                    moe_tp=moe_tp,
+                    ep=ep,
+                    num_slots=num_slots,
+                    num_hidden_layers=num_hidden_layers,
+                    extra_overrides=extra_overrides,
+                    model_type_rewrites={"glm_moe_dsa": "deepseek_v3"},
+                    cache_dir=config_cache_dir,
+                    original_config=orig_config,
+                )
+                work_unit_extra_vllm_args = ()
+            if (
+                is_moe
+                and bool(getattr(args, "moe_real_router", False))
+                and not moe_noop
+                and not physical_tp_real_weights
+            ):
+                router_weight_model = args.model
         row_base = {
             "framework": "vLLM",
             "framework_version": version,
@@ -499,8 +657,9 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
             target_layers = representative.kept_layers()
             includes_moe = (
                 not moe_noop
-                and representative.layer_type.lower() == "moe"
+                and "moe" in representative.layer_type.lower()
             )
+            final_extra_vllm_args = work_unit_extra_vllm_args
             work_units.append(WorkUnit(
                 work_unit_id=_work_unit_id(
                     row_base,
@@ -508,13 +667,22 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
                     num_hidden_layers,
                     representative,
                     moe_noop,
+                    physical_tp,
                 ),
                 model_dir=model_dir,
                 row_base=row_base,
                 representative=representative,
                 target_layers=target_layers,
                 datapoints=datapoints,
+                model_layer_count=num_hidden_layers,
+                max_num_seqs=max_num_seqs,
+                max_num_batched_tokens=max_num_batched_tokens,
+                max_model_len=max_model_len,
+                gen_driver=gen_driver,
+                extra_vllm_args=final_extra_vllm_args,
                 moe_noop=moe_noop,
                 includes_moe=includes_moe,
+                router_weight_model=router_weight_model,
+                physical_gpus=tp if physical_tp else 1,
             ))
     return work_units
