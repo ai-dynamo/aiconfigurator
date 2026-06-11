@@ -920,10 +920,10 @@ This section is very long, let's go through the basic setting quickly
     - `backend_name`: specifies the inference backend - `trtllm` (default), `vllm`, or `sglang`
     - `backend_version`, `isl`, `osl`, `ttft`, `tpot`: defines the same things as in `default` mode  
     - `enable_wideep`: will trigger wide-ep for fined-grained moe model  
-    - `profiles`: some inherit patch, we currently have 'fp8', 'fp8_static', 'bfloat16', 'nvfp4', 'mxfp4' to force the precision of a worker.  
+    - `profiles`: (legacy V1 format) one of 'fp8', 'fp8_static', 'bfloat16', 'nvfp4', 'mxfp4' to force a worker's precision. On load it auto-expands to the explicit `*_quant_mode` fields; the canonical V2 flat YAML sets those directly (see `cli/exps/example_new.yaml`).  
     - `config`: the most important part. It defines `nextn` for MTP; It also defines the agg_/prefill_/decode_worker's quantization, and parallelism search space; It also defines more about how we search for the disagg replica and do correction for better performance alignment. We'll go through it in [Advanced Tuning](advanced_tuning.md). Typically, the only thing here for you to modify, perhaps, is the quantization of the worker.
 
-Quantization override order: explicit quantization set via `profiles` or YAML `config` takes precedence; missing values are filled from the model's HF quantization metadata.  
+Quantization override order: explicit quantization (V2 `*_quant_mode` fields, or the V1 `profiles` / YAML `config`) takes precedence; missing values are filled from the model's HF quantization metadata.  
 If you use `mode: replace`, ensure your replacement config includes the quantization you want.
 
 If you don't want to patch the `config` details, you can just delete them. Here's a simplified one,

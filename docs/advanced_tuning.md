@@ -136,7 +136,7 @@ We allow users to specify different quant methods for different components even 
 Options are listed as comment. fp8 stands for fp8 per-tensor quant. fp8 block is for blockwise quant. bfloat16 is bf16.
 
 Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).  
-Explicit quantization in `profiles` or the YAML `config` overrides those defaults.
+Explicit quantization (V2 `*_quant_mode` fields, or the V1 `profiles` / YAML `config`) overrides those defaults.
 ### parallelism (num_gpus_per_worker, tp_list, etc.)
 This is the most complicated part of the search space definition.  
 First, `num_gpu_per_worker` is trying to define how many gpus in a worker, the searched result will do exact match.

@@ -64,10 +64,7 @@ agg_full:
 
   # Quantization override.
   # Default behavior: each mode is inferred from the model's HF config
-  # (quant_algo, kv_cache_quant_algo).  Set any field below to override.
-  # Use quant_preset for a one-line override of all five modes;
-  # individual *_quant_mode fields then layer on top (explicit > preset).
-  quant_preset: null  # or "fp8" / "fp8_static" / "bfloat16" / "nvfp4" / "mxfp4"
+  # (quant_algo, kv_cache_quant_algo).  Set any *_quant_mode field below to override.
   gemm_quant_mode: fp8_block
   moe_quant_mode: fp8_block
   kvcache_quant_mode: bfloat16
@@ -129,7 +126,6 @@ disagg_full:
   prefill_enable_eplb: false
 
   # Prefill quantization override (default: infer from HF config)
-  prefill_quant_preset: null
   prefill_gemm_quant_mode: fp8_block
   prefill_moe_quant_mode: fp8_block
   prefill_kvcache_quant_mode: bfloat16
@@ -155,7 +151,6 @@ disagg_full:
   decode_enable_eplb: false
 
   # Decode quantization override (default: infer from HF config)
-  decode_quant_preset: null
   decode_gemm_quant_mode: fp8_block
   decode_moe_quant_mode: fp8_block
   decode_kvcache_quant_mode: bfloat16
