@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Install and run cargo-deny
         working-directory: rust/aiconfigurator-core
         # Default log level (warn) surfaces "license inferred from file" notes
@@ -43,7 +43,7 @@ jobs:
             workers: "-n 2"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           lfs: true
           fetch-depth: 0
