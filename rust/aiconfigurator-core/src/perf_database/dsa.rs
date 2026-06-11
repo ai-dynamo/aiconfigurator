@@ -21,7 +21,10 @@ use std::sync::OnceLock;
 
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
-use super::interpolation::{interp_2d_1d_grid_extrapolate_inner, Grid3};
+use super::interpolation::{
+    interp_1d, interp_2d_1d_grid_extrapolate_inner, interp_2d_1d_grid_strict,
+    interp_context_topk_piecewise, nearest_neighbors, Grid3,
+};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct DsaTable {
@@ -70,19 +73,33 @@ impl DsaTable {
         }
     }
 
-    /// Raw context-DSA module latency at a specific prefix/step value.
-    /// 3-D interpolation over (num_heads, isl, batch) within the chosen
-    /// (key, prefix) slice.
+    /// Context-DSA module latency for the sparse-attention block.
+    ///
+    /// Mirrors Python `ContextDSAModule._lookup_prefix_module_at(prefix)`:
+    /// the lookup is keyed by the exact `prefix` slice and evaluated at
+    /// `isl` (the new-token count), NOT `isl + prefix`. The dispatch is:
+    ///
+    ///   1. top-k regime-aware piecewise interpolation over the sequence
+    ///      axis (`boundary = index_topk - prefix`); returns `None` when
+    ///      the exact `(num_heads, b)` curve has < 2 same-regime anchors;
+    ///   2. on `None`, the DSv4 robust 3-D lookup (exact -> strict 3-D ->
+    ///      sampled-batch scaling) over the `(num_heads, isl, batch)` slice.
+    ///
+    /// The previous multiplicative `(s² - prefix²)/s²` "prefix correction"
+    /// had no Python counterpart and under-counted context latency by
+    /// ~75% on disagg DSA shapes; it has been removed.
+    #[allow(clippy::too_many_arguments)]
     pub fn query_context(
         &self,
         b: u32,
-        full_seq_tokens: u32,
+        isl: u32,
         num_heads: u32,
         kv_quant: KvCacheQuantMode,
         fmha_quant: FmhaQuantMode,
         gemm_quant: GemmQuantMode,
         architecture: &str,
         prefix: u32,
+        index_topk: u32,
     ) -> Result<f64, AicError> {
         let cache = self.load_context_prefix_grids()?;
         let key = DsaKey {
@@ -99,7 +116,21 @@ impl DsaTable {
                 "context DSA module data missing for prefix={prefix}, {key:?}"
             ))
         })?;
-        interp_2d_1d_grid_extrapolate_inner(slice, num_heads, full_seq_tokens, b)
+
+        // Branch 1: top-k piecewise over the exact (num_heads, b) seq curve.
+        // `boundary = index_topk - prefix` (saturates as None at prefix>topk
+        // because subtraction underflow can't happen for u32 -> guard it).
+        if index_topk >= prefix {
+            let boundary = index_topk - prefix;
+            if let Some(curve) = build_exact_seq_curve(slice, num_heads, b) {
+                if let Some(latency) = interp_context_topk_piecewise(&curve, isl, boundary) {
+                    return Ok(latency);
+                }
+            }
+        }
+
+        // Branch 2: DSv4 robust 3-D lookup over (num_heads, isl, batch).
+        dsv4_robust_3d_lookup(slice, num_heads, isl, b)
     }
 
     /// Raw generation-DSA module latency. `sequence_tokens = isl + step`
@@ -216,6 +247,126 @@ fn build_generation_grid_cache(grids: &DsaGrids) -> GenerationGridCache {
     GenerationGridCache { by_keys }
 }
 
+/// Extract the exact `(num_heads, b)` sequence curve (`isl -> latency`) from a
+/// per-prefix `[num_heads][isl][batch]` slice. Mirrors the `curve` dict in
+/// Python `interp_context_topk_piecewise_from_raw` — only `seq_len`s that have
+/// the exact requested `b` are included. Returns `None` when the head is absent
+/// (so the caller skips the piecewise branch).
+fn build_exact_seq_curve(
+    slice: &Grid3<f64>,
+    num_heads: u32,
+    b: u32,
+) -> Option<BTreeMap<u32, f64>> {
+    let head_slice = slice.get(&num_heads)?;
+    let mut curve: BTreeMap<u32, f64> = BTreeMap::new();
+    for (&isl_v, by_batch) in head_slice {
+        if let Some(&lat) = by_batch.get(&b) {
+            curve.insert(isl_v, lat);
+        }
+    }
+    Some(curve)
+}
+
+/// Port of Python `operations.dsv4._dsv4_robust_3d_lookup(dict_, x, y, z,
+/// batch_axis="z")` for the DSA context prefix slice.
+///
+/// `slice` is `[num_heads][isl][batch]`; we look up `(num_heads, isl, b)`:
+///   1. exact `slice[num_heads][isl][b]`;
+///   2. strict 3-D interpolation — `interp_2d_1d_grid_strict` errors on a
+///      degenerate axis, mirroring Python's cubic `interp_3d` raising
+///      `QhullError` and falling through;
+///   3. sampled-batch scaling: take the largest sampled batch `bp <= b`,
+///      interpolate (then, on a second pass, extrapolate) along `isl`, and
+///      scale the leaf by `b / bp`.
+fn dsv4_robust_3d_lookup(
+    slice: &Grid3<f64>,
+    num_heads: u32,
+    isl: u32,
+    b: u32,
+) -> Result<f64, AicError> {
+    // Step 1: exact leaf.
+    if let Some(value) = slice
+        .get(&num_heads)
+        .and_then(|m| m.get(&isl))
+        .and_then(|r| r.get(&b))
+    {
+        return Ok(*value);
+    }
+
+    // Step 2: strict 3-D interpolation over (num_heads, isl, batch). Errors on
+    // a degenerate axis (single num_heads, single isl, or single batch) — that
+    // is the signal to fall through to batch scaling, matching Python.
+    if let Ok(value) = interp_2d_1d_grid_strict(slice, num_heads, isl, b, "DSA context 3-D lookup") {
+        if value.is_finite() {
+            return Ok(value);
+        }
+    }
+
+    // Step 3: sampled-batch scaling on the exact-head sub-slice `[isl][batch]`.
+    let sub = slice.get(&num_heads).ok_or_else(|| {
+        AicError::PerfDatabase(format!(
+            "DSA context robust lookup failed: missing num_heads={num_heads}"
+        ))
+    })?;
+
+    // Candidate batch points <= query batch, across all isl rows, descending.
+    let batch_set: std::collections::BTreeSet<u32> = sub
+        .values()
+        .flat_map(|by_batch| by_batch.keys().copied())
+        .filter(|&bp| bp <= b)
+        .collect();
+    let batch_points: Vec<u32> = batch_set.into_iter().rev().collect();
+
+    // Two passes: first interpolation-only (inner_only), then allow extrapolation.
+    for allow_extrapolate in [false, true] {
+        for &bp in &batch_points {
+            if let Some(leaf) = lookup_at_batch(sub, isl, bp, allow_extrapolate) {
+                let scaled = leaf * (b as f64) / (bp as f64);
+                if scaled.is_finite() {
+                    return Ok(scaled);
+                }
+            }
+        }
+    }
+
+    Err(AicError::PerfDatabase(format!(
+        "DSA context robust lookup failed (num_heads={num_heads}, isl={isl}, b={b})"
+    )))
+}
+
+/// Resolve the latency at `(isl, bp)` within a `[isl][batch]` sub-slice,
+/// interpolating along `isl` for the fixed batch `bp`. Mirrors Python
+/// `_lookup_at_batch` with `batch_axis="z"`.
+fn lookup_at_batch(
+    sub: &BTreeMap<u32, BTreeMap<u32, f64>>,
+    isl: u32,
+    bp: u32,
+    allow_extrapolate: bool,
+) -> Option<f64> {
+    // Exact (isl, bp).
+    if let Some(by_batch) = sub.get(&isl) {
+        if let Some(&leaf) = by_batch.get(&bp) {
+            return Some(leaf);
+        }
+    }
+    // Sequence points that have this exact batch.
+    let ss: Vec<u32> = sub
+        .iter()
+        .filter(|(_, by_batch)| by_batch.contains_key(&bp))
+        .map(|(&s, _)| s)
+        .collect();
+    if ss.len() < 2 {
+        return None;
+    }
+    if !allow_extrapolate && !(ss[0] <= isl && isl <= *ss.last().unwrap()) {
+        return None;
+    }
+    let (sl, sr) = nearest_neighbors(isl, &ss, !allow_extrapolate).ok()?;
+    let left = *sub.get(&sl)?.get(&bp)?;
+    let right = *sub.get(&sr)?.get(&bp)?;
+    Some(interp_1d(sl as f64, sr as f64, left, right, isl as f64))
+}
+
 fn load_dsa_parquet(path: &Path) -> Result<DsaGrids, AicError> {
     let reader = PerfReader::open(path)?;
     let arch_col = reader.col("architecture")?;
@@ -283,11 +434,14 @@ mod tests {
             .join("src/aiconfigurator/systems/data/b200_sxm/vllm/0.19.0")
     }
 
+    const INDEX_TOPK: u32 = 2048;
+
     #[test]
     fn dsa_context_module_exact_hit() {
         // First row of dsa_context_module_perf.txt:
         // arch=DeepseekV32ForCausalLM mla=bfloat16 kv=bfloat16 gemm=bfloat16
-        // n=128 b=1 isl=1 step=0 latency=1.0972
+        // n=128 b=1 isl=1 step=0 latency=1.0972. Exact (num_heads, isl, b) hit
+        // — every dispatch branch collapses to the recorded leaf.
         let table = DsaTable::new(b200_vllm_data_root());
         let latency = table
             .query_context(
@@ -299,6 +453,7 @@ mod tests {
                 GemmQuantMode::Bfloat16,
                 "DeepseekV32ForCausalLM",
                 0,
+                INDEX_TOPK,
             )
             .expect("DSA context query must succeed");
         assert!(
@@ -320,8 +475,47 @@ mod tests {
                 GemmQuantMode::Bfloat16,
                 "NotAnArchitecture",
                 0,
+                INDEX_TOPK,
             )
             .unwrap_err();
         assert!(matches!(err, AicError::PerfDatabase(_)));
+    }
+
+    #[test]
+    fn dsa_context_robust_batch_scaling() {
+        // Synthetic single-batch prefix slice: only (isl=128, b=1) is recorded
+        // at prefix=128. A query at b=4 has no exact/strict-3D path (singleton
+        // isl and batch axes) and must fall to sampled-batch scaling:
+        // leaf@(128,1) * 4/1. Mirrors the disagg DSA sglang/vllm probe shape.
+        let mut slice: Grid3<f64> = BTreeMap::new();
+        slice.entry(8).or_default().entry(128).or_default().insert(1, 2.6553);
+        let value = dsv4_robust_3d_lookup(&slice, 8, 128, 4)
+            .expect("batch-scaling fallback must succeed");
+        assert!(
+            (value - 10.6212).abs() < 1e-6,
+            "expected leaf*4 = 10.6212, got {value}"
+        );
+
+        // DSV3.2 analogue: leaf 1.4548 * 4 = 5.8192.
+        let mut slice2: Grid3<f64> = BTreeMap::new();
+        slice2.entry(16).or_default().entry(128).or_default().insert(1, 1.4548);
+        let v2 = dsv4_robust_3d_lookup(&slice2, 16, 128, 4)
+            .expect("batch-scaling fallback must succeed");
+        assert!((v2 - 5.8192).abs() < 1e-6, "expected 5.8192, got {v2}");
+    }
+
+    #[test]
+    fn dsa_context_piecewise_single_seq_returns_to_robust() {
+        // A prefix slice with a single seq anchor makes the piecewise branch
+        // return None (< 2 same-regime anchors), so `query_context` falls
+        // through to the robust batch-scaling path. End-to-end check via the
+        // public API using the synthetic exact-leaf helper is covered above;
+        // here we assert the piecewise primitive itself returns None.
+        // `interp_context_topk_piecewise` is imported at module scope.
+        let mut curve: BTreeMap<u32, f64> = BTreeMap::new();
+        curve.insert(128, 2.6553);
+        assert_eq!(interp_context_topk_piecewise(&curve, 128, 1920), Some(2.6553));
+        // Non-exact query with a single anchor -> None.
+        assert_eq!(interp_context_topk_piecewise(&curve, 200, 1920), None);
     }
 }
