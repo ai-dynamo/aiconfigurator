@@ -522,7 +522,10 @@ def test_total_gpus_budget_filters_and_validates():
     assert td.max_gpu_per_replica == 8  # min(8, 128)
     assert all(n <= 8 for n in td.prefill_num_gpu_candidates)
     assert all(n <= 8 for n in td.decode_num_gpu_candidates)
-    assert all(n <= 8 for n in td.num_gpu_per_replica)  # replica-size list also capped to budget
+    # num_gpu_per_replica keeps v1's full list at construct time; the cap is applied at sweep
+    # time via get_working_list (matches v1 construct state, not a construct-time filter).
+    assert 128 in td.num_gpu_per_replica
+    assert all(n <= 8 for n in td.sweep_disagg_kwargs(prefill_database=None, decode_database=None)["num_gpu_list"])
 
 
 def test_large_pipeline_parallel_augments_dsv32_blackwell_defaults():
