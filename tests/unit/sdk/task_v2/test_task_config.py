@@ -616,6 +616,56 @@ def test_sglang_agg_default_moe_ep_search():
     assert t2.agg_moe_ep_candidates == [1, 2, 4, 8]
 
 
+def test_run_validates_by_default():
+    """run() validates first (v1 fail-fast); validate=False skips it. SGLang WideEP DeepSeek
+    has no wideep_context_mla data for fp8/bf16 -> validate raises."""
+    from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
+
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        enable_wideep=True,
+        total_gpus=64,
+    )
+    with pytest.raises(UnsupportedWideepConfigError):
+        t.run()  # default validate=True
+
+
+def test_enable_wideep_normalizes_moe_backend():
+    """enable_wideep implies the deepep_moe MoE backend (mirrors v1 __init__), so DB
+    validation selects the wideep_*_moe ops."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        enable_wideep=True,
+    )
+    assert t.moe_backend == "deepep_moe"
+
+
+def test_wideep_replica_size_is_bounded():
+    """WideEP num_gpu_list (replica sizes) must be range(1, max_gpu_per_replica+1), not
+    unbounded -- v2 sweep gates replica size by this list, mirroring v1 get_working_list."""
+    t = Task(
+        serving_mode="disagg",
+        prefill_model_path="Qwen/Qwen3-235B-A22B",
+        prefill_system_name="b200_sxm",
+        prefill_backend_name="trtllm",
+        prefill_enable_wideep=True,
+        decode_model_path="Qwen/Qwen3-235B-A22B",
+        decode_system_name="b200_sxm",
+        decode_backend_name="trtllm",
+        decode_enable_wideep=True,
+        total_gpus=64,
+    )
+    kw = t.sweep_disagg_kwargs(prefill_database=None, decode_database=None)
+    assert kw["num_gpu_list"] == list(range(1, t.max_gpu_per_replica + 1))
+    assert max(kw["num_gpu_list"]) <= t.total_gpus
+
+
 def test_disagg_calibration_overrides_flow_into_sweep_kwargs():
     """Overriding the new Task fields propagates to sweep_disagg_kwargs."""
     t = Task(
@@ -671,7 +721,7 @@ def test_run_dispatches_to_sweep_agg(monkeypatch):
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
     )
-    result = t.run()
+    result = t.run(validate=False)  # this test isolates dispatch; validate() is covered separately
     assert result == "agg-result"
     # DB loaded for the (system, backend, version) triple
     assert captured["dbs"] == [("h200_sxm", t.backend_name, t.backend_version)]

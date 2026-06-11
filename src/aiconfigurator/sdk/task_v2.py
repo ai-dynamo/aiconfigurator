@@ -573,9 +573,23 @@ class Task:
         self._validate_deepseek_v4_hardware()
         self._resolve_model_identity()
         self._resolve_backend_version()
+        self._normalize_wideep_moe_backend()
         self._resolve_quant_modes()
         self._resolve_search_space()
         self._validate_megamoe_backend_support()
+
+    def _normalize_wideep_moe_backend(self) -> None:
+        """enable_wideep implies the deepep_moe MoE backend (mirrors v1 __init__), so the
+        DB validation picks the wideep_*_moe ops and ModelConfig gets the right kernel."""
+        if self.moe_backend is not None:
+            return
+        wideep = (
+            self.enable_wideep
+            if self.serving_mode == "agg"
+            else (self.prefill_enable_wideep or self.decode_enable_wideep)
+        )
+        if wideep:
+            self.moe_backend = "deepep_moe"
 
     def _validate_megamoe_backend_support(self) -> None:
         """v1 _validate_megamoe_backend_support: megamoe is sglang + DeepSeek-V4-Pro + Blackwell only."""
@@ -1333,7 +1347,17 @@ class Task:
         # Derive worker count ranges from replica constraints (legacy semantics).
         prefill_worker_list = list(range(1, (self.max_prefill_workers or 32) + 1))
         decode_worker_list = list(range(1, (self.max_decode_workers or 32) + 1))
-        num_gpu_list = self.num_gpu_per_replica if self.num_gpu_per_replica else None
+        # Mirror v1 get_working_list(num_gpu_per_replica, max_gpu_per_replica): an explicit
+        # list is filtered by the cap; a None list (WideEP) becomes range(1, cap+1) so the
+        # replica size stays bounded (v2 sweep gates by this list, not a max ceiling).
+        if self.num_gpu_per_replica:
+            num_gpu_list = self.num_gpu_per_replica
+            if self.max_gpu_per_replica is not None:
+                num_gpu_list = [n for n in num_gpu_list if n <= self.max_gpu_per_replica]
+        elif self.max_gpu_per_replica is not None:
+            num_gpu_list = list(range(1, self.max_gpu_per_replica + 1))
+        else:
+            num_gpu_list = None
         # SGLang non-wideep disaggregated serving requires prefill/decode TP to match
         # (KV transfer layout constraint, ai-dynamo/dynamo#5870). WideEP relaxes it.
         require_same_tp = self.prefill_backend_name == "sglang" and not (
@@ -1370,7 +1394,7 @@ class Task:
     # Optimization entry point
     # =====================================================================
 
-    def run(self, *, autoscale: bool = False):
+    def run(self, *, autoscale: bool = False, validate: bool = True):
         """Run the sweep and return a feasible-candidate DataFrame.
 
         Loads the perf database(s) for the active role(s) internally and
@@ -1383,6 +1407,10 @@ class Task:
                 are picked independently via ``picking.pick_autoscale`` --
                 no rate matching is performed and the result has
                 ``(p)workers=1`` and ``(d)workers=1``.  Ignored in agg mode.
+            validate: when True (default), call ``validate()`` first to fail fast
+                on unsupported quant / WideEP configs -- matches v1, which validates
+                in ``__init__``.  Set False for a best-effort sweep that silently
+                skips unsupported parallel configs (e.g. the Planner).
 
         Returns:
             pandas.DataFrame -- ``common.ColumnsAgg`` schema for agg,
@@ -1390,6 +1418,8 @@ class Task:
             candidate set; Pareto frontier computation is downstream in
             ``aiconfigurator.sdk.picking``.
         """
+        if validate:
+            self.validate()
         from aiconfigurator.sdk.perf_database import get_database
         from aiconfigurator.sdk.sweep import sweep_agg, sweep_disagg
 
