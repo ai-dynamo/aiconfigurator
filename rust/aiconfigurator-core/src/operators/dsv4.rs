@@ -75,18 +75,25 @@ impl Dsv4ModuleOp {
         isl: u32,
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
-        // Mirror Python `ContextDeepSeekV4AttentionModule.get_silicon`: the
-        // context module table is collected with the kernel-Δ convention, so
-        // the base lookup uses `lookup_s = isl` (the new-token count), NOT
-        // `isl + prefix`. The prefix effect is carried by an additive
-        // sparse-kernel delta (paged_mqa_logits for CSA / hca_attn for HCA)
-        // plus, for CSA, a topk_512 IO term `M*prefix/(mem_bw*0.1)*1000`.
+        // Mirror Python `ContextDeepSeekV4AttentionModule._query_context_attn_table`
+        // -> `_dsv4_lookup_prefix_resolved`. The context module CSVs collected
+        // to date carry a SINGLE prefix anchor (`step=0`): the new-token count
+        // `isl` IS the kernel work, and the caller already supplies the
+        // new-token count as `isl` (Python's `s = effective_isl = isl - prefix`,
+        // computed in `run_context_ops`). With one prefix anchor, Python's
+        // prefix-resolved lookup returns that anchor's `(s, b)` slice for ANY
+        // prefix, so `prefix` does not select a different latency here — it is
+        // an intentional no-op for the table lookup.
         //
-        // Both additive corrections are empirically negligible at typical
-        // shapes (kernel Δ ~1e-4 ms, CSA IO term ~1e-3 ms total) — see the
-        // parity decomposition — so they are intentionally omitted here. The
-        // previous multiplicative `(s²-p²)/s²` correction was a SOL-style
-        // approximation that under-counted context latency by ~21% vs Python.
+        // (If a future collection adds genuine `step>0` context rows, this
+        // would need a prefix-resolved slice mirroring `_dsv4_lookup_prefix_resolved`;
+        // the present data has none, so adding it would be dead code.)
+        //
+        // The prefix>0 parity bug fixed alongside this comment was NOT in the
+        // prefix handling: it was the missing exact-hit short-circuit in the
+        // shared `interp_2d_1d_grid` (see `perf_database::interpolation`), which
+        // corrupted the `(tp, isl, b)` lookup whenever `isl` had a sparse
+        // adjacent grid row (e.g. `isl=129`).
         let _ = prefix;
         let raw = db.dsv4.query_context(
             self.attn_kind,
