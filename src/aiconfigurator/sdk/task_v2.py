@@ -734,6 +734,10 @@ class Task:
             ):
                 self._set_role_attr(role, "moe_quant_mode", common.MoEQuantMode.w4a8_mxfp4_mxfp8)
 
+        # Track whether fmha came from an explicit field or a preset (vs HF/fallback): the
+        # V3/Kimi context downgrade must NOT fire on an explicit/preset fp8 -- v1 keeps it
+        # (its `not explicit_fmha_mode` guard) and lets validate fail fast.
+        fmha_explicit_or_preset: dict[str, bool] = {}
         for role in roles:
             preset_name = self._role_attr(role, "quant_preset")
             preset_overrides: dict[str, object] = {}
@@ -749,6 +753,8 @@ class Task:
                 explicit = self._role_attr(role, key)
                 from_preset = preset_overrides.get(key)
                 from_hf = base.get(key)
+                if key == "fmha_quant_mode":
+                    fmha_explicit_or_preset[role] = explicit is not None or from_preset is not None
                 # DeepSeek-V4-Pro on sglang uses arch-specific MoE kernels. This acts at
                 # the HF-base layer so preset/explicit still override it. Skip megamoe,
                 # which keys its own quant table. Mirrors legacy V1 dsv4pro-moe-arch.
@@ -781,6 +787,7 @@ class Task:
             # The decode role uses generation attention, which keeps fp8.
             if (
                 role != "decode"
+                and not fmha_explicit_or_preset.get(role, False)
                 and self._architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
                 and fmha == common.FMHAQuantMode.fp8
             ):

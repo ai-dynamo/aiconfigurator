@@ -669,6 +669,20 @@ def test_wideep_replica_size_is_bounded():
     assert max(kw["num_gpu_list"]) <= t.total_gpus
 
 
+def test_explicit_or_preset_fmha_fp8_not_downgraded():
+    """V3/Kimi context fmha fp8->bf16 downgrade fires only on HF-inferred fp8 (matches v1's
+    `not explicit_fmha_mode` guard). An explicit field or a preset fp8 is kept, so validate
+    can fail fast (instead of silently modelling bf16)."""
+    from aiconfigurator.sdk import common
+
+    base = dict(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", backend_name="trtllm")
+    assert Task(**base).fmha_quant_mode == common.FMHAQuantMode.bfloat16  # HF-inferred -> downgraded
+    assert Task(**base, quant_preset="fp8").fmha_quant_mode == common.FMHAQuantMode.fp8  # preset -> kept
+    assert (
+        Task(**base, fmha_quant_mode=common.FMHAQuantMode.fp8).fmha_quant_mode == common.FMHAQuantMode.fp8
+    )  # explicit -> kept
+
+
 def test_disagg_calibration_overrides_flow_into_sweep_kwargs():
     """Overriding the new Task fields propagates to sweep_disagg_kwargs."""
     t = Task(
