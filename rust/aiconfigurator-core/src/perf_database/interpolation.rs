@@ -223,6 +223,22 @@ pub fn interp_2d_1d_grid_extrapolate_inner(
     y: u32,
     z: u32,
 ) -> Result<f64, AicError> {
+    // Exact-hit short-circuit. Mirrors Python's exact-first lookup
+    // (`_dsv4_robust_3d_lookup` lines 111-115, `interp_3d`'s `_get_exact_3d`,
+    // and `interp_2d_1d_grid_strict` above). When the query lands on a measured
+    // grid point, return it directly instead of bracketing neighbours.
+    //
+    // This is load-bearing for RAGGED grids: e.g. the DSV4 context table has a
+    // dense `isl=128` row and a SPARSE `isl=129` row (only `batch=1`). Without
+    // the short-circuit, `nearest_neighbors(128, [...,128,129,...])` brackets
+    // (128, 129); the z-key intersection then collapses to the sparse `{1}` set
+    // and the bilinear cell returns the `batch=1` value instead of the exact
+    // `(128, b)` latency — a large, prefix-only undercount. The exact corner is
+    // present in the grid, so Python returns it verbatim and so must Rust.
+    if let Some(value) = grid.get(&x).and_then(|m| m.get(&y)).and_then(|r| r.get(&z)) {
+        return Ok(*value);
+    }
+
     let x_keys: Vec<u32> = grid.keys().copied().collect();
     // Allow x-axis extrapolation too — see `interp_2d_1d_grid` for the
     // rationale. The original name `extrapolate_inner` referred to y/z only;
@@ -520,6 +536,37 @@ mod tests {
         // continuation of 10, 20).
         let v = interp_2d_1d_grid(&grid, 3, 1, 1).expect("extrapolation must not error");
         assert!((v - 30.0).abs() < 1e-9, "expected ~30.0, got {v}");
+    }
+
+    #[test]
+    fn interp_2d_1d_grid_exact_hit_on_ragged_grid() {
+        // Regression for the DSV4 context prefix>0 parity bug. The grid has a
+        // dense inner row at y=128 and a SPARSE adjacent row at y=129 (only the
+        // z=1 sample), mirroring the real DSV4 context table. A query exactly at
+        // (x=8, y=128, z=4) must return the measured corner (0.2253), NOT
+        // bracket into the sparse y=129 neighbour (which would collapse the
+        // z-intersection to {1} and return the z=1 value 0.132). This is what
+        // Python's exact-first `_dsv4_robust_3d_lookup` does.
+        let grid = make_grid(&[
+            // dense y=128 row at x=8
+            (8, 128, 1, 0.1320),
+            (8, 128, 2, 0.1598),
+            (8, 128, 4, 0.2253),
+            (8, 128, 8, 0.3202),
+            // sparse y=129 row at x=8 (only z=1)
+            (8, 129, 1, 0.1330),
+            // a second x slice so x-axis varies
+            (4, 128, 1, 0.2000),
+            (4, 128, 2, 0.2400),
+            (4, 128, 4, 0.3000),
+            (4, 128, 8, 0.4000),
+            (4, 129, 1, 0.2010),
+        ]);
+        // Exact corner: must return 0.2253 verbatim.
+        let v = interp_2d_1d_grid(&grid, 8, 128, 4).unwrap();
+        assert!(approx(v, 0.2253, 1e-12), "exact corner must short-circuit, got {v}");
+        // Sanity: another exact corner.
+        assert!(approx(interp_2d_1d_grid(&grid, 8, 128, 8).unwrap(), 0.3202, 1e-12));
     }
 
     #[test]

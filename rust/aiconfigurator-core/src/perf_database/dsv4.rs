@@ -80,10 +80,11 @@ impl Dsv4Table {
         }
     }
 
-    /// Context-DSV4 latency at `lookup_s = isl` (the new-token count). The
-    /// prefix effect is applied additively by the operator (and is negligible),
-    /// so it is not part of this base lookup. Mirrors Python's context base
-    /// `_dsv4_robust_3d_lookup(dict[native_heads], tp_size, isl, b)`.
+    /// Context-DSV4 latency at `lookup_s = isl` (the new-token count). Mirrors
+    /// Python's context base lookup over `(tp_size, isl, b)` on the
+    /// `native_heads` slice. The context CSVs collected to date carry a single
+    /// `step=0` anchor, so there is no prefix axis to resolve here (the operator
+    /// already supplies the new-token count as `isl`).
     #[allow(clippy::too_many_arguments)]
     pub fn query_context(
         &self,
@@ -102,9 +103,10 @@ impl Dsv4Table {
             AttnKind::Hca => self.load_hca_context()?,
         };
         let by_tp = select_native(grids, architecture, fmha_quant, kv_quant, gemm_quant, native_heads)?;
-        // Context grid: [tp_size][isl][batch]. The `step` axis is collapsed —
-        // context data is collected at step=0 (Python's context loader has no
-        // step axis). Outer = tp_size, middle = isl, inner = batch.
+        // Context grid: [tp_size][isl][batch]. The `step` (prefix) axis is
+        // collapsed because the collected context CSVs carry only step=0;
+        // Python's prefix-resolved lookup likewise returns the single anchor.
+        // Outer = tp_size, middle = isl, inner = batch.
         let mut grid: Grid3<f64> = BTreeMap::new();
         for (&tp, by_step) in by_tp {
             for by_isl in by_step.values() {
