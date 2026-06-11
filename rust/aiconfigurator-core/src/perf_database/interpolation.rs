@@ -4,10 +4,10 @@
 //! Latency-grid interpolation primitives.
 //!
 //! Mirrors the scalar paths of `src/aiconfigurator/sdk/interpolation.py`. The
-//! Python module also carries dict-leaf (latency + power + energy) and
-//! topk-piecewise variants; this Rust port covers the scalar latency cases
-//! used by GEMM and the attention/MoE families. The topk-piecewise variants
-//! are not ported here.
+//! Python module also carries dict-leaf (latency + power + energy) variants;
+//! this Rust port covers the scalar latency cases used by GEMM and the
+//! attention/MoE families, plus the top-k-piecewise sequence interpolation
+//! ([`interp_context_topk_piecewise`]) used by the DSA/CSA context path.
 
 use std::collections::BTreeMap;
 
@@ -308,6 +308,61 @@ pub fn interp_2d_1d_grid_extrapolate_inner(
 
 fn missing(x: u32, y: u32, z: u32) -> AicError {
     AicError::PerfDatabase(format!("missing point at ({x},{y},{z})"))
+}
+
+/// Top-k-regime-aware 1-D interpolation over the sequence axis.
+///
+/// Mirrors `interpolation.interp_context_topk_piecewise_from_raw`
+/// (DSA/DSv4 context). The `curve` is the exact `(num_heads, b)` slice
+/// keyed by `seq_len -> latency`. DSA/CSA use different kernel paths before
+/// and after the top-k cache saturates at `boundary`; this helper only
+/// interpolates among `seq_len`s on the SAME side of `boundary` and only
+/// when at least two same-regime anchors exist. Returns `None` when the
+/// regime has fewer than two anchors or the query falls outside it — the
+/// caller then falls through to the 3-D / batch-scaling path, exactly like
+/// Python's `_lookup_prefix_module_at`.
+pub fn interp_context_topk_piecewise(
+    curve: &BTreeMap<u32, f64>,
+    full_s: u32,
+    boundary: u32,
+) -> Option<f64> {
+    if let Some(&value) = curve.get(&full_s) {
+        return Some(value);
+    }
+
+    let same_regime_keys: Vec<u32> = if full_s <= boundary {
+        curve.keys().copied().filter(|&s| s <= boundary).collect()
+    } else {
+        curve.keys().copied().filter(|&s| s > boundary).collect()
+    };
+    if same_regime_keys.len() < 2 {
+        return None;
+    }
+
+    let (left, right) = if full_s < same_regime_keys[0] {
+        if full_s <= boundary {
+            return None;
+        }
+        (same_regime_keys[0], same_regime_keys[1])
+    } else if full_s > *same_regime_keys.last().unwrap() {
+        return None;
+    } else {
+        // Bracket within the same-regime keys; cannot fail (in range, >=2 pts).
+        match nearest_neighbors(full_s, &same_regime_keys, true) {
+            Ok(pair) => pair,
+            Err(_) => return None,
+        }
+    };
+
+    let left_value = *curve.get(&left)?;
+    let right_value = *curve.get(&right)?;
+    Some(interp_1d(
+        left as f64,
+        right as f64,
+        left_value,
+        right_value,
+        full_s as f64,
+    ))
 }
 
 #[cfg(test)]
