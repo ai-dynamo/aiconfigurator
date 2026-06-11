@@ -707,6 +707,81 @@ def test_database_mode_switches_db_default_mode(monkeypatch):
     assert "mode" not in captured
 
 
+def test_no_orphan_fields():
+    """Every tunable Task field must be consumed in task_v2/sweep -- guards against the
+    'accepted-but-ignored field' class of bug (e.g. database_mode, which was defined +
+    converted from YAML but never read at runtime). Candidate lists are read dynamically via
+    getattr(f"{role}_{dim}_candidates") so they're whitelisted; everything else must appear
+    as self.<field> or _role_attr(role, "<bare>")."""
+    import dataclasses
+    import pathlib
+    import re
+
+    import aiconfigurator.sdk.sweep as sweep_mod
+    import aiconfigurator.sdk.task_v2 as tv2_mod
+
+    srcs = pathlib.Path(tv2_mod.__file__).read_text() + pathlib.Path(sweep_mod.__file__).read_text()
+    orphans = []
+    for f in [x.name for x in dataclasses.fields(Task) if x.init and not x.name.startswith("_")]:
+        if f.endswith("_candidates"):
+            continue  # read dynamically via getattr(f"{role}_{dim}_candidates")
+        bare = re.sub(r"^(prefill_|decode_)", "", f)
+        read = (
+            re.search(rf"self\.{f}\b", srcs)
+            or re.search(rf'_role_attr\([^,]+,\s*"{bare}"', srcs)
+            or re.search(rf'"{f}"', srcs)
+            or re.search(rf'"{bare}"', srcs)
+        )
+        if not read:
+            orphans.append(f)
+    assert not orphans, f"orphan Task fields (defined but never consumed): {orphans}"
+
+
+def test_scalar_config_fields_reach_sweep_consumers():
+    """Scalar config knobs must actually reach sweep consumers (regression guard for the
+    accepted-but-ignored class of bug, e.g. database_mode). Values must flow into the
+    sweep kwargs / runtime_config rather than being silently dropped."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        isl=1234,
+        osl=567,
+        ttft=111.0,
+        tpot=22.0,
+        prefix=333,
+        request_latency=8888.0,
+        free_gpu_memory_fraction=0.55,
+        max_seq_len=4321,
+    )
+    kw = t.sweep_agg_kwargs(database=None)
+    rt = kw["runtime_config"]
+    assert (rt.isl, rt.osl, rt.prefix, rt.request_latency) == (1234, 567, 333, 8888.0)
+    assert kw["free_gpu_memory_fraction"] == 0.55
+    assert kw["max_seq_len"] == 4321
+    assert isinstance(rt.tpot, list)  # pareto_sweep=True default -> legacy grid reaches the sweep
+
+    td = Task(
+        serving_mode="disagg",
+        prefill_model_path="deepseek-ai/DeepSeek-V3",
+        prefill_system_name="h200_sxm",
+        prefill_backend_name="trtllm",
+        decode_model_path="deepseek-ai/DeepSeek-V3",
+        decode_system_name="h200_sxm",
+        decode_backend_name="trtllm",
+        total_gpus=16,
+        isl=1234,
+        osl=567,
+        ttft=111.0,
+        tpot=22.0,
+        prefix=333,
+        request_latency=8888.0,
+    )
+    drt = td.sweep_disagg_kwargs(prefill_database=None, decode_database=None)["runtime_config"]
+    assert (drt.isl, drt.osl, drt.prefix, drt.request_latency) == (1234, 567, 333, 8888.0)
+
+
 def test_disagg_calibration_overrides_flow_into_sweep_kwargs():
     """Overriding the new Task fields propagates to sweep_disagg_kwargs."""
     t = Task(
