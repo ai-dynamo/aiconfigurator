@@ -52,28 +52,16 @@ def test_agg_resolves_quant_from_hf():
     assert t.gemm_quant_mode == common.GEMMQuantMode.fp8_block
 
 
-def test_agg_quant_preset_overrides_hf():
+def test_agg_explicit_quant_overrides_hf():
     t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
-        quant_preset="bfloat16",
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
     )
-    assert t.gemm_quant_mode == common.GEMMQuantMode.bfloat16
-    assert t.kvcache_quant_mode == common.KVCacheQuantMode.bfloat16
-
-
-def test_agg_explicit_quant_overrides_preset():
-    t = Task(
-        serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-V3",
-        system_name="h200_sxm",
-        quant_preset="bfloat16",
-        gemm_quant_mode=common.GEMMQuantMode.fp8,
-    )
-    assert t.gemm_quant_mode == common.GEMMQuantMode.fp8
-    # other modes follow preset
-    assert t.kvcache_quant_mode == common.KVCacheQuantMode.bfloat16
+    assert t.gemm_quant_mode == common.GEMMQuantMode.bfloat16  # explicit wins
+    # unset modes fall back to HF inference (DeepSeek-V3)
+    assert t.kvcache_quant_mode == common.KVCacheQuantMode.fp8
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +111,6 @@ def test_disagg_wideep_sets_larger_replica_budget():
         ("enable_wideep", True),
         ("enable_chunked_prefill", True),
         ("enable_eplb", True),
-        ("quant_preset", "fp8"),
         ("gemm_quant_mode", common.GEMMQuantMode.fp8),
     ],
 )
@@ -295,7 +282,7 @@ def test_build_model_config_agg_uses_resolved_quant():
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
-        quant_preset="bfloat16",
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
     )
     mc = t.build_model_config(role="agg")
     assert mc.gemm_quant_mode == common.GEMMQuantMode.bfloat16
@@ -669,15 +656,14 @@ def test_wideep_replica_size_is_bounded():
     assert max(kw["num_gpu_list"]) <= t.total_gpus
 
 
-def test_explicit_or_preset_fmha_fp8_not_downgraded():
+def test_explicit_fmha_fp8_not_downgraded():
     """V3/Kimi context fmha fp8->bf16 downgrade fires only on HF-inferred fp8 (matches v1's
-    `not explicit_fmha_mode` guard). An explicit field or a preset fp8 is kept, so validate
-    can fail fast (instead of silently modelling bf16)."""
+    `not explicit_fmha_mode` guard). An explicit fp8 is kept, so validate can fail fast
+    (instead of silently modelling bf16)."""
     from aiconfigurator.sdk import common
 
     base = dict(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", backend_name="trtllm")
     assert Task(**base).fmha_quant_mode == common.FMHAQuantMode.bfloat16  # HF-inferred -> downgraded
-    assert Task(**base, quant_preset="fp8").fmha_quant_mode == common.FMHAQuantMode.fp8  # preset -> kept
     assert (
         Task(**base, fmha_quant_mode=common.FMHAQuantMode.fp8).fmha_quant_mode == common.FMHAQuantMode.fp8
     )  # explicit -> kept
@@ -1321,7 +1307,8 @@ def test_to_dict_emits_resolved_state_with_enum_names():
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
-        quant_preset="fp8",
+        gemm_quant_mode=common.GEMMQuantMode.fp8,
+        kvcache_quant_mode=common.KVCacheQuantMode.fp8,
     )
     d = t.to_dict()
     assert d["serving_mode"] == "agg"
@@ -1350,7 +1337,7 @@ def test_to_yaml_round_trips_through_from_yaml():
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
-        quant_preset="bfloat16",
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
     )
     yaml_text = t1.to_yaml()
     yaml_data = yaml.safe_load(yaml_text)

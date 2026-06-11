@@ -70,8 +70,8 @@ class TestConvertAgg:
         # scalar quant/flag stay top-level (no prefix) in agg
         assert out["gemm_quant_mode"] == "fp8"
         assert out["enable_wideep"] is True
-        # profiles -> quant_preset
-        assert out["quant_preset"] == "fp8"
+        # profiles -> explicit quant fields
+        assert out["gemm_quant_mode"] == "fp8"
         # structural keys dropped
         assert "mode" not in out
         assert "profiles" not in out
@@ -161,8 +161,8 @@ class TestUnmappable:
     def test_multiple_profiles_uses_first_and_warns(self, caplog):
         with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.task_v1_compat"):
             out = convert_v1_to_v2({"serving_mode": "agg", "model_path": "x", "profiles": ["fp8", "nvfp4"]})
-        assert out["quant_preset"] == "fp8"
-        assert "quant_preset" in caplog.text or "profiles" in caplog.text
+        assert out["gemm_quant_mode"] == "fp8"
+        assert "profiles" in caplog.text
 
 
 class TestFromYamlAutoConvert:

@@ -122,14 +122,58 @@ def is_v1_config(data: dict) -> bool:
     return any(key in data for key in _V1_MARKERS)
 
 
-def _quant_preset_from_profiles(profiles: list, unmapped: list[str]) -> str | None:
-    """Map a V1 ``profiles`` list to a single V2 ``quant_preset``."""
+_PROFILE_TO_QUANT: dict[str, dict[str, str]] = {
+    "fp8": {
+        "gemm_quant_mode": "fp8",
+        "moe_quant_mode": "fp8",
+        "kvcache_quant_mode": "fp8",
+        "fmha_quant_mode": "fp8",
+        "comm_quant_mode": "half",
+    },
+    "fp8_static": {
+        "gemm_quant_mode": "fp8_static",
+        "moe_quant_mode": "fp8",
+        "kvcache_quant_mode": "fp8",
+        "fmha_quant_mode": "fp8",
+        "comm_quant_mode": "half",
+    },
+    "bfloat16": {
+        "gemm_quant_mode": "bfloat16",
+        "moe_quant_mode": "bfloat16",
+        "kvcache_quant_mode": "bfloat16",
+        "fmha_quant_mode": "bfloat16",
+        "comm_quant_mode": "half",
+    },
+    "nvfp4": {
+        "gemm_quant_mode": "nvfp4",
+        "moe_quant_mode": "nvfp4",
+        "kvcache_quant_mode": "fp8",
+        "fmha_quant_mode": "fp8",
+        "comm_quant_mode": "half",
+    },
+    "mxfp4": {
+        "gemm_quant_mode": "bfloat16",
+        "moe_quant_mode": "w4a16_mxfp4",
+        "kvcache_quant_mode": "bfloat16",
+        "fmha_quant_mode": "bfloat16",
+        "comm_quant_mode": "half",
+    },
+}
+
+
+def _profile_quant_overrides(profiles: list, unmapped: list[str]) -> dict[str, str]:
+    """Expand a V1 ``profiles`` list to explicit V2 quant fields. (quant_preset was removed;
+    a profile now maps directly to gemm/moe/kvcache/fmha/comm quant fields.)"""
     profiles = [p for p in (profiles or []) if p]
     if not profiles:
-        return None
+        return {}
     if len(profiles) > 1:
-        unmapped.append(f"profiles{profiles!r} (V2 takes a single quant_preset; using {profiles[0]!r})")
-    return profiles[0]
+        unmapped.append(f"profiles{profiles!r} (only one profile applies; using {profiles[0]!r})")
+    table = _PROFILE_TO_QUANT.get(profiles[0])
+    if table is None:
+        unmapped.append(f"profile {profiles[0]!r} (unknown; ignored)")
+        return {}
+    return dict(table)
 
 
 def _convert_worker(out: dict, worker_cfg: dict, *, list_prefix: str, scalar_prefix: str, unmapped: list[str]) -> None:
@@ -179,7 +223,7 @@ def convert_v1_to_v2(v1: dict) -> dict:
     if "wideep_num_slots" in v1:
         unmapped.append("wideep_num_slots")
 
-    preset = _quant_preset_from_profiles(profiles, unmapped)
+    quant = _profile_quant_overrides(profiles, unmapped)
 
     if serving_mode == "disagg":
         # Fan out shared top-level worker spec to both roles (V2 forbids top-level).
@@ -194,8 +238,8 @@ def convert_v1_to_v2(v1: dict) -> dict:
                 out[f"{role}_enable_wideep"] = v1["enable_wideep"]
             if "enable_eplb" in v1:
                 out[f"{role}_enable_eplb"] = v1["enable_eplb"]
-            if preset is not None:
-                out[f"{role}_quant_preset"] = preset
+            for _qk, _qv in quant.items():
+                out[f"{role}_{_qk}"] = _qv
         if "system_name" in v1:
             out["prefill_system_name"] = v1["system_name"]
         # decode_system_name falls back to the (prefill) system_name when absent.
@@ -222,8 +266,8 @@ def convert_v1_to_v2(v1: dict) -> dict:
         for key in ("model_path", "system_name", "backend_name", "backend_version", "enable_wideep", "enable_eplb"):
             if key in v1:
                 out[key] = v1[key]
-        if preset is not None:
-            out["quant_preset"] = preset
+        for _qk, _qv in quant.items():
+            out[_qk] = _qv
         _convert_worker(out, config.get("worker_config", {}), list_prefix="agg_", scalar_prefix="", unmapped=unmapped)
 
     # 3. replica_config + advanced_tuning_config (disagg-oriented, but map verbatim).

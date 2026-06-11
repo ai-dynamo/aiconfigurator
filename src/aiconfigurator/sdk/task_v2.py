@@ -65,44 +65,6 @@ _LEGACY_TPOT_SWEEP: list[int] = list(range(1, 20, 1)) + list(range(20, 300, 5))
 # all three, i.e. unrestricted).
 _LARGE_PIPELINE_PARALLEL_MODEL_FAMILIES = {"DEEPSEEKV32", "DEEPSEEKV4"}
 
-QUANT_PRESETS: dict[str, dict[str, str]] = {
-    "fp8": {
-        "gemm_quant_mode": "fp8",
-        "moe_quant_mode": "fp8",
-        "kvcache_quant_mode": "fp8",
-        "fmha_quant_mode": "fp8",
-        "comm_quant_mode": "half",
-    },
-    "fp8_static": {
-        "gemm_quant_mode": "fp8_static",
-        "moe_quant_mode": "fp8",
-        "kvcache_quant_mode": "fp8",
-        "fmha_quant_mode": "fp8",
-        "comm_quant_mode": "half",
-    },
-    "bfloat16": {
-        "gemm_quant_mode": "bfloat16",
-        "moe_quant_mode": "bfloat16",
-        "kvcache_quant_mode": "bfloat16",
-        "fmha_quant_mode": "bfloat16",
-        "comm_quant_mode": "half",
-    },
-    "nvfp4": {
-        "gemm_quant_mode": "nvfp4",
-        "moe_quant_mode": "nvfp4",
-        "kvcache_quant_mode": "fp8",
-        "fmha_quant_mode": "fp8",
-        "comm_quant_mode": "half",
-    },
-    "mxfp4": {
-        "gemm_quant_mode": "bfloat16",
-        "moe_quant_mode": "w4a16_mxfp4",
-        "kvcache_quant_mode": "bfloat16",
-        "fmha_quant_mode": "bfloat16",
-        "comm_quant_mode": "half",
-    },
-}
-
 _QUANT_ENUM_TABLES: dict[str, type] = {
     "gemm_quant_mode": common.GEMMQuantMode,
     "moe_quant_mode": common.MoEQuantMode,
@@ -389,7 +351,6 @@ class Task:
     nextn: int | None = None
     nextn_accept_rates: list[float] = field(default_factory=lambda: list(_DEFAULT_NEXTN_ACCEPT_RATES))
     moe_backend: str | None = None
-    quant_preset: str | None = None
     gemm_quant_mode: common.GEMMQuantMode | None = None
     moe_quant_mode: common.MoEQuantMode | None = None
     kvcache_quant_mode: common.KVCacheQuantMode | None = None
@@ -412,7 +373,6 @@ class Task:
     prefill_enable_wideep: bool = False
     prefill_enable_chunked_prefill: bool = False
     prefill_enable_eplb: bool = False
-    prefill_quant_preset: str | None = None
     prefill_gemm_quant_mode: common.GEMMQuantMode | None = None
     prefill_moe_quant_mode: common.MoEQuantMode | None = None
     prefill_kvcache_quant_mode: common.KVCacheQuantMode | None = None
@@ -434,7 +394,6 @@ class Task:
     decode_backend_version: str | None = None
     decode_enable_wideep: bool = False
     decode_enable_eplb: bool = False
-    decode_quant_preset: str | None = None
     decode_gemm_quant_mode: common.GEMMQuantMode | None = None
     decode_moe_quant_mode: common.MoEQuantMode | None = None
     decode_kvcache_quant_mode: common.KVCacheQuantMode | None = None
@@ -650,8 +609,6 @@ class Task:
             leakage.append("enable_chunked_prefill")
         if self.enable_eplb:
             leakage.append("enable_eplb")
-        if self.quant_preset is not None:
-            leakage.append("quant_preset")
         for q in _QUANT_ENUM_TABLES:
             if getattr(self, q) is not None:
                 leakage.append(q)
@@ -714,7 +671,7 @@ class Task:
     def _resolve_quant_modes(self) -> None:
         """Resolve quant modes for the active role(s).
 
-        Priority (highest wins): explicit field > preset > HF base > bfloat16 fallback.
+        Priority (highest wins): explicit field > HF base > bfloat16 fallback.
         """
         roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
         base = _infer_quant_modes_from_raw_config(self._raw_config)
@@ -733,29 +690,18 @@ class Task:
             ):
                 self._set_role_attr(role, "moe_quant_mode", common.MoEQuantMode.w4a8_mxfp4_mxfp8)
 
-        # Track whether fmha came from an explicit field or a preset (vs HF/fallback): the
-        # V3/Kimi context downgrade must NOT fire on an explicit/preset fp8 -- v1 keeps it
+        # Track whether fmha came from an explicit field (vs HF/fallback): the
+        # V3/Kimi context downgrade must NOT fire on an EXPLICIT fp8 -- v1 keeps it
         # (its `not explicit_fmha_mode` guard) and lets validate fail fast.
-        fmha_explicit_or_preset: dict[str, bool] = {}
+        fmha_explicit: dict[str, bool] = {}
         for role in roles:
-            preset_name = self._role_attr(role, "quant_preset")
-            preset_overrides: dict[str, object] = {}
-            if preset_name is not None:
-                preset_def = QUANT_PRESETS.get(preset_name)
-                if preset_def is None:
-                    logger.warning("Unknown quant_preset %r for role %s, ignoring", preset_name, role)
-                else:
-                    for k, v in preset_def.items():
-                        preset_overrides[k] = _resolve_quant_str(k, v)
-
             for key in _QUANT_ENUM_TABLES:
                 explicit = self._role_attr(role, key)
-                from_preset = preset_overrides.get(key)
                 from_hf = base.get(key)
                 if key == "fmha_quant_mode":
-                    fmha_explicit_or_preset[role] = explicit is not None or from_preset is not None
+                    fmha_explicit[role] = explicit is not None
                 # DeepSeek-V4-Pro on sglang uses arch-specific MoE kernels. This acts at
-                # the HF-base layer so preset/explicit still override it. Skip megamoe,
+                # the HF-base layer so an explicit field still overrides it. Skip megamoe,
                 # which keys its own quant table. Mirrors legacy V1 dsv4pro-moe-arch.
                 if (
                     key == "moe_quant_mode"
@@ -772,7 +718,7 @@ class Task:
 
                 if explicit is not None:
                     continue
-                resolved = from_preset if from_preset is not None else (from_hf if from_hf is not None else fallback)
+                resolved = from_hf if from_hf is not None else fallback
                 self._set_role_attr(role, key, resolved)
 
         # Backend / architecture FMHA fp8->bf16 fixups (mirror v1: the V3/Kimi rule
@@ -786,7 +732,7 @@ class Task:
             # The decode role uses generation attention, which keeps fp8.
             if (
                 role != "decode"
-                and not fmha_explicit_or_preset.get(role, False)
+                and not fmha_explicit.get(role, False)
                 and self._architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
                 and fmha == common.FMHAQuantMode.fp8
             ):
@@ -1653,4 +1599,4 @@ class Task:
         return _rate_match_dict(p_dict, prefill_num_workers, d_dict, decode_num_workers)
 
 
-__all__ = ["QUANT_PRESETS", "ParallelChoice", "Task"]
+__all__ = ["ParallelChoice", "Task"]
