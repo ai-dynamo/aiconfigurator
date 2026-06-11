@@ -319,9 +319,18 @@ fn query_two_d(
             m as f64,
         ));
     }
-    // Bilinear fallback over (m, k).
+    // Bilinear fallback over (m, k). Use `inner_only=false` so an out-of-range
+    // query collapses/extrapolates instead of erroring. Python's
+    // `_query_compute_scale_table` / `_query_scale_matrix_table` (gemm.py
+    // ~531-545) clamp `m` and `k` into the table envelope before
+    // `interp_2d_linear`. For an in-range query, `inner_only=false` and the
+    // clamp are identical; for the single-point axis that triggers the parity
+    // regression (e.g. m-axis `[128]`), `nearest_neighbors` returns `(128, 128)`
+    // either way, so the result matches Python's clamp. (They would diverge only
+    // for a multi-point axis queried out of range — extrapolate here vs clamp in
+    // Python — which the scale tables do not currently exercise.)
     let m_keys: Vec<u32> = grid.keys().copied().collect();
-    let (m_left, m_right) = nearest_neighbors(m, &m_keys, true)?;
+    let (m_left, m_right) = nearest_neighbors(m, &m_keys, false)?;
     let left_row = grid.get(&m_left).unwrap();
     let right_row = grid.get(&m_right).unwrap();
     let k_keys: Vec<u32> = left_row
@@ -329,7 +338,7 @@ fn query_two_d(
         .copied()
         .filter(|kv| right_row.contains_key(kv))
         .collect();
-    let (k_left, k_right) = nearest_neighbors(k, &k_keys, true)?;
+    let (k_left, k_right) = nearest_neighbors(k, &k_keys, false)?;
     let q00 = left_row[&k_left];
     let q01 = left_row[&k_right];
     let q10 = right_row[&k_left];
