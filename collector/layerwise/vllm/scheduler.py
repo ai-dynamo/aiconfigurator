@@ -327,6 +327,11 @@ def _lookup_scheduler_timing_aggs(
             continue
         if _event_int(event, "control_past") != int(past_kv):
             continue
+        if datapoint.phase == "gen":
+            scheduled_new_reqs = _event_int(event, "scheduled_new_reqs")
+            scheduled_tokens = _event_int(event, "scheduled_tokens")
+            if scheduled_new_reqs != 0 or scheduled_tokens != int(batch_size):
+                continue
         run = _event_int(event, "control_run")
         if run is None:
             continue
@@ -365,21 +370,30 @@ def _lookup_worker_wall_aggs(
 
     aggs = []
     for event in events:
-        if event.get("event") != "measurement_wall_time":
-            continue
         if event.get("work_unit_id") != work_unit_id:
             continue
-        if event.get("phase") != datapoint.phase:
-            continue
-        if int(event.get("batch_size", -1)) != datapoint.batch_size:
-            continue
-        if int(event.get("new_tokens", -1)) != datapoint.new_tokens:
-            continue
-        if int(event.get("past_kv", -1)) != datapoint.past_kv:
+        if event.get("event") == "measurement_wall_time":
+            if event.get("phase") != datapoint.phase:
+                continue
+            if int(event.get("batch_size", -1)) != datapoint.batch_size:
+                continue
+            if int(event.get("new_tokens", -1)) != datapoint.new_tokens:
+                continue
+            if int(event.get("past_kv", -1)) != datapoint.past_kv:
+                continue
+            latency_ms = event.get("wall_latency_ms")
+        elif event.get("event") == "generate_wall_time" and datapoint.phase == "gen":
+            if event.get("phase") != "gen":
+                continue
+            if int(event.get("batch_size", -1)) != datapoint.batch_size:
+                continue
+            if int(event.get("past_kv", -1)) != datapoint.past_kv:
+                continue
+            latency_ms = event.get("generate_ms")
+        else:
             continue
         if event.get("run") in (None, ""):
             continue
-        latency_ms = event.get("wall_latency_ms")
         if latency_ms in (None, ""):
             continue
         latency_us = float(latency_ms) * 1000.0
@@ -402,10 +416,10 @@ def _effective_latency_source(
     """Return the concrete latency source used for one datapoint."""
 
     if requested_source == "auto":
+        if datapoint.phase == "ctx":
+            return "schedule_to_update"
         if includes_moe and datapoint.batch_size >= moe_decode_gpu_batch_threshold:
             return "gpu"
-        return "span"
-    if requested_source == "schedule_to_update" and datapoint.phase != "ctx":
         return "span"
     return requested_source
 

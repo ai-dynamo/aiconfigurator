@@ -158,8 +158,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         choices=("auto", "span", "gpu", "gpu_capped", "schedule_to_update", "worker_wall"),
         default="auto",
         help=(
-            "Latency source for output rows. auto uses kernel span timing, "
-            "except MoE high-batch decode uses gpu-sum."
+            "Latency source for output rows. auto uses scheduler timing for "
+            "context, kernel span timing for decode, and gpu-sum for high-batch "
+            "MoE decode."
         ),
     )
     advanced.add_argument("--moe-decode-gpu-batch-threshold", type=int, default=8)

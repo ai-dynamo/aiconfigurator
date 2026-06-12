@@ -58,6 +58,26 @@ Production decode batch sizes default up to `512`. Use
 `max_num_seqs` default, or use `--gen-batch-sizes` to request an exact decode
 grid.
 
+## Scheduler Sizing
+
+Do not hardcode `max_num_seqs` or `max_num_batched_tokens` in layerwise or FPM
+commands. They are part of the deployment shape and must either be inferred
+from the collector defaults/vLLM effective config or set intentionally for a
+specific deployment being measured. Do not copy values from old FPM artifacts.
+
+For decode, `batch_size` is the number of active sequences in one vLLM
+iteration, so the requested decode grid must satisfy:
+
+```text
+max(gen_batch_sizes) <= max_num_seqs
+```
+
+If a comparison FPM run used a smaller `max_num_seqs`, compare only rows inside
+that deployment envelope or recollect FPM with the intended scheduler config.
+For context and mixed rows, `max_num_batched_tokens` controls the per-iteration
+token budget and must match the deployment being modeled; otherwise chunking,
+scheduler behavior, and CUDA graph selection are not comparable.
+
 If a work unit crashes repeatedly with the same error and no parsed successes,
 the scheduler records a `work_unit_omitted` event in `profiles/status.jsonl`
 with the stderr tail and marks the remaining datapoints `skipped_same_error`.

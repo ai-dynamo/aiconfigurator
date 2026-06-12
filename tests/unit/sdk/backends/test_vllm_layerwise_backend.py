@@ -1626,7 +1626,7 @@ def test_vllm_layerwise_context_adds_moe_ep_alltoall_for_single_gpu_moe_rows(mon
     assert sources["context_moe_ep_alltoall"] == "silicon"
 
 
-def test_vllm_layerwise_context_chunks_noop_moe_addback(monkeypatch) -> None:
+def test_vllm_layerwise_context_step_uses_direct_noop_moe_addback(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 
     monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
@@ -1663,8 +1663,7 @@ def test_vllm_layerwise_context_chunks_noop_moe_addback(monkeypatch) -> None:
             query = (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache)
             self.layerwise_queries.append(query)
             assert query in {
-                ("deepseek-ai/DeepSeek-V4-Flash", "CTX", 1, 1, 2048, 0),
-                ("deepseek-ai/DeepSeek-V4-Flash", "CTX", 1, 1, 2048, 2048),
+                ("deepseek-ai/DeepSeek-V4-Flash", "CTX", 1, 1, 4096, 0),
             }
             return {
                 "latency": 3.0,
@@ -1686,7 +1685,7 @@ def test_vllm_layerwise_context_chunks_noop_moe_addback(monkeypatch) -> None:
         def query_gemm(self, m, n, k, quant_mode, database_mode=None):
             self.router_token_counts.append(m)
             assert (m, n, k, quant_mode, database_mode) == (
-                2048,
+                4096,
                 256,
                 4096,
                 common.GEMMQuantMode.bfloat16,
@@ -1705,14 +1704,13 @@ def test_vllm_layerwise_context_chunks_noop_moe_addback(monkeypatch) -> None:
     )
 
     assert database.layerwise_queries == [
-        ("deepseek-ai/DeepSeek-V4-Flash", "CTX", 1, 1, 2048, 0),
-        ("deepseek-ai/DeepSeek-V4-Flash", "CTX", 1, 1, 2048, 2048),
+        ("deepseek-ai/DeepSeek-V4-Flash", "CTX", 1, 1, 4096, 0),
     ]
-    assert database.moe_token_counts == [2048, 2048]
-    assert database.router_token_counts == [2048, 2048]
-    assert latency["context_layerwise"] == pytest.approx(6.0)
-    assert latency["context_moe"] == pytest.approx(2.4)
-    assert energy["context_moe"] == pytest.approx(9.6)
+    assert database.moe_token_counts == [4096]
+    assert database.router_token_counts == [4096]
+    assert latency["context_layerwise"] == pytest.approx(3.0)
+    assert latency["context_moe"] == pytest.approx(1.2)
+    assert energy["context_moe"] == pytest.approx(4.8)
     assert sources["context_moe"] == "mixed"
 
 
@@ -2476,7 +2474,7 @@ def test_vllm_layerwise_mixed_step_falls_back_when_gen_kv_missing(monkeypatch, g
     }
 
 
-def test_vllm_layerwise_context_uses_chunked_prefill_kv(monkeypatch) -> None:
+def test_vllm_layerwise_context_step_uses_direct_long_row(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 
     monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
@@ -2496,10 +2494,8 @@ def test_vllm_layerwise_context_uses_chunked_prefill_kv(monkeypatch) -> None:
             assert phase == "CTX"
             assert tp_size == 2
             assert batch_size == 1
-            if seq_len == 8192 and seq_len_kv_cache == 0:
-                return 1.0
-            if seq_len == 8192 and seq_len_kv_cache == 8192:
-                return 1.5
+            if seq_len == 16384 and seq_len_kv_cache == 0:
+                return 2.25
             raise AssertionError((seq_len, seq_len_kv_cache))
 
     latency, _energy, _sources = VLLMBackend()._run_context_phase(
@@ -2511,7 +2507,7 @@ def test_vllm_layerwise_context_uses_chunked_prefill_kv(monkeypatch) -> None:
         prefix=0,
     )
 
-    assert latency["context_layerwise"] == pytest.approx((1.0 + 1.5) * 4)
+    assert latency["context_layerwise"] == pytest.approx(2.25 * 4)
 
 
 def test_vllm_layerwise_context_falls_back_to_direct_long_row(monkeypatch) -> None:
@@ -2554,7 +2550,7 @@ def test_vllm_layerwise_context_falls_back_to_direct_long_row(monkeypatch) -> No
     assert latency["context_layerwise"] == pytest.approx(2.25 * 4)
 
 
-def test_vllm_layerwise_deepseek_context_composes_sparse_prefix_chunks(monkeypatch) -> None:
+def test_vllm_layerwise_deepseek_context_step_uses_direct_long_row(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 
     monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
@@ -2591,4 +2587,4 @@ def test_vllm_layerwise_deepseek_context_composes_sparse_prefix_chunks(monkeypat
         prefix=0,
     )
 
-    assert latency["context_layerwise"] == pytest.approx(2.0 * 4)
+    assert latency["context_layerwise"] == pytest.approx(2.25 * 4)

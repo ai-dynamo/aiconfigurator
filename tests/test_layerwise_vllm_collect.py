@@ -768,24 +768,24 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
         self.assertEqual(args.latency_source, "schedule_to_update")
 
-    def test_scheduler_timing_latency_source_is_context_only(self):
+    def test_scheduler_timing_latency_source_supports_context_and_decode(self):
         self.assertEqual(
             cl._effective_latency_source("schedule_to_update", cl.DataPoint("ctx", 1, 128, 0)),
             "schedule_to_update",
         )
         self.assertEqual(
             cl._effective_latency_source("schedule_to_update", cl.DataPoint("gen", 8, 1, 4096)),
-            "span",
+            "schedule_to_update",
         )
 
-    def test_auto_latency_source_selects_span_and_moe_high_batch_gpu(self):
+    def test_auto_latency_source_selects_context_scheduler_and_moe_high_batch_gpu(self):
         self.assertEqual(
             cl._effective_latency_source("auto", cl.DataPoint("ctx", 1, 128, 0)),
-            "span",
+            "schedule_to_update",
         )
         self.assertEqual(
             cl._effective_latency_source("auto", cl.DataPoint("ctx", 1, 1024, 0), includes_moe=True),
-            "span",
+            "schedule_to_update",
         )
         self.assertEqual(
             cl._effective_latency_source("auto", cl.DataPoint("gen", 4, 1, 4096), includes_moe=True),
@@ -856,6 +856,45 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(measure_count, 2)
         self.assertEqual(kernel_count, 0)
         self.assertEqual(latency_us, 10_000.0)
+
+    def test_scheduler_timing_lookup_uses_decode_only_update_for_generation(self):
+        events = [
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "control_phase": "gen",
+                "control_step": 4097,
+                "control_bs": 4,
+                "control_past": 4096,
+                "control_run": 0,
+                "scheduled_new_reqs": 4,
+                "scheduled_tokens": 64,
+                "fpm_wall_time_ms": 22.0,
+            },
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "control_phase": "gen",
+                "control_step": 4097,
+                "control_bs": 4,
+                "control_past": 4096,
+                "control_run": 0,
+                "scheduled_new_reqs": 0,
+                "scheduled_tokens": 4,
+                "fpm_wall_time_ms": 13.5,
+            },
+        ]
+
+        aggs = cl._lookup_scheduler_timing_aggs(events, "wu", cl.DataPoint("gen", 4, 1, 4096))
+        latency_us, _rms_us, kernel_count, _rms_kernel_count, measure_count = cl._reduce_agg_latency(
+            aggs,
+            latency_source="span",
+            aggregation="mean",
+        )
+
+        self.assertEqual(measure_count, 1)
+        self.assertEqual(kernel_count, 0)
+        self.assertEqual(latency_us, 13_500.0)
 
     def test_scheduler_timing_lookup_sums_chunked_context_by_run(self):
         events = [
@@ -2165,24 +2204,24 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertTrue(spec["enable_layer_patch"])
             self.assertTrue(spec["enable_step_marker"])
 
-    def test_auto_context_uses_span_latency_source(self):
+    def test_auto_context_uses_scheduler_latency_source(self):
         small_ctx = cl.DataPoint("ctx", 1, 128, 0)
         large_ctx = cl.DataPoint("ctx", 1, 1024, 0)
 
         self.assertEqual(
             cl._effective_latency_source("auto", small_ctx, includes_moe=True),
-            "span",
+            "schedule_to_update",
         )
         self.assertEqual(
             cl._effective_latency_source("auto", small_ctx, includes_moe=False),
-            "span",
+            "schedule_to_update",
         )
         self.assertEqual(
             cl._effective_latency_source("auto", large_ctx, includes_moe=False),
-            "span",
+            "schedule_to_update",
         )
 
-    def test_auto_context_keeps_step_marker_for_nsys_span_timing(self):
+    def test_auto_context_does_not_need_step_marker_for_scheduler_timing(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = _args(tmp_path)
@@ -2206,9 +2245,9 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             self.assertEqual(
                 cl._effective_latency_source("auto", unit.datapoints[0], includes_moe=False),
-                "span",
+                "schedule_to_update",
             )
-            self.assertTrue(spec["enable_step_marker"])
+            self.assertFalse(spec["enable_step_marker"])
 
     def test_worker_wall_success_rows_are_not_representative_scaled(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2320,6 +2359,59 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertEqual(row["latency_source"], "worker_wall")
             self.assertEqual(float(row["latency_ms"]), 11.0)
 
+    def test_decode_worker_wall_source_uses_generate_wall_events(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            args = _args(tmp_path)
+            args.latency_source = "worker_wall"
+            args.nsys_capture = "none"
+            unit = dataclasses.replace(
+                _unit(tmp_path, [cl.DataPoint("gen", 8, 1, 4096)]),
+                target_layers=[0, 1, 2, 3],
+                model_layer_count=4,
+                representative=cl.RepresentativeLayer(
+                    layer_index=0,
+                    layer_type="dense",
+                    measured_layer_count=4,
+                    layer_multiplier=4,
+                    target_layers=(0, 1, 2, 3),
+                ),
+            )
+            scheduler = cl.Scheduler(args, [unit])
+            results._write_csv_header_if_needed(Path(args.output))
+            dpid = unit.datapoints[0].datapoint_id(unit.work_unit_id)
+            scheduler.store.append_event(
+                "generate_wall_time",
+                work_unit_id=unit.work_unit_id,
+                datapoint_id=dpid,
+                phase="gen",
+                batch_size=8,
+                past_kv=4096,
+                run=0,
+                generate_ms=12.0,
+            )
+            attempt = cl.Attempt(
+                work_unit=unit,
+                gpu="0",
+                attempt_id=1,
+                spec_path=tmp_path / "spec.json",
+                report_base=tmp_path / "report",
+                stdout_path=tmp_path / "out",
+                stderr_path=tmp_path / "err",
+                process=None,
+                stdout_handle=None,
+                stderr_handle=None,
+                pending_ids={dpid},
+            )
+
+            successes = scheduler._parse_scheduler_timing_only(attempt)
+
+            self.assertEqual(successes, 1)
+            with Path(args.output).open() as f:
+                row = list(csv.DictReader(f))[0]
+            self.assertEqual(row["latency_source"], "worker_wall")
+            self.assertEqual(float(row["latency_ms"]), 12.0)
+
     def test_scheduler_resumes_after_existing_attempt_ids(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
@@ -2331,7 +2423,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             self.assertEqual(scheduler.attempt_counter, 7)
 
-    def test_auto_context_launch_does_not_enable_scheduler_timing(self):
+    def test_auto_context_launch_enables_scheduler_timing(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = _args(tmp_path)
@@ -2348,10 +2440,10 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             attempt.stdout_handle.close()
             attempt.stderr_handle.close()
-            self.assertNotIn("LAYERWISE_SCHEDULER_TIMING", popen.call_args.kwargs["env"])
+            self.assertEqual(popen.call_args.kwargs["env"]["LAYERWISE_SCHEDULER_TIMING"], "1")
             self.assertEqual(popen.call_args.kwargs["env"]["DYN_FORWARDPASS_METRIC_PORT"], "20381")
 
-    def test_auto_context_scheduler_spec_keeps_module_nvtx(self):
+    def test_auto_context_scheduler_spec_disables_module_nvtx(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = _args(tmp_path)
@@ -2361,9 +2453,9 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=1)
 
-            self.assertTrue(spec["enable_layerwise_nvtx_tracing"])
+            self.assertFalse(spec["enable_layerwise_nvtx_tracing"])
 
-    def test_auto_context_attempt_uses_nsys_wrapper(self):
+    def test_auto_context_attempt_skips_nsys_wrapper(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = _args(tmp_path)
@@ -2377,7 +2469,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 capture_nsys=scheduler._attempt_needs_nsys(unit, unit.datapoints),
             )
 
-            self.assertEqual(cmd[:2], ["nsys", "profile"])
+            self.assertNotEqual(cmd[:2], ["nsys", "profile"])
 
     def test_decode_span_scheduler_spec_keeps_module_nvtx(self):
         with tempfile.TemporaryDirectory() as td:

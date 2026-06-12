@@ -650,7 +650,7 @@ context,3,w,0,128,1,0,0,0,0,0.000,0,0,0,0,17.0
     assert filtered[0]["reason"].startswith("decode_latency_above_peer_envelope:")
 
 
-def test_load_fpm_reconstructs_leading_chunked_context_requests(tmp_path) -> None:
+def test_load_fpm_preserves_leading_context_iteration_rows(tmp_path) -> None:
     fpm = tmp_path / "fpm.csv"
     _write(
         fpm,
@@ -665,11 +665,12 @@ context,6,w,0,2048,1,2048,0,0,0,0.000,0,0,0,0,999.0
 """,
     )
 
-    context, decode, _ = _load_fpm(fpm, filter_pathological_context=True)
+    context, decode, _ = _load_fpm(fpm, filter_pathological_context=False)
 
     assert context[(1, 128, 0)] == [17.0]
-    assert context[(1, 4096, 0)] == [210.0]
-    assert (1, 2048, 0) not in context
+    assert context[(1, 2048, 0)] == [100.0]
+    assert context[(1, 2048, 2048)] == [110.0]
+    assert (1, 4096, 0) not in context
     assert decode[(1, 4096.0)] == [8.0]
 
 

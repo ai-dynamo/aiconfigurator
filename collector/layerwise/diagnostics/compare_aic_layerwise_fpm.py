@@ -3,7 +3,8 @@
 
 This diagnostic is intentionally narrow: it uses an explicit layerwise CSV as
 the layerwise database, reuses the repo's real communication/MoE tables, and
-calls ``VLLMBackend`` phase estimators directly for FPM-comparable shapes.
+calls ``VLLMBackend`` scheduler-step estimators directly for FPM-comparable
+shapes.
 """
 
 from __future__ import annotations
@@ -392,11 +393,23 @@ def _load_fpm(
             if str(row.get("phase", "")).lower() != "context":
                 break
             context_rows.append(row)
-    consumed_context_indexes: set[int] = set()
     for index, row in enumerate(context_rows):
-        if index in consumed_context_indexes:
-            continue
         if str(row.get("phase", "")).lower() != "context":
+            continue
+        pathology_reason = context_pathology_reasons.get(index)
+        if pathology_reason:
+            filtered_rows.append({
+                "row_index": index,
+                "phase": row.get("phase", ""),
+                "counter_id": row.get("counter_id", ""),
+                "reason": pathology_reason,
+                "latency_ms": row.get("latency_ms", ""),
+                "ctx_tokens": row.get("ctx_tokens", ""),
+                "ctx_requests": row.get("ctx_requests", ""),
+                "ctx_kv_tokens": row.get("ctx_kv_tokens", ""),
+                "decode_requests": row.get("decode_requests", ""),
+                "mean_decode_kv_tokens": row.get("mean_decode_kv_tokens", ""),
+            })
             continue
         ctx_requests = int(row["ctx_requests"])
         ctx_tokens = int(row["ctx_tokens"])
@@ -404,29 +417,10 @@ def _load_fpm(
         if ctx_requests <= 0 or ctx_tokens <= 0:
             continue
         ctx_prefix_tokens = round(ctx_kv_tokens / max(ctx_requests, 1))
-        total_ctx_tokens = ctx_tokens
-        total_latency = float(row["latency_ms"])
-        consumed_context_indexes.add(index)
-        expected_next_kv_tokens = ctx_kv_tokens + ctx_tokens * ctx_requests
-        next_index = index + 1
-        while next_index < len(context_rows):
-            next_row = context_rows[next_index]
-            if str(next_row.get("phase", "")).lower() != "context":
-                break
-            next_ctx_requests = int(next_row["ctx_requests"])
-            next_ctx_kv_tokens = int(float(next_row.get("ctx_kv_tokens") or 0))
-            if next_ctx_requests != ctx_requests or next_ctx_kv_tokens != expected_next_kv_tokens:
-                break
-            next_ctx_tokens = int(next_row["ctx_tokens"])
-            total_ctx_tokens += next_ctx_tokens
-            total_latency += float(next_row["latency_ms"])
-            consumed_context_indexes.add(next_index)
-            expected_next_kv_tokens += next_ctx_tokens * ctx_requests
-            next_index += 1
-        context[(ctx_requests, total_ctx_tokens, ctx_prefix_tokens)].append(total_latency)
+        context[(ctx_requests, ctx_tokens, ctx_prefix_tokens)].append(float(row["latency_ms"]))
 
     for index, row in enumerate(rows):
-        pathology_reason = decode_pathology_reasons.get(index) or context_pathology_reasons.get(index)
+        pathology_reason = decode_pathology_reasons.get(index)
         if pathology_reason:
             filtered_rows.append({
                 "row_index": index,
@@ -1130,13 +1124,13 @@ def compare(
                 continue
             fpm_ms = _aggregate(samples, aggregation)
             try:
-                latency, _, sources = backend._run_context_phase(
+                latency, _, sources = backend._get_context_step_latency(
                     model,
                     database,
                     runtime_config,
-                    batch_size=batch_size,
-                    isl=ctx_tokens + ctx_prefix_tokens,
-                    prefix=ctx_prefix_tokens,
+                    ctx_tokens=ctx_tokens,
+                    ctx_kv_tokens=ctx_prefix_tokens * batch_size,
+                    ctx_requests=batch_size,
                 )
             except (AssertionError, KeyError, PerfDataNotAvailableError, ValueError):
                 continue
@@ -1190,15 +1184,12 @@ def compare(
             if aic_past_kv is None:
                 continue
             try:
-                latency, _, sources = backend._run_generation_phase(
+                latency, _, sources = backend._get_decode_step_latency(
                     model,
                     database,
                     runtime_config,
                     batch_size=batch_size,
-                    beam_width=1,
-                    isl=aic_past_kv,
-                    osl=decode_osl,
-                    stride=32,
+                    past_kv=aic_past_kv,
                 )
             except (AssertionError, KeyError, PerfDataNotAvailableError, ValueError):
                 continue
@@ -1407,7 +1398,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vllm-max-num-batched-tokens",
         default="auto",
-        help="vLLM scheduler max_num_batched_tokens for AIC chunking. Defaults to FPM metadata when present.",
+        help="vLLM scheduler max_num_batched_tokens for runtime metadata. Defaults to FPM metadata when present.",
     )
     parser.add_argument(
         "--filter-pathological-context",
