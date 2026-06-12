@@ -20,6 +20,12 @@ from .load_predictor_sweep import (
     sweep_load_predictor,
     window_loss,
 )
+from .parallel_enum import (
+    ParallelShape,
+    ReplicaParallelConfig,
+    enumerate_parallel_configs,
+    enumerate_worker_shapes,
+)
 from .planner import SCALING_POLICIES, ScalingPolicy, throughput_intervals
 from .search import run_smart_search
 
@@ -33,6 +39,11 @@ __all__ = [
     "SweepConfig",
     "Workload",
     "run_smart_search",
+    # parallel-config enumeration
+    "ParallelShape",
+    "ReplicaParallelConfig",
+    "enumerate_parallel_configs",
+    "enumerate_worker_shapes",
     # planner scaling-policy decode
     "SCALING_POLICIES",
     "ScalingPolicy",
