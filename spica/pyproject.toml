@@ -15,6 +15,7 @@ license = "Apache-2.0"
 dependencies = [
     "pydantic>=2.5",
     "pyyaml>=6.0",
+    "tqdm>=4.0",
 ]
 
 [project.optional-dependencies]

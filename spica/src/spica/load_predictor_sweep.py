@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from statistics import mean
 from typing import Any
 
+from tqdm import tqdm
+
 from .config import SmartSearchConfig
 from .planner import throughput_intervals
 
@@ -207,9 +209,10 @@ def _common_warmup(preset_ids: list[str], interval_s: int) -> int:
     return max(mins) if mins else 0
 
 
-def sweep_load_predictor(config: SmartSearchConfig) -> LoadPredictorResult:
+def sweep_load_predictor(config: SmartSearchConfig, *, show_progress: bool = True) -> LoadPredictorResult:
     """Grid-search the load-predictor presets, once per distinct throughput
-    interval, picking the lowest-loss preset per interval."""
+    interval, picking the lowest-loss preset per interval. ``show_progress``
+    draws a tqdm bar over presets per interval."""
     space = config.search_space
     intervals = throughput_intervals(space.planner_scaling_policy)
     if not intervals:
@@ -225,10 +228,16 @@ def sweep_load_predictor(config: SmartSearchConfig) -> LoadPredictorResult:
     for iv in intervals:
         windows = build_windows(config.workload.trace_path, iv)
         warmup = _common_warmup(space.load_predictor_presets, iv)
-        per_preset = {
-            pid: evaluate_preset(windows, LOAD_PREDICTOR_PRESETS[pid], iv, warmup)
-            for pid in space.load_predictor_presets
-        }
+        per_preset: dict[str, float] = {}
+        bar = tqdm(
+            space.load_predictor_presets,
+            desc=f"load-predictor @ {iv}s ({len(windows)} windows, warmup {warmup})",
+            unit="preset",
+            disable=not show_progress,
+        )
+        for pid in bar:
+            per_preset[pid] = evaluate_preset(windows, LOAD_PREDICTOR_PRESETS[pid], iv, warmup)
+            bar.set_postfix_str(f"{pid}={per_preset[pid]:.3f}")
         result.losses[iv] = per_preset
         result.best_by_interval[iv] = min(per_preset, key=per_preset.__getitem__)
     return result
