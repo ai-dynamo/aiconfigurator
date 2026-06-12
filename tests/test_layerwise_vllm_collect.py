@@ -325,6 +325,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "--run-preset",
                 "smoke",
                 "--physical-tp",
+                "--allow-multi-gpu-diagnostic",
             ])
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
@@ -362,6 +363,30 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             parallel_patcher.assert_not_called()
             depth_patcher.assert_called_once()
 
+    def test_public_physical_tp_requires_diagnostic_opt_in(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            args = cl._build_arg_parser().parse_args([
+                "--models",
+                "model",
+                "--tp-sizes",
+                "2",
+                "--ep-sizes",
+                "1",
+                "--phases",
+                "ctx",
+                "--run-preset",
+                "smoke",
+                "--physical-tp",
+            ])
+            args.run_dir = tmp_path
+            args.work_dir = str(tmp_path / "profiles")
+            args.config_cache_dir = str(tmp_path / "config_cache")
+            model = LayerwiseModel(model="model", kind="moe", tp_sizes=(2,), ep_sizes=(1,))
+
+            with self.assertRaisesRegex(ValueError, "diagnostic-only"):
+                cl.build_public_work_units(args, [model])
+
     def test_public_physical_tp_ep_enables_vllm_expert_parallel(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
@@ -377,6 +402,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "--run-preset",
                 "smoke",
                 "--physical-tp",
+                "--allow-multi-gpu-diagnostic",
             ])
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
@@ -431,6 +457,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "--run-preset",
                 "smoke",
                 "--physical-tp",
+                "--allow-multi-gpu-diagnostic",
                 "--physical-tp-real-weights",
             ])
             args.run_dir = tmp_path
@@ -476,6 +503,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "--run-preset",
                 "smoke",
                 "--physical-tp",
+                "--allow-multi-gpu-diagnostic",
                 "--physical-tp-real-weights",
                 "--latency-source",
                 "schedule_to_update",
@@ -553,6 +581,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "--latency-source",
                 "worker_wall",
                 "--physical-tp",
+                "--allow-multi-gpu-diagnostic",
                 "--physical-tp-real-weights",
             ])
             args.run_dir = tmp_path
@@ -596,6 +625,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "--run-preset",
                 "smoke",
                 "--physical-tp",
+                "--allow-multi-gpu-diagnostic",
                 "--physical-tp-real-weights",
                 "--target-layer-count",
                 "1",

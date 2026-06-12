@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+import csv
+from pathlib import Path
 
 from aiconfigurator.sdk.perf_database import PerfDatabase
 
@@ -106,3 +108,55 @@ misc:
     assert noop_detail["moe_weight_mode"] == "noop"
     assert dummy_detail["latency"] == pytest.approx(27.0)
     assert dummy_detail["moe_weight_mode"] == "dummy"
+
+
+def test_layerwise_loader_rejects_multi_gpu_physical_rows(tmp_path):
+    systems_root = tmp_path / "systems"
+    data_dir = systems_root / "data" / "test_system" / "vllm" / "0.20.1"
+    data_dir.mkdir(parents=True)
+    (systems_root / "test_system.yaml").write_text(
+        """
+data_dir: data/test_system
+gpu:
+  mem_capacity: 1
+node:
+  num_gpus_per_node: 1
+misc:
+  nccl_mem: {1: 0}
+  other_mem: 0
+"""
+    )
+    (data_dir / "layerwise_perf.csv").write_text(
+        "\n".join(
+            [
+                "framework,framework_version,system,model,phase,tp_size,batch_size,seq_len_q,"
+                "seq_len_kv_cache,latency_ms,physical_gpus",
+                "vLLM,0.20.1,test,Qwen/Qwen3-32B,CTX,2,1,128,0,7.00,2",
+                "",
+            ]
+        )
+    )
+
+    db = PerfDatabase("test_system", "vllm", "0.20.1", systems_root=str(systems_root))
+
+    with pytest.raises(ValueError, match="one physical GPU per worker"):
+        db.query_layerwise("qwen/qwen3-32b", "CTX", 2, 1, 128)
+
+
+def test_installed_layerwise_data_uses_one_physical_gpu_per_worker():
+    repo_root = Path(__file__).resolve().parents[4]
+    layerwise_files = list((repo_root / "src" / "aiconfigurator" / "systems" / "data").rglob("layerwise_perf.csv"))
+    violations: list[str] = []
+    for path in layerwise_files:
+        with path.open(newline="") as f:
+            reader = csv.DictReader(f)
+            if not reader.fieldnames or "physical_gpus" not in reader.fieldnames:
+                continue
+            for line_number, row in enumerate(reader, start=2):
+                value = row.get("physical_gpus")
+                if value in (None, ""):
+                    continue
+                if float(value) > 1:
+                    violations.append(f"{path}:{line_number}: physical_gpus={value}")
+
+    assert violations == []

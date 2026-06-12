@@ -198,6 +198,7 @@ def make_work_unit_args(
         kv_quant=model.kv_quant,
         moe_real_router=bool(public_args.moe_real_router),
         physical_tp=public_args.physical_tp,
+        allow_multi_gpu_diagnostic=bool(getattr(public_args, "allow_multi_gpu_diagnostic", False)),
         physical_tp_real_weights=public_args.physical_tp_real_weights,
     )
 
@@ -515,6 +516,13 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
     max_num_seqs = getattr(args, "max_num_seqs", None)
     max_num_batched_tokens = getattr(args, "max_num_batched_tokens", None)
     max_model_len = getattr(args, "max_model_len", None)
+    physical_tp = bool(getattr(args, "physical_tp", False))
+    if physical_tp and not bool(getattr(args, "allow_multi_gpu_diagnostic", False)):
+        raise ValueError(
+            "physical_tp is diagnostic-only and violates canonical "
+            "one-GPU-per-worker layerwise collection. Re-run with "
+            "--allow-multi-gpu-diagnostic only for non-promoted diagnostics."
+        )
 
     orig_config = _load_original_config(args.model)
     orig_decoder_config = _decoder_config_view(orig_config)
@@ -572,7 +580,6 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
         if is_moe and tp % args.moe_tp != 0:
             print(f"[skip] tp={tp} not divisible by moe_tp={args.moe_tp}")
             continue
-        physical_tp = bool(getattr(args, "physical_tp", False))
         attn_tp = tp
         moe_tp = args.moe_tp if is_moe else 1
         ep = (tp // moe_tp) if is_moe else 1

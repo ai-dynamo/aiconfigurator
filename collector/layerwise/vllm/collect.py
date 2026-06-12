@@ -94,7 +94,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Diagnostic mode: run vLLM with real tensor parallelism across "
             "physical GPUs instead of single-GPU dimension patching. "
-            "Currently intended for TP-only/EP1 gap debugging."
+            "Requires --allow-multi-gpu-diagnostic and must not be promoted "
+            "into canonical layerwise data."
+        ),
+    )
+    advanced.add_argument(
+        "--allow-multi-gpu-diagnostic",
+        action="store_true",
+        help=(
+            "Allow diagnostic work units that reserve more than one physical "
+            "GPU. Canonical layerwise collection should not use this flag."
         ),
     )
     advanced.add_argument(

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _MODE_INDEX_KEY = "__mode_index__"
+_ALLOW_PHYSICAL_GPUS_ENV = "AIC_LAYERWISE_ALLOW_PHYSICAL_GPUS"
 
 
 def _parse_bool(value) -> bool:
@@ -31,6 +32,21 @@ def _parse_optional_float(value) -> float | None:
     if value in (None, ""):
         return None
     return float(value)
+
+
+def _validate_layerwise_physical_gpus(value: float | None, layerwise_file) -> None:
+    """Reject multi-GPU physical rows from canonical layerwise data."""
+
+    if value is None or value <= 1:
+        return
+    if os.getenv(_ALLOW_PHYSICAL_GPUS_ENV):
+        return
+    raise ValueError(
+        f"Layerwise rows must be collected with one physical GPU per worker; "
+        f"found physical_gpus={value:g} in {layerwise_file}. "
+        f"Move physical TP/EP diagnostics out of canonical data or set "
+        f"{_ALLOW_PHYSICAL_GPUS_ENV}=1 for diagnostic-only analysis."
+    )
 
 
 def _parse_int(value, default: int = 0) -> int:
@@ -198,6 +214,7 @@ def load_layerwise_data(layerwise_file):
             if value is not None:
                 entry[metric] = value
         value = _parse_optional_float(row.get("physical_gpus"))
+        _validate_layerwise_physical_gpus(value, layerwise_file)
         if value is not None:
             entry["physical_gpus"] = value
         value = _parse_optional_float(row.get("max_num_batched_tokens"))

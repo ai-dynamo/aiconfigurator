@@ -38,7 +38,7 @@ def test_layerwise_public_cli_defaults_to_all_registry_models(tmp_path):
     args.config_cache_dir = str(tmp_path / "config_cache")
 
     def fake_config(model):
-        if "35B-A3B" in model:
+        if "35B-A3B" in model or "DeepSeek-V4-Flash" in model:
             return {
                 "num_hidden_layers": 2,
                 "num_attention_heads": 8,
@@ -64,18 +64,21 @@ def test_layerwise_public_cli_defaults_to_all_registry_models(tmp_path):
     assert {unit.row_base["model"] for unit in units} == {
         "Qwen/Qwen3-32B",
         "Qwen/Qwen3.6-35B-A3B",
+        "deepseek-ai/DeepSeek-V4-Flash",
     }
     assert any(unit.row_base["ep"] == 2 for unit in units if unit.row_base["model"].endswith("35B-A3B"))
+    assert any(unit.row_base["ep"] == 2 for unit in units if unit.row_base["model"].endswith("DeepSeek-V4-Flash"))
     assert all(unit.row_base["ep"] == 1 for unit in units if unit.row_base["model"] == "Qwen/Qwen3-32B")
 
 
-def test_layerwise_registry_can_select_optional_deepseek_flash_without_expanding_defaults():
+def test_layerwise_registry_defaults_include_deepseek_flash():
     defaults = all_models()
     selected = select_models("deepseek-ai/DeepSeek-V4-Flash")
 
     assert {model.model for model in defaults} == {
         "Qwen/Qwen3-32B",
         "Qwen/Qwen3.6-35B-A3B",
+        "deepseek-ai/DeepSeek-V4-Flash",
     }
     assert len(selected) == 1
     assert selected[0].model == "deepseek-ai/DeepSeek-V4-Flash"

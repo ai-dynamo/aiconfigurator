@@ -1119,8 +1119,6 @@ class VLLMBackend(BaseBackend):
         context_source = str(layer_detail.get("latency_source") or "")
         token_count = batch_size * effective_isl
         layer_includes_moe = bool(layer_detail.get("includes_moe", False))
-        physical_gpus = int(float(layer_detail.get("physical_gpus", 1.0) or 1.0))
-        context_source_covers_tp = physical_gpus >= tp_size
         moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
         deepseek_scheduler_moe_context = (
             "DeepSeek-V4" in str(model_name)
@@ -1128,10 +1126,7 @@ class VLLMBackend(BaseBackend):
             and moe_ep_size > 1
             and context_source in {"schedule_to_update", "fpm_wall", "worker_wall"}
         )
-        if (
-            context_source in {"schedule_to_update", "fpm_wall", "worker_wall"}
-            and (context_source_covers_tp or deepseek_scheduler_moe_context)
-        ):
+        if deepseek_scheduler_moe_context:
             allreduce_ms = 0.0
         else:
             allreduce_ms = (
@@ -1149,7 +1144,7 @@ class VLLMBackend(BaseBackend):
         moe_tp_size = int(getattr(model.config, "moe_tp_size", 1) or 1)
         moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
         represented_moe_layers = self._layerwise_detail_represented_moe_layers(layer_detail, num_layers)
-        if represented_moe_layers > 0 and moe_tp_size > 1 and physical_gpus < moe_tp_size:
+        if represented_moe_layers > 0 and moe_tp_size > 1:
             try:
                 moe_tp_allreduce_ms = (
                     self._layerwise_tp_allreduce_ms(
@@ -1222,7 +1217,6 @@ class VLLMBackend(BaseBackend):
             moe_ep_alltoall_layers > 0
             and moe_ep_size > 1
             and (layer_includes_moe or moe_ms <= 0.0)
-            and physical_gpus < moe_ep_size
         )
         if has_external_moe_ep:
             try:
@@ -1366,7 +1360,6 @@ class VLLMBackend(BaseBackend):
             layer_includes_moe = bool(layer_detail.get("includes_moe", False))
             moe_tp_size = int(getattr(model.config, "moe_tp_size", 1) or 1)
             moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
-            physical_gpus = int(float(layer_detail.get("physical_gpus", 1.0) or 1.0))
             represented_moe_layers = self._layerwise_detail_represented_moe_layers(layer_detail, num_layers)
             # vLLM layerwise GEN rows measure the transformer block execution
             # envelope. The block already contains RMS work, so adding a
@@ -1412,7 +1405,6 @@ class VLLMBackend(BaseBackend):
                 not layer_includes_moe
                 and represented_moe_layers > 0
                 and moe_ep_size > 1
-                and physical_gpus < moe_ep_size
             ):
                 try:
                     moe_ep_alltoall_step_ms = (
@@ -1657,8 +1649,6 @@ class VLLMBackend(BaseBackend):
         combined_ctx_ms = float(combined_detail["latency"]) * self._layerwise_detail_scale(
             combined_detail, num_layers
         )
-        physical_gpus = int(float(combined_detail.get("physical_gpus", 1.0) or 1.0))
-        context_source_covers_tp = physical_gpus >= tp_size
         scheduler_like_context = combined_source in {"schedule_to_update", "fpm_wall", "worker_wall"}
         extra_params = getattr(model, "extra_params", None)
         is_moe_model = (
@@ -1674,9 +1664,9 @@ class VLLMBackend(BaseBackend):
             scheduler_like_context
             and ctx_tokens > 0
             and is_moe_model
-            and (context_source_covers_tp or mixed_ep_context_covers_tp)
+            and mixed_ep_context_covers_tp
         )
-        if scheduler_like_context and (context_source_covers_tp or mixed_ep_context_covers_tp):
+        if scheduler_like_context and mixed_ep_context_covers_tp:
             combined_allreduce_ms = 0.0
         else:
             combined_allreduce_ms = (

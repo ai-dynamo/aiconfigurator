@@ -456,7 +456,7 @@ def test_vllm_layerwise_mixed_uses_prefix_context_chunk_envelope(monkeypatch) ->
     }
 
 
-def test_vllm_layerwise_mixed_moe_tp_envelope_skips_small_decode_delta(monkeypatch) -> None:
+def test_vllm_layerwise_mixed_moe_ep_envelope_skips_small_decode_delta(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 
     monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
@@ -464,8 +464,8 @@ def test_vllm_layerwise_mixed_moe_tp_envelope_skips_small_decode_delta(monkeypat
     class _Config:
         tp_size = 2
         pp_size = 1
-        moe_tp_size = 2
-        moe_ep_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 2
 
     class _Model:
         model_path = "Qwen/Qwen3.6-35B-A3B"
@@ -485,7 +485,7 @@ def test_vllm_layerwise_mixed_moe_tp_envelope_skips_small_decode_delta(monkeypat
                     "latency": 10.0,
                     "energy": 0.0,
                     "latency_source": "schedule_to_update",
-                    "physical_gpus": 2,
+                    "physical_gpus": 1,
                     "includes_moe": True,
                 }
             if phase == "GEN":
@@ -493,7 +493,7 @@ def test_vllm_layerwise_mixed_moe_tp_envelope_skips_small_decode_delta(monkeypat
             raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
 
         def query_custom_allreduce(self, quant_mode, tp_size, size):
-            raise AssertionError("physical scheduler envelope already covers TP")
+            raise AssertionError("MoE EP scheduler envelope already covers this mixed-step TP tail")
 
     latency_ms, _energy_wms, per_ops, _sources = VLLMBackend()._get_mix_step_latency(
         _Model(),
@@ -1210,7 +1210,7 @@ def test_vllm_layerwise_context_skips_moe_compute_when_layer_includes_moe(monkey
     assert sources == {"context_layerwise": "silicon", "context_tp_allreduce": "silicon"}
 
 
-def test_vllm_layerwise_context_envelope_rows_skip_explicit_allreduce(monkeypatch) -> None:
+def test_vllm_layerwise_context_envelope_rows_add_explicit_allreduce(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 
     monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
@@ -1242,11 +1242,15 @@ def test_vllm_layerwise_context_envelope_rows_skip_explicit_allreduce(monkeypatc
                 "measured_layer_count": 4,
                 "layer_multiplier": 4,
                 "latency_source": "schedule_to_update",
-                "physical_gpus": 2,
+                "physical_gpus": 1,
             }
 
-        def query_custom_allreduce(self, *args, **kwargs):
-            raise AssertionError((args, kwargs))
+        def query_custom_allreduce(self, quant_mode, tp_size, size, execution_mode=None):
+            del quant_mode
+            assert tp_size == 2
+            assert size == 128 * 5120
+            assert execution_mode == "eager"
+            return 0.25
 
     latency, energy, sources = VLLMBackend()._run_context_phase(
         _Model(),
@@ -1257,7 +1261,7 @@ def test_vllm_layerwise_context_envelope_rows_skip_explicit_allreduce(monkeypatc
         prefix=0,
     )
 
-    assert latency == {"context_layerwise": pytest.approx(17.0), "context_tp_allreduce": 0.0}
+    assert latency == {"context_layerwise": pytest.approx(17.0), "context_tp_allreduce": pytest.approx(2.0)}
     assert energy == {"context_layerwise": 0.0, "context_tp_allreduce": 0.0}
     assert sources == {"context_layerwise": "silicon", "context_tp_allreduce": "silicon"}
 
@@ -1384,7 +1388,7 @@ def test_vllm_layerwise_deepseek_scheduler_moe_context_skips_dense_tp_allreduce(
     assert sources["context_moe_ep_alltoall"] == "silicon"
 
 
-def test_vllm_layerwise_context_adds_moe_tp_allreduce_for_physical_noop_rows(monkeypatch) -> None:
+def test_vllm_layerwise_context_adds_moe_tp_allreduce_for_noop_rows(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 
     monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
@@ -1429,7 +1433,7 @@ def test_vllm_layerwise_context_adds_moe_tp_allreduce_for_physical_noop_rows(mon
                 "measured_layer_count": 4,
                 "layer_multiplier": 4,
                 "latency_source": "schedule_to_update",
-                "physical_gpus": 2,
+                "physical_gpus": 1,
             }
 
         def query_custom_allreduce(self, quant_mode, tp_size, size, execution_mode=None):
@@ -1457,7 +1461,7 @@ def test_vllm_layerwise_context_adds_moe_tp_allreduce_for_physical_noop_rows(mon
     )
 
     assert latency["context_layerwise"] == pytest.approx(10.0)
-    assert latency["context_tp_allreduce"] == 0.0
+    assert latency["context_tp_allreduce"] == pytest.approx(2.0)
     assert latency["context_moe"] == pytest.approx(2.0)
     assert latency["context_moe_tp_allreduce"] == pytest.approx(1.0)
     assert energy["context_moe"] == pytest.approx(4.0)
@@ -1520,11 +1524,15 @@ def test_vllm_layerwise_context_prefers_qwen_module_moe_addback(monkeypatch) -> 
                 "measured_layer_count": 4,
                 "layer_multiplier": 4,
                 "latency_source": "schedule_to_update",
-                "physical_gpus": 2,
+                "physical_gpus": 1,
             }
 
-        def query_custom_allreduce(self, *args, **kwargs):
-            raise AssertionError("bundled Qwen module MoE row should include MoE TP allreduce")
+        def query_custom_allreduce(self, quant_mode, tp_size, size, execution_mode=None):
+            del quant_mode
+            assert tp_size == 2
+            assert size == 128 * 2048
+            assert execution_mode == "eager"
+            return 0.25
 
         def query_moe(self, **kwargs):
             raise AssertionError(f"bundled Qwen module MoE row should replace routed MoE query: {kwargs}")
@@ -1542,7 +1550,7 @@ def test_vllm_layerwise_context_prefers_qwen_module_moe_addback(monkeypatch) -> 
     )
 
     assert latency["context_layerwise"] == pytest.approx(10.0)
-    assert latency["context_tp_allreduce"] == 0.0
+    assert latency["context_tp_allreduce"] == pytest.approx(2.0)
     assert latency["context_moe"] == pytest.approx(3.0)
     assert "context_moe_tp_allreduce" not in latency
     assert "context_moe_router" not in latency

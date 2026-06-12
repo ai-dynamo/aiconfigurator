@@ -32,9 +32,6 @@ class LayerwiseModel:
 DEFAULT_MODELS: tuple[LayerwiseModel, ...] = (
     LayerwiseModel(model="Qwen/Qwen3-32B", kind="dense"),
     LayerwiseModel(model="Qwen/Qwen3.6-35B-A3B", kind="moe", ep_sizes=(1, 2, 4, 8)),
-)
-
-OPTIONAL_MODELS: tuple[LayerwiseModel, ...] = (
     LayerwiseModel(
         model="deepseek-ai/DeepSeek-V4-Flash",
         kind="moe",
@@ -44,6 +41,8 @@ OPTIONAL_MODELS: tuple[LayerwiseModel, ...] = (
         kv_quant="fp8",
     ),
 )
+
+OPTIONAL_MODELS: tuple[LayerwiseModel, ...] = ()
 
 REGISTERED_MODELS: tuple[LayerwiseModel, ...] = DEFAULT_MODELS + OPTIONAL_MODELS
 
