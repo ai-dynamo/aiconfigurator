@@ -36,13 +36,19 @@ dev = [
 # irrelevant to the build but otherwise fails the clone:
 #   GIT_LFS_SKIP_SMUDGE=1 uv pip install -e ".[dev,dynamo]"
 #
-# prophet/pmdarima/filterpy back the planner predictors (not declared by ai-dynamo).
+# The planner load-predictor stack (filterpy/pmdarima/prophet + their
+# scikit-learn/scipy pins) is NOT declared by the ai-dynamo package; dynamo
+# installs it for the planner service via container/deps/requirements.planner.txt.
+# Pinned here to the same versions (same commit) so spica's predictors behave
+# identically to the planner's. Keep in sync with that file on dynamo bumps.
 dynamo = [
     "ai-dynamo @ git+https://github.com/ai-dynamo/dynamo@4670f248cb79567c06e0c3f9655464b5d94d1cbb",
     "ai-dynamo-runtime @ git+https://github.com/ai-dynamo/dynamo@4670f248cb79567c06e0c3f9655464b5d94d1cbb#subdirectory=lib/bindings/python",
-    "prophet",
-    "pmdarima",
-    "filterpy",
+    "filterpy==1.4.5",
+    "pmdarima==2.1.1",
+    "prophet==1.2.1",
+    "scikit-learn==1.7.2",
+    "scipy>=1.14.0,<2.0",
 ]
 # Wired in later milestones:
 #   search = ["google-vizier"]    # black-box optimizer for the smart sweep
