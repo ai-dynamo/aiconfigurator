@@ -95,6 +95,7 @@ from helper import (
 logger = None
 RESUME_SCHEMA_VERSION = "collector-resume-v1"
 STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before stall bailout
+STALL_TERMINATE_SECONDS = float(os.environ.get("AIC_COLLECT_STALL_TERMINATE_SEC", "0") or 0)
 
 
 def _require_torch():
@@ -776,6 +777,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     with tqdm(total=len(task_infos), desc=f"{module_name}", dynamic_ncols=True, leave=True) as pbar:
         last_progress = 0
         stall_count = 0
+        last_progress_time = time.time()
         last_error_count = 0
 
         if num_processes == 0:
@@ -847,9 +849,26 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 if stall_count > STALL_THRESHOLD:
                     logger.warning(f"Progress stalled at {progress_value.value}/{len(task_infos)}")
                     stall_count = 0
+                if STALL_TERMINATE_SECONDS > 0 and time.time() - last_progress_time > STALL_TERMINATE_SECONDS:
+                    active_workers = [
+                        (i, p, current_task_ids.get(i))
+                        for i, p in enumerate(processes)
+                        if p is not None and p.is_alive() and current_task_ids.get(i) is not None
+                    ]
+                    if active_workers:
+                        logger.error(
+                            "No collector progress for %.1f seconds; terminating %d active worker(s): %s",
+                            time.time() - last_progress_time,
+                            len(active_workers),
+                            [task_id for _i, _p, task_id in active_workers],
+                        )
+                        for _i, p, _task_id in active_workers:
+                            p.terminate()
+                        last_progress_time = time.time()
             else:
                 stall_count = 0
                 last_progress = progress_value.value
+                last_progress_time = time.time()
 
             # Check process health — only restart if there is still work
             # remaining.  Workers that consumed a None sentinel or finished
