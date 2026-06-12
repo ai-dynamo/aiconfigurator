@@ -15,6 +15,12 @@ from .config import (
     SweepConfig,
     Workload,
 )
+from .load_predictor_sweep import (
+    LoadPredictorResult,
+    sweep_load_predictor,
+    window_loss,
+)
+from .planner import SCALING_POLICIES, ScalingPolicy, throughput_intervals
 from .search import run_smart_search
 
 __all__ = [
@@ -27,4 +33,12 @@ __all__ = [
     "SweepConfig",
     "Workload",
     "run_smart_search",
+    # planner scaling-policy decode
+    "SCALING_POLICIES",
+    "ScalingPolicy",
+    "throughput_intervals",
+    # load-predictor sweep
+    "LoadPredictorResult",
+    "sweep_load_predictor",
+    "window_loss",
 ]

@@ -22,10 +22,29 @@ dev = [
     "pytest>=8.0",
     "ruff",
 ]
-# Wired in later milestones (kept out of the base deps so the skeleton installs
-# light and stays decoupled until each seam is built):
-#   aic    = ["aiconfigurator"]   # editable from ..; forward-pass/memory + sweep_smart seam
-#   replay = ["ai-dynamo"]        # Dynamo Replay/Mocker for the ReplayEvaluator
+# Planner load-predictor sweep + (later) Replay evaluator.
+#
+# Pinned to the #10670 merge commit (the warmup empty-window densify fix).
+# ai-dynamo is pure-Python (hatchling), but at this commit main is the
+# unreleased 1.3.0 and ai-dynamo-runtime==1.3.0 is NOT on PyPI, so the Rust
+# bindings must be built from source at the same commit (needs a Rust
+# toolchain). Once 1.3.0 ships, drop the runtime git source and use a released
+# "ai-dynamo==1.3.*" pin (prebuilt wheel, no Rust build). For fast local dev you
+# can instead editable-install the local dynamo checkout.
+#
+# Install needs GIT_LFS_SKIP_SMUDGE=1 — the dynamo repo carries LFS media that is
+# irrelevant to the build but otherwise fails the clone:
+#   GIT_LFS_SKIP_SMUDGE=1 uv pip install -e ".[dev,dynamo]"
+#
+# prophet/pmdarima/filterpy back the planner predictors (not declared by ai-dynamo).
+dynamo = [
+    "ai-dynamo @ git+https://github.com/ai-dynamo/dynamo@4670f248cb79567c06e0c3f9655464b5d94d1cbb",
+    "ai-dynamo-runtime @ git+https://github.com/ai-dynamo/dynamo@4670f248cb79567c06e0c3f9655464b5d94d1cbb#subdirectory=lib/bindings/python",
+    "prophet",
+    "pmdarima",
+    "filterpy",
+]
+# Wired in later milestones:
 #   search = ["google-vizier"]    # black-box optimizer for the smart sweep
 
 [project.scripts]

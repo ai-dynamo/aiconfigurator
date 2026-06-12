@@ -20,16 +20,29 @@ Spica — Spica is the upper layer.
 
 ## Status
 
-Milestone 1 — project skeleton + input schema only. `run_smart_search` is a
-stub; the search loop and the injectable Replay evaluator land next.
+- Input schema (`SmartSearchConfig`) — done.
+- Planner load-predictor independent grid sweep (`sweep_load_predictor`) —
+  done; reuses the real dynamo planner predictors + the planner's densify-fixed
+  trace→window tool.
+- `run_smart_search` (the main Vizier + Replay sweep) — still a stub; lands next.
 
 ## Develop
 
 ```bash
 cd spica
-python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest
+uv venv .venv --python 3.12
+uv pip install --python .venv/bin/python -e ".[dev]"
+.venv/bin/pytest          # pure tests; dynamo integration tests skip without [dynamo]
+```
+
+The load-predictor sweep reuses the dynamo planner predictors (Rust runtime +
+prophet/pmdarima/filterpy), pinned to a dynamo commit. Installing that extra
+needs `GIT_LFS_SKIP_SMUDGE=1` (the dynamo repo carries LFS media irrelevant to
+the build) and a Rust toolchain (`ai-dynamo-runtime` builds from source until
+1.3.0 ships a wheel):
+
+```bash
+GIT_LFS_SKIP_SMUDGE=1 uv pip install --python .venv/bin/python -e ".[dev,dynamo]"
 ```
 
 Validate an example config:
