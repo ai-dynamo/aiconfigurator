@@ -1937,6 +1937,7 @@ class PerfDatabase:
         batch_size: int,
         seq_len: int,
         seq_len_kv_cache: int = 0,
+        moe_weight_mode: str | None = None,
     ) -> dict[str, float]:
         """Query layerwise latency plus optional sideband metrics."""
         from aiconfigurator.sdk.operations.layerwise import Layerwise
@@ -1949,6 +1950,7 @@ class PerfDatabase:
             batch_size,
             seq_len,
             seq_len_kv_cache,
+            moe_weight_mode,
         )
 
     @functools.lru_cache(maxsize=32768)

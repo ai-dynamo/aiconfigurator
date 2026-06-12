@@ -15,6 +15,9 @@ Env:
   LAYERWISE_TARGET_LAYERS=3,4   # comma-separated layer indices (default 3)
   LAYERWISE_SKIP_ENABLE=1       # set 0 to disable
   LAYERWISE_MOE_NOOP=1          # replace target-layer MoE MLPs with identity
+  LAYERWISE_SYNTHETIC_HASH_ROUTING=1
+                                 # replace hash-MoE routing tables with a
+                                 # deterministic synthetic distribution
 """
 import json
 import logging
@@ -301,6 +304,69 @@ def _apply_router_weights(model, source_model: str, target_layers: set[int]) -> 
     return loaded
 
 
+def _power_law_hash_indices(table, *, num_experts: int, alpha: float, seed: int):
+    """Return deterministic hash-table rows with power-law expert frequency."""
+
+    import torch
+
+    vocab_size, topk = table.shape
+    device = table.device
+    ranks = torch.arange(1, num_experts + 1, dtype=torch.float64, device=device)
+    cdf = torch.cumsum(torch.pow(ranks, -float(alpha)), dim=0)
+    cdf = cdf / cdf[-1]
+
+    modulus = 2**31 - 1
+    values = torch.arange(vocab_size * topk, dtype=torch.int64, device=device)
+    values = (values * 1103515245 + int(seed)) % modulus
+    quantiles = values.to(torch.float64) / float(modulus)
+    selected = torch.searchsorted(cdf, quantiles, right=False).to(torch.int64)
+    selected = selected.reshape(vocab_size, topk)
+
+    # Hash routing tables should provide distinct top-k experts per token.
+    for slot in range(1, topk):
+        duplicate = selected[:, :slot].eq(selected[:, slot:slot + 1]).any(dim=1)
+        while bool(duplicate.any()):
+            selected[duplicate, slot] = (selected[duplicate, slot] + 1) % num_experts
+            duplicate = selected[:, :slot].eq(selected[:, slot:slot + 1]).any(dim=1)
+    return selected.to(dtype=table.dtype)
+
+
+def _apply_synthetic_hash_routing(model, *, alpha: float = 1.2, seed: int = 20260612) -> int:
+    """Overwrite hash-MoE tables with deterministic synthetic routing rows."""
+
+    import torch
+
+    patched = []
+    with torch.no_grad():
+        for name, module in model.named_modules():
+            table = getattr(module, "hash_indices_table", None)
+            if table is None or not hasattr(table, "shape") or len(table.shape) != 2:
+                continue
+            num_experts = int(
+                getattr(module, "num_experts", 0)
+                or getattr(module, "global_num_experts", 0)
+                or int(table.max().item()) + 1
+            )
+            if num_experts <= 0:
+                continue
+            table.copy_(
+                _power_law_hash_indices(
+                    table,
+                    num_experts=num_experts,
+                    alpha=alpha,
+                    seed=seed + len(patched),
+                )
+            )
+            patched.append(f"{name}:{tuple(table.shape)}:{num_experts}")
+    if patched:
+        logger.warning(
+            "[vllm-layer-skip] synthetic hash routing patched=%s alpha=%s",
+            patched,
+            alpha,
+        )
+    return len(patched)
+
+
 def _apply_skip(model, target_layers: set[int]) -> int:
     layers, path = _find_layers(model)
     if layers is None:
@@ -363,6 +429,10 @@ def _install_patch():
             router_weight_model = os.environ.get("LAYERWISE_ROUTER_WEIGHT_MODEL", "").strip()
             if router_weight_model:
                 _apply_router_weights(root, router_weight_model, targets)
+            if os.environ.get("LAYERWISE_SYNTHETIC_HASH_ROUTING", "0") == "1":
+                alpha = float(os.environ.get("LAYERWISE_SYNTHETIC_HASH_ALPHA", "1.2"))
+                seed = int(os.environ.get("LAYERWISE_SYNTHETIC_HASH_SEED", "20260612"))
+                _apply_synthetic_hash_routing(root, alpha=alpha, seed=seed)
             # Register PytHooks EARLY only when compile is disabled; under
             # VLLM_COMPILE mode dynamo can't trace `"{}".format(marker_dict)`
             # inside `construct_marker_dict_and_push` and the first forward

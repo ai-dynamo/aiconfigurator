@@ -10,7 +10,7 @@ from collector.layerwise.fpm.datapoint_generator import default_shapes, generate
 from collector.layerwise.fpm.docker import build_collect_command
 from collector.layerwise.vllm import collect as vllm_collect
 from collector.layerwise.vllm import datapoint_generator as vllm_datapoints
-from collector.layerwise.vllm.registry import select_models
+from collector.layerwise.vllm.registry import all_models, select_models
 
 
 def test_default_run_dir_includes_prefix_and_model_slug():
@@ -67,6 +67,23 @@ def test_layerwise_public_cli_defaults_to_all_registry_models(tmp_path):
     }
     assert any(unit.row_base["ep"] == 2 for unit in units if unit.row_base["model"].endswith("35B-A3B"))
     assert all(unit.row_base["ep"] == 1 for unit in units if unit.row_base["model"] == "Qwen/Qwen3-32B")
+
+
+def test_layerwise_registry_can_select_optional_deepseek_flash_without_expanding_defaults():
+    defaults = all_models()
+    selected = select_models("deepseek-ai/DeepSeek-V4-Flash")
+
+    assert {model.model for model in defaults} == {
+        "Qwen/Qwen3-32B",
+        "Qwen/Qwen3.6-35B-A3B",
+    }
+    assert len(selected) == 1
+    assert selected[0].model == "deepseek-ai/DeepSeek-V4-Flash"
+    assert selected[0].kind == "moe"
+    assert selected[0].ep_sizes == (1, 2, 4, 8)
+    assert selected[0].gemm_quant == "fp8_block"
+    assert selected[0].moe_quant == "w4a8_mxfp4_mxfp8"
+    assert selected[0].kv_quant == "fp8"
 
 
 def test_layerwise_auto_ep_sizes_skip_intermediate_moe_tp(tmp_path):
@@ -245,19 +262,19 @@ def test_fpm_case_generation_and_shell_command(tmp_path):
 
     cmd = build_collect_command(args, cases[-1], tmp_path)
     assert cmd.argv[:2] == ["bash", "collector/layerwise/fpm_ground_truth/collect_fpm_metrics.sh"]
-    assert ["--tp-size", "2"] == cmd.argv[cmd.argv.index("--tp-size"): cmd.argv.index("--tp-size") + 2]
-    assert ["--ep-size", "2"] == cmd.argv[cmd.argv.index("--ep-size"): cmd.argv.index("--ep-size") + 2]
+    assert cmd.argv[cmd.argv.index("--tp-size"): cmd.argv.index("--tp-size") + 2] == ["--tp-size", "2"]
+    assert cmd.argv[cmd.argv.index("--ep-size"): cmd.argv.index("--ep-size") + 2] == ["--ep-size", "2"]
     assert "--real-workload" in cmd.argv
     assert "--max-model-len" not in cmd.argv
-    assert ["--real-workload-requests", "128"] == cmd.argv[
+    assert cmd.argv[
         cmd.argv.index("--real-workload-requests"): cmd.argv.index("--real-workload-requests") + 2
-    ]
-    assert ["--real-workload-isl-max", "16384"] == cmd.argv[
+    ] == ["--real-workload-requests", "128"]
+    assert cmd.argv[
         cmd.argv.index("--real-workload-isl-max"): cmd.argv.index("--real-workload-isl-max") + 2
-    ]
-    assert ["--real-workload-osl-mean", "1024"] == cmd.argv[
+    ] == ["--real-workload-isl-max", "16384"]
+    assert cmd.argv[
         cmd.argv.index("--real-workload-osl-mean"): cmd.argv.index("--real-workload-osl-mean") + 2
-    ]
+    ] == ["--real-workload-osl-mean", "1024"]
     assert "--dry-run" in cmd.argv
     assert cmd.argv[-3:] == ["--", "--foo", "bar"]
 

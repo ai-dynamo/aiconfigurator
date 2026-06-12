@@ -16,17 +16,78 @@ from compare_aic_layerwise_fpm import (
     _infer_observed_fpm_context_budget,
     _load_fpm,
     _load_fpm_max_num_batched_tokens,
+    _match_decode,
     _mixed_pathology_reasons,
+    _model_defaults,
+    _nearest_available_generation_kv,
     _nonterminal_mixed_chunk_counter_ids,
+    _prepare_moe_overlay_systems_root,
 )
 from compare_layerwise_fpm import compare_layerwise_to_fpm
 from summarize_layerwise_fpm_comparisons import summarize_manifest
 
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.layerwise import _interpolated_layer_scale_metadata
 
 
 def _write(path: Path, text: str) -> None:
     path.write_text(text.strip() + "\n")
+
+
+def test_diagnostic_model_defaults_include_canonical_deepseek_v4_flash() -> None:
+    model = _model_defaults("deepseek-ai/DeepSeek-V4-Flash", tp=1, moe_tp=1, ep=1)
+
+    assert model.model_path == "deepseek-ai/DeepSeek-V4-Flash"
+    assert model._num_layers == 43
+    assert model._hidden_size == 4096
+    assert model._topk == 6
+    assert model._num_experts == 256
+    assert model._moe_inter_size == 2048
+    assert model.config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
+    assert model.config.moe_quant_mode == common.MoEQuantMode.w4a8_mxfp4_mxfp8
+    assert model.config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+    assert model.config.fmha_quant_mode == common.FMHAQuantMode.fp8
+    assert model.config.nextn == 0
+    assert isinstance(model.extra_params, common.DeepSeekV4Config)
+
+
+def test_prepare_moe_overlay_systems_root_keeps_base_data_and_overlays_moe(tmp_path) -> None:
+    systems_root = tmp_path / "systems"
+    version_root = systems_root / "data" / "b300_sxm" / "vllm" / "0.20.1"
+    version_root.mkdir(parents=True)
+    _write(
+        systems_root / "b300_sxm.yaml",
+        """data_dir: data/b300_sxm
+gpu:
+  sm_version: 103
+node:
+  num_gpus_per_node: 8
+misc:
+  nccl_version: '2.27'
+""",
+    )
+    _write(version_root / "layerwise_perf.csv", "framework,version\nvLLM,0.20.1")
+    local_moe = tmp_path / "moe_perf.txt"
+    _write(
+        local_moe,
+        """framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency
+VLLM,0.20.1,test,moe,vllm_mxfp4_moe,w4a8_mxfp4_mxfp8,1,4096,2048,6,256,1,1,power_law_1.2,0.1
+""",
+    )
+
+    overlay = Path(
+        _prepare_moe_overlay_systems_root(
+            systems_root=str(systems_root),
+            moe_perf_file=local_moe,
+            output=tmp_path / "compare.csv",
+        )
+    )
+
+    overlay_version = overlay / "data" / "b300_sxm" / "vllm" / "0.20.1"
+    assert (overlay / "b300_sxm.yaml").is_file()
+    assert (overlay_version / "layerwise_perf.csv").exists()
+    assert (overlay_version / "moe_perf.txt").read_text().count("w4a8_mxfp4_mxfp8") == 1
+    assert not (overlay_version / "moe_perf.parquet").exists()
 
 
 def test_add_mixed_per_op_columns_emits_stable_schema() -> None:
@@ -519,6 +580,54 @@ def test_decode_pathology_filter_flags_isolated_high_latency_row() -> None:
     assert reasons[0].startswith("decode_latency_above_peer_envelope:")
 
 
+def test_decode_pathology_filter_flags_decode_tail_after_prefill() -> None:
+    rows = [
+        {
+            "phase": "mixed",
+            "ctx_tokens": "79",
+            "decode_requests": "3",
+            "mean_decode_kv_tokens": "4099.000",
+            "latency_ms": "29.344",
+        },
+        {
+            "phase": "decode",
+            "decode_requests": "4",
+            "mean_decode_kv_tokens": "4099.000",
+            "latency_ms": "30.084",
+        },
+        {
+            "phase": "decode",
+            "decode_requests": "3",
+            "mean_decode_kv_tokens": "4099.000",
+            "latency_ms": "8.950",
+        },
+        {
+            "phase": "decode",
+            "decode_requests": "2",
+            "mean_decode_kv_tokens": "4100.000",
+            "latency_ms": "7.677",
+        },
+        {
+            "phase": "decode",
+            "decode_requests": "1",
+            "mean_decode_kv_tokens": "4101.000",
+            "latency_ms": "7.752",
+        },
+    ]
+
+    reasons = _decode_pathology_reasons(
+        rows,
+        peer_kv_window=8.0,
+        peer_batch_window=2,
+        min_peer_count=1,
+        latency_factor=5.0,
+        min_latency_ms=20.0,
+    )
+
+    assert set(reasons) == {1, 2, 3, 4}
+    assert reasons[1].startswith("decode_segment_after_prefill:")
+
+
 def test_load_fpm_returns_filtered_row_audit(tmp_path) -> None:
     fpm = tmp_path / "fpm.csv"
     _write(
@@ -539,6 +648,29 @@ context,3,w,0,128,1,0,0,0,0,0.000,0,0,0,0,17.0
     assert len(filtered) == 1
     assert filtered[0]["counter_id"] == "1"
     assert filtered[0]["reason"].startswith("decode_latency_above_peer_envelope:")
+
+
+def test_load_fpm_reconstructs_leading_chunked_context_requests(tmp_path) -> None:
+    fpm = tmp_path / "fpm.csv"
+    _write(
+        fpm,
+        """
+phase,counter_id,worker_id,dp_rank,ctx_tokens,ctx_requests,ctx_kv_tokens,decode_tokens,decode_requests,decode_kv_tokens,mean_decode_kv_tokens,queued_ctx_tokens,queued_ctx_requests,queued_decode_requests,queued_decode_kv_tokens,latency_ms
+context,1,w,0,128,1,0,0,0,0,0.000,0,0,0,0,17.0
+context,2,w,0,2048,1,0,0,0,0,0.000,0,0,0,0,100.0
+context,3,w,0,2048,1,2048,0,0,0,0.000,0,0,0,0,110.0
+decode,4,w,0,0,0,0,1,1,4096,4096.000,0,0,0,0,8.0
+context,5,w,0,2048,1,0,0,0,0,0.000,0,0,0,0,999.0
+context,6,w,0,2048,1,2048,0,0,0,0.000,0,0,0,0,999.0
+""",
+    )
+
+    context, decode, _ = _load_fpm(fpm, filter_pathological_context=True)
+
+    assert context[(1, 128, 0)] == [17.0]
+    assert context[(1, 4096, 0)] == [210.0]
+    assert (1, 2048, 0) not in context
+    assert decode[(1, 4096.0)] == [8.0]
 
 
 def test_decode_comparison_uses_exact_kv_bin(tmp_path) -> None:
@@ -683,6 +815,64 @@ decode,3,w,0,0,0,0,4,4,16420,4105.000,0,0,0,0,100.0
     assert rows[0]["fpm_samples"] == 2
     assert rows[0]["fpm_ms"] == pytest.approx(12.0)
     assert rows[0]["error_pct"] == pytest.approx(0.0)
+
+
+def test_aic_decode_pooled_match_returns_representative_kv() -> None:
+    decode = {
+        (4, 4097.0): [10.0],
+        (4, 4098.0): [14.0, 16.0],
+        (4, 4105.0): [100.0],
+    }
+
+    matched = _match_decode(
+        decode,
+        batch_size=4,
+        past_kv=4096,
+        mode="pooled",
+        max_distance=4.0,
+        pool_forward_window=4.0,
+    )
+
+    assert matched is not None
+    kv_label, samples, match, representative_kv = matched
+    assert kv_label == "4097.000..4098.000"
+    assert samples == [10.0, 14.0, 16.0]
+    assert match == "pooled"
+    assert representative_kv == 4098
+
+
+def test_aic_decode_query_snaps_to_nearest_collected_layerwise_kv() -> None:
+    layerwise_data = {
+        "qwen/test": {
+            "GEN": {
+                1: {
+                    1: {4096: {"latency": 1.0}},
+                    4: {4096: {"latency": 1.5}},
+                }
+            }
+        }
+    }
+
+    assert (
+        _nearest_available_generation_kv(
+            layerwise_data,
+            model="Qwen/Test",
+            tp_size=1,
+            requested_kv=4098,
+            max_distance=6.0,
+        )
+        == 4096
+    )
+    assert (
+        _nearest_available_generation_kv(
+            layerwise_data,
+            model="Qwen/Test",
+            tp_size=1,
+            requested_kv=8192,
+            max_distance=6.0,
+        )
+        is None
+    )
 
 
 def test_comparison_keeps_multi_model_rows_separate(tmp_path) -> None:

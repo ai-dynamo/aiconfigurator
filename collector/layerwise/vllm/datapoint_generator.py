@@ -576,8 +576,11 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
         attn_tp = tp
         moe_tp = args.moe_tp if is_moe else 1
         ep = (tp // moe_tp) if is_moe else 1
-        if physical_tp and ep != 1:
-            print(f"[skip] physical TP diagnostic currently supports ep=1 only, got tp={tp}, ep={ep}")
+        if physical_tp and ep != 1 and (not is_moe or moe_tp != 1):
+            print(
+                "[skip] physical TP diagnostic with EP currently supports MoE pure-EP only, "
+                f"got tp={tp}, moe_tp={moe_tp}, ep={ep}"
+            )
             continue
         physical_tp_real_weights = bool(getattr(args, "physical_tp_real_weights", False))
         if physical_tp_real_weights and not physical_tp:
@@ -615,6 +618,11 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
                     "--worker-extension-cls",
                     "vllm_worker_extension.LayerwiseWorkerExtension",
                 )
+                if is_moe and ep > 1:
+                    work_unit_extra_vllm_args = (
+                        *work_unit_extra_vllm_args,
+                        "--enable-expert-parallel",
+                    )
                 if physical_tp_real_weights:
                     work_unit_extra_vllm_args = (
                         *work_unit_extra_vllm_args,

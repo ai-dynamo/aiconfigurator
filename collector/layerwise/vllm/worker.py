@@ -68,6 +68,31 @@ def _worker_append_event(
         os.fsync(f.fileno())
         fcntl.flock(f, fcntl.LOCK_UN)
 
+
+def _preload_flashinfer_comm(status_path: Path, work_unit_id: str, attempt_id: int) -> None:
+    """Bind FlashInfer comm to the real CUDA runtime before TileLang loads its stub."""
+
+    try:
+        import flashinfer.comm  # noqa: F401
+    except ModuleNotFoundError:
+        return
+    except Exception as exc:
+        _worker_append_event(
+            status_path,
+            "flashinfer_comm_preload_failed",
+            work_unit_id=work_unit_id,
+            attempt_id=attempt_id,
+            error=repr(exc),
+        )
+        return
+    _worker_append_event(
+        status_path,
+        "flashinfer_comm_preloaded",
+        work_unit_id=work_unit_id,
+        attempt_id=attempt_id,
+    )
+
+
 def _dummy_prompts(
     batch_size: int,
     input_len: int,
@@ -400,8 +425,10 @@ def _run_generate_prefix_suffix(
     )
 
 def _use_live_step_driver(dp: DataPoint) -> bool:
-    """Return whether one measured step drifts by at most 1% of past KV."""
+    """Return whether the opt-in live engine-step driver should handle a row."""
 
+    if os.environ.get("LAYERWISE_USE_LIVE_STEP_DRIVER", "0") != "1":
+        return False
     if dp.past_kv <= 0:
         return False
     if dp.phase == "gen" and dp.past_kv >= 32768:
@@ -797,6 +824,10 @@ def run_worker(spec_path: Path) -> None:
         os.environ["LAYERWISE_MOE_NOOP"] = "1"
     else:
         os.environ.pop("LAYERWISE_MOE_NOOP", None)
+    if spec.get("moe_weight_mode") == "dummy":
+        os.environ["LAYERWISE_SYNTHETIC_HASH_ROUTING"] = "1"
+    else:
+        os.environ.pop("LAYERWISE_SYNTHETIC_HASH_ROUTING", None)
     physical_gpus = int(spec.get("physical_gpus") or 1)
     if spec.get("router_weight_model") and physical_gpus > 1:
         os.environ["LAYERWISE_ROUTER_WEIGHT_MODEL"] = str(spec["router_weight_model"])
@@ -847,6 +878,7 @@ def run_worker(spec_path: Path) -> None:
         work_unit_id=work_unit_id,
         attempt_id=spec["attempt_id"],
     )
+    _preload_flashinfer_comm(status_path, work_unit_id, int(spec["attempt_id"]))
     import vllm_layer_skip_patch  # noqa: F401
     import vllm_scheduler_timing_patch  # noqa: F401
     import vllm_step_marker

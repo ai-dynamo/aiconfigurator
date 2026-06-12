@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+_MODE_INDEX_KEY = "__mode_index__"
 
 
 def _parse_bool(value) -> bool:
@@ -73,6 +74,29 @@ def _is_scheduler_envelope_entry(entry: dict | None) -> bool:
     return str(entry.get("latency_source") or "") in {"schedule_to_update", "worker_wall", "fpm_wall"}
 
 
+def _entry_mode(entry: dict | None) -> str:
+    """Return the MoE weight mode label for a layerwise entry."""
+
+    if not isinstance(entry, dict):
+        return ""
+    value = entry.get("moe_weight_mode")
+    if value in (None, ""):
+        return ""
+    return str(value)
+
+
+def _preferred_default_entry(existing: dict, entry: dict) -> dict:
+    """Pick the default row when alternative MoE row modes share one shape."""
+
+    priority = {"dummy": 30, "real_router": 25, "full": 20, "": 10, "noop": 0}
+    existing_score = priority.get(_entry_mode(existing), 10)
+    entry_score = priority.get(_entry_mode(entry), 10)
+    selected = entry if entry_score > existing_score else existing
+    result = dict(selected)
+    result.setdefault("components", [_entry_component(result)])
+    return result
+
+
 def _merge_layerwise_entries(existing: dict | None, entry: dict) -> dict:
     """Merge representative rows for the same public layerwise query shape."""
 
@@ -80,6 +104,8 @@ def _merge_layerwise_entries(existing: dict | None, entry: dict) -> dict:
         result = dict(entry)
         result["components"] = [_entry_component(entry)]
         return result
+    if _entry_mode(existing) and _entry_mode(entry) and _entry_mode(existing) != _entry_mode(entry):
+        return _preferred_default_entry(existing, entry)
     if _is_scheduler_envelope_entry(existing) != _is_scheduler_envelope_entry(entry):
         selected = dict(existing if _is_scheduler_envelope_entry(existing) else entry)
         selected.setdefault("components", [_entry_component(selected)])
@@ -140,6 +166,7 @@ def load_layerwise_data(layerwise_file):
         and _is_scheduler_envelope_entry(row)
     }
     data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
+    mode_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
     for row in rows:
         model = str(row["model"]).lower()
         phase = str(row["phase"]).upper()
@@ -177,16 +204,34 @@ def load_layerwise_data(layerwise_file):
         if value is not None:
             entry["max_num_batched_tokens"] = value
         entry["includes_moe"] = _parse_bool(row.get("includes_moe"))
+        if row.get("moe_weight_mode") not in (None, ""):
+            entry["moe_weight_mode"] = str(row["moe_weight_mode"])
         for metric in ("latency_source", "measurement_mode", "attribution_target", "vllm_config_hash"):
             if row.get(metric) not in (None, ""):
                 entry[metric] = str(row[metric])
         if phase == "CTX":
             existing = data[model][phase][tp_size][seq_len_q].get(seq_len_kv_cache)
             data[model][phase][tp_size][seq_len_q][seq_len_kv_cache] = _merge_layerwise_entries(existing, entry)
+            if entry.get("moe_weight_mode") not in (None, ""):
+                mode = str(entry["moe_weight_mode"])
+                existing = mode_data[model][phase][tp_size][mode][seq_len_q].get(seq_len_kv_cache)
+                mode_data[model][phase][tp_size][mode][seq_len_q][seq_len_kv_cache] = _merge_layerwise_entries(
+                    existing,
+                    entry,
+                )
         else:
             existing = data[model][phase][tp_size][batch_size].get(seq_len_kv_cache)
             data[model][phase][tp_size][batch_size][seq_len_kv_cache] = _merge_layerwise_entries(existing, entry)
+            if entry.get("moe_weight_mode") not in (None, ""):
+                mode = str(entry["moe_weight_mode"])
+                existing = mode_data[model][phase][tp_size][mode][batch_size].get(seq_len_kv_cache)
+                mode_data[model][phase][tp_size][mode][batch_size][seq_len_kv_cache] = _merge_layerwise_entries(
+                    existing,
+                    entry,
+                )
 
+    if mode_data:
+        data[_MODE_INDEX_KEY] = mode_data
     return data
 
 
@@ -348,6 +393,7 @@ class Layerwise(Operation):
         batch_size: int,
         seq_len: int,
         seq_len_kv_cache: int = 0,
+        moe_weight_mode: str | None = None,
     ) -> dict[str, float]:
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
@@ -359,14 +405,25 @@ class Layerwise(Operation):
             raise PerfDataNotAvailableError("Layerwise data not available for this system/backend/version")
 
         data = data_wrapper.data
-        if model not in data:
-            raise PerfDataNotAvailableError(f"Model {model!r} not found in layerwise data")
-        if phase not in data[model]:
-            raise PerfDataNotAvailableError(f"Phase {phase!r} not found in layerwise data for {model}")
-        if tp_size not in data[model][phase]:
-            raise PerfDataNotAvailableError(f"tp_size={tp_size} not found in layerwise data for {model}/{phase}")
+        mode = str(moe_weight_mode or "")
+        if mode:
+            mode_index = data.get(_MODE_INDEX_KEY, {})
+            try:
+                data = mode_index[model][phase][tp_size][mode]
+                tp_data = data
+            except KeyError as exc:
+                raise PerfDataNotAvailableError(
+                    f"Layerwise data for moe_weight_mode={mode!r} not found for {model}/{phase}/tp{tp_size}"
+                ) from exc
+        else:
+            if model not in data:
+                raise PerfDataNotAvailableError(f"Model {model!r} not found in layerwise data")
+            if phase not in data[model]:
+                raise PerfDataNotAvailableError(f"Phase {phase!r} not found in layerwise data for {model}")
+            if tp_size not in data[model][phase]:
+                raise PerfDataNotAvailableError(f"tp_size={tp_size} not found in layerwise data for {model}/{phase}")
 
-        tp_data = data[model][phase][tp_size]
+            tp_data = data[model][phase][tp_size]
         if phase == "CTX":
             if seq_len in tp_data and seq_len_kv_cache in tp_data[seq_len]:
                 result = tp_data[seq_len][seq_len_kv_cache]
@@ -443,6 +500,8 @@ class Layerwise(Operation):
         for metric in ("latency_source", "measurement_mode", "attribution_target", "vllm_config_hash"):
             if result.get(metric) not in (None, ""):
                 out[metric] = str(result[metric])
+        if result.get("moe_weight_mode") not in (None, ""):
+            out["moe_weight_mode"] = str(result["moe_weight_mode"])
         if isinstance(result.get("components"), list):
             out["components"] = [dict(component) for component in result["components"] if isinstance(component, dict)]
         return out

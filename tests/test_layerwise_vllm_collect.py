@@ -50,6 +50,7 @@ cl = SimpleNamespace(
     _lookup_worker_wall_aggs=scheduler._lookup_worker_wall_aggs,
     _prefix_suffix_prompts=worker._prefix_suffix_prompts,
     _reduce_agg_latency=nsys._reduce_agg_latency,
+    _use_live_step_driver=worker._use_live_step_driver,
     build_public_work_units=dpg.build_public_work_units,
     build_work_units=dpg.build_work_units,
     oom_dominates=scheduler.oom_dominates,
@@ -358,6 +359,60 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             )
             self.assertEqual(units[0].physical_gpus, 2)
             self.assertEqual(units[0].router_weight_model, None)
+            parallel_patcher.assert_not_called()
+            depth_patcher.assert_called_once()
+
+    def test_public_physical_tp_ep_enables_vllm_expert_parallel(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            args = cl._build_arg_parser().parse_args([
+                "--models",
+                "model",
+                "--tp-sizes",
+                "2",
+                "--ep-sizes",
+                "2",
+                "--phases",
+                "ctx",
+                "--run-preset",
+                "smoke",
+                "--physical-tp",
+            ])
+            args.run_dir = tmp_path
+            args.work_dir = str(tmp_path / "profiles")
+            args.config_cache_dir = str(tmp_path / "config_cache")
+            model = LayerwiseModel(model="model", kind="moe", tp_sizes=(2,), ep_sizes=(1, 2))
+            moe_config = {
+                "num_attention_heads": 8,
+                "num_key_value_heads": 8,
+                "intermediate_size": 1024,
+                "moe_intermediate_size": 512,
+                "num_experts": 16,
+                "num_hidden_layers": 4,
+            }
+
+            with (
+                mock.patch.object(dpg, "_load_original_config", return_value=moe_config),
+                mock.patch.object(dpg, "patch_for_parallelism") as parallel_patcher,
+                mock.patch.object(dpg, "patch_model_path", return_value=str(tmp_path / "depth_only")) as depth_patcher,
+            ):
+                units = cl.build_public_work_units(args, [model])
+
+            self.assertEqual(len(units), 1)
+            self.assertEqual(units[0].model_dir, str(tmp_path / "depth_only"))
+            self.assertEqual(units[0].row_base["moe_tp"], 1)
+            self.assertEqual(units[0].row_base["ep"], 2)
+            self.assertEqual(
+                units[0].extra_vllm_args,
+                (
+                    "--tensor-parallel-size",
+                    "2",
+                    "--worker-extension-cls",
+                    "vllm_worker_extension.LayerwiseWorkerExtension",
+                    "--enable-expert-parallel",
+                ),
+            )
+            self.assertEqual(units[0].physical_gpus, 2)
             parallel_patcher.assert_not_called()
             depth_patcher.assert_called_once()
 
@@ -772,6 +827,60 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(kernel_count, 0)
         self.assertEqual(latency_us, 10_000.0)
 
+    def test_scheduler_timing_lookup_sums_chunked_context_by_run(self):
+        events = [
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "control_phase": "ctx",
+                "control_step": 4096,
+                "control_bs": 1,
+                "control_past": 0,
+                "control_run": 0,
+                "fpm_wall_time_ms": 220.0,
+            },
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "control_phase": "ctx",
+                "control_step": 4096,
+                "control_bs": 1,
+                "control_past": 0,
+                "control_run": 0,
+                "fpm_wall_time_ms": 87.0,
+            },
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "control_phase": "ctx",
+                "control_step": 4096,
+                "control_bs": 1,
+                "control_past": 0,
+                "control_run": 1,
+                "fpm_wall_time_ms": 221.0,
+            },
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "control_phase": "ctx",
+                "control_step": 4096,
+                "control_bs": 1,
+                "control_past": 0,
+                "control_run": 1,
+                "fpm_wall_time_ms": 88.0,
+            },
+        ]
+
+        aggs = cl._lookup_scheduler_timing_aggs(events, "wu", cl.DataPoint("ctx", 1, 4096, 0))
+        latency_us, _rms_us, _kernel_count, _rms_kernel_count, measure_count = cl._reduce_agg_latency(
+            aggs,
+            latency_source="span",
+            aggregation="mean",
+        )
+
+        self.assertEqual(measure_count, 2)
+        self.assertEqual(latency_us, 308_000.0)
+
     def test_repeat_aggregation_selects_median_latency(self):
         parsed = cl._aggregate_step_rows([
             {
@@ -969,6 +1078,15 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             cl._live_decode_past_lengths(dp)
+
+    def test_live_step_driver_is_opt_in(self):
+        dp = cl.DataPoint("gen", 1, 1, 4096)
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(cl._use_live_step_driver(dp))
+
+        with mock.patch.dict(os.environ, {"LAYERWISE_USE_LIVE_STEP_DRIVER": "1"}, clear=True):
+            self.assertTrue(cl._use_live_step_driver(dp))
 
     def test_oom_pruning_is_phase_local_and_monotonic(self):
         failed_ctx = cl.DataPoint("ctx", 1, 128, 0)

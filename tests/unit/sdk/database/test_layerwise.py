@@ -50,3 +50,59 @@ misc:
     assert detail["layer_type"] == "moe"
     assert detail["measured_layer_count"] == pytest.approx(1)
     assert detail["layer_multiplier"] == pytest.approx(64)
+
+
+def test_query_layerwise_detail_selects_moe_weight_mode(tmp_path):
+    systems_root = tmp_path / "systems"
+    data_dir = systems_root / "data" / "test_system" / "vllm" / "0.20.1"
+    data_dir.mkdir(parents=True)
+    (systems_root / "test_system.yaml").write_text(
+        """
+data_dir: data/test_system
+gpu:
+  mem_capacity: 1
+node:
+  num_gpus_per_node: 1
+misc:
+  nccl_mem: {1: 0}
+  other_mem: 0
+"""
+    )
+    (data_dir / "layerwise_perf.csv").write_text(
+        "\n".join(
+            [
+                "framework,framework_version,system,model,phase,tp_size,batch_size,seq_len_q,seq_len_kv_cache,"
+                "latency_ms,rms_latency_ms,rms_kernel_count,includes_moe,moe_weight_mode,layer_type,layer_index,"
+                "measured_layer_count,layer_multiplier",
+                "vLLM,0.20.1,test,deepseek-ai/DeepSeek-V4-Flash,CTX,2,1,128,0,21.0,0,0,false,noop,moe,0,43,43",
+                "vLLM,0.20.1,test,deepseek-ai/DeepSeek-V4-Flash,CTX,2,1,128,0,27.0,0,0,true,dummy,moe,0,43,43",
+                "",
+            ]
+        )
+    )
+    db = PerfDatabase("test_system", "vllm", "0.20.1", systems_root=str(systems_root))
+
+    default_detail = db.query_layerwise_detail("deepseek-ai/DeepSeek-V4-Flash", "CTX", 2, 1, 128)
+    noop_detail = db.query_layerwise_detail(
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "CTX",
+        2,
+        1,
+        128,
+        moe_weight_mode="noop",
+    )
+    dummy_detail = db.query_layerwise_detail(
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "CTX",
+        2,
+        1,
+        128,
+        moe_weight_mode="dummy",
+    )
+
+    assert default_detail["latency"] == pytest.approx(27.0)
+    assert default_detail["moe_weight_mode"] == "dummy"
+    assert noop_detail["latency"] == pytest.approx(21.0)
+    assert noop_detail["moe_weight_mode"] == "noop"
+    assert dummy_detail["latency"] == pytest.approx(27.0)
+    assert dummy_detail["moe_weight_mode"] == "dummy"

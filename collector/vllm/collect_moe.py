@@ -158,6 +158,52 @@ class _QwenSharedExpert(nn.Module):
         return torch.sigmoid(self.gate(hidden_states)) * self.down(F.silu(self.up(hidden_states)))
 
 
+def _is_deepseek_v4_model(model_name: str) -> bool:
+    """Return whether a model name should use DeepSeek-V4 MoE routing settings."""
+
+    return "DeepSeek-V4" in model_name
+
+
+def _moe_distribution_label(distribution: str, power_law_alpha: float, *, use_cuda_graph: bool) -> str:
+    """Return the perf-table distribution key for one MoE measurement row."""
+
+    if distribution in {"power_law", "sampled_zipf"}:
+        label = f"{distribution}_{power_law_alpha}"
+    else:
+        label = distribution
+    if not use_cuda_graph:
+        return f"{label}_eager"
+    return label
+
+
+def _deepseek_v4_module_settings(
+    *,
+    topk: int,
+    num_experts: int,
+    device: str,
+) -> dict:
+    """Build DeepSeek-V4 FusedMoE kwargs that affect routed-expert latency."""
+
+    vocab_size = 129280
+    return {
+        "prefix": "model.layers.0.mlp.experts",
+        "scoring_func": "sqrtsoftplus",
+        "routed_scaling_factor": 1.5,
+        "swiglu_limit": 10.0,
+        "router_logits_dtype": torch.float32,
+        # DeepSeek-V4 uses hash MoE in the first layers. The layerwise collector
+        # currently measures layer 0 and scales it, so the op addback follows
+        # the same layer-local routing mode without needing real weights.
+        "hash_indices_table": torch.randint(
+            0,
+            num_experts,
+            (vocab_size, topk),
+            dtype=torch.int32,
+            device=device,
+        ),
+    }
+
+
 def _ensure_workspace_manager(device: str) -> None:
     if init_workspace_manager is None:
         return
@@ -387,6 +433,9 @@ def run_moe_torch(
     moe_module = None
     module_vllm_cfg = None
     qwen_gate_module = None
+    deepseek_hash_indices_table = None
+    deepseek_hash_indices = None
+    deepseek_hash_indices_list = None
 
     if use_mxfp4 or use_unquantized_module:
         if use_mxfp4 and not _mxfp4_available:
@@ -396,7 +445,20 @@ def run_moe_torch(
 
         _ensure_workspace_manager(device)
 
-        module_quant_config = Mxfp4Config() if use_mxfp4 else None
+        module_quant_config = None
+        if use_mxfp4:
+            if "DeepSeek-V4" in model_name:
+                from vllm.model_executor.models.deepseek_v4 import DeepseekV4FP8Config
+
+                module_quant_config = DeepseekV4FP8Config.from_config(
+                    {
+                        "quant_method": "fp8",
+                        "activation_scheme": "dynamic",
+                        "weight_block_size": [128, 128],
+                    }
+                )
+            else:
+                module_quant_config = Mxfp4Config()
         module_config = get_moe_quantization_module_config("vllm", moe_type, model_name=model_name)
 
         # pcp_size=1: vLLM 0.17.0 added prefill context parallel to FusedMoE
@@ -444,6 +506,14 @@ def run_moe_torch(
                 "activation": str(module_config.get("activation", "silu")),
                 "pcp_size": 1,
             }
+            if _is_deepseek_v4_model(model_name):
+                deepseek_settings = _deepseek_v4_module_settings(
+                    topk=topk,
+                    num_experts=num_experts,
+                    device=device,
+                )
+                deepseek_hash_indices_table = deepseek_settings["hash_indices_table"]
+                fused_moe_kwargs.update(deepseek_settings)
             if use_qwen_shared_module:
                 qwen_gate_module = _SyntheticQwenGate(
                     hidden_size,
@@ -608,23 +678,49 @@ def run_moe_torch(
         # Module paths use FusedMoE.forward(hidden_states, router_logits), which
         # does routing internally; other paths need pre-computed topk weights/ids.
         num_iter = 5 if distributed == "power_law" else 1
+        input_ids_list = None
+        input_ids = None
         if use_mxfp4 or use_unquantized_module:
             # FusedMoE.forward() takes raw router logits (num_tokens, num_experts)
+            logits_dtype = torch.float32 if _is_deepseek_v4_model(model_name) else torch.bfloat16
             if distributed == "power_law":
                 actual_logits_list = [
                     power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha)
-                    .to(torch.bfloat16)
+                    .to(logits_dtype)
                     .to(device)
                     for _ in range(num_iter)
                 ]
             elif distributed == "sampled_zipf":
                 actual_logits = sampled_zipf_logits(num_tokens, num_experts, topk, power_law_alpha).to(
-                    torch.bfloat16
+                    logits_dtype
                 ).to(device)
             elif distributed == "balanced":
-                actual_logits = balanced_logits(num_tokens, num_experts, topk).to(torch.bfloat16).to(device)
+                actual_logits = balanced_logits(num_tokens, num_experts, topk).to(logits_dtype).to(device)
             else:
                 raise ValueError(f"Unsupported distributed mode: {distributed}")
+            if deepseek_hash_indices_table is not None:
+                vocab_size = deepseek_hash_indices_table.shape[0]
+                if distributed == "power_law":
+                    input_ids_list = []
+                    deepseek_hash_indices_list = []
+                    for logits in actual_logits_list:
+                        if logits.shape[0] > vocab_size:
+                            raise ValueError(
+                                "DeepSeek-V4 synthetic hash routing requires num_tokens <= vocab_size, "
+                                f"got num_tokens={logits.shape[0]}, vocab_size={vocab_size}"
+                            )
+                        _, selected = torch.topk(logits, topk, dim=-1)
+                        deepseek_hash_indices_list.append(selected.to(torch.int32).contiguous())
+                        input_ids_list.append(torch.arange(logits.shape[0], dtype=torch.int32, device=device))
+                else:
+                    if num_tokens > vocab_size:
+                        raise ValueError(
+                            "DeepSeek-V4 synthetic hash routing requires num_tokens <= vocab_size, "
+                            f"got num_tokens={num_tokens}, vocab_size={vocab_size}"
+                        )
+                    _, selected = torch.topk(actual_logits, topk, dim=-1)
+                    deepseek_hash_indices = selected.to(torch.int32).contiguous()
+                    input_ids = torch.arange(num_tokens, dtype=torch.int32, device=device)
         elif distributed in {"power_law", "sampled_zipf"}:
             topk_weights_list = []
             topk_ids_list = []
@@ -738,13 +834,19 @@ def run_moe_torch(
                 ),
             )
 
-        def _module_forward(hs, rl):
+        def _module_forward(hs, rl, input_token_ids=None, hash_indices=None):
             # vLLM's custom MoE op increments a per-context layer index on
             # each forward call.  We only register one layer, so reset the
             # counter before every call to avoid an index-out-of-range error.
             fwd_ctx = get_forward_context()
             if hasattr(fwd_ctx, "moe_layer_index"):
                 fwd_ctx.moe_layer_index = 0
+            if hash_indices is not None:
+                # DeepSeek-V4 hash MoE routes from ``input_token_ids`` through
+                # ``hash_indices_table``. Keep that production path active, but
+                # overwrite the synthetic table rows used by this microbenchmark
+                # so the requested load distribution is actually measured.
+                deepseek_hash_indices_table[: hash_indices.shape[0]].copy_(hash_indices)
             if qwen_gate_module is not None:
                 qwen_gate_module.override_logits = rl
                 router_input = hs
@@ -761,20 +863,27 @@ def run_moe_torch(
                 original_all_reduce = moe_runner_module.tensor_model_parallel_all_reduce
                 moe_runner_module.tensor_model_parallel_all_reduce = lambda x: x
                 try:
-                    moe_module.forward(hs, router_input)
+                    moe_module.forward(hs, router_input, input_token_ids)
                 finally:
                     moe_runner_module.tensor_model_parallel_all_reduce = original_all_reduce
             else:
-                moe_module.forward(hs, router_input)
+                moe_module.forward(hs, router_input, input_token_ids)
 
         def run_single_iteration():
             if use_mxfp4 or use_unquantized_module:
                 # FusedMoE.forward(hidden_states, router_logits) does routing internally.
                 if distributed == "power_law":
-                    for logits in actual_logits_list:
-                        _module_forward(hidden_states[: logits.shape[0]], logits[: logits.shape[0]])
+                    ids_iter = input_ids_list or [None] * len(actual_logits_list)
+                    hash_iter = deepseek_hash_indices_list or [None] * len(actual_logits_list)
+                    for logits, ids, hash_indices in zip(actual_logits_list, ids_iter, hash_iter, strict=True):
+                        _module_forward(
+                            hidden_states[: logits.shape[0]],
+                            logits[: logits.shape[0]],
+                            ids,
+                            hash_indices,
+                        )
                 else:
-                    _module_forward(hidden_states, actual_logits)
+                    _module_forward(hidden_states, actual_logits, input_ids, deepseek_hash_indices)
             elif use_nvfp4:
                 if distributed == "power_law":
                     for tw, ti in zip(topk_weights_list, topk_ids_list, strict=True):
@@ -862,10 +971,10 @@ def run_moe_torch(
                     "num_experts": num_experts,
                     "moe_tp_size": moe_tp_size,
                     "moe_ep_size": moe_ep_size,
-                    "distribution": (
-                        f"{distributed}_{power_law_alpha}"
-                        if distributed in {"power_law", "sampled_zipf"}
-                        else distributed
+                    "distribution": _moe_distribution_label(
+                        distributed,
+                        power_law_alpha,
+                        use_cuda_graph=use_cuda_graph,
                     ),
                     "latency": latency,
                     "vllm_max_model_len": max_model_len or "",

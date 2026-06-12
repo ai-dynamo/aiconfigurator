@@ -1028,6 +1028,53 @@ def test_vllm_layerwise_qwen_noop_prefers_sampled_zipf_moe_when_available(monkey
     )
 
 
+def test_vllm_layerwise_deepseek_noop_keeps_power_law_moe(monkeypatch) -> None:
+    monkeypatch.setattr(
+        VLLMBackend,
+        "_layerwise_moe_distribution_available",
+        lambda self, model, database, distribution, *, token_count: distribution == "sampled_zipf_0.8",
+    )
+
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+        attention_dp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 2
+        moe_quant_mode = common.MoEQuantMode.w4a8_mxfp4_mxfp8
+        workload_distribution = "power_law"
+        moe_backend = None
+        enable_eplb = False
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        _hidden_size = 4096
+        _topk = 6
+        _num_experts = 256
+        _moe_inter_size = 2048
+        _shared_expert_inter_size = 2048
+        _power_law_alpha = 1.2
+
+    class _Database:
+        def query_moe(self, **kwargs):
+            assert kwargs["workload_distribution"] == "power_law_1.2"
+            assert kwargs["num_tokens"] == 1
+            return PerformanceResult(0.03, energy=0.2, source="silicon")
+
+    latency, energy, source = VLLMBackend()._layerwise_moe_compute(
+        _Model(),
+        _Database(),
+        token_count=1,
+        num_layers=43,
+        is_context=False,
+    )
+
+    assert latency == pytest.approx(1.29)
+    assert energy == pytest.approx(8.6)
+    assert source == "silicon"
+
+
 def test_vllm_layerwise_shared_expert_addback_includes_gate_and_output_mul() -> None:
     class _Config:
         tp_size = 2
@@ -1071,6 +1118,49 @@ def test_vllm_layerwise_shared_expert_addback_includes_gate_and_output_mul() -> 
     assert latency == pytest.approx((0.1 * 3 + 0.01 * 2) * 4)
     assert energy == pytest.approx((0.2 * 3 + 0.02 * 2) * 4)
     assert source == "silicon"
+
+
+def test_vllm_layerwise_deepseek_v4_noop_moe_addback_overlaps_shared_expert(monkeypatch) -> None:
+    backend = VLLMBackend()
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_qwen_module_moe_compute",
+        lambda *args, **kwargs: (0.0, 0.0, "silicon"),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_moe_compute",
+        lambda *args, **kwargs: (1.25, 0.1, "silicon"),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_moe_router_compute",
+        lambda *args, **kwargs: (0.75, 0.2, "silicon"),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_moe_shared_expert_compute",
+        lambda *args, **kwargs: (1.5, 0.3, "silicon"),
+    )
+
+    moe, router, shared, bundled = backend._layerwise_noop_moe_addback(
+        _Model(),
+        database=object(),
+        token_count=1,
+        num_layers=43,
+        is_context=False,
+    )
+
+    assert moe[0] == pytest.approx(2.0)
+    assert moe[1] == pytest.approx(0.3)
+    assert moe[2] == "mixed"
+    assert router == (0.0, 0.0, "silicon")
+    assert shared == (0.0, 0.0, "silicon")
+    assert bundled is True
 
 
 def test_vllm_layerwise_context_skips_moe_compute_when_layer_includes_moe(monkeypatch) -> None:
@@ -1229,6 +1319,69 @@ def test_vllm_layerwise_context_adds_moe_tp_allreduce_for_moe_envelope_rows(monk
     assert latency["context_moe_tp_allreduce"] == pytest.approx(1.0)
     assert energy["context_moe_tp_allreduce"] == 0.0
     assert sources["context_moe_tp_allreduce"] == "silicon"
+
+
+def test_vllm_layerwise_deepseek_scheduler_moe_context_skips_dense_tp_allreduce(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 2048
+        _topk = 8
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0):
+            assert (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache) == (
+                "deepseek-ai/DeepSeek-V4-Flash",
+                "CTX",
+                4,
+                1,
+                128,
+                0,
+            )
+            return {
+                "latency": 17.0,
+                "energy": 0.0,
+                "rms_latency": 0.0,
+                "includes_moe": True,
+                "measured_layer_count": 4,
+                "layer_multiplier": 4,
+                "latency_source": "schedule_to_update",
+                "physical_gpus": 1,
+            }
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            raise AssertionError((args, kwargs))
+
+        def query_nccl(self, dtype, num_gpus, operation, message_size):
+            assert dtype == common.CommQuantMode.half
+            assert (num_gpus, operation, message_size) == (4, "alltoall", 128 * 2048 * 8 // 4)
+            return 0.1
+
+    latency, energy, sources = VLLMBackend()._run_context_phase(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        batch_size=1,
+        isl=128,
+        prefix=0,
+    )
+
+    assert latency["context_layerwise"] == pytest.approx(17.0)
+    assert latency["context_tp_allreduce"] == 0.0
+    assert latency["context_moe_ep_alltoall"] == pytest.approx(0.4)
+    assert energy["context_moe_ep_alltoall"] == 0.0
+    assert sources["context_moe_ep_alltoall"] == "silicon"
 
 
 def test_vllm_layerwise_context_adds_moe_tp_allreduce_for_physical_noop_rows(monkeypatch) -> None:
@@ -1463,6 +1616,162 @@ def test_vllm_layerwise_context_adds_moe_ep_alltoall_for_single_gpu_moe_rows(mon
     assert latency["context_moe_ep_alltoall"] == pytest.approx(0.4)
     assert energy["context_moe_ep_alltoall"] == 0.0
     assert sources["context_moe_ep_alltoall"] == "silicon"
+
+
+def test_vllm_layerwise_context_chunks_noop_moe_addback(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+        attention_dp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 1
+        gemm_quant_mode = common.GEMMQuantMode.bfloat16
+        moe_quant_mode = common.MoEQuantMode.w4a8_mxfp4_mxfp8
+        workload_distribution = "power_law"
+        moe_backend = None
+        enable_eplb = False
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        _num_layers = 2
+        _hidden_size = 4096
+        _topk = 6
+        _num_experts = 256
+        _moe_inter_size = 2048
+        _nextn = 0
+
+    class _Database:
+        def __init__(self):
+            self.layerwise_queries = []
+            self.moe_token_counts = []
+            self.router_token_counts = []
+
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0):
+            query = (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache)
+            self.layerwise_queries.append(query)
+            assert query in {
+                ("deepseek-ai/DeepSeek-V4-Flash", "CTX", 1, 1, 2048, 0),
+                ("deepseek-ai/DeepSeek-V4-Flash", "CTX", 1, 1, 2048, 2048),
+            }
+            return {
+                "latency": 3.0,
+                "energy": 0.0,
+                "rms_latency": 0.0,
+                "includes_moe": False,
+                "measured_layer_count": 2,
+                "layer_multiplier": 2,
+                "latency_source": "schedule_to_update",
+                "physical_gpus": 1,
+            }
+
+        def query_moe(self, **kwargs):
+            self.moe_token_counts.append(kwargs["num_tokens"])
+            assert kwargs["is_context"] is True
+            assert kwargs["workload_distribution"] == "power_law_1.2"
+            return PerformanceResult(0.5, energy=2.0, source="empirical")
+
+        def query_gemm(self, m, n, k, quant_mode, database_mode=None):
+            self.router_token_counts.append(m)
+            assert (m, n, k, quant_mode, database_mode) == (
+                2048,
+                256,
+                4096,
+                common.GEMMQuantMode.bfloat16,
+                common.DatabaseMode.HYBRID,
+            )
+            return PerformanceResult(0.1, energy=0.4, source="empirical")
+
+    database = _Database()
+    latency, energy, sources = VLLMBackend()._run_context_phase(
+        _Model(),
+        database,
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        batch_size=1,
+        isl=4096,
+        prefix=0,
+    )
+
+    assert database.layerwise_queries == [
+        ("deepseek-ai/DeepSeek-V4-Flash", "CTX", 1, 1, 2048, 0),
+        ("deepseek-ai/DeepSeek-V4-Flash", "CTX", 1, 1, 2048, 2048),
+    ]
+    assert database.moe_token_counts == [2048, 2048]
+    assert database.router_token_counts == [2048, 2048]
+    assert latency["context_layerwise"] == pytest.approx(6.0)
+    assert latency["context_moe"] == pytest.approx(2.4)
+    assert energy["context_moe"] == pytest.approx(9.6)
+    assert sources["context_moe"] == "mixed"
+
+
+def test_vllm_deepseek_context_only_sums_shared_noop_addback(monkeypatch) -> None:
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_qwen_module_moe_compute",
+        lambda *args, **kwargs: (0.0, 0.0, "silicon"),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_moe_compute",
+        lambda *args, **kwargs: (10.0, 1.0, "moe"),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_moe_router_compute",
+        lambda *args, **kwargs: (2.0, 0.2, "router"),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_moe_shared_expert_compute",
+        lambda *args, **kwargs: (3.0, 0.3, "shared"),
+    )
+
+    standalone_context = backend._layerwise_noop_moe_addback(
+        _Model(),
+        object(),
+        token_count=128,
+        num_layers=1,
+        is_context=True,
+        deepseek_context_sum_shared=True,
+    )
+    mixed_context = backend._layerwise_noop_moe_addback(
+        _Model(),
+        object(),
+        token_count=128,
+        num_layers=1,
+        is_context=True,
+    )
+    decode = backend._layerwise_noop_moe_addback(
+        _Model(),
+        object(),
+        token_count=1,
+        num_layers=1,
+        is_context=False,
+        deepseek_context_sum_shared=True,
+    )
+
+    assert standalone_context[0][0] == pytest.approx(15.0)
+    assert standalone_context[0][1] == pytest.approx(1.5)
+    assert standalone_context[0][2] == "mixed"
+    assert mixed_context[0][0] == pytest.approx(12.0)
+    assert mixed_context[0][1] == pytest.approx(1.2)
+    assert mixed_context[0][2] == "mixed"
+    assert decode[0][0] == pytest.approx(12.0)
+    assert decode[0][1] == pytest.approx(1.2)
+    assert decode[0][2] == "mixed"
 
 
 def test_vllm_layerwise_context_uses_structural_moe_components(monkeypatch) -> None:
@@ -1827,6 +2136,101 @@ def test_vllm_layerwise_generation_adds_moe_compute(monkeypatch) -> None:
     assert sources["generation_moe_ep_alltoall"] == "silicon"
 
 
+def test_vllm_layerwise_generation_skips_explicit_ep_alltoall_for_bundled_deepseek_moe(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+        attention_dp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 2
+        gemm_quant_mode = common.GEMMQuantMode.bfloat16
+        moe_quant_mode = common.MoEQuantMode.w4a8_mxfp4_mxfp8
+        workload_distribution = "power_law"
+        moe_backend = None
+        enable_eplb = False
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        _num_layers = 2
+        _hidden_size = 4096
+        _topk = 6
+        _num_experts = 256
+        _moe_inter_size = 2048
+        _nextn = 0
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0):
+            assert (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache) == (
+                "deepseek-ai/DeepSeek-V4-Flash",
+                "GEN",
+                1,
+                1,
+                4096,
+                0,
+            )
+            return {
+                "latency": 1.0,
+                "energy": 0.0,
+                "rms_latency": 0.0,
+                "includes_moe": False,
+                "measured_layer_count": 1,
+                "layer_multiplier": 2,
+            }
+
+        def query_moe(self, **kwargs):
+            assert kwargs == {
+                "num_tokens": 1,
+                "hidden_size": 4096,
+                "inter_size": 2048,
+                "topk": 6,
+                "num_experts": 256,
+                "moe_tp_size": 1,
+                "moe_ep_size": 2,
+                "quant_mode": common.MoEQuantMode.w4a8_mxfp4_mxfp8,
+                "workload_distribution": "power_law_1.2",
+                "is_context": False,
+                "moe_backend": None,
+                "is_gated": True,
+                "enable_eplb": False,
+            }
+            return PerformanceResult(0.5, energy=2.0, source="empirical")
+
+        def query_gemm(self, m, n, k, quant_mode, database_mode=None):
+            assert (m, n, k, quant_mode, database_mode) == (
+                1,
+                256,
+                4096,
+                common.GEMMQuantMode.bfloat16,
+                common.DatabaseMode.HYBRID,
+            )
+            return PerformanceResult(0.05, energy=0.2, source="empirical")
+
+        def query_nccl(self, *args, **kwargs):
+            raise AssertionError("bundled DeepSeek-V4 no-op MoE addback should not add explicit EP all-to-all")
+
+    latency, energy, sources = VLLMBackend()._run_generation_phase(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        batch_size=1,
+        beam_width=1,
+        isl=4096,
+        osl=2,
+        stride=32,
+    )
+
+    assert latency["generation_layerwise"] == pytest.approx(2.0)
+    assert latency["generation_moe"] == pytest.approx((0.5 + 0.05) * 2)
+    assert "generation_moe_ep_alltoall" not in latency
+    assert energy["generation_moe"] == pytest.approx((2.0 + 0.2) * 2)
+    assert sources["generation_moe"] == "mixed"
+
+
 def test_vllm_layerwise_generation_skips_moe_compute_when_layer_includes_moe(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 
@@ -2125,7 +2529,7 @@ def test_vllm_layerwise_context_falls_back_to_direct_long_row(monkeypatch) -> No
             if seq_len == 8192 and seq_len_kv_cache == 0:
                 return 1.0
             if seq_len == 8192 and seq_len_kv_cache == 8192:
-                raise ValueError("sparse CTX KV grid")
+                raise KeyError("sparse CTX KV grid")
             if seq_len == 16384 and seq_len_kv_cache == 0:
                 return 2.25
             raise AssertionError((seq_len, seq_len_kv_cache))
@@ -2133,10 +2537,50 @@ def test_vllm_layerwise_context_falls_back_to_direct_long_row(monkeypatch) -> No
     latency, _energy, _sources = VLLMBackend()._run_context_phase(
         _Model(),
         _Database(),
-        RuntimeConfig(),
+        RuntimeConfig(vllm_max_num_batched_tokens=8192),
         batch_size=1,
         isl=16384,
         prefix=0,
     )
 
     assert latency["context_layerwise"] == pytest.approx(2.25 * 4)
+
+
+def test_vllm_layerwise_deepseek_context_composes_sparse_prefix_chunks(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        _num_layers = 4
+
+    class _Database:
+        def query_layerwise(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert phase == "CTX"
+            assert tp_size == 2
+            assert batch_size == 1
+            if seq_len == 8192 and seq_len_kv_cache == 0:
+                return 1.0
+            if seq_len == 8192 and seq_len_kv_cache == 8192:
+                raise KeyError("sparse CTX KV grid")
+            if seq_len == 16384 and seq_len_kv_cache == 0:
+                return 2.25
+            raise AssertionError((seq_len, seq_len_kv_cache))
+
+    latency, _energy, _sources = VLLMBackend()._run_context_phase(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=8192),
+        batch_size=1,
+        isl=16384,
+        prefix=0,
+    )
+
+    assert latency["context_layerwise"] == pytest.approx(2.0 * 4)

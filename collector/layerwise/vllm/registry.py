@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Layerwise model registry for default vLLM collection runs."""
+"""Layerwise model registry for public vLLM collection runs."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class LayerwiseModel:
-    """Configuration for one model in the layerwise default collection set."""
+    """Configuration for one model in the layerwise collection registry."""
 
     model: str
     kind: str
@@ -34,9 +34,22 @@ DEFAULT_MODELS: tuple[LayerwiseModel, ...] = (
     LayerwiseModel(model="Qwen/Qwen3.6-35B-A3B", kind="moe", ep_sizes=(1, 2, 4, 8)),
 )
 
+OPTIONAL_MODELS: tuple[LayerwiseModel, ...] = (
+    LayerwiseModel(
+        model="deepseek-ai/DeepSeek-V4-Flash",
+        kind="moe",
+        ep_sizes=(1, 2, 4, 8),
+        gemm_quant="fp8_block",
+        moe_quant="w4a8_mxfp4_mxfp8",
+        kv_quant="fp8",
+    ),
+)
+
+REGISTERED_MODELS: tuple[LayerwiseModel, ...] = DEFAULT_MODELS + OPTIONAL_MODELS
+
 
 def all_models() -> tuple[LayerwiseModel, ...]:
-    """Return all registered layerwise models."""
+    """Return the default layerwise collection set."""
     return DEFAULT_MODELS
 
 
@@ -45,7 +58,7 @@ def select_models(raw_models: str | None) -> list[LayerwiseModel]:
     if not raw_models:
         return list(DEFAULT_MODELS)
     requested = [value.strip() for value in raw_models.split(",") if value.strip()]
-    by_name = {entry.model: entry for entry in DEFAULT_MODELS}
+    by_name = {entry.model: entry for entry in REGISTERED_MODELS}
     missing = [model for model in requested if model not in by_name]
     if missing:
         choices = ", ".join(sorted(by_name))

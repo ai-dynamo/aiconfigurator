@@ -123,6 +123,7 @@ class VLLMBackend(BaseBackend):
         seq_len: int,
         prefix: int = 0,
         max_num_batched_tokens: int | None = None,
+        moe_weight_mode: str | None = None,
     ) -> dict[str, float | bool]:
         if max_num_batched_tokens is None or seq_len <= max_num_batched_tokens:
             return self._query_layerwise_detail(
@@ -133,6 +134,7 @@ class VLLMBackend(BaseBackend):
                 batch_size,
                 seq_len,
                 seq_len_kv_cache=max(prefix, 0),
+                moe_weight_mode=moe_weight_mode,
             )
 
         chunk_details = []
@@ -150,6 +152,7 @@ class VLLMBackend(BaseBackend):
                         batch_size,
                         chunk_tokens,
                         seq_len_kv_cache=past_kv,
+                        moe_weight_mode=moe_weight_mode,
                     )
                 )
                 past_kv += chunk_tokens
@@ -164,11 +167,50 @@ class VLLMBackend(BaseBackend):
                 "measured_layer_count": float(chunk_details[0].get("measured_layer_count", 1.0)),
                 "layer_multiplier": float(chunk_details[0].get("layer_multiplier", 0.0)),
             }
-        except (PerfDataNotAvailableError, ValueError):
+        except (KeyError, PerfDataNotAvailableError, ValueError):
+            if "DeepSeek-V4" in str(model_name):
+                try:
+                    remaining = seq_len
+                    chunk_details = []
+                    while remaining > 0:
+                        chunk_tokens = min(max_num_batched_tokens, remaining)
+                        chunk_details.append(
+                            self._query_layerwise_detail(
+                                database,
+                                model_name,
+                                "CTX",
+                                tp_size,
+                                batch_size,
+                                chunk_tokens,
+                                seq_len_kv_cache=0,
+                                moe_weight_mode=moe_weight_mode,
+                            )
+                        )
+                        remaining -= chunk_tokens
+                    return {
+                        "latency": sum(float(detail["latency"]) for detail in chunk_details),
+                        "energy": sum(float(detail.get("energy", 0.0)) for detail in chunk_details),
+                        "rms_latency": sum(float(detail.get("rms_latency", 0.0)) for detail in chunk_details),
+                        "includes_moe": all(bool(detail.get("includes_moe", False)) for detail in chunk_details),
+                        "layer_type": chunk_details[0].get("layer_type", ""),
+                        "layer_index": float(chunk_details[0].get("layer_index", 0.0)),
+                        "measured_layer_count": float(chunk_details[0].get("measured_layer_count", 1.0)),
+                        "layer_multiplier": float(chunk_details[0].get("layer_multiplier", 0.0)),
+                    }
+                except (KeyError, PerfDataNotAvailableError, ValueError):
+                    pass
             # Older layerwise datasets have a direct 16k CTX row but no
             # nonzero-context-KV chunk rows. Use that row until chunked data
             # exists for the requested TP.
-            return self._query_layerwise_detail(database, model_name, "CTX", tp_size, batch_size, seq_len)
+            return self._query_layerwise_detail(
+                database,
+                model_name,
+                "CTX",
+                tp_size,
+                batch_size,
+                seq_len,
+                moe_weight_mode=moe_weight_mode,
+            )
 
     def _layerwise_context_chunk_size(
         self,
@@ -189,6 +231,53 @@ class VLLMBackend(BaseBackend):
                 return max(1, int(float(detail_value)))
         return None
 
+    def _deepseek_context_moe_weight_mode(
+        self,
+        *,
+        model_name: str,
+        seq_len: int,
+        runtime_config: RuntimeConfig,
+    ) -> str | None:
+        """Return an alternate DeepSeek context row mode for chunked prefill."""
+
+        if "DeepSeek-V4" not in str(model_name):
+            return None
+        chunk_size = self._layerwise_context_chunk_size(runtime_config)
+        if chunk_size is None or int(seq_len) <= chunk_size:
+            return None
+        return "noop"
+
+    def _deepseek_context_moe_distribution_override(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        *,
+        token_count: int,
+        runtime_config: RuntimeConfig,
+    ) -> str | None:
+        """Return a DeepSeek context-only MoE distribution for chunked prefill."""
+
+        if "DeepSeek-V4" not in str(getattr(model, "model_path", "")):
+            return None
+        if str(getattr(model.config, "workload_distribution", "power_law")) != "power_law":
+            return None
+        chunk_size = self._layerwise_context_chunk_size(runtime_config)
+        if chunk_size is None or int(token_count) <= chunk_size:
+            return None
+
+        query_token_count = min(int(token_count), chunk_size) * int(
+            getattr(model.config, "attention_dp_size", 1) or 1
+        )
+        distribution = "sampled_zipf_1.2"
+        if self._layerwise_moe_distribution_available(
+            model,
+            database,
+            distribution,
+            token_count=query_token_count,
+        ):
+            return distribution
+        return None
+
     def _layerwise_context_detail_for_runtime(
         self,
         database: PerfDatabase,
@@ -198,21 +287,12 @@ class VLLMBackend(BaseBackend):
         seq_len: int,
         prefix: int,
         runtime_config: RuntimeConfig,
+        moe_weight_mode: str | None = None,
     ) -> dict[str, float | bool]:
         """Return context layer detail with the runtime chunking policy."""
 
         chunk_size = self._layerwise_context_chunk_size(runtime_config)
-        detail = self._layerwise_context_layer_detail(
-            database,
-            model_name,
-            tp_size,
-            batch_size,
-            seq_len,
-            prefix,
-            max_num_batched_tokens=chunk_size,
-        )
-        inferred_chunk_size = self._layerwise_context_chunk_size(runtime_config, detail)
-        if chunk_size is None and inferred_chunk_size is not None and seq_len > inferred_chunk_size:
+        try:
             detail = self._layerwise_context_layer_detail(
                 database,
                 model_name,
@@ -220,8 +300,46 @@ class VLLMBackend(BaseBackend):
                 batch_size,
                 seq_len,
                 prefix,
-                max_num_batched_tokens=inferred_chunk_size,
+                max_num_batched_tokens=chunk_size,
+                moe_weight_mode=moe_weight_mode,
             )
+        except (KeyError, PerfDataNotAvailableError, ValueError):
+            if moe_weight_mode is None:
+                raise
+            detail = self._layerwise_context_layer_detail(
+                database,
+                model_name,
+                tp_size,
+                batch_size,
+                seq_len,
+                prefix,
+                max_num_batched_tokens=chunk_size,
+            )
+        inferred_chunk_size = self._layerwise_context_chunk_size(runtime_config, detail)
+        if chunk_size is None and inferred_chunk_size is not None and seq_len > inferred_chunk_size:
+            try:
+                detail = self._layerwise_context_layer_detail(
+                    database,
+                    model_name,
+                    tp_size,
+                    batch_size,
+                    seq_len,
+                    prefix,
+                    max_num_batched_tokens=inferred_chunk_size,
+                    moe_weight_mode=moe_weight_mode,
+                )
+            except (KeyError, PerfDataNotAvailableError, ValueError):
+                if moe_weight_mode is None:
+                    raise
+                detail = self._layerwise_context_layer_detail(
+                    database,
+                    model_name,
+                    tp_size,
+                    batch_size,
+                    seq_len,
+                    prefix,
+                    max_num_batched_tokens=inferred_chunk_size,
+                )
         return detail
 
     def _layerwise_tp_allreduce_ms(
@@ -261,16 +379,28 @@ class VLLMBackend(BaseBackend):
         batch_size: int,
         seq_len: int,
         seq_len_kv_cache: int = 0,
+        moe_weight_mode: str | None = None,
     ) -> dict[str, float]:
         if hasattr(database, "query_layerwise_detail"):
-            return database.query_layerwise_detail(
-                model_name,
-                phase,
-                tp_size,
-                batch_size,
-                seq_len,
-                seq_len_kv_cache,
-            )
+            try:
+                return database.query_layerwise_detail(
+                    model_name,
+                    phase,
+                    tp_size,
+                    batch_size,
+                    seq_len,
+                    seq_len_kv_cache,
+                    moe_weight_mode=moe_weight_mode,
+                )
+            except TypeError:
+                return database.query_layerwise_detail(
+                    model_name,
+                    phase,
+                    tp_size,
+                    batch_size,
+                    seq_len,
+                    seq_len_kv_cache,
+                )
         latency = database.query_layerwise(model_name, phase, tp_size, batch_size, seq_len, seq_len_kv_cache)
         return {
             "latency": float(latency),
@@ -481,6 +611,7 @@ class VLLMBackend(BaseBackend):
         token_count: int,
         num_layers: int,
         is_context: bool,
+        workload_distribution_override: str | None = None,
     ) -> tuple[float, float, str]:
         if token_count <= 0 or num_layers <= 0:
             return 0.0, 0.0, "silicon"
@@ -494,7 +625,7 @@ class VLLMBackend(BaseBackend):
 
         cfg = model.config
         query_token_count = int(token_count) * int(getattr(cfg, "attention_dp_size", 1) or 1)
-        workload_distribution = self._layerwise_moe_workload_distribution(
+        workload_distribution = workload_distribution_override or self._layerwise_moe_workload_distribution(
             model,
             database,
             token_count=query_token_count,
@@ -536,6 +667,10 @@ class VLLMBackend(BaseBackend):
         workload_distribution = getattr(cfg, "workload_distribution", "power_law")
         if workload_distribution != "power_law":
             return str(workload_distribution)
+
+        model_name = str(getattr(model, "model_path", ""))
+        if "Qwen" not in model_name:
+            return "power_law"
 
         shared_inter_size = int(
             getattr(getattr(model, "extra_params", None), "shared_expert_inter_size", 0)
@@ -694,6 +829,8 @@ class VLLMBackend(BaseBackend):
         token_count: int,
         num_layers: int,
         is_context: bool,
+        workload_distribution_override: str | None = None,
+        deepseek_context_sum_shared: bool = False,
     ) -> tuple[tuple[float, float, str], tuple[float, float, str], tuple[float, float, str], bool]:
         """Return no-op MoE replacement pieces and whether they are bundled."""
 
@@ -714,6 +851,7 @@ class VLLMBackend(BaseBackend):
             token_count=token_count,
             num_layers=num_layers,
             is_context=is_context,
+            workload_distribution_override=workload_distribution_override,
         )
         router = self._layerwise_moe_router_compute(
             model,
@@ -727,7 +865,88 @@ class VLLMBackend(BaseBackend):
             token_count=token_count,
             num_layers=num_layers,
         )
+        if (
+            "DeepSeek-V4" in str(getattr(model, "model_path", ""))
+            and is_context
+            and deepseek_context_sum_shared
+        ):
+            zero = (0.0, 0.0, "silicon")
+            # DeepSeek no-op layerwise rows replace the whole MoE MLP block.
+            # The vLLM op-level collector measures only the routed local-rank
+            # FusedMoE call, so the always-on shared expert and router GEMM
+            # must be added back as separate compute.
+            return (
+                (moe[0] + router[0] + shared[0], moe[1] + router[1] + shared[1], "mixed"),
+                zero,
+                zero,
+                True,
+            )
+        if "DeepSeek-V4" in str(getattr(model, "model_path", "")):
+            zero = (0.0, 0.0, "silicon")
+            routed_group_ms = moe[0] + router[0]
+            shared_ms = shared[0]
+            if routed_group_ms >= shared_ms:
+                return (routed_group_ms, moe[1] + router[1], "mixed"), zero, zero, True
+            return shared, zero, zero, True
         return moe, router, shared, False
+
+    def _layerwise_noop_moe_addback_for_context(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        *,
+        token_count: int,
+        num_layers: int,
+        runtime_config: RuntimeConfig,
+        workload_distribution_override: str | None = None,
+        deepseek_context_sum_shared: bool = False,
+    ) -> tuple[tuple[float, float, str], tuple[float, float, str], tuple[float, float, str], bool]:
+        """Return no-op MoE add-back using vLLM context chunking semantics."""
+
+        chunk_size = self._layerwise_context_chunk_size(runtime_config)
+        if chunk_size is None or token_count <= chunk_size:
+            return self._layerwise_noop_moe_addback(
+                model,
+                database,
+                token_count=token_count,
+                num_layers=num_layers,
+                is_context=True,
+                workload_distribution_override=workload_distribution_override,
+                deepseek_context_sum_shared=deepseek_context_sum_shared,
+            )
+
+        totals: list[list[float | str]] = [
+            [0.0, 0.0, "silicon"],
+            [0.0, 0.0, "silicon"],
+            [0.0, 0.0, "silicon"],
+        ]
+        bundled = True
+        remaining = token_count
+        while remaining > 0:
+            chunk_tokens = min(chunk_size, remaining)
+            pieces = self._layerwise_noop_moe_addback(
+                model,
+                database,
+                token_count=chunk_tokens,
+                num_layers=num_layers,
+                is_context=True,
+                workload_distribution_override=workload_distribution_override,
+                deepseek_context_sum_shared=deepseek_context_sum_shared,
+            )
+            for index, piece in enumerate(pieces[:3]):
+                totals[index][0] = float(totals[index][0]) + piece[0]
+                totals[index][1] = float(totals[index][1]) + piece[1]
+                if piece[0] > 0.0:
+                    totals[index][2] = piece[2]
+            bundled = bundled and pieces[3]
+            remaining -= chunk_tokens
+
+        return (
+            (float(totals[0][0]), float(totals[0][1]), str(totals[0][2])),
+            (float(totals[1][0]), float(totals[1][1]), str(totals[1][2])),
+            (float(totals[2][0]), float(totals[2][1]), str(totals[2][2])),
+            bundled,
+        )
 
     def _layerwise_moe_shared_expert_compute(
         self,
@@ -862,6 +1081,11 @@ class VLLMBackend(BaseBackend):
         model_name = getattr(model, "model_path", "")
         tp_size = model.config.tp_size
         num_layers = model._num_layers // model.config.pp_size
+        context_moe_weight_mode = self._deepseek_context_moe_weight_mode(
+            model_name=str(model_name),
+            seq_len=effective_isl,
+            runtime_config=runtime_config,
+        )
         try:
             layer_detail = self._layerwise_context_detail_for_runtime(
                 database,
@@ -871,6 +1095,7 @@ class VLLMBackend(BaseBackend):
                 effective_isl,
                 prefix,
                 runtime_config,
+                moe_weight_mode=context_moe_weight_mode,
             )
         except (AssertionError, PerfDataNotAvailableError, ValueError):
             if prefix <= 0:
@@ -883,6 +1108,7 @@ class VLLMBackend(BaseBackend):
                 effective_isl,
                 0,
                 runtime_config,
+                moe_weight_mode=context_moe_weight_mode,
             )
         structural_moe_context_ms = self._layerwise_structural_moe_context_ms(layer_detail, num_layers)
         if structural_moe_context_ms is None:
@@ -895,7 +1121,17 @@ class VLLMBackend(BaseBackend):
         layer_includes_moe = bool(layer_detail.get("includes_moe", False))
         physical_gpus = int(float(layer_detail.get("physical_gpus", 1.0) or 1.0))
         context_source_covers_tp = physical_gpus >= tp_size
-        if context_source in {"schedule_to_update", "fpm_wall", "worker_wall"} and context_source_covers_tp:
+        moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
+        deepseek_scheduler_moe_context = (
+            "DeepSeek-V4" in str(model_name)
+            and layer_includes_moe
+            and moe_ep_size > 1
+            and context_source in {"schedule_to_update", "fpm_wall", "worker_wall"}
+        )
+        if (
+            context_source in {"schedule_to_update", "fpm_wall", "worker_wall"}
+            and (context_source_covers_tp or deepseek_scheduler_moe_context)
+        ):
             allreduce_ms = 0.0
         else:
             allreduce_ms = (
@@ -938,17 +1174,25 @@ class VLLMBackend(BaseBackend):
         moe_shared_ms, moe_shared_energy, moe_shared_source = 0.0, 0.0, "silicon"
         if structural_moe_context_ms is None and not layer_includes_moe:
             represented_layers = self._layerwise_detail_represented_noop_moe_layers(layer_detail, num_layers)
+            context_moe_distribution_override = self._deepseek_context_moe_distribution_override(
+                model,
+                database,
+                token_count=token_count,
+                runtime_config=runtime_config,
+            )
             (
                 (moe_ms, moe_energy, moe_source),
                 (moe_router_ms, moe_router_energy, moe_router_source),
                 (moe_shared_ms, moe_shared_energy, moe_shared_source),
                 moe_addback_is_bundled,
-            ) = self._layerwise_noop_moe_addback(
+            ) = self._layerwise_noop_moe_addback_for_context(
                 model,
                 database,
                 token_count=token_count,
                 num_layers=represented_layers,
-                is_context=True,
+                runtime_config=runtime_config,
+                workload_distribution_override=context_moe_distribution_override,
+                deepseek_context_sum_shared=True,
             )
             if moe_ms > 0.0 and moe_tp_size > 1 and not moe_addback_is_bundled:
                 try:
@@ -1000,7 +1244,7 @@ class VLLMBackend(BaseBackend):
                     moe_ep_size,
                     token_count,
                 )
-        elif moe_ep_alltoall_layers > 0 and moe_ep_size > 1 and moe_ms > 0.0:
+        elif moe_ep_alltoall_layers > 0 and moe_ep_size > 1 and moe_ms > 0.0 and not moe_addback_is_bundled:
             try:
                 moe_ep_alltoall_ms = (
                     self._layerwise_moe_ep_alltoall_ms(
@@ -1016,6 +1260,32 @@ class VLLMBackend(BaseBackend):
                 logger.debug(
                     "Falling back to no explicit vLLM CTX no-op MoE-EP all-to-all for model=%s, moe_ep_size=%s, "
                     "token_count=%s because NCCL data is unavailable",
+                    model_name,
+                    moe_ep_size,
+                    token_count,
+                )
+        elif (
+            "DeepSeek-V4" in str(model_name)
+            and moe_ep_alltoall_layers > 0
+            and moe_ep_size > 1
+            and moe_ms > 0.0
+            and moe_addback_is_bundled
+        ):
+            try:
+                moe_ep_alltoall_ms = (
+                    self._layerwise_moe_ep_alltoall_ms(
+                        model,
+                        database,
+                        moe_ep_size,
+                        token_count,
+                        exchange_count=1.0,
+                    )
+                    * moe_ep_alltoall_layers
+                )
+            except (AttributeError, PerfDataNotAvailableError, ValueError):
+                logger.debug(
+                    "Falling back to no explicit DeepSeek-V4 CTX no-op MoE-EP all-to-all for model=%s, "
+                    "moe_ep_size=%s, token_count=%s because NCCL data is unavailable",
                     model_name,
                     moe_ep_size,
                     token_count,
@@ -1195,7 +1465,7 @@ class VLLMBackend(BaseBackend):
                             effective_bs,
                         )
                         moe_tp_allreduce_step_ms = 0.0
-                if moe_step_ms > 0.0 and moe_ep_size > 1:
+                if moe_step_ms > 0.0 and moe_ep_size > 1 and not moe_addback_is_bundled:
                     try:
                         moe_ep_alltoall_step_ms = (
                             self._layerwise_moe_ep_alltoall_ms(model, database, moe_ep_size, effective_bs)
@@ -1292,6 +1562,7 @@ class VLLMBackend(BaseBackend):
         ctx_tokens = max(int(ctx_tokens), 0)
         gen_tokens = max(int(gen_tokens), 0)
         combined_tokens = max(ctx_tokens + gen_tokens, 1)
+        mixed_context_moe_weight_mode = "noop" if "DeepSeek-V4" in str(model_name) else None
 
         ctx_prefix = max(int(prefix), 0)
         used_context_tokens = combined_tokens
@@ -1304,6 +1575,7 @@ class VLLMBackend(BaseBackend):
                 combined_tokens,
                 ctx_prefix,
                 runtime_config,
+                moe_weight_mode=mixed_context_moe_weight_mode,
             )
         except (AssertionError, PerfDataNotAvailableError, ValueError):
             if ctx_tokens > 0 and ctx_tokens != combined_tokens:
@@ -1316,6 +1588,7 @@ class VLLMBackend(BaseBackend):
                         ctx_tokens,
                         ctx_prefix,
                         runtime_config,
+                        moe_weight_mode=mixed_context_moe_weight_mode,
                     )
                     used_context_tokens = ctx_tokens
                 except (AssertionError, PerfDataNotAvailableError, ValueError):
@@ -1329,6 +1602,7 @@ class VLLMBackend(BaseBackend):
                         combined_tokens,
                         0,
                         runtime_config,
+                        moe_weight_mode=mixed_context_moe_weight_mode,
                     )
             elif ctx_prefix > 0:
                 combined_detail = self._layerwise_context_detail_for_runtime(
@@ -1339,6 +1613,7 @@ class VLLMBackend(BaseBackend):
                     combined_tokens,
                     0,
                     runtime_config,
+                    moe_weight_mode=mixed_context_moe_weight_mode,
                 )
             else:
                 raise
@@ -1357,6 +1632,7 @@ class VLLMBackend(BaseBackend):
                     combined_tokens,
                     0,
                     runtime_config,
+                    moe_weight_mode=mixed_context_moe_weight_mode,
                 )
                 fresh_source = str(fresh_combined_detail.get("latency_source") or "")
                 fresh_ctx_ms = float(fresh_combined_detail["latency"]) * self._layerwise_detail_scale(
@@ -1459,6 +1735,7 @@ class VLLMBackend(BaseBackend):
                         gen_tokens,
                         0,
                         runtime_config,
+                        moe_weight_mode=mixed_context_moe_weight_mode,
                     )
                     gen_as_ctx_ms = float(gen_as_ctx_detail["latency"]) * self._layerwise_detail_scale(
                         gen_as_ctx_detail, num_layers
@@ -1519,6 +1796,7 @@ class VLLMBackend(BaseBackend):
                                 context_chunk_size or combined_tokens,
                                 0,
                                 runtime_config,
+                                moe_weight_mode=mixed_context_moe_weight_mode,
                             )
                             saturated_ctx_ms = float(saturated_ctx_detail["latency"])
                             ep_high_decode_floor_ms = saturated_ctx_ms * self._layerwise_detail_scale(
@@ -1547,6 +1825,7 @@ class VLLMBackend(BaseBackend):
                     context_chunk_size or combined_tokens,
                     0,
                     runtime_config,
+                    moe_weight_mode=mixed_context_moe_weight_mode,
                 )
                 saturated_ctx_ms = float(saturated_ctx_detail["latency"])
                 ep_high_decode_floor_ms = saturated_ctx_ms * self._layerwise_detail_scale(

@@ -313,6 +313,7 @@ def _lookup_scheduler_timing_aggs(
             return None
         return int(value)
 
+    by_run: dict[int, dict[str, float]] = {}
     for event in events:
         if event.get("event") != "scheduler_update_wall_time":
             continue
@@ -326,18 +327,32 @@ def _lookup_scheduler_timing_aggs(
             continue
         if _event_int(event, "control_past") != int(past_kv):
             continue
-        if event.get("control_run") in (None, ""):
+        run = _event_int(event, "control_run")
+        if run is None:
             continue
         latency_ms = event.get("fpm_wall_time_ms", event.get("schedule_to_update_ms"))
         if latency_ms in (None, ""):
             continue
         latency_us = float(latency_ms) * 1000.0
+        run_agg = by_run.setdefault(
+            run,
+            {
+                "gpu_us": 0.0,
+                "rms_us": 0.0,
+                "span_us": 0.0,
+                "kernel_count": 0.0,
+                "rms_kernel_count": 0.0,
+            },
+        )
+        run_agg["gpu_us"] += latency_us
+        run_agg["span_us"] += latency_us
+    for _run, run_agg in sorted(by_run.items()):
         aggs.append({
-            "gpu_us": latency_us,
-            "rms_us": 0.0,
-            "span_us": latency_us,
-            "kernel_count": 0,
-            "rms_kernel_count": 0,
+            "gpu_us": run_agg["gpu_us"],
+            "rms_us": run_agg["rms_us"],
+            "span_us": run_agg["span_us"],
+            "kernel_count": int(run_agg["kernel_count"]),
+            "rms_kernel_count": int(run_agg["rms_kernel_count"]),
         })
     return aggs
 

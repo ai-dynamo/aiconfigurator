@@ -77,6 +77,7 @@ DECODE_BATCH_SIZES="${DECODE_BATCH_SIZES:-1,4,16}"
 DECODE_PAST_KV="${DECODE_PAST_KV:-4096}"
 DECODE_OSL="${DECODE_OSL:-8}"
 DECODE_REPEATS="${DECODE_REPEATS:-6}"
+DECODE_PREFIX_WARMUP="${DECODE_PREFIX_WARMUP:-1}"
 MIX_REQUESTS="${MIX_REQUESTS:-64}"
 MIX_CONCURRENCY="${MIX_CONCURRENCY:-32}"
 MIX_ISL_VALUES="${MIX_ISL_VALUES:-1024,2048,4096}"
@@ -187,6 +188,8 @@ Options:
   --decode-past-kv N            Decode sweep prompt length / target KV (default: ${DECODE_PAST_KV})
   --decode-osl N                Decode sweep max_tokens (default: ${DECODE_OSL})
   --decode-repeats N            Decode sweep repetitions per batch size (default: ${DECODE_REPEATS})
+  --disable-decode-prefix-warmup
+                                Do not prefill decode prompts before decode-only FPM collection
   --mixed-requests N            Mixed workload request count (default: ${MIX_REQUESTS})
   --mixed-concurrency N         Mixed workload concurrency (default: ${MIX_CONCURRENCY})
   --mixed-isl-values CSV        Mixed workload target ISLs (default: ${MIX_ISL_VALUES})
@@ -520,6 +523,7 @@ while [[ $# -gt 0 ]]; do
         --decode-past-kv) DECODE_PAST_KV="$2"; shift 2 ;;
         --decode-osl) DECODE_OSL="$2"; shift 2 ;;
         --decode-repeats) DECODE_REPEATS="$2"; shift 2 ;;
+        --disable-decode-prefix-warmup) DECODE_PREFIX_WARMUP=0; shift ;;
         --mixed-requests) MIX_REQUESTS="$2"; shift 2 ;;
         --mixed-concurrency) MIX_CONCURRENCY="$2"; shift 2 ;;
         --mixed-isl-values) MIX_ISL_VALUES="$2"; shift 2 ;;
@@ -643,6 +647,8 @@ RUN_EFFECTIVE_CONFIG_JSON="${RUN_DIR}/effective_vllm_config.json"
 RUN_EFFECTIVE_CONFIG_IN_CONTAINER="/work/effective_vllm_config.json"
 NSYS_WORKER_OUTPUT_BASE="${RUN_DIR}/nsys/fpm_worker"
 NSYS_WORKER_OUTPUT_IN_CONTAINER="/work/nsys/fpm_worker"
+MODEL_IN_CONTAINER="${MODEL}"
+MODEL_REQUEST_NAME="${MODEL}"
 
 FRONTEND_NAME="${NAME_PREFIX}-frontend"
 WORKER_NAME="${NAME_PREFIX}-worker"
@@ -872,6 +878,20 @@ stage_helper_scripts() {
 
 stage_helper_scripts
 
+stage_local_model_dir() {
+    if [[ ! -d "${MODEL}" ]]; then
+        return
+    fi
+    rm -rf "${RUN_DIR}/model"
+    mkdir -p "${RUN_DIR}/model"
+    cp -a "${MODEL}/." "${RUN_DIR}/model/"
+    chmod -R a+rX "${RUN_DIR}/model"
+    MODEL_IN_CONTAINER="/work/model"
+    MODEL_REQUEST_NAME="/work/model"
+}
+
+stage_local_model_dir
+
 REQUEST_INDEX_OFFSET=0
 
 start_file_discovery_touch_loop() {
@@ -892,7 +912,7 @@ start_file_discovery_touch_loop() {
 
 deployment_helper_args() {
     local args=(
-        --model "${MODEL}"
+        --model "${MODEL_IN_CONTAINER}"
         --max-num-seqs "${MAX_NUM_SEQS}"
         --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
     )
@@ -1007,7 +1027,7 @@ send_request_workload() {
     local request_driver_cmd=(
         python3 /work/send_requests.py
         --url "http://127.0.0.1:${HTTP_PORT}"
-        --model "${MODEL}"
+        --model "${MODEL_REQUEST_NAME}"
         --requests "${request_count}"
         --concurrency "${concurrency_count}"
         --max-tokens "${MAX_TOKENS}"
@@ -1088,6 +1108,56 @@ send_request_workload() {
 
     REQUEST_INDEX_OFFSET=$((REQUEST_INDEX_OFFSET + request_count))
     return "${request_rc}"
+}
+
+decode_prefix_warmup_enabled() {
+    [[ "${WORKLOAD_PLAN}" == "sweep" ]] || return 1
+    [[ "${DECODE_PREFIX_WARMUP}" == "1" ]] || return 1
+    [[ "${MEASURED_PHASES}" == "decode" ]] || return 1
+    phase_enabled decode
+}
+
+ensure_decode_prefix_warmup_seed() {
+    if [[ -n "${PROMPT_TOKEN_SEED}" ]]; then
+        return
+    fi
+    PROMPT_TOKEN_SEED=0
+    log "Using PROMPT_TOKEN_SEED=${PROMPT_TOKEN_SEED} so decode prefix warmup and measured decode prompts match"
+}
+
+warm_decode_prefix_cache() {
+    local repeat batch_size
+    local warmup_rc=0
+    local saved_request_index_offset="${REQUEST_INDEX_OFFSET}"
+    rm -f "${WARMUP_WORKLOAD_CSV}"
+    log "Priming decode prefix cache for decode-only sweep before FPM collection"
+    for repeat in $(seq 1 "${DECODE_REPEATS}"); do
+        IFS=',' read -ra decode_batches <<< "${DECODE_BATCH_SIZES}"
+        for batch_size in "${decode_batches[@]}"; do
+            batch_size="${batch_size//[[:space:]]/}"
+            if [[ -z "${batch_size}" ]]; then
+                continue
+            fi
+            send_request_workload \
+                "decode_prefix_warmup_b${batch_size}" \
+                "request-driver-decode-prefix-warmup-b${batch_size}-r${repeat}" \
+                "${batch_size}" \
+                "${batch_size}" \
+                "${WARMUP_WORKLOAD_IN_CONTAINER}" \
+                "${DECODE_PAST_KV}" \
+                "1" \
+                1 || warmup_rc=$?
+            if [[ "${warmup_rc}" != "0" ]]; then
+                break 2
+            fi
+        done
+    done
+    REQUEST_INDEX_OFFSET="${saved_request_index_offset}"
+    if [[ "${DRY_RUN}" != "1" ]]; then
+        log "Waiting ${POST_WARMUP_SECONDS}s after decode prefix warmup before starting FPM collector"
+        sleep "${POST_WARMUP_SECONDS}"
+    fi
+    return "${warmup_rc}"
 }
 
 start_nsys_worker_collection() {
@@ -1203,11 +1273,11 @@ if [[ "${DRY_RUN}" != "1" ]]; then
             --url "http://127.0.0.1:${HTTP_PORT}/health" \
             --timeout "${START_TIMEOUT_SECONDS}" >/dev/null
 
-    log "Waiting for model registration (${MODEL})"
+    log "Waiting for model registration (${MODEL_REQUEST_NAME})"
     docker run --rm --network host -v "${RUN_DIR}:/work" "${IMAGE}" \
         python3 /work/wait_http.py \
             --url "http://127.0.0.1:${HTTP_PORT}/v1/models" \
-            --contains "${MODEL}" \
+            --contains "${MODEL_REQUEST_NAME}" \
             --timeout "${START_TIMEOUT_SECONDS}" >/dev/null
 fi
 
@@ -1226,6 +1296,11 @@ if [[ "${SKIP_REQUESTS}" != "1" && "${WARMUP_REQUESTS}" != "0" ]]; then
         log "Waiting ${POST_WARMUP_SECONDS}s after warmup before starting FPM collector"
         sleep "${POST_WARMUP_SECONDS}"
     fi
+fi
+
+if [[ "${SKIP_REQUESTS}" != "1" ]] && decode_prefix_warmup_enabled; then
+    ensure_decode_prefix_warmup_seed
+    warm_decode_prefix_cache || die "decode prefix warmup failed"
 fi
 
 log "Starting FPM collector container ${COLLECTOR_NAME}"
