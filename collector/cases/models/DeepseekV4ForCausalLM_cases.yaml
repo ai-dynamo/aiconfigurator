@@ -7,6 +7,7 @@ model_path: sgl-project/DeepSeek-V4-Flash-FP8
 model_paths:
   - deepseek-ai/DeepSeek-V4-Flash
   - deepseek-ai/DeepSeek-V4-Pro
+  - nvidia/DeepSeek-V4-Pro-NVFP4
   - sgl-project/DeepSeek-V4-Flash-FP8
   - sgl-project/DeepSeek-V4-Pro-FP8
 include_base: true
@@ -27,6 +28,7 @@ model_case_values:
       wideep: true
     - model_paths:
         - deepseek-ai/DeepSeek-V4-Pro
+        - nvidia/DeepSeek-V4-Pro-NVFP4
         - sgl-project/DeepSeek-V4-Pro-FP8
       hidden_size: 7168
       inter_size: 3072
@@ -41,6 +43,7 @@ model_case_values:
       hc_mult: 4
     - model_paths:
         - deepseek-ai/DeepSeek-V4-Pro
+        - nvidia/DeepSeek-V4-Pro-NVFP4
         - sgl-project/DeepSeek-V4-Pro-FP8
       hidden_size: 7168
       hc_mult: 4
@@ -51,6 +54,7 @@ model_case_values:
     supported_model_paths:
       - deepseek-ai/DeepSeek-V4-Flash
       - deepseek-ai/DeepSeek-V4-Pro
+      - nvidia/DeepSeek-V4-Pro-NVFP4
       - sgl-project/DeepSeek-V4-Flash-FP8
       - sgl-project/DeepSeek-V4-Pro-FP8
     attention_kinds:

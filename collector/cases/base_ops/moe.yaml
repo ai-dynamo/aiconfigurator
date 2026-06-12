@@ -92,6 +92,7 @@ common_case_values:
       allowed_model_paths:
       - deepseek-ai/DeepSeek-V4-Flash
       - deepseek-ai/DeepSeek-V4-Pro
+      - nvidia/DeepSeek-V4-Pro-NVFP4
       - sgl-project/DeepSeek-V4-Flash-FP8
       - sgl-project/DeepSeek-V4-Pro-FP8
     model_quantization_policies:
