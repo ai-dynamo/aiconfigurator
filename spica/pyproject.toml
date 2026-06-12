@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "spica"
+version = "0.0.1"
+description = "Spica: Replay-backed smart sweeper for Dynamo deployments (Profiler V2)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = [
+    "pydantic>=2.5",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff",
+]
+# Wired in later milestones (kept out of the base deps so the skeleton installs
+# light and stays decoupled until each seam is built):
+#   aic    = ["aiconfigurator"]   # editable from ..; forward-pass/memory + sweep_smart seam
+#   replay = ["ai-dynamo"]        # Dynamo Replay/Mocker for the ReplayEvaluator
+#   search = ["google-vizier"]    # black-box optimizer for the smart sweep
+
+[project.scripts]
+spica = "spica.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/spica"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+src = ["src", "tests"]
+line-length = 120
+target-version = "py310"
