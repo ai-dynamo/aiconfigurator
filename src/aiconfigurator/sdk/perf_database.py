@@ -340,6 +340,18 @@ def get_latest_database_version(
     return latest_version[1]
 
 
+def _shared_layer_enabled(database_mode: str | None) -> bool:
+    """Whether the shared layer (sibling/cross-version row inheritance) loads.
+
+    Enabled for SILICON and HYBRID: both consult the silicon tables, so both
+    benefit from reusing older collected data points when the active
+    backend/version lacks a shape. EMPIRICAL/SOL compute from formulas, and an
+    unspecified (None) mode stays off so callers that don't thread a mode to the
+    loader keep bit-identical loads.
+    """
+    return (database_mode or "").upper() in ("SILICON", "HYBRID")
+
+
 def get_database(
     system: str,
     backend: str,
@@ -358,11 +370,14 @@ def get_database(
         systems_paths: the systems search paths
         allow_missing_data: instantiate a database from system specs even when
             backend/version data files are absent. This is intended for SOL/EMPIRICAL
-            estimate-only modes, not SILICON mode.
+            estimate-only modes. SILICON/HYBRID can also instantiate a shell
+            database when the shared layer is enabled so sibling rows can supply
+            the requested version's missing op files.
         database_mode: the mode the caller will query under (`SILICON` / `HYBRID` /
-            `EMPIRICAL` / `SOL`). HYBRID auto-enables the shared layer (sibling-row
-            inheritance, including `kernel_source=default` fallback rows); other
-            modes keep it off so predictions stay bit-identical to main.
+            `EMPIRICAL` / `SOL`). SILICON and HYBRID enable the shared layer
+            (sibling-row inheritance, including `kernel_source=default` fallback
+            rows) so missing shapes are filled from older collected data;
+            EMPIRICAL/SOL and an unspecified mode keep it off.
 
     Returns:
         PerfDatabase for the given system, backend, version.
@@ -376,7 +391,7 @@ def get_database(
         logger.error(f"No database version available for {system=}, {backend=}")
         return None
 
-    shared_flag = (database_mode or "").upper() == "HYBRID"
+    shared_flag = _shared_layer_enabled(database_mode)
     missing_data_candidate = None
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
@@ -414,7 +429,7 @@ def get_database(
                         f"failed to load {system=}, {backend=}, {version=}, continuing searching",
                         exc_info=True,
                     )
-        elif allow_missing_data:
+        elif allow_missing_data or shared_flag:
             if missing_data_candidate is None:
                 missing_data_candidate = (systems_root, cache_key)
         else:
@@ -429,7 +444,8 @@ def get_database(
             database = databases_cache[cache_key][backend][version]
             return database
         except KeyError:
-            logger.info(f"Loading estimate-only database for {system=}, {backend=}, {version=}")
+            load_kind = "estimate-only" if allow_missing_data else "shared-layer shell"
+            logger.info(f"Loading {load_kind} database for {system=}, {backend=}, {version=}")
             try:
                 database = PerfDatabase(system, backend, version, systems_root, database_mode=database_mode)
                 databases_cache[cache_key][backend][version] = database
@@ -1205,17 +1221,18 @@ class PerfDatabase:
         Initialize the perf database.
 
         Args:
-            database_mode: drives the shared-layer load behavior. `"HYBRID"` enables
-                sibling-row inheritance (including `kernel_source=default` fallback
-                rows); other modes keep it off so predictions stay bit-identical to
-                main. Doesn't change which rows are interpolated at query time;
-                that's controlled by `set_default_database_mode`.
+            database_mode: drives the shared-layer load behavior. `"SILICON"` and
+                `"HYBRID"` enable sibling-row inheritance (including
+                `kernel_source=default` fallback rows); EMPIRICAL/SOL and an
+                unspecified mode keep it off. Doesn't change which rows are
+                interpolated at query time; that's controlled by
+                `set_default_database_mode`.
         """
         self.system = system
         self.backend = backend
         self.version = version
         self.systems_root = systems_root
-        self.enable_shared_layer = (database_mode or "").upper() == "HYBRID"
+        self.enable_shared_layer = _shared_layer_enabled(database_mode)
         with open(os.path.join(systems_root, system + ".yaml")) as f:
             self.system_spec = SystemSpec(yaml.load(f, Loader=yaml.SafeLoader))
         self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
@@ -1427,8 +1444,9 @@ class PerfDatabase:
 
         # `framework -> set of kernel_sources` that the active backend may inherit
         # from sibling dirs of that framework. Both `shared` and `shared_fallback`
-        # rows are admitted in HYBRID mode; the fallback set is tracked separately
-        # only so we can emit a single warning per fallback source.
+        # rows are admitted whenever the shared layer is enabled (SILICON/HYBRID);
+        # the fallback set is tracked separately only so we can emit a single
+        # warning per fallback source.
         per_framework_filter: dict[str, set[str]] = defaultdict(set)
         per_framework_fallback: dict[str, set[str]] = defaultdict(set)
         for entry in self._op_kernel_source_manifest_entries.get(op_file_basename, ()):

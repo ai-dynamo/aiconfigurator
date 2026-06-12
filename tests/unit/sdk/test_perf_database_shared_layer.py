@@ -11,9 +11,9 @@ unrelated to the loader's tier-merge behavior.
 
 The loader inherits rows from sibling `<sys>/<framework>/<version>/<op_file>`
 directories (cross-version and cross-backend) when the database is loaded in
-HYBRID mode. Both `tier=shared` (named) and `tier=shared_fallback`
+SILICON or HYBRID mode. Both `tier=shared` (named) and `tier=shared_fallback`
 (`kernel_source=default`, framework-implicit, low-fidelity) rows are inherited;
-HYBRID already accepts coarser fallbacks, so they're not gated separately.
+the shared layer admits coarser fallbacks, so they're not gated separately.
 """
 
 from __future__ import annotations
@@ -24,7 +24,12 @@ from pathlib import Path
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.perf_database import PerfDatabase, _load_op_kernel_source_manifest_entries
+from aiconfigurator.sdk.perf_database import (
+    PerfDatabase,
+    _load_op_kernel_source_manifest_entries,
+    databases_cache,
+    get_database,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -121,8 +126,9 @@ def _backend_csv(env: Path, backend: str = "trtllm", version: str = "1.0") -> Pa
 
 def _build_db(systems_root: Path, *, database_mode: str | None = "HYBRID") -> PerfDatabase:
     """Build a PerfDatabase. Defaults to HYBRID so the shared layer is on, which is
-    what most tests exercise. The off-by-default behavior in non-HYBRID modes is
-    covered by `test_shared_layer_off_in_silicon_mode`.
+    what most tests exercise. SILICON also enables it (see
+    `test_shared_layer_on_in_silicon_mode`); an unspecified / EMPIRICAL / SOL mode
+    keeps it off (see `test_shared_layer_off_when_mode_unspecified`).
     """
     return PerfDatabase(
         system="h100_sxm",
@@ -163,10 +169,10 @@ def test_backend_only(env: Path) -> None:
     assert _gemm_lookup(db, 1024, 4096, 4096) == 0.5
 
 
-def test_shared_layer_off_in_silicon_mode(env: Path) -> None:
-    """In any non-HYBRID database_mode (here: unset, which defaults to SILICON
-    semantics), the shared layer is OFF and sibling rows are not consulted —
-    preserves bit-for-bit compatibility with `main`.
+def test_shared_layer_off_when_mode_unspecified(env: Path) -> None:
+    """An unspecified database_mode (None) keeps the shared layer OFF and does not
+    consult sibling rows — preserves bit-for-bit compatibility with `main` for
+    callers that don't thread a mode to the loader.
     """
     active_csv = _backend_csv(env)
     active_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -178,6 +184,66 @@ def test_shared_layer_off_in_silicon_mode(env: Path) -> None:
     db = _build_db(env, database_mode=None)
     assert db.enable_shared_layer is False
     assert _gemm_lookup(db, 1024, 4096, 4096) is None
+
+
+@pytest.mark.parametrize("mode", ["EMPIRICAL", "SOL"])
+def test_shared_layer_off_in_estimate_modes(env: Path, mode: str) -> None:
+    """EMPIRICAL/SOL compute from formulas and do not reuse sibling silicon rows."""
+    active_csv = _backend_csv(env)
+    active_csv.parent.mkdir(parents=True, exist_ok=True)
+    active_csv.write_text(_GEMM_HEADER)
+
+    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+
+    db = _build_db(env, database_mode=mode)
+    assert db.enable_shared_layer is False
+    assert _gemm_lookup(db, 1024, 4096, 4096) is None
+
+
+def test_shared_layer_on_in_silicon_mode(env: Path) -> None:
+    """`database_mode='SILICON'` enables sibling inheritance: a shape missing from
+    the active version is filled from an older collected version, while staying
+    within silicon data (no empirical fallback). Mirrors HYBRID's load-time
+    behavior — both modes consult the silicon tables.
+    """
+    active_csv = _backend_csv(env)
+    active_csv.parent.mkdir(parents=True, exist_ok=True)
+    active_csv.write_text(_GEMM_HEADER)
+
+    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+
+    db = _build_db(env, database_mode="SILICON")
+    assert db.enable_shared_layer is True
+    assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
+
+
+def test_get_database_shared_layer_shell_when_active_version_directory_missing(env: Path) -> None:
+    """SILICON shared-layer reuse should not require an empty active-version dir.
+
+    The requested backend/version may be a new framework release whose silicon
+    rows are intentionally inherited from an older sibling version.
+    """
+    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+
+    databases_cache.clear()
+    try:
+        db = get_database(
+            "h100_sxm",
+            "trtllm",
+            "1.0",
+            systems_paths=str(env),
+            database_mode="SILICON",
+        )
+
+        assert db is not None
+        assert db.version == "1.0"
+        assert db.enable_shared_layer is True
+        assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
+    finally:
+        databases_cache.clear()
 
 
 def test_shared_layer_on_in_hybrid_mode_with_fallback(env: Path) -> None:

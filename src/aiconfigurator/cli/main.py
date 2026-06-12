@@ -1010,7 +1010,20 @@ def _sglang_deepep_perf_data_skip_reason(
     return None
 
 
-def _ensure_backend_version_available(system_name: str, backend_name: str, backend_version: str | None = None) -> None:
+def _shared_layer_allows_missing_version(database_mode: str | None) -> bool:
+    mode = database_mode.name if hasattr(database_mode, "name") else str(database_mode or "")
+    return mode.upper() in {
+        common.DatabaseMode.SILICON.name,
+        common.DatabaseMode.HYBRID.name,
+    }
+
+
+def _ensure_backend_version_available(
+    system_name: str,
+    backend_name: str,
+    backend_version: str | None = None,
+    database_mode: str | None = common.DatabaseMode.SILICON.name,
+) -> None:
     """
     Validate that the backend is supported for the given system and version.
 
@@ -1035,6 +1048,16 @@ def _ensure_backend_version_available(system_name: str, backend_name: str, backe
 
     versions = supported.get(system_name, {}).get(backend_name, [])
     if backend_version is None or backend_version in versions:
+        return
+
+    if versions and _shared_layer_allows_missing_version(database_mode):
+        logger.warning(
+            "No exact perf database for system=%s backend=%s version=%s; allowing shared-layer reuse from sibling version(s): %s",
+            system_name,
+            backend_name,
+            backend_version,
+            ", ".join(versions),
+        )
         return
 
     systems_paths = perf_database.get_systems_paths()
@@ -1195,9 +1218,9 @@ def build_default_tasks(
             raise SystemExit(1)
         backends_to_sweep = available
     elif database_mode == common.DatabaseMode.SILICON.name:
-        _ensure_backend_version_available(system, backend, backend_version)
+        _ensure_backend_version_available(system, backend, backend_version, database_mode=database_mode)
         if decode_system != system:
-            _ensure_backend_version_available(decode_system, backend, backend_version)
+            _ensure_backend_version_available(decode_system, backend, backend_version, database_mode=database_mode)
     else:
         supported = perf_database.get_supported_databases()
         for role, sys_name in (("prefill", system), ("decode", decode_system)):
@@ -1400,6 +1423,8 @@ def build_experiment_tasks(
             logger.warning("Skipping experiment '%s': no system_name provided.", exp_name)
             continue
 
+        database_mode = exp_config.get("database_mode", common.DatabaseMode.SILICON.name)
+
         if exp_config.get("total_gpus") is None:
             logger.warning("Skipping experiment '%s': total_gpus not provided.", exp_name)
             continue
@@ -1428,7 +1453,7 @@ def build_experiment_tasks(
             bname = bname or common.BackendName.trtllm.value
             if bver is not None and sys_name and (sys_name, bname, bver) not in seen_combos:
                 seen_combos.add((sys_name, bname, bver))
-                _ensure_backend_version_available(sys_name, bname, bver)
+                _ensure_backend_version_available(sys_name, bname, bver, database_mode=database_mode)
 
         # Per-experiment engine_step_backend wins over the global default.
         overrides: dict[str, Any] = {}

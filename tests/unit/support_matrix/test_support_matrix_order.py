@@ -5,7 +5,9 @@ import json
 
 import pytest
 
-from tools.support_matrix.support_matrix import STATUS_PASS, SupportMatrix
+from aiconfigurator.sdk import common
+from tools.support_matrix import support_matrix as support_matrix_module
+from tools.support_matrix.support_matrix import STATUS_PASS, SupportMatrix, TestConstraints
 
 pytestmark = pytest.mark.unit
 
@@ -48,3 +50,25 @@ def test_save_results_to_csv_writes_manifest_in_display_order(tmp_path):
         "a100_sxm.csv",
         "b60.csv",
     ]
+
+
+def test_task_uses_silicon_database_mode(monkeypatch):
+    captured_kwargs = {}
+
+    class FakeTask:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(support_matrix_module, "Task", FakeTask)
+
+    SupportMatrix._create_task(
+        mode="agg",
+        model="Qwen/Qwen3-0.6B",
+        system="b200_sxm",
+        backend="sglang",
+        version="0.5.12",
+        constraints=TestConstraints(total_gpus=4, isl=256, osl=256, prefix=128, ttft=1500.0, tpot=50.0),
+        engine_step_backend=None,
+    )
+
+    assert captured_kwargs["database_mode"] == common.DatabaseMode.SILICON.name

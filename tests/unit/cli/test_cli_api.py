@@ -36,8 +36,15 @@ class TestCLIEstimateUnit:
             latest_calls.append((system, backend, systems_paths))
             return "estimate"
 
-        def fake_get_database(system, backend, version, systems_paths=None, allow_missing_data=False):
-            database_calls.append((system, backend, version, systems_paths, allow_missing_data))
+        def fake_get_database(
+            system,
+            backend,
+            version,
+            systems_paths=None,
+            allow_missing_data=False,
+            database_mode=None,
+        ):
+            database_calls.append((system, backend, version, systems_paths, allow_missing_data, database_mode))
             return FakeDatabase()
 
         def fake_run_agg_estimate(**kwargs):
@@ -63,7 +70,7 @@ class TestCLIEstimateUnit:
             ("h200_sxm", "trtllm", [str(custom_systems)]),
             ("h200_sxm", "trtllm", [str(custom_systems)]),
         ]
-        assert database_calls == [("h200_sxm", "trtllm", "estimate", [str(custom_systems)], True)]
+        assert database_calls == [("h200_sxm", "trtllm", "estimate", [str(custom_systems)], True, "SOL")]
 
     def test_disagg_resolves_backend_version_per_system(self, monkeypatch):
         import aiconfigurator.cli.api as api
@@ -78,8 +85,8 @@ class TestCLIEstimateUnit:
         def fake_latest_version(system, backend):
             return {"h200_sxm": "prefill-version", "h100_pcie": None}[system]
 
-        def fake_get_database(system, backend, version, allow_missing_data=False):
-            database_calls.append((system, backend, version, allow_missing_data))
+        def fake_get_database(system, backend, version, allow_missing_data=False, database_mode=None):
+            database_calls.append((system, backend, version, allow_missing_data, database_mode))
             return FakeDatabase()
 
         def fake_run_disagg_estimate(**kwargs):
@@ -104,8 +111,8 @@ class TestCLIEstimateUnit:
         )
 
         assert result == "prefill-version-estimate"
-        assert ("h200_sxm", "trtllm", "prefill-version", True) in database_calls
-        assert ("h100_pcie", "trtllm", "estimate", True) in database_calls
+        assert ("h200_sxm", "trtllm", "prefill-version", True, "SOL") in database_calls
+        assert ("h100_pcie", "trtllm", "estimate", True, "SOL") in database_calls
 
 
 class TestCLIExpUnit:

@@ -704,6 +704,7 @@ class SupportMatrix:
             "ttft": constraints.ttft,
             "tpot": constraints.tpot,
             "engine_step_backend": engine_step_backend,
+            "database_mode": common.DatabaseMode.SILICON.name,
         }
         if mode == "disagg":
             # v2 disagg forbids shared top-level worker fields; fan out to both roles.
@@ -748,7 +749,10 @@ class SupportMatrix:
             constraints=constraints,
             engine_step_backend=engine_step_backend,
         )
-        return task.run()
+        pareto_df = task.run()
+        if pareto_df is None:
+            raise RuntimeError("Task returned no result")
+        return pareto_df
 
     @staticmethod
     def run_single_test(

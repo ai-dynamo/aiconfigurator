@@ -312,6 +312,35 @@ class TestBuildDefaultTaskConfigs:
 
     @patch("aiconfigurator.cli.main.Task")
     @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
+    def test_silicon_mode_allows_missing_explicit_version_for_shared_layer(
+        self,
+        mock_supported_databases,
+        mock_task_config,
+        caplog,
+    ):
+        """A new backend version can reuse sibling silicon rows when no exact dir exists."""
+        mock_supported_databases.return_value = {"b200_sxm": {"sglang": ["0.5.10"]}}
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        with caplog.at_level(logging.WARNING, logger="aiconfigurator.cli.main"):
+            result = build_default_tasks(
+                model_path="Qwen/Qwen3-0.6B",
+                total_gpus=4,
+                system="b200_sxm",
+                backend="sglang",
+                backend_version="0.5.12",
+                database_mode="SILICON",
+            )
+
+        assert set(result) == {"agg", "disagg"}
+        assert mock_task_config.call_count == 2
+        assert mock_task_config.call_args_list[0].kwargs["backend_version"] == "0.5.12"
+        assert mock_task_config.call_args_list[1].kwargs["prefill_backend_version"] == "0.5.12"
+        assert mock_task_config.call_args_list[1].kwargs["decode_backend_version"] == "0.5.12"
+        assert "allowing shared-layer reuse from sibling version(s): 0.5.10" in caplog.text
+
+    @patch("aiconfigurator.cli.main.Task")
+    @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
     def test_auto_megamoe_sweeps_only_sglang(self, mock_supported_databases, mock_task_config):
         """The SGLang-only MegaMoE override must not be passed to TRT-LLM or vLLM."""
         mock_supported_databases.return_value = {
