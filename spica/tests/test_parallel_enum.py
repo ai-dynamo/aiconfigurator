@@ -58,6 +58,12 @@ def test_replica_iteration_within_budget():
     assert all(c.total_gpus <= 8 for c in cfgs)
 
 
+def test_min_gpus_per_worker_floor():
+    # memory-fit floor: workers smaller than 4 GPUs are excluded
+    cfgs = enumerate_parallel_configs(is_moe=False, mla=False, backend="vllm", gpu_budget=8, min_gpus_per_worker=4)
+    assert {c.shape.gpus_per_worker for c in cfgs} == {4, 8}
+
+
 def test_min_gpu_budget_floor():
     cfgs = enumerate_parallel_configs(is_moe=False, mla=False, backend="vllm", gpu_budget=8, min_gpu_budget=4)
     assert all(4 <= c.total_gpus <= 8 for c in cfgs)

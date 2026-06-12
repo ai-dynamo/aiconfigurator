@@ -16,6 +16,10 @@ dependencies = [
     "pydantic>=2.5",
     "pyyaml>=6.0",
     "tqdm>=4.0",
+    # Lower-layer provider: model/MoE detection, weight estimate, system spec,
+    # parallel enumeration + memory-fit floor. Spica lives in the aiconfigurator
+    # repo, so dev installs it editable from the parent (see [tool.uv.sources]).
+    "aiconfigurator>=0.9.0",
 ]
 
 [project.optional-dependencies]
@@ -67,3 +71,7 @@ testpaths = ["tests"]
 src = ["src", "tests"]
 line-length = 120
 target-version = "py310"
+
+[tool.uv.sources]
+# Develop against the local aiconfigurator (this repo's root), editable.
+aiconfigurator = { path = "..", editable = true }

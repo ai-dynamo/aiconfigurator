@@ -158,15 +158,21 @@ def enumerate_parallel_configs(
     backend: str,
     gpu_budget: int,
     min_gpu_budget: int | None = None,
+    min_gpus_per_worker: int = 1,
     gpus_per_worker_candidates: tuple[int, ...] = _DEFAULT_GPUS_PER_WORKER,
     enable_wideep: bool = False,
     moe_backend: str | None = None,
 ) -> list[ReplicaParallelConfig]:
     """Enumerate ``(worker shape, replica count)`` configs that fit ``gpu_budget``.
 
-    For each candidate GPUs-per-worker ``g`` (<= budget), enumerate the legal
-    worker shapes, then iterate replica counts ``r`` in ``1..(gpu_budget // g)``
-    so the total ``g * r`` stays within ``[min_gpu_budget, gpu_budget]``.
+    For each candidate GPUs-per-worker ``g`` (in ``[min_gpus_per_worker, budget]``),
+    enumerate the legal worker shapes, then iterate replica counts ``r`` in
+    ``1..(gpu_budget // g)`` so the total ``g * r`` stays within
+    ``[min_gpu_budget, gpu_budget]``.
+
+    ``min_gpus_per_worker`` is the memory-fit floor (smallest worker that holds
+    the model weights), normally from AIC's ``_calculate_min_tp`` via
+    :func:`spica.model_hw.resolve_model_hardware`.
 
     This is branch-agnostic: call once for an ``agg`` worker, or once per role
     (prefill / decode) for ``disagg`` — the prefill/decode pairing under the
@@ -174,7 +180,7 @@ def enumerate_parallel_configs(
     """
     configs: list[ReplicaParallelConfig] = []
     for g in gpus_per_worker_candidates:
-        if g > gpu_budget:
+        if g > gpu_budget or g < min_gpus_per_worker:
             continue
         shapes = enumerate_worker_shapes(
             is_moe=is_moe,
@@ -203,6 +209,7 @@ def enumerate_disagg_configs(
     backend: str,
     gpu_budget: int,
     min_gpu_budget: int | None = None,
+    min_gpus_per_worker: int = 1,
     gpus_per_worker_candidates: tuple[int, ...] = _DEFAULT_GPUS_PER_WORKER,
     enable_wideep: bool = False,
     moe_backend: str | None = None,
@@ -225,6 +232,7 @@ def enumerate_disagg_configs(
         mla=mla,
         backend=backend,
         gpu_budget=gpu_budget,
+        min_gpus_per_worker=min_gpus_per_worker,
         gpus_per_worker_candidates=gpus_per_worker_candidates,
         enable_wideep=enable_wideep,
         moe_backend=moe_backend,
