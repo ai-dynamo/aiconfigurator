@@ -58,3 +58,44 @@ def test_target_direction():
     assert OptimizationTarget.THROUGHPUT.maximize
     assert OptimizationTarget.GOODPUT_PER_GPU.maximize
     assert not OptimizationTarget.E2E_LATENCY.maximize
+
+
+def _search_space(**overrides):
+    return {"model_name": "m", "hardware_sku": "h200_sxm", **overrides}
+
+
+def test_subset_of_choices_is_accepted():
+    cfg = SmartSearchConfig(
+        search_space=_search_space(router_mode=["kv_router"], backend=["vllm", "sglang"]),
+        workload={"isl": 1, "osl": 1, "concurrency": 1},
+    )
+    assert cfg.search_space.router_mode == ["kv_router"]
+    assert cfg.search_space.backend == ["vllm", "sglang"]
+
+
+def test_value_outside_choices_rejected():
+    with pytest.raises(ValidationError):
+        SmartSearchConfig(
+            search_space=_search_space(router_mode=["bogus"]),
+            workload={"isl": 1, "osl": 1, "concurrency": 1},
+        )
+    # numeric dimension: 999 is not a listed prefill_max_num_seqs choice
+    with pytest.raises(ValidationError):
+        SmartSearchConfig(
+            search_space=_search_space(prefill_max_num_seqs=[1, 999]),
+            workload={"isl": 1, "osl": 1, "concurrency": 1},
+        )
+    # planner: only listed presets allowed
+    with pytest.raises(ValidationError):
+        SmartSearchConfig(
+            search_space=_search_space(planner_scaling_policy=["disabled", "made_up"]),
+            workload={"isl": 1, "osl": 1, "concurrency": 1},
+        )
+
+
+def test_empty_choice_list_rejected():
+    with pytest.raises(ValidationError):
+        SmartSearchConfig(
+            search_space=_search_space(router_mode=[]),
+            workload={"isl": 1, "osl": 1, "concurrency": 1},
+        )

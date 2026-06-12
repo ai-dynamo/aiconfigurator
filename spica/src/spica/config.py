@@ -104,6 +104,53 @@ class Workload(BaseModel):
         return self.trace_path is not None
 
 
+# Allowed choices for each swept search-space dimension. A configured value must
+# be a non-empty subset of these (one or more); the field defaults below use the
+# full set (or a sensible subset, e.g. ``backend``). Centralized here so the
+# candidate generator can reuse it. Pinned scalars and the generated
+# ``parallel_configs`` are intentionally not choice-constrained.
+SEARCH_CHOICES: dict[str, tuple] = {
+    "deployment_mode": ("disagg", "agg"),
+    "backend": ("vllm", "sglang", "trtllm"),
+    "prefill_max_num_batched_tokens": (8192, 16384, 32768),
+    "prefill_max_num_seqs": (1, 2, 4, 8),
+    "decode_max_num_batched_tokens": (8192,),
+    "decode_max_num_seqs": (256, 512, 1024),
+    "agg_max_num_batched_tokens": (8192, 16384, 32768),
+    "agg_max_num_seqs": (256, 512, 1024),
+    "router_mode": ("kv_router", "round_robin"),
+    "overlap_score_credit": (0.0, 0.5, 1.0),
+    "prefill_load_scale": (0.0, 0.25, 0.5, 1.0, 2.0, 4.0),
+    "host_cache_hit_weight": (0.5, 0.75, 1.0),
+    "disk_cache_hit_weight": (0.0, 0.25, 0.5),
+    "router_temperature": (0.0, 0.2, 0.5, 1.0),
+    "planner_scaling_policy": (
+        "disabled",
+        "throughput_180_5",
+        "throughput_600_5",
+        "load_180_5",
+        "load_180_10",
+        "hybrid_180_5",
+        "hybrid_600_5",
+    ),
+    "planner_fpm_sampling": ("small", "default", "large", "fine"),
+    "planner_load_sensitivity": ("aggressive", "default", "conservative"),
+    "load_predictor_presets": (
+        "constant_last",
+        "arima_raw",
+        "arima_log1p",
+        "prophet_w20_raw",
+        "prophet_w20_log1p",
+        "prophet_w50_raw",
+        "prophet_w50_log1p",
+        "kalman_default_raw",
+        "kalman_default_log1p",
+        "kalman_reactive_raw",
+        "kalman_reactive_log1p",
+    ),
+}
+
+
 class SearchSpace(BaseModel):
     """Inputs to one search run, grouped by component.
 
@@ -204,6 +251,18 @@ class SearchSpace(BaseModel):
         "kalman_reactive_raw",
         "kalman_reactive_log1p",
     ]
+
+    @model_validator(mode="after")
+    def _validate_search_choices(self) -> "SearchSpace":
+        """Each swept dimension must be a non-empty subset of its listed choices."""
+        for field_name, allowed in SEARCH_CHOICES.items():
+            values = getattr(self, field_name)
+            if not values:
+                raise ValueError(f"{field_name} must list at least one choice; allowed: {list(allowed)}")
+            invalid = [v for v in values if v not in allowed]
+            if invalid:
+                raise ValueError(f"{field_name} has invalid choices {invalid}; allowed: {list(allowed)}")
+        return self
 
 
 class SweepConfig(BaseModel):
