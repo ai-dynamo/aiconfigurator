@@ -14,8 +14,8 @@ import re
 import sys
 import time
 import traceback
-from contextlib import contextmanager
 from collections.abc import Iterable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -434,7 +434,7 @@ def _temporary_scheduler_token_budget(llm, token_budget: int):
     """Temporarily cap scheduler tokens per step without resizing engine buffers."""
 
     scheduler = _engine_core_scheduler(llm)
-    old_budget = getattr(scheduler, "max_num_scheduled_tokens")
+    old_budget = scheduler.max_num_scheduled_tokens
     scheduler.max_num_scheduled_tokens = int(token_budget)
     try:
         yield
@@ -920,7 +920,8 @@ def run_worker(spec_path: Path) -> None:
     gen_driver = str(spec.get("gen_driver", "prefix_cache"))
     if (has_ctx or has_gen) and runtime_vllm_config is not None:
         cache_config = getattr(runtime_vllm_config, "cache_config", None)
-        needs_prefix_cache = has_ctx or (has_gen and gen_driver == "prefix_cache")
+        ctx_needs_prefix_cache = any(dp.phase == "ctx" and int(dp.past_kv) > 0 for dp in datapoints)
+        needs_prefix_cache = ctx_needs_prefix_cache or (has_gen and gen_driver == "prefix_cache")
         if needs_prefix_cache and getattr(cache_config, "enable_prefix_caching", None) is False:
             raise RuntimeError("prefix-cache ctx/gen driver requires vLLM prefix caching")
     if runtime_vllm_config is not None:
@@ -938,6 +939,7 @@ def run_worker(spec_path: Path) -> None:
             "enable_layer_patch": bool(spec.get("enable_layer_patch", True)),
             "enable_step_marker": bool(spec.get("enable_step_marker", True)),
             "moe_noop": bool(spec.get("moe_noop")),
+            "moe_weight_mode": spec.get("moe_weight_mode") or "",
             "gen_driver": gen_driver,
             "router_weight_model": spec.get("router_weight_model") or "",
             "physical_gpus": int(spec.get("physical_gpus") or 1),
@@ -1287,7 +1289,7 @@ def _run_prefix_cached_ctx_iteration(
     active_iteration: str,
     marker_mod,
 ) -> None:
-    cache_salt_prefix = _ctx_cache_salt_prefix(work_unit_id, dp)
+    cache_salt_prefix = _ctx_cache_salt_prefix(work_unit_id, dp) if dp.past_kv > 0 else None
     prefix_stream_key = _ctx_prefix_stream_key(work_unit_id, dp)
     if fill_prefix and dp.past_kv > 0:
         _set_marker_state(marker_mod, active_iterations="", phase="ctx")

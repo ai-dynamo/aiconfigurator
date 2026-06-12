@@ -37,7 +37,7 @@ SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}"
 FPM_PORT="${DYN_FORWARDPASS_METRIC_PORT:-20380}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-64}"
-MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.9}"
 GPUS="${GPUS:-}"
 TP_SIZE="${TP_SIZE:-}"
@@ -147,7 +147,7 @@ Options:
   --fpm-port PORT               Raw FPM ZMQ PUB port (default: ${FPM_PORT})
   --max-model-len N             vLLM --max-model-len override (default: vLLM model default)
   --max-num-seqs N              vLLM --max-num-seqs (default: ${MAX_NUM_SEQS})
-  --max-num-batched-tokens N    vLLM --max-num-batched-tokens (default: ${MAX_NUM_BATCHED_TOKENS})
+  --max-num-batched-tokens N    vLLM --max-num-batched-tokens override (default: vLLM scheduler default)
   --gpu-memory-utilization X    vLLM --gpu-memory-utilization (default: ${GPU_MEMORY_UTILIZATION})
   --gpus SPEC                   Docker --gpus value for worker (default: inferred from TP/EP, else device=0)
   --tp-size N                   Tensor parallel size for this deployment
@@ -894,9 +894,11 @@ deployment_helper_args() {
     local args=(
         --model "${MODEL}"
         --max-num-seqs "${MAX_NUM_SEQS}"
-        --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}"
         --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
     )
+    if [[ -n "${MAX_NUM_BATCHED_TOKENS}" ]]; then
+        args+=(--max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}")
+    fi
     if [[ -n "${MAX_MODEL_LEN}" ]]; then
         args+=(--max-model-len "${MAX_MODEL_LEN}")
     fi

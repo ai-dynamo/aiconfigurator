@@ -115,6 +115,9 @@ class RuntimeConfig:
     # Optional experimental static-latency backend. "python" preserves existing behavior;
     # "rust" routes static step estimates through the Rust FPM estimator.
     engine_step_backend: str | None = None
+    # Optional vLLM scheduler chunk size for layerwise/FPM parity. Leave unset
+    # to use the direct layerwise context surface.
+    vllm_max_num_batched_tokens: int | None = None
     image_height: int = 0
     image_width: int = 0
     num_images_per_request: int = 1

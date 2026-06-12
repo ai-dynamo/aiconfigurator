@@ -125,10 +125,16 @@ when comparing context kernel timing against the full scheduler/update envelope.
 `--target-layer-count` overrides both phases; `--ctx-target-layer-count` and
 `--gen-target-layer-count` override them independently.
 
-MoE layerwise collection defaults to a no-op MoE block and composes those rows
-with op-level MoE data. This avoids downloading full checkpoints for every
-model we want to characterize. Real router weights are available only as the
-diagnostic `--moe-real-router` mode when we need to inspect routing-specific
+MoE layerwise collection is phase-specific by default. Context rows keep dummy
+MoE weights active, which captures the vLLM MoE module/envelope cost without
+downloading real checkpoint weights. Decode rows use a no-op MoE block and AIC
+composes those rows with op-level routed MoE, router, shared-expert, and comm
+data. This split avoids real-weight dependency while keeping decode collection
+fast. New layerwise CSVs include `moe_weight_mode` (`dummy`, `noop`,
+`real_router`, or `dense`) so runs can be audited without reconstructing the
+launch command. `--moe-noop` forces no-op MoE for all selected phases,
+`--moe-dummy-router` forces dummy MoE for all selected phases, and
+`--moe-real-router` is only a diagnostic mode for inspecting routing-specific
 behavior on a local snapshot.
 
 The full shape grid is intentionally sparse at very small token counts.

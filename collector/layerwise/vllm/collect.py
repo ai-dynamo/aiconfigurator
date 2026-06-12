@@ -45,7 +45,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tp-sizes", default="1,2,4,8", help="Comma-separated TP sizes to collect.")
     parser.add_argument("--ep-sizes", default="auto", help="Comma-separated EP sizes, or auto for model defaults.")
     parser.add_argument("--phases", choices=("ctx", "gen", "both"), default="both")
-    parser.add_argument("--run-preset", choices=("full", "smoke", "production"), default="full")
+    parser.add_argument("--run-preset", choices=("full", "smoke"), default="full")
     parser.add_argument("--ctx-new-tokens", default=None, help="Override context new-token grid.")
     parser.add_argument("--ctx-past-kv", default=None, help="Override context past-KV grid.")
     parser.add_argument("--gen-batch-sizes", default=None, help="Override decode batch-size grid.")
@@ -80,6 +80,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     advanced.add_argument("--attn-quant", default=None)
     advanced.add_argument("--kv-quant", default=None)
     advanced.add_argument("--moe-noop", action="store_true")
+    advanced.add_argument(
+        "--moe-dummy-router",
+        action="store_true",
+        help=(
+            "Diagnostic mode: keep dummy MoE weights/router active instead of "
+            "replacing MoE with a no-op or loading real router weights."
+        ),
+    )
     advanced.add_argument(
         "--physical-tp",
         action="store_true",

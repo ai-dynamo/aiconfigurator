@@ -20,8 +20,8 @@ CSV_COLUMNS = [
     "num_slots", "gemm_quant", "moe_quant", "attn_quant", "kv_quant", "phase",
     "batch_size", "new_tokens", "past_kv", "layer_type", "layer_index",
     "measured_layer_count", "layer_multiplier", "latency_ms", "rms_latency_ms",
-    "rms_kernel_count", "includes_moe", "latency_source", "physical_gpus",
-    "vllm_config_hash",
+    "rms_kernel_count", "includes_moe", "moe_weight_mode", "latency_source",
+    "physical_gpus", "max_num_batched_tokens", "vllm_config_hash",
 ]
 
 

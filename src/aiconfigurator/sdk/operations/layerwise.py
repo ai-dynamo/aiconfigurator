@@ -32,6 +32,14 @@ def _parse_optional_float(value) -> float | None:
     return float(value)
 
 
+def _parse_int(value, default: int = 0) -> int:
+    """Parse integer CSV fields that may have been round-tripped as floats."""
+
+    if value in (None, ""):
+        return default
+    return int(float(value))
+
+
 def _entry_scale(entry: dict) -> float:
     raw_multiplier = float(entry.get("layer_multiplier", 0.0) or 0.0)
     if raw_multiplier <= 0.0:
@@ -57,6 +65,14 @@ def _entry_components(entry: dict) -> list[dict]:
     return [_entry_component(entry)]
 
 
+def _is_scheduler_envelope_entry(entry: dict | None) -> bool:
+    """Return whether a row measures a scheduler/worker iteration envelope."""
+
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("latency_source") or "") in {"schedule_to_update", "worker_wall", "fpm_wall"}
+
+
 def _merge_layerwise_entries(existing: dict | None, entry: dict) -> dict:
     """Merge representative rows for the same public layerwise query shape."""
 
@@ -64,13 +80,17 @@ def _merge_layerwise_entries(existing: dict | None, entry: dict) -> dict:
         result = dict(entry)
         result["components"] = [_entry_component(entry)]
         return result
+    if _is_scheduler_envelope_entry(existing) != _is_scheduler_envelope_entry(entry):
+        selected = dict(existing if _is_scheduler_envelope_entry(existing) else entry)
+        selected.setdefault("components", [_entry_component(selected)])
+        return selected
 
     def _scaled(value: dict, metric: str) -> float:
         return float(value.get(metric, 0.0) or 0.0) * _entry_scale(value)
 
     components = _entry_components(existing) + [_entry_component(entry)]
 
-    return {
+    result = {
         "latency": sum(_scaled(component, "latency") for component in components),
         "energy": sum(_scaled(component, "energy") for component in components),
         "rms_latency": sum(_scaled(component, "rms_latency") for component in components),
@@ -82,6 +102,14 @@ def _merge_layerwise_entries(existing: dict | None, entry: dict) -> dict:
         "layer_multiplier": 1.0,
         "components": components,
     }
+    chunk_sizes = {
+        float(component["max_num_batched_tokens"])
+        for component in components
+        if component.get("max_num_batched_tokens") not in (None, "")
+    }
+    if len(chunk_sizes) == 1:
+        result["max_num_batched_tokens"] = chunk_sizes.pop()
+    return result
 
 
 def _cache_key(database: PerfDatabase) -> tuple:
@@ -100,14 +128,32 @@ def load_layerwise_data(layerwise_file):
         logger.debug("Layerwise data file %s not found.", layerwise_file)
         return None
 
+    scheduler_ctx_shapes = {
+        (
+            str(row["model"]).lower(),
+            _parse_int(row.get("tp_size") or row.get("attn_tp") or row.get("moe_tp"), 1),
+            _parse_int(row.get("seq_len_q") or row.get("new_tokens"), 1),
+        )
+        for row in rows
+        if str(row["phase"]).upper() == "CTX"
+        and _parse_int(row.get("seq_len_kv_cache") or row.get("past_kv"), 0) == 0
+        and _is_scheduler_envelope_entry(row)
+    }
     data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
     for row in rows:
         model = str(row["model"]).lower()
         phase = str(row["phase"]).upper()
-        tp_size = int(row.get("tp_size") or row.get("attn_tp") or row.get("moe_tp") or 1)
-        batch_size = int(row["batch_size"])
-        seq_len_q = int(row.get("seq_len_q") or row.get("new_tokens") or 1)
-        seq_len_kv_cache = int(row.get("seq_len_kv_cache") or row.get("past_kv") or 0)
+        tp_size = _parse_int(row.get("tp_size") or row.get("attn_tp") or row.get("moe_tp"), 1)
+        batch_size = _parse_int(row["batch_size"])
+        seq_len_q = _parse_int(row.get("seq_len_q") or row.get("new_tokens"), 1)
+        seq_len_kv_cache = _parse_int(row.get("seq_len_kv_cache") or row.get("past_kv"), 0)
+        if (
+            phase == "CTX"
+            and seq_len_kv_cache == 0
+            and (model, tp_size, seq_len_q) in scheduler_ctx_shapes
+            and not _is_scheduler_envelope_entry(row)
+        ):
+            continue
         if row.get("latency_ms") not in (None, ""):
             latency_ms = float(row["latency_ms"])
         else:
@@ -127,6 +173,9 @@ def load_layerwise_data(layerwise_file):
         value = _parse_optional_float(row.get("physical_gpus"))
         if value is not None:
             entry["physical_gpus"] = value
+        value = _parse_optional_float(row.get("max_num_batched_tokens"))
+        if value is not None:
+            entry["max_num_batched_tokens"] = value
         entry["includes_moe"] = _parse_bool(row.get("includes_moe"))
         for metric in ("latency_source", "measurement_mode", "attribution_target", "vllm_config_hash"):
             if row.get(metric) not in (None, ""):
@@ -192,6 +241,42 @@ def _uniform_float_metric(data: dict, metric: str, default: float = 0.0) -> floa
     return default
 
 
+def _interpolated_layer_scale_metadata(data: dict) -> tuple[float, float] | None:
+    """Return measured/multiplier metadata for an interpolated layerwise row.
+
+    Interpolation returns a latency from the public layerwise table. Uniform
+    one-layer surfaces still need their normal representative-layer scale.
+    Mixed tables that contain already-merged public rows must not fall back to
+    the model layer count, or the latency is scaled twice.
+    """
+
+    scales: set[float] = set()
+    saw_scale_metadata = False
+    saw_missing_scale_metadata = False
+
+    def _walk(value) -> None:
+        nonlocal saw_missing_scale_metadata, saw_scale_metadata
+        if isinstance(value, dict) and ("latency" in value or "power" in value):
+            has_measured_count = value.get("measured_layer_count") not in (None, "")
+            has_multiplier = value.get("layer_multiplier") not in (None, "")
+            if has_measured_count or has_multiplier:
+                saw_scale_metadata = True
+                scales.add(float(_entry_scale(value)))
+            else:
+                saw_missing_scale_metadata = True
+            return
+        if isinstance(value, dict):
+            for child in value.values():
+                _walk(child)
+
+    _walk(data)
+    if not saw_scale_metadata or saw_missing_scale_metadata:
+        return None
+    if len(scales) == 1:
+        return 1.0, scales.pop()
+    return 1.0, 1.0
+
+
 def _uniform_str_metric(data: dict, metric: str, default: str = "") -> str:
     values: set[str] = set()
 
@@ -208,6 +293,22 @@ def _uniform_str_metric(data: dict, metric: str, default: str = "") -> str:
     if len(values) == 1:
         return values.pop()
     return default
+
+
+def _representative_components(data: dict) -> list[dict]:
+    """Return component metadata from the first leaf entry in a layerwise grid."""
+
+    def _walk(value) -> list[dict] | None:
+        if isinstance(value, dict) and ("latency" in value or "power" in value):
+            return _entry_components(value)
+        if isinstance(value, dict):
+            for child in value.values():
+                found = _walk(child)
+                if found is not None:
+                    return found
+        return None
+
+    return _walk(data) or []
 
 
 class Layerwise(Operation):
@@ -288,8 +389,16 @@ class Layerwise(Operation):
                 result["includes_moe"] = _uniform_bool_metric(tp_data, "includes_moe")
                 result["layer_type"] = _uniform_str_metric(tp_data, "layer_type")
                 result["layer_index"] = _uniform_float_metric(tp_data, "layer_index")
-                result["measured_layer_count"] = _uniform_float_metric(tp_data, "measured_layer_count", 1.0)
-                result["layer_multiplier"] = _uniform_float_metric(tp_data, "layer_multiplier")
+                scale_metadata = _interpolated_layer_scale_metadata(tp_data)
+                if scale_metadata is not None:
+                    result["measured_layer_count"], result["layer_multiplier"] = scale_metadata
+                elif seq_len_kv_cache == 0:
+                    result["measured_layer_count"] = _uniform_float_metric(tp_data, "measured_layer_count", 1.0)
+                    result["layer_multiplier"] = _uniform_float_metric(tp_data, "layer_multiplier")
+                result["max_num_batched_tokens"] = _uniform_float_metric(tp_data, "max_num_batched_tokens")
+                result["physical_gpus"] = _uniform_float_metric(tp_data, "physical_gpus")
+                result["latency_source"] = _uniform_str_metric(tp_data, "latency_source")
+                result["components"] = _representative_components(tp_data)
         elif batch_size in tp_data and seq_len in tp_data[batch_size]:
             result = tp_data[batch_size][seq_len]
         else:
@@ -304,8 +413,16 @@ class Layerwise(Operation):
             result["includes_moe"] = _uniform_bool_metric(tp_data, "includes_moe")
             result["layer_type"] = _uniform_str_metric(tp_data, "layer_type")
             result["layer_index"] = _uniform_float_metric(tp_data, "layer_index")
-            result["measured_layer_count"] = _uniform_float_metric(tp_data, "measured_layer_count", 1.0)
-            result["layer_multiplier"] = _uniform_float_metric(tp_data, "layer_multiplier")
+            scale_metadata = _interpolated_layer_scale_metadata(tp_data)
+            if scale_metadata is not None:
+                result["measured_layer_count"], result["layer_multiplier"] = scale_metadata
+            else:
+                result["measured_layer_count"] = _uniform_float_metric(tp_data, "measured_layer_count", 1.0)
+                result["layer_multiplier"] = _uniform_float_metric(tp_data, "layer_multiplier")
+            result["max_num_batched_tokens"] = _uniform_float_metric(tp_data, "max_num_batched_tokens")
+            result["physical_gpus"] = _uniform_float_metric(tp_data, "physical_gpus")
+            result["latency_source"] = _uniform_str_metric(tp_data, "latency_source")
+            result["components"] = _representative_components(tp_data)
 
         if not isinstance(result, dict):
             result = {"latency": float(result), "energy": 0.0}
@@ -318,7 +435,7 @@ class Layerwise(Operation):
         }
         if result.get("layer_type") not in (None, ""):
             out["layer_type"] = str(result["layer_type"])
-        for metric in ("layer_index", "measured_layer_count", "layer_multiplier"):
+        for metric in ("layer_index", "measured_layer_count", "layer_multiplier", "max_num_batched_tokens"):
             if result.get(metric) not in (None, ""):
                 out[metric] = float(result[metric])
         if result.get("physical_gpus") not in (None, ""):

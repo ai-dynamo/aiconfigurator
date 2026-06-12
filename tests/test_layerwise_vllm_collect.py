@@ -24,6 +24,7 @@ from collector.layerwise.vllm.registry import LayerwiseModel
 
 cl = SimpleNamespace(
     Attempt=scheduler.Attempt,
+    CSV_COLUMNS=results.CSV_COLUMNS,
     DataPoint=DataPoint,
     RandomPromptTokenConfig=worker.RandomPromptTokenConfig,
     RepresentativeLayer=RepresentativeLayer,
@@ -211,7 +212,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertTrue(gen_unit.uses_full_layer_depth())
             self.assertIsNone(gen_unit.max_model_len)
 
-    def test_public_tp1_moe_defaults_to_noop_prefix_cache_without_real_weights(self):
+    def test_public_tp1_moe_defaults_to_dummy_context_and_noop_decode_without_real_weights(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = cl._build_arg_parser().parse_args([
@@ -243,7 +244,11 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             with (
                 mock.patch.object(dpg, "_load_original_config", return_value=moe_config),
-                mock.patch.object(dpg, "_resolve_real_weight_model_dir", return_value=str(tmp_path / "snapshot")) as resolver,
+                mock.patch.object(
+                    dpg,
+                    "_resolve_real_weight_model_dir",
+                    return_value=str(tmp_path / "snapshot"),
+                ) as resolver,
                 mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")) as patcher,
             ):
                 units = cl.build_public_work_units(args, [model])
@@ -252,9 +257,13 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertEqual({unit.datapoints[0].phase for unit in units}, {"ctx", "gen"})
             self.assertTrue(all(unit.model_dir == str(tmp_path / "patched") for unit in units))
             self.assertTrue(all(unit.extra_vllm_args == () for unit in units))
-            self.assertTrue(all(unit.moe_noop for unit in units))
-            self.assertTrue(all(unit.router_weight_model is None for unit in units))
+            ctx_unit = next(unit for unit in units if unit.datapoints[0].phase == "ctx")
             gen_unit = next(unit for unit in units if unit.datapoints[0].phase == "gen")
+            self.assertFalse(ctx_unit.moe_noop)
+            self.assertTrue(gen_unit.moe_noop)
+            self.assertEqual(ctx_unit.moe_weight_mode, "dummy")
+            self.assertEqual(gen_unit.moe_weight_mode, "noop")
+            self.assertTrue(all(unit.router_weight_model is None for unit in units))
             self.assertEqual(gen_unit.gen_driver, "prefix_cache")
             resolver.assert_not_called()
             patcher.assert_called()
@@ -1247,7 +1256,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertNotIn("--no-enable-prefix-caching", spec["extra_vllm_args"])
             self.assertIn("--enable-prefix-caching", spec["extra_vllm_args"])
 
-    def test_scheduler_enables_prefix_cache_for_plain_context(self):
+    def test_scheduler_does_not_enable_prefix_cache_for_zero_past_context(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             unit = _unit(tmp_path, [cl.DataPoint("ctx", 1, 128, 0)])
@@ -1255,7 +1264,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
 
-            self.assertIn("--enable-prefix-caching", spec["extra_vllm_args"])
+            self.assertNotIn("--enable-prefix-caching", spec["extra_vllm_args"])
             self.assertNotIn("--no-enable-prefix-caching", spec["extra_vllm_args"])
 
     def test_scheduler_enables_prefix_cache_for_context_with_past_kv(self):
@@ -1820,7 +1829,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 [1, 2],
             )
 
-    def test_gpt_oss_build_work_units_targets_first_moe_layer_for_noop(self):
+    def test_moe_noop_preserves_layer_type_representatives(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             moe_config = {
@@ -1841,17 +1850,23 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             ):
                 units = cl.build_work_units(args)
 
-            self.assertEqual([u.target_layers for u in units], [[0], [0]])
-            self.assertEqual([u.representative.layer_type for u in units], ["moe", "moe"])
-            self.assertEqual([u.representative.layer_multiplier for u in units], [1, 1])
-            self.assertEqual([u.moe_noop for u in units], [True, True])
+            self.assertEqual([u.target_layers for u in units], [[0], [1], [0], [1]])
+            self.assertEqual(
+                [u.representative.layer_type for u in units],
+                ["sliding_attention_moe", "full_attention_moe", "sliding_attention_moe", "full_attention_moe"],
+            )
+            self.assertEqual([u.representative.layer_multiplier for u in units], [1, 1, 1, 1])
+            self.assertEqual([u.moe_noop for u in units], [True, True, True, True])
             self.assertEqual(
                 [call.kwargs["extra_overrides"] for call in patcher.mock_calls],
-                [{"layer_types": ["sliding_attention"]}, {"layer_types": ["sliding_attention"]}],
+                [
+                    {"layer_types": ["sliding_attention", "full_attention"]},
+                    {"layer_types": ["sliding_attention", "full_attention"]},
+                ],
             )
             self.assertEqual(
                 [call.kwargs["num_hidden_layers"] for call in patcher.mock_calls],
-                [1, 1],
+                [2, 2],
             )
 
     def test_explicit_context_envelope_uses_one_full_depth_unit(self):
@@ -1912,7 +1927,15 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=1)
 
             self.assertTrue(spec["moe_noop"])
+            self.assertEqual(spec["moe_weight_mode"], "noop")
             self.assertTrue(spec["enable_layer_patch"])
+
+    def test_layerwise_csv_schema_includes_moe_weight_mode(self):
+        self.assertIn("moe_weight_mode", cl.CSV_COLUMNS)
+        self.assertLess(
+            cl.CSV_COLUMNS.index("includes_moe"),
+            cl.CSV_COLUMNS.index("moe_weight_mode"),
+        )
 
     def test_scheduler_disables_layer_patch_for_full_depth_schedule_timing(self):
         with tempfile.TemporaryDirectory() as td:

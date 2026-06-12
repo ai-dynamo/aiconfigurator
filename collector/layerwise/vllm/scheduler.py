@@ -617,7 +617,7 @@ class Scheduler:
         _append_default_vllm_args(extra_vllm_args)
         has_ctx = any(dp.phase == "ctx" for dp in pending)
         has_gen = any(dp.phase == "gen" for dp in pending)
-        ctx_needs_prefix_cache = has_ctx
+        ctx_needs_prefix_cache = any(dp.phase == "ctx" and int(dp.past_kv) > 0 for dp in pending)
         needs_prefix_cache = ctx_needs_prefix_cache or (has_gen and unit.gen_driver == "prefix_cache")
         disables_prefix_cache = has_gen and unit.gen_driver == "live_decode" and not has_ctx
         runtime_defaults = gpt_oss_runtime_defaults(
@@ -670,6 +670,7 @@ class Scheduler:
             "model_layer_count": unit.model_layer_count,
             "enable_layer_patch": enable_layer_patch,
             "moe_noop": unit.moe_noop,
+            "moe_weight_mode": unit.moe_weight_mode,
             "datapoints": [asdict(dp) for dp in pending],
             "max_num_seqs": unit.max_num_seqs,
             "max_num_batched_tokens": unit.max_num_batched_tokens,
@@ -898,8 +899,10 @@ class Scheduler:
                 "rms_latency_ms": rms_us / 1000.0,
                 "rms_kernel_count": rms_kernel_count,
                 "includes_moe": _work_unit_includes_moe(attempt.work_unit),
+                "moe_weight_mode": attempt.work_unit.moe_weight_mode,
                 "latency_source": effective_latency_source,
                 "physical_gpus": attempt.work_unit.physical_gpus,
+                "max_num_batched_tokens": attempt.work_unit.max_num_batched_tokens or "",
                 "vllm_config_hash": _attempt_config_hash(attempt, self.store),
             }
             _append_success_row(self.output_path, row)
@@ -973,8 +976,10 @@ class Scheduler:
                 "rms_latency_ms": rms_us / 1000.0,
                 "rms_kernel_count": rms_kernel_count,
                 "includes_moe": _work_unit_includes_moe(attempt.work_unit),
+                "moe_weight_mode": attempt.work_unit.moe_weight_mode,
                 "latency_source": effective_latency_source,
                 "physical_gpus": attempt.work_unit.physical_gpus,
+                "max_num_batched_tokens": attempt.work_unit.max_num_batched_tokens or "",
                 "vllm_config_hash": _attempt_config_hash(attempt, self.store),
             }
             _append_success_row(self.output_path, row)

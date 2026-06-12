@@ -77,6 +77,18 @@ class WorkUnit:
     router_weight_model: str | None = None
     physical_gpus: int = 1
 
+    @property
+    def moe_weight_mode(self) -> str:
+        """Return how MoE weights are represented for this work unit."""
+
+        if "moe" not in self.representative.layer_type.lower():
+            return "dense"
+        if self.moe_noop:
+            return "noop"
+        if self.router_weight_model:
+            return "real_router"
+        return "dummy"
+
     def uses_full_layer_depth(self) -> bool:
         """Return whether this work unit keeps every layer in the engine."""
 
@@ -107,6 +119,7 @@ class WorkUnit:
                 "model_layer_count": self.model_layer_count or "",
                 "moe_noop": self.moe_noop,
                 "includes_moe": self.includes_moe,
+                "moe_weight_mode": self.moe_weight_mode,
                 "router_weight_model": self.router_weight_model or "",
                 "physical_gpus": self.physical_gpus,
                 "phase": dp.phase,

@@ -66,7 +66,7 @@ def _batch_sizes_up_to(max_batch_size: int) -> list[int]:
 
 def values_for_preset(preset: str, *, max_decode_batch_size: int | None = None) -> dict[str, str]:
     """Return CSV shape defaults for the named public run preset."""
-    if preset in {"full", "production"}:
+    if preset == "full":
         gen_batch_sizes = (
             _batch_sizes_up_to(max_decode_batch_size)
             if max_decode_batch_size is not None else GEN_BATCH_SIZES
@@ -155,15 +155,18 @@ def make_work_unit_args(
         system=system,
         tp_size=tp_size,
     )
-    shared_preset_values = values_for_preset(
-        public_args.run_preset,
-        max_decode_batch_size=max_decode_batch_size,
-    )
     preset_values = values_for_preset(
         public_args.run_preset,
         max_decode_batch_size=max_decode_batch_size if phases in ("gen", "both") else None,
     )
     moe_tp = tp_size // ep_size if model.is_moe else 1
+    moe_dummy_router = bool(getattr(public_args, "moe_dummy_router", False))
+    use_moe_noop = public_args.moe_noop or (
+        model.is_moe
+        and not public_args.moe_real_router
+        and not moe_dummy_router
+        and phases != "ctx"
+    )
     return argparse.Namespace(
         model=model.model,
         work_dir=str(public_args.run_dir / "profiles"),
@@ -174,7 +177,7 @@ def make_work_unit_args(
         tp_sizes=str(tp_size),
         moe_tp=moe_tp,
         num_slots=model.num_slots,
-        moe_noop=public_args.moe_noop or (model.is_moe and not public_args.moe_real_router),
+        moe_noop=use_moe_noop,
         target_layer_count=target_layer_count,
         target_layers=public_args.target_layers,
         target_layer_config_depth=public_args.target_layer_config_depth,
@@ -534,7 +537,7 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
     layer_schedule, num_hidden_layers, extra_overrides = _detect_layer_schedule(
         orig_config, target_layer_count,
         explicit_target_layers, args.target_layer_config_depth,
-        expand_layer_types=not moe_noop and not context_schedule_envelope,
+        expand_layer_types=not context_schedule_envelope,
     )
 
     work_dir = Path(args.work_dir).resolve()

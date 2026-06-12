@@ -11,3 +11,5 @@ collection path.
   KV-window matches.
 - `plot_aic_fpm_comparison.py`: plot existing AIC-vs-FPM comparison CSVs,
   including mixed-step context-token and decode-token histograms.
+- `summarize_layerwise_fpm_comparisons.py`: rebuild a curated accuracy summary
+  from a manifest of row-level AIC-vs-FPM comparison CSVs.
