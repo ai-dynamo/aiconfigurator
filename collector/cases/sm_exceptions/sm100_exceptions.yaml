@@ -11,6 +11,20 @@ description: >
   Most quantized paths are supported; remaining skips are kernel-shape limits.
 
 framework_specific_op_exceptions:
+  sglang:
+    gemm:
+      rules:
+        - reason_type: framework_version_unsupported
+          reason: >
+            SGLang 0.5.12.post2.dev454+ge958f4561 can hang indefinitely on
+            B300/SM100 for this tiny-M FP8 GEMM shape; skip it so the collector
+            can finish and report the missing row as an expected SM exception.
+          fields: [gemm_type, token_count, output_features, input_features]
+          match:
+            gemm_type: fp8
+            token_count: 5
+            output_features: 256
+            input_features: 65536
   trtllm:
     mla_bmm_gen_pre:
       rules:
