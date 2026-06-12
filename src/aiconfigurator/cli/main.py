@@ -443,6 +443,21 @@ def _add_estimate_mode_arguments(parser):
     parser.add_argument("--isl", type=int, default=1024, help="Input sequence length. Default: 1024.")
     parser.add_argument("--osl", type=int, default=1024, help="Output sequence length. Default: 1024.")
     parser.add_argument(
+        "--image-height",
+        type=int,
+        default=0,
+        help="Image height in pixels for vision-language models. Default: 0 (disabled).",
+    )
+    parser.add_argument(
+        "--image-width",
+        type=int,
+        default=0,
+        help="Image width in pixels for vision-language models. Default: 0 (disabled).",
+    )
+    parser.add_argument(
+        "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
+    )
+    parser.add_argument(
         "--batch-size",
         "--bs",
         dest="batch_size",
@@ -1974,6 +1989,9 @@ def _run_estimate_mode(args):
         database_mode=args.database_mode,
         isl=args.isl,
         osl=args.osl,
+        image_height=args.image_height,
+        image_width=args.image_width,
+        num_images=args.num_images,
         batch_size=args.batch_size,
         ctx_tokens=args.ctx_tokens,
         tp_size=args.tp_size,
@@ -2051,6 +2069,8 @@ def _run_estimate_mode(args):
     print("-" * 60)
     print(f"  ISL:              {result.isl}")
     print(f"  OSL:              {result.osl}")
+    if args.image_height > 0 and args.image_width > 0 and args.num_images > 0:
+        print(f"  Images:           {args.num_images} x {args.image_height}x{args.image_width}")
 
     # ``--prefix`` and ``--nextn`` are common parameters applied to every
     # mode (agg / disagg / afd / static*), so surface them in the summary box
@@ -2156,6 +2176,9 @@ def _run_estimate_mode(args):
         print(f"  TTFT:             {result.ttft:.3f} ms")
         print(f"  TPOT:             {result.tpot:.3f} ms")
         print(f"  Request Latency:  {result.request_latency:.3f} ms")
+    encoder_latency = float(result.raw.get("encoder_latency", 0.0) or 0.0)
+    if encoder_latency > 0.0:
+        print(f"  Encoder lat.:     {encoder_latency:.3f} ms")
     print(f"  Power (per GPU):  {result.power_w:.1f} W")
     print("-" * 60)
     print(f"  tokens/s:         {result.tokens_per_second:,.2f}")
@@ -2167,6 +2190,9 @@ def _run_estimate_mode(args):
         raw = result.raw
         print(f"  (p) Memory:       {raw.get('(p)memory', 'N/A')} GB")
         print(f"  (d) Memory:       {raw.get('(d)memory', 'N/A')} GB")
+        encoder_memory = float(raw.get("(e)memory", 0.0) or 0.0)
+        if encoder_memory > 0.0:
+            print(f"  Encoder memory:   {encoder_memory:.3f} GB (included in prefill)")
     elif result.mode == "afd":
         raw = result.raw
         a_oom = " (OOM!)" if raw.get("(a)is_oom") else ""
@@ -2175,6 +2201,9 @@ def _run_estimate_mode(args):
         print(f"  (f) Memory:       {raw.get('(f)memory', 'N/A')} GB{f_oom}")
     else:
         print(f"  Memory (GPU):     {result.memory:.2f} GB")
+        encoder_memory = float(result.raw.get("encoder_memory", 0.0) or 0.0)
+        if encoder_memory > 0.0:
+            print(f"  Encoder memory:   {encoder_memory:.3f} GB (included)")
     print("=" * 60)
 
     if result.kv_cache_warning:

@@ -777,6 +777,7 @@ def _parse_hf_config_json(config: dict) -> dict:
                 deepstack_visual_indexes=deepstack_visual_indexes,
                 projector_dims=((merger_dim, merger_dim), (merger_dim, out_hidden_size)),
                 projector_n_instances=1 + len(deepstack_visual_indexes),
+                partial_rotary_factor=0.5,
             )
             logger.info(
                 "Qwen3VL vision encoder config: depth=%d, hidden=%d, patch=%d, spatial_merge=%d",
