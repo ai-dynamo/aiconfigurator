@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from spica.parallel_enum import enumerate_parallel_configs, enumerate_worker_shapes
+from spica.parallel_enum import (
+    enumerate_disagg_configs,
+    enumerate_parallel_configs,
+    enumerate_worker_shapes,
+)
 
 
 def _tuples(shapes):
@@ -66,3 +70,26 @@ def test_moe_mla_budget_only_ep_sharding():
     assert cfgs
     assert all(c.total_gpus <= 16 for c in cfgs)
     assert all(c.shape.moe_tp == 1 for c in cfgs)  # MLA: no pure expert-TP
+
+
+def test_disagg_pairs_share_budget():
+    cfgs = enumerate_disagg_configs(is_moe=True, mla=True, backend="trtllm", gpu_budget=8)
+    assert len(cfgs) == 44
+    for c in cfgs:
+        assert c.total_gpus == c.prefill.total_gpus + c.decode.total_gpus <= 8
+        assert c.prefill.total_gpus >= 2 and c.decode.total_gpus >= 2  # each role >= 1 worker
+    # prefill and decode may differ in shape
+    assert any(c.prefill.shape != c.decode.shape for c in cfgs)
+
+
+def test_disagg_min_gpu_budget_full_utilization():
+    cfgs = enumerate_disagg_configs(is_moe=True, mla=True, backend="trtllm", gpu_budget=8, min_gpu_budget=8)
+    assert len(cfgs) == 24
+    assert all(c.total_gpus == 8 for c in cfgs)
+
+
+def test_disagg_dense_small_budget():
+    cfgs = enumerate_disagg_configs(is_moe=False, mla=False, backend="vllm", gpu_budget=4)
+    assert cfgs
+    assert all(c.total_gpus <= 4 for c in cfgs)
+    assert all(c.prefill.shape.strategy == "tp" for c in cfgs)

@@ -75,6 +75,20 @@ class ReplicaParallelConfig:
         return self.shape.gpus_per_worker * self.replicas
 
 
+@dataclass(frozen=True)
+class DisaggParallelConfig:
+    """A disaggregated candidate: a prefill worker config + a decode worker
+    config sharing the GPU budget. prefill and decode are independent (shape and
+    replica count may differ)."""
+
+    prefill: ReplicaParallelConfig
+    decode: ReplicaParallelConfig
+
+    @property
+    def total_gpus(self) -> int:
+        return self.prefill.total_gpus + self.decode.total_gpus
+
+
 def _ladder_upto(max_value: int, ladder: tuple[int, ...] = _DIM_LADDER) -> list[int]:
     return [v for v in ladder if v <= max_value]
 
@@ -179,4 +193,57 @@ def enumerate_parallel_configs(
                 if min_gpu_budget is not None and total < min_gpu_budget:
                     continue
                 configs.append(ReplicaParallelConfig(shape=shape, replicas=r))
+    return configs
+
+
+def enumerate_disagg_configs(
+    *,
+    is_moe: bool,
+    mla: bool,
+    backend: str,
+    gpu_budget: int,
+    min_gpu_budget: int | None = None,
+    gpus_per_worker_candidates: tuple[int, ...] = _DEFAULT_GPUS_PER_WORKER,
+    enable_wideep: bool = False,
+    moe_backend: str | None = None,
+) -> list[DisaggParallelConfig]:
+    """Enumerate disagg ``(prefill, decode)`` configs that share the GPU budget.
+
+    Both roles are enumerated from the same per-role candidate set (shared
+    model / hardware / backend, first pass) and paired so that
+    ``prefill.total_gpus + decode.total_gpus`` lies in
+    ``[min_gpu_budget, gpu_budget]``. prefill and decode may differ in shape and
+    replica count.
+
+    Required for building the disagg sweep search space. The set grows quickly
+    with the budget, so the smart sweep samples from it rather than
+    grid-enumerating; prefill/decode throughput rate-matching is applied
+    downstream when each candidate is evaluated.
+    """
+    per_role = enumerate_parallel_configs(
+        is_moe=is_moe,
+        mla=mla,
+        backend=backend,
+        gpu_budget=gpu_budget,
+        gpus_per_worker_candidates=gpus_per_worker_candidates,
+        enable_wideep=enable_wideep,
+        moe_backend=moe_backend,
+    )
+    if not per_role:
+        return []
+
+    # Each role needs at least its smallest worker, so cap one role's footprint
+    # at budget minus the other role's minimum (prunes pairs that can never fit).
+    min_role = min(c.total_gpus for c in per_role)
+    candidates = [c for c in per_role if c.total_gpus <= gpu_budget - min_role]
+
+    configs: list[DisaggParallelConfig] = []
+    for prefill in candidates:
+        for decode in candidates:
+            total = prefill.total_gpus + decode.total_gpus
+            if total > gpu_budget:
+                continue
+            if min_gpu_budget is not None and total < min_gpu_budget:
+                continue
+            configs.append(DisaggParallelConfig(prefill=prefill, decode=decode))
     return configs

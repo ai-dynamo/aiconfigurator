@@ -21,8 +21,10 @@ from .load_predictor_sweep import (
     window_loss,
 )
 from .parallel_enum import (
+    DisaggParallelConfig,
     ParallelShape,
     ReplicaParallelConfig,
+    enumerate_disagg_configs,
     enumerate_parallel_configs,
     enumerate_worker_shapes,
 )
@@ -42,8 +44,10 @@ __all__ = [
     # parallel-config enumeration
     "ParallelShape",
     "ReplicaParallelConfig",
+    "DisaggParallelConfig",
     "enumerate_parallel_configs",
     "enumerate_worker_shapes",
+    "enumerate_disagg_configs",
     # planner scaling-policy decode
     "SCALING_POLICIES",
     "ScalingPolicy",
