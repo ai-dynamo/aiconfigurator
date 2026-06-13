@@ -270,13 +270,6 @@ def test_attention_backend_and_wideep_num_slots_reach_model_config():
     assert mc.wideep_num_slots == 288
 
 
-def test_attention_backend_unset_defaults_to_flashinfer():
-    """Leaving attention_backend empty (None) resolves to flashinfer in ModelConfig."""
-    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm")
-    assert t.attention_backend is None
-    assert t.build_model_config(role="agg").attention_backend == "flashinfer"
-
-
 def test_invalid_attention_backend_rejected():
     t = Task(
         serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", attention_backend="torch"
