@@ -3,7 +3,7 @@
 > **YAML format note (V2):** The canonical experiment YAML is now the flat `Task`
 > schema — every key maps 1:1 to a field, with no `mode:` selector and no
 > `config:` / `worker_config:` nesting. See
-> `src/aiconfigurator/cli/exps/example_new.yaml` for the template. The legacy
+> `src/aiconfigurator/cli/example.yaml` for the template. The legacy
 > nested format shown in this document (with `mode: patch` and `config:`
 > subsections) is still accepted: it is auto-converted to the flat schema with a
 > `DeprecationWarning`. Prefer the flat format for new configs.

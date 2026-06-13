@@ -22,7 +22,7 @@ Design:
   kwargs needed by :mod:`aiconfigurator.sdk.sweep` — no caller
   marshalling required.
 
-See ``src/aiconfigurator/cli/exps/example_new.yaml`` for the canonical YAML format.
+See ``src/aiconfigurator/cli/example.yaml`` for the canonical YAML format.
 """
 
 from __future__ import annotations
@@ -474,7 +474,7 @@ class Task:
             warnings.warn(
                 "Legacy V1 task YAML detected; auto-converting to the flat V2 schema. "
                 "This compatibility path is deprecated -- migrate to the flat format "
-                "(see cli/exps/example_new.yaml).",
+                "(see cli/example.yaml).",
                 DeprecationWarning,
                 stacklevel=2,
             )

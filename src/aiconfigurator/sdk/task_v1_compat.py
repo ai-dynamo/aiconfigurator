@@ -201,9 +201,10 @@ def convert_v1_to_v2(v1: dict) -> dict:
         ``Task.from_yaml`` / ``Task(**...)``.
 
     Notes:
-        Unmappable V1 keys (e.g. ``attention_backend``, ``wideep_num_slots``,
-        the ``mode`` selector) are collected and reported in a single
-        warning; they are dropped, not silently swallowed.
+        V1 keys with no V2 equivalent (e.g. unknown ``worker_config`` fields,
+        extra ``profiles``) are collected and the conversion raises -- they are
+        never silently dropped.  The ``mode`` selector is V1 structure and is
+        dropped harmlessly.
     """
     out: dict = {}
     unmapped: list[str] = []
@@ -284,6 +285,6 @@ def convert_v1_to_v2(v1: dict) -> dict:
         raise ValueError(
             f"convert_v1_to_v2: {len(unmapped)} V1 field(s) have no V2 equivalent -- they would be "
             "silently ignored and make V2 results differ from V1. Remove them from the config and "
-            f"migrate to the flat V2 schema (see cli/exps/example_new.yaml). Fields: {', '.join(unmapped)}"
+            f"migrate to the flat V2 schema (see cli/example.yaml). Fields: {', '.join(unmapped)}"
         )
     return out
