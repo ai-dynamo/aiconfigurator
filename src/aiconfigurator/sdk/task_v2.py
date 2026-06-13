@@ -351,7 +351,7 @@ class Task:
     nextn: int | None = None
     nextn_accept_rates: list[float] = field(default_factory=lambda: list(_DEFAULT_NEXTN_ACCEPT_RATES))
     moe_backend: str | None = None
-    attention_backend: str = "flashinfer"  # 'flashinfer' or 'fa3'; only consumed by MLA models
+    attention_backend: str | None = None  # 'flashinfer' (default) or 'fa3'; only consumed by MLA models
     wideep_num_slots: int | None = None  # EPLB slot count; defaults to num_experts when None
     gemm_quant_mode: common.GEMMQuantMode | None = None
     moe_quant_mode: common.MoEQuantMode | None = None
@@ -999,7 +999,8 @@ class Task:
             # flashinfer), and EPLB slot count. workload_distribution remains non-configurable
             # in v2 and ModelConfig's default matches v1's.
             moe_backend=self.moe_backend,
-            attention_backend=self.attention_backend,
+            # None means "unspecified" -> fall back to flashinfer (matches v1 and ModelConfig's default).
+            attention_backend=self.attention_backend or "flashinfer",
             wideep_num_slots=self.wideep_num_slots,
         )
 
@@ -1056,7 +1057,7 @@ class Task:
             UnsupportedWideepConfigError specifically for wideep_* ops
             (lets callers distinguish from generic ``ValueError``).
         """
-        if self.attention_backend not in ("flashinfer", "fa3"):
+        if self.attention_backend is not None and self.attention_backend not in ("flashinfer", "fa3"):
             raise ValueError(f"attention_backend must be 'flashinfer' or 'fa3', got {self.attention_backend!r}.")
         if self.wideep_num_slots is not None and self.wideep_num_slots <= 0:
             raise ValueError(f"wideep_num_slots must be a positive integer, got {self.wideep_num_slots!r}.")
