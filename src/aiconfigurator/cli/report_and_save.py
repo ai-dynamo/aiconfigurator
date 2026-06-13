@@ -321,21 +321,21 @@ def log_final_summary(
     summary_box.append("  " + "-" * 76)
     summary_box.append("  Input Configuration & SLA Target:")
 
-    # For multi-backend mode, get task_config using the backend from best_configs
+    # For multi-backend mode, get task using the backend from best_configs
     chosen_best_config = best_configs.get(chosen_exp)
     if chosen_best_config is not None and "backend" in chosen_best_config.columns and not chosen_best_config.empty:
         chosen_backend = chosen_best_config["backend"].iloc[0]
-        task_config_key = f"{chosen_exp}_{chosen_backend}"
+        task_key = f"{chosen_exp}_{chosen_backend}"
         # Verify the key exists (for multi-backend mode)
-        if task_config_key in tasks:
-            chosen_task_config = tasks[task_config_key]
+        if task_key in tasks:
+            chosen_task = tasks[task_key]
         else:
-            chosen_task_config = tasks[chosen_exp]
+            chosen_task = tasks[chosen_exp]
     else:
-        chosen_task_config = tasks[chosen_exp]
+        chosen_task = tasks[chosen_exp]
 
-    summary_box.append(f"    Model: {chosen_task_config.primary_model_path} (is_moe: {chosen_task_config.is_moe})")
-    summary_box.append(f"    Total GPUs: {chosen_task_config.total_gpus}")
+    summary_box.append(f"    Model: {chosen_task.primary_model_path} (is_moe: {chosen_task.is_moe})")
+    summary_box.append(f"    Total GPUs: {chosen_task.total_gpus}")
 
     if load_match:
         # Load-match mode summary
@@ -382,12 +382,12 @@ def log_final_summary(
     best_config_df = display_best_configs[chosen_exp]
     best_throughput = best_throughputs[chosen_exp]
 
-    summary_box.append(f"    - Best Throughput: {best_throughput * chosen_task_config.total_gpus:,.2f} tokens/s")
+    summary_box.append(f"    - Best Throughput: {best_throughput * chosen_task.total_gpus:,.2f} tokens/s")
     summary_box.append(f"    - Per-GPU Throughput: {best_throughput:.2f} tokens/s/gpu")
     if not best_config_df.empty:
         best_conf_details = best_config_df.iloc[0]
         summary_box.append(f"    - Per-User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
-        replicas = chosen_task_config.total_gpus // int(best_conf_details["num_total_gpus"])
+        replicas = chosen_task.total_gpus // int(best_conf_details["num_total_gpus"])
         cluster_rr = float(best_conf_details["request_rate"]) * replicas
         summary_box.append(f"    - Request Rate: {cluster_rr:.2f} req/s")
         summary_box.append(f"    - TTFT: {best_conf_details['ttft']:.2f}ms")
@@ -417,7 +417,7 @@ def log_final_summary(
                 "label": f"{chosen_exp} best",
             }
         pareto_plot_buf = draw_pareto_to_string(
-            f"{chosen_task_config.primary_model_path} Pareto Frontier",
+            f"{chosen_task.primary_model_path} Pareto Frontier",
             series_payload,
             highlight=highlight_series,
             x_label=target_x_axis,
@@ -451,31 +451,31 @@ def log_final_summary(
         # (total_gpus, is_moe, etc. should be the same across backends)
         if "backend" in config_df.columns and not config_df.empty:
             first_backend = config_df["backend"].iloc[0]
-            task_config_key = f"{exp_name}_{first_backend}"
+            task_key = f"{exp_name}_{first_backend}"
             # Verify the key exists (for multi-backend mode)
-            if task_config_key not in tasks:
-                task_config_key = exp_name
+            if task_key not in tasks:
+                task_key = exp_name
         else:
-            task_config_key = exp_name
+            task_key = exp_name
 
-        if task_config_key not in tasks:
+        if task_key not in tasks:
             logger.info("No task config for %s, skipping deployment table.", exp_name)
             continue
 
         if not config_df.empty and "backend" not in config_df.columns:
             config_df = config_df.copy()
-            config_df["backend"] = tasks[task_config_key].primary_backend_name
+            config_df["backend"] = tasks[task_key].primary_backend_name
 
-        exp_task_config = tasks[task_config_key]
-        total_gpus = getattr(exp_task_config, "total_gpus", None) or 0
+        exp_task = tasks[task_key]
+        total_gpus = getattr(exp_task, "total_gpus", None) or 0
         table_buf = _plot_worker_setup_table(
             exp_name,
             config_df,
             total_gpus,
-            exp_task_config.tpot,
+            exp_task.tpot,
             top_n,
-            exp_task_config.is_moe,
-            exp_task_config.request_latency,
+            exp_task.is_moe,
+            exp_task.request_latency,
             show_power,
         )
         summary_box.append(table_buf)
@@ -647,8 +647,8 @@ def save_results(
 
             # 3. Save the config for this experiment
             if backend != "auto":
-                exp_task_config = tasks[exp_name]
-                backend_version_str = exp_task_config.primary_backend_version
+                exp_task = tasks[exp_name]
+                backend_version_str = exp_task.primary_backend_version
             else:
                 # There could be multiple backends in the same experiment if backend == "auto" as the result is merged
                 actual_backend_versions = {
@@ -686,9 +686,9 @@ def save_results(
                     try:
                         effective_generated_version = resolve_backend_version_for_dynamo(
                             dynamo_version,
-                            exp_task_config.primary_backend_name,
+                            exp_task.primary_backend_name,
                         )
-                        backend_version_str = f"({exp_task_config.primary_backend_name}){effective_generated_version}"
+                        backend_version_str = f"({exp_task.primary_backend_name}){effective_generated_version}"
                     except ValueError as exc:
                         logger.exception(
                             "Failed to resolve backend version for generator_dynamo_version=%s.",
@@ -719,13 +719,13 @@ def save_results(
                 deployment_target = getattr(args, "deployment_target", "dynamo-j2")
                 default_dynamo_version, default_backend_versions = get_default_dynamo_version_mapping()
                 if backend != "auto":
-                    effective_generated_version = default_backend_versions.get(exp_task_config.primary_backend_name)
+                    effective_generated_version = default_backend_versions.get(exp_task.primary_backend_name)
                     if effective_generated_version is None:
                         raise ValueError(
                             "No default backend version mapping for backend "
-                            f"'{exp_task_config.primary_backend_name}' in dynamo '{default_dynamo_version}'."
+                            f"'{exp_task.primary_backend_name}' in dynamo '{default_dynamo_version}'."
                         )
-                    backend_version_str = f"({exp_task_config.primary_backend_name}){effective_generated_version}"
+                    backend_version_str = f"({exp_task.primary_backend_name}){effective_generated_version}"
                 else:
                     generated_backend_versions = dict(default_backend_versions)
                     backend_version_str = ", ".join(
@@ -756,32 +756,32 @@ def save_results(
             # Save the experiment config for future aic repro
             if backend != "auto":
                 with open(os.path.join(exp_dir, "exp_config.yaml"), "w") as f:
-                    f.write(exp_task_config.to_yaml())
+                    f.write(exp_task.to_yaml())
             else:
-                for exp_task_config in exp_tasks.values():
-                    exp_cfg_name = f"{exp_task_config.primary_backend_name}_exp_config.yaml"
+                for exp_task in exp_tasks.values():
+                    exp_cfg_name = f"{exp_task.primary_backend_name}_exp_config.yaml"
                     with open(os.path.join(exp_dir, exp_cfg_name), "w") as f:
-                        f.write(exp_task_config.to_yaml())
+                        f.write(exp_task.to_yaml())
 
             # 4. Save the generated config for this experiment, sub-directory for each best config
             # Use original (non-display) data so --inclusive-tpot does not affect deployment artifacts.
             artifact_config_df = best_configs.get(exp_name)
             if artifact_config_df is not None:
                 for i, (idx, result_df) in enumerate(artifact_config_df.iterrows()):
-                    # For multi-backend mode, get the task_config for this row's backend
+                    # For multi-backend mode, get the task for this row's backend
                     if backend == "auto" and "backend" in result_df:
                         row_backend = result_df["backend"]
-                        row_task_config_key = f"{exp_name}_{row_backend}"
-                        row_task_config = tasks[row_task_config_key]
+                        row_task_key = f"{exp_name}_{row_backend}"
+                        row_task = tasks[row_task_key]
                         row_backend_version = generated_backend_versions.get(
-                            row_backend, row_task_config.primary_backend_version
+                            row_backend, row_task.primary_backend_version
                         )
                     else:
-                        row_task_config = exp_task_config
+                        row_task = exp_task
                         row_backend_version = effective_generated_version
 
                     cfg = task_config_to_generator_config(
-                        task_config=row_task_config,
+                        task_config=row_task,
                         result_df=result_df,
                         generator_overrides=generator_overrides,
                     )
@@ -803,7 +803,7 @@ def save_results(
                         deployment_target = getattr(args, "deployment_target", "dynamo-j2")
                         generate_backend_artifacts(
                             params=cfg,
-                            backend=row_task_config.primary_backend_name,
+                            backend=row_task.primary_backend_name,
                             backend_version=row_backend_version,
                             output_dir=top_config_dir,
                             deployment_target=deployment_target,
