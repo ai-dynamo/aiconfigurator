@@ -1360,12 +1360,20 @@ def build_experiment_tasks(
             continue
 
         serving_mode = exp_config.get("serving_mode")
-        model_path = exp_config.get("model_path")
+        # model_path / system_name are top-level for agg and legacy-V1 disagg, but
+        # flat-V2 disagg carries them only under prefill_* / decode_*.  Accept either.
+        model_path = (
+            exp_config.get("model_path") or exp_config.get("prefill_model_path") or exp_config.get("decode_model_path")
+        )
         if serving_mode not in {"agg", "disagg"} or not model_path:
             logger.warning("Skipping experiment '%s': missing serving_mode or model_path.", exp_name)
             continue
 
-        system_name = exp_config.get("system_name")
+        system_name = (
+            exp_config.get("system_name")
+            or exp_config.get("prefill_system_name")
+            or exp_config.get("decode_system_name")
+        )
         if not system_name:
             logger.warning("Skipping experiment '%s': no system_name provided.", exp_name)
             continue

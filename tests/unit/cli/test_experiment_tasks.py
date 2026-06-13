@@ -46,6 +46,26 @@ def test_build_experiment_preserves_top_level_runtime_fields():
     assert task.request_latency == 25000.0
 
 
+def test_build_experiment_accepts_flat_v2_disagg():
+    """Flat-V2 disagg has no top-level model_path/system_name (only prefill_*/decode_*);
+    the pre-flight skip check must not drop it (regression: V1-centric check skipped it)."""
+    tasks = build_experiment_tasks(
+        config={
+            "exps": ["exp_disagg"],
+            "exp_disagg": {
+                "serving_mode": "disagg",
+                "prefill_model_path": "Qwen/Qwen3-32B-FP8",
+                "prefill_system_name": "h200_sxm",
+                "decode_model_path": "Qwen/Qwen3-32B-FP8",
+                "decode_system_name": "h200_sxm",
+                "total_gpus": 16,
+            },
+        }
+    )
+    assert "exp_disagg" in tasks
+    assert tasks["exp_disagg"].serving_mode == "disagg"
+
+
 def test_build_experiment_keeps_prefix_at_top_level():
     tasks = build_experiment_tasks(
         config={
