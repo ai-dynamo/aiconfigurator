@@ -351,6 +351,8 @@ class Task:
     nextn: int | None = None
     nextn_accept_rates: list[float] = field(default_factory=lambda: list(_DEFAULT_NEXTN_ACCEPT_RATES))
     moe_backend: str | None = None
+    attention_backend: str = "flashinfer"  # 'flashinfer' or 'fa3'; only consumed by MLA models
+    wideep_num_slots: int | None = None  # EPLB slot count; defaults to num_experts when None
     gemm_quant_mode: common.GEMMQuantMode | None = None
     moe_quant_mode: common.MoEQuantMode | None = None
     kvcache_quant_mode: common.KVCacheQuantMode | None = None
@@ -991,11 +993,14 @@ class Task:
             nextn_accept_rates=self.nextn_accept_rates,
             enable_wideep=self._role_attr(role, "enable_wideep"),
             enable_eplb=self._role_attr(role, "enable_eplb"),
-            # moe_backend is shared across roles (Task has no per-role variant);
-            # v1 passed it into ModelConfig so get_model selects the right MoE kernel
-            # (deepep_moe / megamoe) and perf tables. attention_backend / workload_distribution
-            # are not configurable in v2 and ModelConfig's defaults match v1's.
+            # moe_backend / attention_backend / wideep_num_slots are shared across roles
+            # (Task has no per-role variant) and fed to ModelConfig so get_model selects the
+            # right MoE kernel (deepep_moe / megamoe), MLA attention perf tables (fa3 vs
+            # flashinfer), and EPLB slot count. workload_distribution remains non-configurable
+            # in v2 and ModelConfig's default matches v1's.
             moe_backend=self.moe_backend,
+            attention_backend=self.attention_backend,
+            wideep_num_slots=self.wideep_num_slots,
         )
 
     def iter_parallel(self, role: Literal["agg", "prefill", "decode"]) -> Iterator[ParallelChoice]:
@@ -1051,6 +1056,10 @@ class Task:
             UnsupportedWideepConfigError specifically for wideep_* ops
             (lets callers distinguish from generic ``ValueError``).
         """
+        if self.attention_backend not in ("flashinfer", "fa3"):
+            raise ValueError(f"attention_backend must be 'flashinfer' or 'fa3', got {self.attention_backend!r}.")
+        if self.wideep_num_slots is not None and self.wideep_num_slots <= 0:
+            raise ValueError(f"wideep_num_slots must be a positive integer, got {self.wideep_num_slots!r}.")
         if self.serving_mode == "agg":
             self._validate_agg()
         elif self.serving_mode == "disagg":

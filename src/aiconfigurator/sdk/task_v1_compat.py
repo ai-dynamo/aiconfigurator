@@ -84,11 +84,15 @@ _TOP_PASSTHROUGH: frozenset[str] = frozenset(
         "nextn",
         "nextn_accept_rates",
         "moe_backend",
+        "attention_backend",
+        "wideep_num_slots",
     }
 )
 
 # Global scalars that may appear inside the V1 ``config:`` block.
-_CONFIG_SCALARS: frozenset[str] = frozenset({"moe_backend", "nextn", "nextn_accept_rates"})
+_CONFIG_SCALARS: frozenset[str] = frozenset(
+    {"moe_backend", "nextn", "nextn_accept_rates", "attention_backend", "wideep_num_slots"}
+)
 
 # Keys that are part of the V1 format itself (handled structurally, never copied).
 _STRUCTURAL: frozenset[str] = frozenset({"mode", "config", "profiles"})
@@ -104,8 +108,6 @@ _V1_MARKERS: frozenset[str] = frozenset(
         "decode_worker_config",
         "replica_config",
         "advanced_tuning_config",
-        "attention_backend",
-        "wideep_num_slots",
     }
 )
 
@@ -218,10 +220,6 @@ def convert_v1_to_v2(v1: dict) -> dict:
     for key in _CONFIG_SCALARS:
         if key in config:
             out[key] = config[key]
-    if "attention_backend" in config:
-        unmapped.append("config.attention_backend")
-    if "wideep_num_slots" in v1:
-        unmapped.append("wideep_num_slots")
 
     quant = _profile_quant_overrides(profiles, unmapped)
 

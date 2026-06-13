@@ -255,6 +255,35 @@ def test_from_yaml_rejects_non_yaml_expressible_strategy_field(monkeypatch):
     assert "predictor" in str(exc.value)
 
 
+def test_attention_backend_and_wideep_num_slots_reach_model_config():
+    """attention_backend / wideep_num_slots flow into every role's ModelConfig
+    (fa3 vs flashinfer selects different MLA perf tables; slots feeds EPLB)."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        attention_backend="fa3",
+        wideep_num_slots=288,
+    )
+    mc = t.build_model_config(role="agg")
+    assert mc.attention_backend == "fa3"
+    assert mc.wideep_num_slots == 288
+
+
+def test_invalid_attention_backend_rejected():
+    t = Task(
+        serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", attention_backend="torch"
+    )
+    with pytest.raises(ValueError, match="attention_backend"):
+        t.validate()
+
+
+def test_invalid_wideep_num_slots_rejected():
+    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", wideep_num_slots=0)
+    with pytest.raises(ValueError, match="wideep_num_slots"):
+        t.validate()
+
+
 def test_from_yaml_disagg_rejects_legacy_shared_model_path():
     """Legacy YAML shape with top-level model_path is not silently mirrored to roles."""
     with pytest.raises(ValueError, match="top-level worker fields"):

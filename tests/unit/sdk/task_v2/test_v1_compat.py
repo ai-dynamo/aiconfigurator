@@ -16,7 +16,12 @@ class TestIsV1Config:
         assert is_v1_config({"mode": "patch", "serving_mode": "agg"})
         assert is_v1_config({"config": {"worker_config": {}}})
         assert is_v1_config({"profiles": []})
-        assert is_v1_config({"attention_backend": "TRTLLM"})
+
+    def test_attention_backend_alone_is_not_v1(self):
+        # attention_backend / wideep_num_slots are now first-class flat V2 fields,
+        # so they must NOT trigger V1 auto-conversion on their own.
+        assert not is_v1_config({"serving_mode": "agg", "model_path": "x", "attention_backend": "fa3"})
+        assert not is_v1_config({"serving_mode": "agg", "model_path": "x", "wideep_num_slots": 288})
 
     def test_bare_disagg_top_level_not_treated_as_v1(self):
         # No structural marker -> left to V2 prefix-discipline (rejected there),
@@ -147,16 +152,27 @@ class TestUnmappable:
         v1 = {
             "serving_mode": "agg",
             "model_path": "x",
-            "wideep_num_slots": 8,
-            "config": {"attention_backend": "TRTLLM", "worker_config": {"foo_bar": [1]}},
+            "config": {"worker_config": {"foo_bar": [1]}},
         }
         with pytest.raises(ValueError) as exc:
             convert_v1_to_v2(v1)
         msg = str(exc.value)
         assert "no V2 equivalent" in msg
-        assert "wideep_num_slots" in msg
-        assert "attention_backend" in msg
         assert "foo_bar" in msg
+
+    def test_attention_backend_and_wideep_num_slots_map(self):
+        """attention_backend (config-level) and wideep_num_slots (top-level) now map to
+        shared V2 fields instead of being dropped."""
+        out = convert_v1_to_v2(
+            {
+                "serving_mode": "agg",
+                "model_path": "x",
+                "wideep_num_slots": 288,
+                "config": {"attention_backend": "fa3"},
+            }
+        )
+        assert out["attention_backend"] == "fa3"
+        assert out["wideep_num_slots"] == 288
 
     def test_multiple_profiles_raise(self):
         """Multiple V1 profiles drop all but the first -- a silent semantic change, so reject."""
