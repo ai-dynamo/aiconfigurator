@@ -453,13 +453,14 @@ class Task:
         """Construct from a flat YAML dict.
 
         YAML keys must match Task field names directly.  String values
-        for quant_mode fields are converted to the matching enum.  Unknown
-        keys are warned about but ignored.  ``overrides`` (kwargs) win over
-        YAML values.
+        for quant_mode fields are converted to the matching enum.
+        ``overrides`` (kwargs) win over YAML values.
 
-        Strategy fields like ``predictor`` cannot be expressed in YAML
-        (they're Python objects); pass them via ``overrides`` or assign
-        after construction.
+        Any key that would not take effect is rejected with a
+        ``ValueError`` -- there is no silent-ignore path.  This covers
+        unknown/misspelled keys and strategy fields like ``predictor``
+        that cannot be expressed in YAML (they're Python objects; pass
+        them via ``overrides`` or assign after construction).
 
         Legacy V1 YAML (nested ``config:`` / ``mode`` / ``profiles``) is
         auto-detected and converted to the flat V2 schema, emitting a
@@ -478,18 +479,27 @@ class Task:
             logger.warning("from_yaml: legacy V1 YAML auto-converted to V2 (deprecated; migrate to the flat format).")
             yaml_data = convert_v1_to_v2(yaml_data)
         valid_keys = {f.name for f in dataclasses.fields(cls) if f.init and not f.name.startswith("_")}
-        # YAML cannot construct strategy objects; ignore them here even if
-        # they're valid fields.
+        # Strategy objects (e.g. predictor) are valid fields but cannot be
+        # constructed from YAML; writing them in YAML has no effect, so reject.
         _yaml_skip: frozenset[str] = frozenset({"predictor"})
-        kwargs: dict[str, Any] = {}
-        for k, v in yaml_data.items():
-            if k not in valid_keys:
-                logger.warning("from_yaml: ignoring unknown key %r", k)
-                continue
-            if k in _yaml_skip:
-                logger.warning("from_yaml: %r is a strategy object, not YAML-expressible; pass via overrides", k)
-                continue
-            kwargs[k] = _resolve_quant_str(k, v) if k.endswith("quant_mode") else v
+        unknown = [k for k in yaml_data if k not in valid_keys]
+        not_expressible = [k for k in yaml_data if k in _yaml_skip]
+        if unknown or not_expressible:
+            parts: list[str] = []
+            if unknown:
+                parts.append(f"unknown key(s): {', '.join(map(repr, sorted(unknown)))}")
+            if not_expressible:
+                parts.append(
+                    f"not YAML-expressible, pass via overrides: {', '.join(map(repr, sorted(not_expressible)))}"
+                )
+            raise ValueError(
+                "Task.from_yaml: rejecting config with key(s) that would not take effect -- "
+                + "; ".join(parts)
+                + ". Fix or remove them (keys are never silently ignored)."
+            )
+        kwargs: dict[str, Any] = {
+            k: (_resolve_quant_str(k, v) if k.endswith("quant_mode") else v) for k, v in yaml_data.items()
+        }
         kwargs.update({k: v for k, v in overrides.items() if v is not None})
         return cls(**kwargs)
 

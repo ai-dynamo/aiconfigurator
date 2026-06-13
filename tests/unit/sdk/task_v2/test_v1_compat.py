@@ -3,8 +3,6 @@
 
 """Unit tests for the V1 -> V2 task-config compatibility shim."""
 
-import logging
-
 import pytest
 
 from aiconfigurator.sdk import task_v2
@@ -144,25 +142,27 @@ class TestConvertDisagg:
 
 
 class TestUnmappable:
-    def test_unmappable_fields_dropped_and_warned(self, caplog):
+    def test_unmappable_fields_raise(self):
+        """V1 fields with no V2 equivalent hard-fail conversion -- no silent drop."""
         v1 = {
             "serving_mode": "agg",
             "model_path": "x",
             "wideep_num_slots": 8,
             "config": {"attention_backend": "TRTLLM", "worker_config": {"foo_bar": [1]}},
         }
-        with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.task_v1_compat"):
-            out = convert_v1_to_v2(v1)
-        assert "wideep_num_slots" not in out
-        assert "attention_backend" not in out
-        assert "foo_bar" not in out
-        assert "no V2 equivalent" in caplog.text
+        with pytest.raises(ValueError) as exc:
+            convert_v1_to_v2(v1)
+        msg = str(exc.value)
+        assert "no V2 equivalent" in msg
+        assert "wideep_num_slots" in msg
+        assert "attention_backend" in msg
+        assert "foo_bar" in msg
 
-    def test_multiple_profiles_uses_first_and_warns(self, caplog):
-        with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.task_v1_compat"):
-            out = convert_v1_to_v2({"serving_mode": "agg", "model_path": "x", "profiles": ["fp8", "nvfp4"]})
-        assert out["gemm_quant_mode"] == "fp8"
-        assert "profiles" in caplog.text
+    def test_multiple_profiles_raise(self):
+        """Multiple V1 profiles drop all but the first -- a silent semantic change, so reject."""
+        with pytest.raises(ValueError) as exc:
+            convert_v1_to_v2({"serving_mode": "agg", "model_path": "x", "profiles": ["fp8", "nvfp4"]})
+        assert "profiles" in str(exc.value)
 
 
 class TestFromYamlAutoConvert:

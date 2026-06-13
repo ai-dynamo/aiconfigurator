@@ -231,11 +231,9 @@ def test_from_yaml_with_cli_overrides():
     assert t.ttft == 500.0
 
 
-def test_from_yaml_warns_on_unknown_keys(caplog):
-    """Unknown keys are warned about but not silently swallowed."""
-    import logging
-
-    with caplog.at_level(logging.WARNING):
+def test_from_yaml_rejects_unknown_keys():
+    """Unknown keys hard-fail -- no silent-ignore path. Both bad keys are named."""
+    with pytest.raises(ValueError) as exc:
         Task.from_yaml(
             {
                 "serving_mode": "agg",
@@ -245,8 +243,16 @@ def test_from_yaml_warns_on_unknown_keys(caplog):
                 "another_typo": "value",
             }
         )
-    assert "totally_made_up_field" in caplog.text
-    assert "another_typo" in caplog.text
+    assert "totally_made_up_field" in str(exc.value)
+    assert "another_typo" in str(exc.value)
+
+
+def test_from_yaml_rejects_non_yaml_expressible_strategy_field(monkeypatch):
+    """A valid-but-not-YAML-expressible field (predictor) written in YAML hard-fails."""
+    monkeypatch.setattr(Task, "__post_init__", lambda self: None)
+    with pytest.raises(ValueError) as exc:
+        Task.from_yaml({"serving_mode": "agg", "model_path": "x", "system_name": "h200_sxm", "predictor": "nope"})
+    assert "predictor" in str(exc.value)
 
 
 def test_from_yaml_disagg_rejects_legacy_shared_model_path():
@@ -982,23 +988,6 @@ def test_to_dict_skips_predictor_strategy_field():
     )
     d = t.to_dict()
     assert "predictor" not in d
-
-
-def test_from_yaml_warns_and_skips_predictor_key(caplog):
-    """YAML can't construct a Predictor; from_yaml warns and ignores the key."""
-    import logging
-
-    with caplog.at_level(logging.WARNING):
-        t = Task.from_yaml(
-            {
-                "serving_mode": "agg",
-                "model_path": "deepseek-ai/DeepSeek-V3",
-                "system_name": "h200_sxm",
-                "predictor": "MockerPredictor",  # not a real object
-            }
-        )
-    assert "predictor" in caplog.text
-    assert t.predictor is None  # default kept; YAML value ignored
 
 
 # ---------------------------------------------------------------------------

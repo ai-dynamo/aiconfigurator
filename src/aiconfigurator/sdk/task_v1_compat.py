@@ -283,10 +283,9 @@ def convert_v1_to_v2(v1: dict) -> dict:
         logger.debug("convert_v1_to_v2: dropping V1 'mode'=%r (no V2 equivalent)", v1.get("mode"))
 
     if unmapped:
-        logger.warning(
-            "convert_v1_to_v2: %d V1 field(s) have no V2 equivalent and were IGNORED -- if your "
-            "config relied on them, V2 results may differ from V1. Fields: %s",
-            len(unmapped),
-            ", ".join(unmapped),
+        raise ValueError(
+            f"convert_v1_to_v2: {len(unmapped)} V1 field(s) have no V2 equivalent -- they would be "
+            "silently ignored and make V2 results differ from V1. Remove them from the config and "
+            f"migrate to the flat V2 schema (see cli/exps/example_new.yaml). Fields: {', '.join(unmapped)}"
         )
     return out
