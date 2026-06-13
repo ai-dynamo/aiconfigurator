@@ -13,7 +13,7 @@ import os
 import pytest
 import yaml
 
-from aiconfigurator.cli.main import _execute_task_configs, build_default_task_configs
+from aiconfigurator.cli.main import _execute_tasks, build_default_tasks
 from aiconfigurator.generator.api import generate_backend_artifacts
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
 from aiconfigurator.sdk.task_v2 import Task
@@ -25,7 +25,7 @@ SYSTEM = "h200_sxm"
 BACKEND = "trtllm"
 
 
-def _save_chosen_dgd(best_configs, task_configs, chosen_exp, output_dir):
+def _save_chosen_dgd(best_configs, tasks, chosen_exp, output_dir):
     """Save the rank-1 DGD config for the chosen experiment."""
     config_df = best_configs.get(chosen_exp)
     if config_df is None or config_df.empty:
@@ -34,9 +34,9 @@ def _save_chosen_dgd(best_configs, task_configs, chosen_exp, output_dir):
     if "backend" in config_df.columns and not config_df.empty:
         first_backend = config_df["backend"].iloc[0]
         tc_key = f"{chosen_exp}_{first_backend}"
-        tc = task_configs.get(tc_key, task_configs.get(chosen_exp))
+        tc = tasks.get(tc_key, tasks.get(chosen_exp))
     else:
-        tc = task_configs[chosen_exp]
+        tc = tasks[chosen_exp]
 
     row = config_df.iloc[0]
 
@@ -70,7 +70,7 @@ class TestDefaultPicking:
 
     def test_agg_vs_disagg(self, tmp_path):
         """8 GPUs, compare agg vs disagg under relaxed SLA."""
-        task_configs = build_default_task_configs(
+        tasks = build_default_tasks(
             model_path=MODEL,
             total_gpus=8,
             system=SYSTEM,
@@ -80,8 +80,8 @@ class TestDefaultPicking:
             ttft=2000,
             tpot=50,
         )
-        chosen, best_configs, _, _, best_latencies = _execute_task_configs(
-            task_configs,
+        chosen, best_configs, _, _, best_latencies = _execute_tasks(
+            tasks,
             mode="default",
             top_n=3,
         )
@@ -89,13 +89,13 @@ class TestDefaultPicking:
         assert best_latencies[chosen]["ttft"] > 0
         assert best_latencies[chosen]["tpot"] > 0
 
-        _save_chosen_dgd(best_configs, task_configs, chosen, str(tmp_path))
+        _save_chosen_dgd(best_configs, tasks, chosen, str(tmp_path))
         assert (tmp_path / chosen / "generator_config.yaml").exists()
 
     def test_request_latency_constraint(self, tmp_path):
         """Default mode with request_latency as the SLA constraint."""
         request_latency = 35000
-        task_configs = build_default_task_configs(
+        tasks = build_default_tasks(
             model_path=MODEL,
             total_gpus=8,
             system=SYSTEM,
@@ -105,14 +105,14 @@ class TestDefaultPicking:
             ttft=request_latency,
             request_latency=request_latency,
         )
-        chosen, best_configs, _, _, best_latencies = _execute_task_configs(
-            task_configs,
+        chosen, best_configs, _, _, best_latencies = _execute_tasks(
+            tasks,
             mode="default",
             top_n=3,
         )
         assert chosen in ("agg", "disagg")
 
-        _save_chosen_dgd(best_configs, task_configs, chosen, str(tmp_path))
+        _save_chosen_dgd(best_configs, tasks, chosen, str(tmp_path))
         assert (tmp_path / chosen / "generator_config.yaml").exists()
 
 
@@ -121,7 +121,7 @@ class TestLoadMatchPicking:
 
     def test_by_request_rate(self, tmp_path):
         """Find min GPUs for target_request_rate=5.0 req/s."""
-        task_configs = build_default_task_configs(
+        tasks = build_default_tasks(
             model_path=MODEL,
             total_gpus=64,
             system=SYSTEM,
@@ -131,8 +131,8 @@ class TestLoadMatchPicking:
             ttft=2000,
             tpot=50,
         )
-        chosen, best_configs, _, _, best_latencies = _execute_task_configs(
-            task_configs,
+        chosen, best_configs, _, _, best_latencies = _execute_tasks(
+            tasks,
             mode="default",
             top_n=3,
             target_request_rate=5.0,
@@ -145,12 +145,12 @@ class TestLoadMatchPicking:
 
         assert "total_gpus_needed" in best_latencies[chosen]
 
-        _save_chosen_dgd(best_configs, task_configs, chosen, str(tmp_path))
+        _save_chosen_dgd(best_configs, tasks, chosen, str(tmp_path))
         assert (tmp_path / chosen / "generator_config.yaml").exists()
 
     def test_by_concurrency(self, tmp_path):
         """Find min GPUs for target_concurrency=50."""
-        task_configs = build_default_task_configs(
+        tasks = build_default_tasks(
             model_path=MODEL,
             total_gpus=64,
             system=SYSTEM,
@@ -160,8 +160,8 @@ class TestLoadMatchPicking:
             ttft=2000,
             tpot=50,
         )
-        chosen, best_configs, _, _, best_latencies = _execute_task_configs(
-            task_configs,
+        chosen, best_configs, _, _, best_latencies = _execute_tasks(
+            tasks,
             mode="default",
             top_n=3,
             target_concurrency=50,
@@ -172,7 +172,7 @@ class TestLoadMatchPicking:
                 assert "replicas_needed" in df.columns
                 assert "total_gpus_needed" in df.columns
 
-        _save_chosen_dgd(best_configs, task_configs, chosen, str(tmp_path))
+        _save_chosen_dgd(best_configs, tasks, chosen, str(tmp_path))
         assert (tmp_path / chosen / "generator_config.yaml").exists()
 
 

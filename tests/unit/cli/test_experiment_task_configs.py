@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""build_experiment_task_configs builds v2 Tasks from (legacy or flat) experiment YAML.
+"""build_experiment_tasks builds v2 Tasks from (legacy or flat) experiment YAML.
 
 Legacy V1 experiment dicts (``mode`` / nested ``config`` / ``profiles``) are
 auto-converted to the flat V2 schema by ``Task.from_yaml``; these tests check
@@ -10,13 +10,13 @@ that top-level fields survive the conversion onto the flat ``Task``.
 
 import pytest
 
-from aiconfigurator.cli.main import build_experiment_task_configs
+from aiconfigurator.cli.main import build_experiment_tasks
 
 pytestmark = pytest.mark.unit
 
 
 def test_build_experiment_preserves_top_level_runtime_fields():
-    task_configs = build_experiment_task_configs(
+    tasks = build_experiment_tasks(
         config={
             "exps": ["exp_agg_trtllm"],
             "exp_agg_trtllm": {
@@ -36,7 +36,7 @@ def test_build_experiment_preserves_top_level_runtime_fields():
         }
     )
 
-    task = task_configs["exp_agg_trtllm"]
+    task = tasks["exp_agg_trtllm"]
     assert task.serving_mode == "agg"
     assert task.isl == 8000
     assert task.osl == 1000
@@ -47,7 +47,7 @@ def test_build_experiment_preserves_top_level_runtime_fields():
 
 
 def test_build_experiment_keeps_prefix_at_top_level():
-    task_configs = build_experiment_task_configs(
+    tasks = build_experiment_tasks(
         config={
             "exps": ["exp_agg"],
             "exp_agg": {
@@ -65,13 +65,13 @@ def test_build_experiment_keeps_prefix_at_top_level():
         }
     )
 
-    task = task_configs["exp_agg"]
+    task = tasks["exp_agg"]
     assert task.prefix == 1000
     assert task.database_mode == "HYBRID"
 
 
 def test_build_experiment_forwards_top_level_moe_backend():
-    task_configs = build_experiment_task_configs(
+    tasks = build_experiment_tasks(
         config={
             "exps": ["exp_megamoe"],
             "exp_megamoe": {
@@ -88,6 +88,6 @@ def test_build_experiment_forwards_top_level_moe_backend():
         }
     )
 
-    task = task_configs["exp_megamoe"]
+    task = tasks["exp_megamoe"]
     assert task.serving_mode == "agg"
     assert task.moe_backend == "megamoe"

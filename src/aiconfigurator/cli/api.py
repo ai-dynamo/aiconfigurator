@@ -16,11 +16,11 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from aiconfigurator.cli.main import (
-    _execute_task_configs as _execute_task_configs_internal,
+    _execute_tasks as _execute_tasks_internal,
 )
 from aiconfigurator.cli.main import (
-    build_default_task_configs,
-    build_experiment_task_configs,
+    build_default_tasks,
+    build_experiment_tasks,
 )
 from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.config import ModelConfig
@@ -89,7 +89,7 @@ class CLIResult:
     best_throughputs: dict[str, float]
     """Best throughput (tokens/s/gpu_cluster) per experiment."""
 
-    task_configs: dict[str, Task]
+    tasks: dict[str, Task]
     """Task objects used for each experiment."""
 
     best_latencies: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -101,20 +101,20 @@ class CLIResult:
     def __repr__(self) -> str:
         return (
             f"CLIResult(chosen_exp={self.chosen_exp!r}, "
-            f"experiments={list(self.task_configs.keys())}, "
+            f"experiments={list(self.tasks.keys())}, "
             f"best_throughputs={self.best_throughputs})"
         )
 
 
 def _execute_and_wrap_result(
-    task_configs: dict[str, Task],
+    tasks: dict[str, Task],
     mode: str,
     top_n: int = 5,
     strict_sla: bool = False,
 ) -> CLIResult:
     """Execute task configs using main.py's function and wrap result in CLIResult."""
-    chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies = _execute_task_configs_internal(
-        task_configs, mode, top_n=top_n, strict_sla=strict_sla
+    chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies = _execute_tasks_internal(
+        tasks, mode, top_n=top_n, strict_sla=strict_sla
     )
 
     return CLIResult(
@@ -123,7 +123,7 @@ def _execute_and_wrap_result(
         pareto_fronts=pareto_fronts,
         best_throughputs=best_throughputs,
         best_latencies=best_latencies,
-        task_configs=task_configs,
+        tasks=tasks,
         raw_results={},
     )
 
@@ -230,8 +230,8 @@ def cli_default(
         >>> print(result.chosen_exp)  # e.g., 'agg_trtllm' or 'disagg_vllm'
         >>> print(result.best_throughputs)  # Shows all 6 backend/mode combinations
     """
-    # Reuse build_default_task_configs from main.py
-    task_configs = build_default_task_configs(
+    # Reuse build_default_tasks from main.py
+    tasks = build_default_tasks(
         model_path=model_path,
         total_gpus=total_gpus,
         system=system,
@@ -250,7 +250,7 @@ def cli_default(
         engine_step_backend=engine_step_backend,
     )
 
-    result = _execute_and_wrap_result(task_configs, mode="default", top_n=top_n, strict_sla=strict_sla)
+    result = _execute_and_wrap_result(tasks, mode="default", top_n=top_n, strict_sla=strict_sla)
 
     if save_dir:
         # Create a mock args object for save_results compatibility
@@ -279,7 +279,7 @@ def cli_default(
             args=mock_args,
             best_configs=result.best_configs,
             pareto_fronts=result.pareto_fronts,
-            task_configs=result.task_configs,
+            tasks=result.tasks,
             save_dir=save_dir,
             generated_backend_version=None,
         )
@@ -364,15 +364,15 @@ def cli_exp(
           backend_name: trtllm
           total_gpus: 16
     """
-    task_configs = build_experiment_task_configs(
+    tasks = build_experiment_tasks(
         yaml_path=yaml_path,
         config=config,
     )
 
-    if not task_configs:
+    if not tasks:
         raise ValueError("No valid experiments found in configuration.")
 
-    result = _execute_and_wrap_result(task_configs, mode="exp", top_n=top_n)
+    result = _execute_and_wrap_result(tasks, mode="exp", top_n=top_n)
 
     if save_dir:
         # Create a mock args object for save_results compatibility
@@ -390,7 +390,7 @@ def cli_exp(
             args=mock_args,
             best_configs=result.best_configs,
             pareto_fronts=result.pareto_fronts,
-            task_configs=result.task_configs,
+            tasks=result.tasks,
             save_dir=save_dir,
             generated_backend_version=None,
         )

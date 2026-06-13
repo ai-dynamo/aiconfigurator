@@ -16,9 +16,9 @@ import pandas as pd
 import pytest
 
 from aiconfigurator.cli.main import (
-    _execute_task_configs,
-    build_default_task_configs,
-    build_experiment_task_configs,
+    _execute_tasks,
+    build_default_tasks,
+    build_experiment_tasks,
     configure_parser,
 )
 from aiconfigurator.cli.main import main as cli_main
@@ -31,8 +31,8 @@ pytestmark = pytest.mark.unit
 class TestCLIIntegration:
     """Workflow tests for the CLI orchestration layer (builders/executor/save)."""
 
-    @patch("aiconfigurator.cli.main._execute_task_configs")
-    @patch("aiconfigurator.cli.main.build_default_task_configs")
+    @patch("aiconfigurator.cli.main._execute_tasks")
+    @patch("aiconfigurator.cli.main.build_default_tasks")
     def test_cli_main_success_flow(self, mock_build_default, mock_execute, sample_cli_args_with_save_dir):
         """Test successful CLI main execution flow for default mode."""
         mock_task_config = MagicMock(name="TaskConfig")
@@ -63,12 +63,12 @@ class TestCLIIntegration:
         assert save_kwargs["args"] == sample_cli_args_with_save_dir
         assert save_kwargs["best_configs"] == mock_best_configs
         assert save_kwargs["pareto_fronts"] == {"agg": mock_results_df}
-        assert save_kwargs["task_configs"] == {"agg": mock_task_config}
+        assert save_kwargs["tasks"] == {"agg": mock_task_config}
         assert save_kwargs["save_dir"] == sample_cli_args_with_save_dir.save_dir
 
     @patch("aiconfigurator.cli.main.save_results")
-    @patch("aiconfigurator.cli.main._execute_task_configs")
-    @patch("aiconfigurator.cli.main.build_experiment_task_configs")
+    @patch("aiconfigurator.cli.main._execute_tasks")
+    @patch("aiconfigurator.cli.main.build_experiment_tasks")
     def test_cli_main_success_flow_exp_mode(
         self,
         mock_build_exp,
@@ -110,17 +110,17 @@ class TestCLIIntegration:
         assert save_kwargs["args"] == args
         assert save_kwargs["best_configs"] == mock_best_configs
         assert save_kwargs["pareto_fronts"] == {"my_exp": mock_results_df}
-        assert save_kwargs["task_configs"] == {"my_exp": mock_task_config}
+        assert save_kwargs["tasks"] == {"my_exp": mock_task_config}
         assert save_kwargs["save_dir"] == str(mock_exp_yaml_path.parent)
 
     @pytest.mark.parametrize(
         "mode,build_patch",
         [
-            ("default", "aiconfigurator.cli.main.build_default_task_configs"),
-            ("exp", "aiconfigurator.cli.main.build_experiment_task_configs"),
+            ("default", "aiconfigurator.cli.main.build_default_tasks"),
+            ("exp", "aiconfigurator.cli.main.build_experiment_tasks"),
         ],
     )
-    @patch("aiconfigurator.cli.main._execute_task_configs")
+    @patch("aiconfigurator.cli.main._execute_tasks")
     def test_cli_main_build_dispatch(self, mock_execute, mode, build_patch, cli_args_factory, mock_exp_yaml_path):
         """Main should dispatch to the correct builder based on CLI mode."""
         mock_execute.return_value = ("agg", {}, {}, {}, {})
@@ -140,8 +140,8 @@ class TestCLIIntegration:
     @pytest.mark.parametrize(
         "builder_patch",
         [
-            "aiconfigurator.cli.main.build_default_task_configs",
-            "aiconfigurator.cli.main.build_experiment_task_configs",
+            "aiconfigurator.cli.main.build_default_tasks",
+            "aiconfigurator.cli.main.build_experiment_tasks",
         ],
     )
     def test_cli_main_unsupported_mode_raises(self, builder_patch, cli_args_factory):
@@ -157,11 +157,11 @@ class TestCLIIntegration:
     @pytest.mark.parametrize(
         "builder_patch",
         [
-            "aiconfigurator.cli.main.build_default_task_configs",
-            "aiconfigurator.cli.main.build_experiment_task_configs",
+            "aiconfigurator.cli.main.build_default_tasks",
+            "aiconfigurator.cli.main.build_experiment_tasks",
         ],
     )
-    @patch("aiconfigurator.cli.main._execute_task_configs")
+    @patch("aiconfigurator.cli.main._execute_tasks")
     def test_cli_main_runtime_failure(self, mock_execute, builder_patch, cli_args_factory, tmp_path):
         """Execution errors propagate as RuntimeError for visibility."""
         mock_execute.side_effect = RuntimeError("failed")
@@ -192,7 +192,7 @@ class TestCLIIntegration:
         )
         assert args.database_mode == database_mode
 
-    def test_execute_task_configs_no_feasible_config_logs_without_traceback(
+    def test_execute_tasks_no_feasible_config_logs_without_traceback(
         self,
         caplog,
     ):
@@ -205,7 +205,7 @@ class TestCLIIntegration:
         )
 
         with caplog.at_level(logging.WARNING), pytest.raises(SystemExit) as exc_info:
-            _execute_task_configs({"agg": mock_task_config}, mode="default", strict_sla=True)
+            _execute_tasks({"agg": mock_task_config}, mode="default", strict_sla=True)
 
         assert exc_info.value.code == 1
         assert "Experiment agg found no SLA-feasible configuration" in caplog.text
@@ -213,8 +213,8 @@ class TestCLIIntegration:
         assert "Traceback" not in caplog.text
         assert all(record.exc_info is None for record in caplog.records)
 
-    @patch("aiconfigurator.cli.main._execute_task_configs")
-    @patch("aiconfigurator.cli.main.build_experiment_task_configs")
+    @patch("aiconfigurator.cli.main._execute_tasks")
+    @patch("aiconfigurator.cli.main.build_experiment_tasks")
     def test_cli_exp_mode_with_database_mode_in_yaml(self, mock_build_exp, mock_execute, tmp_path):
         """Test that database_mode from YAML is correctly parsed in exp mode."""
         yaml_content = """
@@ -241,8 +241,8 @@ exp_with_db_mode:
         mock_build_exp.assert_called_once()
         mock_execute.assert_called_once()
 
-    @patch("aiconfigurator.cli.main._execute_task_configs")
-    @patch("aiconfigurator.cli.main.build_experiment_task_configs")
+    @patch("aiconfigurator.cli.main._execute_tasks")
+    @patch("aiconfigurator.cli.main.build_experiment_tasks")
     def test_cli_exp_mode_passes_global_engine_step_backend(
         self,
         mock_build_exp,
@@ -274,14 +274,14 @@ exp_with_db_mode:
 
 
 class TestBuildDefaultTaskConfigs:
-    """Tests for build_default_task_configs function."""
+    """Tests for build_default_tasks function."""
 
     @patch("aiconfigurator.cli.main.Task")
     def test_skips_disagg_when_total_gpus_less_than_2(self, mock_task_config):
         """Disagg config should be skipped when total_gpus < 2."""
         mock_task_config.return_value = MagicMock(name="MockTaskConfig")
 
-        result = build_default_task_configs(
+        result = build_default_tasks(
             model_path="Qwen/Qwen3-32B",
             total_gpus=1,
             system="h200_sxm",
@@ -298,7 +298,7 @@ class TestBuildDefaultTaskConfigs:
         """Disagg config should be included when total_gpus >= 2."""
         mock_task_config.return_value = MagicMock(name="MockTaskConfig")
 
-        result = build_default_task_configs(
+        result = build_default_tasks(
             model_path="Qwen/Qwen3-32B",
             total_gpus=2,
             system="h200_sxm",
@@ -323,7 +323,7 @@ class TestBuildDefaultTaskConfigs:
         }
         mock_task_config.return_value = MagicMock(name="MockTaskConfig")
 
-        result = build_default_task_configs(
+        result = build_default_tasks(
             model_path="deepseek-ai/DeepSeek-V4-Pro",
             total_gpus=2,
             system="gb200",
@@ -354,7 +354,7 @@ class TestBuildDefaultTaskConfigs:
         caplog.set_level(logging.INFO, logger="aiconfigurator.cli.main")
 
         with patch("aiconfigurator.cli.main._get_backend_data_path", return_value=str(tmp_path)):
-            result = build_default_task_configs(
+            result = build_default_tasks(
                 model_path="deepseek-ai/DeepSeek-R1",
                 total_gpus=8,
                 system="b200_sxm",
@@ -383,7 +383,7 @@ class TestBuildDefaultTaskConfigs:
             (tmp_path / filename).write_text("header\n", encoding="utf-8")
 
         with patch("aiconfigurator.cli.main._get_backend_data_path", return_value=str(tmp_path)):
-            result = build_default_task_configs(
+            result = build_default_tasks(
                 model_path="deepseek-ai/DeepSeek-R1",
                 total_gpus=8,
                 system="h100_sxm",
@@ -416,7 +416,7 @@ class TestBuildExperimentTaskConfigs:
             },
         }
 
-        build_experiment_task_configs(config=config, engine_step_backend="rust")
+        build_experiment_tasks(config=config, engine_step_backend="rust")
 
         # build_experiment calls Task.from_yaml(exp_config, **overrides): the global
         # default arrives via the overrides kwarg, a per-exp value stays in exp_config.

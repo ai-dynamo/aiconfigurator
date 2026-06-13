@@ -1046,7 +1046,7 @@ def _ensure_backend_version_available(system_name: str, backend_name: str, backe
     raise SystemExit(1)
 
 
-def build_default_task_configs(
+def build_default_tasks(
     model_path: str,
     total_gpus: int,
     system: str,
@@ -1261,13 +1261,13 @@ def build_default_task_configs(
             **global_kwargs,
         )
 
-    task_configs: dict[str, Task] = {}
+    tasks: dict[str, Task] = {}
     is_moe_model = check_is_moe(model_path)
 
     for backend_name in backends_to_sweep:
         backend_moe = _sglang_moe_backend_override(backend_name)
         exp_name = f"agg_{backend_name}" if backend == "auto" else "agg"
-        task_configs[exp_name] = _make_agg(backend_name, backend_moe)
+        tasks[exp_name] = _make_agg(backend_name, backend_moe)
 
         # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
         if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
@@ -1281,14 +1281,14 @@ def build_default_task_configs(
                     logger.info("Skipping SGLang DeepEP agg sweep: %s", exc)
                 else:
                     deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
-                    task_configs[deepep_name] = deepep_task
+                    tasks[deepep_name] = deepep_task
 
         if total_gpus < 2:
             logger.warning("Skipping disagg since it requires at least 2 GPUs.")
             continue
 
         exp_name = f"disagg_{backend_name}" if backend == "auto" else "disagg"
-        task_configs[exp_name] = _make_disagg(backend_name, backend_moe)
+        tasks[exp_name] = _make_disagg(backend_name, backend_moe)
 
         # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
         if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
@@ -1302,11 +1302,11 @@ def build_default_task_configs(
                     logger.info("Skipping SGLang DeepEP disagg sweep: %s", exc)
                 else:
                     deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
-                    task_configs[deepep_name] = deepep_disagg_task
-    return task_configs
+                    tasks[deepep_name] = deepep_disagg_task
+    return tasks
 
 
-def build_experiment_task_configs(
+def build_experiment_tasks(
     yaml_path: str | None = None,
     config: dict[str, Any] | None = None,
     engine_step_backend: str | None = None,
@@ -1351,7 +1351,7 @@ def build_experiment_task_configs(
     else:
         experiment_names = [name for name in experiment_data if name != "exps"]
 
-    task_configs: dict[str, Task] = {}
+    tasks: dict[str, Task] = {}
 
     for exp_name in experiment_names:
         exp_config = experiment_data[exp_name]
@@ -1392,15 +1392,15 @@ def build_experiment_task_configs(
         # mode / profiles).  Task.from_yaml auto-detects and converts it to the flat V2
         # schema (emitting a DeprecationWarning); a native V2 flat dict also works.
         try:
-            task_configs[exp_name] = Task.from_yaml(exp_config, **overrides)
+            tasks[exp_name] = Task.from_yaml(exp_config, **overrides)
         except Exception:
             logger.exception("Failed to build Task for experiment '%s'", exp_name)
 
-    return task_configs
+    return tasks
 
 
-def _execute_task_configs(
-    task_configs: dict[str, Task],
+def _execute_tasks(
+    tasks: dict[str, Task],
     mode: str,
     top_n: int = 5,
     target_request_rate: float | None = None,
@@ -1414,7 +1414,7 @@ def _execute_task_configs(
     throughputs, and estimated latencies.
 
     Args:
-        task_configs: Dictionary mapping experiment names to Task objects to execute.
+        tasks: Dictionary mapping experiment names to Task objects to execute.
         mode: Execution mode ('default' or 'exp').
         top_n: Number of top configurations to return for each experiment.
         target_request_rate: If set, activates load-match picking (minimize
@@ -1441,17 +1441,17 @@ def _execute_task_configs(
     failure_messages: list[str] = []
     start_time = time.time()
     # TODO, can run in parallel
-    for exp_name, task_config in task_configs.items():
+    for exp_name, task in tasks.items():
         try:
             logger.info("Starting experiment: %s", exp_name)
-            logger.debug("Task config: \n%s", task_config.to_yaml())
-            pareto_df = task_config.run()
+            logger.debug("Task config: \n%s", task.to_yaml())
+            pareto_df = task.run()
             task_result = {"pareto_df": pareto_df}
             if pareto_df is not None and not pareto_df.empty:
                 results[exp_name] = task_result
                 logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_df))
             else:
-                db_mode = getattr(task_config, "database_mode", None)
+                db_mode = getattr(task, "database_mode", None)
                 hybrid_hint = (
                     " For frontier/new models without silicon data, try --database-mode HYBRID."
                     if db_mode == common.DatabaseMode.SILICON.name
@@ -1477,7 +1477,7 @@ def _execute_task_configs(
             failure_messages.append(f"Experiment {exp_name} failed: {exc}")
 
     if len(results) < 1:
-        first_config = next(iter(task_configs.values()), None)
+        first_config = next(iter(tasks.values()), None)
         db_mode = getattr(first_config, "database_mode", None) if first_config else None
         if db_mode == common.DatabaseMode.SILICON.name:
             logger.error(
@@ -1497,9 +1497,9 @@ def _execute_task_configs(
     pareto_fronts: dict[str, pd.DataFrame | None] = {}
     pareto_x_axis: dict[str, str] = {}
     for name, task_result in results.items():
-        task_config = task_configs[name]
+        task = tasks[name]
         best_config_df, best_throughput, pareto_frontier_df, x_axis_col, latencies = process_experiment_result(
-            task_config,
+            task,
             task_result,
             top_n,
             target_request_rate=target_request_rate,
@@ -1513,9 +1513,9 @@ def _execute_task_configs(
         pareto_fronts[name] = pareto_frontier_df
         pareto_x_axis[name] = x_axis_col
 
-    if mode == "default" and len(task_configs) > 2:
+    if mode == "default" and len(tasks) > 2:
         best_configs, best_throughputs, pareto_fronts, pareto_x_axis = merge_experiment_results_by_mode(
-            task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n
+            tasks, best_configs, pareto_fronts, pareto_x_axis, top_n
         )
 
     chosen_exp = max(best_throughputs, key=best_throughputs.get) if best_throughputs else "none"
@@ -1525,7 +1525,7 @@ def _execute_task_configs(
         best_throughputs=best_throughputs,  # for summary
         best_configs=best_configs,  # for table
         pareto_fronts=pareto_fronts,  # for plotting
-        task_configs=task_configs,  # for info in summary
+        tasks=tasks,  # for info in summary
         mode=mode,
         pareto_x_axis=pareto_x_axis,
         top_n=top_n,
@@ -2162,7 +2162,7 @@ def main(args):
             args.tpot,
             args.backend,
         )
-        task_configs = build_default_task_configs(
+        tasks = build_default_tasks(
             model_path=args.model_path,
             total_gpus=args.total_gpus,
             system=args.system,
@@ -2193,11 +2193,11 @@ def main(args):
             build_kwargs: dict[str, Any] = {"yaml_path": args.yaml_path}
             if args.engine_step_backend is not None:
                 build_kwargs["engine_step_backend"] = args.engine_step_backend
-            task_configs = build_experiment_task_configs(**build_kwargs)
+            tasks = build_experiment_tasks(**build_kwargs)
         except (ValueError, TypeError) as exc:
             logger.exception("Failed to build experiment task configs")
             raise SystemExit(1) from exc
-        if not task_configs:
+        if not tasks:
             logger.error("No valid experiments found in '%s'.", args.yaml_path)
             raise SystemExit(1)
     else:
@@ -2208,8 +2208,8 @@ def main(args):
         execute_kwargs["strict_sla"] = True
     if getattr(args, "inclusive_tpot", False):
         execute_kwargs["inclusive_tpot"] = True
-    _, best_configs, pareto_fronts, _, _ = _execute_task_configs(
-        task_configs,
+    _, best_configs, pareto_fronts, _, _ = _execute_tasks(
+        tasks,
         args.mode,
         top_n=args.top_n,
         **execute_kwargs,
@@ -2220,7 +2220,7 @@ def main(args):
             args=args,
             best_configs=best_configs,
             pareto_fronts=pareto_fronts,
-            task_configs=task_configs,
+            tasks=tasks,
             save_dir=args.save_dir,
             generated_backend_version=args.generated_config_version,
             backend=args.backend if args.mode == "default" else None,

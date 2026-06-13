@@ -290,7 +290,7 @@ def log_final_summary(
     best_throughputs: dict[str, float],
     best_configs: dict[str, pd.DataFrame],
     pareto_fronts: dict[str, pd.DataFrame | None],
-    task_configs: dict[str, Task],
+    tasks: dict[str, Task],
     mode: str,
     pareto_x_axis: dict[str, str] | None = None,
     top_n: int = 5,
@@ -327,12 +327,12 @@ def log_final_summary(
         chosen_backend = chosen_best_config["backend"].iloc[0]
         task_config_key = f"{chosen_exp}_{chosen_backend}"
         # Verify the key exists (for multi-backend mode)
-        if task_config_key in task_configs:
-            chosen_task_config = task_configs[task_config_key]
+        if task_config_key in tasks:
+            chosen_task_config = tasks[task_config_key]
         else:
-            chosen_task_config = task_configs[chosen_exp]
+            chosen_task_config = tasks[chosen_exp]
     else:
-        chosen_task_config = task_configs[chosen_exp]
+        chosen_task_config = tasks[chosen_exp]
 
     summary_box.append(f"    Model: {chosen_task_config.primary_model_path} (is_moe: {chosen_task_config.is_moe})")
     summary_box.append(f"    Total GPUs: {chosen_task_config.total_gpus}")
@@ -453,20 +453,20 @@ def log_final_summary(
             first_backend = config_df["backend"].iloc[0]
             task_config_key = f"{exp_name}_{first_backend}"
             # Verify the key exists (for multi-backend mode)
-            if task_config_key not in task_configs:
+            if task_config_key not in tasks:
                 task_config_key = exp_name
         else:
             task_config_key = exp_name
 
-        if task_config_key not in task_configs:
+        if task_config_key not in tasks:
             logger.info("No task config for %s, skipping deployment table.", exp_name)
             continue
 
         if not config_df.empty and "backend" not in config_df.columns:
             config_df = config_df.copy()
-            config_df["backend"] = task_configs[task_config_key].primary_backend_name
+            config_df["backend"] = tasks[task_config_key].primary_backend_name
 
-        exp_task_config = task_configs[task_config_key]
+        exp_task_config = tasks[task_config_key]
         total_gpus = getattr(exp_task_config, "total_gpus", None) or 0
         table_buf = _plot_worker_setup_table(
             exp_name,
@@ -488,7 +488,7 @@ def save_results(
     args,
     best_configs: dict[str, pd.DataFrame],
     pareto_fronts: dict[str, pd.DataFrame | None],
-    task_configs: dict[str, Task],
+    tasks: dict[str, Task],
     save_dir: str,
     generated_backend_version: str | None = None,
     backend: str | None = None,
@@ -505,8 +505,8 @@ def save_results(
         display_best_configs = best_configs
         display_pareto_fronts = pareto_fronts
 
-    first_exp_name = list(task_configs.keys())[0]
-    first_task = task_configs[first_exp_name]
+    first_exp_name = list(tasks.keys())[0]
+    first_task = tasks[first_exp_name]
 
     backend_str = backend or first_task.primary_backend_name
 
@@ -541,7 +541,7 @@ def save_results(
         # Save overall pareto plots in the root directory
         fig, ax = plt.subplots(1, 1, figsize=(8, 5))
         pareto_axis = {}
-        for exp_name, cfg in task_configs.items():
+        for exp_name, cfg in tasks.items():
             if cfg.request_latency is not None and cfg.request_latency > 0:
                 pareto_axis[exp_name] = "request_latency"
             else:
@@ -647,20 +647,19 @@ def save_results(
 
             # 3. Save the config for this experiment
             if backend != "auto":
-                exp_task_config = task_configs[exp_name]
+                exp_task_config = tasks[exp_name]
                 backend_version_str = exp_task_config.primary_backend_version
             else:
                 # There could be multiple backends in the same experiment if backend == "auto" as the result is merged
                 actual_backend_versions = {
-                    task_config.primary_backend_name: task_config.primary_backend_version
-                    for task_config in task_configs.values()
+                    task.primary_backend_name: task.primary_backend_version for task in tasks.values()
                 }
                 backend_version_str = ", ".join(
                     f"({backend_name}){backend_version}"
                     for backend_name, backend_version in actual_backend_versions.items()
                 )
-                exp_task_configs = {
-                    f"{exp_name}_{backend_name}": task_configs[f"{exp_name}_{backend_name}"]
+                exp_tasks = {
+                    f"{exp_name}_{backend_name}": tasks[f"{exp_name}_{backend_name}"]
                     for backend_name in actual_backend_versions
                 }
                 # generated backend versions for each backend, empty unless --generator-dynamo-version is provided
@@ -759,7 +758,7 @@ def save_results(
                 with open(os.path.join(exp_dir, "exp_config.yaml"), "w") as f:
                     f.write(exp_task_config.to_yaml())
             else:
-                for exp_task_config in exp_task_configs.values():
+                for exp_task_config in exp_tasks.values():
                     exp_cfg_name = f"{exp_task_config.primary_backend_name}_exp_config.yaml"
                     with open(os.path.join(exp_dir, exp_cfg_name), "w") as f:
                         f.write(exp_task_config.to_yaml())
@@ -773,7 +772,7 @@ def save_results(
                     if backend == "auto" and "backend" in result_df:
                         row_backend = result_df["backend"]
                         row_task_config_key = f"{exp_name}_{row_backend}"
-                        row_task_config = task_configs[row_task_config_key]
+                        row_task_config = tasks[row_task_config_key]
                         row_backend_version = generated_backend_versions.get(
                             row_backend, row_task_config.primary_backend_version
                         )
