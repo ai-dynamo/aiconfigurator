@@ -833,115 +833,121 @@ If you want to customize your experiment apart from simple command which only co
 ```bash
 aiconfigurator cli exp --yaml-path example.yaml
 ```
-> **YAML format (V2):** The canonical format is the flat `Task` schema — every
-> key maps 1:1 to a field, with no `mode:` selector and no `config:` /
-> `worker_config:` nesting. See `src/aiconfigurator/cli/example.yaml`
-> for the template. The legacy nested format shown below is still accepted and
-> auto-converted to the flat schema with a `DeprecationWarning`.
+> **YAML format:** Experiment YAML uses the flat `Task` schema — every key maps
+> 1:1 to a `Task` field, with no `mode:` selector and no `config:` /
+> `worker_config:` nesting. See [`example.yaml`](../src/aiconfigurator/cli/example.yaml)
+> for the annotated template.
+>
+> The legacy V1 nested format (`mode` / `config` / `worker_config` /
+> `replica_config` / `profiles`) is **deprecated** and only a limited
+> compatibility shim remains: V1 YAML still loads, but it is auto-converted to V2
+> with a `DeprecationWarning`, and any field with no V2 equivalent is rejected
+> (not silently dropped). See
+> [`example_v1_deprecated.yaml`](../src/aiconfigurator/cli/example_v1_deprecated.yaml)
+> for the old shape. Write all new configs in the flat V2 format below.
 
-An example yaml file looks like this, the template is [here](../src/aiconfigurator/cli/example.yaml)  
+An example yaml file looks like this, the annotated template is [here](../src/aiconfigurator/cli/example.yaml).  
 Let's split the yaml file into several sections.  
 1. exps
 ```yaml
 exps:
-  - exp_agg_full
-  - exp_agg_simplified
-  - exp_disagg_full
-  - exp_disagg_simplified
+  - agg_full
+  - disagg_full
 ```
-`exps` section defines the experiments you want to run. If not specified, all exps will be run
+`exps` section selects which experiments to run, in order. If omitted, all top-level experiments are run.
 
 2. A certain exp definition
 ```yaml
-exp_disagg_full:
-  mode: "patch" # patch or replace the config section, required
-  serving_mode: "disagg" # required
-  model_path: "deepseek-ai/DeepSeek-V3" # required
-  total_gpus: 32 # required
-  system_name: "h200_sxm" # required
-  decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
-  backend_name: "trtllm" # optional, can be "trtllm" (default), "vllm", or "sglang"
-  backend_version: "0.20.0" # optional, default to the latest version in the database
-  isl: 4000 # input sequence length, optional, default to 4000
-  osl: 1000 # output sequence length, optional, default to 1000
-  prefix: 0 # prefix cache len, default to 0
-  ttft: 1000.0  # Target TTFT in ms, optional, default to 1000.0
-  tpot: 40.0   # Target TPOT in ms, optional, default to 40.0
-  enable_wideep: false # enable wide ep for prefill/decode, optional, default to false
-  profiles: [] # some inherit presets for easier patch, optional
-  config: # all optional, used to patch default values
-    nextn: 1 # mtp 1
-    nextn_accept_rates: [0.85,0,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
-    # each prefill worker config
-    prefill_worker_config:
-      gemm_quant_mode: "fp8_block" # fp8, fp8_block, bfloat16
-      moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, bfloat16
-      kvcache_quant_mode: "bfloat16" # fp8, int8, bfloat16
-      fmha_quant_mode: "bfloat16" # fp8, bfloat16
-      comm_quant_mode: "half" # half
-      num_gpu_per_worker: [4, 8] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
-      tp_list: [1, 2, 4, 8]
-      pp_list: [1]
-      dp_list: [1] # we didn't enable attn dp here. You can enable it if you want.
-      moe_tp_list: [1]
-      moe_ep_list: [1, 2, 4, 8]
-    # each decode worker config
-    decode_worker_config:
-      gemm_quant_mode: "fp8_block" # fp8, fp8_block, bfloat16
-      moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, bfloat16
-      kvcache_quant_mode: "bfloat16" # fp8, int8, bfloat16
-      fmha_quant_mode: "bfloat16" # fp8, bfloat16
-      comm_quant_mode: "half" # half
-      num_gpu_per_worker: [4, 8] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
-      tp_list: [1, 2, 4, 8]
-      pp_list: [1]
-      dp_list: [1, 2, 4, 8]
-      moe_tp_list: [1]
-      moe_ep_list: [1, 2, 4, 8]
-    # the whole replica config, a replica is the minimum unit of disagg deployment. It contains xPyD workers.
-    # x is the number of prefill workers, y is the number of decode workers
-    # then we scale replicas to meet your total gpus requirement.
-    replica_config:
-      num_gpu_per_replica: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128] # It means the searched replica will have total gpus in this list, this list will be capped by max_gpu_per_replica
-      max_gpu_per_replica: 128 # max gpus per replica, if specified as 0, it means no limit. Too many gpus per replica will make the prefill/decoder worker pair complicated. no need to be too large.
-      max_prefill_worker: 32 # It means in every replica, you will have up to 32 prefill workers, x_max = 32
-      max_decode_worker: 32 # It means in every replica, you will have up to 32 decode workers, y_max = 32
-    advanced_tuning_config:
-      # advanced tuning config
-      prefill_latency_correction_scale: 1.1
-      decode_latency_correction_scale: 1.08
-      prefill_max_batch_size: 1
-      decode_max_batch_size: 512
+disagg_full:
+  serving_mode: disagg            # required
+  total_gpus: 32                  # required
+
+  # Workload + SLA (shared across roles)
+  isl: 4000                       # input sequence length (default 4000)
+  osl: 1000                       # output sequence length (default 1000)
+  prefix: 0                       # prefix cache length (default 0)
+  ttft: 1000.0                    # target TTFT in ms (default 1000.0)
+  tpot: 40.0                      # target TPOT in ms (default 40.0)
+
+  # Speculative decoding (auto-inferred from HF config if omitted)
+  nextn: 1
+  nextn_accept_rates: [0.85, 0, 0, 0, 0]
+
+  # --- Prefill role ---
+  prefill_model_path: deepseek-ai/DeepSeek-V3   # required
+  prefill_system_name: h200_sxm                 # required
+  prefill_backend_name: trtllm                  # trtllm (default) | vllm | sglang
+  prefill_enable_wideep: false
+  # Quant override (default: inferred from the HF model config)
+  prefill_gemm_quant_mode: fp8_block            # fp8 | fp8_block | bfloat16
+  prefill_moe_quant_mode: fp8_block             # fp8 | fp8_block | w4afp8 | bfloat16
+  prefill_kvcache_quant_mode: bfloat16          # fp8 | int8 | bfloat16
+  prefill_fmha_quant_mode: bfloat16             # fp8 | bfloat16
+  prefill_comm_quant_mode: half
+  # Search space (tp=attention, pp=layers, dp=attention DP, moe_tp/moe_ep=MoE)
+  prefill_num_gpu_candidates: [4, 8]
+  prefill_tp_candidates: [1, 2, 4, 8]
+  prefill_pp_candidates: [1]
+  prefill_dp_candidates: [1]
+  prefill_moe_tp_candidates: [1]
+  prefill_moe_ep_candidates: [1, 2, 4, 8]
+
+  # --- Decode role (model_path must equal the prefill model) ---
+  decode_model_path: deepseek-ai/DeepSeek-V3    # required
+  decode_system_name: h200_sxm                  # required
+  decode_backend_name: trtllm
+  decode_enable_wideep: false
+  decode_gemm_quant_mode: fp8_block
+  decode_moe_quant_mode: fp8_block
+  decode_kvcache_quant_mode: bfloat16
+  decode_fmha_quant_mode: bfloat16
+  decode_comm_quant_mode: half
+  decode_num_gpu_candidates: [4, 8]
+  decode_tp_candidates: [1, 2, 4, 8]
+  decode_pp_candidates: [1]
+  decode_dp_candidates: [1, 2, 4, 8]
+  decode_moe_tp_candidates: [1]
+  decode_moe_ep_candidates: [1, 2, 4, 8]
+
+  # --- Disagg orchestration: replica shaping + perf correction ---
+  num_gpu_per_replica: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128]
+  max_gpu_per_replica: 128        # caps num_gpu_per_replica (0 = no limit)
+  max_prefill_workers: 32         # max prefill workers per replica (x in xPyD)
+  max_decode_workers: 32          # max decode workers per replica (y in xPyD)
+  prefill_latency_correction: 1.1
+  decode_latency_correction: 1.08
+  prefill_max_batch_size: 1
+  decode_max_batch_size: 512
 ```
-This section is very long, let's go through the basic setting quickly  
-    - `mode`: patch means the `config` session below will do patch to default config while replace will overwrite everything. Typically, no need to modify  
-    - `serving_mode`: defines agg or disagg of this exp  
-    - `model_path`, `total_gpus`: defines the model and GPU resources
-    - `backend_name`: specifies the inference backend - `trtllm` (default), `vllm`, or `sglang`
-    - `backend_version`, `isl`, `osl`, `ttft`, `tpot`: defines the same things as in `default` mode  
-    - `enable_wideep`: will trigger wide-ep for fined-grained moe model  
-    - `profiles`: (legacy V1 format) one of 'fp8', 'fp8_static', 'bfloat16', 'nvfp4', 'mxfp4' to force a worker's precision. On load it auto-expands to the explicit `*_quant_mode` fields; the canonical V2 flat YAML sets those directly (see `cli/example.yaml`).  
-    - `config`: the most important part. It defines `nextn` for MTP; It also defines the agg_/prefill_/decode_worker's quantization, and parallelism search space; It also defines more about how we search for the disagg replica and do correction for better performance alignment. We'll go through it in [Advanced Tuning](advanced_tuning.md). Typically, the only thing here for you to modify, perhaps, is the quantization of the worker.
+This is long; the basics:  
+    - `serving_mode`: `agg` or `disagg` for this experiment.  
+    - `total_gpus`: total GPU budget for the deployment.  
+    - For `disagg`, the worker spec is per-role: set `prefill_*` / `decode_*` for `model_path`, `system_name`, `backend_name`, the `*_quant_mode` fields, and the `*_candidates` search lists. `decode_model_path` must equal `prefill_model_path` (hetero-disagg means different *systems*, not models).  
+    - For `agg`, the same fields are top-level (`model_path`, `system_name`, `gemm_quant_mode`, `agg_tp_candidates`, ...) — see `agg_full` in the template.  
+    - `backend_name`: `trtllm` (default), `vllm`, or `sglang`.  
+    - `backend_version`, `isl`, `osl`, `ttft`, `tpot`: same meaning as in `default` mode (shared, top-level).  
+    - `*_enable_wideep`: enables wide-EP for fine-grained MoE models.  
+    - `nextn` / `nextn_accept_rates`: MTP speculative decoding (auto-inferred from the HF config if omitted).  
+    - The replica/correction knobs (`num_gpu_per_replica`, `max_*_workers`, `*_latency_correction`, ...) are covered in [Advanced Tuning](advanced_tuning.md). Typically the only thing you need to touch is the quantization.
 
-Quantization override order: explicit quantization (V2 `*_quant_mode` fields, or the V1 `profiles` / YAML `config`) takes precedence; missing values are filled from the model's HF quantization metadata.  
-If you use `mode: replace`, ensure your replacement config includes the quantization you want.
+Quantization override order: explicit `*_quant_mode` fields take precedence; any mode left unset is filled from the model's HF quantization metadata.
 
-If you don't want to patch the `config` details, you can just delete them. Here's a simplified one,
+You can drop everything optional and keep just the required fields plus the few knobs you care about. Here's a minimal disagg with wide-EP:
 ```yaml
-exp_disagg_simplified:
-  mode: "patch"
-  serving_mode: "disagg"
-  model_path: "deepseek-ai/DeepSeek-V3"
+disagg_simplified:
+  serving_mode: disagg
   total_gpus: 512
-  system_name: "gb200"
-  enable_wideep: true # enable wide ep for prefill/decode, default to false, optional
-  config: # patch below default values
-    nextn: 2 # mtp 1
-    nextn_accept_rates: [0.85,0.3,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
-    replica_config:
-      max_gpu_per_replica: 512 # max gpus per replica, wide ep needs larger max_gpu_per_replica value
+  nextn: 2
+  nextn_accept_rates: [0.85, 0.3, 0, 0, 0]
+  prefill_model_path: deepseek-ai/DeepSeek-V3
+  prefill_system_name: gb200
+  prefill_enable_wideep: true        # wide-EP for prefill
+  decode_model_path: deepseek-ai/DeepSeek-V3
+  decode_system_name: gb200
+  decode_enable_wideep: true         # wide-EP for decode
+  max_gpu_per_replica: 512           # wide-EP needs a larger replica budget
 ```
-This only defines the system you want to use. Overwrite what you want.
+Everything omitted falls back to defaults / HF inference.
 
 Let's go through some pre-defined experiments for reference.
 1. homegeneous vs. heterogenous  
@@ -952,34 +958,34 @@ exps:
   - exp_b200_h200
 
 exp_h200_h200:
-  mode: "patch"
-  serving_mode: "disagg" # required
-  model_path: "Qwen/Qwen3-32B-FP8" # required
-  total_gpus: 16 # required
-  system_name: "h200_sxm" # required, for prefill
-  decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
-  backend_name: "trtllm" # can also be "vllm" or "sglang"
-  profiles: []
-  isl: 4000 # input sequence length
-  osl: 500 # output sequence length
-  ttft: 300.0  # Target TTFT in ms
-  tpot: 50.0   # Target TPOT in ms
+  serving_mode: disagg
+  total_gpus: 16
+  isl: 4000
+  osl: 500
+  ttft: 300.0
+  tpot: 50.0
+  prefill_model_path: Qwen/Qwen3-32B-FP8
+  prefill_system_name: h200_sxm      # prefill on H200
+  prefill_backend_name: trtllm       # vllm | sglang also work
+  decode_model_path: Qwen/Qwen3-32B-FP8
+  decode_system_name: h200_sxm       # decode on H200
+  decode_backend_name: trtllm
 
 exp_b200_h200:
-  mode: "patch"
-  serving_mode: "disagg" # required
-  model_path: "Qwen/Qwen3-32B-FP8" # required
-  total_gpus: 16 # required
-  system_name: "b200_sxm" # required, for prefill
-  decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
-  backend_name: "trtllm" # can also be "vllm" or "sglang"
-  profiles: []
-  isl: 4000 # input sequence length
-  osl: 500 # output sequence length
-  ttft: 300.0  # Target TTFT in ms
-  tpot: 50.0   # Target TPOT in ms
+  serving_mode: disagg
+  total_gpus: 16
+  isl: 4000
+  osl: 500
+  ttft: 300.0
+  tpot: 50.0
+  prefill_model_path: Qwen/Qwen3-32B-FP8
+  prefill_system_name: b200_sxm      # prefill on B200
+  prefill_backend_name: trtllm
+  decode_model_path: Qwen/Qwen3-32B-FP8
+  decode_system_name: h200_sxm       # decode on H200
+  decode_backend_name: trtllm
 ```
-We defined two experiments. `exp_h200_h200` uses h200 for both prefill and decode. `exp_b200_h200` uses b200 for prefill and h200 for decode.
+We defined two experiments. `exp_h200_h200` uses H200 for both prefill and decode. `exp_b200_h200` uses B200 for prefill and H200 for decode — hetero-disagg is expressed purely by giving the two roles different `*_system_name` values (the model must be the same).
 
 **Note**: You can also compare different backends by setting different `backend_name` values (trtllm, vllm, sglang) in your experiments.
 
@@ -991,33 +997,47 @@ exps:
   - exp_disagg
 
 exp_agg:
-  mode: "patch"
-  serving_mode: "agg" # required
-  model_path: "Qwen/Qwen3-32B-FP8" # required
-  total_gpus: 16 # required
-  system_name: "h200_sxm" # required, for prefill
-  backend_name: "trtllm" # can also be "vllm" or "sglang"
-  profiles: ["fp8"]
-  isl: 4000 # input sequence length
-  osl: 500 # output sequence length
-  ttft: 600.0  # Target TTFT in ms
-  tpot: 16   # Target TPOT in ms
+  serving_mode: agg
+  model_path: Qwen/Qwen3-32B-FP8
+  system_name: h200_sxm
+  total_gpus: 16
+  backend_name: trtllm
+  isl: 4000
+  osl: 500
+  ttft: 600.0
+  tpot: 16
+  # per-tensor FP8 on every component
+  gemm_quant_mode: fp8
+  moe_quant_mode: fp8
+  kvcache_quant_mode: fp8
+  fmha_quant_mode: fp8
+  comm_quant_mode: half
 
 exp_disagg:
-  mode: "patch"
-  serving_mode: "disagg" # required
-  model_path: "Qwen/Qwen3-32B-FP8" # required
-  total_gpus: 16 # required
-  system_name: "h200_sxm" # required, for prefill
-  decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
-  backend_name: "trtllm" # can also be "vllm" or "sglang"
-  profiles: ["fp8"]
-  isl: 4000 # input sequence length
-  osl: 500 # output sequence length
-  ttft: 600.0  # Target TTFT in ms
-  tpot: 16   # Target TPOT in ms
+  serving_mode: disagg
+  total_gpus: 16
+  isl: 4000
+  osl: 500
+  ttft: 600.0
+  tpot: 16
+  prefill_model_path: Qwen/Qwen3-32B-FP8
+  prefill_system_name: h200_sxm
+  prefill_backend_name: trtllm
+  prefill_gemm_quant_mode: fp8
+  prefill_moe_quant_mode: fp8
+  prefill_kvcache_quant_mode: fp8
+  prefill_fmha_quant_mode: fp8
+  prefill_comm_quant_mode: half
+  decode_model_path: Qwen/Qwen3-32B-FP8
+  decode_system_name: h200_sxm
+  decode_backend_name: trtllm
+  decode_gemm_quant_mode: fp8
+  decode_moe_quant_mode: fp8
+  decode_kvcache_quant_mode: fp8
+  decode_fmha_quant_mode: fp8
+  decode_comm_quant_mode: half
 ```
-In this example, we use a pre-defined profile to overwrite quantization of Qwen/Qwen3-32B-FP8. Default is blockwise FP8 for GEMM and here we use per-tensor FP8.
+Here we override the quantization of Qwen/Qwen3-32B-FP8: the default is blockwise FP8 for GEMM, and we set per-tensor FP8 explicitly via the `*_quant_mode` fields. (The deprecated V1 way was `profiles: ["fp8"]`, which expanded to exactly these fields.)
 
 You can refer to [src/aiconfigurator/cli/exps](../src/aiconfigurator/cli/exps) to find more reference yaml files.
 
