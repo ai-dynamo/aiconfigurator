@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Flat hardware profile table for the Phase 2 facts/ data layer.
+# Keyed by logical profile name (matches system_name used in generator CLI).
+#
+# Provenance:
+#   - node_selector labels: collector/sglang/dsv4_megamoe/run_k8s_full_collection.sh
+#     and collector/sglang/dsv4_megamoe/README.md (verified GPU product label pattern).
+#   - nccl_env: salvaged from platforms/hardware/{h200-ib,b200-ib,gb200-compute-domain}.yaml
+#     on etshen/refactor-generator branch (§9 hardware-level silicon facts).
+#   - shared_memory: standard values from k8s deployment baseline tests and guard rails.
+#   - moe_backend: per design doc §9.3 (CUTLASS on Hopper sm90; WIDEEP on Blackwell sm100/GB200;
+#     sgLang uses deepep_moe for wideep mode — see webapp/events/event_fn.py and
+#     cli/exps/deepseek_wideep_trtllm.yaml).
+#
+# SCOPE: hardware-only facts. No NIC names, storage classes, or cluster secrets.
+
+profiles:
+
+  # ---------------------------------------------------------------------------
+  # H100 SXM  —  Hopper  sm90
+  # ---------------------------------------------------------------------------
+  h100:
+    node_selector:
+      # GPU product label reported by NVIDIA GPU operator
+      nvidia.com/gpu.product: NVIDIA-H100-SXM5-80GB
+    arch: x86_64
+    nccl_env:
+      # HARDWARE: cuMem is a Hopper silicon capability (NVLink SXM).
+      # Source: platforms/hardware/h200-ib.yaml (same silicon gen, same env).
+      NCCL_CUMEM_ENABLE: "1"
+    shared_memory:
+      default: 64Gi
+    moe_backend:
+      # Hopper (sm90): CUTLASS is the recommended TRT-LLM MoE kernel.
+      # Source: extra_engine_args templates default to CUTLASS; no WIDEEP data collected for H100.
+      trtllm: CUTLASS
+      # SGLang: deepep_moe is the default MoE runner for wideep mode on any silicon.
+      sglang: deepep_moe
+
+  # ---------------------------------------------------------------------------
+  # H200 SXM  —  Hopper  sm90
+  # ---------------------------------------------------------------------------
+  h200:
+    node_selector:
+      # Source: collector/sglang/dsv4_megamoe/run_k8s_full_collection.sh L63
+      # pattern: NVIDIA-${gpu_product^^}  =>  NVIDIA-H200
+      nvidia.com/gpu.product: NVIDIA-H200
+    arch: x86_64
+    nccl_env:
+      # HARDWARE: cuMem is a Hopper silicon capability (not a network setting).
+      # Source: platforms/hardware/h200-ib.yaml  emits.env.NCCL_CUMEM_ENABLE
+      NCCL_CUMEM_ENABLE: "1"
+    shared_memory:
+      default: 64Gi
+    moe_backend:
+      # Hopper (sm90): CUTLASS is the recommended TRT-LLM MoE kernel.
+      # WIDEEP requires sm100+ (Blackwell FP4 tensor core path); wideep_moe_perf data
+      # for H200 is present in systems/data/h200_sxm/trtllm/ but CUTLASS is the
+      # correct default selection for this silicon generation.
+      trtllm: CUTLASS
+      # SGLang: deepep_moe is the default MoE runner (see webapp/events/event_fn.py)
+      sglang: deepep_moe
+
+  # ---------------------------------------------------------------------------
+  # B200 SXM  —  Blackwell  sm100
+  # ---------------------------------------------------------------------------
+  b200:
+    node_selector:
+      # Source: collector/sglang/dsv4_megamoe/run_k8s_full_collection.sh L62-63
+      # pattern: NVIDIA-${B200_SXM%%_*}  =>  NVIDIA-B200
+      nvidia.com/gpu.product: NVIDIA-B200
+    arch: x86_64
+    nccl_env:
+      # HARDWARE: cuMem is a silicon capability on Blackwell (same as Hopper).
+      # Source: platforms/hardware/b200-ib.yaml  emits.env.NCCL_CUMEM_ENABLE
+      NCCL_CUMEM_ENABLE: "1"
+    shared_memory:
+      default: 64Gi
+    moe_backend:
+      # Blackwell (sm100): WIDEEP uses FP4 tensor cores available on B200/GB200.
+      # Crashes on Hopper (no FP4 path). Source: guard_rails.md §WIDEEP,
+      # systems/data/b200_sxm/trtllm/*/wideep_moe_perf.txt data collected,
+      # and cli/exps/deepseek_wideep_trtllm.yaml (gb200/b200 wideep configs).
+      trtllm: WIDEEP
+      # SGLang: deepep_moe is the default wideep-compatible MoE runner on Blackwell.
+      # Source: webapp/events/event_fn.py  moe_backend="deepep_moe" when enable_wideep+sglang
+      sglang: deepep_moe
+
+  # ---------------------------------------------------------------------------
+  # GB200 NVL72  —  Blackwell  sm100,  arm64 Grace-Blackwell
+  # ---------------------------------------------------------------------------
+  gb200:
+    node_selector:
+      # Source: collector/sglang/dsv4_megamoe/run_k8s_full_collection.sh L58-59
+      # and README.md L205: --node-selector kubernetes.io/arch=arm64,...
+      # GB200 uses ARM64 Grace CPU; arch selector is required for scheduling.
+      kubernetes.io/arch: arm64
+      nvidia.com/gpu.product: NVIDIA-GB200
+    # arch override: Grace-Blackwell superchip uses ARM64 (Grace CPU + Blackwell GPU)
+    arch: arm64
+    nccl_env:
+      # HARDWARE: All of the following follow from the GB200 silicon topology —
+      # NVLink5, MNNVL (multi-node NVLink), NVLS, and P2P via NVSwitch.
+      # Source: platforms/hardware/gb200-compute-domain.yaml  emits.env
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "1"
+      NCCL_P2P_LEVEL: NVL
+      # HARDWARE: MNNVL IPC is enabled by the GPU topology (NVSwitch fabric), not the fabric type.
+      UCX_CUDA_IPC_ENABLE_MNNVL: "y"
+      # HARDWARE: vLLM symmetric memory requires MNNVL — hardware-derived.
+      VLLM_USE_NCCL_SYMM_MEM: "1"
+    shared_memory:
+      default: 64Gi
+      # GB200 compute-domain / disagg-decode needs more shared memory for
+      # MNNVL IPC transfers between nodes in the NVLink fabric.
+      disagg_decode: 128Gi
+    moe_backend:
+      # Blackwell (sm100): WIDEEP uses FP4 tensor cores; mandatory on GB200 for
+      # optimal MoE throughput. Source: cli/exps/deepseek_wideep_trtllm.yaml
+      # (all gb200_wideep_* experiments), systems/data/gb200/trtllm/*/wideep_moe_perf.txt
+      trtllm: WIDEEP
+      # SGLang: deepep_moe for the wideep DeepEP path on GB200 NVLink fabric.
+      # Source: webapp/events/event_fn.py, cli/exps/deepseek_wideep_trtllm.yaml
+      sglang: deepep_moe
