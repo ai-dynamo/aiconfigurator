@@ -1,0 +1,117 @@
+# Model serving profiles — flat facts layer (Phase 2, spec §6).
+# Only models with special serving behaviour get a profile here.
+# Models without an entry flow through the generic path on SDK facts.
+#
+# Consolidated from refs/heads/etshen/refactor-generator:
+#   manifests/models/deepseek-v4/model.yaml
+#   manifests/models/deepseek-v4/variants/pro.yaml
+#   manifests/models/deepseek-v4/variants/flash.yaml
+
+models:
+  deepseek-v4:
+    id: deepseek-v4
+    default_variant: pro
+    default_precision: fp8
+    match:
+      model_paths:
+        - deepseek-ai/DeepSeek-V4*
+        - sgl-project/DeepSeek-V4*
+      architectures:
+        - DeepseekV4ForCausalLM
+      model_types:
+        - deepseek_v4
+    traits:
+      - moe
+      - mla
+      - mtp
+      - compressed_attention
+    requires:
+      capabilities:
+        - deepseek_v4_openai_parsing
+        - deepseek_v4_tokenization
+    defaults:
+      # Downgraded from optimization/rules (design doc Section 12).
+      # Provenance: opt-vllm-deepseek-v4-production-defaults (status: validated)
+      - match: {backend: vllm}
+        roles: ["*"]
+        backend_args:
+          trust-remote-code: true
+          block-size: 256
+          no-enable-flashinfer-autotune: true
+      # Provenance: opt-vllm-deepseek-v4-gb200-defaults (status: validated)
+      - match: {backend: vllm, system: gb200}
+        roles: ["*"]
+        backend_args:
+          moe-backend: deep_gemm_mega_moe
+      - match: {backend: vllm, system: gb200}
+        roles: ["decode", "agg"]
+        backend_args:
+          compilation-config:
+            mode: 3
+            cudagraph_mode: FULL_AND_PIECEWISE
+            custom_ops: ["all"]
+            pass_config:
+              fuse_allreduce_rms: true
+      # Provenance: opt-sglang-deepseek-v4-production-defaults (status: validated)
+      - match: {backend: sglang}
+        roles: ["*"]
+        backend_args:
+          trust-remote-code: true
+          disable-flashinfer-autotune: true
+          speculative-algorithm: EAGLE
+          speculative-num-steps: 3
+          speculative-eagle-topk: 1
+          speculative-num-draft-tokens: 4
+    precision_variants:
+      fp8:
+        weight_dtype: fp8
+        activation_dtype: fp8
+        expert_dtype: fp4
+        kv_cache_dtype_default: fp8
+        requires:
+          capabilities:
+            - fp8_kv_cache
+            - deepseek_v4_attention_indexer
+            - fp4_moe_runner
+      bf16:
+        weight_dtype: bf16
+        activation_dtype: bf16
+        kv_cache_dtype_default: fp8
+        requires:
+          capabilities:
+            - fp8_kv_cache
+    variants:
+      pro:
+        id: pro
+        match:
+          model_paths:
+            - deepseek-ai/DeepSeek-V4-Pro*
+            - sgl-project/DeepSeek-V4-Pro*
+        default_precision: fp8
+        artifacts:
+          include:
+            model_cache_pvc:
+              name: model-cache
+              storage: 1500Gi
+              storageClassName: your-storage-class-name
+            model_download_job:
+              job_name: model-download
+              pvc_name: model-cache
+              mount_path: /model-store
+      flash:
+        id: flash
+        match:
+          model_paths:
+            - deepseek-ai/DeepSeek-V4-Flash*
+            - sgl-project/DeepSeek-V4-Flash*
+        default_precision: fp8
+        artifacts:
+          include:
+            model_cache_pvc:
+              name: model-cache
+              storage: 400Gi
+              storageClassName: your-storage-class-name
+            model_download_job:
+              job_name: model-download
+              pvc_name: model-cache
+              mount_path: /model-store
