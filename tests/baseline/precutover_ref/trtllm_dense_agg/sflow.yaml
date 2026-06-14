@@ -1,0 +1,376 @@
+version: '0.1'
+variables:
+  SLURM_ACCOUNT:
+    description: SLURM account
+    value: "YOUR_ACCOUNT"
+  SLURM_PARTITION:
+    description: SLURM partition
+    value: "YOUR_PARTITION"
+  SLURM_TIMELIMIT:
+    description: SLURM time limit
+    type: integer
+    value: 120
+  GPUS_PER_NODE:
+    description: GPUs per node
+    type: integer
+    value: 8
+  SLURM_NODES:
+    description: Number of nodes
+    type: integer
+    value: 1
+  SERVED_MODEL_NAME:
+    description: Served model name
+    value: "Qwen/Qwen3-0.6B"
+  MODEL_NAME:
+    description: Model path
+    value: "Qwen/Qwen3-0.6B"
+  LOCAL_MODEL_PATH:
+    description: Local model artifact URI
+    value: "fs:///path/to/local/model"
+  EXTRA_FRONTEND_ARGS:
+    description: Extra frontend arguments
+    value: ""
+  EXTRA_AGG_ARGS:
+    description: Extra aggregated server arguments
+    value: ""
+  ISL:
+    description: Input sequence length
+    type: integer
+    value: 4000
+  OSL:
+    description: Output sequence length
+    type: integer
+    value: 1000
+  MULTI_ROUND:
+    description: Number of benchmark rounds
+    type: integer
+    value: 20
+  CONCURRENCY:
+    description: Concurrency
+    type: integer
+    value: 1024
+    domain:
+    - 1024
+  AIPERF_IMAGE:
+    description: AIPerf container image
+    value: "python:3.12-slim"
+  DYNAMO_IMAGE:
+    description: Dynamo container image
+    value: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0"
+  NUM_AGG_SERVERS:
+    description: Number of aggregated servers
+    type: integer
+    value: 8
+  AGG_REPLICAS_POLICY:
+    description: aggregated replicas policy
+    value: "parallel"
+  AGG_TP_SIZE:
+    description: aggregated tensor parallel size
+    type: integer
+    value: 1
+  AGG_PP_SIZE:
+    description: aggregated pipeline parallel size
+    type: integer
+    value: 1
+  AGG_DP_SIZE:
+    description: aggregated data parallel size
+    type: integer
+    value: 1
+  AGG_EP_SIZE:
+    description: aggregated expert parallel size
+    type: integer
+    value: 1
+  AGG_BATCH_SIZE:
+    description: aggregated batch size
+    type: integer
+    value: 128
+  AGG_MAX_NUM_TOKENS:
+    description: aggregated max number of tokens
+    type: integer
+    value: 4640
+  AGG_MAX_SEQ_LEN:
+    description: aggregated max sequence length
+    type: integer
+    value: 0
+  AGG_ENABLE_ATTENTION_DP:
+    description: aggregated enable attention DP
+    value: ""
+  AGG_FREE_GPU_MEMORY_FRACTION:
+    description: aggregated free GPU memory fraction
+    value: "0.9"
+  KV_CACHE_DTYPE:
+    description: KV cache dtype
+    value: "auto"
+artifacts:
+- name: LOCAL_MODEL_PATH
+  uri: ${{ variables.LOCAL_MODEL_PATH }}
+- name: BENCH_RUN
+  uri: file://bench_run.sh
+  content: |
+    #!/bin/bash
+    set -euo pipefail
+
+    concurrency_array=(1 2 8 16 32 64 128 972 1024 1075)
+
+    if [[ -n "${AICONFIGURATOR_BENCH_CONCURRENCY:-}" ]]; then
+      concurrency_array=(${AICONFIGURATOR_BENCH_CONCURRENCY})
+    fi
+
+    ARTIFACT_DIR="${BENCH_ARTIFACT_DIR:-/tmp/bench_artifacts}"
+    BENCH_MODEL="${AICONFIGURATOR_BENCH_MODEL:-Qwen/Qwen3-0.6B}"
+    BENCH_ENDPOINT_TYPE="${AICONFIGURATOR_BENCH_ENDPOINT_TYPE:-chat}"
+    BENCH_ENDPOINT_URL="${AICONFIGURATOR_BENCH_ENDPOINT_URL:-http://0.0.0.0:8000}"
+    BENCH_TOKENIZER="${AICONFIGURATOR_BENCH_TOKENIZER:-Qwen/Qwen3-0.6B}"
+    BENCH_ISL="${AICONFIGURATOR_BENCH_ISL:-4000}"
+    BENCH_ISL_STDDEV="${AICONFIGURATOR_BENCH_ISL_STDDEV:-0}"
+    BENCH_OSL="${AICONFIGURATOR_BENCH_OSL:-1000}"
+    BENCH_OSL_STDDEV="${AICONFIGURATOR_BENCH_OSL_STDDEV:-0}"
+    BENCH_PREFIX="${AICONFIGURATOR_BENCH_PREFIX:-0}"
+    BENCH_PREFIX_PROMPTS="${AICONFIGURATOR_BENCH_PREFIX_PROMPTS:-1}"
+    BENCH_UI="simple"
+    BENCH_MULTI_ROUND="${AICONFIGURATOR_BENCH_MULTI_ROUND:-20}"
+
+    prefix_args=()
+    if [[ "${BENCH_PREFIX}" =~ ^[0-9]+$ && "${BENCH_PREFIX}" -gt 0 \
+        && "${BENCH_PREFIX_PROMPTS}" =~ ^[0-9]+$ && "${BENCH_PREFIX_PROMPTS}" -gt 0 ]]; then
+      prefix_args+=(--prefix-prompt-length "${BENCH_PREFIX}" --num-prefix-prompts "${BENCH_PREFIX_PROMPTS}")
+    fi
+
+    for concurrency in "${concurrency_array[@]}"; do
+      echo "Run concurrency: $concurrency"
+      aiperf profile \
+        --artifact-dir "${ARTIFACT_DIR}/concurrency_${concurrency}" \
+        -m "${BENCH_MODEL}" \
+        --endpoint-type "${BENCH_ENDPOINT_TYPE}" \
+        -u "${BENCH_ENDPOINT_URL}" \
+        --tokenizer "${BENCH_TOKENIZER}" \
+        --isl "${BENCH_ISL}" --isl-stddev "${BENCH_ISL_STDDEV}" \
+        --osl "${BENCH_OSL}" --osl-stddev "${BENCH_OSL_STDDEV}" \
+        "${prefix_args[@]}" \
+        --extra-inputs ignore_eos:true \
+        --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
+        --concurrency ${concurrency} \
+        --num-requests $(($concurrency*${BENCH_MULTI_ROUND})) \
+        --warmup-request-count $(($concurrency*2)) \
+        --random-seed 100 \
+        --ui "${BENCH_UI}" \
+        --streaming
+    done
+- name: AGG_CONFIG
+  uri: file://agg_config.yaml
+  content: |
+    backend: pytorch
+
+
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    enable_attention_dp: False
+    enable_chunked_prefill: False
+
+
+    max_batch_size: 128
+    max_num_tokens: 4640
+
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.8  # Fraction of GPU memory usable for KV-cache
+      dtype: auto
+      tokens_per_block: 32
+      enable_block_reuse: False
+
+
+    cuda_graph_config:
+      enable_padding: True # Pad CUDA graph
+      batch_sizes: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,16,20,24,28,32,32,40,48,56,64,64,80,96,112,128,128,160,192,224,256,256,320,384,448,512,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136]
+
+    disable_overlap_scheduler: False
+    print_iter_log: False
+
+
+backends:
+- name: slurm_cluster
+  type: slurm
+  default: true
+  time: ${{ variables.SLURM_TIMELIMIT }}
+  nodes: ${{ variables.SLURM_NODES }}
+  partition: ${{ variables.SLURM_PARTITION }}
+  account: ${{ variables.SLURM_ACCOUNT }}
+  gpus_per_node: ${{ variables.GPUS_PER_NODE }}
+operators:
+- name: dynamo_trtllm
+  type: srun
+  container_image: ${{ variables.DYNAMO_IMAGE }}
+  container_writable: true
+  mpi: pmix
+- name: aiperf
+  type: srun
+  container_image: ${{ variables.AIPERF_IMAGE }}
+  container_writable: true
+  mpi: pmix
+workflow:
+  name: dynamo_trtllm_agg
+  timeout: 115m
+  variables:
+    HEAD_NODE_IP:
+      description: Head node IP (resolved after allocation)
+      value: ${{ backends.slurm_cluster.nodes[0].ip_address }}
+    ETCD_ENDPOINTS:
+      description: ETCD endpoints
+      value: ${{ backends.slurm_cluster.nodes[0].ip_address }}:2379
+    NATS_SERVER:
+      description: NATS server URL
+      value: nats://${{ backends.slurm_cluster.nodes[0].ip_address }}:4222
+  tasks:
+  - name: load_image
+    operator:
+      name: dynamo_trtllm
+      ntasks: ${{ variables.SLURM_NODES }}
+      ntasks_per_node: 1
+    script:
+    - echo "Image Loaded"
+    - sleep 3600
+    probes:
+      readiness:
+        log_watch:
+          regex_pattern: Image Loaded
+          match_count: ${{ variables.SLURM_NODES }}
+        timeout: 1200
+        interval: 2
+  - name: gpu_monitor
+    operator:
+      name: dynamo_trtllm
+      ntasks: ${{ variables.SLURM_NODES }}
+      ntasks_per_node: 1
+    resources:
+      nodes:
+        count: ${{ variables.SLURM_NODES }}
+    script:
+    - echo "Starting gpu monitor"
+    - |-
+      nvidia-smi --query-gpu=index,utilization.gpu,utilization.memory,temperature.gpu,temperature.memory,power.draw,clocks.sm,clocks.mem,memory.total,memory.used  \
+        --format=csv,noheader,nounits -lms 2000 |  while IFS= read -r input || [ -n "$input" ] ;  do timestamp=$(date +%s%3N);  printf "%s.%s,%s\n" "${timestamp:0:10}" "${timestamp:10:3}" "${input}";  done  >> ${SFLOW_TASK_OUTPUT_DIR}/gpu_monitor_node_${SLURM_NODEID}_${SLURMD_NODENAME}.log
+    probes:
+      readiness:
+        log_watch:
+          regex_pattern: Starting gpu monitor
+        timeout: 60
+        interval: 2
+    depends_on:
+    - load_image
+  - name: nats_server
+    operator: dynamo_trtllm
+    script:
+    - nats-server -js
+    resources:
+      nodes:
+        indices:
+        - 0
+    probes:
+      readiness:
+        tcp_port:
+          port: 4222
+        timeout: 60
+        interval: 2
+    depends_on:
+    - load_image
+  - name: etcd_server
+    operator: dynamo_trtllm
+    script:
+    - |-
+      etcd --listen-client-urls "http://0.0.0.0:2379" \
+        --advertise-client-urls "http://0.0.0.0:2379" \
+        --listen-peer-urls "http://0.0.0.0:2380" \
+        --initial-advertise-peer-urls "http://${HEAD_NODE_IP}:2380" \
+        --initial-cluster "default=http://${HEAD_NODE_IP}:2380" \
+        --data-dir /tmp/etcd
+    resources:
+      nodes:
+        indices:
+        - 0
+    probes:
+      readiness:
+        tcp_port:
+          port: 2379
+        timeout: 60
+        interval: 2
+    depends_on:
+    - load_image
+  - name: frontend_server
+    operator: dynamo_trtllm
+    script:
+    - python3 -m dynamo.frontend --http-port 8000 ${{ variables.EXTRA_FRONTEND_ARGS }}
+    resources:
+      nodes:
+        indices:
+        - 0
+    probes:
+      readiness:
+        tcp_port:
+          port: 8000
+        timeout: 120
+        interval: 5
+    depends_on:
+    - nats_server
+    - etcd_server
+  - name: agg_server
+    operator:
+      name: dynamo_trtllm
+      ntasks: ${{ variables.AGG_TP_SIZE }}
+      ntasks_per_node: ${{ [ variables.AGG_TP_SIZE, variables.GPUS_PER_NODE ] | min }}
+    replicas:
+      count: ${{ variables.NUM_AGG_SERVERS }}
+      policy: ${{ variables.AGG_REPLICAS_POLICY }}
+    script:
+    - set -x
+    - echo ${CUDA_VISIBLE_DEVICES}
+    - export TLLM_LOG_LEVEL=INFO
+    - env | grep UCX
+    - unset UCX_TLS
+    - |-
+      trtllm-llmapi-launch python3 -m dynamo.trtllm \
+        --model-path ${{ artifacts.LOCAL_MODEL_PATH.path }} \
+        --served-model-name ${{ variables.SERVED_MODEL_NAME }} \
+        --extra-engine-args ${{ artifacts.AGG_CONFIG.path }} ${EXTRA_AGG_ARGS}
+    resources:
+      gpus:
+        count: ${{ (variables.AGG_TP_SIZE * variables.AGG_DP_SIZE * variables.AGG_PP_SIZE) if variables.AGG_ENABLE_ATTENTION_DP == '' else (variables.AGG_TP_SIZE * variables.AGG_PP_SIZE) }}
+    depends_on:
+    - frontend_server
+    probes:
+      readiness:
+        log_watch:
+          regex_pattern: Setting PyTorch memory fraction
+        timeout: 600
+        interval: 10
+      failure:
+        log_watch:
+          regex_pattern: Traceback (most recent call last)
+        interval: 10
+  - name: benchmark
+    operator:
+      name: aiperf
+      ntasks: 1
+    script:
+    - set -x
+    - pip install aiperf==0.3.0
+    - export COLUMNS=200
+    - export BENCH_ARTIFACT_DIR=${SFLOW_WORKFLOW_OUTPUT_DIR}/aiperf_concurrency_${CONCURRENCY}
+    - export AICONFIGURATOR_BENCH_CONCURRENCY=${CONCURRENCY}
+    - export AICONFIGURATOR_BENCH_MODEL=${{ variables.SERVED_MODEL_NAME }}
+    - export AICONFIGURATOR_BENCH_TOKENIZER=${{ variables.SERVED_MODEL_NAME }}
+    - export AICONFIGURATOR_BENCH_ENDPOINT_URL=http://${{ variables.HEAD_NODE_IP }}:8000
+    - export AICONFIGURATOR_BENCH_ISL=${{ variables.ISL }}
+    - export AICONFIGURATOR_BENCH_OSL=${{ variables.OSL }}
+    - export AICONFIGURATOR_BENCH_MULTI_ROUND=${{ variables.MULTI_ROUND }}
+    - bash ${{ artifacts.BENCH_RUN.path }}
+    - echo "Benchmarking finished"
+    resources:
+      nodes:
+        indices:
+        - 0
+    replicas:
+      variables:
+      - CONCURRENCY
+      policy: sequential
+    depends_on:
+    - agg_server
+    - frontend_server

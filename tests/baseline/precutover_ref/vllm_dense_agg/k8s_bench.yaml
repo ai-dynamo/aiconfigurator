@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dynamo-agg-benchmark
+  namespace: None
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      name: dynamo-agg-benchmark
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: aiperf
+          image: python:3.12-slim
+          env:
+            - name: AIPERF_SERVICE_PROFILE_START_TIMEOUT
+              value: "400"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              pip install aiperf
+              concurrency_array=(1 2 8 16 32 64 128 972 1024 1075)
+              ARTIFACT_DIR="${BENCH_ARTIFACT_DIR:-/tmp/bench_artifacts}"
+              BENCH_PREFIX="${AICONFIGURATOR_BENCH_PREFIX:-0}"
+              BENCH_PREFIX_PROMPTS="${AICONFIGURATOR_BENCH_PREFIX_PROMPTS:-1}"
+              prefix_args=()
+              if [[ "${BENCH_PREFIX}" =~ ^[0-9]+$ && "${BENCH_PREFIX}" -gt 0 \
+                  && "${BENCH_PREFIX_PROMPTS}" =~ ^[0-9]+$ && "${BENCH_PREFIX_PROMPTS}" -gt 0 ]]; then
+                prefix_args+=(--prefix-prompt-length "${BENCH_PREFIX}" --num-prefix-prompts "${BENCH_PREFIX_PROMPTS}")
+              fi
+              for concurrency in "${concurrency_array[@]}"; do
+                echo "Run concurrency: $concurrency"
+                aiperf profile \
+                  --artifact-dir "${ARTIFACT_DIR}/concurrency_${concurrency}" \
+                  -m Qwen/Qwen3-0.6B \
+                  --endpoint-type chat \
+                  -u http://dynamo-agg-frontend.None.svc.cluster.local:8000 \
+                  --tokenizer Qwen/Qwen3-0.6B \
+                  --isl 4000 --isl-stddev 0 \
+                  --osl 1000 --osl-stddev 0 \
+                  "${prefix_args[@]}" \
+                  --extra-inputs ignore_eos:true \
+                  --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
+                  --concurrency ${concurrency} \
+                  --num-requests $(($concurrency*50)) \
+                  --warmup-request-count $(($concurrency*2)) \
+                  --random-seed 100 \
+                  --ui simple \
+                  --streaming
+              done
