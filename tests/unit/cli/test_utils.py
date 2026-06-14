@@ -215,6 +215,7 @@ class TestMergeIntoTopN:
         for backend in ["trtllm", "vllm", "sglang"]:
             mock_config = MagicMock()
             mock_config.backend_name = backend
+            mock_config.primary_backend_name = backend
             tasks[f"agg_{backend}"] = mock_config
 
         # Create mock best configs
@@ -256,6 +257,7 @@ class TestMergeIntoTopN:
         for i, backend in enumerate(["trtllm", "vllm", "sglang"]):
             mock_config = MagicMock()
             mock_config.backend_name = backend
+            mock_config.primary_backend_name = backend
             exp_name = f"agg_{backend}"
             tasks[exp_name] = mock_config
 
@@ -281,8 +283,8 @@ class TestMergeIntoTopN:
     def test_merge_with_empty_dataframes(self):
         """Test merging when some configs are empty."""
         tasks = {
-            "agg_trtllm": MagicMock(backend_name="trtllm"),
-            "agg_vllm": MagicMock(backend_name="vllm"),
+            "agg_trtllm": MagicMock(backend_name="trtllm", primary_backend_name="trtllm"),
+            "agg_vllm": MagicMock(backend_name="vllm", primary_backend_name="vllm"),
         }
 
         best_configs = {
@@ -311,7 +313,7 @@ class TestMergeIntoTopN:
 
     def test_merge_with_missing_pareto_fronts(self):
         """Test merging when pareto fronts are missing."""
-        tasks = {"agg_trtllm": MagicMock(backend_name="trtllm")}
+        tasks = {"agg_trtllm": MagicMock(backend_name="trtllm", primary_backend_name="trtllm")}
 
         best_configs = {"agg_trtllm": pd.DataFrame({"tokens/s/gpu_cluster": [100.0], "tokens/s/user": [10.0]})}
 
@@ -341,6 +343,7 @@ class TestMergeIntoTopN:
         for backend in ["trtllm", "vllm"]:
             mock_config = MagicMock()
             mock_config.backend_name = backend
+            mock_config.primary_backend_name = backend
             exp_name = f"agg_{backend}"
             tasks[exp_name] = mock_config
 
@@ -383,6 +386,7 @@ class TestMergeExperimentResultsByMode:
             for mode in ["agg", "disagg"]:
                 mock_config = MagicMock()
                 mock_config.backend_name = backend
+                mock_config.primary_backend_name = backend
                 mock_config.serving_mode = mode
                 tasks[f"{mode}_{backend}"] = mock_config
 
@@ -435,6 +439,7 @@ class TestMergeExperimentResultsByMode:
         for i, backend in enumerate(["trtllm", "vllm", "sglang"]):
             mock_config = MagicMock()
             mock_config.backend_name = backend
+            mock_config.primary_backend_name = backend
             mock_config.serving_mode = "agg"
             exp_name = f"agg_{backend}"
             tasks[exp_name] = mock_config
@@ -460,9 +465,9 @@ class TestMergeExperimentResultsByMode:
     def test_merge_with_mixed_agg_disagg(self):
         """Test merging with mix of agg and disagg experiments."""
         tasks = {
-            "agg_trtllm": MagicMock(backend_name="trtllm", serving_mode="agg"),
-            "agg_vllm": MagicMock(backend_name="vllm", serving_mode="agg"),
-            "disagg_trtllm": MagicMock(backend_name="trtllm", serving_mode="disagg"),
+            "agg_trtllm": MagicMock(backend_name="trtllm", primary_backend_name="trtllm", serving_mode="agg"),
+            "agg_vllm": MagicMock(backend_name="vllm", primary_backend_name="vllm", serving_mode="agg"),
+            "disagg_trtllm": MagicMock(backend_name="trtllm", primary_backend_name="trtllm", serving_mode="disagg"),
         }
 
         best_configs = {
@@ -497,6 +502,7 @@ class TestMergeExperimentResultsByMode:
         for backend in ["trtllm", "vllm"]:
             mock_config = MagicMock()
             mock_config.backend_name = backend
+            mock_config.primary_backend_name = backend
             mock_config.serving_mode = "agg"
             exp_name = f"agg_{backend}"
             tasks[exp_name] = mock_config
@@ -517,9 +523,9 @@ class TestMergeExperimentResultsByMode:
     def test_merge_with_empty_experiments(self):
         """Test merging when some experiments have no results."""
         tasks = {
-            "agg_trtllm": MagicMock(backend_name="trtllm", serving_mode="agg"),
-            "agg_vllm": MagicMock(backend_name="vllm", serving_mode="agg"),
-            "disagg_trtllm": MagicMock(backend_name="trtllm", serving_mode="disagg"),
+            "agg_trtllm": MagicMock(backend_name="trtllm", primary_backend_name="trtllm", serving_mode="agg"),
+            "agg_vllm": MagicMock(backend_name="vllm", primary_backend_name="vllm", serving_mode="agg"),
+            "disagg_trtllm": MagicMock(backend_name="trtllm", primary_backend_name="trtllm", serving_mode="disagg"),
         }
 
         best_configs = {

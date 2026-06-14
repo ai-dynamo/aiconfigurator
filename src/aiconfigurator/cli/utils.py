@@ -112,7 +112,7 @@ def _merge_into_top_n(
         if exp_name not in best_configs:
             continue
         retained_exps.append(exp_name)
-        backend_name = tasks[exp_name].backend_name
+        backend_name = tasks[exp_name].primary_backend_name
         df = best_configs[exp_name].copy()
         if not df.empty:
             df["backend"] = backend_name

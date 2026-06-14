@@ -846,7 +846,7 @@ aiconfigurator cli exp --yaml-path example.yaml
 > [`example_v1_deprecated.yaml`](../src/aiconfigurator/cli/example_v1_deprecated.yaml)
 > for the old shape. Write all new configs in the flat V2 format below.
 
-An example yaml file looks like this, the annotated template is [here](../src/aiconfigurator/cli/example.yaml).  
+An example YAML file looks like this; see the [annotated experiment template](../src/aiconfigurator/cli/example.yaml).  
 Let's split the yaml file into several sections.  
 1. exps
 ```yaml

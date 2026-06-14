@@ -1398,13 +1398,30 @@ def build_experiment_tasks(
             continue
 
         # Early-fail on an unavailable backend version (clearer than failing deep in the sweep).
-        backend_name = exp_config.get("backend_name") or common.BackendName.trtllm.value
-        backend_version = exp_config.get("backend_version")
-        if backend_version is not None:
-            _ensure_backend_version_available(system_name, backend_name, backend_version)
-            decode_system = exp_config.get("decode_system_name") if serving_mode == "disagg" else None
-            if decode_system and decode_system != system_name:
-                _ensure_backend_version_available(decode_system, backend_name, backend_version)
+        # Role-aware: agg and legacy-v1 disagg carry backend/version/system at the top level;
+        # flat-v2 disagg carries them per role (prefill_*/decode_*), falling back to top-level so
+        # v1 configs still validate.
+        if serving_mode == "disagg":
+            role_checks = [
+                (
+                    exp_config.get("prefill_system_name") or system_name,
+                    exp_config.get("prefill_backend_name") or exp_config.get("backend_name"),
+                    exp_config.get("prefill_backend_version") or exp_config.get("backend_version"),
+                ),
+                (
+                    exp_config.get("decode_system_name") or system_name,
+                    exp_config.get("decode_backend_name") or exp_config.get("backend_name"),
+                    exp_config.get("decode_backend_version") or exp_config.get("backend_version"),
+                ),
+            ]
+        else:
+            role_checks = [(system_name, exp_config.get("backend_name"), exp_config.get("backend_version"))]
+        seen_combos: set[tuple[str, str, str]] = set()
+        for sys_name, bname, bver in role_checks:
+            bname = bname or common.BackendName.trtllm.value
+            if bver is not None and sys_name and (sys_name, bname, bver) not in seen_combos:
+                seen_combos.add((sys_name, bname, bver))
+                _ensure_backend_version_available(sys_name, bname, bver)
 
         # Per-experiment engine_step_backend wins over the global default.
         overrides: dict[str, Any] = {}
