@@ -2,7 +2,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: dynamo-disagg-benchmark
-  namespace: None
+  namespace: dynamo
 spec:
   backoffLimit: 0
   template:
@@ -35,7 +35,7 @@ spec:
                   --artifact-dir "${ARTIFACT_DIR}/concurrency_${concurrency}" \
                   -m Qwen/Qwen3-30B-A3B \
                   --endpoint-type chat \
-                  -u http://dynamo-disagg-frontend.None.svc.cluster.local:8000 \
+                  -u http://dynamo-disagg-frontend.dynamo.svc.cluster.local:8000 \
                   --tokenizer Qwen/Qwen3-30B-A3B \
                   --isl 4000 --isl-stddev 0 \
                   --osl 1000 --osl-stddev 0 \

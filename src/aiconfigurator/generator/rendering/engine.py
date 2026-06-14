@@ -12,7 +12,7 @@ import logging
 import os
 import shlex
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, Undefined
@@ -210,12 +210,30 @@ def _generate_k8s_via_dynamo(
     return yaml.dump(config_dict, sort_keys=False)
 
 
+def _assemble_k8s_context(context: dict[str, Any], has_engine_templates: bool) -> dict[str, Any]:
+    """Assemble the exact context the dynamo-j2 ``k8s_deploy.yaml`` render consumes.
+
+    For backends with extra_engine_args templates (trtllm), suppress cli_args_list
+    so the k8s template uses the ``--extra-engine-args`` file approach instead of
+    inlining all parameters as redundant CLI flags. Pure helper: no behavior change
+    versus the prior inline assembly.
+    """
+    if not has_engine_templates:
+        return context
+    k8s_context = dict(context)
+    k8s_context["agg_cli_args_list"] = None
+    k8s_context["prefill_cli_args_list"] = None
+    k8s_context["decode_cli_args_list"] = None
+    return k8s_context
+
+
 def render_backend_templates(
     param_values: dict[str, Any],
     backend: str,
     templates_dir: Optional[str] = None,
     version: Optional[str] = None,
     deployment_target: str = "dynamo-j2",
+    _context_sink: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> dict[str, str]:
     """
     Render templates for a specific backend with version-specific template selection.
@@ -527,16 +545,9 @@ def render_backend_templates(
         k8s_aux = template_path / "k8s_deploy.yaml.j2"
         if k8s_aux.exists():
             try:
-                k8s_context = context
-                # For backends with extra_engine_args templates (trtllm),
-                # suppress cli_args_list so the k8s template uses the
-                # --extra-engine-args file approach instead of inlining
-                # all parameters as redundant CLI flags.
-                if has_engine_templates:
-                    k8s_context = dict(context)
-                    k8s_context["agg_cli_args_list"] = None
-                    k8s_context["prefill_cli_args_list"] = None
-                    k8s_context["decode_cli_args_list"] = None
+                k8s_context = _assemble_k8s_context(context, has_engine_templates)
+                if _context_sink is not None:
+                    _context_sink(k8s_context)
                 tmpl = env.get_template("k8s_deploy.yaml.j2")
                 rendered = tmpl.render(**k8s_context)
                 rendered_templates["k8s_deploy.yaml"] = rendered
@@ -722,6 +733,31 @@ def render_backend_templates(
             logger.warning(f"Failed to render sflow template: {e}")
 
     return rendered_templates
+
+
+def build_k8s_context_for_test(param_values, backend, templates_dir=None, backend_version=None):
+    """Return the exact context dict the dynamo-j2 k8s_deploy render uses.
+
+    Pure extraction of existing logic so the typed builder and tests can consume
+    the identical context. Runs the same ``render_backend_templates`` pipeline the
+    Jinja k8s render uses and captures the assembled k8s context via a sink, so the
+    returned dict is byte-for-byte what ``k8s_deploy.yaml.j2`` is rendered with.
+    Must not change ``render_backend_templates`` output.
+    """
+    captured: dict[str, Any] = {}
+
+    def _sink(ctx: dict[str, Any]) -> None:
+        captured["ctx"] = ctx
+
+    render_backend_templates(
+        param_values,
+        backend,
+        templates_dir,
+        backend_version,
+        deployment_target="dynamo-j2",
+        _context_sink=_sink,
+    )
+    return captured["ctx"]
 
 
 def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict[str, Any]:

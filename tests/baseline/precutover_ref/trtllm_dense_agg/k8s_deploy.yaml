@@ -4,7 +4,7 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: qwen-qwen3-0.6b-agg
-  namespace: None
+  namespace: dynamo
 spec:
   services:
     Frontend:

@@ -32,6 +32,7 @@ def _make_params(
         system_name=system_name,
         backend_name=backend_name,
         mode=mode,
+        generator_overrides={"K8sConfig": {"k8s_namespace": "dynamo"}},
     )
 
 
