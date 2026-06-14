@@ -18,7 +18,7 @@ sys.path.insert(0, str(_COMMON_DIR))
 
 from config_patch import patch_model_path
 from parallel_config_patch import EXPERT_COUNT_KEYS, _load_original_config, patch_for_parallelism
-from vllm_deployment import gpt_oss_runtime_defaults, has_cli_flag
+from vllm_deployment import gpt_oss_runtime_defaults
 
 try:
     from .data import DataPoint, RepresentativeLayer, WorkUnit
