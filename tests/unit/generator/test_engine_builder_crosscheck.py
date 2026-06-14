@@ -12,7 +12,16 @@ _TRTLLM = [c for c in CANARY_CASES if c.backend == "trtllm"]
 
 
 @pytest.mark.parametrize("case", _TRTLLM, ids=lambda c: c.name)
-def test_engine_builder_semantically_equals_jinja(case):
+def test_engine_builder_context_seam_matches_render_path(case):
+    """The test-seam engine-context builder matches the production render path.
+
+    Before the cutover this asserted builder == Jinja. Post-cutover, at covered
+    versions ``generate_backend_artifacts`` IS the engine builder, so this now
+    guards that ``build_engine_worker_contexts_for_test`` stays faithful to the
+    real per-worker engine context. The durable builder-vs-Jinja parity lives in
+    ``tests/baseline/test_cutover_semantics.py`` (vs the immutable pre-cutover
+    reference); below the coverage floor the Jinja fallback still renders.
+    """
     arts = generate_backend_artifacts(
         copy.deepcopy(case.params), case.backend, backend_version=case.backend_version
     )

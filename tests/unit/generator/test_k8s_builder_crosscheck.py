@@ -11,14 +11,23 @@ from tests.baseline.canary import CANARY_CASES
 
 
 @pytest.mark.parametrize("case", CANARY_CASES, ids=lambda c: c.name)
-def test_builder_k8s_semantically_equals_jinja(case):
-    jinja = generate_backend_artifacts(
+def test_k8s_builder_context_seam_matches_render_path(case):
+    """The test-seam context builder produces the same k8s output as production.
+
+    Before the cutover this asserted builder == Jinja. Post-cutover the k8s
+    templates are retired and ``generate_backend_artifacts`` IS the builder, so
+    this now guards that ``build_k8s_context_for_test`` stays faithful to the
+    real ``render_backend_templates`` context. The durable builder-vs-Jinja
+    parity guarantee lives in ``tests/baseline/test_cutover_semantics.py``
+    (compared against the immutable pre-cutover Jinja reference).
+    """
+    render_path = generate_backend_artifacts(
         copy.deepcopy(case.params), case.backend, backend_version=case.backend_version
     )["k8s_deploy.yaml"]
     ctx = build_k8s_context_for_test(
         copy.deepcopy(case.params), case.backend, backend_version=case.backend_version
     )
     built = dgd_documents_to_yaml(build_dgd(ctx, case.backend))
-    assert list(yaml.safe_load_all(built)) == list(yaml.safe_load_all(jinja)), (
-        f"{case.name}: typed builder k8s differs semantically from Jinja"
+    assert list(yaml.safe_load_all(built)) == list(yaml.safe_load_all(render_path)), (
+        f"{case.name}: test-seam k8s context diverges from the render path"
     )
