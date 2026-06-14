@@ -673,7 +673,7 @@ class SupportMatrix:
         return combinations
 
     @staticmethod
-    def _create_task_config(
+    def _create_task(
         *,
         mode: str,
         model: str,
@@ -726,7 +726,7 @@ class SupportMatrix:
         constraints: TestConstraints,
         engine_step_backend: str | None,
     ) -> pd.DataFrame | None:
-        task_config = SupportMatrix._create_task_config(
+        task = SupportMatrix._create_task(
             mode=mode,
             model=model,
             system=system,
@@ -735,7 +735,7 @@ class SupportMatrix:
             constraints=constraints,
             engine_step_backend=engine_step_backend,
         )
-        return task_config.run()
+        return task.run()
 
     @staticmethod
     def run_single_test(
