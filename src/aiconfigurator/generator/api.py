@@ -22,6 +22,7 @@ from .artifacts import ArtifactWriter
 from .rendering import _cast_literal, render_backend_parameters, render_backend_templates
 from .utils import (
     DEFAULT_BACKEND,
+    DEFAULT_BACKEND_VERSION_MATRIX_PATH,
     _load_yaml_payload,
     get_default_dynamo_version_mapping,
     normalize_backend,
@@ -31,7 +32,6 @@ from .utils import (
 GENERATOR_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
 DEFAULT_DEPLOYMENT_SCHEMA_PATH = os.path.join(GENERATOR_CONFIG_DIR, "deployment_config.yaml")
 DEFAULT_BACKEND_MAPPING_PATH = os.path.join(GENERATOR_CONFIG_DIR, "backend_config_mapping.yaml")
-DEFAULT_BACKEND_VERSION_MATRIX_PATH = os.path.join(GENERATOR_CONFIG_DIR, "backend_version_matrix.yaml")
 _VALID_GENERATOR_HELP_SECTIONS = {"all", "deploy", "backend"}
 
 
