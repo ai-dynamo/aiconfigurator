@@ -51,7 +51,7 @@ _NVFP4_QUANT_ARGS = {
 
 
 def _skip_vllm_sm89_022_fp8_gemm(gemm_type: str) -> bool:
-    return vllm_version.startswith("0.22.0") and get_sm_version() == 89 and gemm_type in {"fp8", "fp8_static"}
+    return vllm_version.startswith("0.22.0") and get_sm_version() == 89 and gemm_type == "fp8"
 
 
 def get_gemm_test_cases():
