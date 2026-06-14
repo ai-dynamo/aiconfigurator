@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
@@ -615,24 +616,47 @@ class Layerwise(Operation):
         data = data_wrapper.data
         mode = str(moe_weight_mode or "")
         parallel_requested = moe_tp_size is not None or moe_ep_size is not None
+        parallel_fallback_ep_size: int | None = None
         if parallel_requested:
             query_moe_tp = int(moe_tp_size or 1)
             query_ep = int(moe_ep_size or 1)
+
+            def _select_parallel_family(family: dict | None) -> tuple[dict | None, int | None]:
+                if not family:
+                    return None, None
+                if query_ep in family and family[query_ep]:
+                    return family[query_ep], None
+                candidates = [
+                    (int(candidate_ep), candidate_data)
+                    for candidate_ep, candidate_data in family.items()
+                    if int(candidate_ep) != query_ep and candidate_data
+                ]
+                if not candidates:
+                    return None, None
+                candidates.sort(
+                    key=lambda item: (
+                        abs(math.log2(max(float(item[0]), 1.0) / max(float(query_ep), 1.0))),
+                        item[0],
+                    )
+                )
+                return candidates[0][1], candidates[0][0]
+
             try:
                 if phase == "CTX" and max_num_batched_tokens is not None and mode:
                     max_key = int(max_num_batched_tokens)
-                    tp_data = data[_MAX_NUM_BATCHED_PARALLEL_MODE_INDEX_KEY][model][phase][tp_size][mode][max_key][
-                        query_moe_tp
-                    ][query_ep]
+                    parallel_family = data[_MAX_NUM_BATCHED_PARALLEL_MODE_INDEX_KEY][model][phase][tp_size][mode][
+                        max_key
+                    ][query_moe_tp]
                 elif phase == "CTX" and max_num_batched_tokens is not None:
                     max_key = int(max_num_batched_tokens)
-                    tp_data = data[_MAX_NUM_BATCHED_PARALLEL_INDEX_KEY][model][phase][tp_size][max_key][
+                    parallel_family = data[_MAX_NUM_BATCHED_PARALLEL_INDEX_KEY][model][phase][tp_size][max_key][
                         query_moe_tp
-                    ][query_ep]
+                    ]
                 elif mode:
-                    tp_data = data[_PARALLEL_MODE_INDEX_KEY][model][phase][tp_size][mode][query_moe_tp][query_ep]
+                    parallel_family = data[_PARALLEL_MODE_INDEX_KEY][model][phase][tp_size][mode][query_moe_tp]
                 else:
-                    tp_data = data[_PARALLEL_INDEX_KEY][model][phase][tp_size][query_moe_tp][query_ep]
+                    parallel_family = data[_PARALLEL_INDEX_KEY][model][phase][tp_size][query_moe_tp]
+                tp_data, parallel_fallback_ep_size = _select_parallel_family(parallel_family)
             except KeyError:
                 tp_data = None
         else:
@@ -768,6 +792,9 @@ class Layerwise(Operation):
                 out[metric] = str(result[metric])
         if result.get("moe_weight_mode") not in (None, ""):
             out["moe_weight_mode"] = str(result["moe_weight_mode"])
+        if parallel_fallback_ep_size is not None:
+            out["parallel_fallback_moe_ep_size"] = float(parallel_fallback_ep_size)
+            out["requested_moe_ep_size"] = float(moe_ep_size or 1)
         if isinstance(result.get("components"), list):
             out["components"] = [dict(component) for component in result["components"] if isinstance(component, dict)]
         return out

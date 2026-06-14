@@ -22,6 +22,7 @@ class LayerwiseModel:
     kv_quant: str = "bf16"
     num_slots: int | None = None
     gen_driver: str = "prefix_cache"
+    full_gen_past_kv: tuple[int, ...] | None = None
 
     @property
     def is_moe(self) -> bool:
@@ -39,6 +40,7 @@ DEFAULT_MODELS: tuple[LayerwiseModel, ...] = (
         gemm_quant="fp8_block",
         moe_quant="w4a8_mxfp4_mxfp8",
         kv_quant="fp8",
+        full_gen_past_kv=(4096, 8192, 16384, 32768),
     ),
 )
 

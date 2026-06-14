@@ -121,6 +121,7 @@ def _args(tmp_path):
         gen_measured_runs=1,
         gen_repeat_aggregation="median",
         live_step_driver=False,
+        live_step_gen_min_past_kv=8192,
         prompt_seed=None,
         rollup=r"layers\.(\d+)\.(self_attn|mlp)",
         rank_reduce="sum",
@@ -156,6 +157,8 @@ def _build_args(tmp_path, **overrides):
         max_num_batched_tokens=None,
         gpu_memory_utilization=0.9,
         physical_tp_real_weights=False,
+        live_step_driver=False,
+        live_step_gen_min_past_kv=8192,
     )
     for key, value in overrides.items():
         setattr(args, key, value)
@@ -178,6 +181,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(args.ctx_target_layer_count, 0)
         self.assertEqual(args.gen_target_layer_count, 1)
         self.assertIsNone(args.gen_driver)
+        self.assertEqual(args.live_step_gen_min_past_kv, 8192)
         self.assertFalse(hasattr(args, "ctx_driver"))
         self.assertEqual(args.nsys_capture, "full")
 
@@ -310,6 +314,35 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
         self.assertEqual(len(models), 1)
         self.assertEqual(models[0].gen_driver, "prefix_cache")
+        self.assertEqual(models[0].full_gen_past_kv, (4096, 8192, 16384, 32768))
+
+    def test_public_deepseek_full_preset_uses_model_specific_gen_past_grid(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            args = cl._build_arg_parser().parse_args([
+                "--models",
+                "deepseek-ai/DeepSeek-V4-Flash",
+                "--tp-sizes",
+                "4",
+                "--ep-sizes",
+                "4",
+                "--phases",
+                "gen",
+                "--run-preset",
+                "full",
+                "--max-decode-batch-size",
+                "256",
+            ])
+            args.run_dir = tmp_path
+            model = public_collect._selected_models(args)[0]
+
+            work_args = dpg.make_work_unit_args(args, model, tp_size=4, ep_size=4, phase="gen")
+
+            self.assertEqual(work_args.gen_past_kv, "4096,8192,16384,32768")
+
+            args.gen_past_kv = "1,4096"
+            override_args = dpg.make_work_unit_args(args, model, tp_size=4, ep_size=4, phase="gen")
+            self.assertEqual(override_args.gen_past_kv, "1,4096")
 
     def test_public_deepseek_v4_flash_stub_memory_filter_allows_small_tp(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1028,6 +1061,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "past_kv": 3696,
                 "run": 0,
                 "live_step_driver": True,
+                "sync_execute_model_wall_time": True,
                 "execute_model_wall_time_ms": 17.0,
             },
             {
@@ -1069,6 +1103,62 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(measure_count, 1)
         self.assertEqual(kernel_count, 0)
         self.assertEqual(latency_us, 17_000.0)
+
+    def test_scheduler_timing_lookup_uses_scheduler_update_for_live_generation(self):
+        events = [
+            {
+                "event": "completed_execution",
+                "work_unit_id": "wu",
+                "attempt_id": 2,
+                "phase": "gen",
+                "batch_size": 2,
+                "new_tokens": 1,
+                "past_kv": 4096,
+                "run": 0,
+                "live_step_driver": True,
+                "execute_model_wall_time_ms": 40.0,
+            },
+            {
+                "event": "live_step_wall_time",
+                "work_unit_id": "wu",
+                "attempt_id": 2,
+                "phase": "gen",
+                "batch_size": 2,
+                "new_tokens": 1,
+                "past_kv": 4096,
+                "run": 0,
+                "wall_latency_ms": 35.0,
+            },
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "attempt_id": 2,
+                "control_phase": "gen",
+                "control_step": 4097,
+                "control_bs": 2,
+                "control_past": 4096,
+                "control_run": 0,
+                "scheduled_new_reqs": 0,
+                "scheduled_tokens": 2,
+                "fpm_wall_time_ms": 8.5,
+            },
+        ]
+
+        aggs = cl._lookup_scheduler_timing_aggs(
+            events,
+            "wu",
+            cl.DataPoint("gen", 2, 1, 4096),
+            attempt_id=2,
+        )
+        latency_us, _rms_us, kernel_count, _rms_kernel_count, measure_count = cl._reduce_agg_latency(
+            aggs,
+            latency_source="span",
+            aggregation="mean",
+        )
+
+        self.assertEqual(measure_count, 1)
+        self.assertEqual(kernel_count, 0)
+        self.assertEqual(latency_us, 8_500.0)
 
     def test_live_ctx_chunk_plan_caps_steps_at_scheduler_budget(self):
         chunks = cl._live_ctx_chunk_plan(
@@ -1707,6 +1797,13 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertFalse(cl._use_live_step_driver(dp))
 
         with mock.patch.dict(os.environ, {"LAYERWISE_USE_LIVE_STEP_DRIVER": "1"}, clear=True):
+            self.assertFalse(cl._use_live_step_driver(dp))
+
+        with mock.patch.dict(
+            os.environ,
+            {"LAYERWISE_USE_LIVE_STEP_DRIVER": "1", "LAYERWISE_LIVE_STEP_GEN_MIN_PAST_KV": "4096"},
+            clear=True,
+        ):
             self.assertTrue(cl._use_live_step_driver(dp))
 
     def test_live_step_driver_allows_large_decode_past(self):
@@ -1715,15 +1812,15 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"LAYERWISE_USE_LIVE_STEP_DRIVER": "1"}, clear=True):
             self.assertTrue(cl._use_live_step_driver(dp))
 
-    def test_live_step_driver_allows_all_positive_decode_past(self):
-        small = cl.DataPoint("gen", 1, 1, 1)
-        zero = cl.DataPoint("gen", 1, 1, 0)
+    def test_live_step_driver_defaults_to_high_decode_past(self):
+        small = cl.DataPoint("gen", 1, 1, 4096)
+        large = cl.DataPoint("gen", 1, 1, 8192)
 
         with mock.patch.dict(os.environ, {"LAYERWISE_USE_LIVE_STEP_DRIVER": "1"}, clear=True):
-            self.assertTrue(cl._use_live_step_driver(small))
-            self.assertTrue(cl._live_step_driver_would_handle(small))
-            self.assertFalse(cl._use_live_step_driver(zero))
-            self.assertFalse(cl._live_step_driver_would_handle(zero))
+            self.assertFalse(cl._use_live_step_driver(small))
+            self.assertFalse(cl._live_step_driver_would_handle(small))
+            self.assertTrue(cl._use_live_step_driver(large))
+            self.assertTrue(cl._live_step_driver_would_handle(large))
 
     def test_live_step_driver_handles_context_past_rows(self):
         ctx = cl.DataPoint("ctx", 1, 400, 3696)
@@ -2170,20 +2267,20 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertIn("--enable-prefix-caching", spec["extra_vllm_args"])
             self.assertNotIn("--no-enable-prefix-caching", spec["extra_vllm_args"])
 
-    def test_scheduler_live_step_gen_disables_prefix_cache_without_live_decode_driver(self):
+    def test_scheduler_live_step_gen_preserves_prefix_cache_without_live_decode_driver(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = _args(tmp_path)
             args.live_step_driver = True
-            unit = _unit(tmp_path, [cl.DataPoint("gen", 4, 1, 4096)])
+            unit = _unit(tmp_path, [cl.DataPoint("gen", 4, 1, 8192)])
             sched = cl.Scheduler(args, [unit])
 
             with mock.patch.object(scheduler, "_get_vllm_deployment_max_num_batched_tokens", return_value=2048):
                 spec = sched._make_spec(unit, unit.datapoints, attempt_id=0)
 
             self.assertEqual(spec["gen_driver"], "prefix_cache")
-            self.assertIn("--no-enable-prefix-caching", spec["extra_vllm_args"])
-            self.assertNotIn("--enable-prefix-caching", spec["extra_vllm_args"])
+            self.assertIn("--enable-prefix-caching", spec["extra_vllm_args"])
+            self.assertNotIn("--no-enable-prefix-caching", spec["extra_vllm_args"])
             self.assertEqual(spec["max_num_batched_tokens"], 2048)
 
     def test_scheduler_spec_keeps_simulated_tp_out_of_runtime_engine(self):
@@ -2733,9 +2830,10 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 phases="gen",
                 tp_sizes="4",
                 gen_batch_sizes="1",
-                gen_past_kv="1,4096",
+                gen_past_kv="1,8192",
                 max_num_seqs=128,
                 live_step_driver=True,
+                live_step_gen_min_past_kv=8192,
             )
 
             with (
@@ -2745,11 +2843,16 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             ):
                 units = cl.build_work_units(args)
 
-            self.assertEqual(units[0].max_num_batched_tokens, 2048)
-            self.assertIn("--no-enable-prefix-caching", units[0].extra_vllm_args)
+            self.assertEqual(len(units), 2)
+            self.assertEqual([unit.work_unit_id.rsplit("_", 1)[-1] for unit in units], ["prefixgen", "livegen"])
+            self.assertEqual([[dp.past_kv for dp in unit.datapoints] for unit in units], [[1], [8192]])
+            self.assertEqual([unit.max_num_batched_tokens for unit in units], [2048, 2048])
+            self.assertNotIn("--no-enable-prefix-caching", units[0].extra_vllm_args)
             self.assertNotIn("--enable-prefix-caching", units[0].extra_vllm_args)
+            self.assertNotIn("--no-enable-prefix-caching", units[1].extra_vllm_args)
+            self.assertNotIn("--enable-prefix-caching", units[1].extra_vllm_args)
             resolver.assert_called_once()
-            self.assertIn("--no-enable-prefix-caching", resolver.call_args.kwargs["extra_args"])
+            self.assertNotIn("--no-enable-prefix-caching", resolver.call_args.kwargs["extra_args"])
             self.assertNotIn("--enable-prefix-caching", resolver.call_args.kwargs["extra_args"])
 
     def test_build_work_units_does_not_force_auto_cache_block_size_for_ep(self):
@@ -3639,6 +3742,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             attempt.stdout_handle.close()
             attempt.stderr_handle.close()
             self.assertEqual(popen.call_args.kwargs["env"]["LAYERWISE_USE_LIVE_STEP_DRIVER"], "1")
+            self.assertEqual(popen.call_args.kwargs["env"]["LAYERWISE_LIVE_STEP_GEN_MIN_PAST_KV"], "8192")
 
     def test_live_step_driver_spec_keeps_marker_without_nsys(self):
         with tempfile.TemporaryDirectory() as td:

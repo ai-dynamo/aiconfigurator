@@ -90,6 +90,14 @@ def values_for_preset(preset: str, *, max_decode_batch_size: int | None = None) 
     raise ValueError(f"unknown run preset: {preset}")
 
 
+def _model_full_gen_past_kv_default(model: LayerwiseModel) -> str | None:
+    """Return a model-specific full-preset decode past grid, when defined."""
+
+    if model.full_gen_past_kv is None:
+        return None
+    return ",".join(map(str, model.full_gen_past_kv))
+
+
 def resolve_max_decode_batch_size(raw: str, *, system: str | None, tp_size: int) -> int:
     """Resolve the public max decode batch setting to an integer."""
 
@@ -171,6 +179,11 @@ def make_work_unit_args(
         public_args.run_preset,
         max_decode_batch_size=max_decode_batch_size if phases in ("gen", "both") else None,
     )
+    model_full_gen_past_kv = (
+        _model_full_gen_past_kv_default(model)
+        if public_args.run_preset == "full" and phases in ("gen", "both")
+        else None
+    )
     if model.is_moe:
         moe_tp = tp_size if ep_size == 1 else 1
     else:
@@ -201,13 +214,14 @@ def make_work_unit_args(
         ctx_past_kv=public_args.ctx_past_kv or preset_values["ctx_past_kv"],
         no_filter_model_max_len=public_args.no_filter_model_max_len,
         gen_batch_sizes=public_args.gen_batch_sizes or preset_values["gen_batch_sizes"],
-        gen_past_kv=public_args.gen_past_kv or preset_values["gen_past_kv"],
+        gen_past_kv=public_args.gen_past_kv or model_full_gen_past_kv or preset_values["gen_past_kv"],
         max_num_seqs=public_args.max_num_seqs,
         max_num_batched_tokens=public_args.max_num_batched_tokens,
         max_model_len=public_args.max_model_len,
         gpu_memory_utilization=public_args.gpu_memory_utilization,
         gen_driver=model.gen_driver,
         live_step_driver=public_args.live_step_driver,
+        live_step_gen_min_past_kv=public_args.live_step_gen_min_past_kv,
         latency_source=public_args.latency_source,
         gemm_quant=model.gemm_quant,
         moe_quant=model.moe_quant,
@@ -464,6 +478,33 @@ def _work_unit_id(
     return "wu_" + _stable_hash(payload)
 
 
+def _partition_gen_datapoints_for_live_step(
+    datapoints: list[DataPoint],
+    *,
+    live_step_driver: bool,
+    live_step_gen_min_past_kv: int,
+) -> list[tuple[str, list[DataPoint]]]:
+    """Split prefix-cache decode rows from live-step decode rows when mixed."""
+
+    if not live_step_driver or any(dp.phase != "gen" for dp in datapoints):
+        return [("", datapoints)]
+
+    prefix_datapoints = [
+        dp for dp in datapoints
+        if not _live_step_gen_would_handle(dp, min_past_kv=live_step_gen_min_past_kv)
+    ]
+    live_step_datapoints = [
+        dp for dp in datapoints
+        if _live_step_gen_would_handle(dp, min_past_kv=live_step_gen_min_past_kv)
+    ]
+    if not prefix_datapoints or not live_step_datapoints:
+        return [("", datapoints)]
+    return [
+        ("_prefixgen", prefix_datapoints),
+        ("_livegen", live_step_datapoints),
+    ]
+
+
 def _patch_for_layerwise_depth(
     model_id: str,
     *,
@@ -510,10 +551,10 @@ def _build_datapoints(
                 datapoints.append(DataPoint("gen", batch_size, 1, past_kv))
     return datapoints
 
-def _live_step_gen_would_handle(datapoint: DataPoint) -> bool:
+def _live_step_gen_would_handle(datapoint: DataPoint, *, min_past_kv: int = 8192) -> bool:
     """Mirror live-step decode deployment eligibility without importing worker."""
 
-    return datapoint.phase == "gen" and int(datapoint.past_kv) > 0
+    return datapoint.phase == "gen" and int(datapoint.past_kv) >= int(min_past_kv)
 
 def _model_max_position_embeddings(config: dict[str, Any]) -> int | None:
     config = _decoder_config_view(config)
@@ -672,18 +713,19 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
         if is_moe and ep > 1:
             deployment_extra_args.append("--enable-expert-parallel")
         gen_datapoints = [dp for dp in datapoints if dp.phase == "gen"]
-        live_step_gen_deployment = (
-            gen_driver == "live_decode"
-            or (
-                bool(getattr(args, "live_step_driver", False))
-                and bool(gen_datapoints)
-                and all(_live_step_gen_would_handle(dp) for dp in gen_datapoints)
+        live_step_gen_min_past_kv = int(getattr(args, "live_step_gen_min_past_kv", 8192))
+        has_live_step_gen = (
+            bool(getattr(args, "live_step_driver", False))
+            and bool(gen_datapoints)
+            and any(
+                _live_step_gen_would_handle(dp, min_past_kv=live_step_gen_min_past_kv)
+                for dp in gen_datapoints
             )
         )
-        if live_step_gen_deployment and not has_cli_flag(
-            deployment_extra_args, "--enable-prefix-caching", "--no-enable-prefix-caching"
-        ):
-            deployment_extra_args.append("--no-enable-prefix-caching")
+        live_step_gen_deployment = (
+            gen_driver == "live_decode"
+            or has_live_step_gen
+        )
         runtime_defaults = gpt_oss_runtime_defaults(
             model=args.model,
             system=system,
@@ -797,41 +839,37 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
                 and "moe" in representative.layer_type.lower()
             )
             final_extra_vllm_args = work_unit_extra_vllm_args
-            if (
-                live_step_gen_deployment
-                and has_cli_flag(deployment_extra_args, "--no-enable-prefix-caching")
-                and not has_cli_flag(
-                    final_extra_vllm_args,
-                    "--enable-prefix-caching",
-                    "--no-enable-prefix-caching",
-                )
+            base_work_unit_id = _work_unit_id(
+                row_base,
+                target_layers,
+                num_hidden_layers,
+                representative,
+                moe_noop,
+                physical_tp,
+            )
+            for id_suffix, partitioned_datapoints in _partition_gen_datapoints_for_live_step(
+                datapoints,
+                live_step_driver=bool(getattr(args, "live_step_driver", False)),
+                live_step_gen_min_past_kv=live_step_gen_min_past_kv,
             ):
-                final_extra_vllm_args = (*final_extra_vllm_args, "--no-enable-prefix-caching")
-            work_units.append(WorkUnit(
-                work_unit_id=_work_unit_id(
-                    row_base,
-                    target_layers,
-                    num_hidden_layers,
-                    representative,
-                    moe_noop,
-                    physical_tp,
-                ),
-                model_dir=model_dir,
-                row_base=row_base,
-                representative=representative,
-                target_layers=target_layers,
-                datapoints=datapoints,
-                model_layer_count=num_hidden_layers,
-                max_num_seqs=max_num_seqs,
-                max_num_batched_tokens=resolved_max_num_batched_tokens,
-                cache_block_size=resolved_cache_block_size,
-                max_model_len=max_model_len,
-                gpu_memory_utilization=gpu_memory_utilization,
-                gen_driver=gen_driver,
-                extra_vllm_args=final_extra_vllm_args,
-                moe_noop=moe_noop,
-                includes_moe=includes_moe,
-                router_weight_model=router_weight_model,
-                physical_gpus=tp if physical_tp else 1,
-            ))
+                work_units.append(WorkUnit(
+                    work_unit_id=f"{base_work_unit_id}{id_suffix}",
+                    model_dir=model_dir,
+                    row_base=row_base,
+                    representative=representative,
+                    target_layers=target_layers,
+                    datapoints=partitioned_datapoints,
+                    model_layer_count=num_hidden_layers,
+                    max_num_seqs=max_num_seqs,
+                    max_num_batched_tokens=resolved_max_num_batched_tokens,
+                    cache_block_size=resolved_cache_block_size,
+                    max_model_len=max_model_len,
+                    gpu_memory_utilization=gpu_memory_utilization,
+                    gen_driver=gen_driver,
+                    extra_vllm_args=final_extra_vllm_args,
+                    moe_noop=moe_noop,
+                    includes_moe=includes_moe,
+                    router_weight_model=router_weight_model,
+                    physical_gpus=tp if physical_tp else 1,
+                ))
     return work_units

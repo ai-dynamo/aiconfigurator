@@ -206,6 +206,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "avoids repeated LLM.generate submission overhead."
         ),
     )
+    advanced.add_argument(
+        "--live-step-gen-min-past-kv",
+        type=int,
+        default=8192,
+        help=(
+            "Minimum decode past-KV for --live-step-driver generation rows. "
+            "Lower-past decode rows stay on the prefix-cache generate path."
+        ),
+    )
     advanced.add_argument("--timeout", type=int, default=1800)
     advanced.add_argument("--nsys-capture", choices=("full", "cuda_profiler_api", "none"), default="full")
     advanced.add_argument(

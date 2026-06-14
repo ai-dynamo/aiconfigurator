@@ -335,7 +335,11 @@ def _lookup_scheduler_timing_aggs(
             continue
         if event.get("work_unit_id") != work_unit_id:
             continue
+        if datapoint.phase != "ctx":
+            continue
         if not event.get("live_step_driver"):
+            continue
+        if not event.get("sync_execute_model_wall_time"):
             continue
         event_attempt_id = event.get("attempt_id")
         if attempt_id is not None and event_attempt_id not in (None, "") and event_attempt_id != attempt_id:
@@ -369,6 +373,8 @@ def _lookup_scheduler_timing_aggs(
         if event.get("event") != "live_step_wall_time":
             continue
         if event.get("work_unit_id") != work_unit_id:
+            continue
+        if datapoint.phase != "ctx":
             continue
         event_attempt_id = event.get("attempt_id")
         if attempt_id is not None and event_attempt_id not in (None, "") and event_attempt_id != attempt_id:
@@ -526,13 +532,13 @@ def _effective_latency_source(
         return "span"
     return requested_source
 
-def _live_step_driver_would_handle(datapoint: DataPoint) -> bool:
+def _live_step_driver_would_handle(datapoint: DataPoint, *, gen_min_past_kv: int = 8192) -> bool:
     """Mirror the worker's live-step eligibility without importing worker code."""
 
     if datapoint.phase == "ctx":
         return datapoint.batch_size == 1 and int(datapoint.new_tokens) > 0
     if datapoint.phase == "gen":
-        return int(datapoint.past_kv) > 0
+        return int(datapoint.past_kv) >= int(gen_min_past_kv)
     return False
 
 
@@ -721,6 +727,9 @@ class Scheduler:
             env["LAYERWISE_SCHEDULER_TIMING"] = "1"
         if getattr(self.args, "live_step_driver", False):
             env["LAYERWISE_USE_LIVE_STEP_DRIVER"] = "1"
+            env["LAYERWISE_LIVE_STEP_GEN_MIN_PAST_KV"] = str(
+                int(getattr(self.args, "live_step_gen_min_past_kv", 8192))
+            )
         cmd = self._worker_cmd(
             paths["spec"],
             paths["report"],
@@ -770,18 +779,23 @@ class Scheduler:
         has_ctx = any(dp.phase == "ctx" for dp in pending)
         has_gen = any(dp.phase == "gen" for dp in pending)
         gen_datapoints = [dp for dp in pending if dp.phase == "gen"]
+        live_step_gen_min_past_kv = int(getattr(self.args, "live_step_gen_min_past_kv", 8192))
+        has_live_step_gen = (
+            getattr(self.args, "live_step_driver", False)
+            and any(
+                _live_step_driver_would_handle(dp, gen_min_past_kv=live_step_gen_min_past_kv)
+                for dp in gen_datapoints
+            )
+        )
         live_step_gen_deployment = (
             has_gen
             and (
                 unit.gen_driver == "live_decode"
-                or (
-                    getattr(self.args, "live_step_driver", False)
-                    and all(_live_step_driver_would_handle(dp) for dp in gen_datapoints)
-                )
+                or has_live_step_gen
             )
         )
-        needs_prefix_cache = has_gen and unit.gen_driver == "prefix_cache" and not live_step_gen_deployment
-        disables_prefix_cache = live_step_gen_deployment and not needs_prefix_cache
+        needs_prefix_cache = has_gen and unit.gen_driver == "prefix_cache"
+        disables_prefix_cache = live_step_gen_deployment and unit.gen_driver == "live_decode"
         runtime_defaults = gpt_oss_runtime_defaults(
             model=unit.row_base["model"],
             system=unit.row_base["system"],
@@ -821,7 +835,10 @@ class Scheduler:
         )
         live_step_marker = (
             getattr(self.args, "live_step_driver", False)
-            and any(_live_step_driver_would_handle(dp) for dp in pending)
+            and any(
+                _live_step_driver_would_handle(dp, gen_min_past_kv=live_step_gen_min_past_kv)
+                for dp in pending
+            )
         )
         enable_step_marker = (
             self._attempt_needs_nsys(unit, pending)

@@ -42,6 +42,7 @@ corresponding cache slot is ``None`` and consumers must guard.
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
@@ -376,6 +377,147 @@ class MoE(Operation):
                 f"workload_distribution='{used_workload_distribution}'."
             )
 
+        def _query_moe_dict(
+            moe_dict: dict,
+            query_tokens: int,
+            used_workload_distribution: str,
+            query_moe_tp_size: int,
+            query_moe_ep_size: int,
+        ) -> PerformanceResult:
+            token_points = _require_moe_token_points(
+                moe_dict,
+                query_tokens,
+                used_workload_distribution,
+            )
+            if query_tokens > token_points[-1]:
+                return _estimate_overflow_with_last_token_util(
+                    query_tokens,
+                    moe_dict,
+                    hidden_size,
+                    inter_size,
+                    topk,
+                    num_experts,
+                    query_moe_tp_size,
+                    query_moe_ep_size,
+                    quant_mode,
+                    used_workload_distribution,
+                )
+            num_left, num_right = interpolation.nearest_1d_point_helper(
+                query_tokens,
+                list(moe_dict.keys()),
+                inner_only=False,
+            )
+            result = interpolation.interp_1d(
+                [num_left, num_right],
+                [moe_dict[num_left], moe_dict[num_right]],
+                query_tokens,
+            )
+            if isinstance(result, dict):
+                lat = result["latency"]
+                energy = result.get("energy", 0.0)
+            else:
+                lat = result
+                energy = 0.0
+            return database._interp_pr(lat, energy=energy)
+
+        def _nonempty_moe_dict(moe_tp_data: dict, query_moe_tp_size: int, query_moe_ep_size: int) -> dict | None:
+            if query_moe_tp_size not in moe_tp_data:
+                return None
+            ep_data = moe_tp_data[query_moe_tp_size]
+            if query_moe_ep_size not in ep_data:
+                return None
+            moe_dict = ep_data[query_moe_ep_size]
+            return moe_dict if moe_dict else None
+
+        def _query_scaled_from_same_tp_silicon(
+            moe_tp_data: dict,
+            query_tokens: int,
+            used_workload_distribution: str,
+        ) -> PerformanceResult | None:
+            """Scale a same-TP silicon row to a missing EP with the SOL ratio.
+
+            MoE table token counts are global input-token counts. The local
+            routed work changes with EP, which is exactly what ``get_sol``
+            captures through ``moe_ep_size``. This keeps the fallback anchored
+            on a measured row while avoiding target/FPM residual calibration.
+            """
+
+            if moe_ep_size <= 0 or moe_ep_size & (moe_ep_size - 1):
+                return None
+            if moe_tp_size not in moe_tp_data:
+                return None
+            available = [
+                int(candidate_ep)
+                for candidate_ep, candidate_dict in moe_tp_data[moe_tp_size].items()
+                if int(candidate_ep) != int(moe_ep_size)
+                and int(candidate_ep) > 0
+                and not (int(candidate_ep) & (int(candidate_ep) - 1))
+                and candidate_dict
+            ]
+            if not available:
+                return None
+
+            reference_ep = min(
+                available,
+                key=lambda candidate_ep: (
+                    abs(math.log2(max(float(candidate_ep), 1.0) / max(float(moe_ep_size), 1.0))),
+                    candidate_ep,
+                ),
+            )
+            reference_dict = moe_tp_data[moe_tp_size][reference_ep]
+            reference = _query_moe_dict(
+                reference_dict,
+                query_tokens,
+                used_workload_distribution,
+                moe_tp_size,
+                reference_ep,
+            )
+            reference_sol = get_sol(
+                query_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                moe_tp_size,
+                reference_ep,
+                quant_mode,
+                used_workload_distribution,
+            )[0]
+            target_sol = get_sol(
+                query_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                used_workload_distribution,
+            )[0]
+            if reference_sol <= 0.0:
+                return None
+
+            scale = target_sol / reference_sol
+            logger.debug(
+                "Scaling MoE silicon row from moe_ep_size=%s to moe_ep_size=%s for "
+                "num_tokens=%s, hidden_size=%s, inter_size=%s, topk=%s, num_experts=%s, "
+                "moe_tp_size=%s, distribution=%s with SOL ratio %.4f.",
+                reference_ep,
+                moe_ep_size,
+                query_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                moe_tp_size,
+                used_workload_distribution,
+                scale,
+            )
+            return database._interp_pr(
+                float(reference) * scale,
+                energy=float(getattr(reference, "energy", 0.0)) * scale,
+            )
+
         if database_mode is None:
             database_mode = database._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
@@ -564,36 +706,34 @@ class MoE(Operation):
                     used_workload_distribution = (
                         workload_distribution if workload_distribution in database._moe_data[quant_mode] else "uniform"
                     )
-                    moe_dict = database._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
+                    moe_tp_data = database._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
                         hidden_size
-                    ][inter_size][moe_tp_size][moe_ep_size]
-                    token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
-                    if num_tokens > token_points[-1]:
-                        return _estimate_overflow_with_last_token_util(
-                            num_tokens,
+                    ][inter_size]
+                    moe_dict = _nonempty_moe_dict(moe_tp_data, moe_tp_size, moe_ep_size)
+                    if moe_dict is not None:
+                        return _query_moe_dict(
                             moe_dict,
-                            hidden_size,
-                            inter_size,
-                            topk,
-                            num_experts,
+                            num_tokens,
+                            used_workload_distribution,
                             moe_tp_size,
                             moe_ep_size,
-                            quant_mode,
-                            workload_distribution,
                         )
-                    num_left, num_right = interpolation.nearest_1d_point_helper(
-                        num_tokens, list(moe_dict.keys()), inner_only=False
+                    scaled_result = _query_scaled_from_same_tp_silicon(
+                        moe_tp_data,
+                        num_tokens,
+                        used_workload_distribution,
                     )
-                    result = interpolation.interp_1d(
-                        [num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens
+                    if scaled_result is not None:
+                        return scaled_result
+                    raise PerfDataNotAvailableError(
+                        "Missing silicon data for the requested lookup. "
+                        "No MoE silicon data points for requested shape or same-TP EP fallback. "
+                        f"system='{database.system}', backend='{database.backend}', version='{database.version}', "
+                        f"num_tokens={num_tokens}, hidden_size={hidden_size}, inter_size={inter_size}, "
+                        f"topk={topk}, num_experts={num_experts}, moe_tp_size={moe_tp_size}, "
+                        f"moe_ep_size={moe_ep_size}, quant_mode={quant_mode}, "
+                        f"workload_distribution='{used_workload_distribution}'."
                     )
-                    if isinstance(result, dict):
-                        latency = result["latency"]
-                        energy = result.get("energy", 0.0)
-                    else:
-                        latency = result
-                        energy = 0.0
-                    return database._interp_pr(latency, energy=energy)
                 else:
                     raise NotImplementedError(f"backend {database.backend} not supported for moe")
 

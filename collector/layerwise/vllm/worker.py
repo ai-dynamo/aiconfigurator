@@ -436,7 +436,8 @@ def _use_live_step_driver(dp: DataPoint) -> bool:
     if dp.phase == "ctx":
         return dp.batch_size == 1 and int(dp.new_tokens) > 0
     if dp.phase == "gen":
-        return int(dp.past_kv) > 0
+        min_past_kv = int(os.environ.get("LAYERWISE_LIVE_STEP_GEN_MIN_PAST_KV", "8192"))
+        return int(dp.past_kv) >= min_past_kv
     return False
 
 def _make_final_only_sampling_params(sampling_cls, **kwargs):
@@ -1574,6 +1575,7 @@ def _run_live_ctx_iteration(
                         past=chunk_past_kv,
                         run=run_idx,
                         live_step_driver=True,
+                        sync_execute_model_wall_time=True,
                         requested_new_tokens=dp.new_tokens,
                         requested_past_kv=dp.past_kv,
                         chunk_index=chunk_index,

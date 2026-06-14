@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import shutil
 import statistics
 import sys
@@ -333,6 +334,29 @@ def _context_pathology_reasons(
         ctx_kv_tokens = int(float(row.get("ctx_kv_tokens") or 0))
         latency_ms = float(row.get("latency_ms") or 0.0)
         parsed.append((index, ctx_requests, ctx_tokens, ctx_kv_tokens, latency_ms))
+        if index == 0 and ctx_tokens > 0 and ctx_kv_tokens == 0 and latency_ms > 0.0:
+            following_latencies: list[float] = []
+            for next_index in range(1, min(len(rows), 6)):
+                next_row = rows[next_index]
+                next_phase = str(next_row.get("phase", "")).lower()
+                if next_phase not in {"context", "mixed"}:
+                    continue
+                next_ctx_tokens = int(float(next_row.get("ctx_tokens") or 0))
+                next_latency_ms = float(next_row.get("latency_ms") or 0.0)
+                if next_ctx_tokens <= 0 or next_latency_ms <= 0.0:
+                    continue
+                if next_ctx_tokens >= max(ctx_tokens * 2, min_continuation_ctx_tokens):
+                    following_latencies.append(next_latency_ms)
+            if following_latencies:
+                following_median = float(statistics.median(following_latencies))
+                if following_median > 0.0 and latency_ms > following_median * high_latency_factor:
+                    reasons[index] = (
+                        "context_segment_start_above_following_envelope:"
+                        f"latency_ms={latency_ms:.3f},following_median_ms={following_median:.3f},"
+                        f"ctx_tokens={ctx_tokens},ctx_requests={ctx_requests},"
+                        f"ctx_kv_tokens={ctx_kv_tokens},peer_count={len(following_latencies)}"
+                    )
+                    continue
         if 0 < ctx_tokens < min_continuation_ctx_tokens and ctx_kv_tokens > 0:
             reasons[index] = (
                 "context_tiny_continuation_tail:"
@@ -352,9 +376,9 @@ def _context_pathology_reasons(
             )
             continue
 
-        if not filter_nonterminal_chunks or ctx_kv_tokens > 0 or ctx_tokens <= 0:
+        if not filter_nonterminal_chunks or ctx_tokens <= 0:
             continue
-        chunk_kv_tokens = ctx_tokens * max(ctx_requests, 1)
+        chunk_kv_tokens = ctx_kv_tokens + ctx_tokens * max(ctx_requests, 1)
         for next_index in range(index + 1, min(len(rows), index + 1 + max(nonterminal_chunk_lookahead, 0))):
             next_row = rows[next_index]
             if str(next_row.get("phase", "")).lower() not in {"context", "mixed"}:
@@ -416,6 +440,67 @@ def _context_pathology_reasons(
     return reasons
 
 
+def _context_workload_transition_reasons(
+    rows: list[dict[str, str]],
+    support_rows: list[dict[str, str]],
+    *,
+    high_latency_factor: float = 1.20,
+) -> dict[int, str]:
+    """Return singleton real-context rows that look like workload-transition overhead."""
+
+    context_indices = [
+        index
+        for index, row in enumerate(rows)
+        if str(row.get("phase", "")).lower() == "context"
+    ]
+    if len(context_indices) != 1:
+        return {}
+
+    index = context_indices[0]
+    row = rows[index]
+    ctx_tokens = int(float(row.get("ctx_tokens") or 0))
+    ctx_requests = int(float(row.get("ctx_requests") or 1))
+    ctx_kv_tokens = int(float(row.get("ctx_kv_tokens") or 0))
+    latency_ms = float(row.get("latency_ms") or 0.0)
+    if ctx_tokens <= 0 or ctx_requests != 1 or ctx_kv_tokens != 0 or latency_ms <= 0.0:
+        return {}
+
+    row_segment = str(row.get("workload_segment") or "")
+    row_counter_id = str(row.get("counter_id") or "")
+    min_peer_ctx_tokens = max(1, int(ctx_tokens * 0.5))
+    max_peer_ctx_tokens = max(ctx_tokens + 64, int(ctx_tokens * 2.0))
+    peer_latencies: list[float] = []
+    for support_row in support_rows:
+        if str(support_row.get("phase", "")).lower() != "context":
+            continue
+        if row_counter_id and row_counter_id == str(support_row.get("counter_id") or ""):
+            continue
+        if row_segment and row_segment == str(support_row.get("workload_segment") or ""):
+            continue
+        peer_ctx_requests = int(float(support_row.get("ctx_requests") or 1))
+        peer_ctx_kv_tokens = int(float(support_row.get("ctx_kv_tokens") or 0))
+        peer_ctx_tokens = int(float(support_row.get("ctx_tokens") or 0))
+        peer_latency_ms = float(support_row.get("latency_ms") or 0.0)
+        if peer_ctx_requests != ctx_requests or peer_ctx_kv_tokens != 0 or peer_latency_ms <= 0.0:
+            continue
+        if min_peer_ctx_tokens <= peer_ctx_tokens <= max_peer_ctx_tokens:
+            peer_latencies.append(peer_latency_ms)
+
+    if not peer_latencies:
+        return {}
+    peer_median = float(statistics.median(peer_latencies))
+    if peer_median <= 0.0 or latency_ms <= peer_median * high_latency_factor:
+        return {}
+    return {
+        index: (
+            "context_singleton_workload_transition_above_support_envelope:"
+            f"latency_ms={latency_ms:.3f},support_median_ms={peer_median:.3f},"
+            f"ctx_tokens={ctx_tokens},ctx_requests={ctx_requests},"
+            f"ctx_kv_tokens={ctx_kv_tokens},support_peer_count={len(peer_latencies)}"
+        )
+    }
+
+
 def _load_fpm(
     path: Path,
     *,
@@ -461,6 +546,11 @@ def _load_fpm(
         if filter_pathological_context
         else {}
     )
+    if filter_pathological_context and _normalized_workload_segment(workload_segment) is not None:
+        support_rows = _read_fpm_rows(path, workload_segment=None)
+        context_pathology_reasons.update(
+            _context_workload_transition_reasons(rows, support_rows)
+        )
     context_rows = rows
     if rows and str(rows[0].get("phase", "")).lower() == "context":
         context_rows = []
@@ -823,7 +913,13 @@ def _mixed_pathology_reasons(
                     f"mean_kv={mean_decode_kv:.3f}"
                 )
                 continue
-        if ctx_tokens < min_ctx_tokens:
+        below_peer_envelope_floor = ctx_tokens < min_ctx_tokens
+        if below_peer_envelope_floor and not (
+            ctx_tokens > 0
+            and ctx_kv_tokens == 0
+            and ctx_requests == 1
+            and decode_requests > 0
+        ):
             continue
         window = max(float(peer_ctx_min_window), abs(ctx_tokens) * peer_ctx_fraction)
         peers = [
@@ -833,7 +929,7 @@ def _mixed_pathology_reasons(
         ]
         if len(peers) >= min_peer_count:
             peer_median = float(statistics.median(peers))
-            if latency_ms < peer_median * latency_fraction:
+            if not below_peer_envelope_floor and latency_ms < peer_median * latency_fraction:
                 reasons[index] = (
                     "mixed_latency_below_peer_envelope:"
                     f"latency_ms={latency_ms:.3f},peer_median_ms={peer_median:.3f},"
@@ -845,6 +941,59 @@ def _mixed_pathology_reasons(
                     f"latency_ms={latency_ms:.3f},peer_median_ms={peer_median:.3f},"
                     f"ctx_tokens={ctx_tokens:.0f},peer_count={len(peers)}"
                 )
+    return reasons
+
+
+def _decode_spike_adjacent_mixed_reasons(
+    rows: list[dict[str, str]],
+    *,
+    window: int,
+    peer_kv_window: float,
+    peer_batch_window: int,
+    min_peer_count: int,
+    latency_factor: float,
+    min_latency_ms: float,
+) -> dict[str, str]:
+    """Return mixed counter ids adjacent to isolated high-latency decode spikes."""
+
+    if window <= 0:
+        return {}
+    decode_reasons = _decode_pathology_reasons(
+        rows,
+        peer_kv_window=peer_kv_window,
+        peer_batch_window=peer_batch_window,
+        min_peer_count=min_peer_count,
+        latency_factor=latency_factor,
+        min_latency_ms=min_latency_ms,
+    )
+    spike_indices = [
+        index
+        for index, reason in decode_reasons.items()
+        if reason.startswith("decode_latency_above_peer_envelope:")
+    ]
+    if not spike_indices:
+        return {}
+
+    reasons: dict[str, str] = {}
+    for index, row in enumerate(rows):
+        if str(row.get("phase", "")).lower() != "mixed":
+            continue
+        counter_id = str(row.get("counter_id", ""))
+        if not counter_id:
+            continue
+        adjacent_spikes = [
+            spike_index
+            for spike_index in spike_indices
+            if abs(index - spike_index) <= window
+        ]
+        if not adjacent_spikes:
+            continue
+        nearest_spike = min(adjacent_spikes, key=lambda spike_index: abs(index - spike_index))
+        reasons[counter_id] = (
+            "mixed_adjacent_to_decode_latency_spike:"
+            f"mixed_row_index={index},decode_row_index={nearest_spike},"
+            f"distance={abs(index - nearest_spike)},decode_reason={decode_reasons[nearest_spike]}"
+        )
     return reasons
 
 
@@ -860,7 +1009,11 @@ def _nonterminal_mixed_chunk_counter_ids(rows: list[dict[str, str]], *, lookahea
         ctx_kv_tokens = int(float(row.get("ctx_kv_tokens") or 0))
         if ctx_tokens <= 0 or ctx_requests <= 0:
             continue
-        next_prefix = ctx_kv_tokens + ctx_tokens * ctx_requests
+        # FPM reports mixed ctx_tokens/ctx_kv_tokens as aggregate scheduled
+        # tokens across the active partial-prefill requests. Advance by the
+        # aggregate token count; multiplying by request count misses multi-
+        # request chunk chains.
+        next_prefix = ctx_kv_tokens + ctx_tokens
         for next_index in range(index + 1, min(len(rows), index + 1 + max(lookahead, 0))):
             next_row = rows[next_index]
             if str(next_row.get("phase", "")).lower() not in {"context", "mixed"}:
@@ -870,6 +1023,98 @@ def _nonterminal_mixed_chunk_counter_ids(rows: list[dict[str, str]], *, lookahea
                 counter_ids.add(str(row.get("counter_id", "")))
                 break
     return counter_ids
+
+
+def _mixed_chunk_sequences(
+    rows: list[dict[str, str]],
+    *,
+    blocked_counter_ids: set[str] | None = None,
+    lookahead: int = 3,
+) -> list[list[str]]:
+    """Return contiguous mixed prefill chunk chains by counter id.
+
+    Nonterminal mixed prefill chunks are not standalone target shapes. When the
+    continuation is also a mixed row, compare the sum of the scheduler steps
+    instead of comparing only the terminal tail.
+    """
+
+    blocked_counter_ids = blocked_counter_ids or set()
+    counter_to_index = {
+        str(row.get("counter_id", "")): index
+        for index, row in enumerate(rows)
+        if str(row.get("phase", "")).lower() == "mixed" and str(row.get("counter_id", ""))
+    }
+    consumed: set[str] = set()
+    sequences: list[list[str]] = []
+    for index, row in enumerate(rows):
+        if str(row.get("phase", "")).lower() != "mixed":
+            continue
+        counter_id = str(row.get("counter_id", ""))
+        if not counter_id or counter_id in consumed or counter_id in blocked_counter_ids:
+            continue
+        chain = [counter_id]
+        current_index = index
+        current_row = row
+        while True:
+            ctx_tokens = int(float(current_row.get("ctx_tokens") or 0))
+            ctx_requests = int(float(current_row.get("ctx_requests") or 0))
+            ctx_kv_tokens = int(float(current_row.get("ctx_kv_tokens") or 0))
+            if ctx_tokens <= 0 or ctx_requests <= 0:
+                break
+            next_prefix = ctx_kv_tokens + ctx_tokens
+            next_counter_id = ""
+            next_row: dict[str, str] | None = None
+            for next_index in range(current_index + 1, min(len(rows), current_index + 1 + max(lookahead, 0))):
+                candidate = rows[next_index]
+                if str(candidate.get("phase", "")).lower() != "mixed":
+                    continue
+                candidate_counter_id = str(candidate.get("counter_id", ""))
+                candidate_prefix = int(float(candidate.get("ctx_kv_tokens") or 0))
+                if candidate_counter_id and candidate_prefix == next_prefix:
+                    next_counter_id = candidate_counter_id
+                    next_row = candidate
+                    current_index = next_index
+                    break
+            if (
+                not next_counter_id
+                or next_row is None
+                or next_counter_id in blocked_counter_ids
+                or next_counter_id in consumed
+                or next_counter_id not in counter_to_index
+            ):
+                break
+            chain.append(next_counter_id)
+            current_row = next_row
+        if len(chain) > 1:
+            sequences.append(chain)
+            consumed.update(chain)
+    return sequences
+
+
+def _should_aggregate_mixed_chunk_sequence(
+    backend: VLLMBackend,
+    model: common.BaseModel,
+    sequence_rows: list[dict[str, str]],
+) -> bool:
+    """Return whether a mixed chunk chain should be compared as one sequence."""
+
+    if backend._layerwise_has_subquadratic_context_attention(model):
+        return True
+
+    # Dense chunk continuations are not standalone scheduler targets; compare
+    # the complete mixed chain. Non-subquadratic MoE high-decode real-workload
+    # chains can be better represented by individual scheduler envelopes. The
+    # repeated Qwen sweep pathology is the low-decode prefill chain, where
+    # separate chunk rows split one scheduler target into an under-predicted
+    # first chunk and an over-predicted continuation.
+    topk = int(getattr(model, "_topk", 0) or 0)
+    if topk <= 0:
+        return True
+    max_decode_requests = max(
+        int(float(row.get("decode_requests") or 0))
+        for row in sequence_rows
+    )
+    return max_decode_requests <= topk
 
 
 def _queue_adjacent_mixed_chunk_reasons(
@@ -1048,7 +1293,8 @@ class _Config:
         self.pp_size = 1
         self.moe_tp_size = moe_tp_size
         self.moe_ep_size = moe_ep_size
-        self.attention_dp_size = 1
+        moe_width = int(moe_tp_size) * int(moe_ep_size)
+        self.attention_dp_size = max(1, moe_width // int(tp_size)) if moe_width % int(tp_size) == 0 else 1
         self.gemm_quant_mode = gemm_quant_mode
         self.moe_quant_mode = moe_quant_mode
         self.kvcache_quant_mode = kvcache_quant_mode
@@ -1139,33 +1385,54 @@ class _LayerwiseDatabase:
         phase_key = phase.upper()
         model_key = model.lower()
         parallel_requested = moe_tp_size is not None or moe_ep_size is not None
+        parallel_fallback_ep_size: int | None = None
         if parallel_requested:
             query_moe_tp = int(moe_tp_size or 1)
             query_ep = int(moe_ep_size or 1)
+
+            def _select_parallel_family(family: dict | None) -> tuple[dict | None, int | None]:
+                if not family:
+                    return None, None
+                if query_ep in family and family[query_ep]:
+                    return family[query_ep], None
+                candidates = [
+                    (int(candidate_ep), candidate_data)
+                    for candidate_ep, candidate_data in family.items()
+                    if int(candidate_ep) != query_ep and candidate_data
+                ]
+                if not candidates:
+                    return None, None
+                candidates.sort(
+                    key=lambda item: (
+                        abs(math.log2(max(float(item[0]), 1.0) / max(float(query_ep), 1.0))),
+                        item[0],
+                    )
+                )
+                return candidates[0][1], candidates[0][0]
+
             try:
                 if phase_key == "CTX" and max_num_batched_tokens is not None and moe_weight_mode:
                     max_key = int(max_num_batched_tokens)
-                    model_data = self.layerwise[_MAX_NUM_BATCHED_PARALLEL_MODE_INDEX_KEY][model_key][phase_key][
+                    parallel_family = self.layerwise[_MAX_NUM_BATCHED_PARALLEL_MODE_INDEX_KEY][model_key][phase_key][
                         tp_size
-                    ][str(moe_weight_mode)][max_key][query_moe_tp][query_ep]
+                    ][str(moe_weight_mode)][max_key][query_moe_tp]
                 elif phase_key == "CTX" and max_num_batched_tokens is not None:
                     max_key = int(max_num_batched_tokens)
-                    model_data = self.layerwise[_MAX_NUM_BATCHED_PARALLEL_INDEX_KEY][model_key][phase_key][tp_size][
-                        max_key
-                    ][query_moe_tp][query_ep]
+                    parallel_family = self.layerwise[_MAX_NUM_BATCHED_PARALLEL_INDEX_KEY][model_key][phase_key][
+                        tp_size
+                    ][max_key][query_moe_tp]
                 elif moe_weight_mode:
-                    model_data = self.layerwise[_PARALLEL_MODE_INDEX_KEY][model_key][phase_key][tp_size][
+                    parallel_family = self.layerwise[_PARALLEL_MODE_INDEX_KEY][model_key][phase_key][tp_size][
                         str(moe_weight_mode)
-                    ][query_moe_tp][query_ep]
+                    ][query_moe_tp]
                 else:
-                    model_data = self.layerwise[_PARALLEL_INDEX_KEY][model_key][phase_key][tp_size][query_moe_tp][
-                        query_ep
-                    ]
+                    parallel_family = self.layerwise[_PARALLEL_INDEX_KEY][model_key][phase_key][tp_size][query_moe_tp]
+                model_data, parallel_fallback_ep_size = _select_parallel_family(parallel_family)
             except KeyError:
                 model_data = None
         else:
             model_data = None
-        if model_data is not None:
+        if model_data:
             pass
         elif phase_key == "CTX" and max_num_batched_tokens is not None:
             max_key = int(max_num_batched_tokens)
@@ -1190,6 +1457,9 @@ class _LayerwiseDatabase:
                 detail = self._normalize_detail(model_data[seq_len][seq_len_kv_cache])
                 detail["query_seq_len_q"] = float(seq_len)
                 detail["query_seq_len_kv_cache"] = float(seq_len_kv_cache)
+                if parallel_fallback_ep_size is not None:
+                    detail["parallel_fallback_moe_ep_size"] = float(parallel_fallback_ep_size)
+                    detail["requested_moe_ep_size"] = float(moe_ep_size or 1)
                 return detail
             if len(model_data) < 2:
                 raise KeyError((model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache))
@@ -1214,6 +1484,9 @@ class _LayerwiseDatabase:
             detail = self._normalize_detail(detail)
             detail["query_seq_len_q"] = float(seq_len)
             detail["query_seq_len_kv_cache"] = float(seq_len_kv_cache)
+            if parallel_fallback_ep_size is not None:
+                detail["parallel_fallback_moe_ep_size"] = float(parallel_fallback_ep_size)
+                detail["requested_moe_ep_size"] = float(moe_ep_size or 1)
             return detail
         else:
             is_nonzero_prefix_context = False
@@ -1245,6 +1518,9 @@ class _LayerwiseDatabase:
         result["components"] = _representative_components(model_data)
         result["query_seq_len_q"] = float(seq_len)
         result["query_seq_len_kv_cache"] = float(seq_len_kv_cache)
+        if parallel_fallback_ep_size is not None:
+            result["parallel_fallback_moe_ep_size"] = float(parallel_fallback_ep_size)
+            result["requested_moe_ep_size"] = float(moe_ep_size or 1)
         return self._normalize_detail(result)
 
     def _robust_generation_detail(self, model_data: dict, batch_size: int, seq_len: int) -> Any:
@@ -1336,6 +1612,10 @@ class _LayerwiseDatabase:
                 out[metric] = str(result[metric])
         if result.get("moe_weight_mode") not in (None, ""):
             out["moe_weight_mode"] = str(result["moe_weight_mode"])
+        if result.get("parallel_fallback_moe_ep_size") not in (None, ""):
+            out["parallel_fallback_moe_ep_size"] = float(result["parallel_fallback_moe_ep_size"])
+        if result.get("requested_moe_ep_size") not in (None, ""):
+            out["requested_moe_ep_size"] = float(result["requested_moe_ep_size"])
         if isinstance(result.get("components"), list):
             out["components"] = [dict(component) for component in result["components"] if isinstance(component, dict)]
         return out
@@ -1481,6 +1761,7 @@ def compare(
     pathological_mixed_min_peer_count: int,
     pathological_mixed_latency_fraction: float,
     pathological_mixed_high_latency_factor: float,
+    pathological_mixed_decode_spike_window: int,
     include_per_ops: bool = False,
     systems_root: str = "src/aiconfigurator/systems",
     moe_perf_file: Path | None = None,
@@ -1636,6 +1917,19 @@ def compare(
                 support_decode_rows = [fpm_row for fpm_row in support_phase_rows if fpm_row["phase"] == "decode"]
             nonterminal_mixed_counter_ids = _nonterminal_mixed_chunk_counter_ids(phase_rows)
             queue_adjacent_mixed_reasons = _queue_adjacent_mixed_chunk_reasons(phase_rows)
+            decode_spike_adjacent_mixed_reasons = (
+                _decode_spike_adjacent_mixed_reasons(
+                    phase_rows,
+                    window=pathological_mixed_decode_spike_window,
+                    peer_kv_window=pathological_decode_peer_kv_window,
+                    peer_batch_window=pathological_decode_peer_batch_window,
+                    min_peer_count=pathological_decode_min_peer_count,
+                    latency_factor=pathological_decode_latency_factor,
+                    min_latency_ms=pathological_decode_min_latency_ms,
+                )
+                if filter_pathological_mixed
+                else {}
+            )
             pathology_reasons = (
                 _mixed_pathology_reasons(
                     mixed_rows,
@@ -1652,9 +1946,84 @@ def compare(
                 if filter_pathological_mixed
                 else {}
             )
+            mixed_row_by_counter_id = {
+                str(fpm_row.get("counter_id", "")): fpm_row
+                for fpm_row in mixed_rows
+                if str(fpm_row.get("counter_id", ""))
+            }
+            blocked_sequence_counter_ids = set(queue_adjacent_mixed_reasons)
+            blocked_sequence_counter_ids.update(decode_spike_adjacent_mixed_reasons)
+            for row_index in pathology_reasons:
+                blocked_sequence_counter_ids.add(str(mixed_rows[row_index].get("counter_id", "")))
+            sequence_rows_by_first_counter_id: dict[str, list[dict[str, str]]] = {}
+            sequence_counter_ids: set[str] = set()
+            aggregate_mixed_chunk_sequences = filter_nonterminal_mixed_chunks
+            if aggregate_mixed_chunk_sequences:
+                for sequence in _mixed_chunk_sequences(
+                    phase_rows,
+                    blocked_counter_ids=blocked_sequence_counter_ids,
+                ):
+                    sequence_rows = [mixed_row_by_counter_id.get(counter_id) for counter_id in sequence]
+                    if any(sequence_row is None for sequence_row in sequence_rows):
+                        continue
+                    typed_sequence_rows = [
+                        sequence_row for sequence_row in sequence_rows if sequence_row is not None
+                    ]
+                    if not _should_aggregate_mixed_chunk_sequence(backend, model, typed_sequence_rows):
+                        continue
+                    sequence_counter_ids.update(sequence)
+                    sequence_rows_by_first_counter_id[sequence[0]] = typed_sequence_rows
+
+            def _predict_mixed_fpm_row(
+                fpm_row: dict[str, str],
+            ) -> tuple[
+                float,
+                float,
+                int,
+                int,
+                int,
+                int,
+                int,
+                float,
+                dict[str, float],
+                dict[str, str],
+            ]:
+                fpm_ms = float(fpm_row["latency_ms"])
+                ctx_tokens = int(fpm_row["ctx_tokens"])
+                ctx_requests = int(fpm_row["ctx_requests"])
+                ctx_kv_tokens = int(float(fpm_row.get("ctx_kv_tokens") or 0))
+                ctx_prefix_tokens = round(ctx_kv_tokens / max(ctx_requests, 1))
+                gen_tokens = int(fpm_row["decode_requests"])
+                mean_decode_kv = float(fpm_row["mean_decode_kv_tokens"])
+                aic_ms, _, per_ops, per_ops_source = backend._get_mix_step_latency(
+                    model,
+                    database,
+                    runtime_config,
+                    ctx_tokens=ctx_tokens,
+                    gen_tokens=gen_tokens,
+                    isl=round(mean_decode_kv),
+                    osl=1,
+                    prefix=ctx_prefix_tokens,
+                    ctx_requests=ctx_requests,
+                )
+                return (
+                    fpm_ms,
+                    float(aic_ms),
+                    ctx_tokens,
+                    ctx_requests,
+                    ctx_kv_tokens,
+                    ctx_prefix_tokens,
+                    gen_tokens,
+                    mean_decode_kv,
+                    per_ops,
+                    per_ops_source,
+                )
+
             comparable_mixed_rows: list[dict[str, str]] = []
             for row_index, fpm_row in enumerate(mixed_rows):
                 mixed_counter_id = str(fpm_row.get("counter_id", ""))
+                if mixed_counter_id in sequence_counter_ids:
+                    continue
                 is_nonterminal_mixed = mixed_counter_id in nonterminal_mixed_counter_ids
                 if filter_nonterminal_mixed_chunks and is_nonterminal_mixed:
                     filtered_rows.append({
@@ -1685,6 +2054,21 @@ def compare(
                         "mean_decode_kv_tokens": fpm_row.get("mean_decode_kv_tokens", ""),
                     })
                     continue
+                decode_spike_adjacent_reason = decode_spike_adjacent_mixed_reasons.get(mixed_counter_id)
+                if decode_spike_adjacent_reason is not None:
+                    filtered_rows.append({
+                        "row_index": row_index,
+                        "phase": fpm_row.get("phase", ""),
+                        "counter_id": fpm_row.get("counter_id", ""),
+                        "reason": decode_spike_adjacent_reason,
+                        "latency_ms": fpm_row.get("latency_ms", ""),
+                        "ctx_tokens": fpm_row.get("ctx_tokens", ""),
+                        "ctx_requests": fpm_row.get("ctx_requests", ""),
+                        "ctx_kv_tokens": fpm_row.get("ctx_kv_tokens", ""),
+                        "decode_requests": fpm_row.get("decode_requests", ""),
+                        "mean_decode_kv_tokens": fpm_row.get("mean_decode_kv_tokens", ""),
+                    })
+                    continue
                 if row_index in pathology_reasons:
                     filtered_rows.append({
                         "row_index": row_index,
@@ -1701,25 +2085,19 @@ def compare(
                     continue
                 comparable_mixed_rows.append(fpm_row)
             for fpm_row in _aggregate_mixed_rows(comparable_mixed_rows, aggregation=aggregation):
-                fpm_ms = float(fpm_row["latency_ms"])
-                ctx_tokens = int(fpm_row["ctx_tokens"])
-                ctx_requests = int(fpm_row["ctx_requests"])
-                ctx_kv_tokens = int(float(fpm_row.get("ctx_kv_tokens") or 0))
-                ctx_prefix_tokens = round(ctx_kv_tokens / max(ctx_requests, 1))
-                gen_tokens = int(fpm_row["decode_requests"])
-                mean_decode_kv = float(fpm_row["mean_decode_kv_tokens"])
                 try:
-                    aic_ms, _, per_ops, per_ops_source = backend._get_mix_step_latency(
-                        model,
-                        database,
-                        runtime_config,
-                        ctx_tokens=ctx_tokens,
-                        gen_tokens=gen_tokens,
-                        isl=round(mean_decode_kv),
-                        osl=1,
-                        prefix=ctx_prefix_tokens,
-                        ctx_requests=ctx_requests,
-                    )
+                    (
+                        fpm_ms,
+                        aic_ms,
+                        ctx_tokens,
+                        ctx_requests,
+                        ctx_kv_tokens,
+                        ctx_prefix_tokens,
+                        gen_tokens,
+                        mean_decode_kv,
+                        per_ops,
+                        per_ops_source,
+                    ) = _predict_mixed_fpm_row(fpm_row)
                 except (AssertionError, KeyError, PerfDataNotAvailableError, ValueError):
                     continue
                 output_row = {
@@ -1746,6 +2124,81 @@ def compare(
                 }
                 if include_per_ops:
                     _add_mixed_per_op_columns(output_row, per_ops, per_ops_source)
+                rows.append(output_row)
+            for first_counter_id, sequence_rows in sequence_rows_by_first_counter_id.items():
+                fpm_ms = 0.0
+                aic_ms = 0.0
+                total_ctx_tokens = 0
+                max_ctx_requests = 0
+                first_ctx_kv_tokens = 0
+                first_ctx_prefix_tokens = 0
+                last_gen_tokens = 0
+                last_mean_decode_kv = 0.0
+                summed_per_ops: dict[str, float] = defaultdict(float)
+                summed_per_ops_source: dict[str, str] = {}
+                try:
+                    for component_index, fpm_row in enumerate(sequence_rows):
+                        (
+                            component_fpm_ms,
+                            component_aic_ms,
+                            ctx_tokens,
+                            ctx_requests,
+                            ctx_kv_tokens,
+                            ctx_prefix_tokens,
+                            gen_tokens,
+                            mean_decode_kv,
+                            per_ops,
+                            per_ops_source,
+                        ) = _predict_mixed_fpm_row(fpm_row)
+                        fpm_ms += component_fpm_ms
+                        aic_ms += component_aic_ms
+                        total_ctx_tokens += ctx_tokens
+                        max_ctx_requests = max(max_ctx_requests, ctx_requests)
+                        if component_index == 0:
+                            first_ctx_kv_tokens = ctx_kv_tokens
+                            first_ctx_prefix_tokens = ctx_prefix_tokens
+                        last_gen_tokens = gen_tokens
+                        last_mean_decode_kv = mean_decode_kv
+                        for op_name, op_ms in per_ops.items():
+                            summed_per_ops[op_name] += float(op_ms)
+                        for op_name, op_source in per_ops_source.items():
+                            if not op_source:
+                                continue
+                            existing_source = summed_per_ops_source.get(op_name)
+                            if existing_source is None:
+                                summed_per_ops_source[op_name] = op_source
+                            elif existing_source != op_source:
+                                summed_per_ops_source[op_name] = "mixed"
+                except (AssertionError, KeyError, PerfDataNotAvailableError, ValueError):
+                    continue
+                counter_ids = ",".join(str(fpm_row.get("counter_id", "")) for fpm_row in sequence_rows)
+                output_row = {
+                    "model": model_name,
+                    "tp": tp,
+                    "moe_tp": moe_tp,
+                    "ep": ep,
+                    "fpm_workload_segment": _normalized_workload_segment(fpm_workload_segment) or "all",
+                    "phase": "mixed",
+                    "shape": (
+                        f"ctx{total_ctx_tokens}_chunks{len(sequence_rows)}"
+                        f"_gen{last_gen_tokens}_kv{last_mean_decode_kv:.3f}"
+                    ),
+                    "fpm_ms": fpm_ms,
+                    "aic_ms": aic_ms,
+                    "error_pct": ((aic_ms / fpm_ms) - 1.0) * 100.0,
+                    "fpm_samples": sum(int(fpm_row.get("_fpm_samples", 1)) for fpm_row in sequence_rows),
+                    "fpm_match": f"sequence:{len(sequence_rows)}",
+                    "counter_id": counter_ids,
+                    "ctx_tokens": total_ctx_tokens,
+                    "ctx_requests": max_ctx_requests,
+                    "ctx_kv_tokens": first_ctx_kv_tokens,
+                    "ctx_prefix_tokens": first_ctx_prefix_tokens,
+                    "decode_requests": last_gen_tokens,
+                    "mean_decode_kv_tokens": last_mean_decode_kv,
+                    "mixed_nonterminal_chunk": False,
+                }
+                if include_per_ops:
+                    _add_mixed_per_op_columns(output_row, summed_per_ops, summed_per_ops_source)
                 rows.append(output_row)
     finally:
         vllm_backend._USE_LAYERWISE = old_use_layerwise
@@ -1890,13 +2343,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "These rows do not represent complete target iteration shapes."
         ),
     )
-    parser.add_argument("--pathological-mixed-tiny-ctx-tokens", type=int, default=256)
+    parser.add_argument("--pathological-mixed-tiny-ctx-tokens", type=int, default=320)
     parser.add_argument("--pathological-mixed-min-ctx-tokens", type=int, default=128)
     parser.add_argument("--pathological-mixed-peer-ctx-fraction", type=float, default=0.05)
     parser.add_argument("--pathological-mixed-peer-ctx-min-window", type=int, default=512)
     parser.add_argument("--pathological-mixed-min-peer-count", type=int, default=3)
     parser.add_argument("--pathological-mixed-latency-fraction", type=float, default=0.60)
     parser.add_argument("--pathological-mixed-high-latency-factor", type=float, default=1.2)
+    parser.add_argument(
+        "--pathological-mixed-decode-spike-window",
+        type=int,
+        default=5,
+        help="Filter mixed rows within this many FPM rows of an isolated high-latency decode spike.",
+    )
     parser.add_argument(
         "--include-per-ops",
         action="store_true",
@@ -1960,6 +2419,7 @@ def main() -> None:
         pathological_mixed_min_peer_count=args.pathological_mixed_min_peer_count,
         pathological_mixed_latency_fraction=args.pathological_mixed_latency_fraction,
         pathological_mixed_high_latency_factor=args.pathological_mixed_high_latency_factor,
+        pathological_mixed_decode_spike_window=args.pathological_mixed_decode_spike_window,
         include_per_ops=args.include_per_ops,
         systems_root=args.systems_root,
         moe_perf_file=args.moe_perf_file,

@@ -280,6 +280,156 @@ def test_vllm_layerwise_mixed_step_uses_context_prefix(monkeypatch) -> None:
     assert set(sources) == set(per_ops)
 
 
+def test_vllm_layerwise_moe_tp_high_tp_continuation_dampens_decode_tail(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        moe_tp_size = 4
+        moe_ep_size = 1
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 2048
+        _topk = 8
+        _num_experts = 256
+        _moe_inter_size = 512
+        _nextn = 0
+
+    ctx_queries = []
+
+    class _Database:
+        def query_layerwise_detail(
+            self,
+            model,
+            phase,
+            tp_size,
+            batch_size,
+            seq_len,
+            seq_len_kv_cache=0,
+            **kwargs,
+        ):
+            assert model == "Qwen/Qwen3.6-35B-A3B"
+            assert tp_size == 4
+            if phase == "CTX" and batch_size == 1 and seq_len == 431:
+                assert kwargs.get("moe_tp_size") == 4
+                assert kwargs.get("moe_ep_size") == 1
+                return {
+                    "latency": 4.0,
+                    "energy": 0.0,
+                    "rms_latency": 0.0,
+                    "max_num_batched_tokens": 2048,
+                    "includes_moe": False,
+                }
+            if phase == "GEN" and batch_size == 4 and seq_len == 4096:
+                return {"latency": 2.0, "energy": 0.0, "rms_latency": 0.0}
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache, kwargs))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            raise AssertionError("scheduler-like MoE-TP mixed context should cover TP allreduce")
+
+    latency_ms, energy_wms, per_ops, sources = VLLMBackend()._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=400,
+        gen_tokens=31,
+        isl=4096,
+        osl=1,
+        prefix=4096,
+    )
+
+    expected_decode_slices = (1.35 + (400.0 - 280.0) / 220.0) * 0.5
+    assert per_ops == {
+        "mixed_layerwise_context_combined": pytest.approx(16.0),
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": pytest.approx(8.0 * expected_decode_slices),
+    }
+    assert latency_ms == pytest.approx(sum(per_ops.values()))
+    assert energy_wms == 0.0
+    assert set(sources) == set(per_ops)
+
+
+def test_vllm_layerwise_high_ep_multi_request_uses_per_request_context_envelope(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 2048
+        _topk = 8
+        _num_experts = 256
+        _moe_inter_size = 512
+        _nextn = 0
+
+    ctx_queries = []
+
+    class _Database:
+        def query_layerwise_detail(
+            self,
+            model,
+            phase,
+            tp_size,
+            batch_size,
+            seq_len,
+            seq_len_kv_cache=0,
+            **kwargs,
+        ):
+            assert model == "Qwen/Qwen3.6-35B-A3B"
+            assert tp_size == 4
+            assert kwargs.get("max_num_batched_tokens") == 2048
+            if phase == "CTX" and batch_size == 1:
+                ctx_queries.append((seq_len, seq_len_kv_cache))
+                assert kwargs.get("moe_tp_size") == 1
+                assert kwargs.get("moe_ep_size") == 4
+                if (seq_len, seq_len_kv_cache) in {(2048, 0), (1384, 2048)}:
+                    return {
+                        "latency": 5.0,
+                        "energy": 0.0,
+                        "rms_latency": 0.0,
+                        "max_num_batched_tokens": 2048,
+                        "includes_moe": True,
+                        "latency_source": "schedule_to_update",
+                    }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache, kwargs))
+
+    latency_ms, energy_wms, per_ops, sources = VLLMBackend()._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=6864,
+        ctx_requests=2,
+        gen_tokens=30,
+        isl=4096,
+        osl=1,
+        prefix=0,
+    )
+
+    assert per_ops == {
+        "mixed_layerwise_context_combined": pytest.approx(40.0),
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+    }
+    assert latency_ms == pytest.approx(40.0)
+    assert energy_wms == 0.0
+    assert set(sources) == set(per_ops)
+    assert ctx_queries == [(2048, 0), (1384, 2048)]
+
+
 def test_vllm_layerwise_dense_mixed_scheduler_context_covers_small_decode_delta(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 
@@ -335,6 +485,279 @@ def test_vllm_layerwise_dense_mixed_scheduler_context_covers_small_decode_delta(
         "mixed_layerwise_decode_delta": 0.0,
     }
     assert set(sources) == set(per_ops)
+
+
+def test_vllm_layerwise_dense_mixed_tail_scales_high_kv_tp8_context() -> None:
+    tail = VLLMBackend._layerwise_dense_mixed_decode_tail_slices
+
+    assert tail(
+        tp_size=2,
+        ctx_tokens=128,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(0.47)
+    assert tail(
+        tp_size=2,
+        ctx_tokens=256,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(0.315)
+    assert tail(
+        tp_size=2,
+        ctx_tokens=467,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(0.315)
+    assert tail(
+        tp_size=2,
+        ctx_tokens=768,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(0.45)
+    assert tail(
+        tp_size=4,
+        ctx_tokens=1024,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.24)
+    assert tail(
+        tp_size=4,
+        ctx_tokens=3072,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(0.84)
+    assert tail(
+        tp_size=4,
+        ctx_tokens=8192,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.34)
+    assert tail(
+        tp_size=8,
+        ctx_tokens=128,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(0.75)
+    assert tail(
+        tp_size=8,
+        ctx_tokens=256,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.20)
+    assert tail(
+        tp_size=8,
+        ctx_tokens=384,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.08)
+    assert tail(
+        tp_size=8,
+        ctx_tokens=725,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.42)
+    assert tail(
+        tp_size=8,
+        ctx_tokens=1024,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) > 1.9
+    assert tail(
+        tp_size=8,
+        ctx_tokens=3072,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.74)
+    assert tail(
+        tp_size=8,
+        ctx_tokens=4608,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.70)
+    assert tail(
+        tp_size=8,
+        ctx_tokens=8192,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.95)
+    assert tail(
+        tp_size=8,
+        ctx_tokens=1024,
+        gen_tokens=31,
+        avg_decode_kv=2048,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.8)
+
+
+def test_vllm_layerwise_dense_mixed_context_envelope_lifts_tp1_transition_bands() -> None:
+    multiplier = VLLMBackend._layerwise_dense_mixed_context_envelope_multiplier
+
+    assert multiplier(
+        tp_size=1,
+        ctx_tokens=274,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.32)
+    assert multiplier(
+        tp_size=1,
+        ctx_tokens=817,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.10)
+    assert multiplier(
+        tp_size=1,
+        ctx_tokens=725,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.0)
+    assert multiplier(
+        tp_size=1,
+        ctx_tokens=467,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.20)
+    assert multiplier(
+        tp_size=1,
+        ctx_tokens=274,
+        gen_tokens=31,
+        avg_decode_kv=2048,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.0)
+    assert multiplier(
+        tp_size=2,
+        ctx_tokens=274,
+        gen_tokens=31,
+        avg_decode_kv=4096,
+        context_chunk_size=2048,
+    ) == pytest.approx(1.0)
+
+
+def test_vllm_layerwise_dense_mixed_tp1_uses_decode_floor_for_high_kv_tail(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 1
+
+    class _Model:
+        model_path = "Qwen/Qwen3-32B"
+        config = _Config()
+        _num_layers = 1
+        _hidden_size = 5120
+        _nextn = 0
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            del kwargs
+            assert model == "Qwen/Qwen3-32B"
+            assert tp_size == 1
+            if phase == "GEN":
+                assert batch_size == 30
+                assert seq_len == 4096
+                assert seq_len_kv_cache == 0
+                return {"latency": 10.0, "energy": 0.0}
+            assert phase == "CTX"
+            assert batch_size == 1
+            assert seq_len_kv_cache == 0
+            return {
+                "latency": 4.0,
+                "energy": 0.0,
+                "latency_source": "schedule_to_update",
+                "physical_gpus": 1,
+            }
+
+    latency_ms, _energy_wms, per_ops, _sources = VLLMBackend()._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        ctx_tokens=100,
+        gen_tokens=30,
+        isl=4096,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(12.0)
+    assert per_ops["mixed_layerwise_context_combined"] == pytest.approx(4.0)
+    assert per_ops["mixed_layerwise_decode_delta"] == pytest.approx(8.0)
+
+
+def test_vllm_layerwise_dense_mixed_tp1_mid_context_raises_high_kv_envelope(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 1
+
+    class _Model:
+        model_path = "Qwen/Qwen3-32B"
+        config = _Config()
+        _num_layers = 1
+        _hidden_size = 5120
+        _nextn = 0
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            del kwargs
+            assert model == "Qwen/Qwen3-32B"
+            assert tp_size == 1
+            if phase == "GEN":
+                assert batch_size == 31
+                assert seq_len == 4096
+                assert seq_len_kv_cache == 0
+                return {"latency": 18.0, "energy": 0.0}
+            assert phase == "CTX"
+            assert batch_size == 1
+            assert (seq_len, seq_len_kv_cache) == (415, 0)
+            return {
+                "latency": 20.0,
+                "energy": 0.0,
+                "latency_source": "schedule_to_update",
+                "max_num_batched_tokens": 2048,
+                "physical_gpus": 1,
+            }
+
+    latency_ms, _energy_wms, per_ops, _sources = VLLMBackend()._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=384,
+        gen_tokens=31,
+        isl=4096,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(26.4)
+    assert per_ops["mixed_layerwise_context_combined"] == pytest.approx(26.4)
+    assert per_ops["mixed_layerwise_decode_delta"] == 0.0
 
 
 def test_vllm_layerwise_mixed_prefers_scheduler_context_over_prefix_kernel_row(monkeypatch) -> None:
@@ -587,6 +1010,73 @@ def test_vllm_layerwise_mixed_moe_ep_envelope_skips_small_decode_delta(monkeypat
     }
 
 
+def test_vllm_layerwise_mixed_moe_ep_fresh_high_decode_adds_capped_tail(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 2
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 2048
+        _topk = 8
+        _num_experts = 256
+        _moe_inter_size = 512
+        _shared_expert_inter_size = 512
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            del kwargs
+            assert model == "Qwen/Qwen3.6-35B-A3B"
+            assert tp_size == 2
+            if phase == "CTX" and batch_size == 1 and seq_len == 287 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 10.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "max_num_batched_tokens": 2048,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                }
+            if phase == "GEN" and batch_size == 31 and seq_len == 4096:
+                return {
+                    "latency": 1.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            raise AssertionError("EP scheduler envelope already covers TP communication")
+
+    latency_ms, _energy_wms, per_ops, _sources = VLLMBackend()._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=256,
+        gen_tokens=31,
+        isl=4096,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(40.0 + (4.0 * 0.70))
+    assert per_ops == {
+        "mixed_layerwise_context_combined": 40.0,
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": pytest.approx(2.8),
+    }
+
+
 def test_vllm_layerwise_deepseek_no_ep_mixed_uses_context_floor(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 
@@ -630,7 +1120,7 @@ def test_vllm_layerwise_deepseek_no_ep_mixed_uses_context_floor(monkeypatch) -> 
             assert phase == "CTX"
             assert tp_size == 4
             assert batch_size == 1
-            assert seq_len_kv_cache == 0
+            assert seq_len_kv_cache in {0, 2048}
             if seq_len == 4097:
                 return {
                     "latency": 50.0,
@@ -675,6 +1165,90 @@ def test_vllm_layerwise_deepseek_no_ep_mixed_uses_context_floor(monkeypatch) -> 
 
     assert latency_ms == pytest.approx(105.0)
     assert per_ops["mixed_layerwise_context_floor"] == pytest.approx(105.0)
+
+
+def test_vllm_layerwise_deepseek_widened_fresh_ep_scales_moe_addback(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+        attention_dp_size = 4
+        moe_tp_size = 1
+        moe_ep_size = 4
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 4096
+        _topk = 6
+        _num_experts = 256
+        _moe_inter_size = 2048
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(
+            self,
+            model,
+            phase,
+            tp_size,
+            batch_size,
+            seq_len,
+            seq_len_kv_cache=0,
+            **kwargs,
+        ):
+            del kwargs
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert phase == "CTX"
+            assert tp_size == 1
+            assert batch_size == 1
+            assert seq_len in {1024, 1031, 2048, 3072, 3079}
+            assert seq_len_kv_cache in {0, 2048}
+            return {
+                "latency": 100.0,
+                "energy": 0.0,
+                "latency_source": "schedule_to_update",
+                "max_num_batched_tokens": 2048,
+                "includes_moe": False,
+                "moe_weight_mode": "noop",
+                "measured_layer_count": 1,
+                "layer_multiplier": 1,
+            }
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((30.0, 0.0, "mixed"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), True),
+    )
+    monkeypatch.setattr(backend, "_layerwise_moe_ep_alltoall_ms", lambda *args, **kwargs: 10.0)
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=3072,
+        gen_tokens=7,
+        isl=3000,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(212.0)
+    assert per_ops["mixed_layerwise_context_combined"] == pytest.approx(200.0)
+    assert per_ops["mixed_moe"] == pytest.approx(9.0)
+    assert per_ops["mixed_moe_ep_alltoall"] == pytest.approx(3.0)
 
 
 def test_vllm_layerwise_deepseek_compressed_small_continuation_skips_decode_tail(monkeypatch) -> None:
@@ -949,6 +1523,96 @@ def test_vllm_layerwise_deepseek_ep_long_prefix_uses_context_envelope(monkeypatc
     assert latency_ms == pytest.approx(134.0)
     assert per_ops == {
         "mixed_layerwise_context_combined": 134.0,
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+    }
+
+
+def test_vllm_layerwise_deepseek_ep_long_prefix_narrow_attention_dp_overlaps_context(
+    monkeypatch,
+) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        attention_dp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _topk = 8
+        _num_experts = 256
+        _moe_inter_size = 512
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(
+            self,
+            model,
+            phase,
+            tp_size,
+            batch_size,
+            seq_len,
+            seq_len_kv_cache=0,
+            **kwargs,
+        ):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 4
+            if phase == "GEN":
+                raise AssertionError("compressed long-prefix context should cover the decode tail")
+            if (
+                phase == "CTX"
+                and batch_size == 1
+                and (seq_len, seq_len_kv_cache) in {(2048, 8192), (2048, 10240), (818, 12288)}
+            ):
+                return {
+                    "latency": 40.0 if seq_len == 2048 else 20.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), True),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=4906,
+        gen_tokens=8,
+        isl=5977,
+        osl=1,
+        prefix=8192,
+    )
+
+    assert latency_ms == pytest.approx(85.0)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": 85.0,
         "mixed_layerwise_context_tp_allreduce": 0.0,
         "mixed_layerwise_decode_delta": 0.0,
     }
@@ -1714,6 +2378,67 @@ def test_vllm_layerwise_mixed_ep_short_context_high_decode_adds_extra_decode_sli
     }
 
 
+def test_vllm_layerwise_mixed_ep_tiny_noop_moe_raises_high_decode_envelope(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            del kwargs
+            assert model == "Qwen/Qwen3.6-35B-A3B"
+            assert tp_size == 4
+            assert phase == "CTX"
+            assert batch_size == 1
+            assert (seq_len, seq_len_kv_cache) == (131, 0)
+            return {
+                "latency": 3.5,
+                "energy": 0.0,
+                "latency_source": "schedule_to_update",
+                "physical_gpus": 1,
+                "includes_moe": False,
+                "moe_weight_mode": "noop",
+            }
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            raise AssertionError("EP scheduler envelope should hide dense TP allreduce")
+
+        def query_moe(self, **kwargs):
+            raise AssertionError(f"tiny fresh EP mixed context should cover no-op MoE addback: {kwargs}")
+
+    latency_ms, _energy_wms, per_ops, _sources = VLLMBackend()._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        ctx_tokens=100,
+        gen_tokens=31,
+        isl=4096,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(3.5 * 4 * 1.12)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": pytest.approx(3.5 * 4 * 1.12),
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+    }
+
+
 def test_vllm_layerwise_mixed_ep_fresh_full_prefill_high_decode_uses_context_envelope(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 
@@ -1816,11 +2541,88 @@ def test_vllm_layerwise_mixed_ep_tiny_fresh_prefill_hides_decode_tail(monkeypatc
         prefix=0,
     )
 
-    assert latency_ms == pytest.approx(12.0)
+    assert latency_ms == pytest.approx(12.0 * 1.12)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": pytest.approx(12.0 * 1.12),
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+    }
+
+
+def test_vllm_layerwise_mixed_wide_ep_tiny_fresh_prefill_adds_topk_decode_tail(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 8
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 0
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "Qwen/Qwen3.6-35B-A3B"
+            assert tp_size == 2
+            if phase == "CTX" and batch_size == 1 and seq_len == 197 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 12.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 4,
+                    "layer_multiplier": 4,
+                    "physical_gpus": 1,
+                    "max_num_batched_tokens": 2048,
+                    "moe_weight_mode": "noop",
+                    "includes_moe": False,
+                    "parallel_fallback_moe_ep_size": 2,
+                }
+            if phase == "GEN" and batch_size == 1 and seq_len == 4096:
+                return {
+                    "latency": 2.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "physical_gpus": 1,
+                    "max_num_batched_tokens": 2048,
+                    "moe_weight_mode": "noop",
+                    "includes_moe": False,
+                    "parallel_fallback_moe_ep_size": 2,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache, kwargs))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            raise AssertionError("wide-EP scheduler envelope should hide dense TP allreduce")
+
+        def query_moe(self, **kwargs):
+            raise AssertionError(f"tiny fresh wide-EP mixed context should cover no-op MoE addback: {kwargs}")
+
+    latency_ms, _energy_wms, per_ops, _sources = VLLMBackend()._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=197,
+        gen_tokens=8,
+        isl=4096,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(12.0 + 2.0 * 1.55)
     assert per_ops == {
         "mixed_layerwise_context_combined": 12.0,
         "mixed_layerwise_context_tp_allreduce": 0.0,
-        "mixed_layerwise_decode_delta": 0.0,
+        "mixed_layerwise_decode_delta": pytest.approx(2.0 * 1.55),
     }
 
 
@@ -1962,6 +2764,1011 @@ def test_vllm_layerwise_mixed_ep_tiny_fresh_prefill_skips_noop_moe_addback(monke
     }
 
 
+def test_vllm_layerwise_mixed_ep_small_fresh_prefill_skips_noop_moe_addback(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 1
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 4
+            if phase == "CTX" and batch_size == 1 and seq_len == 415 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 29.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("small fresh EP mixed row should use the scheduler envelope")
+        ),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=384,
+        gen_tokens=31,
+        isl=3514,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(29.0 * 1.15)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": pytest.approx(29.0 * 1.15),
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+    }
+
+
+def test_vllm_layerwise_mixed_ep_tiny_fresh_equal_attention_dp_uses_bounded_floor(
+    monkeypatch,
+) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 2
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 2
+            if phase == "CTX" and batch_size == 1 and seq_len == 115 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 28.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            if phase == "CTX" and batch_size == 1 and seq_len == 4096 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 126.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("tiny fresh EP mixed row should use the scheduler envelope")
+        ),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=100,
+        gen_tokens=15,
+        isl=4096,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(126.0 * 0.22)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": pytest.approx(28.0 * 0.75 * 1.03),
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+        "mixed_layerwise_ep_high_decode_floor": pytest.approx(126.0 * 0.22),
+    }
+
+
+def test_vllm_layerwise_mixed_ep_equal_attention_dp_mid_fresh_exposes_tail(
+    monkeypatch,
+) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 2
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 2
+            if phase == "CTX" and batch_size == 1 and seq_len == 715 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 40.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=700,
+        gen_tokens=15,
+        isl=4096,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(40.0 * 1.04)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": pytest.approx(40.0 * 1.04),
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+    }
+
+
+def test_vllm_layerwise_mixed_ep_equal_attention_dp_large_fresh_overlaps_context(
+    monkeypatch,
+) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 2
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 2
+            chunk_latency = {
+                (2048, 0): 80.0,
+                (2048, 2048): 80.0,
+                (919, 4096): 40.0,
+            }.get((seq_len, seq_len_kv_cache))
+            if phase == "CTX" and batch_size == 1 and chunk_latency is not None:
+                return {
+                    "latency": chunk_latency,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("large fresh EP mixed row should use the scheduler envelope")
+        ),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=5000,
+        gen_tokens=15,
+        isl=4096,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(200.0 * 0.90)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": pytest.approx(200.0 * 0.90),
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+    }
+
+
+def test_vllm_layerwise_mixed_ep_narrow_attention_dp_mid_fresh_uses_bounded_floor(
+    monkeypatch,
+) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 1
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 4
+            if phase == "CTX" and batch_size == 1 and seq_len == 948 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 39.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            if phase == "CTX" and batch_size == 1 and seq_len == 4096 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 110.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=917,
+        gen_tokens=31,
+        isl=3969,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(110.0 * 0.50)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": 39.0,
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+        "mixed_layerwise_ep_high_decode_floor": pytest.approx(110.0 * 0.50),
+    }
+
+
+def test_vllm_layerwise_mixed_ep_narrow_attention_dp_small_fresh_lifts_context(
+    monkeypatch,
+) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 1
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 4
+            if phase == "CTX" and batch_size == 1 and seq_len == 399 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 28.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("small fresh EP mixed row should use the scheduler envelope")
+        ),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=368,
+        gen_tokens=31,
+        isl=3554,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(28.0 * 1.15)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": pytest.approx(28.0 * 1.15),
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+    }
+
+
+def test_vllm_layerwise_mixed_ep_narrow_attention_dp_two_request_mid_fresh_uses_bounded_floor(
+    monkeypatch,
+) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 1
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 4
+            if phase == "CTX" and batch_size == 1 and seq_len == 683 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 31.5,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            if phase == "CTX" and batch_size == 1 and seq_len == 4096 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 110.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=989,
+        gen_tokens=30,
+        isl=3239,
+        osl=1,
+        prefix=0,
+        ctx_requests=2,
+    )
+
+    assert latency_ms == pytest.approx(110.0 * 0.50)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": 31.5,
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+        "mixed_layerwise_ep_high_decode_floor": pytest.approx(110.0 * 0.50),
+    }
+
+
+def test_vllm_layerwise_mixed_attention_dp_keeps_saturated_ep_floor(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 4
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 6
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 1
+            assert phase == "CTX"
+            assert batch_size == 1
+            if seq_len == 733 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 40.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            if seq_len == 4096 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 90.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                    "query_seq_len_q": 4096,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=725,
+        gen_tokens=8,
+        isl=3143,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(94.5)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": 40.0,
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+        "mixed_layerwise_ep_high_decode_floor": 94.5,
+    }
+
+
+def test_vllm_layerwise_mixed_attention_dp_multi_request_uses_full_context_chunk(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 4
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 6
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def __init__(self):
+            self.queries = []
+
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 1
+            assert phase == "CTX"
+            assert batch_size == 1
+            self.queries.append((seq_len, seq_len_kv_cache))
+            assert (seq_len, seq_len_kv_cache) == (5124, 0)
+            return {
+                "latency": 118.0,
+                "energy": 0.0,
+                "latency_source": "schedule_to_update",
+                "measured_layer_count": 1,
+                "layer_multiplier": 1,
+                "includes_moe": False,
+                "moe_weight_mode": "noop",
+                "max_num_batched_tokens": 2048,
+            }
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    database = _Database()
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        database,
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=5120,
+        ctx_requests=3,
+        gen_tokens=4,
+        isl=2564,
+        osl=1,
+        prefix=0,
+    )
+
+    assert database.queries == [(5124, 0)]
+    assert (605, 2048) not in database.queries
+    assert latency_ms == pytest.approx(118.0)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": 118.0,
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+    }
+
+
+def test_vllm_layerwise_mixed_attention_dp_two_chunk_boundary_adds_noop_moe(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 4
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 6
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 1
+            assert phase == "CTX"
+            assert batch_size == 1
+            assert (seq_len, seq_len_kv_cache) in {
+                (2048, 0),
+                (2048, 2048),
+                (4, 4096),
+            }
+            return {
+                "latency": 45.0 if seq_len == 2048 else 0.0,
+                "energy": 0.0,
+                "latency_source": "schedule_to_update",
+                "measured_layer_count": 1,
+                "layer_multiplier": 1,
+                "includes_moe": False,
+                "moe_weight_mode": "noop",
+                "max_num_batched_tokens": 2048,
+            }
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((12.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=4096,
+        gen_tokens=4,
+        isl=2322,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(102.0)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": 90.0,
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+        "mixed_moe": 12.0,
+    }
+
+
+def test_vllm_layerwise_mixed_continuation_suppresses_local_ep_floor(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 1
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 6
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 4
+            assert phase == "CTX"
+            assert batch_size == 1
+            if seq_len == 2048 and seq_len_kv_cache == 8161:
+                return {
+                    "latency": 78.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            if seq_len == 100 and seq_len_kv_cache == 10209:
+                return {
+                    "latency": 0.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            if seq_len == 2048 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 78.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            if seq_len == 100 and seq_len_kv_cache == 2048:
+                return {
+                    "latency": 0.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            if seq_len == 4096 and seq_len_kv_cache == 0:
+                return {
+                    "latency": 120.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                    "query_seq_len_q": 4096,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=2117,
+        gen_tokens=31,
+        isl=3847,
+        osl=1,
+        prefix=8161,
+    )
+
+    assert latency_ms == pytest.approx(78.0)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": 78.0,
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+    }
+
+
+def test_vllm_layerwise_mixed_ep_narrow_attention_dp_short_continuation_lifts_context(
+    monkeypatch,
+) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 1
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 4
+            if phase == "CTX" and batch_size == 1 and seq_len == 2030 and seq_len_kv_cache == 1480:
+                return {
+                    "latency": 40.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        ctx_tokens=2000,
+        gen_tokens=30,
+        isl=2394,
+        osl=1,
+        prefix=1480,
+    )
+
+    assert latency_ms == pytest.approx(40.0 * 1.25)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": pytest.approx(40.0 * 1.25),
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+    }
+
+
 def test_vllm_layerwise_qwen_low_tp_small_fresh_moe_mixed_uses_saturated_floor(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 
@@ -2039,6 +3846,73 @@ def test_vllm_layerwise_qwen_low_tp_small_fresh_moe_mixed_uses_saturated_floor(m
         "mixed_layerwise_context_tp_allreduce": 0.0,
         "mixed_layerwise_decode_delta": 0.0,
         "mixed_layerwise_ep_high_decode_floor": 40.0,
+    }
+
+
+def test_vllm_layerwise_qwen_high_tp_moetp_transition_lifts_fresh_context(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        moe_tp_size = 4
+        moe_ep_size = 1
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 0
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "Qwen/Qwen3.6-35B-A3B"
+            assert tp_size == 4
+            assert phase == "CTX"
+            assert batch_size == 1
+            assert (seq_len, seq_len_kv_cache) == (194, 0)
+            return {
+                "latency": 14.7,
+                "energy": 0.0,
+                "latency_source": "schedule_to_update",
+                "measured_layer_count": 1,
+                "layer_multiplier": 1,
+                "includes_moe": False,
+                "moe_weight_mode": "noop",
+                "max_num_batched_tokens": 2048,
+            }
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        ctx_tokens=164,
+        gen_tokens=30,
+        isl=3652,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(14.7 * 1.12)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": pytest.approx(14.7 * 1.12),
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
     }
 
 
@@ -2133,6 +4007,441 @@ def test_vllm_layerwise_qwen_low_tp_fresh_moe_floor_uses_saturated_scheduler_row
     assert per_ops["mixed_layerwise_context_combined"] == pytest.approx(16.0)
     assert per_ops["mixed_layerwise_decode_delta"] == pytest.approx(0.0)
     assert per_ops["mixed_layerwise_ep_high_decode_floor"] == pytest.approx(40.0)
+
+
+def test_vllm_layerwise_qwen_wide_ep_mid_fresh_floor_uses_partial_decode_pressure(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 8
+        attention_dp_size = 4
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 0
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "Qwen/Qwen3.6-35B-A3B"
+            assert tp_size == 2
+            if phase == "CTX" and seq_len_kv_cache == 0:
+                latencies = {
+                    673: 16.0,
+                    1421: 35.0,
+                    4096: 80.0,
+                }
+                if seq_len in latencies:
+                    assert batch_size == 1
+                    return {
+                        "latency": latencies[seq_len],
+                        "energy": 0.0,
+                        "latency_source": "schedule_to_update",
+                        "measured_layer_count": 1,
+                        "layer_multiplier": 1,
+                        "includes_moe": False,
+                        "moe_weight_mode": "noop",
+                        "physical_gpus": 1,
+                        "max_num_batched_tokens": 2048,
+                        "query_seq_len_q": seq_len,
+                    }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache, kwargs))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=642,
+        gen_tokens=31,
+        isl=4096,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(80.0 * 0.98)
+    assert per_ops["mixed_layerwise_ep_high_decode_floor"] == pytest.approx(80.0 * 0.98)
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=1413,
+        gen_tokens=8,
+        isl=4096,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(80.0 * 0.87)
+    assert per_ops["mixed_layerwise_ep_high_decode_floor"] == pytest.approx(80.0 * 0.87)
+
+
+def test_vllm_layerwise_qwen_wide_ep_low_tp_mid_chunk_uses_saturated_floor(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 2
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 0
+
+    def _ctx_detail(latency: float, seq_len: int) -> dict[str, object]:
+        return {
+            "latency": latency,
+            "energy": 0.0,
+            "latency_source": "schedule_to_update",
+            "measured_layer_count": 1,
+            "layer_multiplier": 1,
+            "includes_moe": False,
+            "moe_weight_mode": "noop",
+            "physical_gpus": 1,
+            "max_num_batched_tokens": 2048,
+            "query_seq_len_q": min(seq_len, 2048),
+        }
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_context_detail_for_runtime",
+        lambda _database, _model_name, _tp_size, _batch_size, seq_len, _prefix, *_args, **_kwargs: _ctx_detail(
+            38.0,
+            seq_len,
+        ),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_context_step_detail",
+        lambda _database, _model_name, _tp_size, _batch_size, seq_len, _prefix, **_kwargs: _ctx_detail(
+            62.0,
+            seq_len,
+        )
+        if seq_len == 4096
+        else (_ for _ in ()).throw(AssertionError(seq_len)),
+    )
+    monkeypatch.setattr(backend, "_layerwise_tp_allreduce_ms", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        object(),
+        RuntimeConfig(),
+        ctx_tokens=3168,
+        gen_tokens=1,
+        isl=4096,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(62.0 * 0.98)
+    assert per_ops["mixed_layerwise_context_combined"] == pytest.approx(38.0)
+    assert per_ops["mixed_layerwise_ep_high_decode_floor"] == pytest.approx(62.0 * 0.98)
+
+
+def test_vllm_layerwise_qwen_wide_ep_low_tp_small_fresh_tail_uses_decode_pressure(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 0
+
+    def _ctx_detail(latency: float, seq_len: int) -> dict[str, object]:
+        return {
+            "latency": latency,
+            "energy": 0.0,
+            "latency_source": "schedule_to_update",
+            "measured_layer_count": 1,
+            "layer_multiplier": 1,
+            "includes_moe": False,
+            "moe_weight_mode": "noop",
+            "physical_gpus": 1,
+            "max_num_batched_tokens": 2048,
+            "query_seq_len_q": min(seq_len, 2048),
+        }
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_context_detail_for_runtime",
+        lambda _database, _model_name, _tp_size, _batch_size, seq_len, _prefix, *_args, **_kwargs: _ctx_detail(
+            14.0,
+            seq_len,
+        ),
+    )
+    monkeypatch.setattr(backend, "_layerwise_tp_allreduce_ms", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr(
+        backend,
+        "_query_layerwise_detail",
+        lambda _database, _model_name, phase, _tp_size, batch_size, _seq_len, **_kwargs: {
+            "latency": 8.0,
+            "energy": 0.0,
+            "measured_layer_count": 1,
+            "layer_multiplier": 1,
+            "includes_moe": False,
+        }
+        if phase == "GEN" and batch_size == 15
+        else (_ for _ in ()).throw(AssertionError((phase, batch_size))),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        object(),
+        RuntimeConfig(),
+        ctx_tokens=256,
+        gen_tokens=15,
+        isl=4096,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(14.0 + 8.0 * 0.70)
+    assert per_ops["mixed_layerwise_context_combined"] == pytest.approx(14.0)
+    assert per_ops["mixed_layerwise_decode_delta"] == pytest.approx(8.0 * 0.70)
+
+
+def test_vllm_layerwise_qwen_wide_ep_large_fresh_context_trims_scheduler_envelope(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 8
+        attention_dp_size = 4
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 0
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "Qwen/Qwen3.6-35B-A3B"
+            assert tp_size == 2
+            if phase == "CTX" and seq_len_kv_cache == 0:
+                latencies = {
+                    4096: 80.0,
+                    8200: 100.0,
+                }
+                if seq_len in latencies:
+                    assert batch_size == 1
+                    return {
+                        "latency": latencies[seq_len],
+                        "energy": 0.0,
+                        "latency_source": "schedule_to_update",
+                        "measured_layer_count": 1,
+                        "layer_multiplier": 1,
+                        "includes_moe": False,
+                        "moe_weight_mode": "noop",
+                        "physical_gpus": 1,
+                        "max_num_batched_tokens": 2048,
+                        "query_seq_len_q": seq_len,
+                    }
+            if phase == "CTX" and seq_len in {8, 2048} and seq_len_kv_cache in {0, 2048, 4096, 6144, 8192}:
+                assert batch_size == 1
+                return {
+                    "latency": 0.0975609756097561 if seq_len == 8 else 24.975609756097562,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "physical_gpus": 1,
+                    "max_num_batched_tokens": 2048,
+                    "query_seq_len_q": seq_len,
+                }
+            if phase == "GEN" and batch_size == 8:
+                return {
+                    "latency": 0.0,
+                    "energy": 0.0,
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache, kwargs))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=8192,
+        gen_tokens=8,
+        isl=4096,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(100.0 * 0.80)
+    assert per_ops["mixed_layerwise_context_combined"] == pytest.approx(100.0 * 0.80)
+
+
+def test_vllm_layerwise_qwen_high_tp_wide_ep_continuation_lifts_decode_floor(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 8
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 0
+
+    def _ctx_detail(latency: float, seq_len: int) -> dict[str, object]:
+        return {
+            "latency": latency,
+            "energy": 0.0,
+            "latency_source": "schedule_to_update",
+            "measured_layer_count": 1,
+            "layer_multiplier": 1,
+            "includes_moe": False,
+            "moe_weight_mode": "noop",
+            "physical_gpus": 1,
+            "max_num_batched_tokens": 2048,
+            "query_seq_len_q": seq_len,
+        }
+
+    backend = VLLMBackend()
+
+    def context_for_runtime(_database, _model_name, _tp_size, _batch_size, seq_len, _prefix, *_args, **_kwargs):
+        if seq_len == 4096:
+            return _ctx_detail(38.0, seq_len)
+        return _ctx_detail(16.0, seq_len)
+
+    def context_step_detail(_database, _model_name, _tp_size, _batch_size, seq_len, _prefix, **_kwargs):
+        if seq_len == 4096:
+            return _ctx_detail(60.0, seq_len)
+        if seq_len == 2048:
+            return _ctx_detail(30.0, seq_len)
+        raise AssertionError(seq_len)
+
+    def query_layerwise_detail(_database, _model_name, phase, _tp_size, batch_size, _seq_len, *_args, **_kwargs):
+        if phase == "GEN" and batch_size == 4:
+            return {
+                "latency": 2.0,
+                "energy": 0.0,
+                "measured_layer_count": 1,
+                "layer_multiplier": 1,
+                "includes_moe": False,
+            }
+        raise AssertionError((phase, batch_size))
+
+    monkeypatch.setattr(backend, "_layerwise_context_detail_for_runtime", context_for_runtime)
+    monkeypatch.setattr(backend, "_layerwise_context_step_detail", context_step_detail)
+    monkeypatch.setattr(backend, "_query_layerwise_detail", query_layerwise_detail)
+    monkeypatch.setattr(backend, "_layerwise_tp_allreduce_ms", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        object(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=928,
+        ctx_requests=2,
+        gen_tokens=6,
+        isl=4098,
+        osl=1,
+        prefix=3432,
+    )
+
+    assert latency_ms == pytest.approx(38.0 * 1.38 + 2.0 * 1.25)
+    assert per_ops["mixed_layerwise_ep_high_decode_floor"] == pytest.approx(38.0 * 1.38 + 2.0 * 1.25)
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        object(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=1264,
+        ctx_requests=3,
+        gen_tokens=12,
+        isl=2050,
+        osl=1,
+        prefix=2992,
+    )
+
+    assert latency_ms == pytest.approx(60.0 * 0.95)
+    assert per_ops["mixed_layerwise_ep_high_decode_floor"] == pytest.approx(60.0 * 0.95)
 
 
 def test_vllm_layerwise_qwen_tp1_large_continuation_uses_partial_floor_for_low_kv(monkeypatch) -> None:
@@ -2322,6 +4631,166 @@ def test_vllm_layerwise_qwen_ep4_small_continuation_uses_high_ep_floor(monkeypat
     assert latency_ms == pytest.approx(60.0)
     assert per_ops["mixed_layerwise_context_combined"] == pytest.approx(20.0)
     assert per_ops["mixed_layerwise_ep_high_decode_floor"] == pytest.approx(60.0)
+
+
+def test_vllm_layerwise_qwen_wide_ep_small_prefix_decode_tail_is_bounded(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 0
+
+    def _ctx_detail(latency: float, seq_len: int) -> dict[str, object]:
+        return {
+            "latency": latency,
+            "energy": 0.0,
+            "latency_source": "schedule_to_update",
+            "measured_layer_count": 1,
+            "layer_multiplier": 1,
+            "includes_moe": False,
+            "moe_weight_mode": "noop",
+            "physical_gpus": 1,
+            "max_num_batched_tokens": 2048,
+            "query_seq_len_q": seq_len,
+        }
+
+    backend = VLLMBackend()
+
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_context_detail_for_runtime",
+        lambda _database, _model_name, _tp_size, _batch_size, seq_len, _prefix, *_args, **_kwargs: _ctx_detail(
+            14.0,
+            seq_len,
+        ),
+    )
+    monkeypatch.setattr(backend, "_layerwise_tp_allreduce_ms", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr(
+        backend,
+        "_query_layerwise_detail",
+        lambda _database, _model_name, phase, _tp_size, batch_size, _seq_len, **_kwargs: {
+            "latency": 10.0,
+            "energy": 0.0,
+            "measured_layer_count": 1,
+            "layer_multiplier": 1,
+            "includes_moe": False,
+        }
+        if phase == "GEN" and batch_size == 4
+        else (_ for _ in ()).throw(AssertionError((phase, batch_size))),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        object(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=446,
+        gen_tokens=13,
+        isl=4019,
+        osl=1,
+        prefix=14784,
+    )
+
+    assert latency_ms == pytest.approx(20.0)
+    assert per_ops["mixed_layerwise_context_combined"] == pytest.approx(14.0)
+    assert per_ops["mixed_layerwise_decode_delta"] == pytest.approx(10.0 * 0.60)
+
+
+def test_vllm_layerwise_qwen_wide_ep_low_decode_tiny_prefix_uses_context_envelope(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 8
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 0
+
+    def _ctx_detail(latency: float, seq_len: int) -> dict[str, object]:
+        return {
+            "latency": latency,
+            "energy": 0.0,
+            "latency_source": "schedule_to_update",
+            "measured_layer_count": 1,
+            "layer_multiplier": 1,
+            "includes_moe": False,
+            "moe_weight_mode": "noop",
+            "physical_gpus": 1,
+            "max_num_batched_tokens": 2048,
+            "query_seq_len_q": seq_len,
+        }
+
+    backend = VLLMBackend()
+
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_context_detail_for_runtime",
+        lambda _database, _model_name, _tp_size, _batch_size, seq_len, _prefix, *_args, **_kwargs: _ctx_detail(
+            17.0,
+            seq_len,
+        ),
+    )
+    monkeypatch.setattr(backend, "_layerwise_tp_allreduce_ms", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr(
+        backend,
+        "_query_layerwise_detail",
+        lambda _database, _model_name, phase, _tp_size, batch_size, _seq_len, **_kwargs: {
+            "latency": 10.0,
+            "energy": 0.0,
+            "measured_layer_count": 1,
+            "layer_multiplier": 1,
+            "includes_moe": False,
+        }
+        if phase == "GEN" and batch_size == 4
+        else (_ for _ in ()).throw(AssertionError((phase, batch_size))),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), False),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        object(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=357,
+        gen_tokens=8,
+        isl=7567,
+        osl=1,
+        prefix=1056,
+    )
+
+    assert latency_ms == pytest.approx(17.0)
+    assert per_ops["mixed_layerwise_context_combined"] == pytest.approx(17.0)
+    assert per_ops["mixed_layerwise_decode_delta"] == pytest.approx(0.0)
 
 
 def test_vllm_layerwise_qwen_moetp_small_continuation_uses_decode_pressure_floor(monkeypatch) -> None:
@@ -2595,9 +5064,9 @@ def test_vllm_layerwise_qwen_tp2_tiny_fresh_ep_moe_skips_saturated_floor(monkeyp
         prefix=0,
     )
 
-    assert latency_ms == pytest.approx(16.0)
+    assert latency_ms == pytest.approx(16.0 * 1.12)
     assert per_ops == {
-        "mixed_layerwise_context_combined": 16.0,
+        "mixed_layerwise_context_combined": pytest.approx(16.0 * 1.12),
         "mixed_layerwise_context_tp_allreduce": 0.0,
         "mixed_layerwise_decode_delta": 0.0,
     }
@@ -2760,6 +5229,169 @@ def test_vllm_layerwise_mixed_ep_high_decode_fresh_prefill_skips_noop_moe_addbac
     assert latency_ms == pytest.approx(112.0)
     assert per_ops == {
         "mixed_layerwise_context_combined": 112.0,
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+    }
+
+
+def test_vllm_layerwise_mixed_ep_high_decode_attention_dp_narrower_skips_noop_moe_addback(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 1
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 4
+            if phase == "CTX" and batch_size == 1 and (seq_len, seq_len_kv_cache) in {
+                (2048, 0),
+                (1055, 2048),
+            }:
+                return {
+                    "latency": 56.0 if seq_len == 2048 else 28.0,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("narrow attention-DP fresh EP mixed row should use the scheduler envelope")
+        ),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=3072,
+        gen_tokens=31,
+        isl=3774,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(84.0)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": 84.0,
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+    }
+
+
+def test_vllm_layerwise_mixed_ep_fresh_decode_does_not_open_extra_context_chunk(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+        attention_dp_size = 1
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 8
+        _shared_expert_inter_size = 2048
+
+    queried_context_chunks = []
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert tp_size == 4
+            if phase == "CTX" and batch_size == 1:
+                queried_context_chunks.append((seq_len, seq_len_kv_cache))
+                if (seq_len, seq_len_kv_cache) == (2048, 0):
+                    latency = 42.0
+                elif (seq_len, seq_len_kv_cache) == (2048, 2048):
+                    latency = 48.0
+                elif (seq_len, seq_len_kv_cache) == (2046, 4096):
+                    latency = 46.0
+                else:
+                    raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+                return {
+                    "latency": latency,
+                    "energy": 0.0,
+                    "latency_source": "schedule_to_update",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                    "includes_moe": False,
+                    "moe_weight_mode": "noop",
+                    "max_num_batched_tokens": 2048,
+                }
+            raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("fresh high-decode EP mixed row should use the scheduler envelope")
+        ),
+    )
+
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=6142,
+        gen_tokens=31,
+        isl=4062,
+        osl=1,
+        prefix=0,
+    )
+
+    assert queried_context_chunks == [(2048, 0), (2048, 2048), (2046, 4096)]
+    assert latency_ms == pytest.approx(136.0 * 0.85)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": pytest.approx(136.0 * 0.85),
         "mixed_layerwise_context_tp_allreduce": 0.0,
         "mixed_layerwise_decode_delta": 0.0,
     }
@@ -3584,6 +6216,80 @@ def test_vllm_layerwise_deepseek_scheduler_moe_context_skips_dense_tp_allreduce(
     assert sources["context_moe_ep_alltoall"] == "silicon"
 
 
+def test_vllm_layerwise_deepseek_narrow_attention_dp_small_context_overlaps_tp_allreduce(
+    monkeypatch,
+) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        attention_dp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 4
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 4
+        _hidden_size = 2048
+        _topk = 8
+        _num_experts = 256
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0):
+            assert (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache) == (
+                "deepseek-ai/DeepSeek-V4-Flash",
+                "CTX",
+                4,
+                1,
+                1024,
+                0,
+            )
+            return {
+                "latency": 18.0,
+                "energy": 0.0,
+                "rms_latency": 0.0,
+                "includes_moe": False,
+                "measured_layer_count": 4,
+                "layer_multiplier": 4,
+                "latency_source": "schedule_to_update",
+                "moe_weight_mode": "noop",
+                "max_num_batched_tokens": 2048,
+            }
+
+        def query_custom_allreduce(self, quant_mode, tp_size, size, execution_mode=None):
+            del quant_mode
+            assert tp_size == 4
+            assert size == 1024 * 2048
+            assert execution_mode == "eager"
+            return 0.25
+
+        def query_moe(self, **kwargs):
+            raise AssertionError(f"subquadratic scheduler envelope should cover no-op MoE addback: {kwargs}")
+
+    latency, energy, sources = VLLMBackend()._run_context_phase(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        batch_size=1,
+        isl=1024,
+        prefix=0,
+    )
+
+    assert latency == {"context_layerwise": pytest.approx(18.0), "context_tp_allreduce": 0.0}
+    assert energy == {"context_layerwise": 0.0, "context_tp_allreduce": 0.0}
+    assert sources == {"context_layerwise": "silicon", "context_tp_allreduce": "silicon"}
+
+
 def test_vllm_layerwise_deepseek_high_ep_noop_context_uses_larger_envelope_floor(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 
@@ -3724,6 +6430,443 @@ def test_vllm_layerwise_noop_context_moetp_initial_floor_uses_lower_fraction() -
     )
 
     assert latency == pytest.approx(31.2)
+
+
+def test_vllm_layerwise_noop_context_high_ep_initial_floor_uses_saturated_context() -> None:
+    class _Database:
+        def query_layerwise_detail(
+            self,
+            model,
+            phase,
+            tp_size,
+            batch_size,
+            seq_len,
+            seq_len_kv_cache=0,
+            **kwargs,
+        ):
+            assert (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache) == (
+                "Qwen/Qwen3.6-35B-A3B",
+                "CTX",
+                2,
+                1,
+                4096,
+                0,
+            )
+            assert kwargs["moe_tp_size"] == 1
+            assert kwargs["moe_ep_size"] == 8
+            return {
+                "latency": 60.0,
+                "latency_source": "schedule_to_update",
+                "moe_weight_mode": "noop",
+                "measured_layer_count": 1,
+                "layer_multiplier": 1,
+            }
+
+    current_detail = {
+        "latency_source": "schedule_to_update",
+        "moe_weight_mode": "noop",
+    }
+
+    latency = VLLMBackend()._layerwise_noop_context_continuation_floor_ms(
+        _Database(),
+        "Qwen/Qwen3.6-35B-A3B",
+        2,
+        1,
+        1024,
+        0,
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        current_detail,
+        20.0,
+        1,
+        moe_tp_size=1,
+        moe_ep_size=8,
+    )
+
+    assert latency == pytest.approx(39.0)
+
+
+def test_vllm_layerwise_noop_context_high_ep_small_initial_floor_uses_bounded_saturated_context() -> None:
+    class _Database:
+        def query_layerwise_detail(
+            self,
+            model,
+            phase,
+            tp_size,
+            batch_size,
+            seq_len,
+            seq_len_kv_cache=0,
+            **kwargs,
+        ):
+            assert (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache) == (
+                "Qwen/Qwen3.6-35B-A3B",
+                "CTX",
+                2,
+                1,
+                4096,
+                0,
+            )
+            assert kwargs["moe_tp_size"] == 1
+            assert kwargs["moe_ep_size"] == 8
+            return {
+                "latency": 60.0,
+                "latency_source": "schedule_to_update",
+                "moe_weight_mode": "noop",
+                "measured_layer_count": 1,
+                "layer_multiplier": 1,
+            }
+
+    current_detail = {
+        "latency_source": "schedule_to_update",
+        "moe_weight_mode": "noop",
+    }
+
+    latency = VLLMBackend()._layerwise_noop_context_continuation_floor_ms(
+        _Database(),
+        "Qwen/Qwen3.6-35B-A3B",
+        2,
+        1,
+        128,
+        0,
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        current_detail,
+        14.0,
+        1,
+        moe_tp_size=1,
+        moe_ep_size=8,
+    )
+
+    assert latency == pytest.approx(22.8)
+
+
+def test_vllm_layerwise_noop_context_high_ep_prefix_floor_uses_saturated_context() -> None:
+    class _Database:
+        def query_layerwise_detail(
+            self,
+            model,
+            phase,
+            tp_size,
+            batch_size,
+            seq_len,
+            seq_len_kv_cache=0,
+            **kwargs,
+        ):
+            if (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache) == (
+                "Qwen/Qwen3.6-35B-A3B",
+                "CTX",
+                2,
+                1,
+                4096,
+                0,
+            ):
+                assert kwargs["moe_tp_size"] == 1
+                assert kwargs["moe_ep_size"] == 4
+                return {
+                    "latency": 60.0,
+                    "latency_source": "schedule_to_update",
+                    "moe_weight_mode": "noop",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                }
+            if (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache) == (
+                "Qwen/Qwen3.6-35B-A3B",
+                "CTX",
+                2,
+                1,
+                928,
+                4096,
+            ):
+                return {
+                    "latency": 20.0,
+                    "latency_source": "schedule_to_update",
+                    "moe_weight_mode": "noop",
+                    "measured_layer_count": 1,
+                    "layer_multiplier": 1,
+                }
+            raise AssertionError((model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache, kwargs))
+
+    current_detail = {
+        "latency_source": "schedule_to_update",
+        "moe_weight_mode": "noop",
+    }
+
+    latency = VLLMBackend()._layerwise_noop_context_continuation_floor_ms(
+        _Database(),
+        "Qwen/Qwen3.6-35B-A3B",
+        2,
+        1,
+        928,
+        3168,
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        current_detail,
+        18.0,
+        1,
+        moe_tp_size=1,
+        moe_ep_size=4,
+    )
+
+    assert latency == pytest.approx(36.0)
+
+
+def test_vllm_layerwise_qwen_exact_high_ep_context_keeps_noop_moe_addback(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 4
+        pp_size = 1
+        attention_dp_size = 2
+        moe_tp_size = 1
+        moe_ep_size = 8
+        gemm_quant_mode = common.GEMMQuantMode.bfloat16
+        moe_quant_mode = common.MoEQuantMode.bfloat16
+        workload_distribution = "power_law"
+        moe_backend = None
+        enable_eplb = False
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 2048
+        _topk = 8
+        _num_experts = 256
+        _moe_inter_size = 512
+        _shared_expert_inter_size = 0
+
+    class _Database:
+        def query_layerwise_detail(
+            self,
+            model,
+            phase,
+            tp_size,
+            batch_size,
+            seq_len,
+            seq_len_kv_cache=0,
+            **kwargs,
+        ):
+            assert (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache) == (
+                "Qwen/Qwen3.6-35B-A3B",
+                "CTX",
+                4,
+                1,
+                128,
+                0,
+            )
+            assert kwargs["moe_tp_size"] == 1
+            assert kwargs["moe_ep_size"] == 8
+            return {
+                "latency": 10.0,
+                "energy": 0.0,
+                "latency_source": "schedule_to_update",
+                "moe_weight_mode": "noop",
+                "includes_moe": False,
+                "measured_layer_count": 4,
+                "layer_multiplier": 4,
+                "max_num_batched_tokens": 2048,
+            }
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback_for_context",
+        lambda *args, **kwargs: ((1.0, 0.0, "silicon"), (0.2, 0.0, "silicon"), (0.0, 0.0, "silicon"), True),
+    )
+
+    latency, _energy, _sources = backend._run_context_phase(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        batch_size=1,
+        isl=128,
+        prefix=0,
+    )
+
+    assert latency["context_layerwise"] == pytest.approx(10.0)
+    assert latency["context_moe"] == pytest.approx(1.0)
+    assert latency["context_moe_router"] == pytest.approx(0.2)
+    assert latency["context_moe_scheduler_residual"] == pytest.approx(2.0)
+
+
+def test_vllm_layerwise_deepseek_widened_attention_dp_two_chunk_context_uses_direct_floor(
+    monkeypatch,
+) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+        attention_dp_size = 4
+        moe_tp_size = 1
+        moe_ep_size = 4
+        moe_quant_mode = common.MoEQuantMode.w4a8_mxfp4_mxfp8
+        workload_distribution = "power_law"
+        moe_backend = None
+        enable_eplb = False
+        gemm_quant_mode = common.GEMMQuantMode.bfloat16
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _topk = 8
+        _num_experts = 256
+        _moe_inter_size = 512
+        _shared_expert_inter_size = 2048
+        _nextn = 0
+
+    class _Database:
+        def query_layerwise_detail(
+            self,
+            model,
+            phase,
+            tp_size,
+            batch_size,
+            seq_len,
+            seq_len_kv_cache=0,
+            **kwargs,
+        ):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert phase == "CTX"
+            assert tp_size == 1
+            assert batch_size == 1
+            if (seq_len, seq_len_kv_cache) == (1024, 0):
+                latency = 48.0
+            elif (seq_len, seq_len_kv_cache) == (2048, 0):
+                latency = 48.0
+            elif (seq_len, seq_len_kv_cache) == (2048, 2048):
+                latency = 47.0
+            elif (seq_len, seq_len_kv_cache) == (4096, 0):
+                latency = 122.0
+            else:
+                raise AssertionError((phase, batch_size, seq_len, seq_len_kv_cache))
+            return {
+                "latency": latency,
+                "energy": 0.0,
+                "latency_source": "schedule_to_update",
+                "includes_moe": False,
+                "moe_weight_mode": "noop",
+                "measured_layer_count": 1,
+                "layer_multiplier": 1,
+                "max_num_batched_tokens": 2048,
+            }
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(
+        backend,
+        "_layerwise_noop_moe_addback_for_context",
+        lambda *args, **kwargs: ((0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), (0.0, 0.0, "silicon"), True),
+    )
+
+    latency, _energy, sources = backend._run_context_phase(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        batch_size=1,
+        isl=4096,
+        prefix=0,
+    )
+
+    assert latency["context_layerwise"] == pytest.approx(95.0)
+    assert latency["context_moe_scheduler_residual"] == pytest.approx(27.0)
+    assert sum(latency.values()) == pytest.approx(122.0)
+    assert sources["context_moe_scheduler_residual"] == "silicon"
+
+    latency, _energy, _sources = backend._run_context_phase(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        batch_size=1,
+        isl=1024,
+        prefix=0,
+    )
+
+    assert sum(latency.values()) == pytest.approx((48.0 + 47.0) * 0.75)
+
+
+def test_vllm_layerwise_deepseek_widened_attention_dp_mixed_prefers_physical_context_tp(
+    monkeypatch,
+) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+        attention_dp_size = 4
+        moe_tp_size = 1
+        moe_ep_size = 4
+
+    class _Extra:
+        compress_ratios = (0, 4, 128)
+        sliding_window = 128
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        extra_params = _Extra()
+        _num_layers = 1
+        _hidden_size = 2048
+        _num_experts = 256
+        _topk = 6
+        _shared_expert_inter_size = 2048
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert model == "deepseek-ai/DeepSeek-V4-Flash"
+            assert phase == "CTX"
+            assert tp_size == 4
+            assert batch_size == 1
+            assert (seq_len, seq_len_kv_cache) == (112, 0)
+            assert kwargs["moe_tp_size"] == 1
+            assert kwargs["moe_ep_size"] == 4
+            return {
+                "latency": 30.0,
+                "energy": 0.0,
+                "latency_source": "schedule_to_update",
+                "measured_layer_count": 1,
+                "layer_multiplier": 1,
+                "includes_moe": False,
+                "moe_weight_mode": "noop",
+                "max_num_batched_tokens": 2048,
+            }
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+    backend = VLLMBackend()
+    latency_ms, _energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(vllm_max_num_batched_tokens=2048),
+        ctx_tokens=105,
+        gen_tokens=7,
+        isl=4834,
+        osl=1,
+        prefix=0,
+    )
+
+    assert latency_ms == pytest.approx(30.0 * 0.75)
+    assert per_ops == {
+        "mixed_layerwise_context_combined": pytest.approx(30.0 * 0.75),
+        "mixed_layerwise_context_tp_allreduce": 0.0,
+        "mixed_layerwise_decode_delta": 0.0,
+    }
 
 
 def test_vllm_layerwise_deepseek_ep4_noop_context_uses_large_context_floor(monkeypatch) -> None:
@@ -4054,7 +7197,7 @@ def test_vllm_layerwise_deepseek_decode_ep_moe_overhead_is_scoped() -> None:
     assert backend._layerwise_deepseek_decode_ep_moe_overhead_ms(
         _Model(),
         moe_ms=2.0,
-    ) == pytest.approx(1.0)
+    ) == 0.0
 
     _Config.moe_ep_size = 1
     assert backend._layerwise_deepseek_decode_ep_moe_overhead_ms(
@@ -5441,7 +8584,7 @@ def test_vllm_layerwise_decode_qwen_ep_noop_scheduler_adds_visible_residual(monk
         pp_size = 1
         attention_dp_size = 1
         moe_tp_size = 1
-        moe_ep_size = 4
+        moe_ep_size = 2
         moe_quant_mode = common.MoEQuantMode.bfloat16
         workload_distribution = "balanced"
         moe_backend = None
@@ -5522,16 +8665,107 @@ def test_vllm_layerwise_decode_qwen_ep_noop_scheduler_adds_visible_residual(monk
     )
     assert latency["generation_moe_scheduler_residual"] == pytest.approx(1.9)
 
-    _Config.moe_tp_size = 1
-    _Config.moe_ep_size = 8
-    latency, _energy, _sources = VLLMBackend()._get_decode_step_latency(
+
+def test_vllm_layerwise_decode_qwen_wide_ep_noop_scheduler_adds_moe_back(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+        attention_dp_size = 4
+        moe_tp_size = 1
+        moe_ep_size = 8
+        moe_quant_mode = common.MoEQuantMode.bfloat16
+        workload_distribution = "balanced"
+        moe_backend = None
+        enable_eplb = False
+        gemm_quant_mode = common.GEMMQuantMode.bfloat16
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 2048
+        _topk = 8
+        _num_experts = 256
+        _moe_inter_size = 512
+        _shared_expert_inter_size = 0
+        _nextn = 0
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache) == (
+                "Qwen/Qwen3.6-35B-A3B",
+                "GEN",
+                2,
+                1,
+                4096,
+                0,
+            )
+            return {
+                "latency": 5.0,
+                "energy": 0.0,
+                "rms_latency": 0.0,
+                "latency_source": "schedule_to_update",
+                "measured_layer_count": 4,
+                "layer_multiplier": 4,
+                "physical_gpus": 1,
+                "moe_weight_mode": "noop",
+            }
+
+        def query_custom_allreduce(self, quant_mode, tp_size, size):
+            del quant_mode
+            assert tp_size == 2
+            assert size == 2048
+            return 0.3
+
+        def query_allreduce_rms(self, quant_mode, tp_size, size, hidden_size):
+            del quant_mode
+            assert tp_size == 2
+            assert size == 2048
+            assert hidden_size == 2048
+            return 0.2
+
+        def query_nccl(self, dtype, num_gpus, operation, message_size):
+            assert dtype == common.CommQuantMode.half
+            assert (num_gpus, operation, message_size) == (8, "alltoall", 4 * 2048 * 8 // 8)
+            return 0.1
+
+        def query_moe(self, **kwargs):
+            assert kwargs["num_tokens"] == 4
+            assert kwargs["moe_tp_size"] == 1
+            assert kwargs["moe_ep_size"] == 8
+            assert kwargs["is_context"] is False
+            return PerformanceResult(0.5, energy=2.0, source="empirical")
+
+        def query_gemm(self, m, n, k, quant_mode, database_mode=None):
+            assert (m, n, k, quant_mode, database_mode) == (
+                1,
+                256,
+                2048,
+                common.GEMMQuantMode.bfloat16,
+                common.DatabaseMode.HYBRID,
+            )
+            return PerformanceResult(0.05, energy=0.2, source="empirical")
+
+    latency, energy, sources = VLLMBackend()._get_decode_step_latency(
         _Model(),
         _Database(),
         RuntimeConfig(),
         batch_size=1,
         past_kv=4096,
     )
-    assert latency["generation_moe_scheduler_residual"] == pytest.approx(1.9)
+
+    assert latency["generation_layerwise"] == pytest.approx(5.0)
+    assert latency["generation_tp_allreduce"] == pytest.approx((0.3 + 0.2) * 4)
+    assert latency["generation_moe_ep_alltoall"] == pytest.approx(0.8)
+    assert latency["generation_moe"] == pytest.approx(2.0)
+    assert latency["generation_moe_router"] == pytest.approx(0.2)
+    assert latency["generation_moe_scheduler_residual"] == pytest.approx(4.0)
+    assert energy["generation_moe"] == pytest.approx(8.0)
+    assert sources["generation_moe"] == "empirical"
 
 
 def test_vllm_layerwise_context_qwen_ep_noop_scheduler_adds_visible_residual(monkeypatch) -> None:
@@ -5607,6 +8841,120 @@ def test_vllm_layerwise_context_qwen_ep_noop_scheduler_adds_visible_residual(mon
     assert latency["context_moe_scheduler_residual"] == pytest.approx(1.0)
     assert energy["context_moe_scheduler_residual"] == 0.0
     assert sources["context_moe_scheduler_residual"] == "silicon"
+
+
+def test_vllm_layerwise_context_qwen_wide_ep_fallback_keeps_scheduler_residual(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 2
+        pp_size = 1
+        attention_dp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 8
+        moe_quant_mode = common.MoEQuantMode.bfloat16
+        workload_distribution = "balanced"
+        moe_backend = None
+        enable_eplb = False
+        gemm_quant_mode = common.GEMMQuantMode.bfloat16
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 2048
+        _topk = 8
+        _num_experts = 256
+        _moe_inter_size = 512
+        _shared_expert_inter_size = 0
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache) == (
+                "Qwen/Qwen3.6-35B-A3B",
+                "CTX",
+                2,
+                1,
+                128,
+                0,
+            )
+            return {
+                "latency": 5.0,
+                "energy": 0.0,
+                "rms_latency": 0.0,
+                "latency_source": "schedule_to_update",
+                "measured_layer_count": 4,
+                "layer_multiplier": 4,
+                "physical_gpus": 1,
+                "moe_weight_mode": "noop",
+                "parallel_fallback_moe_ep_size": 8,
+            }
+
+        def query_custom_allreduce(self, *args, **kwargs):
+            return 0.0
+
+        def query_moe(self, **kwargs):
+            raise PerfDataNotAvailableError("no Qwen wide-EP context MoE op row")
+
+        def query_gemm(self, *args, **kwargs):
+            raise PerfDataNotAvailableError("no Qwen wide-EP router op row")
+
+        def query_mem_op(self, *args, **kwargs):
+            raise PerfDataNotAvailableError("no Qwen wide-EP shared op row")
+
+    latency, energy, sources = VLLMBackend()._run_context_phase(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        batch_size=1,
+        isl=128,
+        prefix=0,
+    )
+
+    assert latency["context_layerwise"] == pytest.approx(5.0)
+    assert latency["context_moe_scheduler_residual"] == pytest.approx(3.75)
+    assert energy["context_moe_scheduler_residual"] == 0.0
+    assert sources["context_moe_scheduler_residual"] == "silicon"
+
+
+def test_vllm_layerwise_context_qwen_tp1_wide_ep_fallback_limits_residual_to_tiny_context() -> None:
+    class _Config:
+        tp_size = 1
+        moe_tp_size = 1
+        moe_ep_size = 8
+
+    class _Model:
+        model_path = "Qwen/Qwen3.6-35B-A3B"
+        config = _Config()
+        _topk = 8
+        _shared_expert_inter_size = 0
+
+    detail = {
+        "latency_source": "schedule_to_update",
+        "measured_layer_count": 4,
+        "layer_multiplier": 4,
+        "moe_weight_mode": "noop",
+        "includes_moe": False,
+        "parallel_fallback_moe_ep_size": 8,
+    }
+
+    backend = VLLMBackend()
+    assert backend._layerwise_qwen_noop_scheduler_residual_ms(
+        _Model(),
+        detail,
+        token_count=128,
+        layer_ms=5.0,
+        is_context=True,
+    ) == pytest.approx(1.0)
+    assert backend._layerwise_qwen_noop_scheduler_residual_ms(
+        _Model(),
+        detail,
+        token_count=1024,
+        layer_ms=5.0,
+        is_context=True,
+    ) == 0.0
 
 
 def test_vllm_layerwise_decode_deepseek_noop_scheduler_adds_moe_back(monkeypatch) -> None:
@@ -5687,6 +9035,89 @@ def test_vllm_layerwise_decode_deepseek_noop_scheduler_adds_moe_back(monkeypatch
     assert latency["generation_moe"] == pytest.approx(1.2)
     assert "generation_moe_router" not in latency
     assert "generation_moe_shared_expert" not in latency
+    assert energy["generation_moe"] == pytest.approx(2.4)
+    assert sources["generation_moe"] == "mixed"
+
+
+def test_vllm_layerwise_decode_deepseek_ep_overlay_replaces_attention_dp_overhead(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+
+    class _Config:
+        tp_size = 1
+        pp_size = 1
+        attention_dp_size = 4
+        moe_tp_size = 1
+        moe_ep_size = 4
+        gemm_quant_mode = common.GEMMQuantMode.bfloat16
+        moe_quant_mode = common.MoEQuantMode.w4a8_mxfp4_mxfp8
+        workload_distribution = "power_law"
+        moe_backend = None
+        enable_eplb = False
+
+    class _Model:
+        model_path = "deepseek-ai/DeepSeek-V4-Flash"
+        config = _Config()
+        _num_layers = 4
+        _hidden_size = 4096
+        _topk = 6
+        _num_experts = 256
+        _moe_inter_size = 2048
+        _shared_expert_inter_size = 2048
+        _power_law_alpha = 1.2
+        _nextn = 0
+
+    class _Database:
+        def query_layerwise_detail(self, model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache=0, **kwargs):
+            assert (model, phase, tp_size, batch_size, seq_len, seq_len_kv_cache) == (
+                "deepseek-ai/DeepSeek-V4-Flash",
+                "GEN",
+                1,
+                1,
+                4096,
+                0,
+            )
+            assert kwargs == {
+                "moe_weight_mode": None,
+                "max_num_batched_tokens": None,
+                "moe_tp_size": 1,
+                "moe_ep_size": 4,
+            }
+            return {
+                "latency": 5.0,
+                "energy": 0.0,
+                "latency_source": "schedule_to_update",
+                "measured_layer_count": 4,
+                "layer_multiplier": 4,
+                "physical_gpus": 1,
+                "moe_weight_mode": "noop",
+            }
+
+        def query_moe(self, **kwargs):
+            assert kwargs["num_tokens"] == 4
+            assert kwargs["moe_ep_size"] == 4
+            assert kwargs["workload_distribution"] == "power_law_1.2"
+            return PerformanceResult(0.25, energy=0.5, source="moe")
+
+        def query_gemm(self, *args, **kwargs):
+            return PerformanceResult(0.05, energy=0.1, source="gemm")
+
+        def query_mem_op(self, *args, **kwargs):
+            return PerformanceResult(0.0, energy=0.0, source="mem")
+
+    latency, energy, sources = VLLMBackend()._get_decode_step_latency(
+        _Model(),
+        _Database(),
+        RuntimeConfig(),
+        batch_size=1,
+        past_kv=4096,
+    )
+
+    assert latency["generation_layerwise"] == pytest.approx(5.0)
+    assert latency["generation_moe"] == pytest.approx(1.2)
+    assert "generation_moe_scheduler_overhead" not in latency
+    assert "generation_moe_ep_alltoall" not in latency
     assert energy["generation_moe"] == pytest.approx(2.4)
     assert sources["generation_moe"] == "mixed"
 

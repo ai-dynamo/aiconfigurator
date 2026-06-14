@@ -403,6 +403,8 @@ def _run_marked_step(
         progress_extra["trigger"] = control.get("trigger")
     if control.get("live_step_driver"):
         progress_extra["live_step_driver"] = True
+    if control.get("sync_execute_model_wall_time"):
+        progress_extra["sync_execute_model_wall_time"] = True
     if forced_run is not None:
         progress_extra["run"] = int(forced_run)
     label_step = step if forced_step is None else int(forced_step)
@@ -423,7 +425,7 @@ def _run_marked_step(
     try:
         execute_start = time.perf_counter()
         ret = orig(runner, scheduler_output, intermediate_tensors)
-        if control.get("sync_execute_model_wall_time") or control.get("live_step_driver"):
+        if control.get("sync_execute_model_wall_time"):
             torch.cuda.synchronize()
         execute_model_wall_time_ms = (time.perf_counter() - execute_start) * 1000.0
         _write_progress(

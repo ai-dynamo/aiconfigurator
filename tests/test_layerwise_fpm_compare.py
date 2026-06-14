@@ -13,18 +13,22 @@ from compare_aic_layerwise_fpm import (
     _add_mixed_per_op_columns,
     _aggregate_mixed_rows,
     _context_pathology_reasons,
+    _context_workload_transition_reasons,
     _decode_pathology_reasons,
+    _decode_spike_adjacent_mixed_reasons,
     _effective_moe_parallelism,
     _infer_observed_fpm_context_budget,
     _LayerwiseDatabase,
     _load_fpm,
     _load_fpm_max_num_batched_tokens,
     _match_decode,
+    _mixed_chunk_sequences,
     _mixed_pathology_reasons,
     _model_defaults,
     _nearest_available_generation_kv,
     _nonterminal_mixed_chunk_counter_ids,
     _prepare_moe_overlay_systems_root,
+    _should_aggregate_mixed_chunk_sequence,
 )
 from compare_layerwise_fpm import compare_layerwise_to_fpm
 from summarize_layerwise_fpm_comparisons import summarize_manifest
@@ -147,10 +151,10 @@ def test_summarize_layerwise_fpm_comparisons_manifest(tmp_path) -> None:
     comparison = tmp_path / "compare.csv"
     _write(
         comparison,
-        """phase,shape,error_pct
-mixed,ctx128_gen1,10.0
-mixed,ctx256_gen1,-5.0
-gen,bs1_past4096,2.0
+        """phase,shape,fpm_ms,aic_ms,error_pct
+mixed,ctx128_gen1,100.0,110.0,10.0
+mixed,ctx256_gen1,200.0,190.0,-5.0
+gen,bs1_past4096,50.0,51.0,2.0
 """,
     )
     manifest = tmp_path / "manifest.csv"
@@ -172,12 +176,59 @@ Qwen/Test,TP8,1,8,mixed_broader,mixed,{comparison.name}
             "phase": "mixed_broader",
             "rows": 2,
             "mape_pct": pytest.approx(7.5),
+            "median_abs_error_pct": pytest.approx(7.5),
+            "p90_abs_error_pct": pytest.approx(9.5),
+            "p95_abs_error_pct": pytest.approx(9.75),
             "max_abs_error_pct": pytest.approx(10.0),
+            "within_5": "1/2",
+            "within_10": "2/2",
+            "wmape_pct": pytest.approx(20.0 / 300.0 * 100.0),
+            "weighted_bias_pct": pytest.approx(0.0),
             "worst_shape": "ctx128_gen1",
             "worst_error_pct": pytest.approx(10.0),
             "comparison_csv": comparison.name,
         }
     ]
+
+
+def test_summarize_layerwise_fpm_comparisons_can_append_overall_row(tmp_path) -> None:
+    comparison_a = tmp_path / "compare_a.csv"
+    comparison_b = tmp_path / "compare_b.csv"
+    _write(
+        comparison_a,
+        """phase,shape,fpm_ms,aic_ms,error_pct
+mixed,ctx128_gen1,100.0,110.0,10.0
+mixed,ctx256_gen1,200.0,190.0,-5.0
+""",
+    )
+    _write(
+        comparison_b,
+        """phase,shape,fpm_ms,aic_ms,error_pct
+gen,bs1_past4096,50.0,55.0,10.0
+""",
+    )
+    manifest = tmp_path / "manifest.csv"
+    _write(
+        manifest,
+        f"""model,tp,moe_tp,ep,phase,source_phase,comparison_csv
+Qwen/Test,TP8,1,8,mixed,mixed,{comparison_a.name}
+DeepSeek/Test,TP2,1,4,gen,gen,{comparison_b.name}
+""",
+    )
+
+    rows = summarize_manifest(manifest, include_overall=True)
+
+    assert len(rows) == 3
+    overall = rows[-1]
+    assert overall["model"] == "ALL"
+    assert overall["tp"] == "all"
+    assert overall["phase"] == "all"
+    assert overall["rows"] == 3
+    assert overall["mape_pct"] == pytest.approx(25.0 / 3.0)
+    assert overall["within_5"] == "1/3"
+    assert overall["within_10"] == "3/3"
+    assert overall["wmape_pct"] == pytest.approx(25.0 / 350.0 * 100.0)
+    assert overall["weighted_bias_pct"] == pytest.approx(5.0 / 350.0 * 100.0)
 
 
 def test_mixed_pathology_filter_flags_low_latency_large_context_row() -> None:
@@ -284,6 +335,54 @@ def test_mixed_pathology_filter_flags_high_latency_large_context_row() -> None:
 
     assert set(reasons) == {5}
     assert reasons[5].startswith("mixed_latency_above_peer_envelope:")
+
+
+def test_mixed_pathology_filter_flags_tiny_fresh_latency_spike() -> None:
+    rows = [
+        {"phase": "mixed", "ctx_tokens": "100", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "30", "latency_ms": "30.4"},
+        {"phase": "mixed", "ctx_tokens": "101", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "31", "latency_ms": "20.8"},
+        {"phase": "mixed", "ctx_tokens": "103", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "31", "latency_ms": "22.1"},
+        {"phase": "mixed", "ctx_tokens": "112", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "31", "latency_ms": "23.2"},
+        {"phase": "mixed", "ctx_tokens": "123", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "31", "latency_ms": "20.3"},
+        {"phase": "mixed", "ctx_tokens": "140", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "30", "latency_ms": "25.0"},
+        {"phase": "mixed", "ctx_tokens": "147", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "31", "latency_ms": "22.0"},
+    ]
+
+    reasons = _mixed_pathology_reasons(
+        rows,
+        tiny_ctx_tokens=320,
+        min_ctx_tokens=128,
+        peer_ctx_fraction=0.05,
+        peer_ctx_min_window=512,
+        min_peer_count=3,
+        latency_fraction=0.60,
+        high_latency_factor=1.2,
+    )
+
+    assert set(reasons) == {0}
+    assert reasons[0].startswith("mixed_latency_above_peer_envelope:")
+
+
+def test_mixed_pathology_filter_keeps_tiny_fresh_low_latency_row() -> None:
+    rows = [
+        {"phase": "mixed", "ctx_tokens": "105", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "8", "latency_ms": "19.3"},
+        {"phase": "mixed", "ctx_tokens": "185", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "8", "latency_ms": "69.6"},
+        {"phase": "mixed", "ctx_tokens": "256", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "8", "latency_ms": "69.8"},
+        {"phase": "mixed", "ctx_tokens": "313", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "7", "latency_ms": "80.9"},
+    ]
+
+    reasons = _mixed_pathology_reasons(
+        rows,
+        tiny_ctx_tokens=320,
+        min_ctx_tokens=128,
+        peer_ctx_fraction=0.05,
+        peer_ctx_min_window=512,
+        min_peer_count=3,
+        latency_fraction=0.60,
+        high_latency_factor=1.2,
+    )
+
+    assert reasons == {}
 
 
 def test_mixed_pathology_filter_flags_duplicate_shape_spike() -> None:
@@ -421,6 +520,39 @@ def test_mixed_pathology_filter_flags_tiny_continuation_tail() -> None:
     assert reasons[0].startswith("mixed_tiny_continuation_tail:")
 
 
+def test_mixed_pathology_filter_flags_sub320_continuation_tail() -> None:
+    rows = [
+        {
+            "phase": "mixed",
+            "ctx_tokens": "286",
+            "ctx_kv_tokens": "1056",
+            "decode_requests": "31",
+            "latency_ms": "16.8",
+        },
+        {
+            "phase": "mixed",
+            "ctx_tokens": "4096",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "1",
+            "latency_ms": "208.0",
+        },
+    ]
+
+    reasons = _mixed_pathology_reasons(
+        rows,
+        tiny_ctx_tokens=320,
+        min_ctx_tokens=1024,
+        peer_ctx_fraction=0.05,
+        peer_ctx_min_window=128,
+        min_peer_count=5,
+        latency_fraction=0.25,
+        high_latency_factor=1.75,
+    )
+
+    assert set(reasons) == {0}
+    assert reasons[0].startswith("mixed_tiny_continuation_tail:")
+
+
 def test_nonterminal_mixed_chunk_counter_ids_flags_following_prefix() -> None:
     rows = [
         {
@@ -447,6 +579,135 @@ def test_nonterminal_mixed_chunk_counter_ids_flags_following_prefix() -> None:
     ]
 
     assert _nonterminal_mixed_chunk_counter_ids(rows) == {"10"}
+
+
+def test_nonterminal_mixed_chunk_counter_ids_uses_aggregate_tokens_for_multi_request_rows() -> None:
+    rows = [
+        {
+            "phase": "mixed",
+            "counter_id": "10",
+            "ctx_tokens": "7392",
+            "ctx_requests": "3",
+            "ctx_kv_tokens": "0",
+        },
+        {
+            "phase": "mixed",
+            "counter_id": "11",
+            "ctx_tokens": "3968",
+            "ctx_requests": "3",
+            "ctx_kv_tokens": "7392",
+        },
+    ]
+
+    assert _nonterminal_mixed_chunk_counter_ids(rows) == {"10"}
+
+
+def test_mixed_chunk_sequences_groups_contiguous_mixed_prefill_chunks() -> None:
+    rows = [
+        {
+            "phase": "mixed",
+            "counter_id": "10",
+            "ctx_tokens": "4096",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+        },
+        {
+            "phase": "decode",
+            "counter_id": "11",
+            "ctx_tokens": "0",
+            "ctx_requests": "0",
+            "ctx_kv_tokens": "0",
+        },
+        {
+            "phase": "mixed",
+            "counter_id": "12",
+            "ctx_tokens": "2048",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "4096",
+        },
+        {
+            "phase": "mixed",
+            "counter_id": "13",
+            "ctx_tokens": "128",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "6144",
+        },
+    ]
+
+    assert _mixed_chunk_sequences(rows) == [["10", "12", "13"]]
+
+
+def test_mixed_chunk_sequences_uses_aggregate_tokens_for_multi_request_rows() -> None:
+    rows = [
+        {
+            "phase": "mixed",
+            "counter_id": "10",
+            "ctx_tokens": "7392",
+            "ctx_requests": "3",
+            "ctx_kv_tokens": "0",
+        },
+        {
+            "phase": "mixed",
+            "counter_id": "11",
+            "ctx_tokens": "3968",
+            "ctx_requests": "3",
+            "ctx_kv_tokens": "7392",
+        },
+        {
+            "phase": "mixed",
+            "counter_id": "12",
+            "ctx_tokens": "928",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "3168",
+        },
+    ]
+
+    assert _mixed_chunk_sequences(rows) == [["10", "11"]]
+
+
+def test_should_aggregate_mixed_chunk_sequence_limits_non_subquadratic_high_decode() -> None:
+    class Backend:
+        def __init__(self, subquadratic: bool) -> None:
+            self.subquadratic = subquadratic
+
+        def _layerwise_has_subquadratic_context_attention(self, model) -> bool:
+            return self.subquadratic
+
+    class Model:
+        _topk = 8
+
+    low_decode_rows = [{"decode_requests": "1"}, {"decode_requests": "1"}]
+    high_decode_rows = [{"decode_requests": "31"}, {"decode_requests": "31"}]
+
+    assert _should_aggregate_mixed_chunk_sequence(Backend(False), Model(), low_decode_rows)
+    assert not _should_aggregate_mixed_chunk_sequence(Backend(False), Model(), high_decode_rows)
+    assert _should_aggregate_mixed_chunk_sequence(Backend(True), Model(), high_decode_rows)
+
+    class DenseModel:
+        _topk = 0
+
+    assert _should_aggregate_mixed_chunk_sequence(Backend(False), DenseModel(), high_decode_rows)
+
+
+def test_mixed_chunk_sequences_skips_blocked_components() -> None:
+    rows = [
+        {
+            "phase": "mixed",
+            "counter_id": "10",
+            "ctx_tokens": "4096",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+        },
+        {
+            "phase": "mixed",
+            "counter_id": "11",
+            "ctx_tokens": "2048",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "4096",
+        },
+    ]
+
+    assert _mixed_chunk_sequences(rows, blocked_counter_ids={"11"}) == []
 
 
 def test_aggregate_mixed_rows_groups_repeated_scheduler_shapes() -> None:
@@ -628,6 +889,82 @@ def test_context_pathology_filter_flags_nonterminal_prefill_chunk() -> None:
     assert reasons[1].startswith("context_continuation_below_latency_floor:")
 
 
+def test_context_pathology_filter_flags_nonzero_prefix_nonterminal_prefill_chunk() -> None:
+    rows = [
+        {
+            "phase": "context",
+            "ctx_tokens": "7392",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "latency_ms": "115.7",
+        },
+        {
+            "phase": "context",
+            "ctx_tokens": "3168",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "7392",
+            "latency_ms": "21.1",
+        },
+        {
+            "phase": "context",
+            "ctx_tokens": "303",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "10560",
+            "latency_ms": "2.0",
+        },
+    ]
+
+    reasons = _context_pathology_reasons(
+        rows,
+        min_continuation_ctx_tokens=128,
+        continuation_min_latency_ms=5.0,
+    )
+
+    assert set(reasons) == {0, 1, 2}
+    assert reasons[0].startswith("context_nonterminal_prefill_chunk:")
+    assert reasons[1].startswith("context_nonterminal_prefill_chunk:")
+    assert reasons[2].startswith("context_continuation_below_latency_floor:")
+
+
+def test_context_pathology_filter_flags_segment_start_spike() -> None:
+    rows = [
+        {
+            "phase": "context",
+            "ctx_tokens": "1486",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "latency_ms": "1638.8",
+        },
+        {
+            "phase": "decode",
+            "ctx_tokens": "0",
+            "ctx_requests": "0",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "1",
+            "mean_decode_kv_tokens": "1486",
+            "latency_ms": "9.0",
+        },
+        {
+            "phase": "mixed",
+            "ctx_tokens": "8191",
+            "ctx_requests": "2",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "1",
+            "mean_decode_kv_tokens": "1487",
+            "latency_ms": "169.1",
+        },
+    ]
+
+    reasons = _context_pathology_reasons(
+        rows,
+        min_continuation_ctx_tokens=128,
+        continuation_min_latency_ms=5.0,
+    )
+
+    assert set(reasons) == {0}
+    assert reasons[0].startswith("context_segment_start_above_following_envelope:")
+
+
 def test_fpm_context_budget_uses_observed_scheduler_rows(tmp_path: Path) -> None:
     phase_csv = tmp_path / "fpm_metrics_phase.csv"
     _write(
@@ -802,6 +1139,35 @@ vLLM,0.20.1,test,Test/Model,1,1,1,,bf16,bf16,bf16,bf16,ctx,1,1024,0,dense,0,1,1,
     assert detail["max_num_batched_tokens"] == pytest.approx(2048.0)
 
 
+def test_diagnostic_layerwise_database_falls_back_from_empty_parallel_index(tmp_path: Path) -> None:
+    layerwise = tmp_path / "layerwise.csv"
+    _write(
+        layerwise,
+        """
+framework,framework_version,system,model,attn_tp,moe_tp,ep,num_slots,gemm_quant,moe_quant,attn_quant,kv_quant,phase,batch_size,new_tokens,past_kv,layer_type,layer_index,measured_layer_count,layer_multiplier,latency_ms,rms_latency_ms,rms_kernel_count,includes_moe,moe_weight_mode,latency_source,physical_gpus,max_num_batched_tokens,vllm_config_hash
+vLLM,0.20.1,test,Test/MoE,1,1,1,,bf16,bf16,bf16,bf16,ctx,1,128,0,moe,0,1,1,12.8,0,0,false,noop,schedule_to_update,1,2048,abc
+vLLM,0.20.1,test,Test/MoE,1,1,1,,bf16,bf16,bf16,bf16,ctx,1,256,0,moe,0,1,1,25.6,0,0,false,noop,schedule_to_update,1,2048,abc
+""",
+    )
+    database = _LayerwiseDatabase(layerwise, real_database=object())
+
+    detail = database.query_layerwise_detail(
+        "Test/MoE",
+        "CTX",
+        1,
+        1,
+        128,
+        0,
+        moe_weight_mode="noop",
+        max_num_batched_tokens=2048,
+        moe_tp_size=1,
+        moe_ep_size=4,
+    )
+
+    assert detail["latency"] == pytest.approx(12.8)
+    assert detail["max_num_batched_tokens"] == pytest.approx(2048.0)
+
+
 def test_diagnostic_layerwise_database_smooths_isolated_gen_scheduler_outlier(tmp_path: Path) -> None:
     layerwise = tmp_path / "layerwise.csv"
     _write(
@@ -964,6 +1330,63 @@ def test_decode_pathology_filter_flags_decode_tail_after_prefill() -> None:
     assert reasons[1].startswith("decode_segment_after_prefill:")
 
 
+def test_decode_spike_adjacent_mixed_filter_uses_only_latency_spikes() -> None:
+    rows = [
+        {
+            "phase": "decode",
+            "decode_requests": "4",
+            "mean_decode_kv_tokens": "4096.000",
+            "latency_ms": "10.0",
+        },
+        {
+            "phase": "mixed",
+            "counter_id": "near_before",
+            "ctx_tokens": "1024",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "4",
+            "mean_decode_kv_tokens": "4097.000",
+            "latency_ms": "45.0",
+        },
+        {
+            "phase": "decode",
+            "decode_requests": "4",
+            "mean_decode_kv_tokens": "4097.000",
+            "latency_ms": "90.0",
+        },
+        {
+            "phase": "mixed",
+            "counter_id": "near_after",
+            "ctx_tokens": "2048",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "4",
+            "mean_decode_kv_tokens": "4098.000",
+            "latency_ms": "90.0",
+        },
+        {
+            "phase": "decode",
+            "decode_requests": "4",
+            "mean_decode_kv_tokens": "4098.000",
+            "latency_ms": "11.0",
+        },
+    ]
+
+    reasons = _decode_spike_adjacent_mixed_reasons(
+        rows,
+        window=1,
+        peer_kv_window=8.0,
+        peer_batch_window=2,
+        min_peer_count=1,
+        latency_factor=5.0,
+        min_latency_ms=20.0,
+    )
+
+    assert set(reasons) == {"near_before", "near_after"}
+    assert reasons["near_before"].startswith("mixed_adjacent_to_decode_latency_spike:")
+    assert "decode_latency_above_peer_envelope" in reasons["near_after"]
+
+
 def test_load_fpm_returns_filtered_row_audit(tmp_path) -> None:
     fpm = tmp_path / "fpm.csv"
     _write(
@@ -1008,6 +1431,71 @@ decode,real,4,w,0,0,0,0,1,1,4096,4096.000,0,0,0,0,40.0
     assert all_context[(1, 128, 0)] == [17.0]
     assert all_context[(1, 4096, 0)] == [900.0]
     assert all_decode[(1, 4096.0)] == [4.0, 40.0]
+
+
+def test_load_fpm_filters_slow_singleton_real_context_with_support_peer(tmp_path) -> None:
+    fpm = tmp_path / "fpm.csv"
+    _write(
+        fpm,
+        """
+phase,workload_segment,counter_id,worker_id,dp_rank,ctx_tokens,ctx_requests,ctx_kv_tokens,decode_tokens,decode_requests,decode_kv_tokens,mean_decode_kv_tokens,queued_ctx_tokens,queued_ctx_requests,queued_decode_requests,queued_decode_kv_tokens,latency_ms
+context,sweep,1,w,0,128,1,0,0,0,0,0.000,0,0,0,0,16.0
+decode,sweep,2,w,0,0,0,0,1,1,4096,4096.000,0,0,0,0,4.0
+decode,real,3,w,0,0,0,0,1,1,4096,4096.000,0,0,0,0,4.0
+context,real,4,w,0,147,1,0,0,0,0,0.000,0,0,0,0,22.0
+decode,real,5,w,0,0,0,0,1,1,4097,4097.000,0,0,0,0,4.0
+""",
+    )
+
+    context, _, filtered = _load_fpm(
+        fpm,
+        workload_segment="real",
+        filter_pathological_context=True,
+    )
+
+    assert (1, 147, 0) not in context
+    assert len(filtered) == 1
+    assert filtered[0]["counter_id"] == "4"
+    assert filtered[0]["reason"].startswith(
+        "context_singleton_workload_transition_above_support_envelope:"
+    )
+
+
+def test_context_workload_transition_filter_requires_singleton_fresh_context() -> None:
+    rows = [
+        {
+            "phase": "context",
+            "workload_segment": "real",
+            "counter_id": "2",
+            "ctx_tokens": "147",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "latency_ms": "22.0",
+        },
+        {
+            "phase": "context",
+            "workload_segment": "real",
+            "counter_id": "3",
+            "ctx_tokens": "150",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "latency_ms": "21.0",
+        },
+    ]
+    support_rows = [
+        {
+            "phase": "context",
+            "workload_segment": "sweep",
+            "counter_id": "1",
+            "ctx_tokens": "128",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "latency_ms": "16.0",
+        },
+        *rows,
+    ]
+
+    assert _context_workload_transition_reasons(rows, support_rows) == {}
 
 
 def test_load_fpm_preserves_leading_context_iteration_rows(tmp_path) -> None:
