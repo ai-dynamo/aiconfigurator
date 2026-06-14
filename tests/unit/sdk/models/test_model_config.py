@@ -304,7 +304,7 @@ class TestHFModelSupport:
             ),
             (
                 "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
-                common.GEMMQuantMode.fp8,
+                common.GEMMQuantMode.fp8_static,
                 common.MoEQuantMode.fp8,
                 common.KVCacheQuantMode.fp8,
                 common.FMHAQuantMode.fp8,
