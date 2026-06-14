@@ -234,6 +234,7 @@ def render_backend_templates(
     version: Optional[str] = None,
     deployment_target: str = "dynamo-j2",
     _context_sink: Optional[Callable[[dict[str, Any]], None]] = None,
+    _engine_context_sink: Optional[Callable[[dict[str, dict[str, Any]]], None]] = None,
 ) -> dict[str, str]:
     """
     Render templates for a specific backend with version-specific template selection.
@@ -430,13 +431,26 @@ def render_backend_templates(
                 speculative_config.setdefault("num_nextn_predict_layers", num_nextn_predict_layers)
             wc["speculative_config"] = speculative_config
 
+    def build_engine_worker_context(worker: str) -> dict[str, Any]:
+        """Assemble the exact per-worker engine render context for one worker role.
+
+        Pure extraction of the inline engine-context assembly used by the engine
+        render loop below: ``make_worker_context(...)`` plus, for trtllm, the
+        nested-engine-config population. No behavior change.
+        """
+        wc = make_worker_context(context, worker, param_keys, mapping_data)
+        if backend == "trtllm":
+            _populate_trtllm_nested_engine_config(wc)
+        return wc
+
+    if _engine_context_sink is not None:
+        _engine_context_sink({worker: build_engine_worker_context(worker) for worker in worker_plan})
+
     if engine_template_file is not None:
         try:
             eng_tmpl = env.get_template(engine_template_file.name)
             for worker in worker_plan:
-                wc = make_worker_context(context, worker, param_keys, mapping_data)
-                if backend == "trtllm":
-                    _populate_trtllm_nested_engine_config(wc)
+                wc = build_engine_worker_context(worker)
                 rendered = eng_tmpl.render(**wc)
                 if worker == "agg":
                     out_name = "extra_engine_args_agg.yaml"
@@ -763,6 +777,41 @@ def build_k8s_context_for_test(param_values, backend, templates_dir=None, backen
         _context_sink=_sink,
     )
     return captured["ctx"]
+
+
+def build_engine_worker_contexts_for_test(param_values, backend, templates_dir=None, backend_version=None) -> dict:
+    """Return {worker: wc} — the exact per-worker engine contexts the engine render uses.
+
+    Pure extraction of existing logic; must not change render_backend_templates output.
+    Runs the same ``render_backend_templates`` pipeline the Jinja engine render uses and
+    captures the assembled per-worker engine contexts via a sink, so each returned context
+    is byte-for-byte what ``extra_engine_args*.yaml.j2`` is rendered with.
+    """
+    captured: dict[str, dict[str, Any]] = {}
+
+    def _sink(contexts: dict[str, dict[str, Any]]) -> None:
+        captured.update(contexts)
+
+    render_backend_templates(
+        param_values,
+        backend,
+        templates_dir,
+        backend_version,
+        deployment_target="dynamo-j2",
+        _engine_context_sink=_sink,
+    )
+    return captured
+
+
+def engine_builder_covers(version: str | None) -> bool:
+    """True when a trtllm version manifest with builder_facts exists at/<= version
+    (floor match). Below the floor, the Jinja extra_engine_args template is used."""
+    from aiconfigurator.generator.contract.loader import MANIFESTS_DIR, _select_version_manifest
+    versions_dir = MANIFESTS_DIR / "backends" / "trtllm" / "versions"
+    try:
+        return _select_version_manifest(versions_dir, version) is not None
+    except Exception:
+        return False
 
 
 def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict[str, Any]:
