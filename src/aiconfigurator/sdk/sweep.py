@@ -118,6 +118,9 @@ def _rate_match_dict(
     seq_s_gpu = seq_s / num_total_gpus if num_total_gpus > 0 else 0.0
     tokens_s = seq_s * osl
     tokens_s_gpu = tokens_s / num_total_gpus if num_total_gpus > 0 else 0.0
+    encoder_latency = float(p.get("encoder_latency", 0.0))
+    encoder_memory = float(p.get("encoder_memory", 0.0))
+    # static_ctx ttft already includes colocated encoder latency.
     request_latency = p["ttft"] + d["tpot"] * max(osl - 1, 0)
 
     # Weighted average power across prefill and decode phases.
@@ -145,6 +148,7 @@ def _rate_match_dict(
         "ttft": ttft,
         "tpot": tpot,
         "request_latency": request_latency,
+        "encoder_latency": encoder_latency,
         "seq/s": seq_s,
         "seq/s/gpu": seq_s_gpu,
         "tokens/s": tokens_s,
@@ -183,14 +187,13 @@ def _rate_match_dict(
         "(d)backend": d.get("backend", ""),
         "(d)version": d.get("version", ""),
         "(d)system": d.get("system", ""),
-        # Encoder worker fields — non-multimodal default placeholders.
-        # ColumnsDisagg added these in the Qwen3-VL vision-encoder commit;
-        # rate-match for text-only models leaves them at zero/empty.
+        # Encoder is colocated with prefill for VL; text-only models leave these
+        # visibility fields at zero/empty.
         "(e)workers": 0,
         "(e)tp": 0,
         "(e)pp": 0,
         "(e)parallel": "",
-        "(e)memory": 0.0,
+        "(e)memory": encoder_memory,
         "power_w": disagg_power_avg,
     }
 

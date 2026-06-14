@@ -23,6 +23,7 @@ mod common;
 mod config;
 pub mod engine;
 mod fpm;
+pub mod memory;
 mod operators;
 mod perf_database;
 mod session;
@@ -43,6 +44,13 @@ pub use fpm::{
 // `engine/runtime.rs`) keep resolving after the types moved into `fpm`.
 pub(crate) use fpm::validate_forward_pass_metrics;
 pub use fpm::{ForwardPassMetrics, QueuedRequestMetrics, ScheduledRequestMetrics, FPM_VERSION};
+// KV-cache memory API. Top-level surface, not a method on
+// `AicEngine`: estimation runs once at startup, separate from the latency path.
+pub use memory::{
+    estimate_kv_cache, EstimateSource, KvCacheEstimate, KvCacheEstimateAdjusted,
+    KvCacheEstimateError, KvCacheEstimateOptions, KvCacheEstimateRequest, KvCacheMemoryFraction,
+    MemoryBreakdown,
+};
 // PyO3 bindings. `AicEngine` is the Python -> Rust hot-path pyclass;
 // `build_aic_engine` is the Rust -> Python -> Rust embedded build entry point
 // for callers in OTHER crates (the Dynamo Mocker,

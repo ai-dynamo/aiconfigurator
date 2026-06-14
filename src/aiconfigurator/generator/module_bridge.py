@@ -258,6 +258,8 @@ def task_config_to_generator_config(
     )
 
     params = _deep_merge(params, overrides.get("Params"))
+    # Expose SDK's system identifier to templates via NodeConfig.system_name
+    params.setdefault("NodeConfig", {})["system_name"] = task_config.system_name
     rule_name = overrides.get("rule")
     if rule_name:
         params["rule"] = rule_name

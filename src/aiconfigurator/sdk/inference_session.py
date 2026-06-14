@@ -19,7 +19,7 @@ from aiconfigurator.sdk.picking import (
     _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
     _build_disagg_summary_dict,
 )
-from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
+from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -72,7 +72,12 @@ class InferenceSession:
             InferenceSummary: the summary of the inference result
         """
         return self._backend.run_static(
-            self._model, self._database, runtime_config, mode, stride, latency_correction_scale
+            self._model,
+            self._database,
+            runtime_config,
+            mode,
+            stride,
+            latency_correction_scale,
         )
 
     def run_static_latency_only(
@@ -302,6 +307,7 @@ class DisaggInferenceSession:
         )
         decode_runtime_config = copy.deepcopy(runtime_config)
         decode_runtime_config.batch_size = decode_batch_size
+
         decode_summary = decode_sess.run_static(
             mode="static_gen",
             runtime_config=decode_runtime_config,
@@ -326,6 +332,20 @@ class DisaggInferenceSession:
         # Carry per-op latency breakdowns from prefill/decode static runs
         per_ops_data = {}
         per_ops_source = {}
+        prefill_encoder_latency = prefill_summary.get_encoder_latency_dict()
+        if prefill_encoder_latency:
+            per_ops_data["encoder"] = dict(prefill_encoder_latency)
+            disagg_summary.set_encoder_latency_dict(dict(prefill_encoder_latency))
+            disagg_summary.set_encoder_energy_wms_dict(dict(prefill_summary.get_encoder_energy_wms_dict()))
+            disagg_summary.set_encoder_power_avg(prefill_summary.get_encoder_power_avg())
+            encoder_memory = prefill_summary.get_encoder_memory()
+            if encoder_memory:
+                disagg_summary.set_encoder_memory(dict(encoder_memory))
+        prefill_encoder_source = prefill_summary.get_encoder_source_dict()
+        if prefill_encoder_source:
+            encoder_source = dict(prefill_encoder_source)
+            disagg_summary.set_encoder_source_dict(encoder_source)
+            per_ops_source["encoder"] = encoder_source
         prefill_ctx_latency = prefill_summary.get_context_latency_dict()
         if prefill_ctx_latency:
             per_ops_data["prefill"] = dict(prefill_ctx_latency)
@@ -748,11 +768,19 @@ class DisaggInferenceSession:
         else:
             decode_batch_size_range = [i for i in decode_batch_size_list_default if i <= decode_max_num_tokens]
 
-        if prefill_max_num_tokens < runtime_config.isl:
-            logger.warning("prefill_max_num_tokens is less than runtime_config.isl, set to runtime_config.isl")
-            prefill_max_num_tokens = runtime_config.isl
+        try:
+            enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
+        except Exception:
+            logger.debug("Could not resolve model config for VL effective ISL; using text ISL", exc_info=True)
+            enc_cfg = None
+        prefill_effective_isl = runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(
+            enc_cfg, runtime_config
+        )
+        if prefill_max_num_tokens < prefill_effective_isl:
+            logger.warning("prefill_max_num_tokens is less than effective prefill ISL, set to effective prefill ISL")
+            prefill_max_num_tokens = prefill_effective_isl
 
-        max_prefill_batch_size = prefill_max_num_tokens // runtime_config.isl
+        max_prefill_batch_size = prefill_max_num_tokens // prefill_effective_isl
         prefill_batch_size_range = range(1, max_prefill_batch_size + 1)
 
         # initialize disagg summary

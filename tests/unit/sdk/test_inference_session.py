@@ -113,6 +113,8 @@ def _build_mock_backend():
         )
         summary = _make_summary(row, runtime_config)
         if mode == "static_ctx":
+            summary.set_encoder_latency_dict({"encoder_attention": 0.5})
+            summary.set_encoder_source_dict({"encoder_attention": "mixed"})
             summary.set_context_latency_dict({"context_attention": 1.0})
             summary.set_context_source_dict({"context_attention": "silicon"})
         elif mode == "static_gen":
@@ -221,9 +223,11 @@ class TestRequireSameTPFiltering:
         )
 
         assert result.get_per_ops_source() == {
+            "encoder": {"encoder_attention": "mixed"},
             "prefill": {"context_attention": "silicon"},
             "decode": {"generation_attention": "empirical"},
         }
+        assert result.get_encoder_source_dict() == {"encoder_attention": "mixed"}
 
     def test_false_allows_mismatched_tp(self, disagg_session, runtime_config, model_config):
         """require_same_tp=False → results are non-empty (mismatched TP is fine)."""

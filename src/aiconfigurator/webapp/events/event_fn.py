@@ -225,7 +225,7 @@ class EventFn:
                     prefix=prefix,
                     image_height=int(image_height or 0),
                     image_width=int(image_width or 0),
-                    num_images_per_request=int(num_images or 1),
+                    num_images_per_request=int(num_images if num_images is not None else 1),
                 )
 
                 model = get_model(model_path, model_config, backend_name)

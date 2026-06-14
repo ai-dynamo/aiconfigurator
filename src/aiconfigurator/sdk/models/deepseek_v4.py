@@ -346,3 +346,7 @@ class DeepSeekV4Model(BaseModel):
                     # CSA has a second FP4 indexer compressor with its own decode state.
                     total += 2 * ratio * 2 * deepseek_v4_cfg.index_head_dim * 4
         return total
+
+    def get_kvcache_max_tokens(self, kv_budget_bytes: float) -> int:
+        """Capacity inverse over the window-capped + compressed KV curve (non-linear)."""
+        return self._binary_search_kvcache_max_tokens(kv_budget_bytes)
