@@ -6,6 +6,7 @@ Re-running overwrites; the committed result IS the baseline.
 """
 from __future__ import annotations
 
+import copy
 import pathlib
 
 from aiconfigurator.generator.api import generate_backend_artifacts
@@ -15,8 +16,14 @@ FROZEN_DIR = pathlib.Path(__file__).parent / "frozen"
 
 
 def generate_case(case) -> dict[str, str]:
+    # generate_backend_artifacts mutates its input params in place (the rule
+    # engine writes computed fields back; the max_batch_size rule is
+    # non-idempotent). CANARY_CASES are shared module-level singletons, so we
+    # deep-copy before generating to guarantee the freeze and the parity gate
+    # always run on pristine params, independent of any other test that may
+    # have touched the same case object earlier in the session.
     return generate_backend_artifacts(
-        case.params, case.backend, backend_version=case.backend_version
+        copy.deepcopy(case.params), case.backend, backend_version=case.backend_version
     )
 
 

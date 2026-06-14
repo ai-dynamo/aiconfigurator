@@ -8,6 +8,7 @@ phases replace the render step with typed builders; the seam stays here.
 """
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -52,6 +53,14 @@ def run_pipeline(
     backend_version: Optional[str] = None,
     deployment_target: Optional[str] = None,
 ) -> PipelineResult:
+    # The legacy render path (render_backend_templates -> rule engine) mutates
+    # its input params dict in place (e.g. the non-idempotent
+    # ``max_batch_size = 512 if x < 512 else x * 2`` rule writes the result
+    # back). The v2 orchestrator must NOT side-effect its caller's dict, so we
+    # work on a private copy. Output is unaffected; only the caller's input is
+    # protected. This makes run_pipeline safe to call repeatedly on shared
+    # params (e.g. test fixtures) without divergence.
+    params = copy.deepcopy(params)
     ir = _build_ir(params, backend, backend_version)
     artifacts = render_backend_templates(
         params, backend, templates_dir, backend_version,
