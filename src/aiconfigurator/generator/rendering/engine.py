@@ -548,7 +548,7 @@ def render_backend_templates(
                 k8s_context = _assemble_k8s_context(context, has_engine_templates)
                 if _context_sink is not None:
                     _context_sink(k8s_context)
-                if backend in {"vllm", "sglang"}:
+                if backend in {"vllm", "sglang", "trtllm"}:
                     from aiconfigurator.generator.builders.k8s_builder import build_dgd
                     from aiconfigurator.generator.builders.dgd_model import dgd_documents_to_yaml
                     rendered_templates["k8s_deploy.yaml"] = dgd_documents_to_yaml(build_dgd(k8s_context, backend))

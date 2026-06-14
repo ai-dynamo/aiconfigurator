@@ -1,5 +1,3 @@
-
-
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -15,69 +13,45 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
           imagePullPolicy: IfNotPresent
-
     TRTLLMWorker:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 8
       resources:
         limits:
-          gpu: "1"
+          gpu: '1'
       extraPodSpec:
         volumes:
-          - name: engine-configs
-            emptyDir: {}
-          - name: tmp
-            emptyDir:
-              medium: Memory
-              sizeLimit: 10Gi
+        - name: engine-configs
+          emptyDir: {}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
           workingDir: /workspace/components/backends/trtllm
           imagePullPolicy: IfNotPresent
           volumeMounts:
-            - name: engine-configs
-              mountPath: /workspace/engine_configs
-            - name: tmp
-              mountPath: /tmp
-          command: ["/bin/bash","-c"]
+          - name: engine-configs
+            mountPath: /workspace/engine_configs
+          - name: tmp
+            mountPath: /tmp
+          command:
+          - /bin/bash
+          - -c
           args:
-            - |
-              set -euo pipefail
-              mkdir -p /workspace/engine_configs
-              cat > /workspace/engine_configs/agg_config.yaml <<'YAML'
-              backend: pytorch
-
-
-              tensor_parallel_size: 1
-              pipeline_parallel_size: 1
-              enable_attention_dp: False
-              enable_chunked_prefill: False
-
-
-              max_batch_size: 128
-              max_num_tokens: 4640
-
-              kv_cache_config:
-                free_gpu_memory_fraction: 0.8  # Fraction of GPU memory usable for KV-cache
-                dtype: auto
-                tokens_per_block: 32
-                enable_block_reuse: False
-
-
-              cuda_graph_config:
-                enable_padding: True # Pad CUDA graph
-                batch_sizes: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,16,20,24,28,32,32,40,48,56,64,64,80,96,112,128,128,160,192,224,256,256,320,384,448,512,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136]
-
-              disable_overlap_scheduler: False
-              print_iter_log: False
-              YAML
-              args=(
-                --model-path "Qwen/Qwen3-0.6B"
-                --served-model-name "Qwen/Qwen3-0.6B"
-                --extra-engine-args "/workspace/engine_configs/agg_config.yaml"
-              )
-              exec python3 -m dynamo.trtllm "${args[@]}"
+          - "set -euo pipefail\nmkdir -p /workspace/engine_configs\ncat > /workspace/engine_configs/agg_config.yaml\
+            \ <<'YAML'\nbackend: pytorch\n\n\ntensor_parallel_size: 1\npipeline_parallel_size:\
+            \ 1\nenable_attention_dp: False\nenable_chunked_prefill: False\n\n\nmax_batch_size:\
+            \ 128\nmax_num_tokens: 4640\n\nkv_cache_config:\n  free_gpu_memory_fraction:\
+            \ 0.8  # Fraction of GPU memory usable for KV-cache\n  dtype: auto\n \
+            \ tokens_per_block: 32\n  enable_block_reuse: False\n\n\ncuda_graph_config:\n\
+            \  enable_padding: True # Pad CUDA graph\n  batch_sizes: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,16,20,24,28,32,32,40,48,56,64,64,80,96,112,128,128,160,192,224,256,256,320,384,448,512,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136]\n\
+            \ndisable_overlap_scheduler: False\nprint_iter_log: False\nYAML\nargs=(\n\
+            \  --model-path \"Qwen/Qwen3-0.6B\"\n  --served-model-name \"Qwen/Qwen3-0.6B\"\
+            \n  --extra-engine-args \"/workspace/engine_configs/agg_config.yaml\"\n\
+            )\nexec python3 -m dynamo.trtllm \"${args[@]}\"\n"
           startupProbe:
             httpGet:
               path: /health
@@ -102,5 +76,3 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 10
-
-
