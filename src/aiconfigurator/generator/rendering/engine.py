@@ -560,23 +560,18 @@ def render_backend_templates(
         except Exception as e:
             logger.warning(f"Failed to generate k8s config via Dynamo: {e}")
     else:
-        # Dynamo deployment using Jinja2 templates (default: dynamo-j2)
-        k8s_aux = template_path / "k8s_deploy.yaml.j2"
-        if k8s_aux.exists():
-            try:
-                k8s_context = _assemble_k8s_context(context, has_engine_templates)
-                if _context_sink is not None:
-                    _context_sink(k8s_context)
-                if backend in {"vllm", "sglang", "trtllm"}:
-                    from aiconfigurator.generator.builders.k8s_builder import build_dgd
-                    from aiconfigurator.generator.builders.dgd_model import dgd_documents_to_yaml
-                    rendered_templates["k8s_deploy.yaml"] = dgd_documents_to_yaml(build_dgd(k8s_context, backend))
-                else:
-                    tmpl = env.get_template("k8s_deploy.yaml.j2")
-                    rendered = tmpl.render(**k8s_context)
-                    rendered_templates["k8s_deploy.yaml"] = rendered
-            except Exception as e:
-                logger.warning(f"Failed to render template k8s_deploy.yaml.j2: {e}")
+        # Dynamo deployment (default: dynamo-j2). The k8s_deploy.yaml for all
+        # backends (vllm/sglang/trtllm) is now produced by the typed k8s builder
+        # (build_dgd); the legacy k8s_deploy.yaml.j2 templates have been retired.
+        try:
+            k8s_context = _assemble_k8s_context(context, has_engine_templates)
+            if _context_sink is not None:
+                _context_sink(k8s_context)
+            from aiconfigurator.generator.builders.k8s_builder import build_dgd
+            from aiconfigurator.generator.builders.dgd_model import dgd_documents_to_yaml
+            rendered_templates["k8s_deploy.yaml"] = dgd_documents_to_yaml(build_dgd(k8s_context, backend))
+        except Exception as e:
+            logger.warning(f"Failed to build k8s_deploy.yaml: {e}")
 
     # Benchmark templates (Dynamo-specific)
     if deployment_target in ("dynamo-j2", "dynamo-python"):
