@@ -1,0 +1,1 @@
+--tensor-parallel-size "1" --pipeline-parallel-size "1" --data-parallel-size "1" --max-num-seqs "512" --max-num-batched-tokens 512

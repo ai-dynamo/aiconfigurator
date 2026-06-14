@@ -1,0 +1,1 @@
+--tensor-parallel-size 1 --pipeline-parallel-size 1 --expert-parallel-size 1 --max-batch-size 128 --max-num-tokens 4640
