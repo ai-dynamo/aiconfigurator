@@ -10,6 +10,7 @@ from pathlib import Path
 
 OUTPUT_COLUMNS = [
     "phase",
+    "workload_segment",
     "counter_id",
     "worker_id",
     "dp_rank",
@@ -61,6 +62,7 @@ def summarize_rows(rows: list[dict[str, str]], *, include_idle: bool = False) ->
         out.append(
             {
                 "phase": phase,
+                "workload_segment": row.get("workload_segment", ""),
                 "counter_id": _as_int(row, "counter_id"),
                 "worker_id": row.get("worker_id", ""),
                 "dp_rank": _as_int(row, "dp_rank"),

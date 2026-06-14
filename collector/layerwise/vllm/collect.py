@@ -151,6 +151,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override vLLM max_model_len for FPM parity diagnostics.",
     )
+    advanced.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.9,
+        help=(
+            "vLLM GPU memory utilization for layerwise worker engines. "
+            "Increase only when the requested high-KV decode envelope is "
+            "intended to fit on the target system."
+        ),
+    )
     advanced.add_argument("--no-filter-model-max-len", action="store_true")
     advanced.add_argument("--rank-reduce", choices=("sum", "max"), default="max")
     advanced.add_argument(
@@ -164,19 +174,37 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     advanced.add_argument("--moe-decode-gpu-batch-threshold", type=int, default=8)
-    advanced.add_argument("--ctx-warmup-runs", type=int, default=0)
+    advanced.add_argument("--ctx-warmup-runs", type=int, default=1)
     advanced.add_argument("--ctx-measured-runs", type=int, default=6)
     advanced.add_argument(
         "--ctx-repeat-aggregation",
         choices=("median", "mean", "trimmed_mean", "min"),
         default="trimmed_mean",
     )
-    advanced.add_argument("--gen-warmup-runs", type=int, default=0)
+    advanced.add_argument("--gen-warmup-runs", type=int, default=1)
     advanced.add_argument("--gen-measured-runs", type=int, default=6)
     advanced.add_argument(
         "--gen-repeat-aggregation",
         choices=("median", "mean", "trimmed_mean", "min"),
         default="trimmed_mean",
+    )
+    advanced.add_argument(
+        "--gen-driver",
+        choices=("prefix_cache", "live_decode"),
+        default=None,
+        help=(
+            "Decode measurement driver. Defaults to the registry setting for "
+            "known models and prefix_cache for ad-hoc models."
+        ),
+    )
+    advanced.add_argument(
+        "--live-step-driver",
+        action="store_true",
+        help=(
+            "Use the lower-level live LLMEngine stepping driver for eligible "
+            "ctx/gen datapoints. This keeps the requested shape grid but "
+            "avoids repeated LLM.generate submission overhead."
+        ),
     )
     advanced.add_argument("--timeout", type=int, default=1800)
     advanced.add_argument("--nsys-capture", choices=("full", "cuda_profiler_api", "none"), default="full")
@@ -213,6 +241,7 @@ def _selected_models(args: argparse.Namespace) -> list[LayerwiseModel]:
                 attn_quant=args.attn_quant or "bf16",
                 kv_quant=args.kv_quant or "bf16",
                 num_slots=args.num_slots,
+                gen_driver=args.gen_driver or "prefix_cache",
             )
         ]
 
@@ -224,6 +253,7 @@ def _selected_models(args: argparse.Namespace) -> list[LayerwiseModel]:
             "attn_quant": args.attn_quant,
             "kv_quant": args.kv_quant,
             "num_slots": args.num_slots,
+            "gen_driver": args.gen_driver,
         }.items() if value is not None
     }
     if overrides:

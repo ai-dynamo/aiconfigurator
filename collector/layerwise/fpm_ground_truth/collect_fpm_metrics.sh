@@ -36,12 +36,17 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}"
 FPM_PORT="${DYN_FORWARDPASS_METRIC_PORT:-20380}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-64}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.9}"
 GPUS="${GPUS:-}"
 TP_SIZE="${TP_SIZE:-}"
 EP_SIZE="${EP_SIZE:-1}"
+DATA_PARALLEL_SIZE="${DATA_PARALLEL_SIZE:-}"
+DATA_PARALLEL_SIZE_EXPLICIT=0
+if [[ -n "${DATA_PARALLEL_SIZE}" ]]; then
+    DATA_PARALLEL_SIZE_EXPLICIT=1
+fi
 ENABLE_EXPERT_PARALLEL="${ENABLE_EXPERT_PARALLEL:-0}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
 if [[ -v DISABLE_PREFIX_CACHING ]]; then
@@ -58,6 +63,7 @@ CONCURRENCY="${CONCURRENCY:-32}"
 WORKLOAD_PLAN="${WORKLOAD_PLAN:-sweep}"
 MEASURED_PHASES="${MEASURED_PHASES:-context,decode}"
 REAL_WORKLOAD="${REAL_WORKLOAD:-1}"
+INCLUDE_SWEEP="${INCLUDE_SWEEP:-0}"
 REAL_WORKLOAD_REQUESTS="${REAL_WORKLOAD_REQUESTS:-128}"
 REAL_WORKLOAD_CONCURRENCY="${REAL_WORKLOAD_CONCURRENCY:-32}"
 REAL_WORKLOAD_DATASET="${REAL_WORKLOAD_DATASET:-OpenAssistant/oasst1}"
@@ -90,6 +96,7 @@ WARMUP_OSL_VALUES="${WARMUP_OSL_VALUES:-}"
 POST_WARMUP_SECONDS="${POST_WARMUP_SECONDS:-1}"
 MAX_TOKENS="${MAX_TOKENS:-64}"
 PROMPT_TOKEN_SEED="${PROMPT_TOKEN_SEED:-}"
+PROMPT_TOKEN_MODE="${PROMPT_TOKEN_MODE:-safe_ascii}"
 REQUEST_TIMEOUT_SECONDS="${REQUEST_TIMEOUT_SECONDS:-900}"
 REQUEST_RETRIES="${REQUEST_RETRIES:-3}"
 REQUEST_RETRY_BACKOFF_SECONDS="${REQUEST_RETRY_BACKOFF_SECONDS:-2}"
@@ -129,6 +136,9 @@ SKIP_REQUESTS="${SKIP_REQUESTS:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 
 HF_HOME_HOST="${HF_HOME:-}"
+VLLM_CACHE_HOST="${VLLM_CACHE_HOST:-${VLLM_CACHE:-}}"
+TILELANG_CACHE_DIR_CONTAINER="${TILELANG_CACHE_DIR_CONTAINER:-/home/dynamo/.cache/vllm/tilelang}"
+TILELANG_TMP_DIR_CONTAINER="${TILELANG_TMP_DIR_CONTAINER:-${TILELANG_CACHE_DIR_CONTAINER}/tmp}"
 
 WORKER_EXTRA_ARGS=()
 CLEANUP_ENABLED=0
@@ -147,13 +157,15 @@ Options:
   --system-port PORT            Worker health/metrics port (default: ${SYSTEM_PORT})
   --fpm-port PORT               Raw FPM ZMQ PUB port (default: ${FPM_PORT})
   --max-model-len N             vLLM --max-model-len override (default: vLLM model default)
-  --max-num-seqs N              vLLM --max-num-seqs (default: ${MAX_NUM_SEQS})
+  --max-num-seqs N              vLLM --max-num-seqs override (default: vLLM scheduler default)
   --max-num-batched-tokens N    vLLM --max-num-batched-tokens override (default: vLLM scheduler default)
   --gpu-memory-utilization X    vLLM --gpu-memory-utilization (default: ${GPU_MEMORY_UTILIZATION})
   --gpus SPEC                   Docker --gpus value for worker (default: inferred from TP/EP, else device=0)
   --tp-size N                   Tensor parallel size for this deployment
   --tp-sizes N                  Alias for --tp-size. Comma lists are not supported by one invocation.
-  --ep-size N                   Expert parallel size. Values >1 enable vLLM expert parallel.
+  --data-parallel-size N        vLLM data parallel size for this deployment
+  --ep-size N                   vLLM expert parallel size. Values >1 enable vLLM expert parallel.
+                                vLLM computes EP as TP * DP, so DP is inferred as EP/TP when omitted.
   --ep-sizes N                  Alias for --ep-size. Comma lists are not supported by one invocation.
   --enable-expert-parallel      Pass vLLM --enable-expert-parallel
   --enforce-eager               Force vLLM eager mode instead of standard compile/graph behavior
@@ -164,6 +176,7 @@ Options:
   --phases CSV                  Phases to send: context,decode,mixed (default: ${MEASURED_PHASES})
   --real-workload               Send dataset-shaped mixed request traffic (default)
   --no-real-workload            Use the static context/decode/mixed sweep instead
+  --include-sweep               With --real-workload, also send the static sweep first
   --real-workload-requests N    Dataset-shaped request count (default: ${REAL_WORKLOAD_REQUESTS})
   --real-workload-concurrency N Dataset-shaped request concurrency (default: ${REAL_WORKLOAD_CONCURRENCY})
   --real-workload-dataset NAME  HF dataset for shape sampling (default: ${REAL_WORKLOAD_DATASET})
@@ -221,6 +234,7 @@ Options:
   --nsys-full-worker            Profile from worker start instead of only measured traffic
   --max-tokens N                Fixed-workload max_tokens (default: ${MAX_TOKENS})
   --prompt-token-seed N         Seed for reproducible random prompt token IDs (default: random)
+  --prompt-token-mode MODE      random_vocab_excluding_special or safe_ascii (default: ${PROMPT_TOKEN_MODE})
   --request-retries N           Retries per request for transient HTTP errors (default: ${REQUEST_RETRIES})
   --request-retry-backoff N     Base seconds between request retries (default: ${REQUEST_RETRY_BACKOFF_SECONDS})
   --request-allow-failures N    Continue if at most N requests fail after retries (default: ${REQUEST_ALLOW_FAILURES})
@@ -243,15 +257,15 @@ Environment aliases:
   DYNAMO_VLLM_IMAGE, MODEL, REQUESTS, CONCURRENCY, MAX_TOKENS, GPUS,
   WARMUP_REQUESTS, WARMUP_CONCURRENCY, WARMUP_ISL_VALUES,
   WARMUP_OSL_VALUES, POST_WARMUP_SECONDS,
-  TP_SIZE, EP_SIZE, ENABLE_EXPERT_PARALLEL, WORKLOAD_PLAN, MEASURED_PHASES,
-  REAL_WORKLOAD, REAL_WORKLOAD_REQUESTS, REAL_WORKLOAD_CONCURRENCY,
+  TP_SIZE, DATA_PARALLEL_SIZE, EP_SIZE, ENABLE_EXPERT_PARALLEL, WORKLOAD_PLAN, MEASURED_PHASES,
+  REAL_WORKLOAD, INCLUDE_SWEEP, REAL_WORKLOAD_REQUESTS, REAL_WORKLOAD_CONCURRENCY,
   REAL_WORKLOAD_DATASET,
   CONTEXT_ISL_VALUES, CONTEXT_REPEATS, DECODE_BATCH_SIZES, DECODE_PAST_KV, DECODE_OSL, MIX_ISL_VALUES,
   MIX_OSL_VALUES, REQUEST_RETRIES, REQUEST_RETRY_BACKOFF_SECONDS,
   REQUEST_ALLOW_FAILURES,
   VARY_ISL_OSL, REQUEST_ENDPOINT, ISL_MIN, ISL_MAX, OSL_MIN, OSL_MAX,
-  PROMPT_TOKEN_SEED, ISL_VALUES, OSL_VALUES, DYN_HTTP_PORT, DYN_SYSTEM_PORT,
-  DYN_FORWARDPASS_METRIC_PORT, HF_HOME.
+  PROMPT_TOKEN_SEED, PROMPT_TOKEN_MODE, ISL_VALUES, OSL_VALUES, DYN_HTTP_PORT, DYN_SYSTEM_PORT,
+  DYN_FORWARDPASS_METRIC_PORT, HF_HOME, VLLM_CACHE_HOST.
 
 Output:
   CSV columns are exactly:
@@ -486,6 +500,7 @@ while [[ $# -gt 0 ]]; do
         --gpus) GPUS="$2"; shift 2 ;;
         --tp-size) TP_SIZE="$(single_parallel_size "$1" "$2")"; shift 2 ;;
         --tp-sizes) TP_SIZE="$(single_parallel_size "$1" "$2")"; shift 2 ;;
+        --data-parallel-size) DATA_PARALLEL_SIZE="$(single_parallel_size "$1" "$2")"; DATA_PARALLEL_SIZE_EXPLICIT=1; shift 2 ;;
         --ep-size) EP_SIZE="$(single_parallel_size "$1" "$2")"; shift 2 ;;
         --ep-sizes) EP_SIZE="$(single_parallel_size "$1" "$2")"; shift 2 ;;
         --enable-expert-parallel) ENABLE_EXPERT_PARALLEL=1; shift ;;
@@ -500,6 +515,7 @@ while [[ $# -gt 0 ]]; do
         --measured-phases) MEASURED_PHASES="$2"; shift 2 ;;
         --real-workload) REAL_WORKLOAD=1; shift ;;
         --no-real-workload) REAL_WORKLOAD=0; shift ;;
+        --include-sweep) INCLUDE_SWEEP=1; shift ;;
         --real-workload-requests) REAL_WORKLOAD_REQUESTS="$2"; shift 2 ;;
         --real-workload-concurrency) REAL_WORKLOAD_CONCURRENCY="$2"; shift 2 ;;
         --real-workload-dataset) REAL_WORKLOAD_DATASET="$2"; shift 2 ;;
@@ -555,6 +571,7 @@ while [[ $# -gt 0 ]]; do
         --nsys-full-worker) NSYS_PROFILE_TRAFFIC_ONLY=0; shift ;;
         --max-tokens) MAX_TOKENS="$2"; shift 2 ;;
         --prompt-token-seed) PROMPT_TOKEN_SEED="$2"; shift 2 ;;
+        --prompt-token-mode) PROMPT_TOKEN_MODE="$2"; shift 2 ;;
         --request-retries) REQUEST_RETRIES="$2"; shift 2 ;;
         --request-retry-backoff) REQUEST_RETRY_BACKOFF_SECONDS="$2"; shift 2 ;;
         --request-allow-failures) REQUEST_ALLOW_FAILURES="$2"; shift 2 ;;
@@ -620,11 +637,23 @@ if [[ -z "${EFFECTIVE_CONFIG_OUTPUT_JSON}" ]]; then
 elif [[ "${EFFECTIVE_CONFIG_OUTPUT_JSON}" != /* ]]; then
     EFFECTIVE_CONFIG_OUTPUT_JSON="${PWD}/${EFFECTIVE_CONFIG_OUTPUT_JSON}"
 fi
+HF_HOME_HOST_IS_RUN_LOCAL=0
 if [[ -z "${HF_HOME_HOST}" ]]; then
-    HF_HOME_HOST="${RUN_DIR}/hf-home"
+    if [[ -d "${HOME}/.cache/huggingface" ]]; then
+        HF_HOME_HOST="${HOME}/.cache/huggingface"
+    else
+        HF_HOME_HOST="${RUN_DIR}/hf-home"
+        HF_HOME_HOST_IS_RUN_LOCAL=1
+    fi
 fi
 if [[ "${HF_HOME_HOST}" != /* ]]; then
     HF_HOME_HOST="${PWD}/${HF_HOME_HOST}"
+fi
+if [[ -z "${VLLM_CACHE_HOST}" ]]; then
+    VLLM_CACHE_HOST="${HOME}/.cache/aic-vllm"
+fi
+if [[ "${VLLM_CACHE_HOST}" != /* ]]; then
+    VLLM_CACHE_HOST="${PWD}/${VLLM_CACHE_HOST}"
 fi
 OUTPUT_DIR="$(dirname "${OUTPUT_CSV}")"
 DETAIL_OUTPUT_DIR="$(dirname "${DETAIL_OUTPUT_CSV}")"
@@ -645,6 +674,8 @@ WARMUP_WORKLOAD_IN_CONTAINER="/work/warmup_workload.csv"
 RUN_METADATA_JSON="${RUN_DIR}/vllm_metadata.json"
 RUN_EFFECTIVE_CONFIG_JSON="${RUN_DIR}/effective_vllm_config.json"
 RUN_EFFECTIVE_CONFIG_IN_CONTAINER="/work/effective_vllm_config.json"
+SEGMENT_FILE="${RUN_DIR}/fpm_segment.txt"
+SEGMENT_IN_CONTAINER="/work/fpm_segment.txt"
 NSYS_WORKER_OUTPUT_BASE="${RUN_DIR}/nsys/fpm_worker"
 NSYS_WORKER_OUTPUT_IN_CONTAINER="/work/nsys/fpm_worker"
 MODEL_IN_CONTAINER="${MODEL}"
@@ -662,12 +693,28 @@ DOCKER_ENV=(
     -e "DYN_NAMESPACE=dynamo"
 )
 WORKER_DOCKER_ENV=("${DOCKER_ENV[@]}")
+WORKER_DOCKER_ENV+=(
+    -e "TILELANG_CACHE_DIR=${TILELANG_CACHE_DIR_CONTAINER}"
+    -e "TILELANG_TMP_DIR=${TILELANG_TMP_DIR_CONTAINER}"
+)
 if [[ -n "${VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8:-}" ]]; then
     WORKER_DOCKER_ENV+=(
         -e "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=${VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8}"
     )
 fi
 NSYS_DOCKER_MOUNTS=()
+HF_TOKEN_FILE_HOST="${HF_TOKEN_FILE:-/home/shadeform/hf.token}"
+HF_TOKEN_DOCKER_MOUNTS=()
+HF_TOKEN_CONTAINER_PREFIX=()
+if [[ -f "${HF_TOKEN_FILE_HOST}" ]]; then
+    HF_TOKEN_DOCKER_MOUNTS=(-v "${HF_TOKEN_FILE_HOST}:/run/secrets/hf.token:ro")
+    HF_TOKEN_CONTAINER_PREFIX=(
+        bash
+        -lc
+        'if [[ -f /run/secrets/hf.token ]]; then export HF_TOKEN="$(tr -d "\r\n" < /run/secrets/hf.token)"; fi; exec "$@"'
+        bash
+    )
+fi
 
 mkdir -p \
     "${RUN_DIR}/discovery" \
@@ -679,8 +726,13 @@ mkdir -p \
     "${METADATA_OUTPUT_DIR}" \
     "${EFFECTIVE_CONFIG_OUTPUT_DIR}" \
     "${RUN_DIR}/nsys" \
-    "${HF_HOME_HOST}"
-chmod a+rwx "${RUN_DIR}" "${RUN_DIR}/discovery" "${HF_HOME_HOST}"
+    "${HF_HOME_HOST}" \
+    "${VLLM_CACHE_HOST}" \
+    "${VLLM_CACHE_HOST}/tilelang/tmp"
+chmod a+rwx "${RUN_DIR}" "${RUN_DIR}/discovery" "${VLLM_CACHE_HOST}" "${VLLM_CACHE_HOST}/tilelang" "${VLLM_CACHE_HOST}/tilelang/tmp"
+if [[ "${HF_HOME_HOST_IS_RUN_LOCAL}" == "1" ]]; then
+    chmod a+rwx "${HF_HOME_HOST}"
+fi
 
 if [[ "${NSYS_PROFILE_WORKER}" == "1" ]]; then
     if [[ -z "${NSYS_HOST_DIR}" && "${NSYS_BIN}" == /* && -x "${NSYS_BIN}" ]]; then
@@ -718,15 +770,32 @@ fi
 if [[ -n "${TP_SIZE}" ]]; then
     TP_SIZE="$(single_parallel_size "TP_SIZE" "${TP_SIZE}")"
 fi
+if [[ -n "${DATA_PARALLEL_SIZE}" ]]; then
+    DATA_PARALLEL_SIZE="$(single_parallel_size "DATA_PARALLEL_SIZE" "${DATA_PARALLEL_SIZE}")"
+fi
 EP_SIZE="$(single_parallel_size "EP_SIZE" "${EP_SIZE}")"
 if (( EP_SIZE > 1 )); then
     ENABLE_EXPERT_PARALLEL=1
     if [[ -z "${TP_SIZE}" ]]; then
-        TP_SIZE="${EP_SIZE}"
+        TP_SIZE=1
+    fi
+    if [[ -z "${DATA_PARALLEL_SIZE}" ]]; then
+        if (( EP_SIZE % TP_SIZE != 0 )); then
+            die "--ep-size ${EP_SIZE} is not divisible by --tp-size ${TP_SIZE}; vLLM EP size is TP_SIZE * DATA_PARALLEL_SIZE"
+        fi
+        DATA_PARALLEL_SIZE="$((EP_SIZE / TP_SIZE))"
+    elif (( EP_SIZE != TP_SIZE * DATA_PARALLEL_SIZE )); then
+        die "--ep-size ${EP_SIZE} conflicts with --tp-size ${TP_SIZE} and --data-parallel-size ${DATA_PARALLEL_SIZE}; vLLM EP size is TP_SIZE * DATA_PARALLEL_SIZE"
     fi
 fi
+if [[ -z "${DATA_PARALLEL_SIZE}" ]]; then
+    DATA_PARALLEL_SIZE=1
+fi
+if [[ -z "${TP_SIZE}" && "${DATA_PARALLEL_SIZE}" != "1" ]]; then
+    TP_SIZE=1
+fi
 if [[ -z "${GPUS}" ]]; then
-    gpu_count="${TP_SIZE:-1}"
+    gpu_count="$(( ${TP_SIZE:-1} * DATA_PARALLEL_SIZE ))"
     GPUS="$(infer_docker_gpus "${gpu_count}")"
 fi
 apply_vllm_runtime_defaults
@@ -737,6 +806,10 @@ fi
 case "${WORKLOAD_PLAN}" in
     sweep|legacy) ;;
     *) die "--workload-plan must be 'sweep' or 'legacy'" ;;
+esac
+case "${PROMPT_TOKEN_MODE}" in
+    random_vocab_excluding_special|safe_ascii) ;;
+    *) die "--prompt-token-mode must be 'random_vocab_excluding_special' or 'safe_ascii'" ;;
 esac
 MEASURED_PHASES="${MEASURED_PHASES//[[:space:]]/}"
 if [[ -z "${MEASURED_PHASES}" ]]; then
@@ -749,15 +822,28 @@ for phase in ${MEASURED_PHASES//,/ }; do
     esac
 done
 
+RUN_SWEEP=0
+RUN_REAL_WORKLOAD=0
 if [[ "${WORKLOAD_PLAN}" == "sweep" ]]; then
     if [[ "${REAL_WORKLOAD}" == "1" ]]; then
+        RUN_REAL_WORKLOAD=1
+        if [[ "${INCLUDE_SWEEP}" == "1" ]]; then
+            RUN_SWEEP=1
+        fi
+    else
+        RUN_SWEEP=1
+    fi
+fi
+
+if [[ "${WORKLOAD_PLAN}" == "sweep" ]]; then
+    if [[ "${RUN_REAL_WORKLOAD}" == "1" ]]; then
         if ! [[ "${REAL_WORKLOAD_REQUESTS}" =~ ^[0-9]+$ ]] || (( REAL_WORKLOAD_REQUESTS < 1 )); then
             die "real workload requests must be >= 1"
         fi
         if ! [[ "${REAL_WORKLOAD_CONCURRENCY}" =~ ^[0-9]+$ ]] || (( REAL_WORKLOAD_CONCURRENCY < 1 )); then
             die "real workload concurrency must be >= 1"
         fi
-        if (( REAL_WORKLOAD_CONCURRENCY > MAX_NUM_SEQS )); then
+        if [[ -n "${MAX_NUM_SEQS}" ]] && (( REAL_WORKLOAD_CONCURRENCY > MAX_NUM_SEQS )); then
             die "real workload concurrency ${REAL_WORKLOAD_CONCURRENCY} exceeds --max-num-seqs ${MAX_NUM_SEQS}"
         fi
         case "${REAL_WORKLOAD_SHAPE_SOURCE}" in
@@ -771,7 +857,7 @@ if [[ "${WORKLOAD_PLAN}" == "sweep" ]]; then
             die "invalid real workload OSL range: ${REAL_WORKLOAD_OSL_MIN}..${REAL_WORKLOAD_OSL_MAX}"
         fi
     fi
-    if [[ "${REAL_WORKLOAD}" != "1" ]]; then
+    if [[ "${RUN_SWEEP}" == "1" ]]; then
         if (( CONTEXT_REPEATS < 1 || CONTEXT_CONCURRENCY < 1 )); then
             die "context repeats/concurrency must be >= 1"
         fi
@@ -795,7 +881,7 @@ if [[ "${WORKLOAD_PLAN}" == "sweep" ]]; then
             if (( decode_max_batch < 1 )); then
                 die "decode batch-size list must not be empty"
             fi
-            if (( decode_max_batch > MAX_NUM_SEQS )); then
+            if [[ -n "${MAX_NUM_SEQS}" ]] && (( decode_max_batch > MAX_NUM_SEQS )); then
                 die "decode max batch size ${decode_max_batch} exceeds --max-num-seqs ${MAX_NUM_SEQS}"
             fi
             if [[ -n "${MAX_MODEL_LEN}" ]] && (( DECODE_PAST_KV + DECODE_OSL > MAX_MODEL_LEN )); then
@@ -808,7 +894,7 @@ if [[ "${WORKLOAD_PLAN}" == "sweep" ]]; then
             if (( mixed_max_isl < 1 || mixed_max_osl < 1 )); then
                 die "mixed ISL/OSL lists must not be empty"
             fi
-            if (( MIX_CONCURRENCY > MAX_NUM_SEQS )); then
+            if [[ -n "${MAX_NUM_SEQS}" ]] && (( MIX_CONCURRENCY > MAX_NUM_SEQS )); then
                 die "mixed concurrency ${MIX_CONCURRENCY} exceeds --max-num-seqs ${MAX_NUM_SEQS}"
             fi
             if [[ -n "${MAX_MODEL_LEN}" ]] && (( mixed_max_isl + mixed_max_osl > MAX_MODEL_LEN )); then
@@ -913,9 +999,11 @@ start_file_discovery_touch_loop() {
 deployment_helper_args() {
     local args=(
         --model "${MODEL_IN_CONTAINER}"
-        --max-num-seqs "${MAX_NUM_SEQS}"
         --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
     )
+    if [[ -n "${MAX_NUM_SEQS}" ]]; then
+        args+=(--max-num-seqs "${MAX_NUM_SEQS}")
+    fi
     if [[ -n "${MAX_NUM_BATCHED_TOKENS}" ]]; then
         args+=(--max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}")
     fi
@@ -924,6 +1012,9 @@ deployment_helper_args() {
     fi
     if [[ -n "${TP_SIZE}" ]]; then
         args+=(--tensor-parallel-size "${TP_SIZE}")
+    fi
+    if [[ "${DATA_PARALLEL_SIZE}" != "1" || "${DATA_PARALLEL_SIZE_EXPLICIT}" == "1" ]]; then
+        args+=(--data-parallel-size "${DATA_PARALLEL_SIZE}")
     fi
     if [[ -n "${KV_CACHE_DTYPE}" ]]; then
         args+=(--kv-cache-dtype "${KV_CACHE_DTYPE}")
@@ -978,11 +1069,12 @@ snapshot_effective_vllm_config() {
         --network host \
         -v "${RUN_DIR}:/work" \
         -v "${HF_HOME_HOST}:/work/hf-home" \
+        "${HF_TOKEN_DOCKER_MOUNTS[@]}" \
         -e "HF_HOME=/work/hf-home" \
         -e "HF_HUB_CACHE=/work/hf-home/hub" \
         -e "TRANSFORMERS_CACHE=/work/hf-home/transformers" \
-        -e "HF_TOKEN=${HF_TOKEN:-}" \
         "${IMAGE}" \
+        "${HF_TOKEN_CONTAINER_PREFIX[@]}" \
         python3 /work/vllm_deployment.py snapshot-effective \
             --args-json "${VLLM_DEPLOYMENT_ARGS_JSON}" \
             --output "${RUN_EFFECTIVE_CONFIG_IN_CONTAINER}" || snapshot_rc=$?
@@ -1022,7 +1114,10 @@ send_request_workload() {
     local append_workload="${8:-0}"
     local seed_offset="${9:-0}"
     local real_workload="${10:-0}"
+    local workload_segment="${11:-${phase}}"
     local request_rc=0
+
+    printf '%s\n' "${workload_segment}" > "${SEGMENT_FILE}"
 
     local request_driver_cmd=(
         python3 /work/send_requests.py
@@ -1031,6 +1126,7 @@ send_request_workload() {
         --requests "${request_count}"
         --concurrency "${concurrency_count}"
         --max-tokens "${MAX_TOKENS}"
+        --prompt-token-mode "${PROMPT_TOKEN_MODE}"
         --endpoint "${REQUEST_ENDPOINT}"
         --isl-min "${ISL_MIN}"
         --isl-max "${ISL_MAX}"
@@ -1099,11 +1195,12 @@ send_request_workload() {
         --network host \
         -v "${RUN_DIR}:/work" \
         -v "${HF_HOME_HOST}:/work/hf-home" \
+        "${HF_TOKEN_DOCKER_MOUNTS[@]}" \
         -e "HF_HOME=/work/hf-home" \
         -e "HF_HUB_CACHE=/work/hf-home/hub" \
         -e "TRANSFORMERS_CACHE=/work/hf-home/transformers" \
-        -e "HF_TOKEN=${HF_TOKEN:-}" \
         "${IMAGE}" \
+        "${HF_TOKEN_CONTAINER_PREFIX[@]}" \
         "${request_driver_cmd[@]}" || request_rc=$?
 
     REQUEST_INDEX_OFFSET=$((REQUEST_INDEX_OFFSET + request_count))
@@ -1146,7 +1243,10 @@ warm_decode_prefix_cache() {
                 "${WARMUP_WORKLOAD_IN_CONTAINER}" \
                 "${DECODE_PAST_KV}" \
                 "1" \
-                1 || warmup_rc=$?
+                1 \
+                0 \
+                0 \
+                "warmup" || warmup_rc=$?
             if [[ "${warmup_rc}" != "0" ]]; then
                 break 2
             fi
@@ -1255,6 +1355,9 @@ run docker run -d \
     --gpus "${GPUS}" \
     -v "${RUN_DIR}:/work" \
     -v "${HF_HOME_HOST}:/work/hf-home" \
+    -v "${VLLM_CACHE_HOST}:/home/dynamo/.cache/vllm" \
+    -v "${VLLM_CACHE_HOST}:/root/.cache/vllm" \
+    "${HF_TOKEN_DOCKER_MOUNTS[@]}" \
     "${NSYS_DOCKER_MOUNTS[@]}" \
     "${WORKER_DOCKER_ENV[@]}" \
     -e "DYN_FORWARDPASS_METRIC_PORT=${FPM_PORT}" \
@@ -1262,8 +1365,8 @@ run docker run -d \
     -e "HF_HOME=/work/hf-home" \
     -e "HF_HUB_CACHE=/work/hf-home/hub" \
     -e "TRANSFORMERS_CACHE=/work/hf-home/transformers" \
-    -e "HF_TOKEN=${HF_TOKEN:-}" \
     "${IMAGE}" \
+    "${HF_TOKEN_CONTAINER_PREFIX[@]}" \
     "${WORKER_CONTAINER_CMD[@]}"
 
 if [[ "${DRY_RUN}" != "1" ]]; then
@@ -1291,7 +1394,9 @@ if [[ "${SKIP_REQUESTS}" != "1" && "${WARMUP_REQUESTS}" != "0" ]]; then
         "${WARMUP_ISL_VALUES}" \
         "${WARMUP_OSL_VALUES}" \
         0 \
-        1000000000
+        1000000000 \
+        0 \
+        "warmup"
     if [[ "${DRY_RUN}" != "1" ]]; then
         log "Waiting ${POST_WARMUP_SECONDS}s after warmup before starting FPM collector"
         sleep "${POST_WARMUP_SECONDS}"
@@ -1312,7 +1417,8 @@ run docker run -d \
     python3 /work/fpm_collect.py \
         --port "${FPM_PORT}" \
         --output "${COLLECTOR_OUTPUT_IN_CONTAINER}" \
-        --detail-output "${COLLECTOR_DETAIL_IN_CONTAINER}"
+        --detail-output "${COLLECTOR_DETAIL_IN_CONTAINER}" \
+        --segment-file "${SEGMENT_IN_CONTAINER}"
 
 if [[ "${DRY_RUN}" != "1" ]]; then
     # Avoid ZMQ slow-joiner loss on the first prefill iteration.
@@ -1338,7 +1444,10 @@ send_sweep_workloads() {
             "${REQUEST_WORKLOAD_IN_CONTAINER}" \
             "${CONTEXT_ISL_VALUES}" \
             "${CONTEXT_OSL}" \
-            1 || sweep_rc=$?
+            1 \
+            0 \
+            0 \
+            "sweep" || sweep_rc=$?
     fi
 
     if phase_enabled decode; then
@@ -1357,7 +1466,10 @@ send_sweep_workloads() {
                     "${REQUEST_WORKLOAD_IN_CONTAINER}" \
                     "${DECODE_PAST_KV}" \
                     "${DECODE_OSL}" \
-                    1 || sweep_rc=$?
+                    1 \
+                    0 \
+                    0 \
+                    "sweep" || sweep_rc=$?
             done
         done
     fi
@@ -1372,7 +1484,10 @@ send_sweep_workloads() {
                 "${REQUEST_WORKLOAD_IN_CONTAINER}" \
                 "${MIX_ISL_VALUES}" \
                 "${MIX_OSL_VALUES}" \
-                1 || sweep_rc=$?
+                1 \
+                0 \
+                0 \
+                "sweep" || sweep_rc=$?
         done
     fi
 
@@ -1380,7 +1495,10 @@ send_sweep_workloads() {
 }
 
 send_real_workload() {
-    rm -f "${REQUEST_WORKLOAD_CSV}"
+    local append_workload="${1:-0}"
+    if [[ "${append_workload}" != "1" ]]; then
+        rm -f "${REQUEST_WORKLOAD_CSV}"
+    fi
     send_request_workload \
         "real" \
         "request-driver-real" \
@@ -1389,18 +1507,22 @@ send_real_workload() {
         "${REQUEST_WORKLOAD_IN_CONTAINER}" \
         "" \
         "" \
-        1 \
+        "${append_workload}" \
         2000000000 \
-        1
+        1 \
+        "real"
 }
 
 REQUEST_SEND_RC=0
 if [[ "${SKIP_REQUESTS}" == "1" ]]; then
     log "Skipping sample requests. Collector is running; send traffic to http://127.0.0.1:${HTTP_PORT}."
-elif [[ "${WORKLOAD_PLAN}" == "sweep" && "${REAL_WORKLOAD}" == "1" ]]; then
-    send_real_workload || REQUEST_SEND_RC=$?
 elif [[ "${WORKLOAD_PLAN}" == "sweep" ]]; then
-    send_sweep_workloads || REQUEST_SEND_RC=$?
+    if [[ "${RUN_SWEEP}" == "1" ]]; then
+        send_sweep_workloads || REQUEST_SEND_RC=$?
+    fi
+    if [[ "${RUN_REAL_WORKLOAD}" == "1" && "${REQUEST_SEND_RC}" == "0" ]]; then
+        send_real_workload "${RUN_SWEEP}" || REQUEST_SEND_RC=$?
+    fi
 else
     send_request_workload \
         "measured" \
@@ -1410,7 +1532,10 @@ else
         "${REQUEST_WORKLOAD_IN_CONTAINER}" \
         "${ISL_VALUES}" \
         "${OSL_VALUES}" \
-        0 || REQUEST_SEND_RC=$?
+        0 \
+        0 \
+        0 \
+        "legacy" || REQUEST_SEND_RC=$?
 fi
 
 stop_nsys_worker_collection

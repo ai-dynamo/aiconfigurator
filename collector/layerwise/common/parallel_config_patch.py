@@ -7,7 +7,8 @@ Supports three parallelism axes for MoE models:
   - attn_tp: tensor parallelism for attention (divides heads, intermediate_size)
   - moe_tp:  tensor parallelism within each expert (divides moe_intermediate_size)
   - ep:      expert parallelism (divides n_routed_experts / num_experts / num_local_experts)
-  Constraint: attn_tp == moe_tp * ep
+  Constraint: either attn_tp == moe_tp * ep for simulated MoE-TP/EP, or
+              moe_tp == 1 and ep is a TP-multiple for vLLM DP-backed EP.
 
 Reusable across trtllm, vllm, and sglang collectors.
 
@@ -99,9 +100,13 @@ def patch_for_parallelism(
     config, override_prefix = _decoder_config_view(root_config)
     is_moe = any((config.get(k, 0) or 0) > 0 for k in EXPERT_COUNT_KEYS)
 
-    if is_moe and attn_tp != moe_tp * ep:
+    legacy_moe_tp_ep = attn_tp == moe_tp * ep
+    vllm_effective_ep = moe_tp == 1 and ep >= attn_tp and ep % attn_tp == 0
+    if is_moe and not (legacy_moe_tp_ep or vllm_effective_ep):
         raise ValueError(
-            f"Constraint violated: attn_tp ({attn_tp}) != moe_tp ({moe_tp}) * ep ({ep})"
+            "Constraint violated: expected either "
+            f"attn_tp ({attn_tp}) == moe_tp ({moe_tp}) * ep ({ep}), "
+            f"or vLLM effective EP with moe_tp=1 and ep a multiple of attn_tp"
         )
 
     uses_intermediate_as_moe = (
@@ -125,6 +130,14 @@ def patch_for_parallelism(
         f"{override_prefix}num_key_value_heads": math.ceil(orig_kv_heads / attn_tp),
         f"{override_prefix}num_hidden_layers": num_hidden_layers,
     }
+    for linear_head_key in ("linear_num_key_heads", "linear_num_value_heads"):
+        orig_linear_heads = config.get(linear_head_key, 0) or 0
+        if orig_linear_heads > 0:
+            if orig_linear_heads % attn_tp != 0:
+                raise ValueError(
+                    f"{linear_head_key}={orig_linear_heads} not divisible by attn_tp={attn_tp}"
+                )
+            overrides[f"{override_prefix}{linear_head_key}"] = orig_linear_heads // attn_tp
     if not uses_intermediate_as_moe and orig_inter > 0:
         overrides[f"{override_prefix}intermediate_size"] = orig_inter // attn_tp
 

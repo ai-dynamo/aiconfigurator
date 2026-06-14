@@ -321,6 +321,11 @@ def get_moe_test_cases():
                     common_moe_testcase.model_name,
                     common_moe_testcase.token_expert_distribution,
                     common_moe_testcase.power_law_alpha,
+                    common_moe_testcase.shared_expert_inter_size,
+                    common_moe_testcase.max_model_len,
+                    common_moe_testcase.max_num_seqs,
+                    common_moe_testcase.max_num_batched_tokens,
+                    common_moe_testcase.use_cuda_graph,
                 ]
             )
 
@@ -971,10 +976,14 @@ def run_moe_torch(
                     "num_experts": num_experts,
                     "moe_tp_size": moe_tp_size,
                     "moe_ep_size": moe_ep_size,
-                    "distribution": _moe_distribution_label(
-                        distributed,
-                        power_law_alpha,
-                        use_cuda_graph=use_cuda_graph,
+                    "distribution": (
+                        "qwen_module_tp_block"
+                        if use_qwen_shared_module
+                        else _moe_distribution_label(
+                            distributed,
+                            power_law_alpha,
+                            use_cuda_graph=use_cuda_graph,
+                        )
                     ),
                     "latency": latency,
                     "vllm_max_model_len": max_model_len or "",

@@ -15,6 +15,7 @@ Work from the `aiconfigurator` repo unless the user points elsewhere. Use:
 - Expected vLLM: `0.20.1`; do not allow version mismatch unless explicitly accepted.
 - HF token: export `HF_TOKEN` directly, or set `HF_TOKEN_FILE` and export `HF_TOKEN="$(tr -d '\n' < "$HF_TOKEN_FILE")"`.
 - Model cache: set `HF_HOME`; default to `$HOME/.cache/huggingface` when unspecified.
+- vLLM compile/cache directory: set `VLLM_CACHE_HOST`; default to `$HOME/.cache/aic-vllm`. The wrapper mounts it to both `/home/dynamo/.cache/vllm` and `/root/.cache/vllm` so DeepGEMM, FlashInfer, TileLang, and torch compile artifacts survive worker restarts in Dynamo and root-run vLLM containers. For DeepSeek/TileLang paths, export `TILELANG_CACHE_DIR=/home/dynamo/.cache/vllm/tilelang` and `TILELANG_TMP_DIR=/home/dynamo/.cache/vllm/tilelang/tmp`.
 - Artifact directory: set `AIC_LAYERWISE_ARTIFACTS`; default to `$PWD/.tmp/layerwise-artifacts` when running from the repo.
 
 Prefer one deployment per sweep. For layerwise gap closure, collect `context,decode` first and add `mixed` only after those phases are understood. Always preserve `*_phase.csv`, `*_detail.csv`, and `*_workload.csv`; partial runs can still be valid for phases that finished.

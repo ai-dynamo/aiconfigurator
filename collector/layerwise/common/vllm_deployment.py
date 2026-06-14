@@ -17,6 +17,8 @@ CRITICAL_CONFIG_KEYS = (
     "model_config.max_model_len",
     "model_config.dtype",
     "cache_config.cache_dtype",
+    "cache_config.block_size",
+    "cache_config.mamba_cache_mode",
     "cache_config.enable_prefix_caching",
     "parallel_config.tensor_parallel_size",
     "parallel_config.pipeline_parallel_size",
@@ -29,6 +31,7 @@ CRITICAL_CONFIG_KEYS = (
     "compilation_config.pass_config",
     "attention_config.backend",
     "optimization_level",
+    "parallel_config.data_parallel_size",
 )
 
 
@@ -38,8 +41,10 @@ class VllmDeploymentConfig:
     max_model_len: int | None = None
     max_num_seqs: int | None = None
     max_num_batched_tokens: int | None = None
+    block_size: int | None = None
     gpu_memory_utilization: float | None = None
     tensor_parallel_size: int | None = None
+    data_parallel_size: int | None = None
     pipeline_parallel_size: int | None = None
     dtype: str | None = None
     kv_cache_dtype: str | None = None
@@ -59,6 +64,11 @@ class VllmRuntimeDefaults:
 def is_gpt_oss_model(model: str) -> bool:
     normalized = str(model).lower().replace("_", "-")
     return "gpt-oss" in normalized
+
+
+def is_deepseek_v4_model(model: str) -> bool:
+    normalized = str(model).lower().replace("_", "-")
+    return "deepseek-v4" in normalized
 
 
 def is_blackwell_system(system: str | None) -> bool:
@@ -114,6 +124,19 @@ def _apply_common_runtime_defaults(args: list[str]) -> None:
     _append_default_pair(args, "--generation-config", "vllm")
 
 
+def _apply_deepseek_v4_runtime_defaults(args: list[str]) -> None:
+    """Add vLLM's published DeepSeek-V4 recipe defaults when not overridden."""
+    _append_default_pair(args, "--block-size", "256")
+    _append_default_pair(
+        args,
+        "--compilation-config",
+        '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}',
+    )
+    if not has_cli_flag(args, "--attention-config", "--attention_config.use_fp4_indexer_cache"):
+        args.extend(["--attention-config", '{"use_fp4_indexer_cache":true}'])
+    _append_default_pair(args, "--tokenizer-mode", "deepseek_v4")
+
+
 def gpt_oss_runtime_defaults(
     *,
     model: str,
@@ -133,6 +156,13 @@ def gpt_oss_runtime_defaults(
     _apply_common_runtime_defaults(normalized_extra)
     resolved_kv_cache_dtype = kv_cache_dtype
     resolved_disable_prefix_caching = disable_prefix_caching
+    if is_deepseek_v4_model(model) and not resolved_kv_cache_dtype and not has_cli_flag(
+        normalized_extra, "--kv-cache-dtype"
+    ):
+        resolved_kv_cache_dtype = "fp8"
+    if is_deepseek_v4_model(model):
+        _apply_deepseek_v4_runtime_defaults(normalized_extra)
+
     if not is_gpt_oss_model(model):
         return VllmRuntimeDefaults(
             kv_cache_dtype=resolved_kv_cache_dtype,
@@ -177,10 +207,14 @@ def build_engine_args(config: VllmDeploymentConfig) -> list[str]:
         args.extend(["--max-num-seqs", str(config.max_num_seqs)])
     if config.max_num_batched_tokens is not None:
         args.extend(["--max-num-batched-tokens", str(config.max_num_batched_tokens)])
+    if config.block_size is not None:
+        args.extend(["--block-size", str(config.block_size)])
     if config.gpu_memory_utilization is not None:
         args.extend(["--gpu-memory-utilization", str(config.gpu_memory_utilization)])
     if config.tensor_parallel_size is not None:
         args.extend(["--tensor-parallel-size", str(config.tensor_parallel_size)])
+    if config.data_parallel_size is not None:
+        args.extend(["--data-parallel-size", str(config.data_parallel_size)])
     if config.pipeline_parallel_size is not None:
         args.extend(["--pipeline-parallel-size", str(config.pipeline_parallel_size)])
     if config.dtype:
@@ -368,6 +402,7 @@ def _add_config_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-num-batched-tokens", type=int)
     parser.add_argument("--gpu-memory-utilization", type=float)
     parser.add_argument("--tensor-parallel-size", type=int)
+    parser.add_argument("--data-parallel-size", type=int)
     parser.add_argument("--pipeline-parallel-size", type=int)
     parser.add_argument("--dtype")
     parser.add_argument("--kv-cache-dtype")
@@ -385,6 +420,7 @@ def _config_from_args(args: argparse.Namespace) -> VllmDeploymentConfig:
         max_num_batched_tokens=args.max_num_batched_tokens,
         gpu_memory_utilization=args.gpu_memory_utilization,
         tensor_parallel_size=args.tensor_parallel_size,
+        data_parallel_size=args.data_parallel_size,
         pipeline_parallel_size=args.pipeline_parallel_size,
         dtype=args.dtype,
         kv_cache_dtype=args.kv_cache_dtype,

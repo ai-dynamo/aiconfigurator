@@ -35,9 +35,11 @@ import fcntl
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import torch
 import torch.cuda.nvtx as nvtx
 
 logger = logging.getLogger(__name__)
@@ -107,6 +109,9 @@ def _write_progress(event, *, step, batch_size, past_kv, phase=None, **extra):
         "past_kv": int(past_kv),
         "ts": datetime.now(timezone.utc).isoformat(),
     }
+    attempt_id = os.environ.get("LAYERWISE_ATTEMPT_ID")
+    if attempt_id not in (None, ""):
+        row["attempt_id"] = int(attempt_id)
     row.update(extra)
     with open(path, "a") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
@@ -394,6 +399,12 @@ def _run_marked_step(
                 "actual_past_kv": int(past_kv),
             }
         )
+    if control.get("trigger"):
+        progress_extra["trigger"] = control.get("trigger")
+    if control.get("live_step_driver"):
+        progress_extra["live_step_driver"] = True
+    if forced_run is not None:
+        progress_extra["run"] = int(forced_run)
     label_step = step if forced_step is None else int(forced_step)
     label_bs = batch_size if forced_bs is None else int(forced_bs)
     label_past = past_kv if forced_past is None else int(forced_past)
@@ -410,13 +421,18 @@ def _run_marked_step(
     )
     nvtx.range_push(label)
     try:
+        execute_start = time.perf_counter()
         ret = orig(runner, scheduler_output, intermediate_tensors)
+        if control.get("sync_execute_model_wall_time") or control.get("live_step_driver"):
+            torch.cuda.synchronize()
+        execute_model_wall_time_ms = (time.perf_counter() - execute_start) * 1000.0
         _write_progress(
             "completed_execution",
             step=label_step,
             batch_size=label_bs,
             past_kv=label_past,
             phase=forced_phase,
+            execute_model_wall_time_ms=execute_model_wall_time_ms,
             **progress_extra,
         )
         return ret

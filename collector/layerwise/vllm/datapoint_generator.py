@@ -18,6 +18,7 @@ sys.path.insert(0, str(_COMMON_DIR))
 
 from config_patch import patch_model_path
 from parallel_config_patch import EXPERT_COUNT_KEYS, _load_original_config, patch_for_parallelism
+from vllm_deployment import gpt_oss_runtime_defaults, has_cli_flag
 
 try:
     from .data import DataPoint, RepresentativeLayer, WorkUnit
@@ -25,6 +26,7 @@ try:
     from .runtime import (
         _get_system_name,
         _get_vllm_default_max_num_seqs,
+        _get_vllm_deployment_max_num_batched_tokens,
         _get_vllm_version,
         _infer_default_max_num_seqs_from_system,
         _parse_ints,
@@ -36,6 +38,7 @@ except ImportError:  # pragma: no cover - direct script compatibility
     from runtime import (
         _get_system_name,
         _get_vllm_default_max_num_seqs,
+        _get_vllm_deployment_max_num_batched_tokens,
         _get_vllm_version,
         _infer_default_max_num_seqs_from_system,
         _parse_ints,
@@ -121,16 +124,25 @@ def _resolve_real_weight_model_dir(model: str) -> str:
 def ep_sizes_for_model(model: LayerwiseModel, raw_ep_sizes: str, tp: int) -> list[int]:
     """Resolve vLLM-parity EP sizes for one registry model and TP size.
 
-    vLLM does not expose an independent MoE-TP axis. With expert parallelism
-    enabled, MoE layers set local MoE TP to 1 and distribute experts over the
-    full TP/DP group. In this collector schema that means the deployment-parity
-    cases are TP-only (ep=1) and full expert parallel (ep=tp).
+    vLLM computes the effective expert-parallel degree as ``TP * DP`` when
+    expert parallelism is enabled. In this collector schema ``ep`` is that
+    effective degree, so valid deployment-parity cases are TP-only
+    (``ep=1``) or an effective EP degree representable by an integer DP size.
     """
     if not model.is_moe:
         return [1]
     parsed = parse_csv_ints_or_auto(raw_ep_sizes)
     candidates = list(model.ep_sizes) if parsed == "auto" else parsed
-    return [ep for ep in candidates if ep == 1 or ep == tp]
+    return [ep for ep in candidates if ep == 1 or (ep >= tp and ep % tp == 0)]
+
+
+def _passes_stub_memory_filter(model: LayerwiseModel, *, tp_size: int, ep_size: int) -> bool:
+    """Return whether a TP/EP config is eligible for layerwise collection."""
+
+    # TODO: Replace this stopgap with a real memory-fit check using AIC's model
+    # weight/KV/overhead estimator and backend-specific TP/EP sharding rules.
+    del model, tp_size, ep_size
+    return True
 
 
 def make_work_unit_args(
@@ -159,13 +171,15 @@ def make_work_unit_args(
         public_args.run_preset,
         max_decode_batch_size=max_decode_batch_size if phases in ("gen", "both") else None,
     )
-    moe_tp = tp_size // ep_size if model.is_moe else 1
+    if model.is_moe:
+        moe_tp = tp_size if ep_size == 1 else 1
+    else:
+        moe_tp = 1
     moe_dummy_router = bool(getattr(public_args, "moe_dummy_router", False))
     use_moe_noop = public_args.moe_noop or (
         model.is_moe
         and not public_args.moe_real_router
         and not moe_dummy_router
-        and phases != "ctx"
     )
     return argparse.Namespace(
         model=model.model,
@@ -176,6 +190,7 @@ def make_work_unit_args(
         framework_version=public_args.framework_version,
         tp_sizes=str(tp_size),
         moe_tp=moe_tp,
+        effective_ep_size=ep_size if model.is_moe else 1,
         num_slots=model.num_slots,
         moe_noop=use_moe_noop,
         target_layer_count=target_layer_count,
@@ -190,7 +205,9 @@ def make_work_unit_args(
         max_num_seqs=public_args.max_num_seqs,
         max_num_batched_tokens=public_args.max_num_batched_tokens,
         max_model_len=public_args.max_model_len,
+        gpu_memory_utilization=public_args.gpu_memory_utilization,
         gen_driver=model.gen_driver,
+        live_step_driver=public_args.live_step_driver,
         latency_source=public_args.latency_source,
         gemm_quant=model.gemm_quant,
         moe_quant=model.moe_quant,
@@ -200,6 +217,11 @@ def make_work_unit_args(
         physical_tp=public_args.physical_tp,
         allow_multi_gpu_diagnostic=bool(getattr(public_args, "allow_multi_gpu_diagnostic", False)),
         physical_tp_real_weights=public_args.physical_tp_real_weights,
+        default_gen_target_layer_count=(
+            public_args.target_layer_count is None
+            and phases == "gen"
+            and public_args.gen_target_layer_count == 1
+        ),
     )
 
 
@@ -213,6 +235,8 @@ def build_public_work_units(public_args: argparse.Namespace, models: list[Layerw
             if tp not in model.tp_sizes:
                 continue
             for ep in ep_sizes_for_model(model, public_args.ep_sizes, tp):
+                if not _passes_stub_memory_filter(model, tp_size=tp, ep_size=ep):
+                    continue
                 for phase in phases:
                     work_units.extend(
                         build_work_units(make_work_unit_args(public_args, model, tp_size=tp, ep_size=ep, phase=phase))
@@ -388,6 +412,25 @@ def _is_moe_config(config: dict[str, Any]) -> bool:
     config = _decoder_config_view(config)
     return any((config.get(k, 0) or 0) > 0 for k in EXPERT_COUNT_KEYS)
 
+def _has_shared_expert_moe_config(config: dict[str, Any]) -> bool:
+    config = _decoder_config_view(config)
+    for key in (
+        "n_shared_experts",
+        "num_shared_experts",
+        "shared_expert_intermediate_size",
+        "shared_expert_inter_size",
+        "moe_shared_expert_intermediate_size",
+    ):
+        raw = config.get(key)
+        if raw in (None, "") or isinstance(raw, bool):
+            continue
+        try:
+            if float(raw) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
 def _is_all_moe_config(config: dict[str, Any]) -> bool:
     config = _decoder_config_view(config)
     model_type = str(config.get("model_type") or "").lower()
@@ -467,6 +510,11 @@ def _build_datapoints(
                 datapoints.append(DataPoint("gen", batch_size, 1, past_kv))
     return datapoints
 
+def _live_step_gen_would_handle(datapoint: DataPoint) -> bool:
+    """Mirror live-step decode deployment eligibility without importing worker."""
+
+    return datapoint.phase == "gen" and int(datapoint.past_kv) > 0
+
 def _model_max_position_embeddings(config: dict[str, Any]) -> int | None:
     config = _decoder_config_view(config)
     for key in ("max_position_embeddings", "model_max_length", "seq_length", "n_positions"):
@@ -516,6 +564,7 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
     max_num_seqs = getattr(args, "max_num_seqs", None)
     max_num_batched_tokens = getattr(args, "max_num_batched_tokens", None)
     max_model_len = getattr(args, "max_model_len", None)
+    gpu_memory_utilization = getattr(args, "gpu_memory_utilization", 0.9)
     physical_tp = bool(getattr(args, "physical_tp", False))
     if physical_tp and not bool(getattr(args, "allow_multi_gpu_diagnostic", False)):
         raise ValueError(
@@ -528,24 +577,45 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
     orig_decoder_config = _decoder_config_view(orig_config)
     orig_layer_count = int(orig_decoder_config.get("num_hidden_layers") or 0)
     target_layer_count = args.target_layer_count
-    if target_layer_count == 0:
-        if orig_layer_count < 1:
-            raise ValueError("target_layer_count=0 requires config num_hidden_layers")
-        target_layer_count = orig_layer_count
     is_moe = _is_moe_config(orig_config)
     explicit_target_layers = (
         _parse_ints(args.target_layers) if getattr(args, "target_layers", None) else None
     )
     moe_noop = bool(getattr(args, "moe_noop", False) and is_moe)
     requested_latency_source = str(getattr(args, "latency_source", "span"))
+    shared_moe_gen_schedule_envelope = (
+        args.phases == "gen"
+        and is_moe
+        and moe_noop
+        and _has_shared_expert_moe_config(orig_config)
+        and requested_latency_source in {"auto", "schedule_to_update", "worker_wall"}
+        and bool(getattr(args, "default_gen_target_layer_count", False))
+        and explicit_target_layers is None
+        and getattr(args, "target_layer_config_depth", None) is None
+    )
+    dense_gen_schedule_envelope = (
+        args.phases == "gen"
+        and not is_moe
+        and requested_latency_source in {"auto", "schedule_to_update", "worker_wall"}
+        and bool(getattr(args, "default_gen_target_layer_count", False))
+        and explicit_target_layers is None
+        and getattr(args, "target_layer_config_depth", None) is None
+    )
+    if target_layer_count == 0 or shared_moe_gen_schedule_envelope or dense_gen_schedule_envelope:
+        if orig_layer_count < 1:
+            raise ValueError("target_layer_count=0 requires config num_hidden_layers")
+        target_layer_count = orig_layer_count
     context_schedule_envelope = (
         args.phases == "ctx"
-        and requested_latency_source in {"schedule_to_update", "worker_wall"}
+        and requested_latency_source in {"auto", "schedule_to_update", "worker_wall"}
+    )
+    moe_gen_schedule_envelope = (
+        shared_moe_gen_schedule_envelope
     )
     layer_schedule, num_hidden_layers, extra_overrides = _detect_layer_schedule(
         orig_config, target_layer_count,
         explicit_target_layers, args.target_layer_config_depth,
-        expand_layer_types=not context_schedule_envelope,
+        expand_layer_types=not (context_schedule_envelope or moe_gen_schedule_envelope),
     )
 
     work_dir = Path(args.work_dir).resolve()
@@ -577,12 +647,61 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
             raise ValueError("all datapoints exceed the model's configured max length")
     work_units: list[WorkUnit] = []
     for tp in tp_sizes:
-        if is_moe and tp % args.moe_tp != 0:
-            print(f"[skip] tp={tp} not divisible by moe_tp={args.moe_tp}")
-            continue
+        requested_effective_ep = int(getattr(args, "effective_ep_size", 0) or 0)
         attn_tp = tp
-        moe_tp = args.moe_tp if is_moe else 1
-        ep = (tp // moe_tp) if is_moe else 1
+        if is_moe:
+            if requested_effective_ep:
+                ep = requested_effective_ep
+                moe_tp = tp if ep == 1 else 1
+                if ep != 1 and (ep < tp or ep % tp != 0):
+                    print(
+                        f"[skip] effective_ep_size={ep} is not representable "
+                        f"for tp={tp}; vLLM EP is TP * DP"
+                    )
+                    continue
+            else:
+                if tp % args.moe_tp != 0:
+                    print(f"[skip] tp={tp} not divisible by moe_tp={args.moe_tp}")
+                    continue
+                moe_tp = args.moe_tp
+                ep = tp // moe_tp
+        else:
+            moe_tp = 1
+            ep = 1
+        deployment_extra_args = list(getattr(args, "extra_vllm_arg", ()) or ())
+        if is_moe and ep > 1:
+            deployment_extra_args.append("--enable-expert-parallel")
+        gen_datapoints = [dp for dp in datapoints if dp.phase == "gen"]
+        live_step_gen_deployment = (
+            gen_driver == "live_decode"
+            or (
+                bool(getattr(args, "live_step_driver", False))
+                and bool(gen_datapoints)
+                and all(_live_step_gen_would_handle(dp) for dp in gen_datapoints)
+            )
+        )
+        if live_step_gen_deployment and not has_cli_flag(
+            deployment_extra_args, "--enable-prefix-caching", "--no-enable-prefix-caching"
+        ):
+            deployment_extra_args.append("--no-enable-prefix-caching")
+        runtime_defaults = gpt_oss_runtime_defaults(
+            model=args.model,
+            system=system,
+            extra_args=tuple(deployment_extra_args),
+        )
+        resolved_max_num_batched_tokens = max_num_batched_tokens
+        if resolved_max_num_batched_tokens is None and (
+            any(dp.phase == "ctx" for dp in datapoints) or live_step_gen_deployment
+        ):
+            resolved_max_num_batched_tokens = _get_vllm_deployment_max_num_batched_tokens(
+                model=args.model,
+                tensor_parallel_size=tp,
+                max_num_seqs=max_num_seqs,
+                max_model_len=max_model_len,
+                gpu_memory_utilization=gpu_memory_utilization,
+                extra_args=runtime_defaults.extra_args,
+            )
+        resolved_cache_block_size = None
         if physical_tp and ep != 1 and (not is_moe or moe_tp != 1):
             print(
                 "[skip] physical TP diagnostic with EP currently supports MoE pure-EP only, "
@@ -678,6 +797,16 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
                 and "moe" in representative.layer_type.lower()
             )
             final_extra_vllm_args = work_unit_extra_vllm_args
+            if (
+                live_step_gen_deployment
+                and has_cli_flag(deployment_extra_args, "--no-enable-prefix-caching")
+                and not has_cli_flag(
+                    final_extra_vllm_args,
+                    "--enable-prefix-caching",
+                    "--no-enable-prefix-caching",
+                )
+            ):
+                final_extra_vllm_args = (*final_extra_vllm_args, "--no-enable-prefix-caching")
             work_units.append(WorkUnit(
                 work_unit_id=_work_unit_id(
                     row_base,
@@ -694,8 +823,10 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
                 datapoints=datapoints,
                 model_layer_count=num_hidden_layers,
                 max_num_seqs=max_num_seqs,
-                max_num_batched_tokens=max_num_batched_tokens,
+                max_num_batched_tokens=resolved_max_num_batched_tokens,
+                cache_block_size=resolved_cache_block_size,
                 max_model_len=max_model_len,
+                gpu_memory_utilization=gpu_memory_utilization,
                 gen_driver=gen_driver,
                 extra_vllm_args=final_extra_vllm_args,
                 moe_noop=moe_noop,

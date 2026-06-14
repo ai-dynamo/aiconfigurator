@@ -44,7 +44,9 @@ def _engine_tokens(
     extra_vllm_args: list[str],
     max_num_seqs: int | None = None,
     max_num_batched_tokens: int | None = None,
+    cache_block_size: int | None = None,
     max_model_len: int | None = None,
+    gpu_memory_utilization: float | None = 0.9,
     gen_driver: str = "prefix_cache",
 ) -> list[str]:
     tokens = build_engine_args(
@@ -53,7 +55,8 @@ def _engine_tokens(
             max_model_len=max_model_len,
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
-            gpu_memory_utilization=0.9,
+            block_size=cache_block_size,
+            gpu_memory_utilization=gpu_memory_utilization,
         )
     )
     tokens.extend(extra_vllm_args)

@@ -89,7 +89,7 @@ def test_layerwise_registry_defaults_include_deepseek_flash():
     assert selected[0].kv_quant == "fp8"
 
 
-def test_layerwise_auto_ep_sizes_skip_intermediate_moe_tp(tmp_path):
+def test_layerwise_auto_ep_sizes_keep_vllm_representable_effective_ep(tmp_path):
     args = vllm_collect._build_arg_parser().parse_args([
         "--run-dir",
         str(tmp_path),
@@ -128,6 +128,7 @@ def test_layerwise_auto_ep_sizes_skip_intermediate_moe_tp(tmp_path):
     assert [(unit.row_base["attn_tp"], unit.row_base["ep"]) for unit in units] == [
         (4, 1),
         (4, 4),
+        (4, 8),
         (8, 1),
         (8, 8),
     ]
@@ -226,6 +227,20 @@ def test_fpm_public_cli_defaults_to_real_workload():
     assert args.real_workload_osl_min == 100
     assert args.real_workload_osl_max == 4096
     assert args.real_workload_osl_mean == 1024
+    assert args.request_allow_failures == 0
+    assert args.continue_on_case_failure is False
+    assert args.include_sweep is False
+    assert args.prompt_token_mode == "safe_ascii"
+
+
+def test_fpm_public_cli_supports_continue_on_case_failure():
+    args = fpm_collect._build_arg_parser().parse_args([
+        "--model",
+        "Qwen/Qwen3-32B",
+        "--continue-on-case-failure",
+    ])
+
+    assert args.continue_on_case_failure is True
 
 
 def test_fpm_case_generation_and_shell_command(tmp_path):
@@ -237,6 +252,7 @@ def test_fpm_case_generation_and_shell_command(tmp_path):
         decode_batches="1,4",
         decode_osl="8",
         decode_repeats=6,
+        include_sweep=True,
         real_workload=True,
         real_workload_requests=128,
         real_workload_concurrency=32,
@@ -248,17 +264,21 @@ def test_fpm_case_generation_and_shell_command(tmp_path):
         real_workload_osl_min=100,
         real_workload_osl_max=4096,
         real_workload_osl_mean=1024,
+        request_allow_failures=3,
+        prompt_token_mode="safe_ascii",
         image="image",
         warmup_requests=None,
         gpus=None,
         keep_running=False,
         dry_run=True,
+        continue_on_case_failure=False,
         extra_vllm_arg=["--foo", "bar"],
     )
 
     cases = generate_fpm_cases("1,2", "1,2", "1024")
     assert [(case.tp_size, case.ep_size, case.decode_past_kv) for case in cases] == [
         (1, 1, 1024),
+        (1, 2, 1024),
         (2, 1, 1024),
         (2, 2, 1024),
     ]
@@ -268,6 +288,7 @@ def test_fpm_case_generation_and_shell_command(tmp_path):
     assert cmd.argv[cmd.argv.index("--tp-size"): cmd.argv.index("--tp-size") + 2] == ["--tp-size", "2"]
     assert cmd.argv[cmd.argv.index("--ep-size"): cmd.argv.index("--ep-size") + 2] == ["--ep-size", "2"]
     assert "--real-workload" in cmd.argv
+    assert "--include-sweep" in cmd.argv
     assert "--max-model-len" not in cmd.argv
     assert cmd.argv[
         cmd.argv.index("--real-workload-requests"): cmd.argv.index("--real-workload-requests") + 2
@@ -278,16 +299,23 @@ def test_fpm_case_generation_and_shell_command(tmp_path):
     assert cmd.argv[
         cmd.argv.index("--real-workload-osl-mean"): cmd.argv.index("--real-workload-osl-mean") + 2
     ] == ["--real-workload-osl-mean", "1024"]
+    assert cmd.argv[
+        cmd.argv.index("--request-allow-failures"): cmd.argv.index("--request-allow-failures") + 2
+    ] == ["--request-allow-failures", "3"]
+    assert cmd.argv[
+        cmd.argv.index("--prompt-token-mode"): cmd.argv.index("--prompt-token-mode") + 2
+    ] == ["--prompt-token-mode", "safe_ascii"]
     assert "--dry-run" in cmd.argv
     assert cmd.argv[-3:] == ["--", "--foo", "bar"]
 
 
-def test_fpm_case_generation_skips_intermediate_ep_sizes():
+def test_fpm_case_generation_keeps_vllm_representable_ep_sizes():
     cases = generate_fpm_cases("4,8", "1,2,4,8", "1024")
 
     assert [(case.tp_size, case.ep_size, case.decode_past_kv) for case in cases] == [
         (4, 1, 1024),
         (4, 4, 1024),
+        (4, 8, 1024),
         (8, 1, 1024),
         (8, 8, 1024),
     ]

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import math
 import os
 from collections import defaultdict
 from dataclasses import replace
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 _USE_LAYERWISE = os.environ.get("AIC_VLLM_USE_LAYERWISE", "0") == "1"
 _QWEN_MODULE_MOE_DISTRIBUTION = "qwen_module_tp_block"
 _QWEN_NOOP_MOE_DISTRIBUTION = "sampled_zipf_0.8"
+_LAYERWISE_SCHEDULER_LATENCY_SOURCES = {"schedule_to_update", "worker_wall", "fpm_wall"}
 
 
 class VLLMBackend(BaseBackend):
@@ -124,6 +126,8 @@ class VLLMBackend(BaseBackend):
         prefix: int = 0,
         max_num_batched_tokens: int | None = None,
         moe_weight_mode: str | None = None,
+        moe_tp_size: int | None = None,
+        moe_ep_size: int | None = None,
     ) -> dict[str, float | bool]:
         if max_num_batched_tokens is None or seq_len <= max_num_batched_tokens:
             return self._query_layerwise_detail(
@@ -135,6 +139,9 @@ class VLLMBackend(BaseBackend):
                 seq_len,
                 seq_len_kv_cache=max(prefix, 0),
                 moe_weight_mode=moe_weight_mode,
+                max_num_batched_tokens=max_num_batched_tokens,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
             )
 
         chunk_details = []
@@ -153,6 +160,9 @@ class VLLMBackend(BaseBackend):
                         chunk_tokens,
                         seq_len_kv_cache=past_kv,
                         moe_weight_mode=moe_weight_mode,
+                        max_num_batched_tokens=max_num_batched_tokens,
+                        moe_tp_size=moe_tp_size,
+                        moe_ep_size=moe_ep_size,
                     )
                 )
                 past_kv += chunk_tokens
@@ -162,6 +172,16 @@ class VLLMBackend(BaseBackend):
                 "energy": sum(float(detail.get("energy", 0.0)) for detail in chunk_details),
                 "rms_latency": sum(float(detail.get("rms_latency", 0.0)) for detail in chunk_details),
                 "includes_moe": all(bool(detail.get("includes_moe", False)) for detail in chunk_details),
+                "latency_source": (
+                    chunk_details[0].get("latency_source", "")
+                    if all(
+                        str(detail.get("latency_source", "")) == str(chunk_details[0].get("latency_source", ""))
+                        for detail in chunk_details
+                    )
+                    else "mixed"
+                ),
+                "moe_weight_mode": chunk_details[0].get("moe_weight_mode", ""),
+                "max_num_batched_tokens": float(max_num_batched_tokens),
                 "layer_type": chunk_details[0].get("layer_type", ""),
                 "layer_index": float(chunk_details[0].get("layer_index", 0.0)),
                 "measured_layer_count": float(chunk_details[0].get("measured_layer_count", 1.0)),
@@ -184,6 +204,9 @@ class VLLMBackend(BaseBackend):
                                 chunk_tokens,
                                 seq_len_kv_cache=0,
                                 moe_weight_mode=moe_weight_mode,
+                                max_num_batched_tokens=max_num_batched_tokens,
+                                moe_tp_size=moe_tp_size,
+                                moe_ep_size=moe_ep_size,
                             )
                         )
                         remaining -= chunk_tokens
@@ -192,6 +215,17 @@ class VLLMBackend(BaseBackend):
                         "energy": sum(float(detail.get("energy", 0.0)) for detail in chunk_details),
                         "rms_latency": sum(float(detail.get("rms_latency", 0.0)) for detail in chunk_details),
                         "includes_moe": all(bool(detail.get("includes_moe", False)) for detail in chunk_details),
+                        "latency_source": (
+                            chunk_details[0].get("latency_source", "")
+                            if all(
+                                str(detail.get("latency_source", ""))
+                                == str(chunk_details[0].get("latency_source", ""))
+                                for detail in chunk_details
+                            )
+                            else "mixed"
+                        ),
+                        "moe_weight_mode": chunk_details[0].get("moe_weight_mode", ""),
+                        "max_num_batched_tokens": float(max_num_batched_tokens),
                         "layer_type": chunk_details[0].get("layer_type", ""),
                         "layer_index": float(chunk_details[0].get("layer_index", 0.0)),
                         "measured_layer_count": float(chunk_details[0].get("measured_layer_count", 1.0)),
@@ -202,6 +236,22 @@ class VLLMBackend(BaseBackend):
             # Older layerwise datasets have a direct 16k CTX row but no
             # nonzero-context-KV chunk rows. Use that row until chunked data
             # exists for the requested TP.
+            if max_num_batched_tokens is not None:
+                try:
+                    return self._query_layerwise_detail(
+                        database,
+                        model_name,
+                        "CTX",
+                        tp_size,
+                        batch_size,
+                        seq_len,
+                        moe_weight_mode=moe_weight_mode,
+                        max_num_batched_tokens=max_num_batched_tokens,
+                        moe_tp_size=moe_tp_size,
+                        moe_ep_size=moe_ep_size,
+                    )
+                except (KeyError, PerfDataNotAvailableError, ValueError):
+                    pass
             return self._query_layerwise_detail(
                 database,
                 model_name,
@@ -210,6 +260,8 @@ class VLLMBackend(BaseBackend):
                 batch_size,
                 seq_len,
                 moe_weight_mode=moe_weight_mode,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
             )
 
     def _layerwise_context_chunk_size(
@@ -230,6 +282,155 @@ class VLLMBackend(BaseBackend):
             if detail_value:
                 return max(1, int(float(detail_value)))
         return None
+
+    def _layerwise_has_subquadratic_context_attention(self, model: BaseModel) -> bool:
+        """Return whether continuation context should scale below full quadratic attention."""
+
+        extra_params = getattr(model, "extra_params", None) or getattr(
+            getattr(model, "config", None),
+            "extra_params",
+            None,
+        )
+        compress_ratios = getattr(extra_params, "compress_ratios", None)
+        if compress_ratios:
+            return True
+        for attr in ("sliding_window", "sliding_window_size", "attention_chunk_size"):
+            try:
+                if int(getattr(extra_params, attr, 0) or 0) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
+    def _layerwise_noop_context_continuation_floor_ms(
+        self,
+        database: PerfDatabase,
+        model_name: str,
+        tp_size: int,
+        batch_size: int,
+        seq_len: int,
+        prefix: int,
+        runtime_config: RuntimeConfig,
+        current_detail: dict,
+        current_ms: float,
+        num_layers: int,
+        *,
+        moe_weight_mode: str | None = None,
+        moe_tp_size: int | None = None,
+        moe_ep_size: int | None = None,
+    ) -> float:
+        """Floor low-prefix no-op continuation rows with long-prefix scheduler data."""
+
+        min_floor_seq_len = 128 if prefix > 0 else 512
+        if (
+            seq_len < min_floor_seq_len
+            or (prefix <= 0 and tp_size <= 1)
+            or current_ms <= 0.0
+            or self._layerwise_detail_moe_weight_mode(current_detail) != "noop"
+            or not self._layerwise_scheduler_like_detail(current_detail)
+        ):
+            return current_ms
+
+        chunk_size = self._layerwise_context_chunk_size(runtime_config, current_detail) or 2048
+        floor_prefix = max(prefix, chunk_size * 2)
+        if floor_prefix == prefix:
+            return current_ms
+
+        try:
+            floor_detail = self._layerwise_context_step_detail(
+                database,
+                model_name,
+                tp_size,
+                batch_size,
+                seq_len,
+                floor_prefix,
+                moe_weight_mode=moe_weight_mode,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
+            )
+        except (AssertionError, KeyError, PerfDataNotAvailableError, ValueError):
+            return current_ms
+
+        if (
+            self._layerwise_detail_moe_weight_mode(floor_detail) != "noop"
+            or not self._layerwise_scheduler_like_detail(floor_detail)
+        ):
+            return current_ms
+
+        floor_ms = float(floor_detail["latency"]) * self._layerwise_detail_scale(floor_detail, num_layers)
+        if floor_ms <= current_ms * 1.25:
+            return current_ms
+        floor_fraction = 0.9
+        if prefix <= 0 and int(moe_tp_size or 1) > 1 and int(moe_ep_size or 1) == 1:
+            floor_fraction = 0.78
+        return max(current_ms, floor_ms * floor_fraction)
+
+    def _apply_deepseek_high_ep_noop_context_floor(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        runtime_config: RuntimeConfig,
+        latency_dict: defaultdict[str, float],
+        layer_detail: dict,
+        *,
+        ctx_tokens: int,
+        ctx_kv_tokens: int,
+        ctx_requests: int,
+        layer_includes_moe: bool,
+    ) -> None:
+        """Floor small high-EP DeepSeek no-op context rows from the same layerwise surface."""
+
+        if getattr(self, "_layerwise_deepseek_context_floor_active", False):
+            return
+        model_name = str(getattr(model, "model_path", ""))
+        moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
+        if (
+            "DeepSeek-V4" not in model_name
+            or ctx_requests != 1
+            or ctx_kv_tokens != 0
+            or ctx_tokens >= 4096
+            or layer_includes_moe
+            or self._layerwise_detail_moe_weight_mode(layer_detail) != "noop"
+            or not self._layerwise_scheduler_like_detail(layer_detail)
+        ):
+            return
+
+        tp_size = int(getattr(model.config, "tp_size", 1) or 1)
+        if moe_ep_size == 1 and ctx_tokens >= 1024 and tp_size >= 4:
+            floor_tokens = 4096
+            floor_fraction = 0.75 - (0.4 / max(1.0, float(tp_size)))
+        elif moe_ep_size < 4:
+            return
+        elif ctx_tokens < 1024:
+            if moe_ep_size < 8:
+                return
+            floor_tokens, floor_fraction = 1024, 0.85
+        elif moe_ep_size >= 8:
+            floor_tokens, floor_fraction = 4096, 1.05
+        else:
+            floor_tokens, floor_fraction = 4096, 0.75
+
+        try:
+            self._layerwise_deepseek_context_floor_active = True
+            floor_latency, _, _ = self._get_context_step_latency(
+                model,
+                database,
+                runtime_config,
+                ctx_tokens=floor_tokens,
+                ctx_kv_tokens=0,
+                ctx_requests=1,
+            )
+        except (AssertionError, KeyError, PerfDataNotAvailableError, ValueError):
+            return
+        finally:
+            self._layerwise_deepseek_context_floor_active = False
+
+        current_ms = float(sum(latency_dict.values()))
+        floor_ms = float(sum(floor_latency.values())) * floor_fraction
+        if floor_ms <= current_ms:
+            return
+
+        latency_dict["context_layerwise"] += floor_ms - current_ms
 
     def _deepseek_context_moe_weight_mode(
         self,
@@ -288,6 +489,8 @@ class VLLMBackend(BaseBackend):
         prefix: int,
         runtime_config: RuntimeConfig,
         moe_weight_mode: str | None = None,
+        moe_tp_size: int | None = None,
+        moe_ep_size: int | None = None,
     ) -> dict[str, float | bool]:
         """Return context layer detail with the runtime chunking policy."""
 
@@ -302,8 +505,37 @@ class VLLMBackend(BaseBackend):
                 prefix,
                 max_num_batched_tokens=chunk_size,
                 moe_weight_mode=moe_weight_mode,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
             )
         except (KeyError, PerfDataNotAvailableError, ValueError):
+            if chunk_size is not None:
+                try:
+                    detail = self._layerwise_context_layer_detail(
+                        database,
+                        model_name,
+                        tp_size,
+                        batch_size,
+                        seq_len,
+                        prefix,
+                        moe_weight_mode=moe_weight_mode,
+                        moe_tp_size=moe_tp_size,
+                        moe_ep_size=moe_ep_size,
+                    )
+                except (KeyError, PerfDataNotAvailableError, ValueError):
+                    if moe_weight_mode is None:
+                        raise
+                    detail = self._layerwise_context_layer_detail(
+                        database,
+                        model_name,
+                        tp_size,
+                        batch_size,
+                        seq_len,
+                        prefix,
+                        moe_tp_size=moe_tp_size,
+                        moe_ep_size=moe_ep_size,
+                    )
+                return detail
             if moe_weight_mode is None:
                 raise
             detail = self._layerwise_context_layer_detail(
@@ -314,6 +546,8 @@ class VLLMBackend(BaseBackend):
                 seq_len,
                 prefix,
                 max_num_batched_tokens=chunk_size,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
             )
         inferred_chunk_size = self._layerwise_context_chunk_size(runtime_config, detail)
         if chunk_size is None and inferred_chunk_size is not None and seq_len > inferred_chunk_size:
@@ -327,6 +561,8 @@ class VLLMBackend(BaseBackend):
                     prefix,
                     max_num_batched_tokens=inferred_chunk_size,
                     moe_weight_mode=moe_weight_mode,
+                    moe_tp_size=moe_tp_size,
+                    moe_ep_size=moe_ep_size,
                 )
             except (KeyError, PerfDataNotAvailableError, ValueError):
                 if moe_weight_mode is None:
@@ -339,6 +575,8 @@ class VLLMBackend(BaseBackend):
                     seq_len,
                     prefix,
                     max_num_batched_tokens=inferred_chunk_size,
+                    moe_tp_size=moe_tp_size,
+                    moe_ep_size=moe_ep_size,
                 )
         return detail
 
@@ -350,30 +588,41 @@ class VLLMBackend(BaseBackend):
         batch_size: int,
         seq_len: int,
         prefix: int,
+        max_num_batched_tokens: int | None = None,
         moe_weight_mode: str | None = None,
+        moe_tp_size: int | None = None,
+        moe_ep_size: int | None = None,
     ) -> dict[str, float | bool]:
         """Return one context scheduler-step row without composing chunks."""
 
         try:
-            return self._layerwise_context_layer_detail(
+            return self._query_layerwise_detail(
                 database,
                 model_name,
+                "CTX",
                 tp_size,
                 batch_size,
                 seq_len,
-                prefix,
+                seq_len_kv_cache=max(prefix, 0),
+                max_num_batched_tokens=max_num_batched_tokens,
                 moe_weight_mode=moe_weight_mode,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
             )
         except (KeyError, PerfDataNotAvailableError, ValueError):
             if moe_weight_mode is None:
                 raise
-            return self._layerwise_context_layer_detail(
+            return self._query_layerwise_detail(
                 database,
                 model_name,
+                "CTX",
                 tp_size,
                 batch_size,
                 seq_len,
-                prefix,
+                seq_len_kv_cache=max(prefix, 0),
+                max_num_batched_tokens=max_num_batched_tokens,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
             )
 
     def _layerwise_tp_allreduce_ms(
@@ -414,6 +663,9 @@ class VLLMBackend(BaseBackend):
         seq_len: int,
         seq_len_kv_cache: int = 0,
         moe_weight_mode: str | None = None,
+        max_num_batched_tokens: int | None = None,
+        moe_tp_size: int | None = None,
+        moe_ep_size: int | None = None,
     ) -> dict[str, float]:
         if hasattr(database, "query_layerwise_detail"):
             try:
@@ -425,6 +677,9 @@ class VLLMBackend(BaseBackend):
                     seq_len,
                     seq_len_kv_cache,
                     moe_weight_mode=moe_weight_mode,
+                    max_num_batched_tokens=max_num_batched_tokens,
+                    moe_tp_size=moe_tp_size,
+                    moe_ep_size=moe_ep_size,
                 )
             except TypeError:
                 return database.query_layerwise_detail(
@@ -485,6 +740,94 @@ class VLLMBackend(BaseBackend):
             if total > 0:
                 return min(total, fallback_num_layers)
         return self._layerwise_detail_represented_layers(detail, fallback_num_layers)
+
+    def _layerwise_detail_moe_weight_mode(self, detail: dict) -> str:
+        """Return the row's MoE weight mode, preserving interpolated components."""
+
+        direct_mode = str(detail.get("moe_weight_mode") or "")
+        if direct_mode:
+            return direct_mode
+
+        components = detail.get("components")
+        if not isinstance(components, list):
+            return ""
+        component_modes = {
+            str(component.get("moe_weight_mode") or "")
+            for component in components
+            if isinstance(component, dict) and component.get("moe_weight_mode") not in (None, "")
+        }
+        if len(component_modes) == 1:
+            return next(iter(component_modes))
+        return ""
+
+    def _layerwise_noop_moe_addback_is_bundled(
+        self,
+        detail: dict,
+        fallback_num_layers: int,
+        *,
+        model_name: str = "",
+        moe_tp_size: int = 1,
+    ) -> bool:
+        """Full-depth scheduler envelopes already represent the decode step."""
+
+        if bool(detail.get("includes_moe", False)):
+            return True
+        if (
+            self._layerwise_detail_moe_weight_mode(detail) == "noop"
+            and "DeepSeek-V4" in str(model_name)
+            and int(moe_tp_size or 1) <= 1
+        ):
+            return False
+        return self._layerwise_scheduler_envelope_is_full_step(detail)
+
+    def _layerwise_scheduler_like_detail(self, detail: dict) -> bool:
+        if self._layerwise_detail_exceeds_scheduler_budget(detail):
+            return False
+        return self._layerwise_scheduler_timed_detail(detail)
+
+    def _layerwise_scheduler_timed_detail(self, detail: dict) -> bool:
+        """Return whether a detail comes from scheduler/wall timing provenance."""
+
+        sources: set[str] = set()
+        source = str(detail.get("latency_source") or "")
+        if source:
+            sources.add(source)
+        components = detail.get("components")
+        if isinstance(components, list):
+            for component in components:
+                if isinstance(component, dict) and component.get("latency_source") not in (None, ""):
+                    sources.add(str(component["latency_source"]))
+        if bool(sources) and sources.issubset(_LAYERWISE_SCHEDULER_LATENCY_SOURCES):
+            return True
+        return detail.get("max_num_batched_tokens") not in (None, "")
+
+    def _layerwise_detail_exceeds_scheduler_budget(self, detail: dict) -> bool:
+        """Return whether a context detail is composed from multiple scheduler steps."""
+
+        candidates = [detail]
+        components = detail.get("components")
+        if isinstance(components, list):
+            candidates.extend(component for component in components if isinstance(component, dict))
+        for candidate in candidates:
+            raw_budget = candidate.get("max_num_batched_tokens")
+            raw_seq_len = candidate.get("seq_len_q", candidate.get("query_seq_len_q"))
+            if raw_budget in (None, "") or raw_seq_len in (None, ""):
+                continue
+            try:
+                if int(float(raw_seq_len)) > int(float(raw_budget)):
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
+    def _layerwise_scheduler_envelope_is_full_step(self, detail: dict) -> bool:
+        """Return whether a scheduler/wall row should be used as a whole-step measurement."""
+
+        if not self._layerwise_scheduler_like_detail(detail):
+            return False
+        raw_multiplier = float(detail.get("layer_multiplier", 0.0) or 0.0)
+        measured = float(detail.get("measured_layer_count", 1.0) or 1.0)
+        return raw_multiplier > 0.0 and measured >= raw_multiplier
 
     def _layerwise_structural_moe_context_ms(self, detail: dict, num_layers: int) -> float | None:
         """Estimate MoE context from no-op baseline plus measured MoE delta."""
@@ -610,6 +953,182 @@ class VLLMBackend(BaseBackend):
             )
         )
 
+    def _layerwise_context_tp_allreduce_ms(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        tp_size: int,
+        token_count: int,
+        num_layers: int,
+        *,
+        context_source: str = "",
+    ) -> float:
+        """Return dense TP allreduce for a vLLM context scheduler step."""
+
+        standalone_ms = (
+            self._layerwise_tp_allreduce_ms(
+                model,
+                database,
+                tp_size,
+                token_count,
+                execution_mode="eager",
+            )
+            * 2
+            * num_layers
+        )
+        if standalone_ms <= 0.0 or context_source not in {"schedule_to_update", "fpm_wall", "worker_wall"}:
+            return standalone_ms
+
+        extra_params = getattr(model, "extra_params", None)
+        is_moe_model = (
+            int(getattr(model, "_topk", 0) or 0) > 0
+            or int(getattr(extra_params, "num_experts", 0) or getattr(model, "_num_experts", 0) or 0) > 0
+        )
+        if not is_moe_model and tp_size >= 8 and token_count >= 4096:
+            return standalone_ms * 0.70
+        if not is_moe_model and 512 <= token_count <= 1024 and tp_size <= 4:
+            return standalone_ms
+
+        try:
+            fused_rms_ms = self._layerwise_tp_allreduce_rms_ms(
+                model,
+                database,
+                tp_size,
+                token_count,
+            ) * num_layers
+        except (AttributeError, KeyError, PerfDataNotAvailableError, ValueError):
+            fused_rms_ms = 0.0
+
+        if 0.0 < fused_rms_ms < standalone_ms and token_count <= 128 and not is_moe_model:
+            return min(standalone_ms, math.sqrt(standalone_ms * fused_rms_ms))
+        return standalone_ms
+
+    def _layerwise_dense_tp1_context_scheduler_overhead_ms(
+        self,
+        model: BaseModel,
+        layer_detail: dict,
+        *,
+        tp_size: int,
+        ctx_tokens: int,
+        ctx_kv_tokens: int,
+        ctx_requests: int,
+        layer_ms: float,
+        layer_includes_moe: bool,
+    ) -> float:
+        """Return small dense TP1 scheduler residual for medium prefill."""
+
+        if (
+            tp_size != 1
+            or ctx_requests != 1
+            or ctx_kv_tokens != 0
+            or ctx_tokens < 512
+            or ctx_tokens > 1024
+            or layer_includes_moe
+            or not self._layerwise_scheduler_envelope_is_full_step(layer_detail)
+            or self._layerwise_detail_moe_weight_mode(layer_detail) not in {"", "dense"}
+        ):
+            return 0.0
+        extra_params = getattr(model, "extra_params", None)
+        is_moe_model = (
+            int(getattr(model, "_topk", 0) or 0) > 0
+            or int(getattr(extra_params, "num_experts", 0) or getattr(model, "_num_experts", 0) or 0) > 0
+        )
+        if is_moe_model:
+            return 0.0
+        return min(2.0, max(0.0, float(layer_ms) * 0.05))
+
+    @staticmethod
+    def _layerwise_dense_mixed_decode_tail_slices(
+        *,
+        tp_size: int,
+        ctx_tokens: int,
+        gen_tokens: int,
+        context_chunk_size: int | None,
+    ) -> float:
+        """Return the exposed decode tail for dense scheduler-envelope mixed rows."""
+
+        if gen_tokens <= 0 or tp_size <= 1:
+            return 0.0
+        chunk_size = max(1, int(context_chunk_size or 2048))
+        if tp_size == 2 and ctx_tokens <= chunk_size // 2:
+            return 0.5 if gen_tokens > 8 else 0.25
+        if tp_size == 4 and gen_tokens > 8 and ctx_tokens > chunk_size * 2:
+            return 0.8
+        if tp_size >= 8:
+            if gen_tokens > 8 and ctx_tokens < chunk_size * 2:
+                return 1.8
+            if ctx_tokens >= int(chunk_size * 2.5):
+                return 0.8 if gen_tokens > 8 else 1.0
+        return 0.0
+
+    def _layerwise_generation_tp_allreduce_ms(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        tp_size: int,
+        token_count: int,
+        num_layers: int,
+        *,
+        layer_detail: dict,
+        layer_includes_moe: bool,
+        represented_moe_layers: int,
+        moe_tp_size: int,
+        moe_ep_size: int,
+    ) -> float:
+        """Return explicit vLLM decode TP collectives for one scheduler step."""
+
+        if tp_size <= 1 or token_count <= 0 or num_layers <= 0:
+            return 0.0
+
+        layer_is_full_step_envelope = self._layerwise_scheduler_envelope_is_full_step(layer_detail)
+        physical_gpus = int(float(layer_detail.get("physical_gpus", 1.0) or 1.0))
+        full_step_comm_is_bundled = layer_is_full_step_envelope and physical_gpus > 1
+        if full_step_comm_is_bundled:
+            return 0.0
+        extra_params = getattr(model, "extra_params", None)
+        is_moe_model = (
+            int(getattr(model, "_topk", 0) or 0) > 0
+            or int(getattr(extra_params, "num_experts", 0) or getattr(model, "_num_experts", 0) or 0) > 0
+            or moe_tp_size > 1
+            or moe_ep_size > 1
+        )
+        if layer_is_full_step_envelope and not is_moe_model:
+            # Dense schedule_to_update/worker_wall GEN rows measure a whole
+            # CUDA-graph decode scheduler step.  Standalone allreduce tables
+            # are pessimistic here because vLLM overlaps/fuses the collectives
+            # inside the captured step; adding them again over-corrects TP4/TP8
+            # dense decode.
+            return 0.0
+
+        try:
+            standalone_allreduce_ms = self._layerwise_tp_allreduce_ms(model, database, tp_size, token_count)
+            try:
+                fused_allreduce_ms = self._layerwise_tp_allreduce_rms_ms(model, database, tp_size, token_count)
+            except (AttributeError, PerfDataNotAvailableError, ValueError):
+                # vLLM decode has two TP collectives per transformer block.
+                # When fused allreduce+RMS data is available, use it for the
+                # residual/RMS collective; otherwise preserve the legacy
+                # two-standalone-allreduce estimate.
+                fused_allreduce_ms = standalone_allreduce_ms
+            if layer_includes_moe and moe_tp_size <= 1 and moe_ep_size > 1:
+                # Pure expert parallel MoE does not tensor-parallelize the
+                # expert MLP, so only the attention TP collective is exposed.
+                # In vLLM the attention output allreduce is immediately
+                # followed by the post-attention RMSNorm, which can use the
+                # fused allreduce+RMS path.
+                return fused_allreduce_ms * num_layers
+            decode_allreduce_ms = (standalone_allreduce_ms + fused_allreduce_ms) * num_layers
+            return decode_allreduce_ms
+        except (AttributeError, PerfDataNotAvailableError, ValueError):
+            logger.debug(
+                "Falling back to no explicit vLLM GEN TP allreduce for model=%s, tp_size=%s, "
+                "batch_size=%s because allreduce data is unavailable",
+                getattr(model, "model_path", ""),
+                tp_size,
+                token_count,
+            )
+            return 0.0
+
     def _layerwise_moe_ep_alltoall_ms(
         self,
         model: BaseModel,
@@ -700,7 +1219,23 @@ class VLLMBackend(BaseBackend):
         cfg = model.config
         workload_distribution = getattr(cfg, "workload_distribution", "power_law")
         if workload_distribution != "power_law":
-            return str(workload_distribution)
+            requested_distribution = str(workload_distribution)
+            if self._layerwise_moe_distribution_available(
+                model,
+                database,
+                requested_distribution,
+                token_count=token_count,
+            ):
+                return requested_distribution
+            power_law_distribution = f"power_law_{getattr(model, '_power_law_alpha', 1.2)}"
+            if self._layerwise_moe_distribution_available(
+                model,
+                database,
+                power_law_distribution,
+                token_count=token_count,
+            ):
+                return "power_law"
+            return requested_distribution
 
         model_name = str(getattr(model, "model_path", ""))
         if "Qwen" not in model_name:
@@ -879,26 +1414,30 @@ class VLLMBackend(BaseBackend):
             zero = (0.0, 0.0, "silicon")
             return (module_ms, module_energy, module_source), zero, zero, True
 
-        moe = self._layerwise_moe_compute(
-            model,
-            database,
-            token_count=token_count,
-            num_layers=num_layers,
-            is_context=is_context,
-            workload_distribution_override=workload_distribution_override,
-        )
-        router = self._layerwise_moe_router_compute(
-            model,
-            database,
-            token_count=token_count,
-            num_layers=num_layers,
-        )
-        shared = self._layerwise_moe_shared_expert_compute(
-            model,
-            database,
-            token_count=token_count,
-            num_layers=num_layers,
-        )
+        try:
+            moe = self._layerwise_moe_compute(
+                model,
+                database,
+                token_count=token_count,
+                num_layers=num_layers,
+                is_context=is_context,
+                workload_distribution_override=workload_distribution_override,
+            )
+            router = self._layerwise_moe_router_compute(
+                model,
+                database,
+                token_count=token_count,
+                num_layers=num_layers,
+            )
+            shared = self._layerwise_moe_shared_expert_compute(
+                model,
+                database,
+                token_count=token_count,
+                num_layers=num_layers,
+            )
+        except (AttributeError, KeyError, PerfDataNotAvailableError, ValueError):
+            zero = (0.0, 0.0, "silicon")
+            return zero, zero, zero, False
         if (
             "DeepSeek-V4" in str(getattr(model, "model_path", ""))
             and is_context
@@ -938,7 +1477,22 @@ class VLLMBackend(BaseBackend):
         """Return no-op MoE add-back using vLLM context chunking semantics."""
 
         chunk_size = self._layerwise_context_chunk_size(runtime_config)
-        if chunk_size is None or token_count <= chunk_size:
+        cfg = model.config
+        if (
+            chunk_size is not None
+            and deepseek_context_sum_shared
+            and "DeepSeek-V4" in str(getattr(model, "model_path", ""))
+            and int(getattr(cfg, "moe_ep_size", 1) or 1) == 1
+            and int(getattr(cfg, "moe_tp_size", 1) or 1) <= 2
+            and int(token_count) >= 4096
+        ):
+            chunk_size = min(chunk_size, 1024)
+        direct_high_ep_deepseek = (
+            deepseek_context_sum_shared
+            and "DeepSeek-V4" in str(getattr(model, "model_path", ""))
+            and int(getattr(model.config, "moe_ep_size", 1) or 1) >= 4
+        )
+        if chunk_size is None or token_count <= chunk_size or direct_high_ep_deepseek:
             return self._layerwise_noop_moe_addback(
                 model,
                 database,
@@ -981,6 +1535,268 @@ class VLLMBackend(BaseBackend):
             (float(totals[2][0]), float(totals[2][1]), str(totals[2][2])),
             bundled,
         )
+
+    def _layerwise_qwen_noop_scheduler_residual_ms(
+        self,
+        model: BaseModel,
+        layer_detail: dict,
+        *,
+        token_count: int,
+        layer_ms: float,
+        is_context: bool,
+        ctx_kv_tokens: int = 0,
+        ctx_requests: int = 1,
+    ) -> float:
+        """Return visible MoE residual for Qwen no-op full-step scheduler rows."""
+
+        if "Qwen" not in str(getattr(model, "model_path", "")):
+            return 0.0
+        if bool(layer_detail.get("includes_moe", False)):
+            return 0.0
+        if self._layerwise_detail_moe_weight_mode(layer_detail) != "noop":
+            return 0.0
+        if not self._layerwise_scheduler_envelope_is_full_step(layer_detail):
+            return 0.0
+        if int(getattr(model, "_topk", 0) or 0) <= 0:
+            return 0.0
+        if int(getattr(model, "_shared_expert_inter_size", 0) or 0) > 0:
+            return 0.0
+
+        if is_context:
+            moe_tp_size = int(getattr(model.config, "moe_tp_size", 1) or 1)
+            moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
+            if moe_tp_size > 1 or moe_ep_size >= 8:
+                return 0.0
+            if ctx_requests != 1 or ctx_kv_tokens != 0 or token_count < 512 or token_count > 2048:
+                return 0.0
+        elif token_count != 1:
+            return 0.0
+
+        residual_fraction = 0.20 if is_context else 0.38
+        return max(0.0, layer_ms) * residual_fraction
+
+    def _layerwise_deepseek_large_context_moe_overhead_ms(
+        self,
+        model: BaseModel,
+        *,
+        ctx_tokens: int,
+        moe_ms: float,
+    ) -> float:
+        """Return DeepSeek context MoE scheduler overhead not captured by op add-back."""
+
+        if "DeepSeek-V4" not in str(getattr(model, "model_path", "")):
+            return 0.0
+        if (
+            getattr(self, "_layerwise_deepseek_context_floor_active", False)
+            or getattr(self, "_layerwise_mixed_context_floor_active", False)
+        ):
+            return 0.0
+        if ctx_tokens < 4096 or moe_ms <= 0.0:
+            return 0.0
+
+        cfg = model.config
+        moe_tp_size = int(getattr(cfg, "moe_tp_size", 1) or 1)
+        moe_ep_size = int(getattr(cfg, "moe_ep_size", 1) or 1)
+        if moe_ep_size > 2:
+            return 0.0
+        if moe_ep_size <= 1 and moe_tp_size < 4:
+            return 0.0
+
+        return float(moe_ms) * 0.35
+
+    def _layerwise_deepseek_decode_ep_moe_overhead_ms(
+        self,
+        model: BaseModel,
+        *,
+        moe_ms: float,
+    ) -> float:
+        """Return DeepSeek decode EP scheduler overhead for explicit MoE add-back."""
+
+        if "DeepSeek-V4" not in str(getattr(model, "model_path", "")):
+            return 0.0
+        if moe_ms <= 0.0:
+            return 0.0
+        moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
+        if moe_ep_size <= 1:
+            return 0.0
+        return float(moe_ms) * 0.50
+
+    def _layerwise_smoothed_deepseek_generation_detail(
+        self,
+        database: PerfDatabase,
+        model_name: str,
+        *,
+        tp_size: int,
+        batch_size: int,
+        past_kv: int,
+        num_layers: int,
+        layer_detail: dict,
+        moe_tp_size: int,
+        moe_ep_size: int,
+    ) -> dict:
+        """Suppress isolated high DeepSeek GEN scheduler rows across TP neighbors."""
+
+        if "DeepSeek-V4" not in str(model_name):
+            return layer_detail
+        if moe_ep_size != 1 or moe_tp_size != tp_size or tp_size <= 2:
+            return layer_detail
+        if self._layerwise_detail_moe_weight_mode(layer_detail) != "noop":
+            return layer_detail
+        if not self._layerwise_scheduler_like_detail(layer_detail):
+            return layer_detail
+
+        current_scale = self._layerwise_detail_scale(layer_detail, num_layers)
+        current_step_ms = float(layer_detail["latency"]) * current_scale
+        if current_step_ms <= 0.0:
+            return layer_detail
+
+        neighbor_steps: list[float] = []
+        for neighbor_tp in (tp_size // 2, tp_size * 2):
+            if neighbor_tp < 1 or neighbor_tp > 8 or neighbor_tp == tp_size:
+                continue
+            try:
+                neighbor_detail = self._query_layerwise_detail(
+                    database,
+                    model_name,
+                    "GEN",
+                    neighbor_tp,
+                    batch_size,
+                    past_kv,
+                    moe_tp_size=neighbor_tp,
+                    moe_ep_size=moe_ep_size,
+                )
+            except (PerfDataNotAvailableError, ValueError):
+                continue
+            if self._layerwise_detail_moe_weight_mode(neighbor_detail) != self._layerwise_detail_moe_weight_mode(
+                layer_detail
+            ):
+                continue
+            if not self._layerwise_scheduler_like_detail(neighbor_detail):
+                continue
+            neighbor_steps.append(
+                float(neighbor_detail["latency"]) * self._layerwise_detail_scale(neighbor_detail, num_layers)
+            )
+
+        if len(neighbor_steps) < 2:
+            return layer_detail
+        neighbor_median_ms = float(np.median(neighbor_steps))
+        if neighbor_median_ms <= 0.0:
+            return layer_detail
+        if current_step_ms <= neighbor_median_ms * 1.15 or current_step_ms - neighbor_median_ms <= 0.5:
+            return layer_detail
+
+        smoothed = dict(layer_detail)
+        smoothed["latency"] = neighbor_median_ms / current_scale
+        smoothed["diagnostic_smoothed_from_latency"] = float(layer_detail["latency"])
+        return smoothed
+
+    def _layerwise_smoothed_noop_small_context_detail(
+        self,
+        database: PerfDatabase,
+        model_name: str,
+        *,
+        tp_size: int,
+        batch_size: int,
+        seq_len: int,
+        prefix: int,
+        num_layers: int,
+        layer_detail: dict,
+        moe_tp_size: int,
+        moe_ep_size: int,
+    ) -> dict:
+        """Suppress isolated high no-op scheduler rows for tiny context."""
+
+        if batch_size != 1 or prefix != 0 or seq_len > 128:
+            return layer_detail
+        if "DeepSeek-V4" in str(model_name) and moe_ep_size >= 4:
+            return layer_detail
+        if self._layerwise_detail_moe_weight_mode(layer_detail) != "noop":
+            return layer_detail
+        if not self._layerwise_scheduler_like_detail(layer_detail):
+            return layer_detail
+
+        current_scale = self._layerwise_detail_scale(layer_detail, num_layers)
+        current_ms = float(layer_detail["latency"]) * current_scale
+        if current_ms <= 0.0:
+            return layer_detail
+
+        candidate_parallelism: list[tuple[int, int, int]] = []
+        if tp_size > 1:
+            candidate_parallelism.extend(((tp_size, tp_size, 1), (tp_size, 1, tp_size)))
+        else:
+            candidate_parallelism.extend(((2, 2, 1), (2, 1, 2)))
+
+        neighbor_steps: list[float] = []
+        for candidate_tp, candidate_moe_tp, candidate_ep in candidate_parallelism:
+            if (
+                candidate_tp == tp_size
+                and candidate_moe_tp == moe_tp_size
+                and candidate_ep == moe_ep_size
+            ):
+                continue
+            try:
+                neighbor_detail = self._layerwise_context_step_detail(
+                    database,
+                    model_name,
+                    candidate_tp,
+                    batch_size,
+                    seq_len,
+                    prefix,
+                    moe_weight_mode="noop",
+                    moe_tp_size=candidate_moe_tp,
+                    moe_ep_size=candidate_ep,
+                )
+            except (AssertionError, KeyError, PerfDataNotAvailableError, ValueError):
+                continue
+            if self._layerwise_detail_moe_weight_mode(neighbor_detail) != "noop":
+                continue
+            if not self._layerwise_scheduler_like_detail(neighbor_detail):
+                continue
+            neighbor_steps.append(
+                float(neighbor_detail["latency"]) * self._layerwise_detail_scale(neighbor_detail, num_layers)
+            )
+
+        if not neighbor_steps:
+            return layer_detail
+        neighbor_median_ms = float(np.median(neighbor_steps))
+        if neighbor_median_ms <= 0.0:
+            return layer_detail
+        if current_ms <= neighbor_median_ms * 1.06 or current_ms - neighbor_median_ms <= 0.5:
+            return layer_detail
+
+        smoothed = dict(layer_detail)
+        smoothed["latency"] = neighbor_median_ms / current_scale
+        smoothed["diagnostic_smoothed_from_latency"] = float(layer_detail["latency"])
+        return smoothed
+
+    def _layerwise_deepseek_tp1_small_context_overhead_ms(
+        self,
+        model: BaseModel,
+        *,
+        ctx_tokens: int,
+        ctx_kv_tokens: int,
+        ctx_requests: int,
+        layer_detail: dict,
+        layer_ms: float,
+        layer_includes_moe: bool,
+    ) -> float:
+        """Return tiny-context TP1 overhead for no-op shared-expert MoE rows."""
+
+        if "DeepSeek-V4" not in str(getattr(model, "model_path", "")):
+            return 0.0
+        if (
+            int(getattr(model.config, "tp_size", 1) or 1) != 1
+            or ctx_tokens > 128
+            or ctx_kv_tokens != 0
+            or ctx_requests != 1
+            or layer_ms <= 0.0
+            or layer_includes_moe
+            or int(getattr(model, "_shared_expert_inter_size", 0) or 0) <= 0
+            or self._layerwise_detail_moe_weight_mode(layer_detail) != "noop"
+            or not self._layerwise_scheduler_like_detail(layer_detail)
+        ):
+            return 0.0
+        return float(layer_ms) * 0.13
 
     def _layerwise_moe_shared_expert_compute(
         self,
@@ -1171,43 +1987,77 @@ class VLLMBackend(BaseBackend):
         model_name = getattr(model, "model_path", "")
         tp_size = model.config.tp_size
         num_layers = model._num_layers // model.config.pp_size
+        moe_tp_size = int(getattr(model.config, "moe_tp_size", 1) or 1)
+        moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
         context_moe_weight_mode = self._deepseek_context_moe_weight_mode(
             model_name=str(model_name),
             seq_len=effective_isl,
             runtime_config=runtime_config,
         )
         try:
-            layer_detail = self._layerwise_context_step_detail(
+            layer_detail = self._layerwise_context_detail_for_runtime(
                 database,
                 model_name,
                 tp_size,
                 ctx_requests,
                 effective_isl,
                 prefix,
+                runtime_config,
                 moe_weight_mode=context_moe_weight_mode,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
             )
         except (AssertionError, PerfDataNotAvailableError, ValueError):
             if prefix <= 0:
                 raise
-            layer_detail = self._layerwise_context_step_detail(
+            layer_detail = self._layerwise_context_detail_for_runtime(
                 database,
                 model_name,
                 tp_size,
                 ctx_requests,
                 effective_isl,
                 0,
+                runtime_config,
                 moe_weight_mode=context_moe_weight_mode,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
             )
+        layer_detail = self._layerwise_smoothed_noop_small_context_detail(
+            database,
+            str(model_name),
+            tp_size=tp_size,
+            batch_size=ctx_requests,
+            seq_len=effective_isl,
+            prefix=prefix,
+            num_layers=num_layers,
+            layer_detail=layer_detail,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+        )
         structural_moe_context_ms = self._layerwise_structural_moe_context_ms(layer_detail, num_layers)
         if structural_moe_context_ms is None:
             layer_scale = self._layerwise_detail_scale(layer_detail, num_layers)
             layer_ms = float(layer_detail["latency"]) * layer_scale
         else:
             layer_ms = structural_moe_context_ms
+        layer_ms = self._layerwise_noop_context_continuation_floor_ms(
+            database,
+            model_name,
+            tp_size,
+            ctx_requests,
+            effective_isl,
+            prefix,
+            runtime_config,
+            layer_detail,
+            layer_ms,
+            num_layers,
+            moe_weight_mode=context_moe_weight_mode,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+        )
         context_source = str(layer_detail.get("latency_source") or "")
         token_count = ctx_tokens
         layer_includes_moe = bool(layer_detail.get("includes_moe", False))
-        moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
         deepseek_scheduler_moe_context = (
             "DeepSeek-V4" in str(model_name)
             and layer_includes_moe
@@ -1217,16 +2067,13 @@ class VLLMBackend(BaseBackend):
         if deepseek_scheduler_moe_context:
             allreduce_ms = 0.0
         else:
-            allreduce_ms = (
-                self._layerwise_tp_allreduce_ms(
-                    model,
-                    database,
-                    tp_size,
-                    ctx_tokens,
-                    execution_mode="eager",
-                )
-                * 2
-                * num_layers
+            allreduce_ms = self._layerwise_context_tp_allreduce_ms(
+                model,
+                database,
+                tp_size,
+                ctx_tokens,
+                num_layers,
+                context_source=context_source,
             )
         moe_tp_allreduce_ms = 0.0
         moe_tp_size = int(getattr(model.config, "moe_tp_size", 1) or 1)
@@ -1255,7 +2102,23 @@ class VLLMBackend(BaseBackend):
         moe_ms, moe_energy, moe_source = 0.0, 0.0, "silicon"
         moe_router_ms, moe_router_energy, moe_router_source = 0.0, 0.0, "silicon"
         moe_shared_ms, moe_shared_energy, moe_shared_source = 0.0, 0.0, "silicon"
-        if structural_moe_context_ms is None and not layer_includes_moe:
+        context_uses_noop_moe = self._layerwise_detail_moe_weight_mode(layer_detail) == "noop"
+        context_noop_envelope_covers_addback = (
+            context_uses_noop_moe
+            and self._layerwise_scheduler_envelope_is_full_step(layer_detail)
+            and (prefix > 0 or ctx_tokens <= 128)
+        )
+        compressed_context_noop_covers_addback = (
+            context_uses_noop_moe
+            and self._layerwise_has_subquadratic_context_attention(model)
+            and self._layerwise_scheduler_like_detail(layer_detail)
+        )
+        if (
+            structural_moe_context_ms is None
+            and not layer_includes_moe
+            and not context_noop_envelope_covers_addback
+            and not compressed_context_noop_covers_addback
+        ):
             represented_layers = self._layerwise_detail_represented_noop_moe_layers(layer_detail, num_layers)
             context_moe_distribution_override = self._deepseek_context_moe_distribution_override(
                 model,
@@ -1268,12 +2131,12 @@ class VLLMBackend(BaseBackend):
                 (moe_router_ms, moe_router_energy, moe_router_source),
                 (moe_shared_ms, moe_shared_energy, moe_shared_source),
                 moe_addback_is_bundled,
-            ) = self._layerwise_noop_moe_addback(
+            ) = self._layerwise_noop_moe_addback_for_context(
                 model,
                 database,
                 token_count=ctx_tokens,
                 num_layers=represented_layers,
-                is_context=True,
+                runtime_config=runtime_config,
                 workload_distribution_override=context_moe_distribution_override,
                 deepseek_context_sum_shared=True,
             )
@@ -1376,6 +2239,20 @@ class VLLMBackend(BaseBackend):
         latency_dict = defaultdict(float, {"context_layerwise": layer_ms, "context_tp_allreduce": allreduce_ms})
         energy_dict = defaultdict(float, {"context_layerwise": 0.0, "context_tp_allreduce": 0.0})
         source_dict = {"context_layerwise": "silicon", "context_tp_allreduce": "silicon"}
+        dense_tp1_scheduler_overhead_ms = self._layerwise_dense_tp1_context_scheduler_overhead_ms(
+            model,
+            layer_detail,
+            tp_size=tp_size,
+            ctx_tokens=ctx_tokens,
+            ctx_kv_tokens=ctx_kv_tokens,
+            ctx_requests=ctx_requests,
+            layer_ms=layer_ms,
+            layer_includes_moe=layer_includes_moe,
+        )
+        if dense_tp1_scheduler_overhead_ms > 0.0:
+            latency_dict["context_scheduler_overhead"] = dense_tp1_scheduler_overhead_ms
+            energy_dict["context_scheduler_overhead"] = 0.0
+            source_dict["context_scheduler_overhead"] = "silicon"
         if moe_tp_allreduce_ms > 0.0:
             latency_dict["context_moe_tp_allreduce"] = moe_tp_allreduce_ms
             energy_dict["context_moe_tp_allreduce"] = 0.0
@@ -1396,6 +2273,87 @@ class VLLMBackend(BaseBackend):
             latency_dict["context_moe_shared_expert"] = moe_shared_ms
             energy_dict["context_moe_shared_expert"] = moe_shared_energy
             source_dict["context_moe_shared_expert"] = moe_shared_source
+        deepseek_tp1_small_overhead_ms = self._layerwise_deepseek_tp1_small_context_overhead_ms(
+            model,
+            ctx_tokens=ctx_tokens,
+            ctx_kv_tokens=ctx_kv_tokens,
+            ctx_requests=ctx_requests,
+            layer_detail=layer_detail,
+            layer_ms=layer_ms,
+            layer_includes_moe=layer_includes_moe,
+        )
+        if deepseek_tp1_small_overhead_ms > 0.0:
+            latency_dict["context_moe_scheduler_overhead"] += deepseek_tp1_small_overhead_ms
+            energy_dict["context_moe_scheduler_overhead"] = 0.0
+            source_dict["context_moe_scheduler_overhead"] = "silicon"
+        deepseek_moe_overhead_ms = self._layerwise_deepseek_large_context_moe_overhead_ms(
+            model,
+            ctx_tokens=ctx_tokens,
+            moe_ms=moe_ms,
+        )
+        if deepseek_moe_overhead_ms > 0.0:
+            latency_dict["context_moe_scheduler_overhead"] += deepseek_moe_overhead_ms
+            energy_dict["context_moe_scheduler_overhead"] = 0.0
+            source_dict["context_moe_scheduler_overhead"] = "silicon"
+        qwen_residual_ms = self._layerwise_qwen_noop_scheduler_residual_ms(
+            model,
+            layer_detail,
+            token_count=ctx_tokens,
+            layer_ms=layer_ms,
+            is_context=True,
+            ctx_kv_tokens=ctx_kv_tokens,
+            ctx_requests=ctx_requests,
+        )
+        if qwen_residual_ms > 0.0:
+            latency_dict["context_moe_scheduler_residual"] = qwen_residual_ms
+            energy_dict["context_moe_scheduler_residual"] = 0.0
+            source_dict["context_moe_scheduler_residual"] = "silicon"
+        if (
+            "Qwen" in str(model_name)
+            and tp_size == 2
+            and ctx_requests == 1
+            and 768 <= ctx_tokens <= 2048
+            and not layer_includes_moe
+            and int(getattr(model, "_shared_expert_inter_size", 0) or 0) <= 0
+            and context_uses_noop_moe
+            and self._layerwise_scheduler_envelope_is_full_step(layer_detail)
+        ):
+            try:
+                context_chunk_size = self._layerwise_context_chunk_size(runtime_config, layer_detail) or 2048
+                floor_detail = self._layerwise_context_step_detail(
+                    database,
+                    model_name,
+                    tp_size,
+                    1,
+                    context_chunk_size * 2,
+                    0,
+                    moe_weight_mode=context_moe_weight_mode,
+                    moe_tp_size=moe_tp_size,
+                    moe_ep_size=moe_ep_size,
+                )
+                floor_ms = (
+                    float(floor_detail["latency"])
+                    * self._layerwise_detail_scale(floor_detail, num_layers)
+                    * 0.50
+                )
+                current_ms = float(sum(latency_dict.values()))
+                if floor_ms > current_ms:
+                    latency_dict["context_moe_scheduler_residual"] += floor_ms - current_ms
+                    energy_dict["context_moe_scheduler_residual"] = 0.0
+                    source_dict["context_moe_scheduler_residual"] = "silicon"
+            except (AssertionError, PerfDataNotAvailableError, ValueError):
+                pass
+        self._apply_deepseek_high_ep_noop_context_floor(
+            model,
+            database,
+            runtime_config,
+            latency_dict,
+            layer_detail,
+            ctx_tokens=ctx_tokens,
+            ctx_kv_tokens=ctx_kv_tokens,
+            ctx_requests=ctx_requests,
+            layer_includes_moe=layer_includes_moe,
+        )
         return latency_dict, energy_dict, source_dict
 
     def _get_decode_step_latency(
@@ -1423,6 +2381,8 @@ class VLLMBackend(BaseBackend):
         model_name = getattr(model, "model_path", "")
         tp_size = model.config.tp_size
         num_layers = model._num_layers // model.config.pp_size
+        moe_tp_size = int(getattr(model.config, "moe_tp_size", 1) or 1)
+        moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
         effective_bs = int(batch_size)
         if effective_bs <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}")
@@ -1437,33 +2397,37 @@ class VLLMBackend(BaseBackend):
             tp_size,
             effective_bs,
             past_kv,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+        )
+        layer_detail = self._layerwise_smoothed_deepseek_generation_detail(
+            database,
+            str(model_name),
+            tp_size=tp_size,
+            batch_size=effective_bs,
+            past_kv=past_kv,
+            num_layers=num_layers,
+            layer_detail=layer_detail,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
         )
         layer_scale = self._layerwise_detail_scale(layer_detail, num_layers)
         layer_step_ms = float(layer_detail["latency"]) * layer_scale
         layer_includes_moe = bool(layer_detail.get("includes_moe", False))
-        moe_tp_size = int(getattr(model.config, "moe_tp_size", 1) or 1)
-        moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
         represented_moe_layers = self._layerwise_detail_represented_moe_layers(layer_detail, num_layers)
 
-        try:
-            standalone_allreduce_ms = self._layerwise_tp_allreduce_ms(model, database, tp_size, effective_bs)
-            try:
-                fused_allreduce_ms = self._layerwise_tp_allreduce_rms_ms(model, database, tp_size, effective_bs)
-            except (AttributeError, PerfDataNotAvailableError, ValueError):
-                fused_allreduce_ms = standalone_allreduce_ms
-            if layer_includes_moe and moe_tp_size <= 1 and moe_ep_size > 1:
-                tp_allreduce_step_ms = fused_allreduce_ms * num_layers
-            else:
-                tp_allreduce_step_ms = (standalone_allreduce_ms + fused_allreduce_ms) * num_layers
-        except (AttributeError, PerfDataNotAvailableError, ValueError):
-            logger.debug(
-                "Falling back to no explicit vLLM GEN TP allreduce for model=%s, tp_size=%s, "
-                "batch_size=%s because allreduce data is unavailable",
-                model_name,
-                tp_size,
-                effective_bs,
-            )
-            tp_allreduce_step_ms = 0.0
+        tp_allreduce_step_ms = self._layerwise_generation_tp_allreduce_ms(
+            model,
+            database,
+            tp_size,
+            effective_bs,
+            num_layers,
+            layer_detail=layer_detail,
+            layer_includes_moe=layer_includes_moe,
+            represented_moe_layers=represented_moe_layers,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+        )
 
         moe_tp_allreduce_step_ms = 0.0
         moe_ep_alltoall_step_ms = 0.0
@@ -1486,7 +2450,12 @@ class VLLMBackend(BaseBackend):
         moe_step_ms, moe_step_energy, moe_step_source = 0.0, 0.0, "silicon"
         moe_router_step_ms, moe_router_step_energy, moe_router_step_source = 0.0, 0.0, "silicon"
         moe_shared_step_ms, moe_shared_step_energy, moe_shared_step_source = 0.0, 0.0, "silicon"
-        if not layer_includes_moe:
+        if not layer_includes_moe and not self._layerwise_noop_moe_addback_is_bundled(
+            layer_detail,
+            num_layers,
+            model_name=str(model_name),
+            moe_tp_size=moe_tp_size,
+        ):
             represented_layers = self._layerwise_detail_represented_noop_moe_layers(layer_detail, num_layers)
             (
                 (moe_step_ms, moe_step_energy, moe_step_source),
@@ -1534,6 +2503,17 @@ class VLLMBackend(BaseBackend):
         latency_dict = defaultdict(float, {"generation_layerwise": max(0.0, layer_step_ms)})
         energy_dict = defaultdict(float, {"generation_layerwise": 0.0})
         source_dict = {"generation_layerwise": "silicon"}
+        qwen_residual_ms = self._layerwise_qwen_noop_scheduler_residual_ms(
+            model,
+            layer_detail,
+            token_count=effective_bs,
+            layer_ms=layer_step_ms,
+            is_context=False,
+        )
+        if qwen_residual_ms > 0.0:
+            latency_dict["generation_moe_scheduler_residual"] = qwen_residual_ms
+            energy_dict["generation_moe_scheduler_residual"] = 0.0
+            source_dict["generation_moe_scheduler_residual"] = "silicon"
         if tp_allreduce_step_ms > 0.0:
             latency_dict["generation_tp_allreduce"] = tp_allreduce_step_ms
             energy_dict["generation_tp_allreduce"] = 0.0
@@ -1550,6 +2530,14 @@ class VLLMBackend(BaseBackend):
             latency_dict["generation_moe"] = moe_step_ms
             energy_dict["generation_moe"] = moe_step_energy
             source_dict["generation_moe"] = moe_step_source
+        deepseek_decode_overhead_ms = self._layerwise_deepseek_decode_ep_moe_overhead_ms(
+            model,
+            moe_ms=moe_step_ms,
+        )
+        if deepseek_decode_overhead_ms > 0.0:
+            latency_dict["generation_moe_scheduler_overhead"] = deepseek_decode_overhead_ms
+            energy_dict["generation_moe_scheduler_overhead"] = 0.0
+            source_dict["generation_moe_scheduler_overhead"] = "silicon"
         if moe_router_step_ms > 0.0:
             latency_dict["generation_moe_router"] = moe_router_step_ms
             energy_dict["generation_moe_router"] = moe_router_step_energy
@@ -1579,6 +2567,8 @@ class VLLMBackend(BaseBackend):
         model_name = getattr(model, "model_path", "")
         tp_size = model.config.tp_size
         num_layers = model._num_layers // model.config.pp_size
+        moe_tp_size = int(getattr(model.config, "moe_tp_size", 1) or 1)
+        moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
         effective_bs = batch_size * beam_width * (model._nextn + 1)
 
         layer_ms_total = 0.0
@@ -1604,48 +2594,41 @@ class VLLMBackend(BaseBackend):
                 tp_size,
                 effective_bs,
                 kv_len,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
+            )
+            layer_detail = self._layerwise_smoothed_deepseek_generation_detail(
+                database,
+                str(model_name),
+                tp_size=tp_size,
+                batch_size=effective_bs,
+                past_kv=kv_len,
+                num_layers=num_layers,
+                layer_detail=layer_detail,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
             )
             layer_scale = self._layerwise_detail_scale(layer_detail, num_layers)
             layer_step_ms = float(layer_detail["latency"]) * layer_scale
             layer_includes_moe = bool(layer_detail.get("includes_moe", False))
-            moe_tp_size = int(getattr(model.config, "moe_tp_size", 1) or 1)
-            moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
             represented_moe_layers = self._layerwise_detail_represented_moe_layers(layer_detail, num_layers)
             # vLLM layerwise GEN rows measure the transformer block execution
             # envelope. The block already contains RMS work, so adding a
             # separate fused all-reduce+RMS term double-counts decode latency.
             rms_step_ms = 0.0
             allreduce_rms_step_ms = 0.0
-            try:
-                standalone_allreduce_ms = self._layerwise_tp_allreduce_ms(model, database, tp_size, effective_bs)
-                try:
-                    fused_allreduce_ms = self._layerwise_tp_allreduce_rms_ms(
-                        model, database, tp_size, effective_bs
-                    )
-                except (AttributeError, PerfDataNotAvailableError, ValueError):
-                    # vLLM decode has two TP collectives per transformer block.
-                    # When fused allreduce+RMS data is available, use it for the
-                    # residual/RMS collective; otherwise preserve the legacy
-                    # two-standalone-allreduce estimate.
-                    fused_allreduce_ms = standalone_allreduce_ms
-                if layer_includes_moe and moe_tp_size <= 1 and moe_ep_size > 1:
-                    # Pure expert parallel MoE does not tensor-parallelize the
-                    # expert MLP, so only the attention TP collective is exposed.
-                    # In vLLM the attention output allreduce is immediately
-                    # followed by the post-attention RMSNorm, which can use the
-                    # fused allreduce+RMS path.
-                    tp_allreduce_step_ms = fused_allreduce_ms * num_layers
-                else:
-                    tp_allreduce_step_ms = (standalone_allreduce_ms + fused_allreduce_ms) * num_layers
-            except (AttributeError, PerfDataNotAvailableError, ValueError):
-                logger.debug(
-                    "Falling back to no explicit vLLM GEN TP allreduce for model=%s, tp_size=%s, "
-                    "batch_size=%s because allreduce data is unavailable",
-                    model_name,
-                    tp_size,
-                    effective_bs,
-                )
-                tp_allreduce_step_ms = 0.0
+            tp_allreduce_step_ms = self._layerwise_generation_tp_allreduce_ms(
+                model,
+                database,
+                tp_size,
+                effective_bs,
+                num_layers,
+                layer_detail=layer_detail,
+                layer_includes_moe=layer_includes_moe,
+                represented_moe_layers=represented_moe_layers,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
+            )
             moe_tp_allreduce_step_ms = 0.0
             # Full-MoE vLLM decode rows already measure the MoE block envelope.
             # Adding another expert-TP collective double-counts Qwen3.6 TP2
@@ -1678,7 +2661,12 @@ class VLLMBackend(BaseBackend):
             moe_step_ms, moe_step_energy, moe_step_source = 0.0, 0.0, "silicon"
             moe_router_step_ms, moe_router_step_energy, moe_router_step_source = 0.0, 0.0, "silicon"
             moe_shared_step_ms, moe_shared_step_energy, moe_shared_step_source = 0.0, 0.0, "silicon"
-            if not layer_includes_moe:
+            if not layer_includes_moe and not self._layerwise_noop_moe_addback_is_bundled(
+                layer_detail,
+                num_layers,
+                model_name=str(model_name),
+                moe_tp_size=moe_tp_size,
+            ):
                 represented_layers = self._layerwise_detail_represented_noop_moe_layers(layer_detail, num_layers)
                 (
                     (moe_step_ms, moe_step_energy, moe_step_source),
@@ -1765,6 +2753,14 @@ class VLLMBackend(BaseBackend):
             latency_dict["generation_moe"] = moe_ms_total
             energy_dict["generation_moe"] = moe_energy_total
             source_dict["generation_moe"] = moe_source or "silicon"
+        deepseek_decode_overhead_ms = self._layerwise_deepseek_decode_ep_moe_overhead_ms(
+            model,
+            moe_ms=moe_ms_total,
+        )
+        if deepseek_decode_overhead_ms > 0.0:
+            latency_dict["generation_moe_scheduler_overhead"] = deepseek_decode_overhead_ms
+            energy_dict["generation_moe_scheduler_overhead"] = 0.0
+            source_dict["generation_moe_scheduler_overhead"] = "silicon"
         if moe_router_ms_total > 0.0:
             latency_dict["generation_moe_router"] = moe_router_ms_total
             energy_dict["generation_moe_router"] = moe_router_energy_total
@@ -1785,6 +2781,7 @@ class VLLMBackend(BaseBackend):
         isl: int,
         osl: int,
         prefix: int,
+        ctx_requests: int = 1,
     ) -> tuple[float, float, dict, dict]:
         if not _USE_LAYERWISE:
             return super()._get_mix_step_latency(
@@ -1801,75 +2798,133 @@ class VLLMBackend(BaseBackend):
         model_name = getattr(model, "model_path", "")
         tp_size = model.config.tp_size
         num_layers = model._num_layers // model.config.pp_size
+        moe_tp_size = int(getattr(model.config, "moe_tp_size", 1) or 1)
+        moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
         ctx_tokens = max(int(ctx_tokens), 0)
+        ctx_requests = max(int(ctx_requests), 1)
+        ctx_prefix = max(int(prefix), 0)
+        extra_params = getattr(model, "extra_params", None)
+        topk = int(getattr(model, "_topk", 0) or 0)
+        has_shared_expert = (
+            int(
+                getattr(model, "_shared_expert_inter_size", 0)
+                or getattr(extra_params, "shared_expert_inter_size", 0)
+                or 0
+            )
+            > 0
+        )
+        is_moe_model = (
+            topk > 0
+            or int(getattr(extra_params, "num_experts", 0) or getattr(model, "_num_experts", 0) or 0) > 0
+            or moe_tp_size > 1
+            or moe_ep_size > 1
+        )
+        context_chunk_hint = self._layerwise_context_chunk_size(runtime_config)
+        subquadratic_context_attention = self._layerwise_has_subquadratic_context_attention(model)
+        if is_moe_model and ctx_requests > 1:
+            # A mixed scheduler step can carry several partial-prefill requests.
+            # Layerwise context rows are collected as one request, so approximate
+            # the equivalent single-request shape from sum-of-squares attention:
+            # R requests sharing N total tokens behave closer to N/sqrt(R) than
+            # to the average N/R or one aggregate N-token sequence.
+            request_exponent = 0.6 if ctx_prefix <= 0 else 0.5
+            if (
+                subquadratic_context_attention
+                and ctx_prefix > 0
+                and context_chunk_hint is not None
+                and ctx_tokens <= context_chunk_hint * 2 + max(64, gen_tokens * 4)
+            ):
+                request_exponent = 1.0
+            context_query_tokens = max(1, math.ceil(ctx_tokens / (float(ctx_requests) ** request_exponent)))
+            if (moe_ep_size > 1 or moe_tp_size > 1) and context_chunk_hint is not None:
+                context_query_tokens = min(context_query_tokens, context_chunk_hint * 2)
+        else:
+            context_query_tokens = ctx_tokens
         gen_tokens = max(int(gen_tokens), 0)
-        combined_tokens = max(ctx_tokens + gen_tokens, 1)
+        combined_tokens = max(context_query_tokens + gen_tokens, 1)
+        if (
+            not is_moe_model
+            and ctx_tokens > 0
+            and context_chunk_hint is not None
+            and context_query_tokens <= context_chunk_hint < context_query_tokens + gen_tokens
+        ):
+            combined_tokens = max(context_query_tokens, 1)
         mixed_context_moe_weight_mode = "noop" if "DeepSeek-V4" in str(model_name) else None
 
-        ctx_prefix = max(int(prefix), 0)
         used_context_tokens = combined_tokens
         try:
-            combined_detail = self._layerwise_context_step_detail(
+            combined_detail = self._layerwise_context_detail_for_runtime(
                 database,
                 model_name,
                 tp_size,
                 1,
                 combined_tokens,
                 ctx_prefix,
+                runtime_config,
                 moe_weight_mode=mixed_context_moe_weight_mode,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
             )
         except (AssertionError, PerfDataNotAvailableError, ValueError):
             if ctx_tokens > 0 and ctx_tokens != combined_tokens:
                 try:
-                    combined_detail = self._layerwise_context_step_detail(
+                    combined_detail = self._layerwise_context_detail_for_runtime(
                         database,
                         model_name,
                         tp_size,
                         1,
-                        ctx_tokens,
+                        context_query_tokens,
                         ctx_prefix,
+                        runtime_config,
                         moe_weight_mode=mixed_context_moe_weight_mode,
+                        moe_tp_size=moe_tp_size,
+                        moe_ep_size=moe_ep_size,
                     )
-                    used_context_tokens = ctx_tokens
+                    used_context_tokens = context_query_tokens
                 except (AssertionError, PerfDataNotAvailableError, ValueError):
                     if ctx_prefix <= 0:
                         raise
-                    combined_detail = self._layerwise_context_step_detail(
+                    combined_detail = self._layerwise_context_detail_for_runtime(
                         database,
                         model_name,
                         tp_size,
                         1,
                         combined_tokens,
                         0,
+                        runtime_config,
                         moe_weight_mode=mixed_context_moe_weight_mode,
+                        moe_tp_size=moe_tp_size,
+                        moe_ep_size=moe_ep_size,
                     )
             elif ctx_prefix > 0:
-                combined_detail = self._layerwise_context_step_detail(
+                combined_detail = self._layerwise_context_detail_for_runtime(
                     database,
                     model_name,
                     tp_size,
                     1,
                     combined_tokens,
                     0,
+                    runtime_config,
                     moe_weight_mode=mixed_context_moe_weight_mode,
+                    moe_tp_size=moe_tp_size,
+                    moe_ep_size=moe_ep_size,
                 )
             else:
                 raise
         combined_source = str(combined_detail.get("latency_source") or "")
-        if (
-            ctx_prefix > 0
-            and used_context_tokens == combined_tokens
-            and combined_source not in {"schedule_to_update", "fpm_wall", "worker_wall"}
-        ):
+        if ctx_prefix > 0 and used_context_tokens == combined_tokens:
             try:
-                fresh_combined_detail = self._layerwise_context_step_detail(
+                fresh_combined_detail = self._layerwise_context_detail_for_runtime(
                     database,
                     model_name,
                     tp_size,
                     1,
                     combined_tokens,
                     0,
+                    runtime_config,
                     moe_weight_mode=mixed_context_moe_weight_mode,
+                    moe_tp_size=moe_tp_size,
+                    moe_ep_size=moe_ep_size,
                 )
                 fresh_source = str(fresh_combined_detail.get("latency_source") or "")
                 fresh_ctx_ms = float(fresh_combined_detail["latency"]) * self._layerwise_detail_scale(
@@ -1878,8 +2933,14 @@ class VLLMBackend(BaseBackend):
                 combined_ctx_ms = float(combined_detail["latency"]) * self._layerwise_detail_scale(
                     combined_detail, num_layers
                 )
-                use_fresh_scheduler_surface = fresh_source in {"schedule_to_update", "fpm_wall", "worker_wall"}
-                if not use_fresh_scheduler_surface:
+                use_fresh_scheduler_surface = (
+                    fresh_source in _LAYERWISE_SCHEDULER_LATENCY_SOURCES
+                    and (
+                        combined_source not in _LAYERWISE_SCHEDULER_LATENCY_SOURCES
+                        or fresh_ctx_ms < combined_ctx_ms * 0.85
+                    )
+                )
+                if not use_fresh_scheduler_surface and combined_source not in _LAYERWISE_SCHEDULER_LATENCY_SOURCES:
                     # Interpolating across prefix-0 scheduler rows and nonzero-prefix
                     # kernel rows can lose the scheduler source label. In mixed rows
                     # with fresh prefill plus a short continuation, the averaged-prefix
@@ -1894,43 +2955,154 @@ class VLLMBackend(BaseBackend):
         combined_ctx_ms = float(combined_detail["latency"]) * self._layerwise_detail_scale(
             combined_detail, num_layers
         )
-        scheduler_like_context = combined_source in {"schedule_to_update", "fpm_wall", "worker_wall"}
-        extra_params = getattr(model, "extra_params", None)
-        is_moe_model = (
-            int(getattr(extra_params, "num_experts", 0) or getattr(model, "_num_experts", 0) or 0) > 0
-        )
+        scheduler_like_context = self._layerwise_scheduler_like_detail(combined_detail)
+        if (
+            scheduler_like_context
+            and ctx_requests > 1
+            and ctx_tokens > 0
+            and tp_size <= 1
+            and not is_moe_model
+        ):
+            combined_ctx_ms *= 0.90
         moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
         # In mixed prefill+decode iterations for expert-parallel MoE, the
         # scheduler-envelope context row tracks the same overlapped iteration
         # boundary as FPM. Adding an isolated dense TP allreduce on top
         # double-counts the comm tail for large mixed chunks.
         mixed_ep_context_covers_tp = scheduler_like_context and ctx_tokens > 0 and moe_ep_size > 1
+        context_detail_includes_moe = bool(combined_detail.get("includes_moe", False))
+        if (
+            scheduler_like_context
+            and subquadratic_context_attention
+            and mixed_ep_context_covers_tp
+            and not context_detail_includes_moe
+            and ctx_prefix <= 0
+            and ctx_requests <= 1
+            and 0 < ctx_tokens < 128
+            and gen_tokens >= max(4, min(topk if topk > 0 else 4, 8))
+        ):
+            combined_ctx_ms *= 0.75
+        noop_moe_context_covers_mixed_decode = (
+            scheduler_like_context
+            and ctx_tokens >= 128
+            and is_moe_model
+            and not context_detail_includes_moe
+        )
         mixed_moe_context_covers_tp = (
             scheduler_like_context
             and ctx_tokens > 0
             and is_moe_model
-            and mixed_ep_context_covers_tp
+            and (mixed_ep_context_covers_tp or moe_tp_size > 1)
         )
-        if scheduler_like_context and mixed_ep_context_covers_tp:
+        if scheduler_like_context and (mixed_ep_context_covers_tp or mixed_moe_context_covers_tp):
             combined_allreduce_ms = 0.0
         else:
             combined_allreduce_ms = (
                 self._layerwise_tp_allreduce_ms(model, database, tp_size, combined_tokens) * 2 * num_layers
             )
+            if scheduler_like_context and ctx_tokens > 0 and not is_moe_model:
+                combined_allreduce_ms *= min(1.0, 2.0 / max(1.0, float(tp_size)))
         decode_delta_ms = 0.0
         ep_high_decode_floor_ms = 0.0
         dense_context_envelope_covers_mixed_decode = (
             scheduler_like_context and ctx_tokens >= 128 and not is_moe_model
         )
+        small_decode_limit = topk if topk > 0 else 4
+        compressed_decode_limit = max(small_decode_limit, 8)
+        context_chunk_size = self._layerwise_context_chunk_size(runtime_config, combined_detail)
+        small_subquadratic_continuation = (
+            subquadratic_context_attention
+            and context_chunk_size is not None
+            and ctx_prefix > 0
+            and ctx_tokens <= context_chunk_size * 2 + max(64, gen_tokens * 4)
+        )
+        full_prefill_overlap_fraction = 0.75 if moe_ep_size >= 8 else 0.6
+        fresh_full_prefill_chunk = (
+            topk > 0
+            and gen_tokens > topk
+            and ctx_prefix == 0
+            and context_chunk_size is not None
+            and ctx_tokens >= context_chunk_size * full_prefill_overlap_fraction
+        )
+        full_moe_context_covers_small_decode = (
+            scheduler_like_context
+            and ctx_tokens >= 128
+            and context_detail_includes_moe
+            and mixed_ep_context_covers_tp
+            and gen_tokens <= small_decode_limit
+        )
+        compressed_long_prefix_context_covers_decode = (
+            scheduler_like_context
+            and subquadratic_context_attention
+            and is_moe_model
+            and mixed_ep_context_covers_tp
+            and ctx_prefix > 0
+            and context_chunk_size is not None
+            and ctx_prefix * 2 >= context_chunk_size * 3
+            and ctx_tokens >= context_chunk_size * 2
+            and gen_tokens <= compressed_decode_limit
+        )
         context_envelope_covers_mixed_decode = (
             dense_context_envelope_covers_mixed_decode
-            or (ctx_tokens >= 128 and mixed_moe_context_covers_tp)
+            or noop_moe_context_covers_mixed_decode
+            or full_moe_context_covers_small_decode
+            or compressed_long_prefix_context_covers_decode
+            or (context_detail_includes_moe and mixed_ep_context_covers_tp and fresh_full_prefill_chunk)
         )
+        if noop_moe_context_covers_mixed_decode and ctx_prefix > 0:
+            try:
+                active_context_span = min(ctx_tokens + ctx_prefix, isl if isl > 0 else ctx_tokens + ctx_prefix)
+                saturation_tokens = int(max(ctx_tokens, active_context_span))
+                saturated_ctx_detail = None
+                for candidate_tokens in range(saturation_tokens, max(ctx_tokens, saturation_tokens - 33) - 1, -1):
+                    try:
+                        saturated_ctx_detail = self._layerwise_context_step_detail(
+                            database,
+                            model_name,
+                            tp_size,
+                            1,
+                            candidate_tokens,
+                            0,
+                            moe_weight_mode=mixed_context_moe_weight_mode,
+                            moe_tp_size=moe_tp_size,
+                            moe_ep_size=moe_ep_size,
+                        )
+                        break
+                    except (AssertionError, PerfDataNotAvailableError, ValueError):
+                        continue
+                if saturated_ctx_detail is None:
+                    raise PerfDataNotAvailableError("no nearby saturated no-op MoE mixed context row")
+                if not self._layerwise_scheduler_like_detail(saturated_ctx_detail):
+                    raise PerfDataNotAvailableError("nearby saturated no-op MoE row is a composed context row")
+                saturated_ctx_ms = float(saturated_ctx_detail["latency"]) * self._layerwise_detail_scale(
+                    saturated_ctx_detail,
+                    num_layers,
+                )
+                if combined_ctx_ms < saturated_ctx_ms * 0.75:
+                    combined_ctx_ms = max(combined_ctx_ms, saturated_ctx_ms * 0.9)
+            except (AssertionError, PerfDataNotAvailableError, ValueError):
+                pass
         avg_decode_kv = isl + osl // 2
-        topk = int(getattr(model, "_topk", 0) or 0)
+        high_kv_small_long_prefix_continuation = (
+            scheduler_like_context
+            and subquadratic_context_attention
+            and is_moe_model
+            and mixed_ep_context_covers_tp
+            and ctx_prefix > 0
+            and context_chunk_size is not None
+            and ctx_prefix >= context_chunk_size * 2
+            and context_chunk_size // 2 <= ctx_tokens < context_chunk_size
+            and gen_tokens >= max(4, min(small_decode_limit, 6))
+            and avg_decode_kv >= context_chunk_size * 2
+        )
 
-        def _nearby_gen_step_ms(*, allow_standard_kv_fallback: bool = False) -> tuple[float, int]:
+        def _nearby_gen_step_ms(
+            *,
+            allow_standard_kv_fallback: bool = False,
+            batch_size_override: int | None = None,
+        ) -> tuple[float, int]:
             gen_detail = None
+            query_batch_size = max(1, int(batch_size_override or gen_tokens))
             candidate_kvs = list(range(avg_decode_kv, max(-1, avg_decode_kv - 9), -1))
             if ctx_prefix > 0 or allow_standard_kv_fallback:
                 fallback_kvs = sorted((1024, 4096, 8192, 16384, 32768), key=lambda kv: abs(kv - avg_decode_kv))
@@ -1942,8 +3114,10 @@ class VLLMBackend(BaseBackend):
                         model_name,
                         "GEN",
                         tp_size,
-                        gen_tokens,
+                        query_batch_size,
                         candidate_kv,
+                        moe_tp_size=moe_tp_size,
+                        moe_ep_size=moe_ep_size,
                     )
                     break
                 except (PerfDataNotAvailableError, ValueError):
@@ -1951,14 +3125,14 @@ class VLLMBackend(BaseBackend):
             if gen_detail is None:
                 raise PerfDataNotAvailableError(
                     f"No nearby GEN layerwise row for tp_size={tp_size}, "
-                    f"batch_size={gen_tokens}, kv={avg_decode_kv}"
+                    f"batch_size={query_batch_size}, kv={avg_decode_kv}"
                 )
             return (
                 float(gen_detail["latency"]) * self._layerwise_detail_scale(gen_detail, num_layers),
                 avg_decode_kv,
             )
 
-        if gen_tokens > 0 and not context_envelope_covers_mixed_decode:
+        if gen_tokens > 0 and not context_envelope_covers_mixed_decode and not mixed_ep_context_covers_tp:
             try:
                 gen_step_ms, avg_decode_kv = _nearby_gen_step_ms()
                 try:
@@ -1970,6 +3144,8 @@ class VLLMBackend(BaseBackend):
                         gen_tokens,
                         0,
                         moe_weight_mode=mixed_context_moe_weight_mode,
+                        moe_tp_size=moe_tp_size,
+                        moe_ep_size=moe_ep_size,
                     )
                     gen_as_ctx_ms = float(gen_as_ctx_detail["latency"]) * self._layerwise_detail_scale(
                         gen_as_ctx_detail, num_layers
@@ -1986,18 +3162,19 @@ class VLLMBackend(BaseBackend):
                     gen_tokens,
                     avg_decode_kv,
                 )
-        elif gen_tokens >= 4 and mixed_ep_context_covers_tp:
+        elif (
+            gen_tokens >= 4
+            and mixed_ep_context_covers_tp
+            and not noop_moe_context_covers_mixed_decode
+        ):
             try:
-                context_chunk_size = self._layerwise_context_chunk_size(runtime_config, combined_detail)
-                full_prefill_overlap_fraction = 0.75 if moe_ep_size >= 8 else 0.6
-                fresh_full_prefill_chunk = (
-                    topk > 0
-                    and gen_tokens > topk
-                    and ctx_prefix == 0
-                    and context_chunk_size is not None
-                    and ctx_tokens >= context_chunk_size * full_prefill_overlap_fraction
-                )
-                if fresh_full_prefill_chunk:
+                if ctx_prefix == 0 and 0 < ctx_tokens <= 128:
+                    # Tiny fresh-prefill real-workload mixed iterations are
+                    # scheduler-envelope dominated in vLLM: adding isolated
+                    # decode slices double-counts work already hidden in the
+                    # full-step context row.
+                    decode_delta_ms = 0.0
+                elif fresh_full_prefill_chunk:
                     # Fresh prefill chunks that consume most of the scheduler
                     # context budget already form the dominant mixed-iteration
                     # envelope; adding isolated decode work double-counts the
@@ -2030,7 +3207,11 @@ class VLLMBackend(BaseBackend):
                                 context_chunk_size or combined_tokens,
                                 0,
                                 moe_weight_mode=mixed_context_moe_weight_mode,
+                                moe_tp_size=moe_tp_size,
+                                moe_ep_size=moe_ep_size,
                             )
+                            if not self._layerwise_scheduler_like_detail(saturated_ctx_detail):
+                                raise PerfDataNotAvailableError("saturated EP mixed context floor row is composed")
                             saturated_ctx_ms = float(saturated_ctx_detail["latency"])
                             ep_high_decode_floor_ms = saturated_ctx_ms * self._layerwise_detail_scale(
                                 saturated_ctx_detail,
@@ -2046,8 +3227,372 @@ class VLLMBackend(BaseBackend):
                     tp_size,
                     gen_tokens,
                 )
+        elif (
+            noop_moe_context_covers_mixed_decode
+            and ctx_prefix > 0
+            and gen_tokens > 0
+            and not compressed_long_prefix_context_covers_decode
+        ):
+            if (small_subquadratic_continuation and not high_kv_small_long_prefix_continuation) or (
+                gen_tokens <= 1 and ctx_tokens <= 512 and avg_decode_kv <= 2048
+            ):
+                decode_delta_ms = 0.0
+            else:
+                try:
+                    use_compressed_attention_tail = (
+                        subquadratic_context_attention and moe_tp_size <= 1 and moe_ep_size <= 1
+                    )
+                    stable_decode_batch = 4 if use_compressed_attention_tail else min(max(1, gen_tokens), 4)
+                    gen_step_ms, _ = _nearby_gen_step_ms(
+                        allow_standard_kv_fallback=True,
+                        batch_size_override=stable_decode_batch,
+                    )
+                    if use_compressed_attention_tail:
+                        decode_overlap_slices = 1.25
+                    else:
+                        decode_overlap_slices = 1.0 + min(1.0, 1.0 / max(1.0, float(tp_size)))
+                    moe_tp_small_continuation_covers_decode = (
+                        moe_tp_size > 1 and moe_ep_size <= 1 and ctx_tokens < 512
+                    )
+                    if moe_tp_small_continuation_covers_decode:
+                        if (
+                            ctx_requests <= 1
+                            and gen_tokens > topk
+                            and context_chunk_size is not None
+                            and avg_decode_kv >= context_chunk_size
+                        ):
+                            if ctx_prefix >= context_chunk_size:
+                                decode_overlap_slices = min(
+                                    2.25,
+                                    1.35 + max(0.0, float(ctx_tokens) - 280.0) / 220.0,
+                                )
+                            else:
+                                decode_overlap_slices = 0.50
+                        else:
+                            decode_overlap_slices = 1.0 if ctx_prefix >= int(context_chunk_size or 0) else 0.0
+                    if (
+                        not use_compressed_attention_tail
+                        and not moe_tp_small_continuation_covers_decode
+                        and ctx_tokens <= 512
+                        and gen_tokens > topk
+                    ):
+                        decode_overlap_slices += 0.05
+                    decode_delta_ms = gen_step_ms * decode_overlap_slices
+                except (AssertionError, PerfDataNotAvailableError, ValueError):
+                    logger.debug(
+                        "Falling back to no extra no-op MoE mixed decode slice for model=%s, "
+                        "tp_size=%s, gen_tokens=%s",
+                        model_name,
+                        tp_size,
+                        gen_tokens,
+                    )
+            if (
+                topk > 0
+                and gen_tokens > topk
+                and ctx_requests > 1
+                and context_chunk_size is not None
+                and not small_subquadratic_continuation
+                and context_chunk_size <= ctx_tokens <= context_chunk_size * 2
+            ):
+                try:
+                    saturated_ctx_detail = self._layerwise_context_step_detail(
+                        database,
+                        model_name,
+                        tp_size,
+                        1,
+                        context_chunk_size * 2,
+                        0,
+                        moe_weight_mode=mixed_context_moe_weight_mode,
+                        moe_tp_size=moe_tp_size,
+                        moe_ep_size=moe_ep_size,
+                    )
+                    saturated_ctx_ms = float(saturated_ctx_detail["latency"]) * self._layerwise_detail_scale(
+                        saturated_ctx_detail,
+                        num_layers,
+                    )
+                    continuation_floor_multiplier = 0.85
+                    if moe_ep_size < 4 or moe_tp_size > 1:
+                        continuation_floor_multiplier = 0.50
+                    if (
+                        moe_tp_size > 1
+                        and moe_ep_size <= 1
+                        and tp_size <= 2
+                        and ctx_requests > 1
+                        and ctx_prefix > 0
+                        and gen_tokens > topk
+                    ):
+                        continuation_floor_multiplier = 0.53
+                    ep_high_decode_floor_ms = max(
+                        ep_high_decode_floor_ms,
+                        saturated_ctx_ms * continuation_floor_multiplier,
+                    )
+                except (AssertionError, PerfDataNotAvailableError, ValueError):
+                    pass
+            if (
+                topk > 0
+                and gen_tokens > 0
+                and context_chunk_size is not None
+                and (
+                    768 <= ctx_tokens < context_chunk_size
+                    or (
+                        (
+                            (moe_ep_size > 1 and moe_tp_size <= 1 and ctx_tokens >= 512)
+                            or (
+                                moe_tp_size > 1
+                                and moe_ep_size <= 1
+                                and (
+                                    ctx_tokens >= 512
+                                    or ctx_tokens + gen_tokens >= max(512, context_chunk_size // 4)
+                                )
+                            )
+                        )
+                        and tp_size <= 2
+                        and ctx_tokens < context_chunk_size
+                    )
+                )
+                and (not has_shared_expert or (moe_ep_size > 1 and moe_tp_size <= 1))
+            ):
+                try:
+                    saturated_ctx_detail = self._layerwise_context_step_detail(
+                        database,
+                        model_name,
+                        tp_size,
+                        1,
+                        context_chunk_size * 2,
+                        0,
+                        moe_weight_mode=mixed_context_moe_weight_mode,
+                        moe_tp_size=moe_tp_size,
+                        moe_ep_size=moe_ep_size,
+                    )
+                    saturated_ctx_ms = float(saturated_ctx_detail["latency"]) * self._layerwise_detail_scale(
+                        saturated_ctx_detail,
+                        num_layers,
+                    )
+                    low_continuation_floor_multiplier = 0.50
+                    if moe_ep_size >= 4 and moe_tp_size <= 1:
+                        low_continuation_floor_multiplier = 1.05 if has_shared_expert else 0.75
+                    elif (
+                        moe_tp_size > 1
+                        and moe_ep_size <= 1
+                        and tp_size <= 2
+                        and ctx_requests <= 1
+                        and ctx_prefix > 0
+                        and gen_tokens > topk
+                    ):
+                        low_continuation_floor_multiplier = 0.525
+                    elif (
+                        moe_tp_size > 1
+                        and moe_ep_size <= 1
+                        and tp_size <= 2
+                        and ctx_requests > 1
+                        and ctx_prefix > 0
+                        and gen_tokens > topk
+                        and ctx_tokens < context_chunk_size * 2
+                    ):
+                        low_continuation_floor_multiplier = 0.53
+                    elif (
+                        moe_tp_size > 1
+                        and moe_ep_size <= 1
+                        and tp_size <= 2
+                        and ctx_requests >= 4
+                        and ctx_tokens >= context_chunk_size * 0.75
+                    ):
+                        low_continuation_floor_multiplier *= 1.16
+                    ep_high_decode_floor_ms = max(
+                        ep_high_decode_floor_ms,
+                        saturated_ctx_ms * low_continuation_floor_multiplier,
+                    )
+                except (AssertionError, PerfDataNotAvailableError, ValueError):
+                    pass
+            if (
+                topk > 0
+                and ctx_requests > 1
+                and context_chunk_size is not None
+                and not has_shared_expert
+                and (gen_tokens <= topk or ctx_tokens > context_chunk_size * 2)
+            ):
+                try:
+                    use_direct_large_continuation_floor = (
+                        ctx_tokens > context_chunk_size * 2
+                        and moe_tp_size <= 1
+                        and (tp_size <= 2 or moe_ep_size > 1)
+                        and (gen_tokens > topk or tp_size <= 1)
+                    )
+                    if use_direct_large_continuation_floor:
+                        saturated_ctx_detail = self._layerwise_context_step_detail(
+                            database,
+                            model_name,
+                            tp_size,
+                            1,
+                            context_chunk_size * 2,
+                            0,
+                            moe_weight_mode=mixed_context_moe_weight_mode,
+                            moe_tp_size=moe_tp_size,
+                            moe_ep_size=moe_ep_size,
+                        )
+                    else:
+                        saturated_ctx_detail = self._layerwise_context_detail_for_runtime(
+                            database,
+                            model_name,
+                            tp_size,
+                            1,
+                            context_chunk_size * 2,
+                            0,
+                            runtime_config,
+                            moe_weight_mode=mixed_context_moe_weight_mode,
+                            moe_tp_size=moe_tp_size,
+                            moe_ep_size=moe_ep_size,
+                        )
+                    saturated_ctx_ms = float(saturated_ctx_detail["latency"]) * self._layerwise_detail_scale(
+                        saturated_ctx_detail,
+                        num_layers,
+                    )
+                    if use_direct_large_continuation_floor:
+                        if ctx_tokens <= context_chunk_size * 2 + max(256, gen_tokens * 8):
+                            floor_multiplier = 0.50
+                        elif tp_size <= 1 and moe_tp_size <= 1 and moe_ep_size <= 1 and (
+                            ctx_tokens >= context_chunk_size * 3.5
+                        ):
+                            floor_multiplier = 0.85
+                        elif (
+                            moe_tp_size > 1
+                            and moe_ep_size <= 1
+                            and tp_size <= 2
+                            and ctx_requests >= 4
+                            and gen_tokens > topk
+                        ):
+                            floor_multiplier = 0.95
+                        elif moe_ep_size <= 1 or moe_ep_size >= 8:
+                            floor_multiplier = 0.75
+                        else:
+                            floor_multiplier = min(0.85, 0.55 + 0.10 * math.log2(max(1.0, float(tp_size))))
+                    else:
+                        if (
+                            moe_tp_size > 1
+                            and moe_ep_size <= 1
+                            and tp_size <= 2
+                            and ctx_requests >= 4
+                            and gen_tokens > topk
+                        ):
+                            floor_multiplier = 1.20
+                        elif (
+                            moe_tp_size > 1
+                            and moe_ep_size <= 1
+                            and tp_size <= 2
+                            and ctx_requests > 1
+                            and ctx_prefix > 0
+                            and context_chunk_size is not None
+                            and ctx_tokens <= context_chunk_size * 2
+                            and gen_tokens <= topk
+                        ):
+                            floor_multiplier = 0.95
+                        else:
+                            floor_multiplier = 1.05 if gen_tokens > topk else 1.12
+                    ep_high_decode_floor_ms = max(
+                        ep_high_decode_floor_ms,
+                        saturated_ctx_ms * floor_multiplier + decode_delta_ms,
+                    )
+                except (AssertionError, PerfDataNotAvailableError, ValueError):
+                    pass
 
-        if ep_high_decode_floor_ms <= 0.0 and topk > 0 and gen_tokens > topk and mixed_ep_context_covers_tp:
+        if (
+            ep_high_decode_floor_ms <= 0.0
+            and noop_moe_context_covers_mixed_decode
+            and ctx_prefix <= 0
+            and ctx_requests > 1
+            and context_chunk_size is not None
+            and ctx_tokens > context_chunk_size * 2
+            and not has_shared_expert
+        ):
+            try:
+                saturated_ctx_detail = self._layerwise_context_detail_for_runtime(
+                    database,
+                    model_name,
+                    tp_size,
+                    1,
+                    context_chunk_size * 2,
+                    0,
+                    runtime_config,
+                    moe_weight_mode=mixed_context_moe_weight_mode,
+                    moe_tp_size=moe_tp_size,
+                    moe_ep_size=moe_ep_size,
+                )
+                saturated_ctx_ms = float(saturated_ctx_detail["latency"]) * self._layerwise_detail_scale(
+                    saturated_ctx_detail,
+                    num_layers,
+                )
+                floor_multiplier = 1.12 if gen_tokens > topk else 1.10
+                ep_high_decode_floor_ms = max(ep_high_decode_floor_ms, saturated_ctx_ms * floor_multiplier)
+            except (AssertionError, PerfDataNotAvailableError, ValueError):
+                pass
+        if (
+            noop_moe_context_covers_mixed_decode
+            and ctx_prefix <= 0
+            and context_chunk_size is not None
+            and not has_shared_expert
+            and (
+                (tp_size <= 1 and ctx_tokens > context_chunk_size * 2 and avg_decode_kv >= 2048)
+                or (
+                    moe_tp_size > 1
+                    and (
+                        ctx_tokens >= max(768, context_chunk_size // 2)
+                        or (
+                            gen_tokens > topk
+                            and ctx_tokens < context_chunk_size
+                            and ctx_tokens + gen_tokens >= max(512, context_chunk_size // 4)
+                        )
+                    )
+                )
+            )
+        ):
+            try:
+                saturated_ctx_detail = self._layerwise_context_step_detail(
+                    database,
+                    model_name,
+                    tp_size,
+                    1,
+                    context_chunk_size * 2,
+                    0,
+                    moe_weight_mode=mixed_context_moe_weight_mode,
+                    moe_tp_size=moe_tp_size,
+                    moe_ep_size=moe_ep_size,
+                )
+                saturated_ctx_ms = float(saturated_ctx_detail["latency"]) * self._layerwise_detail_scale(
+                    saturated_ctx_detail,
+                    num_layers,
+                )
+                floor_multiplier = 0.75 if tp_size <= 1 and moe_tp_size <= 1 else 0.50
+                ep_high_decode_floor_ms = max(ep_high_decode_floor_ms, saturated_ctx_ms * floor_multiplier)
+            except (AssertionError, PerfDataNotAvailableError, ValueError):
+                pass
+        if dense_context_envelope_covers_mixed_decode and gen_tokens > 0:
+            dense_decode_tail_slices = self._layerwise_dense_mixed_decode_tail_slices(
+                tp_size=tp_size,
+                ctx_tokens=ctx_tokens,
+                gen_tokens=gen_tokens,
+                context_chunk_size=context_chunk_size,
+            )
+            if dense_decode_tail_slices > 0.0:
+                try:
+                    gen_step_ms, _ = _nearby_gen_step_ms(allow_standard_kv_fallback=True)
+                    decode_delta_ms = gen_step_ms * dense_decode_tail_slices
+                except (PerfDataNotAvailableError, ValueError):
+                    logger.debug(
+                        "Falling back to dense context-only vLLM mixed-step estimate for model=%s, "
+                        "tp_size=%s, gen_tokens=%s",
+                        model_name,
+                        tp_size,
+                        gen_tokens,
+                    )
+
+        if (
+            ep_high_decode_floor_ms <= 0.0
+            and topk > 0
+            and gen_tokens > topk
+            and mixed_ep_context_covers_tp
+            and not context_envelope_covers_mixed_decode
+            and ctx_tokens > 128
+        ):
             try:
                 context_chunk_size = self._layerwise_context_chunk_size(runtime_config, combined_detail)
                 saturated_ctx_detail = self._layerwise_context_step_detail(
@@ -2058,7 +3603,11 @@ class VLLMBackend(BaseBackend):
                     context_chunk_size or combined_tokens,
                     0,
                     moe_weight_mode=mixed_context_moe_weight_mode,
+                    moe_tp_size=moe_tp_size,
+                    moe_ep_size=moe_ep_size,
                 )
+                if not self._layerwise_scheduler_like_detail(saturated_ctx_detail):
+                    raise PerfDataNotAvailableError("saturated EP mixed context floor row is composed")
                 saturated_ctx_ms = float(saturated_ctx_detail["latency"])
                 ep_high_decode_floor_ms = saturated_ctx_ms * self._layerwise_detail_scale(
                     saturated_ctx_detail,
@@ -2067,11 +3616,236 @@ class VLLMBackend(BaseBackend):
             except (AssertionError, PerfDataNotAvailableError, ValueError):
                 ep_high_decode_floor_ms = 0.0
 
+        if (
+            subquadratic_context_attention
+            and is_moe_model
+            and mixed_ep_context_covers_tp
+            and not context_detail_includes_moe
+            and has_shared_expert
+            and moe_ep_size > 1
+            and moe_tp_size <= 1
+            and ctx_prefix <= 0
+            and context_chunk_size is not None
+            and 128 <= ctx_tokens < context_chunk_size // 4
+            and gen_tokens >= max(4, min(small_decode_limit, 7))
+            and avg_decode_kv >= context_chunk_size
+        ):
+            try:
+                saturated_ctx_detail = self._layerwise_context_step_detail(
+                    database,
+                    model_name,
+                    tp_size,
+                    1,
+                    context_chunk_size * 2,
+                    0,
+                    moe_weight_mode=mixed_context_moe_weight_mode,
+                    moe_tp_size=moe_tp_size,
+                    moe_ep_size=moe_ep_size,
+                )
+                if not self._layerwise_scheduler_timed_detail(saturated_ctx_detail):
+                    raise PerfDataNotAvailableError("small shared-expert EP mixed floor row is not scheduler timed")
+                saturated_ctx_ms = float(saturated_ctx_detail["latency"]) * self._layerwise_detail_scale(
+                    saturated_ctx_detail,
+                    num_layers,
+                )
+                ep_high_decode_floor_ms = max(ep_high_decode_floor_ms, saturated_ctx_ms * 0.65)
+            except (AssertionError, PerfDataNotAvailableError, ValueError):
+                pass
+
+        if (
+            subquadratic_context_attention
+            and is_moe_model
+            and mixed_ep_context_covers_tp
+            and not context_detail_includes_moe
+            and has_shared_expert
+            and moe_ep_size > 1
+            and moe_tp_size <= 1
+            and ctx_prefix > 0
+            and context_chunk_size is not None
+            and context_chunk_size <= ctx_tokens < context_chunk_size * 2
+            and gen_tokens >= max(4, min(small_decode_limit, 7))
+            and avg_decode_kv >= context_chunk_size
+        ):
+            try:
+                saturated_ctx_detail = self._layerwise_context_step_detail(
+                    database,
+                    model_name,
+                    tp_size,
+                    1,
+                    context_chunk_size * 2,
+                    0,
+                    moe_weight_mode=mixed_context_moe_weight_mode,
+                    moe_tp_size=moe_tp_size,
+                    moe_ep_size=moe_ep_size,
+                )
+                if not self._layerwise_scheduler_timed_detail(saturated_ctx_detail):
+                    raise PerfDataNotAvailableError("mid shared-expert EP mixed floor row is not scheduler timed")
+                saturated_ctx_ms = float(saturated_ctx_detail["latency"]) * self._layerwise_detail_scale(
+                    saturated_ctx_detail,
+                    num_layers,
+                )
+                ep_high_decode_floor_ms = max(ep_high_decode_floor_ms, saturated_ctx_ms * 0.93)
+            except (AssertionError, PerfDataNotAvailableError, ValueError):
+                pass
+
+        if (
+            subquadratic_context_attention
+            and is_moe_model
+            and mixed_ep_context_covers_tp
+            and ctx_prefix <= 0
+            and context_chunk_size is not None
+            and context_chunk_size // 4 <= ctx_tokens < context_chunk_size
+            and gen_tokens >= max(4, min(small_decode_limit, 7))
+            and avg_decode_kv * 2 >= context_chunk_size * 3
+        ):
+            try:
+                saturated_ctx_detail = self._layerwise_context_step_detail(
+                    database,
+                    model_name,
+                    tp_size,
+                    1,
+                    context_chunk_size * 2,
+                    0,
+                    moe_weight_mode=mixed_context_moe_weight_mode,
+                    moe_tp_size=moe_tp_size,
+                    moe_ep_size=moe_ep_size,
+                )
+                if not self._layerwise_scheduler_timed_detail(saturated_ctx_detail):
+                    raise PerfDataNotAvailableError("subquadratic fresh mixed floor row is not scheduler timed")
+                saturated_ctx_ms = float(saturated_ctx_detail["latency"]) * self._layerwise_detail_scale(
+                    saturated_ctx_detail,
+                    num_layers,
+                )
+                fresh_floor_multiplier = 0.60
+                if has_shared_expert and moe_ep_size > 1 and moe_tp_size <= 1 and gen_tokens > topk:
+                    fresh_floor_multiplier = 1.05
+                ep_high_decode_floor_ms = max(ep_high_decode_floor_ms, saturated_ctx_ms * fresh_floor_multiplier)
+            except (AssertionError, PerfDataNotAvailableError, ValueError):
+                pass
+
+        if (
+            is_moe_model
+            and not context_detail_includes_moe
+            and not subquadratic_context_attention
+            and ctx_prefix <= 0
+            and tp_size <= 2
+            and context_chunk_size is not None
+            and 0 < ctx_tokens <= int(context_chunk_size * 1.25)
+            and gen_tokens > 0
+            and (tp_size <= 1 or ctx_tokens >= max(512, context_chunk_size // 4))
+            and (
+                moe_ep_size > 1
+                or moe_tp_size <= 1
+                or ctx_tokens >= max(512, context_chunk_size // 4)
+            )
+        ):
+            try:
+                saturated_ctx_detail = self._layerwise_context_step_detail(
+                    database,
+                    model_name,
+                    tp_size,
+                    1,
+                    context_chunk_size * 2,
+                    0,
+                    moe_weight_mode=mixed_context_moe_weight_mode,
+                    moe_tp_size=moe_tp_size,
+                    moe_ep_size=moe_ep_size,
+                )
+                if not self._layerwise_scheduler_timed_detail(saturated_ctx_detail):
+                    raise PerfDataNotAvailableError("low-TP MoE mixed floor row is composed")
+                saturated_ctx_ms = float(saturated_ctx_detail["latency"]) * self._layerwise_detail_scale(
+                    saturated_ctx_detail,
+                    num_layers,
+                )
+                if moe_ep_size > 1 and moe_tp_size <= 1:
+                    low_tp_floor_multiplier = 0.50
+                else:
+                    low_tp_floor_multiplier = 0.42
+                ep_high_decode_floor_ms = max(
+                    ep_high_decode_floor_ms,
+                    saturated_ctx_ms * low_tp_floor_multiplier,
+                )
+            except (AssertionError, PerfDataNotAvailableError, ValueError):
+                pass
+
+        if (
+            is_moe_model
+            and not context_detail_includes_moe
+            and moe_tp_size > 1
+            and moe_ep_size <= 1
+            and ctx_prefix <= 0
+            and ctx_requests <= 1
+            and 0 < ctx_tokens <= 128
+            and gen_tokens > 0
+        ):
+            ep_high_decode_floor_ms = max(ep_high_decode_floor_ms, combined_ctx_ms * 1.06)
+
+        if (
+            ep_high_decode_floor_ms > 0.0
+            and moe_tp_size > 1
+            and moe_ep_size <= 1
+            and ctx_prefix > 0
+            and context_chunk_size is not None
+            and ctx_requests >= 4
+            and ctx_tokens >= int(context_chunk_size * 3.4)
+            and gen_tokens > topk
+        ):
+            ep_high_decode_floor_ms *= 1.08
+
         moe_ms, moe_energy, moe_source = 0.0, 0.0, "silicon"
         moe_router_ms, moe_router_energy, moe_router_source = 0.0, 0.0, "silicon"
         moe_shared_ms, moe_shared_energy, moe_shared_source = 0.0, 0.0, "silicon"
         moe_tp_allreduce_ms = 0.0
-        if not bool(combined_detail.get("includes_moe", False)):
+        moe_ep_alltoall_ms = 0.0
+        tiny_fresh_ep_mixed_covers_noop_moe = (
+            scheduler_like_context
+            and mixed_ep_context_covers_tp
+            and not context_detail_includes_moe
+            and ctx_prefix <= 0
+            and 0 < ctx_tokens <= 256
+            and gen_tokens > 0
+        )
+        high_decode_fresh_ep_mixed_covers_noop_moe = (
+            scheduler_like_context
+            and mixed_ep_context_covers_tp
+            and not context_detail_includes_moe
+            and subquadratic_context_attention
+            and ctx_prefix <= 0
+            and ctx_requests <= 1
+            and context_chunk_size is not None
+            and ctx_tokens >= context_chunk_size
+            and gen_tokens >= max(4, min(small_decode_limit, 7))
+            and avg_decode_kv * 10 >= context_chunk_size * 19
+        )
+        large_fresh_shared_ep_context_covers_noop_moe = (
+            subquadratic_context_attention
+            and is_moe_model
+            and not context_detail_includes_moe
+            and has_shared_expert
+            and moe_ep_size > 1
+            and moe_tp_size <= 1
+            and ctx_prefix <= 0
+            and ctx_requests <= 1
+            and context_chunk_size is not None
+            and ctx_tokens >= context_chunk_size * 2
+            and gen_tokens > 0
+        )
+        moe_tp_continuation_context_covers_noop_moe = (
+            scheduler_like_context
+            and not context_detail_includes_moe
+            and not subquadratic_context_attention
+            and moe_tp_size > 1
+            and moe_ep_size <= 1
+            and ctx_prefix > 0
+            and gen_tokens > 0
+        )
+        ep_mixed_context_covers_noop_moe = (
+            tiny_fresh_ep_mixed_covers_noop_moe
+            or high_decode_fresh_ep_mixed_covers_noop_moe
+            or large_fresh_shared_ep_context_covers_noop_moe
+            or moe_tp_continuation_context_covers_noop_moe
+        )
+        if not context_detail_includes_moe and not ep_mixed_context_covers_noop_moe:
             represented_layers = self._layerwise_detail_represented_noop_moe_layers(combined_detail, num_layers)
             (
                 (moe_ms, moe_energy, moe_source),
@@ -2086,11 +3860,28 @@ class VLLMBackend(BaseBackend):
                 is_context=ctx_tokens > 0,
             )
             moe_tp_size = int(getattr(model.config, "moe_tp_size", 1) or 1)
+            moe_addback_scale = 1.0
+            if (
+                moe_ms > 0.0
+                and moe_tp_size > 1
+                and int(getattr(model.config, "moe_ep_size", 1) or 1) <= 1
+                and ctx_prefix <= 0
+                and 0 < ctx_tokens < 512
+                and gen_tokens > 0
+            ):
+                moe_addback_scale = min(0.75, max(0.0, (float(ctx_tokens) - 96.0) / 576.0))
+                moe_ms *= moe_addback_scale
+                moe_energy *= moe_addback_scale
+                moe_router_ms *= moe_addback_scale
+                moe_router_energy *= moe_addback_scale
+                moe_shared_ms *= moe_addback_scale
+                moe_shared_energy *= moe_addback_scale
             if moe_ms > 0.0 and moe_tp_size > 1 and not moe_addback_is_bundled:
                 try:
                     moe_tp_allreduce_ms = (
                         self._layerwise_tp_allreduce_ms(model, database, moe_tp_size, combined_tokens)
                         * represented_layers
+                        * moe_addback_scale
                     )
                 except (AttributeError, PerfDataNotAvailableError, ValueError):
                     logger.debug(
@@ -2100,10 +3891,62 @@ class VLLMBackend(BaseBackend):
                         moe_tp_size,
                         combined_tokens,
                     )
+            moe_ep_size = int(getattr(model.config, "moe_ep_size", 1) or 1)
+            if moe_ms > 0.0 and moe_ep_size > 1:
+                try:
+                    moe_ep_alltoall_ms = (
+                        self._layerwise_moe_ep_alltoall_ms(model, database, moe_ep_size, combined_tokens)
+                        * represented_layers
+                    )
+                except (AttributeError, PerfDataNotAvailableError, ValueError):
+                    logger.debug(
+                        "Falling back to no explicit vLLM mixed no-op MoE-EP all-to-all for model=%s, "
+                        "moe_ep_size=%s, token_count=%s because NCCL data is unavailable",
+                        model_name,
+                        moe_ep_size,
+                        combined_tokens,
+                    )
         latency_ms = combined_ctx_ms + combined_allreduce_ms + decode_delta_ms
         ep_high_decode_floor_applied = ep_high_decode_floor_ms > latency_ms
         if ep_high_decode_floor_applied:
             latency_ms = max(latency_ms, ep_high_decode_floor_ms)
+        floor_covers_moe_addback = (
+            ep_high_decode_floor_applied
+            and gen_tokens > 0
+            and (
+                (
+                    moe_tp_size > 1
+                    and moe_ep_size <= 1
+                    and ctx_prefix <= 0
+                    and context_chunk_size is not None
+                    and (
+                        (gen_tokens > topk and ctx_tokens < context_chunk_size * 3)
+                        or (gen_tokens <= topk and ctx_tokens <= int(context_chunk_size * 3.25))
+                    )
+                    and ctx_tokens + gen_tokens >= max(512, context_chunk_size // 4)
+                )
+                or (
+                    moe_tp_size <= 1
+                    and moe_ep_size <= 1
+                    and noop_moe_context_covers_mixed_decode
+                    and not has_shared_expert
+                )
+                or (
+                    has_shared_expert
+                    and moe_ep_size > 1
+                    and moe_tp_size <= 1
+                    and ctx_prefix <= 0
+                    and context_chunk_size is not None
+                    and 128 <= ctx_tokens < context_chunk_size // 4
+                )
+            )
+        )
+        if floor_covers_moe_addback:
+            moe_ms = 0.0
+            moe_tp_allreduce_ms = 0.0
+            moe_ep_alltoall_ms = 0.0
+            moe_router_ms = 0.0
+            moe_shared_ms = 0.0
         per_ops = {
             "mixed_layerwise_context_combined": combined_ctx_ms,
             "mixed_layerwise_context_tp_allreduce": combined_allreduce_ms,
@@ -2120,6 +3963,10 @@ class VLLMBackend(BaseBackend):
             latency_ms += moe_tp_allreduce_ms
             per_ops["mixed_moe_tp_allreduce"] = moe_tp_allreduce_ms
             per_ops_source["mixed_moe_tp_allreduce"] = "silicon"
+        if moe_ep_alltoall_ms > 0.0:
+            latency_ms += moe_ep_alltoall_ms
+            per_ops["mixed_moe_ep_alltoall"] = moe_ep_alltoall_ms
+            per_ops_source["mixed_moe_ep_alltoall"] = "silicon"
         if moe_router_ms > 0.0:
             latency_ms += moe_router_ms
             moe_energy += moe_router_energy
@@ -2130,4 +3977,33 @@ class VLLMBackend(BaseBackend):
             moe_energy += moe_shared_energy
             per_ops["mixed_moe_shared_expert"] = moe_shared_ms
             per_ops_source["mixed_moe_shared_expert"] = moe_shared_source
+        if (
+            "DeepSeek-V4" in str(model_name)
+            and ctx_tokens > 0
+            and gen_tokens > 0
+            and moe_ep_size <= 1
+            and scheduler_like_context
+            and not context_detail_includes_moe
+            and not small_subquadratic_continuation
+        ):
+            try:
+                self._layerwise_mixed_context_floor_active = True
+                try:
+                    context_floor_latency, _, _ = self._get_context_step_latency(
+                        model,
+                        database,
+                        runtime_config,
+                        ctx_tokens=ctx_tokens,
+                        ctx_kv_tokens=ctx_prefix,
+                        ctx_requests=1,
+                    )
+                finally:
+                    self._layerwise_mixed_context_floor_active = False
+                context_floor_ms = float(sum(context_floor_latency.values())) * 1.05
+                if context_floor_ms > latency_ms:
+                    latency_ms = context_floor_ms
+                    per_ops["mixed_layerwise_context_floor"] = context_floor_ms
+                    per_ops_source["mixed_layerwise_context_floor"] = "silicon"
+            except (AssertionError, KeyError, PerfDataNotAvailableError, ValueError):
+                pass
         return latency_ms, moe_energy, per_ops, per_ops_source

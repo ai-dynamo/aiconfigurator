@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +36,7 @@ cl = SimpleNamespace(
     _aggregate_step_rows=nsys._aggregate_step_rows,
     _build_arg_parser=public_collect._build_arg_parser,
     _ctx_cache_salt_prefix=worker._ctx_cache_salt_prefix,
+    _live_ctx_chunk_plan=worker._live_ctx_chunk_plan,
     _ctx_marker_iteration=worker._ctx_marker_iteration,
     _ctx_prefix_stream_key=worker._ctx_prefix_stream_key,
     _dummy_prompts=worker._dummy_prompts,
@@ -43,12 +45,23 @@ cl = SimpleNamespace(
     _filter_datapoints_for_model_max_len=dpg._filter_datapoints_for_model_max_len,
     _gen_cache_salt_prefix=worker._gen_cache_salt_prefix,
     _gen_prefix_stream_key=worker._gen_prefix_stream_key,
+    _prime_engine_requests_for_context=worker._prime_engine_requests_for_context,
+    _prime_engine_requests_for_decode=worker._prime_engine_requests_for_decode,
+    _run_live_gen_datapoint=worker._run_live_gen_datapoint,
+    _step_engine_until=worker._step_engine_until,
+    _abort_engine_requests=worker._abort_engine_requests,
+    _add_engine_requests=worker._add_engine_requests,
+    _all_requests_computed_at_least=worker._all_requests_computed_at_least,
     _live_decode_past_lengths=worker._live_decode_past_lengths,
     _latency_us_from_agg=nsys._latency_us_from_agg,
     _lookup_aggs=nsys._lookup_aggs,
     _lookup_scheduler_timing_aggs=scheduler._lookup_scheduler_timing_aggs,
+    _lookup_timing_source_aggs=scheduler._lookup_timing_source_aggs,
     _lookup_worker_wall_aggs=scheduler._lookup_worker_wall_aggs,
+    _live_step_driver_would_handle=scheduler._live_step_driver_would_handle,
+    _is_oom_text=scheduler._is_oom_text,
     _prefix_suffix_prompts=worker._prefix_suffix_prompts,
+    _token_prompts=worker._token_prompts,
     _reduce_agg_latency=nsys._reduce_agg_latency,
     _use_live_step_driver=worker._use_live_step_driver,
     build_public_work_units=dpg.build_public_work_units,
@@ -107,6 +120,7 @@ def _args(tmp_path):
         gen_warmup_runs=0,
         gen_measured_runs=1,
         gen_repeat_aggregation="median",
+        live_step_driver=False,
         prompt_seed=None,
         rollup=r"layers\.(\d+)\.(self_attn|mlp)",
         rank_reduce="sum",
@@ -140,6 +154,7 @@ def _build_args(tmp_path, **overrides):
         attn_quant="bf16",
         kv_quant="bf16",
         max_num_batched_tokens=None,
+        gpu_memory_utilization=0.9,
         physical_tp_real_weights=False,
     )
     for key, value in overrides.items():
@@ -152,14 +167,17 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         args = cl._build_arg_parser().parse_args(["--model", "model"])
 
         self.assertEqual(args.ctx_measured_runs, 6)
+        self.assertEqual(args.ctx_warmup_runs, 1)
         self.assertEqual(args.ctx_repeat_aggregation, "trimmed_mean")
         self.assertEqual(args.gen_measured_runs, 6)
+        self.assertEqual(args.gen_warmup_runs, 1)
         self.assertEqual(args.gen_repeat_aggregation, "trimmed_mean")
         self.assertEqual(args.latency_source, "auto")
         self.assertEqual(args.max_decode_batch_size, "512")
+        self.assertEqual(args.gpu_memory_utilization, 0.9)
         self.assertEqual(args.ctx_target_layer_count, 0)
         self.assertEqual(args.gen_target_layer_count, 1)
-        self.assertFalse(hasattr(args, "gen_driver"))
+        self.assertIsNone(args.gen_driver)
         self.assertFalse(hasattr(args, "ctx_driver"))
         self.assertEqual(args.nsys_capture, "full")
 
@@ -206,14 +224,14 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertEqual(ctx_unit.model_layer_count, 4)
             self.assertTrue(ctx_unit.uses_full_layer_depth())
             self.assertIsNone(ctx_unit.max_model_len)
-            self.assertEqual(gen_unit.representative.measured_layer_count, 1)
+            self.assertEqual(gen_unit.representative.measured_layer_count, 4)
             self.assertEqual(gen_unit.representative.layer_multiplier, 4)
-            self.assertEqual(gen_unit.target_layers, [0])
-            self.assertEqual(gen_unit.model_layer_count, 1)
+            self.assertEqual(gen_unit.target_layers, [0, 1, 2, 3])
+            self.assertEqual(gen_unit.model_layer_count, 4)
             self.assertTrue(gen_unit.uses_full_layer_depth())
             self.assertIsNone(gen_unit.max_model_len)
 
-    def test_public_tp1_moe_defaults_to_dummy_context_and_noop_decode_without_real_weights(self):
+    def test_public_tp1_moe_defaults_to_noop_without_real_weights(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = cl._build_arg_parser().parse_args([
@@ -260,14 +278,142 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertTrue(all(unit.extra_vllm_args == () for unit in units))
             ctx_unit = next(unit for unit in units if unit.datapoints[0].phase == "ctx")
             gen_unit = next(unit for unit in units if unit.datapoints[0].phase == "gen")
-            self.assertFalse(ctx_unit.moe_noop)
+            self.assertTrue(ctx_unit.moe_noop)
             self.assertTrue(gen_unit.moe_noop)
-            self.assertEqual(ctx_unit.moe_weight_mode, "dummy")
+            self.assertEqual(ctx_unit.moe_weight_mode, "noop")
             self.assertEqual(gen_unit.moe_weight_mode, "noop")
             self.assertTrue(all(unit.router_weight_model is None for unit in units))
             self.assertEqual(gen_unit.gen_driver, "prefix_cache")
             resolver.assert_not_called()
             patcher.assert_called()
+
+    def test_public_gen_driver_override_updates_registry_models(self):
+        args = cl._build_arg_parser().parse_args([
+            "--models",
+            "Qwen/Qwen3-32B",
+            "--gen-driver",
+            "live_decode",
+        ])
+
+        models = public_collect._selected_models(args)
+
+        self.assertEqual(len(models), 1)
+        self.assertEqual(models[0].gen_driver, "live_decode")
+
+    def test_public_deepseek_registry_defaults_to_prefix_cache(self):
+        args = cl._build_arg_parser().parse_args([
+            "--models",
+            "deepseek-ai/DeepSeek-V4-Flash",
+        ])
+
+        models = public_collect._selected_models(args)
+
+        self.assertEqual(len(models), 1)
+        self.assertEqual(models[0].gen_driver, "prefix_cache")
+
+    def test_public_deepseek_v4_flash_stub_memory_filter_allows_small_tp(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            args = cl._build_arg_parser().parse_args([
+                "--models",
+                "deepseek-ai/DeepSeek-V4-Flash",
+                "--tp-sizes",
+                "1,2,4,8",
+                "--ep-sizes",
+                "auto",
+                "--phases",
+                "ctx",
+                "--run-preset",
+                "smoke",
+            ])
+            args.run_dir = tmp_path
+            args.work_dir = str(tmp_path / "profiles")
+            args.config_cache_dir = str(tmp_path / "config_cache")
+            model = LayerwiseModel(
+                model="deepseek-ai/DeepSeek-V4-Flash",
+                kind="moe",
+                tp_sizes=(1, 2, 4, 8),
+                ep_sizes=(1, 2, 4, 8),
+            )
+            built = []
+
+            def fake_make_args(public_args, model, *, tp_size, ep_size, phase=None):
+                return SimpleNamespace(
+                    public_args=public_args,
+                    model=model.model,
+                    tp_size=tp_size,
+                    ep_size=ep_size,
+                    phase=phase,
+                )
+
+            def fake_build_work_units(unit_args):
+                built.append((unit_args.tp_size, unit_args.ep_size, unit_args.phase))
+                return [unit_args]
+
+            with (
+                mock.patch.object(dpg, "make_work_unit_args", side_effect=fake_make_args),
+                mock.patch.object(dpg, "build_work_units", side_effect=fake_build_work_units),
+            ):
+                units = cl.build_public_work_units(args, [model])
+
+            self.assertEqual(len(units), 13)
+            self.assertEqual(
+                built,
+                [
+                    (1, 1, "ctx"),
+                    (1, 2, "ctx"),
+                    (1, 4, "ctx"),
+                    (1, 8, "ctx"),
+                    (2, 1, "ctx"),
+                    (2, 2, "ctx"),
+                    (2, 4, "ctx"),
+                    (2, 8, "ctx"),
+                    (4, 1, "ctx"),
+                    (4, 4, "ctx"),
+                    (4, 8, "ctx"),
+                    (8, 1, "ctx"),
+                    (8, 8, "ctx"),
+                ],
+            )
+
+    def test_public_moe_effective_ep_can_exceed_attention_tp(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            args = cl._build_arg_parser().parse_args([
+                "--models",
+                "model",
+                "--tp-sizes",
+                "1",
+                "--ep-sizes",
+                "4",
+                "--phases",
+                "ctx",
+                "--run-preset",
+                "smoke",
+            ])
+            args.run_dir = tmp_path
+            args.work_dir = str(tmp_path / "profiles")
+            args.config_cache_dir = str(tmp_path / "config_cache")
+            model = LayerwiseModel(model="model", kind="moe", tp_sizes=(1,), ep_sizes=(1, 2, 4, 8))
+            moe_config = {
+                "num_attention_heads": 8,
+                "num_key_value_heads": 8,
+                "intermediate_size": 1024,
+                "moe_intermediate_size": 512,
+                "num_experts": 16,
+                "num_hidden_layers": 4,
+            }
+
+            with (
+                mock.patch.object(dpg, "_load_original_config", return_value=moe_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
+            ):
+                units = cl.build_public_work_units(args, [model])
+
+            self.assertEqual(len(units), 1)
+            self.assertEqual(units[0].row_base["attn_tp"], 1)
+            self.assertEqual(units[0].row_base["moe_tp"], 1)
+            self.assertEqual(units[0].row_base["ep"], 4)
 
     def test_public_patched_moe_uses_router_weight_overlay(self):
         with tempfile.TemporaryDirectory() as td:
@@ -684,6 +830,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 _unit(tmp_path, [cl.DataPoint("gen", 4, 1, 4096)]),
                 max_num_seqs=16,
                 max_num_batched_tokens=4096,
+                cache_block_size=16,
             )
             scheduler = cl.Scheduler(_args(tmp_path), [unit])
 
@@ -691,6 +838,17 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             self.assertEqual(spec["max_num_seqs"], 16)
             self.assertEqual(spec["max_num_batched_tokens"], 4096)
+            self.assertEqual(spec["cache_block_size"], 16)
+
+    def test_scheduler_spec_leaves_auto_cache_block_size_unset(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            unit = _unit(tmp_path, [cl.DataPoint("gen", 4, 1, 4096)])
+            scheduler_obj = cl.Scheduler(_args(tmp_path), [unit])
+
+            spec = scheduler_obj._make_spec(unit, unit.datapoints, attempt_id=0)
+
+            self.assertIsNone(spec["cache_block_size"])
 
     def test_datapoint_ids_and_parse_keys_are_stable(self):
         ctx = cl.DataPoint("ctx", 1, 128, 0)
@@ -708,12 +866,13 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             {"event": "started", "work_unit_id": "wu", "datapoint_id": "b"},
             {"event": "started", "work_unit_id": "wu", "datapoint_id": "c"},
             {"event": "failed_error", "work_unit_id": "wu", "datapoint_id": "c"},
+            {"event": "live_step_driver_started", "work_unit_id": "wu", "datapoint_id": "d"},
         ]
         index = cl.StatusIndex(events)
 
         self.assertTrue(index.is_terminal("a"))
         self.assertTrue(index.is_terminal("c"))
-        self.assertEqual(index.active_started("wu", {"a", "b", "c"}), "b")
+        self.assertEqual(index.active_started("wu", {"a", "b", "c", "d"}), "d")
 
     def test_aggregate_step_rows_uses_span_for_latency_source(self):
         parsed = cl._aggregate_step_rows([
@@ -778,7 +937,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             "schedule_to_update",
         )
 
-    def test_auto_latency_source_selects_context_scheduler_and_moe_high_batch_gpu(self):
+    def test_auto_latency_source_selects_scheduler_timing_for_context_and_decode(self):
         self.assertEqual(
             cl._effective_latency_source("auto", cl.DataPoint("ctx", 1, 128, 0)),
             "schedule_to_update",
@@ -789,15 +948,15 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         )
         self.assertEqual(
             cl._effective_latency_source("auto", cl.DataPoint("gen", 4, 1, 4096), includes_moe=True),
-            "span",
+            "schedule_to_update",
         )
         self.assertEqual(
             cl._effective_latency_source("auto", cl.DataPoint("gen", 8, 1, 4096), includes_moe=True),
-            "gpu",
+            "schedule_to_update",
         )
         self.assertEqual(
             cl._effective_latency_source("auto", cl.DataPoint("gen", 8, 1, 4096), includes_moe=False),
-            "span",
+            "schedule_to_update",
         )
 
     def test_scheduler_timing_lookup_matches_datapoint_shape(self):
@@ -857,6 +1016,185 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(kernel_count, 0)
         self.assertEqual(latency_us, 10_000.0)
 
+    def test_scheduler_timing_lookup_prefers_live_execute_model_wall_time(self):
+        events = [
+            {
+                "event": "completed_execution",
+                "work_unit_id": "wu",
+                "attempt_id": 2,
+                "phase": "ctx",
+                "batch_size": 1,
+                "new_tokens": 400,
+                "past_kv": 3696,
+                "run": 0,
+                "live_step_driver": True,
+                "execute_model_wall_time_ms": 17.0,
+            },
+            {
+                "event": "live_step_wall_time",
+                "work_unit_id": "wu",
+                "attempt_id": 2,
+                "phase": "ctx",
+                "batch_size": 1,
+                "new_tokens": 400,
+                "past_kv": 3696,
+                "run": 0,
+                "wall_latency_ms": 22.0,
+            },
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "attempt_id": 2,
+                "control_phase": "ctx",
+                "control_step": 400,
+                "control_bs": 1,
+                "control_past": 3696,
+                "control_run": 0,
+                "schedule_to_update_ms": 30.0,
+            },
+        ]
+
+        aggs = cl._lookup_scheduler_timing_aggs(
+            events,
+            "wu",
+            cl.DataPoint("ctx", 1, 400, 3696),
+            attempt_id=2,
+        )
+        latency_us, _rms_us, kernel_count, _rms_kernel_count, measure_count = cl._reduce_agg_latency(
+            aggs,
+            latency_source="span",
+            aggregation="mean",
+        )
+
+        self.assertEqual(measure_count, 1)
+        self.assertEqual(kernel_count, 0)
+        self.assertEqual(latency_us, 17_000.0)
+
+    def test_live_ctx_chunk_plan_caps_steps_at_scheduler_budget(self):
+        chunks = cl._live_ctx_chunk_plan(
+            cl.DataPoint("ctx", 1, 8192, 4096),
+            max_num_batched_tokens=2048,
+        )
+
+        self.assertEqual(
+            chunks,
+            [
+                (2048, 4096),
+                (2048, 6144),
+                (2048, 8192),
+                (2048, 10240),
+            ],
+        )
+
+    def test_scheduler_timing_lookup_uses_composed_live_ctx_wall_time(self):
+        events = [
+            {
+                "event": "completed_execution",
+                "work_unit_id": "wu",
+                "attempt_id": 2,
+                "phase": "ctx",
+                "batch_size": 1,
+                "new_tokens": 2048,
+                "past_kv": 0,
+                "run": 0,
+                "live_step_driver": True,
+                "execute_model_wall_time_ms": 10.0,
+            },
+            {
+                "event": "completed_execution",
+                "work_unit_id": "wu",
+                "attempt_id": 2,
+                "phase": "ctx",
+                "batch_size": 1,
+                "new_tokens": 2048,
+                "past_kv": 2048,
+                "run": 0,
+                "live_step_driver": True,
+                "execute_model_wall_time_ms": 12.0,
+            },
+            {
+                "event": "live_step_wall_time",
+                "work_unit_id": "wu",
+                "attempt_id": 2,
+                "phase": "ctx",
+                "batch_size": 1,
+                "new_tokens": 4096,
+                "past_kv": 0,
+                "run": 0,
+                "live_step_driver": True,
+                "chunks": 2,
+                "wall_latency_ms": 23.0,
+            },
+        ]
+
+        aggs = cl._lookup_scheduler_timing_aggs(
+            events,
+            "wu",
+            cl.DataPoint("ctx", 1, 4096, 0),
+            attempt_id=2,
+        )
+        latency_us, _rms_us, kernel_count, _rms_kernel_count, measure_count = cl._reduce_agg_latency(
+            aggs,
+            latency_source="span",
+            aggregation="mean",
+        )
+
+        self.assertEqual(measure_count, 1)
+        self.assertEqual(kernel_count, 0)
+        self.assertEqual(latency_us, 23_000.0)
+
+    def test_scheduler_timing_lookup_filters_by_attempt_id(self):
+        events = [
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "attempt_id": 1,
+                "control_phase": "ctx",
+                "control_step": 128,
+                "control_bs": 1,
+                "control_past": 0,
+                "control_run": 0,
+                "schedule_to_update_ms": 6000.0,
+            },
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "attempt_id": 2,
+                "control_phase": "ctx",
+                "control_step": 128,
+                "control_bs": 1,
+                "control_past": 0,
+                "control_run": 0,
+                "schedule_to_update_ms": 14.0,
+            },
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "attempt_id": 2,
+                "control_phase": "ctx",
+                "control_step": 128,
+                "control_bs": 1,
+                "control_past": 0,
+                "control_run": 1,
+                "schedule_to_update_ms": 16.0,
+            },
+        ]
+
+        aggs = cl._lookup_scheduler_timing_aggs(
+            events,
+            "wu",
+            cl.DataPoint("ctx", 1, 128, 0),
+            attempt_id=2,
+        )
+        latency_us, _rms_us, _kernel_count, _rms_kernel_count, measure_count = cl._reduce_agg_latency(
+            aggs,
+            latency_source="span",
+            aggregation="mean",
+        )
+
+        self.assertEqual(measure_count, 2)
+        self.assertEqual(latency_us, 15_000.0)
+
     def test_scheduler_timing_lookup_uses_decode_only_update_for_generation(self):
         events = [
             {
@@ -882,6 +1220,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "scheduled_new_reqs": 0,
                 "scheduled_tokens": 4,
                 "fpm_wall_time_ms": 13.5,
+                "schedule_to_update_ms": 15.5,
             },
         ]
 
@@ -895,6 +1234,91 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(measure_count, 1)
         self.assertEqual(kernel_count, 0)
         self.assertEqual(latency_us, 13_500.0)
+
+        dense_aggs = cl._lookup_scheduler_timing_aggs(
+            events,
+            "wu",
+            cl.DataPoint("gen", 4, 1, 4096),
+            prefer_schedule_to_update_for_gen=True,
+        )
+        dense_latency_us, _rms_us, _kernel_count, _rms_kernel_count, _measure_count = cl._reduce_agg_latency(
+            dense_aggs,
+            latency_source="span",
+            aggregation="mean",
+        )
+        self.assertEqual(dense_latency_us, 15_500.0)
+
+    def test_auto_noop_moe_generation_uses_fpm_wall_not_schedule_to_update(self):
+        events = [
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "attempt_id": 3,
+                "control_phase": "gen",
+                "control_step": 4097,
+                "control_bs": 2,
+                "control_past": 4096,
+                "control_run": 0,
+                "scheduled_new_reqs": 0,
+                "scheduled_tokens": 2,
+                "fpm_wall_time_ms": 8.0,
+                "schedule_to_update_ms": 150.0,
+            },
+        ]
+
+        noop_aggs = cl._lookup_scheduler_timing_aggs(
+            events=events,
+            work_unit_id="wu",
+            datapoint=cl.DataPoint("gen", 2, 1, 4096),
+            attempt_id=3,
+            prefer_schedule_to_update_for_gen=False,
+        )
+        noop_latency_us, *_ = cl._reduce_agg_latency(noop_aggs, latency_source="span", aggregation="mean")
+
+        dense_aggs = cl._lookup_scheduler_timing_aggs(
+            events=events,
+            work_unit_id="wu",
+            datapoint=cl.DataPoint("gen", 2, 1, 4096),
+            attempt_id=3,
+            prefer_schedule_to_update_for_gen=True,
+        )
+        dense_latency_us, *_ = cl._reduce_agg_latency(dense_aggs, latency_source="span", aggregation="mean")
+
+        self.assertEqual(noop_latency_us, 8_000.0)
+        self.assertEqual(dense_latency_us, 150_000.0)
+
+    def test_auto_dense_generation_uses_fpm_wall_not_schedule_to_update(self):
+        events = [
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "attempt_id": 3,
+                "control_phase": "gen",
+                "control_step": 4097,
+                "control_bs": 2,
+                "control_past": 4096,
+                "control_run": 0,
+                "scheduled_new_reqs": 0,
+                "scheduled_tokens": 2,
+                "fpm_wall_time_ms": 8.0,
+                "schedule_to_update_ms": 150.0,
+            },
+        ]
+
+        source, aggs = cl._lookup_timing_source_aggs(
+            requested_source="auto",
+            effective_source="schedule_to_update",
+            events=events,
+            work_unit_id="wu",
+            datapoint=cl.DataPoint("gen", 2, 1, 4096),
+            attempt_id=3,
+            includes_moe=False,
+            moe_noop=False,
+        )
+
+        latency_us, *_ = cl._reduce_agg_latency(aggs, latency_source="span", aggregation="mean")
+        self.assertEqual(source, "schedule_to_update")
+        self.assertEqual(latency_us, 8_000.0)
 
     def test_scheduler_timing_lookup_sums_chunked_context_by_run(self):
         events = [
@@ -949,6 +1373,56 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
         self.assertEqual(measure_count, 2)
         self.assertEqual(latency_us, 308_000.0)
+
+    def test_scheduler_timing_lookup_skips_cached_context_spillover_updates(self):
+        events = [
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "control_phase": "ctx",
+                "control_step": 928,
+                "control_bs": 1,
+                "control_past": 4096,
+                "control_run": 0,
+                "scheduled_new_reqs": 1,
+                "scheduled_tokens": 2048,
+                "fpm_wall_time_ms": 39.0,
+            },
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "control_phase": "ctx",
+                "control_step": 928,
+                "control_bs": 1,
+                "control_past": 4096,
+                "control_run": 0,
+                "scheduled_new_reqs": 0,
+                "scheduled_tokens": 2048,
+                "fpm_wall_time_ms": 22.0,
+            },
+            {
+                "event": "scheduler_update_wall_time",
+                "work_unit_id": "wu",
+                "control_phase": "ctx",
+                "control_step": 928,
+                "control_bs": 1,
+                "control_past": 4096,
+                "control_run": 0,
+                "scheduled_new_reqs": 0,
+                "scheduled_tokens": 928,
+                "fpm_wall_time_ms": 3.0,
+            },
+        ]
+
+        aggs = cl._lookup_scheduler_timing_aggs(events, "wu", cl.DataPoint("ctx", 1, 928, 4096))
+        latency_us, _rms_us, _kernel_count, _rms_kernel_count, measure_count = cl._reduce_agg_latency(
+            aggs,
+            latency_source="span",
+            aggregation="mean",
+        )
+
+        self.assertEqual(measure_count, 1)
+        self.assertEqual(latency_us, 39_000.0)
 
     def test_repeat_aggregation_selects_median_latency(self):
         parsed = cl._aggregate_step_rows([
@@ -1064,6 +1538,84 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertEqual(token_config.vocab_size, 16)
             self.assertEqual(token_config.excluded_token_ids, frozenset({1, 2, 3}))
 
+    def test_prompt_token_config_falls_back_to_tokenizer_when_auto_config_is_unknown(self):
+        class FakeAutoConfig:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                raise ValueError("unknown model_type")
+
+        class FakeTokenizer:
+            vocab_size = 32
+            all_special_ids: ClassVar[list[int]] = [0, 1, 31]
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                return FakeTokenizer()
+
+        fake_transformers = SimpleNamespace(
+            AutoConfig=FakeAutoConfig,
+            AutoTokenizer=FakeAutoTokenizer,
+        )
+
+        with mock.patch.dict(sys.modules, {"transformers": fake_transformers}):
+            token_config = load_random_prompt_token_config(
+                "example/new-model",
+                allow_transformers_fallback=True,
+            )
+
+        self.assertEqual(token_config.vocab_size, 32)
+        self.assertEqual(token_config.excluded_token_ids, frozenset({0, 1, 31}))
+
+    def test_prompt_token_config_falls_back_to_hf_json_when_transformers_is_unknown(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            (tmp_path / "config.json").write_text(json.dumps({
+                "vocab_size": 64,
+                "bos_token_id": 1,
+                "eos_token_id": [2, 3],
+            }))
+            (tmp_path / "tokenizer_config.json").write_text(json.dumps({
+                "pad_token_id": 0,
+                "added_tokens_decoder": {
+                    "4": {"special": True},
+                    "5": {"special": False},
+                },
+            }))
+
+            class FakeAutoConfig:
+                @staticmethod
+                def from_pretrained(*args, **kwargs):
+                    raise ValueError("unknown model_type")
+
+            class FakeAutoTokenizer:
+                @staticmethod
+                def from_pretrained(*args, **kwargs):
+                    raise AttributeError("tokenizer config is unknown")
+
+            def fake_hf_hub_download(*, repo_id, filename, local_files_only):
+                self.assertEqual(repo_id, "example/new-model")
+                self.assertTrue(local_files_only)
+                return str(tmp_path / filename)
+
+            fake_transformers = SimpleNamespace(
+                AutoConfig=FakeAutoConfig,
+                AutoTokenizer=FakeAutoTokenizer,
+            )
+            fake_hub = SimpleNamespace(hf_hub_download=fake_hf_hub_download)
+
+            with mock.patch.dict(
+                sys.modules,
+                {"transformers": fake_transformers, "huggingface_hub": fake_hub},
+            ):
+                token_config = load_random_prompt_token_config(
+                    "example/new-model",
+                    allow_transformers_fallback=True,
+                )
+
+        self.assertEqual(token_config.vocab_size, 64)
+        self.assertEqual(token_config.excluded_token_ids, frozenset({0, 1, 2, 3, 4}))
+
     def test_prefix_suffix_prompts_reuse_prefix_and_vary_suffix(self):
         token_config = cl.RandomPromptTokenConfig(
             vocab_size=128,
@@ -1157,6 +1709,259 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"LAYERWISE_USE_LIVE_STEP_DRIVER": "1"}, clear=True):
             self.assertTrue(cl._use_live_step_driver(dp))
 
+    def test_live_step_driver_allows_large_decode_past(self):
+        dp = cl.DataPoint("gen", 256, 1, 32768)
+
+        with mock.patch.dict(os.environ, {"LAYERWISE_USE_LIVE_STEP_DRIVER": "1"}, clear=True):
+            self.assertTrue(cl._use_live_step_driver(dp))
+
+    def test_live_step_driver_allows_all_positive_decode_past(self):
+        small = cl.DataPoint("gen", 1, 1, 1)
+        zero = cl.DataPoint("gen", 1, 1, 0)
+
+        with mock.patch.dict(os.environ, {"LAYERWISE_USE_LIVE_STEP_DRIVER": "1"}, clear=True):
+            self.assertTrue(cl._use_live_step_driver(small))
+            self.assertTrue(cl._live_step_driver_would_handle(small))
+            self.assertFalse(cl._use_live_step_driver(zero))
+            self.assertFalse(cl._live_step_driver_would_handle(zero))
+
+    def test_live_step_driver_handles_context_past_rows(self):
+        ctx = cl.DataPoint("ctx", 1, 400, 3696)
+        ctx_no_past = cl.DataPoint("ctx", 1, 400, 0)
+        ctx_batch = cl.DataPoint("ctx", 2, 400, 3696)
+
+        with mock.patch.dict(os.environ, {"LAYERWISE_USE_LIVE_STEP_DRIVER": "1"}, clear=True):
+            self.assertTrue(cl._use_live_step_driver(ctx))
+            self.assertTrue(cl._live_step_driver_would_handle(ctx))
+            self.assertTrue(cl._use_live_step_driver(ctx_no_past))
+            self.assertTrue(cl._live_step_driver_would_handle(ctx_no_past))
+            self.assertFalse(cl._use_live_step_driver(ctx_batch))
+            self.assertFalse(cl._live_step_driver_would_handle(ctx_batch))
+
+    def test_live_gen_datapoint_uses_shared_prefix_cache_key(self):
+        dp = cl.DataPoint("gen", 4, 1, 4096)
+        prompt_factory = cl.PromptTokenFactory(seed=123)
+        token_config = mock.Mock()
+        sampling_cls = mock.Mock(return_value=mock.Mock())
+        llm = mock.Mock()
+        marker_mod = mock.Mock()
+        request_ids = ["req0", "req1", "req2", "req3"]
+
+        def fake_step():
+            marker_mod._LAST_DECODE_MATCH_META = {"matched": True}
+
+        class FakeRequest:
+            num_prompt_tokens = 4096
+
+            def __init__(self):
+                self.num_computed_tokens = 0
+                self.num_tokens = 4096
+                self.prompt_token_ids = [1]
+                self.appended = []
+
+            def append_output_token_ids(self, token_id):
+                self.appended.append(token_id)
+                self.num_tokens += 1
+
+        requests = {request_id: FakeRequest() for request_id in request_ids}
+        kv_cache_manager = mock.Mock()
+        kv_cache_manager.allocate_slots.return_value = object()
+
+        def fake_token_prompts(batch_size, input_len, token_config, **kwargs):
+            self.assertEqual(batch_size, 4)
+            self.assertEqual(input_len, 4096)
+            self.assertEqual(kwargs["stream_key_prefix"], cl._gen_prefix_stream_key("wu"))
+            self.assertEqual(kwargs["cache_salt_prefix"], cl._gen_cache_salt_prefix("wu", dp))
+            return [{"prompt_token_ids": [1]} for _ in range(batch_size)]
+
+        with (
+            mock.patch.object(worker, "_token_prompts", side_effect=fake_token_prompts),
+            mock.patch.object(worker, "_add_engine_requests", return_value=request_ids),
+            mock.patch.object(
+                worker,
+                "_engine_core_scheduler",
+                return_value=SimpleNamespace(requests=requests, kv_cache_manager=kv_cache_manager),
+            ),
+            mock.patch.object(worker, "_abort_engine_requests"),
+            mock.patch.dict(os.environ, {}, clear=True),
+        ):
+            llm.llm_engine.step.side_effect = fake_step
+            cl._run_live_gen_datapoint(
+                llm,
+                sampling_cls,
+                marker_mod,
+                dp,
+                work_unit_id="wu",
+                token_config=token_config,
+                prompt_factory=prompt_factory,
+                warmup_runs=0,
+                measured_runs=1,
+            )
+
+        self.assertTrue(llm.llm_engine.step.called)
+        self.assertTrue(all(request.num_computed_tokens == 4096 for request in requests.values()))
+        self.assertTrue(all(request.appended == [1] for request in requests.values()))
+        self.assertEqual(kv_cache_manager.allocate_slots.call_count, len(request_ids))
+
+    def test_prime_engine_requests_for_decode_allocates_prefix_slots(self):
+        class FakeRequest:
+            num_prompt_tokens = 128
+
+            def __init__(self):
+                self.num_computed_tokens = 0
+                self.num_tokens = 128
+                self.prompt_token_ids = [17, 23]
+                self.appended = []
+
+            def append_output_token_ids(self, token_id):
+                self.appended.append(token_id)
+                self.num_tokens += 1
+
+        request = FakeRequest()
+        kv_cache_manager = mock.Mock()
+        kv_cache_manager.allocate_slots.return_value = object()
+        with mock.patch.object(
+            worker,
+            "_engine_core_scheduler",
+            return_value=SimpleNamespace(requests={"req": request}, kv_cache_manager=kv_cache_manager),
+        ):
+            chunks = cl._prime_engine_requests_for_decode(mock.Mock(), ["req"], 128)
+
+        self.assertEqual(chunks, 1)
+        kv_cache_manager.allocate_slots.assert_called_once_with(request, 128)
+        self.assertEqual(request.num_computed_tokens, 128)
+        self.assertEqual(request.num_tokens, 129)
+        self.assertEqual(request.appended, [23])
+
+    def test_prime_engine_requests_for_decode_chunks_prefix_allocation(self):
+        class FakeRequest:
+            num_prompt_tokens = 128
+
+            def __init__(self):
+                self.num_computed_tokens = 0
+                self.num_tokens = 128
+                self.prompt_token_ids = [17, 23]
+                self.appended = []
+
+            def append_output_token_ids(self, token_id):
+                self.appended.append(token_id)
+                self.num_tokens += 1
+
+        request = FakeRequest()
+        kv_cache_manager = mock.Mock()
+        kv_cache_manager.allocate_slots.return_value = object()
+        scheduler = SimpleNamespace(
+            requests={"req": request},
+            kv_cache_manager=kv_cache_manager,
+            max_num_scheduled_tokens=64,
+        )
+        with mock.patch.object(worker, "_engine_core_scheduler", return_value=scheduler):
+            chunks = cl._prime_engine_requests_for_decode(mock.Mock(), ["req"], 128)
+
+        self.assertEqual(chunks, 2)
+        self.assertEqual(kv_cache_manager.allocate_slots.call_args_list, [
+            mock.call(request, 64),
+            mock.call(request, 64),
+        ])
+        self.assertEqual(request.num_computed_tokens, 128)
+        self.assertEqual(request.appended, [23])
+
+    def test_prime_engine_requests_for_context_does_not_append_decode_token(self):
+        class FakeRequest:
+            num_prompt_tokens = 528
+
+            def __init__(self):
+                self.num_computed_tokens = 0
+                self.num_tokens = 528
+                self.prompt_token_ids = [17, 23]
+                self.appended = []
+
+            def append_output_token_ids(self, token_id):
+                self.appended.append(token_id)
+                self.num_tokens += 1
+
+        request = FakeRequest()
+        kv_cache_manager = mock.Mock()
+        kv_cache_manager.allocate_slots.return_value = object()
+        scheduler = SimpleNamespace(
+            requests={"req": request},
+            kv_cache_manager=kv_cache_manager,
+            max_num_scheduled_tokens=64,
+        )
+        with mock.patch.object(worker, "_engine_core_scheduler", return_value=scheduler):
+            chunks = cl._prime_engine_requests_for_context(mock.Mock(), ["req"], 128)
+
+        self.assertEqual(chunks, 2)
+        self.assertEqual(kv_cache_manager.allocate_slots.call_args_list, [
+            mock.call(request, 64),
+            mock.call(request, 64),
+        ])
+        self.assertEqual(request.num_computed_tokens, 128)
+        self.assertEqual(request.num_tokens, 528)
+        self.assertEqual(request.appended, [])
+
+    def test_prime_engine_requests_for_decode_splits_scheduler_budget_across_batch(self):
+        class FakeRequest:
+            num_prompt_tokens = 128
+
+            def __init__(self, token_id):
+                self.num_computed_tokens = 0
+                self.num_tokens = 128
+                self.prompt_token_ids = [token_id]
+                self.appended = []
+
+            def append_output_token_ids(self, token_id):
+                self.appended.append(token_id)
+                self.num_tokens += 1
+
+        requests = {f"req{i}": FakeRequest(100 + i) for i in range(4)}
+        kv_cache_manager = mock.Mock()
+        kv_cache_manager.allocate_slots.return_value = object()
+        scheduler = SimpleNamespace(
+            requests=requests,
+            kv_cache_manager=kv_cache_manager,
+            max_num_scheduled_tokens=128,
+        )
+        with mock.patch.object(worker, "_engine_core_scheduler", return_value=scheduler):
+            rounds = cl._prime_engine_requests_for_decode(mock.Mock(), list(requests), 128)
+
+        self.assertEqual(rounds, 4)
+        self.assertEqual(kv_cache_manager.allocate_slots.call_count, 16)
+        for request in requests.values():
+            self.assertEqual(request.num_computed_tokens, 128)
+            self.assertEqual(request.num_tokens, 129)
+        self.assertEqual(
+            kv_cache_manager.allocate_slots.call_args_list[:4],
+            [mock.call(requests[f"req{i}"], 32) for i in range(4)],
+        )
+
+    def test_prime_engine_requests_for_decode_reports_capacity_without_mutating(self):
+        class FakeRequest:
+            num_prompt_tokens = 128
+            num_computed_tokens = 0
+            num_tokens = 128
+            prompt_token_ids: ClassVar[list[int]] = [17, 23]
+
+            def append_output_token_ids(self, token_id):
+                raise AssertionError("should not append output token after allocation failure")
+
+        request = FakeRequest()
+        block_pool = mock.Mock()
+        block_pool.get_num_free_blocks.return_value = 12
+        kv_cache_manager = mock.Mock(block_pool=block_pool)
+        kv_cache_manager.allocate_slots.return_value = None
+        with (
+            mock.patch.object(
+                worker,
+                "_engine_core_scheduler",
+                return_value=SimpleNamespace(requests={"req": request}, kv_cache_manager=kv_cache_manager),
+            ),
+            self.assertRaisesRegex(RuntimeError, "insufficient KV blocks"),
+        ):
+            cl._prime_engine_requests_for_decode(mock.Mock(), ["req"], 128)
+
+        self.assertEqual(request.num_computed_tokens, 0)
+
     def test_oom_pruning_is_phase_local_and_monotonic(self):
         failed_ctx = cl.DataPoint("ctx", 1, 128, 0)
         self.assertTrue(cl.oom_dominates(failed_ctx, cl.DataPoint("ctx", 1, 256, 0)))
@@ -1166,7 +1971,22 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         failed_gen = cl.DataPoint("gen", 4, 1, 128)
         self.assertTrue(cl.oom_dominates(failed_gen, cl.DataPoint("gen", 8, 1, 128)))
         self.assertTrue(cl.oom_dominates(failed_gen, cl.DataPoint("gen", 4, 1, 256)))
+        self.assertTrue(cl.oom_dominates(cl.DataPoint("gen", 256, 1, 32768), cl.DataPoint("gen", 512, 1, 16384)))
         self.assertFalse(cl.oom_dominates(failed_gen, cl.DataPoint("gen", 2, 1, 256)))
+        self.assertFalse(cl.oom_dominates(cl.DataPoint("gen", 256, 1, 32768), cl.DataPoint("gen", 128, 1, 32768)))
+
+    def test_vllm_block_pool_capacity_error_is_not_oom(self):
+        self.assertFalse(cl._is_oom_text("ValueError: Cannot get 8193 free blocks from the pool"))
+
+    def test_live_decode_kv_block_exhaustion_is_oom(self):
+        message = (
+            "RuntimeError: insufficient KV blocks to prime decode prefix for request req: "
+            "prefix=32768 computed=29104 round_tokens=416 chunk_tokens=8 "
+            "active_requests=256 free_blocks=0"
+        )
+
+        self.assertTrue(cl._is_oom_text(message))
+        self.assertEqual(cl._attempt_signature(1, message), "oom")
 
     def test_status_store_manifest_is_idempotent(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1350,6 +2170,22 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertIn("--enable-prefix-caching", spec["extra_vllm_args"])
             self.assertNotIn("--no-enable-prefix-caching", spec["extra_vllm_args"])
 
+    def test_scheduler_live_step_gen_disables_prefix_cache_without_live_decode_driver(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            args = _args(tmp_path)
+            args.live_step_driver = True
+            unit = _unit(tmp_path, [cl.DataPoint("gen", 4, 1, 4096)])
+            sched = cl.Scheduler(args, [unit])
+
+            with mock.patch.object(scheduler, "_get_vllm_deployment_max_num_batched_tokens", return_value=2048):
+                spec = sched._make_spec(unit, unit.datapoints, attempt_id=0)
+
+            self.assertEqual(spec["gen_driver"], "prefix_cache")
+            self.assertIn("--no-enable-prefix-caching", spec["extra_vllm_args"])
+            self.assertNotIn("--enable-prefix-caching", spec["extra_vllm_args"])
+            self.assertEqual(spec["max_num_batched_tokens"], 2048)
+
     def test_scheduler_spec_keeps_simulated_tp_out_of_runtime_engine(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
@@ -1430,7 +2266,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertNotIn("--limit-mm-per-prompt", extra)
             self.assertIn("--limit-mm-per-prompt={\"image\":1}", extra)
 
-    def test_scheduler_keeps_prefix_cache_for_gpt_oss_prefix_context(self):
+    def test_scheduler_keeps_prefix_cache_unset_for_gpt_oss_context_with_past_kv(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             unit = _unit(tmp_path, [cl.DataPoint("ctx", 1, 128, 4096)])
@@ -1440,8 +2276,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
 
+            self.assertNotIn("--enable-prefix-caching", spec["extra_vllm_args"])
             self.assertNotIn("--no-enable-prefix-caching", spec["extra_vllm_args"])
-            self.assertIn("--enable-prefix-caching", spec["extra_vllm_args"])
 
     def test_scheduler_does_not_enable_prefix_cache_for_zero_past_context(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1454,7 +2290,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertNotIn("--enable-prefix-caching", spec["extra_vllm_args"])
             self.assertNotIn("--no-enable-prefix-caching", spec["extra_vllm_args"])
 
-    def test_scheduler_enables_prefix_cache_for_context_with_past_kv(self):
+    def test_scheduler_keeps_prefix_cache_unset_for_context_with_past_kv(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             unit = _unit(tmp_path, [cl.DataPoint("ctx", 1, 128, 4096)])
@@ -1462,7 +2298,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=0)
 
-            self.assertIn("--enable-prefix-caching", spec["extra_vllm_args"])
+            self.assertNotIn("--enable-prefix-caching", spec["extra_vllm_args"])
             self.assertNotIn("--no-enable-prefix-caching", spec["extra_vllm_args"])
 
     def test_scheduler_live_decode_keeps_prefix_cache_disabled(self):
@@ -1575,6 +2411,27 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
         self.assertEqual(tokens[tokens.index("--max-num-seqs") + 1], "16")
         self.assertEqual(tokens[tokens.index("--max-num-batched-tokens") + 1], "4096")
+
+    def test_engine_tokens_honor_gpu_memory_utilization(self):
+        tokens = cl._engine_tokens(
+            model_dir="/model",
+            datapoints=[cl.DataPoint("gen", 256, 1, 32768)],
+            extra_vllm_args=[],
+            gpu_memory_utilization=0.98,
+            gen_driver="live_decode",
+        )
+
+        self.assertEqual(tokens[tokens.index("--gpu-memory-utilization") + 1], "0.98")
+
+    def test_engine_tokens_honor_explicit_cache_block_size(self):
+        tokens = cl._engine_tokens(
+            model_dir="/model",
+            datapoints=[cl.DataPoint("ctx", 1, 128, 0)],
+            extra_vllm_args=[],
+            cache_block_size=16,
+        )
+
+        self.assertEqual(tokens[tokens.index("--block-size") + 1], "16")
 
     def test_engine_tokens_prefix_cache_does_not_inject_block_budget(self):
         tokens = cl._engine_tokens(
@@ -1714,6 +2571,95 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             self.assertEqual(units[0].max_num_seqs, 16)
 
+    def test_public_routed_moe_noop_decode_uses_representative_scheduler_envelope(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            moe_config = {
+                "num_hidden_layers": 4,
+                "num_attention_heads": 8,
+                "num_key_value_heads": 8,
+                "hidden_size": 1024,
+                "moe_intermediate_size": 128,
+                "num_experts": 8,
+                "num_experts_per_tok": 2,
+            }
+            args = public_collect._build_arg_parser().parse_args([
+                "--models",
+                "model",
+                "--tp-sizes",
+                "1",
+                "--ep-sizes",
+                "1",
+                "--phases",
+                "gen",
+                "--run-preset",
+                "smoke",
+                "--max-decode-batch-size",
+                "8",
+            ])
+            args.run_dir = tmp_path
+            args.work_dir = str(tmp_path / "profiles")
+            args.config_cache_dir = str(tmp_path / "config_cache")
+            model = LayerwiseModel(model="model", kind="moe", tp_sizes=(1,), ep_sizes=(1,))
+
+            with (
+                mock.patch.object(dpg, "_load_original_config", return_value=moe_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
+            ):
+                units = cl.build_public_work_units(args, [model])
+
+            self.assertEqual(len(units), 1)
+            self.assertEqual(units[0].model_layer_count, 1)
+            self.assertEqual(units[0].target_layers, [0])
+            self.assertEqual(units[0].representative.measured_layer_count, 1)
+            self.assertEqual(units[0].representative.layer_multiplier, 4)
+            self.assertTrue(units[0].moe_noop)
+
+    def test_public_shared_moe_noop_decode_uses_full_depth_scheduler_envelope(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            moe_config = {
+                "num_hidden_layers": 4,
+                "num_attention_heads": 8,
+                "num_key_value_heads": 8,
+                "hidden_size": 1024,
+                "moe_intermediate_size": 128,
+                "num_experts": 8,
+                "num_experts_per_tok": 2,
+                "n_shared_experts": 1,
+            }
+            args = public_collect._build_arg_parser().parse_args([
+                "--models",
+                "model",
+                "--tp-sizes",
+                "1",
+                "--ep-sizes",
+                "1",
+                "--phases",
+                "gen",
+                "--run-preset",
+                "smoke",
+                "--max-decode-batch-size",
+                "8",
+            ])
+            args.run_dir = tmp_path
+            args.work_dir = str(tmp_path / "profiles")
+            args.config_cache_dir = str(tmp_path / "config_cache")
+            model = LayerwiseModel(model="model", kind="moe", tp_sizes=(1,), ep_sizes=(1,))
+
+            with (
+                mock.patch.object(dpg, "_load_original_config", return_value=moe_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
+            ):
+                units = cl.build_public_work_units(args, [model])
+
+            self.assertEqual(len(units), 1)
+            self.assertEqual(units[0].model_layer_count, 4)
+            self.assertEqual(units[0].target_layers, [0, 1, 2, 3])
+            self.assertEqual(units[0].representative.measured_layer_count, 4)
+            self.assertEqual(units[0].representative.layer_multiplier, 4)
+            self.assertTrue(units[0].moe_noop)
+
     def test_build_work_units_preserves_explicit_max_num_batched_tokens(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
@@ -1738,6 +2684,131 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 units = cl.build_work_units(args)
 
             self.assertEqual(units[0].max_num_batched_tokens, 4096)
+
+    def test_build_work_units_resolves_context_deployment_max_num_batched_tokens(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            dense_config = {
+                "num_attention_heads": 8,
+                "num_key_value_heads": 8,
+                "intermediate_size": 1024,
+                "num_hidden_layers": 4,
+            }
+            args = _build_args(
+                tmp_path,
+                phases="ctx",
+                tp_sizes="8",
+                ctx_new_tokens="128",
+                ctx_past_kv="0",
+                max_num_seqs=64,
+                gpu_memory_utilization=0.97,
+            )
+
+            with (
+                mock.patch.object(dpg, "_load_original_config", return_value=dense_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
+                mock.patch.object(dpg, "_get_vllm_deployment_max_num_batched_tokens", return_value=2048) as resolver,
+            ):
+                units = cl.build_work_units(args)
+
+            self.assertEqual(units[0].max_num_batched_tokens, 2048)
+            self.assertIsNone(units[0].cache_block_size)
+            resolver.assert_called_once()
+            self.assertEqual(resolver.call_args.kwargs["model"], args.model)
+            self.assertEqual(resolver.call_args.kwargs["tensor_parallel_size"], 8)
+            self.assertEqual(resolver.call_args.kwargs["max_num_seqs"], 64)
+            self.assertEqual(resolver.call_args.kwargs["gpu_memory_utilization"], 0.97)
+
+    def test_build_work_units_resolves_live_step_gen_deployment_max_num_batched_tokens(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            dense_config = {
+                "num_attention_heads": 8,
+                "num_key_value_heads": 8,
+                "intermediate_size": 1024,
+                "num_hidden_layers": 4,
+            }
+            args = _build_args(
+                tmp_path,
+                phases="gen",
+                tp_sizes="4",
+                gen_batch_sizes="1",
+                gen_past_kv="1,4096",
+                max_num_seqs=128,
+                live_step_driver=True,
+            )
+
+            with (
+                mock.patch.object(dpg, "_load_original_config", return_value=dense_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
+                mock.patch.object(dpg, "_get_vllm_deployment_max_num_batched_tokens", return_value=2048) as resolver,
+            ):
+                units = cl.build_work_units(args)
+
+            self.assertEqual(units[0].max_num_batched_tokens, 2048)
+            self.assertIn("--no-enable-prefix-caching", units[0].extra_vllm_args)
+            self.assertNotIn("--enable-prefix-caching", units[0].extra_vllm_args)
+            resolver.assert_called_once()
+            self.assertIn("--no-enable-prefix-caching", resolver.call_args.kwargs["extra_args"])
+            self.assertNotIn("--enable-prefix-caching", resolver.call_args.kwargs["extra_args"])
+
+    def test_build_work_units_does_not_force_auto_cache_block_size_for_ep(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            moe_config = {
+                "num_attention_heads": 8,
+                "num_key_value_heads": 2,
+                "intermediate_size": 1024,
+                "moe_intermediate_size": 512,
+                "num_experts": 16,
+                "num_hidden_layers": 4,
+            }
+            args = _build_args(
+                tmp_path,
+                phases="ctx",
+                tp_sizes="4",
+                moe_tp=1,
+                ctx_new_tokens="128",
+                ctx_past_kv="0",
+            )
+
+            with (
+                mock.patch.object(dpg, "_load_original_config", return_value=moe_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
+                mock.patch.object(dpg, "_get_vllm_deployment_max_num_batched_tokens", return_value=2048) as resolver,
+            ):
+                units = cl.build_work_units(args)
+
+            self.assertIsNone(units[0].cache_block_size)
+            self.assertIn("--enable-expert-parallel", resolver.call_args.kwargs["extra_args"])
+
+    def test_build_work_units_explicit_context_max_num_batched_tokens_skips_auto_resolution(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            dense_config = {
+                "num_attention_heads": 8,
+                "num_key_value_heads": 8,
+                "intermediate_size": 1024,
+                "num_hidden_layers": 4,
+            }
+            args = _build_args(
+                tmp_path,
+                phases="ctx",
+                tp_sizes="8",
+                ctx_new_tokens="128",
+                ctx_past_kv="0",
+                max_num_batched_tokens=4096,
+            )
+
+            with (
+                mock.patch.object(dpg, "_load_original_config", return_value=dense_config),
+                mock.patch.object(dpg, "patch_for_parallelism", return_value=str(tmp_path / "patched")),
+                mock.patch.object(dpg, "_get_vllm_deployment_max_num_batched_tokens") as resolver,
+            ):
+                units = cl.build_work_units(args)
+
+            self.assertEqual(units[0].max_num_batched_tokens, 4096)
+            resolver.assert_not_called()
 
     def test_public_split_phase_context_leaves_max_model_len_to_vllm_by_default(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2143,13 +3214,15 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 ),
                 includes_moe=True,
             )
-            scheduler = cl.Scheduler(args, [unit])
+            sched = cl.Scheduler(args, [unit])
 
-            spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=1)
+            with mock.patch.object(scheduler, "_get_vllm_deployment_max_num_batched_tokens", return_value=2048):
+                spec = sched._make_spec(unit, unit.datapoints, attempt_id=1)
 
             self.assertFalse(spec["enable_layerwise_nvtx_tracing"])
             self.assertFalse(spec["enable_layer_patch"])
             self.assertFalse(spec["enable_step_marker"])
+            self.assertEqual(spec["max_num_batched_tokens"], 2048)
 
     def test_scheduler_keeps_layer_patch_for_router_overlay(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2249,6 +3322,32 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             )
             self.assertFalse(spec["enable_step_marker"])
 
+    def test_auto_context_does_not_enable_step_marker_when_decode_needs_nsys_globally(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            args = _args(tmp_path)
+            args.latency_source = "auto"
+            args.nsys_capture = "full"
+            unit = dataclasses.replace(
+                _unit(tmp_path, [cl.DataPoint("ctx", 1, 128, 0)]),
+                target_layers=[0, 1, 2, 3],
+                model_layer_count=4,
+                representative=cl.RepresentativeLayer(
+                    layer_index=0,
+                    layer_type="dense",
+                    measured_layer_count=4,
+                    layer_multiplier=4,
+                    target_layers=(0, 1, 2, 3),
+                ),
+            )
+            scheduler = cl.Scheduler(args, [unit])
+
+            spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=1)
+
+            self.assertFalse(scheduler._attempt_needs_nsys(unit, unit.datapoints))
+            self.assertFalse(spec["enable_layerwise_nvtx_tracing"])
+            self.assertFalse(spec["enable_step_marker"])
+
     def test_worker_wall_success_rows_are_not_representative_scaled(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
@@ -2282,11 +3381,13 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 run=0,
                 wall_latency_ms=9.0,
             )
+            spec_path = tmp_path / "spec.json"
+            spec_path.write_text(json.dumps({"max_num_batched_tokens": 2048}))
             attempt = cl.Attempt(
                 work_unit=unit,
                 gpu="0",
                 attempt_id=1,
-                spec_path=tmp_path / "spec.json",
+                spec_path=spec_path,
                 report_base=tmp_path / "report",
                 stdout_path=tmp_path / "out",
                 stderr_path=tmp_path / "err",
@@ -2304,6 +3405,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertEqual(row["latency_source"], "worker_wall")
             self.assertEqual(float(row["latency_ms"]), 9.0)
             self.assertEqual(row["layer_multiplier"], "4")
+            self.assertEqual(row["max_num_batched_tokens"], "2048")
 
     def test_explicit_worker_wall_source_uses_worker_wall_events(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2471,7 +3573,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             self.assertNotEqual(cmd[:2], ["nsys", "profile"])
 
-    def test_decode_span_scheduler_spec_keeps_module_nvtx(self):
+    def test_auto_decode_scheduler_spec_disables_module_nvtx(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = _args(tmp_path)
@@ -2481,9 +3583,9 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             spec = scheduler._make_spec(unit, unit.datapoints, attempt_id=1)
 
-            self.assertTrue(spec["enable_layerwise_nvtx_tracing"])
+            self.assertFalse(spec["enable_layerwise_nvtx_tracing"])
 
-    def test_auto_decode_attempt_uses_nsys_wrapper(self):
+    def test_auto_decode_attempt_skips_nsys_wrapper(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = _args(tmp_path)
@@ -2497,9 +3599,9 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 capture_nsys=scheduler._attempt_needs_nsys(unit, unit.datapoints),
             )
 
-            self.assertEqual(cmd[:2], ["nsys", "profile"])
+            self.assertNotEqual(cmd[:2], ["nsys", "profile"])
 
-    def test_auto_decode_launch_does_not_enable_scheduler_timing(self):
+    def test_auto_decode_launch_enables_scheduler_timing(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = _args(tmp_path)
@@ -2516,8 +3618,44 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             attempt.stdout_handle.close()
             attempt.stderr_handle.close()
-            self.assertNotIn("LAYERWISE_SCHEDULER_TIMING", popen.call_args.kwargs["env"])
+            self.assertEqual(popen.call_args.kwargs["env"]["LAYERWISE_SCHEDULER_TIMING"], "1")
             self.assertEqual(popen.call_args.kwargs["env"]["DYN_FORWARDPASS_METRIC_PORT"], "20381")
+
+    def test_live_step_driver_launch_sets_worker_env(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            args = _args(tmp_path)
+            args.live_step_driver = True
+            unit = _unit(tmp_path, [cl.DataPoint("gen", 1, 1, 4096)])
+            scheduler = cl.Scheduler(args, [unit])
+            fake_process = mock.Mock()
+
+            with mock.patch.object(scheduler, "_worker_cmd", return_value=["worker"]), mock.patch(
+                "collector.layerwise.vllm.scheduler.subprocess.Popen",
+                return_value=fake_process,
+            ) as popen:
+                attempt = scheduler._launch_attempt(unit, "0", unit.datapoints)
+
+            attempt.stdout_handle.close()
+            attempt.stderr_handle.close()
+            self.assertEqual(popen.call_args.kwargs["env"]["LAYERWISE_USE_LIVE_STEP_DRIVER"], "1")
+
+    def test_live_step_driver_spec_keeps_marker_without_nsys(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            args = _args(tmp_path)
+            args.nsys_capture = "none"
+            args.live_step_driver = True
+            args.latency_source = "auto"
+            unit = _unit(tmp_path, [cl.DataPoint("gen", 256, 1, 32768)])
+            sched = cl.Scheduler(args, [unit])
+
+            with mock.patch.object(scheduler, "_get_vllm_deployment_max_num_batched_tokens", return_value=2048):
+                spec = sched._make_spec(unit, unit.datapoints, attempt_id=1)
+
+            self.assertTrue(cl._live_step_driver_would_handle(unit.datapoints[0]))
+            self.assertTrue(spec["enable_step_marker"])
+            self.assertEqual(spec["max_num_batched_tokens"], 2048)
 
     def test_schedule_to_update_success_rows_are_not_representative_scaled(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2600,6 +3738,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             "num_attention_heads": 8,
             "num_key_value_heads": 8,
             "intermediate_size": 1024,
+            "linear_num_key_heads": 16,
+            "linear_num_value_heads": 32,
             "num_local_experts": 128,
             "num_experts_per_tok": 4,
             "experts_per_token": 4,
@@ -2619,9 +3759,53 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(overrides["num_attention_heads"], 2)
         self.assertEqual(overrides["num_key_value_heads"], 2)
         self.assertEqual(overrides["intermediate_size"], 256)
+        self.assertEqual(overrides["linear_num_key_heads"], 4)
+        self.assertEqual(overrides["linear_num_value_heads"], 8)
         self.assertEqual(overrides["num_local_experts"], 32)
         self.assertNotIn("num_experts_per_tok", overrides)
         self.assertNotIn("experts_per_token", overrides)
+
+    def test_parallel_config_patch_allows_vllm_dp_backed_effective_ep(self):
+        config = {
+            "num_attention_heads": 8,
+            "num_key_value_heads": 8,
+            "intermediate_size": 1024,
+            "num_local_experts": 128,
+            "moe_intermediate_size": 512,
+        }
+
+        with mock.patch.object(pcp, "patch_model_path", return_value="patched") as patcher:
+            result = pcp.patch_for_parallelism(
+                "model",
+                attn_tp=1,
+                moe_tp=1,
+                ep=4,
+                original_config=config,
+            )
+
+        self.assertEqual(result, "patched")
+        overrides = patcher.call_args.kwargs["overrides"]
+        self.assertEqual(overrides["num_attention_heads"], 8)
+        self.assertEqual(overrides["num_key_value_heads"], 8)
+        self.assertEqual(overrides["intermediate_size"], 1024)
+        self.assertEqual(overrides["num_local_experts"], 32)
+        self.assertNotIn("moe_intermediate_size", overrides)
+
+    def test_parallel_config_patch_rejects_unshardable_linear_attention_heads(self):
+        config = {
+            "num_attention_heads": 8,
+            "num_key_value_heads": 8,
+            "intermediate_size": 1024,
+            "linear_num_key_heads": 10,
+            "linear_num_value_heads": 32,
+        }
+
+        with self.assertRaisesRegex(ValueError, "linear_num_key_heads=10"):
+            pcp.patch_for_parallelism(
+                "model",
+                attn_tp=4,
+                original_config=config,
+            )
 
 
 if __name__ == "__main__":

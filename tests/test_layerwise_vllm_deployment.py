@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "collector" / "layerwise" / "common"))
 
-from vllm_deployment import (  # noqa: E402
+from vllm_deployment import (
     VllmDeploymentConfig,
     build_engine_args,
     compare_metadata,
@@ -38,6 +38,44 @@ def test_build_engine_args_omits_compile_defaults() -> None:
         "0.85",
     ]
     assert "--compilation-config" not in args
+
+
+def test_build_engine_args_includes_explicit_block_size() -> None:
+    args = build_engine_args(
+        VllmDeploymentConfig(
+            model="Qwen/Qwen3.6-35B-A3B",
+            block_size=16,
+            gpu_memory_utilization=0.9,
+        )
+    )
+
+    assert args == [
+        "--model",
+        "Qwen/Qwen3.6-35B-A3B",
+        "--block-size",
+        "16",
+        "--gpu-memory-utilization",
+        "0.9",
+    ]
+
+
+def test_build_engine_args_includes_data_parallel_size() -> None:
+    args = build_engine_args(
+        VllmDeploymentConfig(
+            model="deepseek-ai/DeepSeek-V4-Flash",
+            tensor_parallel_size=1,
+            data_parallel_size=4,
+        )
+    )
+
+    assert args == [
+        "--model",
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "--tensor-parallel-size",
+        "1",
+        "--data-parallel-size",
+        "4",
+    ]
 
 
 def test_metadata_compare_flags_compile_mode_mismatch() -> None:
@@ -91,12 +129,11 @@ def test_gpt_oss_runtime_defaults_use_fp8_kv_on_blackwell() -> None:
 
     assert defaults.kv_cache_dtype == "fp8"
     assert defaults.disable_prefix_caching is True
-    assert defaults.extra_args == (
-        "--max-cudagraph-capture-size",
-        "2048",
-        "--stream-interval",
-        "20",
-    )
+    assert "--skip-mm-profiling" in defaults.extra_args
+    assert "--generation-config" in defaults.extra_args
+    assert defaults.extra_args[defaults.extra_args.index("--generation-config") + 1] == "vllm"
+    assert defaults.extra_args[defaults.extra_args.index("--max-cudagraph-capture-size") + 1] == "2048"
+    assert defaults.extra_args[defaults.extra_args.index("--stream-interval") + 1] == "20"
 
 
 def test_gpt_oss_runtime_defaults_do_not_infer_fp8_kv_without_blackwell() -> None:
@@ -109,6 +146,41 @@ def test_gpt_oss_runtime_defaults_do_not_infer_fp8_kv_without_blackwell() -> Non
     assert defaults.kv_cache_dtype is None
     assert defaults.disable_prefix_caching is True
     assert "--max-cudagraph-capture-size" in defaults.extra_args
+
+
+def test_runtime_defaults_use_fp8_kv_for_deepseek_v4() -> None:
+    defaults = gpt_oss_runtime_defaults(
+        model="deepseek-ai/DeepSeek-V4-Flash",
+        system="b300_sxm",
+    )
+
+    assert defaults.kv_cache_dtype == "fp8"
+    assert "--max-cudagraph-capture-size" not in defaults.extra_args
+    assert defaults.extra_args[defaults.extra_args.index("--block-size") + 1] == "256"
+    assert defaults.extra_args[defaults.extra_args.index("--compilation-config") + 1] == (
+        '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
+    )
+    assert defaults.extra_args[defaults.extra_args.index("--attention-config") + 1] == (
+        '{"use_fp4_indexer_cache":true}'
+    )
+    assert defaults.extra_args[defaults.extra_args.index("--tokenizer-mode") + 1] == "deepseek_v4"
+    assert "--reasoning-parser" not in defaults.extra_args
+
+    explicit = gpt_oss_runtime_defaults(
+        model="deepseek-ai/DeepSeek-V4-Flash",
+        system="b300_sxm",
+        extra_args=(
+            "--kv-cache-dtype=auto",
+            "--block-size",
+            "128",
+            "--attention_config.use_fp4_indexer_cache=False",
+        ),
+    )
+    assert explicit.kv_cache_dtype is None
+    assert "--kv-cache-dtype=auto" in explicit.extra_args
+    assert explicit.extra_args[explicit.extra_args.index("--block-size") + 1] == "128"
+    assert "--attention-config" not in explicit.extra_args
+    assert "--attention_config.use_fp4_indexer_cache=False" in explicit.extra_args
 
 
 def test_gpt_oss_runtime_defaults_preserve_explicit_overrides() -> None:

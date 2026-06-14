@@ -26,6 +26,8 @@ def _send_args(tmp_path, **overrides):
         requests=3,
         max_tokens=1,
         prompt_token_seed=0,
+        prompt_token_mode="random_vocab_excluding_special",
+        prompt_token_pool=[],
         prompt_rng=random.Random(0),
         prompt_token_config=RandomPromptTokenConfig(100, frozenset({0, 1})),
         workload_output=str(tmp_path / "workload.csv"),
@@ -74,6 +76,27 @@ def test_send_requests_prompt_seed_is_optional_and_reproducible_when_set(tmp_pat
         16,
         10,
     )
+
+
+def test_send_requests_safe_ascii_prompt_pool_limits_sampled_tokens(tmp_path):
+    args = _send_args(
+        tmp_path,
+        prompt_token_mode="safe_ascii",
+        prompt_token_pool=[7, 11, 13],
+    )
+
+    token_ids = send_requests.make_token_ids(args, 64, 10)
+
+    assert len(token_ids) == 64
+    assert set(token_ids) <= {7, 11, 13}
+
+
+def test_send_requests_printable_ascii_token_filter():
+    assert send_requests.is_printable_ascii_token_text(" hello")
+    assert send_requests.is_printable_ascii_token_text("A")
+    assert not send_requests.is_printable_ascii_token_text("")
+    assert not send_requests.is_printable_ascii_token_text("   ")
+    assert not send_requests.is_printable_ascii_token_text("Eva𠅁")
 
 
 def test_send_requests_real_workload_uses_fallback_shapes_when_dataset_missing(tmp_path, monkeypatch):
@@ -126,6 +149,7 @@ def test_summarize_fpm_classifies_context_decode_and_mixed_rows(tmp_path):
     detail_path = tmp_path / "detail.csv"
     output_path = tmp_path / "phase.csv"
     fieldnames = [
+        "workload_segment",
         "counter_id",
         "worker_id",
         "dp_rank",
@@ -145,10 +169,10 @@ def test_summarize_fpm_classifies_context_decode_and_mixed_rows(tmp_path):
         "latency_ms",
     ]
     rows = [
-        [1, "w", 0, 64, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "1.0"],
-        [2, "w", 0, 0, 0, 0, 0, 4, 4096, 0, 0, 0, 0, 0, 0, 0, "2.0"],
-        [3, "w", 0, 128, 1, 0, 0, 3, 3072, 0, 0, 0, 0, 0, 0, 0, "3.0"],
-        [4, "w", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "4.0"],
+        ["sweep", 1, "w", 0, 64, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "1.0"],
+        ["sweep", 2, "w", 0, 0, 0, 0, 0, 4, 4096, 0, 0, 0, 0, 0, 0, 0, "2.0"],
+        ["real", 3, "w", 0, 128, 1, 0, 0, 3, 3072, 0, 0, 0, 0, 0, 0, 0, "3.0"],
+        ["real", 4, "w", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "4.0"],
     ]
     with detail_path.open("w", newline="") as f:
         writer = csv.writer(f)
@@ -160,5 +184,6 @@ def test_summarize_fpm_classifies_context_decode_and_mixed_rows(tmp_path):
     summarized = list(csv.DictReader(output_path.open()))
     assert count == 3
     assert [row["phase"] for row in summarized] == ["context", "decode", "mixed"]
+    assert [row["workload_segment"] for row in summarized] == ["sweep", "sweep", "real"]
     assert summarized[1]["decode_tokens"] == "4"
     assert summarized[1]["mean_decode_kv_tokens"] == "1024.000"

@@ -52,6 +52,10 @@ def _worker_append_event(
     datapoint_id: str | None = None,
     **extra: Any,
 ) -> None:
+    if "attempt_id" not in extra:
+        raw_attempt_id = os.environ.get("LAYERWISE_ATTEMPT_ID")
+        if raw_attempt_id not in (None, ""):
+            extra["attempt_id"] = int(raw_attempt_id)
     row = {
         "event": event,
         "work_unit_id": work_unit_id,
@@ -429,11 +433,11 @@ def _use_live_step_driver(dp: DataPoint) -> bool:
 
     if os.environ.get("LAYERWISE_USE_LIVE_STEP_DRIVER", "0") != "1":
         return False
-    if dp.past_kv <= 0:
-        return False
-    if dp.phase == "gen" and dp.past_kv >= 32768:
-        return False
-    return int(dp.new_tokens) * 100 <= int(dp.past_kv)
+    if dp.phase == "ctx":
+        return dp.batch_size == 1 and int(dp.new_tokens) > 0
+    if dp.phase == "gen":
+        return int(dp.past_kv) > 0
+    return False
 
 def _make_final_only_sampling_params(sampling_cls, **kwargs):
     """Build sampling params matching ``LLM.generate`` output processing."""
@@ -495,6 +499,135 @@ def _add_engine_requests(llm, prompts: list[dict[str, Any]], sampling_params, *,
         request_id = f"{request_prefix}:{idx}:{time.time_ns()}"
         request_ids.append(llm.llm_engine.add_request(request_id, prompt, sampling_params))
     return request_ids
+
+def _prime_engine_requests_for_prompt_prefix(
+    llm,
+    request_ids: list[str],
+    prefix_tokens: int,
+    *,
+    label: str,
+    append_decode_token: bool = False,
+) -> int:
+    """Allocate KV slots and advance newly submitted requests to ``prefix_tokens``.
+
+    vLLM tracks both the token counter and allocated KV blocks for each
+    request.  Allocate the prompt's historical KV slots through the normal
+    cache manager in scheduler-sized rounds, then leave the request in WAITING.
+    The next scheduler iteration can admit either the next prefill chunk or,
+    when requested, a one-token decode step with a full block table.
+
+    Chunking matters for hybrid caches such as DeepSeek V4: sliding-window and
+    compressed groups recycle blocks as ``num_computed_tokens`` advances.  A
+    one-shot allocation for a long prefix can ask those groups to hold blocks
+    that real chunked prefill would already have freed.  The scheduler token
+    budget is batch-wide, not per request, so split each round across all active
+    requests.
+    """
+
+    prefix_tokens = int(prefix_tokens)
+    if prefix_tokens <= 0:
+        return 0
+
+    scheduler = _engine_core_scheduler(llm)
+    requests = getattr(scheduler, "requests", {})
+    kv_cache_manager = getattr(scheduler, "kv_cache_manager", None)
+    if kv_cache_manager is None:
+        raise RuntimeError("vLLM scheduler does not expose kv_cache_manager")
+    scheduled_requests: list[tuple[str, Any]] = []
+    for request_id in request_ids:
+        request = requests.get(request_id)
+        if request is None:
+            raise RuntimeError(f"request {request_id} was not registered with the scheduler")
+        if int(getattr(request, "num_prompt_tokens", 0)) < prefix_tokens:
+            raise RuntimeError(
+                f"request {request_id} prompt is shorter than synthetic {label} prefix={prefix_tokens}"
+            )
+        if int(getattr(request, "num_computed_tokens", 0)) != 0:
+            raise RuntimeError(f"request {request_id} was already partially computed")
+        scheduled_requests.append((request_id, request))
+
+    scheduler_token_budget = int(getattr(scheduler, "max_num_scheduled_tokens", 0) or 0)
+    if scheduler_token_budget <= 0:
+        scheduler_token_budget = prefix_tokens * max(1, len(scheduled_requests))
+    scheduler_token_budget = max(1, scheduler_token_budget)
+
+    def _free_blocks() -> Any:
+        return getattr(
+            getattr(kv_cache_manager, "block_pool", None),
+            "get_num_free_blocks",
+            lambda: None,
+        )()
+
+    total_rounds = 0
+    while True:
+        active = [
+            (request_id, request)
+            for request_id, request in scheduled_requests
+            if int(getattr(request, "num_computed_tokens", 0)) < prefix_tokens
+        ]
+        if not active:
+            break
+        round_tokens = 0
+        per_request_budget = max(1, scheduler_token_budget // max(1, len(active)))
+        for request_id, request in active:
+            available_tokens = scheduler_token_budget - round_tokens
+            if available_tokens <= 0:
+                break
+            remaining = prefix_tokens - int(getattr(request, "num_computed_tokens", 0))
+            num_new_tokens = min(per_request_budget, remaining, available_tokens)
+            try:
+                new_blocks = kv_cache_manager.allocate_slots(request, num_new_tokens)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"failed to prime {label} prefix for request {request_id}: "
+                    f"prefix={prefix_tokens} computed={getattr(request, 'num_computed_tokens', 0)} "
+                    f"round_tokens={round_tokens} chunk_tokens={num_new_tokens} "
+                    f"active_requests={len(active)} free_blocks={_free_blocks()}: {exc}"
+                ) from exc
+            if new_blocks is None:
+                raise RuntimeError(
+                    f"insufficient KV blocks to prime {label} prefix for request {request_id}: "
+                    f"prefix={prefix_tokens} computed={getattr(request, 'num_computed_tokens', 0)} "
+                    f"round_tokens={round_tokens} chunk_tokens={num_new_tokens} "
+                    f"active_requests={len(active)} free_blocks={_free_blocks()}"
+                )
+            request.num_computed_tokens += num_new_tokens
+            round_tokens += num_new_tokens
+        if round_tokens <= 0:
+            raise RuntimeError(
+                f"failed to advance {label} prefix priming: prefix={prefix_tokens} "
+                f"active_requests={len(active)} scheduler_token_budget={scheduler_token_budget}"
+            )
+        total_rounds += 1
+
+    if append_decode_token:
+        for _, request in scheduled_requests:
+            if int(getattr(request, "num_tokens", 0)) <= prefix_tokens:
+                token_ids = getattr(request, "prompt_token_ids", None) or [0]
+                request.append_output_token_ids(int(token_ids[-1]))
+    return total_rounds
+
+def _prime_engine_requests_for_context(llm, request_ids: list[str], past_kv: int) -> int:
+    """Move newly submitted requests to an exact-past prefill scheduler state."""
+
+    return _prime_engine_requests_for_prompt_prefix(
+        llm,
+        request_ids,
+        past_kv,
+        label="context",
+        append_decode_token=False,
+    )
+
+def _prime_engine_requests_for_decode(llm, request_ids: list[str], past_kv: int) -> int:
+    """Move newly submitted requests to a decode-ready scheduler state."""
+
+    return _prime_engine_requests_for_prompt_prefix(
+        llm,
+        request_ids,
+        past_kv,
+        label="decode",
+        append_decode_token=True,
+    )
 
 def _abort_engine_requests(llm, request_ids: list[str]) -> None:
     """Abort live engine requests, ignoring already-finished IDs."""
@@ -628,6 +761,29 @@ def _ctx_marker_iteration(
     if max_num_batched_tokens < 1:
         raise ValueError(f"max_num_batched_tokens must be >= 1, got {max_num_batched_tokens}")
     return 1
+
+def _live_ctx_chunk_plan(
+    dp: DataPoint,
+    max_num_batched_tokens: int | None,
+) -> list[tuple[int, int]]:
+    """Return ``(new_tokens, past_kv)`` scheduler chunks for a live ctx row."""
+
+    if dp.phase != "ctx":
+        raise ValueError(f"live ctx chunk plan requires ctx datapoint, got {dp.phase}")
+    if dp.new_tokens <= 0:
+        raise ValueError(f"ctx new_tokens must be positive, got {dp.new_tokens}")
+    budget = int(max_num_batched_tokens or 0)
+    if budget <= 0:
+        budget = int(dp.new_tokens)
+    remaining = int(dp.new_tokens)
+    past_kv = int(dp.past_kv)
+    chunks = []
+    while remaining > 0:
+        chunk_tokens = min(budget, remaining)
+        chunks.append((chunk_tokens, past_kv))
+        remaining -= chunk_tokens
+        past_kv += chunk_tokens
+    return chunks
 
 def _resolve_attr_path(obj: Any, path: str) -> Any | None:
     """Return a nested attribute path if every segment exists."""
@@ -793,6 +949,7 @@ def run_worker(spec_path: Path) -> None:
     spec = json.loads(spec_path.read_text())
     status_path = Path(spec["status_path"])
     work_unit_id = spec["work_unit_id"]
+    os.environ["LAYERWISE_ATTEMPT_ID"] = str(spec["attempt_id"])
     datapoints = [DataPoint(**raw) for raw in spec["datapoints"]]
     _worker_append_event(
         status_path,
@@ -845,6 +1002,7 @@ def run_worker(spec_path: Path) -> None:
     os.environ["LAYERWISE_BENCH_MIN_NEW"] = "1"
     os.environ["LAYERWISE_PROGRESS_FILE"] = str(status_path)
     os.environ["LAYERWISE_WORK_UNIT_ID"] = work_unit_id
+    os.environ["LAYERWISE_ATTEMPT_ID"] = str(spec["attempt_id"])
     os.environ["LAYERWISE_CONTROL_FILE"] = str(
         status_path.parent / "marker_control" / f"{work_unit_id}_a{spec['attempt_id']}.json"
     )
@@ -902,7 +1060,9 @@ def run_worker(spec_path: Path) -> None:
         extra_vllm_args=spec["extra_vllm_args"],
         max_num_seqs=spec.get("max_num_seqs"),
         max_num_batched_tokens=spec.get("max_num_batched_tokens"),
+        cache_block_size=spec.get("cache_block_size"),
         max_model_len=spec.get("max_model_len"),
+        gpu_memory_utilization=spec.get("gpu_memory_utilization", 0.9),
         gen_driver=spec.get("gen_driver", "prefix_cache"),
     )
     _worker_append_event(status_path, "engine_args_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
@@ -952,8 +1112,11 @@ def run_worker(spec_path: Path) -> None:
     gen_driver = str(spec.get("gen_driver", "prefix_cache"))
     if (has_ctx or has_gen) and runtime_vllm_config is not None:
         cache_config = getattr(runtime_vllm_config, "cache_config", None)
-        ctx_needs_prefix_cache = any(dp.phase == "ctx" and int(dp.past_kv) > 0 for dp in datapoints)
-        needs_prefix_cache = ctx_needs_prefix_cache or (has_gen and gen_driver == "prefix_cache")
+        needs_prefix_cache = (
+            has_gen
+            and gen_driver == "prefix_cache"
+            and any(dp.phase == "gen" and not _use_live_step_driver(dp) for dp in datapoints)
+        )
         if needs_prefix_cache and getattr(cache_config, "enable_prefix_caching", None) is False:
             raise RuntimeError("prefix-cache ctx/gen driver requires vLLM prefix caching")
     if runtime_vllm_config is not None:
@@ -1141,19 +1304,6 @@ def _worker_run_ctx(
             prefix_key = (int(dp.batch_size), int(dp.past_kv))
             fill_prefix = dp.past_kv > 0 and prefix_key not in filled_prefixes
             if _use_live_step_driver(dp):
-                if fill_prefix:
-                    _set_marker_state(marker_mod, active_iterations="", phase="ctx")
-                    _run_generate(
-                        llm,
-                        sampling_params,
-                        batch_size=dp.batch_size,
-                        input_len=dp.past_kv,
-                        token_config=prompt_token_config,
-                        prompt_factory=prompt_factory,
-                        stream_key_prefix=_ctx_prefix_stream_key(work_unit_id, dp),
-                        cache_salt_prefix=_ctx_cache_salt_prefix(work_unit_id, dp),
-                    )
-                    filled_prefixes.add(prefix_key)
                 wall_start = time.perf_counter()
                 _run_live_ctx_iteration(
                     llm,
@@ -1167,6 +1317,7 @@ def _worker_run_ctx(
                     marker_mod=marker_mod,
                     status_path=status_path,
                     datapoint_id=dpid,
+                    max_num_batched_tokens=max_num_batched_tokens,
                 )
                 if not warmup:
                     _worker_append_event(
@@ -1369,6 +1520,7 @@ def _run_live_ctx_iteration(
     marker_mod,
     status_path: Path | None = None,
     datapoint_id: str | None = None,
+    max_num_batched_tokens: int | None = None,
 ) -> None:
     """Measure a ctx row by stepping one live chunked-prefill request."""
 
@@ -1392,47 +1544,73 @@ def _run_live_ctx_iteration(
         request_prefix=f"ctx-live:{work_unit_id}:run{run_idx}",
     )
     try:
-        with _temporary_scheduler_token_budget(llm, dp.new_tokens):
-            if warmup:
-                _set_marker_state(marker_mod, active_iterations="", phase="ctx")
-            else:
-                _set_marker_state(
-                    marker_mod,
-                    active_iterations="",
-                    trigger="ctx_chunk",
-                    phase="ctx",
-                    step=dp.new_tokens,
-                    bs=dp.batch_size,
-                    past=dp.past_kv,
-                    run=run_idx,
-                    allow_variable_past=True,
-                    past_tolerance=max(1.0, float(dp.past_kv) * 0.01),
-                    match_once=True,
-                )
-            live_start = time.perf_counter()
-            marker_mod._LAST_CTX_MATCH_META = {}
-            max_steps = max(8, dp.past_kv // max(1, dp.new_tokens) + 8)
-            for step_idx in range(max_steps):
-                llm.llm_engine.step()
+        prime_rounds = _prime_engine_requests_for_context(llm, request_ids, dp.past_kv)
+        _worker_append_event(
+            status_path,
+            "live_ctx_prefix_primed",
+            work_unit_id=work_unit_id,
+            datapoint_id=datapoint_id,
+            batch_size=dp.batch_size,
+            new_tokens=dp.new_tokens,
+            past_kv=dp.past_kv,
+            run=run_idx,
+            rounds=prime_rounds,
+        )
+        live_start = time.perf_counter()
+        chunks = _live_ctx_chunk_plan(dp, max_num_batched_tokens)
+        executed_steps = 0
+        for chunk_index, (chunk_tokens, chunk_past_kv) in enumerate(chunks):
+            with _temporary_scheduler_token_budget(llm, chunk_tokens):
                 if warmup:
-                    return
-                matched_after = dict(getattr(marker_mod, "_LAST_CTX_MATCH_META", {}))
-                if matched_after:
-                    _worker_append_event(
-                        status_path,
-                        "live_step_wall_time",
-                        work_unit_id=work_unit_id,
-                        datapoint_id=datapoint_id,
+                    _set_marker_state(marker_mod, active_iterations="", phase="ctx")
+                else:
+                    _set_marker_state(
+                        marker_mod,
+                        active_iterations="",
+                        trigger="ctx_chunk",
                         phase="ctx",
-                        batch_size=dp.batch_size,
-                        new_tokens=dp.new_tokens,
-                        past_kv=dp.past_kv,
+                        step=chunk_tokens,
+                        bs=dp.batch_size,
+                        past=chunk_past_kv,
                         run=run_idx,
-                        steps=step_idx + 1,
-                        wall_latency_ms=(time.perf_counter() - live_start) * 1000.0,
+                        live_step_driver=True,
+                        requested_new_tokens=dp.new_tokens,
+                        requested_past_kv=dp.past_kv,
+                        chunk_index=chunk_index,
+                        chunk_count=len(chunks),
                     )
-                    return
-            raise RuntimeError(f"live ctx driver did not capture target chunk for {dp.shape_key}")
+                marker_mod._LAST_CTX_MATCH_META = {}
+                max_steps = 8
+                for step_idx in range(max_steps):
+                    llm.llm_engine.step()
+                    executed_steps += 1
+                    if warmup:
+                        break
+                    matched_after = dict(getattr(marker_mod, "_LAST_CTX_MATCH_META", {}))
+                    if matched_after:
+                        break
+                else:
+                    raise RuntimeError(
+                        "live ctx driver did not capture target chunk "
+                        f"for {dp.shape_key}: chunk_index={chunk_index}, "
+                        f"chunk_tokens={chunk_tokens}, chunk_past_kv={chunk_past_kv}"
+                    )
+        if not warmup:
+            _worker_append_event(
+                status_path,
+                "live_step_wall_time",
+                work_unit_id=work_unit_id,
+                datapoint_id=datapoint_id,
+                phase="ctx",
+                batch_size=dp.batch_size,
+                new_tokens=dp.new_tokens,
+                past_kv=dp.past_kv,
+                run=run_idx,
+                live_step_driver=True,
+                chunks=len(chunks),
+                steps=executed_steps,
+                wall_latency_ms=(time.perf_counter() - live_start) * 1000.0,
+            )
     finally:
         _set_marker_state(marker_mod, active_iterations="", phase="ctx")
         _abort_engine_requests(llm, request_ids)
@@ -1711,7 +1889,8 @@ def _run_live_gen_datapoint(
         dp.past_kv,
         token_config,
         prompt_factory=prompt_factory,
-        stream_key_prefix=("gen-live", work_unit_id, dp.batch_size, dp.past_kv),
+        stream_key_prefix=_gen_prefix_stream_key(work_unit_id),
+        cache_salt_prefix=_gen_cache_salt_prefix(work_unit_id, dp),
     )
     request_ids = _add_engine_requests(
         llm,
@@ -1722,24 +1901,17 @@ def _run_live_gen_datapoint(
     try:
         _set_marker_state(marker_mod, active_iterations="", phase="gen")
         prefill_start = time.perf_counter()
-        _step_engine_until(
-            llm,
-            lambda: _all_requests_computed_at_least(llm, request_ids, dp.past_kv),
-            max_steps=max(8, dp.past_kv + total_decode_steps + 8),
-            status_path=status_path,
-            work_unit_id=work_unit_id,
-            datapoint_id=datapoint_id,
-            event="live_gen_prefill_finished",
-        )
+        prime_chunks = _prime_engine_requests_for_decode(llm, request_ids, dp.past_kv)
         if status_path is not None and work_unit_id is not None:
             _worker_append_event(
                 status_path,
-                "live_step_wall_time",
+                "synthetic_decode_prefill_ready",
                 work_unit_id=work_unit_id,
                 datapoint_id=datapoint_id,
                 phase="gen_prefill",
                 batch_size=dp.batch_size,
                 past_kv=dp.past_kv,
+                prime_chunks=prime_chunks,
                 wall_latency_ms=(time.perf_counter() - prefill_start) * 1000.0,
             )
 
@@ -1767,6 +1939,7 @@ def _run_live_gen_datapoint(
                 bs=dp.batch_size,
                 past=dp.past_kv,
                 run=run_idx,
+                live_step_driver=True,
             )
             live_start = time.perf_counter()
             marker_mod._LAST_DECODE_MATCH_META = {}
@@ -1775,18 +1948,19 @@ def _run_live_gen_datapoint(
                 llm.llm_engine.step()
                 matched_after = dict(getattr(marker_mod, "_LAST_DECODE_MATCH_META", {}))
                 if matched_after:
-                    _worker_append_event(
-                        status_path,
-                        "live_step_wall_time",
-                        work_unit_id=work_unit_id,
-                        datapoint_id=datapoint_id,
-                        phase="gen",
-                        batch_size=dp.batch_size,
-                        past_kv=dp.past_kv,
-                        run=run_idx,
-                        steps=step_idx + 1,
-                        wall_latency_ms=(time.perf_counter() - live_start) * 1000.0,
-                    )
+                    if status_path is not None and work_unit_id is not None:
+                        _worker_append_event(
+                            status_path,
+                            "live_step_wall_time",
+                            work_unit_id=work_unit_id,
+                            datapoint_id=datapoint_id,
+                            phase="gen",
+                            batch_size=dp.batch_size,
+                            past_kv=dp.past_kv,
+                            run=run_idx,
+                            steps=step_idx + 1,
+                            wall_latency_ms=(time.perf_counter() - live_start) * 1000.0,
+                        )
                     break
             else:
                 raise RuntimeError(f"live gen driver did not capture target decode step for {dp.shape_key}")

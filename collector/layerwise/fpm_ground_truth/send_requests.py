@@ -377,9 +377,16 @@ def real_workload_values(args):
 
 
 def make_token_ids(args, target_tokens, request_index):
+    token_pool = getattr(args, "prompt_token_pool", None)
+    if args.prompt_token_seed is None:
+        rng = args.prompt_rng
+    else:
+        rng = random.Random(int(args.prompt_token_seed) + int(request_index))
+    if token_pool:
+        return [token_pool[rng.randrange(len(token_pool))] for _ in range(int(target_tokens))]
     if args.prompt_token_seed is None:
         return sample_prompt_token_ids(
-            args.prompt_rng,
+            rng,
             int(target_tokens),
             args.prompt_token_config,
         )
@@ -389,6 +396,106 @@ def make_token_ids(args, target_tokens, request_index):
         request_index=request_index,
         token_config=args.prompt_token_config,
     )
+
+
+def is_printable_ascii_token_text(text):
+    """Return whether one decoded token is safe for vLLM HTTP prompt handling."""
+
+    if not text or not text.strip():
+        return False
+    return all(32 <= ord(ch) <= 126 for ch in text)
+
+
+def decode_one_token(tokenizer, token_id):
+    try:
+        return tokenizer.decode(
+            [token_id],
+            clean_up_tokenization_spaces=False,
+            skip_special_tokens=False,
+        )
+    except TypeError:
+        return tokenizer.decode([token_id])
+
+
+def resolve_cached_hf_file(model, filename):
+    try:
+        from huggingface_hub import hf_hub_download
+    except Exception:
+        return None
+    try:
+        return hf_hub_download(repo_id=model, filename=filename, local_files_only=True)
+    except Exception:
+        return None
+
+
+def iter_printable_ascii_token_ids(token_config, decode_token):
+    candidates = []
+    for token_id in range(token_config.vocab_size):
+        if token_id in token_config.excluded_token_ids:
+            continue
+        try:
+            text = decode_token(token_id)
+        except Exception:
+            continue
+        if is_printable_ascii_token_text(text):
+            candidates.append(token_id)
+    return candidates
+
+
+def load_safe_ascii_prompt_token_ids_from_tokenizer_json(model, token_config):
+    tokenizer_path = resolve_cached_hf_file(model, "tokenizer.json")
+    if not tokenizer_path:
+        return []
+    try:
+        from tokenizers import Tokenizer
+
+        tokenizer = Tokenizer.from_file(tokenizer_path)
+    except Exception as exc:
+        print(
+            f"safe_ascii_tokenizer_json_load_failed model={model!r} error={exc!r}",
+            flush=True,
+        )
+        return []
+    return iter_printable_ascii_token_ids(
+        token_config,
+        lambda token_id: tokenizer.decode([token_id], skip_special_tokens=False),
+    )
+
+
+def load_safe_ascii_prompt_token_ids(model, token_config):
+    load_error = None
+    try:
+        from transformers import AutoTokenizer
+    except Exception as exc:
+        print(f"safe_ascii_prompt_tokens_unavailable reason={type(exc).__name__}", flush=True)
+        load_error = exc
+    else:
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+        except Exception as exc:
+            print(f"safe_ascii_prompt_tokens_load_failed model={model!r} error={exc!r}", flush=True)
+            load_error = exc
+        else:
+            candidates = iter_printable_ascii_token_ids(
+                token_config,
+                lambda token_id: decode_one_token(tokenizer, token_id),
+            )
+            if not candidates:
+                print("safe_ascii_prompt_tokens_empty", flush=True)
+            return candidates
+
+    candidates = load_safe_ascii_prompt_token_ids_from_tokenizer_json(model, token_config)
+    if candidates:
+        if load_error is not None:
+            print(
+                "safe_ascii_prompt_tokens_loaded_from=tokenizer_json "
+                f"after_error={type(load_error).__name__}",
+                flush=True,
+            )
+        return candidates
+    if not candidates:
+        print("safe_ascii_prompt_tokens_empty", flush=True)
+    return candidates
 
 
 def build_specs(args):
@@ -455,7 +562,7 @@ def build_specs(args):
                     spec["target_osl"],
                     spec["prompt_tokens"],
                     spec["target_osl"],
-                    "random_vocab_excluding_special",
+                    getattr(args, "prompt_token_mode", "random_vocab_excluding_special"),
                     real_source if real_workload else "explicit_or_logspace_shape_grid",
                 ]
             )
@@ -524,11 +631,20 @@ def main() -> int:
     parser.add_argument("--concurrency", type=int, required=True)
     parser.add_argument("--max-tokens", type=int, required=True)
     parser.add_argument("--prompt-token-seed", type=int, default=None)
+    parser.add_argument(
+        "--prompt-token-mode",
+        choices=["random_vocab_excluding_special", "safe_ascii"],
+        default="random_vocab_excluding_special",
+    )
     parser.add_argument("--vary-isl-osl", action="store_true")
     parser.add_argument("--real-workload", action="store_true")
     parser.add_argument("--real-workload-dataset", default="OpenAssistant/oasst1")
     parser.add_argument("--real-workload-max-rows", type=int, default=5000)
-    parser.add_argument("--real-workload-shape-source", choices=["scaled_dataset", "synthetic"], default="scaled_dataset")
+    parser.add_argument(
+        "--real-workload-shape-source",
+        choices=["scaled_dataset", "synthetic"],
+        default="scaled_dataset",
+    )
     parser.add_argument("--real-workload-isl-min", type=int, default=100)
     parser.add_argument("--real-workload-isl-max", type=int, default=16384)
     parser.add_argument("--real-workload-isl-mean", type=float, default=4096)
@@ -558,6 +674,17 @@ def main() -> int:
         args.model,
         allow_transformers_fallback=True,
     )
+    args.prompt_token_pool = []
+    if args.prompt_token_mode == "safe_ascii":
+        args.prompt_token_pool = load_safe_ascii_prompt_token_ids(args.model, args.prompt_token_config)
+        if args.prompt_token_pool:
+            print(
+                f"prompt_token_mode=safe_ascii candidate_count={len(args.prompt_token_pool)}",
+                flush=True,
+            )
+        else:
+            args.prompt_token_mode = "random_vocab_excluding_special"
+            print("prompt_token_mode_fallback=random_vocab_excluding_special", flush=True)
     print(
         "prompt_token_config "
         f"vocab_size={args.prompt_token_config.vocab_size} "

@@ -30,13 +30,25 @@ try:
     from .engine import _append_default_vllm_args
     from .nsys import _aggregate_step_rows, _effective_rollup, _lookup_aggs, _reduce_agg_latency
     from .results import _append_success_row, _work_unit_includes_moe, _write_csv_header_if_needed
-    from .runtime import _detect_gpus, _json_dump, _tail, _utc_now
+    from .runtime import (
+        _detect_gpus,
+        _get_vllm_deployment_max_num_batched_tokens,
+        _json_dump,
+        _tail,
+        _utc_now,
+    )
 except ImportError:  # pragma: no cover - direct script compatibility
     from data import DataPoint, WorkUnit
     from engine import _append_default_vllm_args
     from nsys import _aggregate_step_rows, _effective_rollup, _lookup_aggs, _reduce_agg_latency
     from results import _append_success_row, _work_unit_includes_moe, _write_csv_header_if_needed
-    from runtime import _detect_gpus, _json_dump, _tail, _utc_now
+    from runtime import (
+        _detect_gpus,
+        _get_vllm_deployment_max_num_batched_tokens,
+        _json_dump,
+        _tail,
+        _utc_now,
+    )
 
 
 TERMINAL_EVENTS = {
@@ -77,7 +89,7 @@ class StatusIndex:
             if not dpid:
                 continue
             name = event.get("event")
-            if name == "started":
+            if name in {"started", "live_step_driver_started"}:
                 self.started.setdefault(dpid, []).append(event)
             elif name == "completed_execution":
                 self.completed.add(dpid)
@@ -101,8 +113,9 @@ class StatusIndex:
         worker dies, the newest non-terminal started datapoint is considered
         the one that caused the crash and is never retried.
         """
+        start_events = {"started", "live_step_driver_started"}
         for event in reversed(self.events):
-            if event.get("event") != "started":
+            if event.get("event") not in start_events:
                 continue
             if event.get("work_unit_id") != work_unit_id:
                 continue
@@ -153,7 +166,10 @@ class StatusStore:
             for line in f:
                 line = line.strip()
                 if line:
-                    events.append(json.loads(line))
+                    try:
+                        events.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
         return events
 
     def max_attempt_id(self) -> int:
@@ -199,7 +215,13 @@ class StatusStore:
 
 def _is_oom_text(text: str) -> bool:
     lowered = text.lower()
-    return "out of memory" in lowered or "cuda oom" in lowered or "cublas_status_alloc_failed" in lowered
+    return (
+        "out of memory" in lowered
+        or "cuda oom" in lowered
+        or "cublas_status_alloc_failed" in lowered
+        or "insufficient kv blocks" in lowered
+        or "failed to prime" in lowered and "prefix" in lowered and "free_blocks=0" in lowered
+    )
 
 def _is_fatal_cuda_text(text: str) -> bool:
     lowered = text.lower()
@@ -247,7 +269,20 @@ def oom_dominates(failed: DataPoint, candidate: DataPoint) -> bool:
         candidate.batch_size > failed.batch_size
         or candidate.past_kv > failed.past_kv
     )
-    return same_or_larger and strictly_larger
+    if same_or_larger and strictly_larger:
+        return True
+
+    if candidate.batch_size < failed.batch_size:
+        return False
+    failed_kv_footprint = int(failed.batch_size) * max(
+        1,
+        int(failed.past_kv) + max(1, int(failed.new_tokens)),
+    )
+    candidate_kv_footprint = int(candidate.batch_size) * max(
+        1,
+        int(candidate.past_kv) + max(1, int(candidate.new_tokens)),
+    )
+    return candidate_kv_footprint >= failed_kv_footprint
 
 def _attempt_config_hash(attempt: Attempt, store: StatusStore) -> str:
     for event in reversed(store.index().events):
@@ -260,10 +295,27 @@ def _attempt_config_hash(attempt: Attempt, store: StatusStore) -> str:
         return str(event.get("vllm_config_hash") or "")
     return ""
 
+def _attempt_max_num_batched_tokens(attempt: Attempt) -> int | None:
+    """Return the context-token budget used by a launched attempt."""
+
+    if attempt.work_unit.max_num_batched_tokens is not None:
+        return attempt.work_unit.max_num_batched_tokens
+    try:
+        spec = json.loads(attempt.spec_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    value = spec.get("max_num_batched_tokens")
+    if value in (None, ""):
+        return None
+    return int(value)
+
 def _lookup_scheduler_timing_aggs(
     events: list[dict[str, Any]],
     work_unit_id: str,
     datapoint: DataPoint,
+    *,
+    attempt_id: int | None = None,
+    prefer_schedule_to_update_for_gen: bool = False,
 ) -> list[dict[str, Any]]:
     """Return scheduler wall-envelope repeats for one datapoint.
 
@@ -277,11 +329,49 @@ def _lookup_scheduler_timing_aggs(
     step, batch_size, past_kv = datapoint.parse_key()
     aggs = []
 
+    model_execute_aggs = []
+    for event in events:
+        if event.get("event") != "completed_execution":
+            continue
+        if event.get("work_unit_id") != work_unit_id:
+            continue
+        if not event.get("live_step_driver"):
+            continue
+        event_attempt_id = event.get("attempt_id")
+        if attempt_id is not None and event_attempt_id not in (None, "") and event_attempt_id != attempt_id:
+            continue
+        if event.get("phase") != datapoint.phase:
+            continue
+        if int(event.get("batch_size", -1)) != int(batch_size):
+            continue
+        if int(event.get("past_kv", -1)) != int(past_kv):
+            continue
+        if datapoint.phase == "ctx" and int(event.get("new_tokens", -1)) != int(step):
+            continue
+        if event.get("run") in (None, ""):
+            continue
+        latency_ms = event.get("execute_model_wall_time_ms")
+        if latency_ms in (None, ""):
+            continue
+        latency_us = float(latency_ms) * 1000.0
+        model_execute_aggs.append({
+            "gpu_us": latency_us,
+            "rms_us": 0.0,
+            "span_us": latency_us,
+            "kernel_count": 0,
+            "rms_kernel_count": 0,
+        })
+    if model_execute_aggs:
+        return model_execute_aggs
+
     live_step_aggs = []
     for event in events:
         if event.get("event") != "live_step_wall_time":
             continue
         if event.get("work_unit_id") != work_unit_id:
+            continue
+        event_attempt_id = event.get("attempt_id")
+        if attempt_id is not None and event_attempt_id not in (None, "") and event_attempt_id != attempt_id:
             continue
         if event.get("phase") != datapoint.phase:
             continue
@@ -319,6 +409,9 @@ def _lookup_scheduler_timing_aggs(
             continue
         if event.get("work_unit_id") != work_unit_id:
             continue
+        event_attempt_id = event.get("attempt_id")
+        if attempt_id is not None and event_attempt_id not in (None, "") and event_attempt_id != attempt_id:
+            continue
         if event.get("control_phase") != datapoint.phase:
             continue
         if _event_int(event, "control_step") != int(step):
@@ -327,6 +420,10 @@ def _lookup_scheduler_timing_aggs(
             continue
         if _event_int(event, "control_past") != int(past_kv):
             continue
+        if datapoint.phase == "ctx":
+            scheduled_new_reqs = _event_int(event, "scheduled_new_reqs")
+            if scheduled_new_reqs == 0:
+                continue
         if datapoint.phase == "gen":
             scheduled_new_reqs = _event_int(event, "scheduled_new_reqs")
             scheduled_tokens = _event_int(event, "scheduled_tokens")
@@ -335,7 +432,10 @@ def _lookup_scheduler_timing_aggs(
         run = _event_int(event, "control_run")
         if run is None:
             continue
-        latency_ms = event.get("fpm_wall_time_ms", event.get("schedule_to_update_ms"))
+        if datapoint.phase == "gen" and prefer_schedule_to_update_for_gen:
+            latency_ms = event.get("schedule_to_update_ms", event.get("fpm_wall_time_ms"))
+        else:
+            latency_ms = event.get("fpm_wall_time_ms", event.get("schedule_to_update_ms"))
         if latency_ms in (None, ""):
             continue
         latency_us = float(latency_ms) * 1000.0
@@ -365,12 +465,17 @@ def _lookup_worker_wall_aggs(
     events: list[dict[str, Any]],
     work_unit_id: str,
     datapoint: DataPoint,
+    *,
+    attempt_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return outer worker generate-call wall-time repeats for one datapoint."""
 
     aggs = []
     for event in events:
         if event.get("work_unit_id") != work_unit_id:
+            continue
+        event_attempt_id = event.get("attempt_id")
+        if attempt_id is not None and event_attempt_id not in (None, "") and event_attempt_id != attempt_id:
             continue
         if event.get("event") == "measurement_wall_time":
             if event.get("phase") != datapoint.phase:
@@ -416,12 +521,19 @@ def _effective_latency_source(
     """Return the concrete latency source used for one datapoint."""
 
     if requested_source == "auto":
-        if datapoint.phase == "ctx":
+        if datapoint.phase in {"ctx", "gen"}:
             return "schedule_to_update"
-        if includes_moe and datapoint.batch_size >= moe_decode_gpu_batch_threshold:
-            return "gpu"
         return "span"
     return requested_source
+
+def _live_step_driver_would_handle(datapoint: DataPoint) -> bool:
+    """Mirror the worker's live-step eligibility without importing worker code."""
+
+    if datapoint.phase == "ctx":
+        return datapoint.batch_size == 1 and int(datapoint.new_tokens) > 0
+    if datapoint.phase == "gen":
+        return int(datapoint.past_kv) > 0
+    return False
 
 
 def _lookup_timing_source_aggs(
@@ -431,20 +543,29 @@ def _lookup_timing_source_aggs(
     events: list[dict[str, Any]],
     work_unit_id: str,
     datapoint: DataPoint,
+    attempt_id: int | None = None,
+    includes_moe: bool = False,
+    moe_noop: bool = False,
 ) -> tuple[str, list[dict[str, Any]]] | None:
     """Return scheduler/worker timing repeats, falling back only for auto mode."""
 
     if effective_source == "schedule_to_update":
-        aggs = _lookup_scheduler_timing_aggs(events, work_unit_id, datapoint)
+        aggs = _lookup_scheduler_timing_aggs(
+            events,
+            work_unit_id,
+            datapoint,
+            attempt_id=attempt_id,
+            prefer_schedule_to_update_for_gen=False,
+        )
         if aggs:
             return effective_source, aggs
         if requested_source == "auto":
-            worker_aggs = _lookup_worker_wall_aggs(events, work_unit_id, datapoint)
+            worker_aggs = _lookup_worker_wall_aggs(events, work_unit_id, datapoint, attempt_id=attempt_id)
             if worker_aggs:
                 return "worker_wall", worker_aggs
         return None
     if effective_source == "worker_wall":
-        aggs = _lookup_worker_wall_aggs(events, work_unit_id, datapoint)
+        aggs = _lookup_worker_wall_aggs(events, work_unit_id, datapoint, attempt_id=attempt_id)
         if aggs:
             return effective_source, aggs
         return None
@@ -598,6 +719,8 @@ class Scheduler:
             for dp in pending
         ):
             env["LAYERWISE_SCHEDULER_TIMING"] = "1"
+        if getattr(self.args, "live_step_driver", False):
+            env["LAYERWISE_USE_LIVE_STEP_DRIVER"] = "1"
         cmd = self._worker_cmd(
             paths["spec"],
             paths["report"],
@@ -646,9 +769,19 @@ class Scheduler:
         _append_default_vllm_args(extra_vllm_args)
         has_ctx = any(dp.phase == "ctx" for dp in pending)
         has_gen = any(dp.phase == "gen" for dp in pending)
-        ctx_needs_prefix_cache = any(dp.phase == "ctx" and int(dp.past_kv) > 0 for dp in pending)
-        needs_prefix_cache = ctx_needs_prefix_cache or (has_gen and unit.gen_driver == "prefix_cache")
-        disables_prefix_cache = has_gen and unit.gen_driver == "live_decode" and not has_ctx
+        gen_datapoints = [dp for dp in pending if dp.phase == "gen"]
+        live_step_gen_deployment = (
+            has_gen
+            and (
+                unit.gen_driver == "live_decode"
+                or (
+                    getattr(self.args, "live_step_driver", False)
+                    and all(_live_step_driver_would_handle(dp) for dp in gen_datapoints)
+                )
+            )
+        )
+        needs_prefix_cache = has_gen and unit.gen_driver == "prefix_cache" and not live_step_gen_deployment
+        disables_prefix_cache = live_step_gen_deployment and not needs_prefix_cache
         runtime_defaults = gpt_oss_runtime_defaults(
             model=unit.row_base["model"],
             system=unit.row_base["system"],
@@ -686,10 +819,27 @@ class Scheduler:
         enable_layer_patch = unit.needs_layer_patch(
             enable_layerwise_nvtx_tracing=enable_layerwise_nvtx
         )
-        enable_step_marker = (
-            self.args.nsys_capture != "none"
-            or enable_layerwise_nvtx
+        live_step_marker = (
+            getattr(self.args, "live_step_driver", False)
+            and any(_live_step_driver_would_handle(dp) for dp in pending)
         )
+        enable_step_marker = (
+            self._attempt_needs_nsys(unit, pending)
+            or enable_layerwise_nvtx
+            or live_step_marker
+            or (enable_layer_patch and self.args.nsys_capture != "none")
+        )
+        max_num_batched_tokens = unit.max_num_batched_tokens
+        if max_num_batched_tokens is None and (has_ctx or live_step_gen_deployment):
+            max_num_batched_tokens = _get_vllm_deployment_max_num_batched_tokens(
+                model=unit.row_base["model"],
+                tensor_parallel_size=int(unit.row_base["attn_tp"]),
+                max_num_seqs=unit.max_num_seqs,
+                max_model_len=unit.max_model_len,
+                gpu_memory_utilization=unit.gpu_memory_utilization,
+                extra_args=tuple(extra_vllm_args),
+            )
+        cache_block_size = unit.cache_block_size
 
         return {
             "attempt_id": attempt_id,
@@ -702,8 +852,10 @@ class Scheduler:
             "moe_weight_mode": unit.moe_weight_mode,
             "datapoints": [asdict(dp) for dp in pending],
             "max_num_seqs": unit.max_num_seqs,
-            "max_num_batched_tokens": unit.max_num_batched_tokens,
+            "max_num_batched_tokens": max_num_batched_tokens,
+            "cache_block_size": cache_block_size,
             "max_model_len": unit.max_model_len,
+            "gpu_memory_utilization": unit.gpu_memory_utilization,
             "gen_driver": unit.gen_driver,
             "status_path": str(self.store.status_path),
             "extra_vllm_args": extra_vllm_args,
@@ -892,6 +1044,9 @@ class Scheduler:
                     events=index.events,
                     work_unit_id=attempt.work_unit.work_unit_id,
                     datapoint=dp,
+                    attempt_id=attempt.attempt_id,
+                    includes_moe=_work_unit_includes_moe(attempt.work_unit),
+                    moe_noop=bool(attempt.work_unit.moe_noop),
                 )
                 if timing is None:
                     continue
@@ -931,7 +1086,7 @@ class Scheduler:
                 "moe_weight_mode": attempt.work_unit.moe_weight_mode,
                 "latency_source": effective_latency_source,
                 "physical_gpus": attempt.work_unit.physical_gpus,
-                "max_num_batched_tokens": attempt.work_unit.max_num_batched_tokens or "",
+                "max_num_batched_tokens": _attempt_max_num_batched_tokens(attempt) or "",
                 "vllm_config_hash": _attempt_config_hash(attempt, self.store),
             }
             _append_success_row(self.output_path, row)
@@ -971,13 +1126,18 @@ class Scheduler:
                 moe_decode_gpu_batch_threshold=self.args.moe_decode_gpu_batch_threshold,
             )
             if effective_latency_source not in {"schedule_to_update", "worker_wall"}:
-                continue
+                if dp.phase != "gen":
+                    continue
+                effective_latency_source = "worker_wall"
             timing = _lookup_timing_source_aggs(
                 requested_source=self.args.latency_source,
                 effective_source=effective_latency_source,
                 events=index.events,
                 work_unit_id=attempt.work_unit.work_unit_id,
                 datapoint=dp,
+                attempt_id=attempt.attempt_id,
+                includes_moe=_work_unit_includes_moe(attempt.work_unit),
+                moe_noop=bool(attempt.work_unit.moe_noop),
             )
             if timing is None:
                 continue
@@ -985,7 +1145,7 @@ class Scheduler:
             latency_us, rms_us, kernel_count, rms_kernel_count, measure_count = _reduce_agg_latency(
                 aggs,
                 latency_source="span",
-                aggregation=self.args.ctx_repeat_aggregation,
+                aggregation=self.args.ctx_repeat_aggregation if dp.phase == "ctx" else self.args.gen_repeat_aggregation,
             )
             representative = asdict(attempt.work_unit.representative)
             physical_representative = (
@@ -1008,7 +1168,7 @@ class Scheduler:
                 "moe_weight_mode": attempt.work_unit.moe_weight_mode,
                 "latency_source": effective_latency_source,
                 "physical_gpus": attempt.work_unit.physical_gpus,
-                "max_num_batched_tokens": attempt.work_unit.max_num_batched_tokens or "",
+                "max_num_batched_tokens": _attempt_max_num_batched_tokens(attempt) or "",
                 "vllm_config_hash": _attempt_config_hash(attempt, self.store),
             }
             _append_success_row(self.output_path, row)
@@ -1020,7 +1180,9 @@ class Scheduler:
                 latency_ms=row["latency_ms"],
                 latency_source=effective_latency_source,
                 requested_latency_source=self.args.latency_source,
-                repeat_aggregation=self.args.ctx_repeat_aggregation,
+                repeat_aggregation=(
+                    self.args.ctx_repeat_aggregation if dp.phase == "ctx" else self.args.gen_repeat_aggregation
+                ),
                 measure_count=measure_count,
                 kernel_count=kernel_count,
                 rms_latency_ms=row["rms_latency_ms"],

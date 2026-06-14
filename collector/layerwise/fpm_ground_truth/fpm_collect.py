@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from pathlib import Path
 import signal
 import sys
 import time
@@ -30,11 +31,21 @@ def classify_phase(sum_prefill_tokens: int, num_decode_requests: int) -> str:
     return "idle"
 
 
+def read_segment(segment_file: str | None) -> str:
+    if not segment_file:
+        return ""
+    try:
+        return Path(segment_file).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--detail-output", required=True)
+    parser.add_argument("--segment-file", default=None)
     parser.add_argument("--idle-timeout", type=float, default=0.0)
     args = parser.parse_args()
 
@@ -57,6 +68,7 @@ def main() -> int:
         detail_writer.writerow(
             [
                 "phase",
+                "workload_segment",
                 "counter_id",
                 "worker_id",
                 "dp_rank",
@@ -98,6 +110,7 @@ def main() -> int:
                 int(scheduled.sum_prefill_tokens),
                 int(scheduled.num_decode_requests),
             )
+            workload_segment = read_segment(args.segment_file)
             row = [
                 int(scheduled.sum_prefill_tokens),
                 int(scheduled.num_decode_requests),
@@ -105,6 +118,7 @@ def main() -> int:
             ]
             detail_row = [
                 phase,
+                workload_segment,
                 int(metrics.counter_id),
                 metrics.worker_id,
                 int(metrics.dp_rank),

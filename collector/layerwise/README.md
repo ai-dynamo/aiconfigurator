@@ -26,9 +26,10 @@ Dynamo vLLM runtime and mount host Nsight:
 export AIC_REPO="${AIC_REPO:-$PWD}"
 export HF_TOKEN="${HF_TOKEN:-$(tr -d '\n' < ~/hf.token)}"
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+export VLLM_CACHE_HOST="${VLLM_CACHE_HOST:-$HOME/.cache/aic-vllm}"
 export NSYS_VERSION="${NSYS_VERSION:-2025.6.3}"
 export RUN_DIR="$AIC_REPO/.tmp/smoke-layerwise-$(date -u +%Y%m%d_%H%M%S)"
-mkdir -p "$RUN_DIR" "$HF_HOME"
+mkdir -p "$RUN_DIR" "$HF_HOME" "$VLLM_CACHE_HOST/tilelang/tmp"
 
 docker run --rm --ipc=host --network=host \
   --gpus '"device=0"' \
@@ -36,8 +37,12 @@ docker run --rm --ipc=host --network=host \
   -v "$AIC_REPO:/workspace" \
   -v "$RUN_DIR:/results" \
   -v "$HF_HOME:/hf-cache" \
+  -v "$VLLM_CACHE_HOST:/home/dynamo/.cache/vllm" \
+  -v "$VLLM_CACHE_HOST:/root/.cache/vllm" \
   -e HF_HOME=/hf-cache \
   -e HF_HUB_CACHE=/hf-cache/hub \
+  -e TILELANG_CACHE_DIR=/home/dynamo/.cache/vllm/tilelang \
+  -e TILELANG_TMP_DIR=/home/dynamo/.cache/vllm/tilelang/tmp \
   -e HF_TOKEN="$HF_TOKEN" \
   -w /workspace \
   nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0 \

@@ -38,6 +38,7 @@ def _read_control() -> dict[str, Any]:
 def _append_event(event: dict[str, Any]) -> None:
     path = os.environ.get("LAYERWISE_PROGRESS_FILE")
     work_unit_id = os.environ.get("LAYERWISE_WORK_UNIT_ID")
+    attempt_id = os.environ.get("LAYERWISE_ATTEMPT_ID")
     if not path or not work_unit_id:
         return
     row = {
@@ -46,6 +47,8 @@ def _append_event(event: dict[str, Any]) -> None:
         "ts": datetime.now(timezone.utc).isoformat(),
         **event,
     }
+    if attempt_id not in (None, ""):
+        row["attempt_id"] = int(attempt_id)
     with open(path, "a") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         f.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")

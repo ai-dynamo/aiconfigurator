@@ -110,6 +110,117 @@ misc:
     assert dummy_detail["moe_weight_mode"] == "dummy"
 
 
+def test_query_layerwise_detail_selects_max_num_batched_tokens(tmp_path):
+    systems_root = tmp_path / "systems"
+    data_dir = systems_root / "data" / "test_system" / "vllm" / "0.20.1"
+    data_dir.mkdir(parents=True)
+    (systems_root / "test_system.yaml").write_text(
+        """
+data_dir: data/test_system
+gpu:
+  mem_capacity: 1
+node:
+  num_gpus_per_node: 1
+misc:
+  nccl_mem: {1: 0}
+  other_mem: 0
+"""
+    )
+    (data_dir / "layerwise_perf.csv").write_text(
+        "\n".join(
+            [
+                "framework,framework_version,system,model,phase,tp_size,batch_size,seq_len_q,seq_len_kv_cache,"
+                "latency_ms,latency_source,max_num_batched_tokens",
+                "vLLM,0.20.1,test,Qwen/Qwen3-32B,CTX,8,1,128,0,15.0,schedule_to_update,",
+                "vLLM,0.20.1,test,Qwen/Qwen3-32B,CTX,8,1,128,0,9.0,schedule_to_update,2048",
+                "",
+            ]
+        )
+    )
+    db = PerfDatabase("test_system", "vllm", "0.20.1", systems_root=str(systems_root))
+
+    default_detail = db.query_layerwise_detail("qwen/qwen3-32b", "CTX", 8, 1, 128)
+    chunked_detail = db.query_layerwise_detail(
+        "qwen/qwen3-32b",
+        "CTX",
+        8,
+        1,
+        128,
+        max_num_batched_tokens=2048,
+    )
+
+    assert default_detail["latency"] == pytest.approx(15.0)
+    assert "max_num_batched_tokens" not in default_detail
+    assert chunked_detail["latency"] == pytest.approx(9.0)
+    assert chunked_detail["max_num_batched_tokens"] == pytest.approx(2048)
+
+
+def test_query_layerwise_detail_selects_moe_parallelism(tmp_path):
+    systems_root = tmp_path / "systems"
+    data_dir = systems_root / "data" / "test_system" / "vllm" / "0.20.1"
+    data_dir.mkdir(parents=True)
+    (systems_root / "test_system.yaml").write_text(
+        """
+data_dir: data/test_system
+gpu:
+  mem_capacity: 1
+node:
+  num_gpus_per_node: 1
+misc:
+  nccl_mem: {1: 0}
+  other_mem: 0
+"""
+    )
+    (data_dir / "layerwise_perf.csv").write_text(
+        "\n".join(
+            [
+                "framework,framework_version,system,model,phase,attn_tp,moe_tp,ep,batch_size,new_tokens,past_kv,"
+                "latency_ms,latency_source,max_num_batched_tokens,moe_weight_mode",
+                "vLLM,0.20.1,test,Qwen/Qwen3.6-35B-A3B,ctx,2,2,1,1,128,0,14.0,schedule_to_update,8192,noop",
+                "vLLM,0.20.1,test,Qwen/Qwen3.6-35B-A3B,ctx,2,1,2,1,128,0,22.0,schedule_to_update,8192,noop",
+                "",
+            ]
+        )
+    )
+    db = PerfDatabase("test_system", "vllm", "0.20.1", systems_root=str(systems_root))
+
+    merged_detail = db.query_layerwise_detail(
+        "Qwen/Qwen3.6-35B-A3B",
+        "CTX",
+        2,
+        1,
+        128,
+        moe_weight_mode="noop",
+        max_num_batched_tokens=8192,
+    )
+    tp_only_detail = db.query_layerwise_detail(
+        "Qwen/Qwen3.6-35B-A3B",
+        "CTX",
+        2,
+        1,
+        128,
+        moe_weight_mode="noop",
+        max_num_batched_tokens=8192,
+        moe_tp_size=2,
+        moe_ep_size=1,
+    )
+    ep_detail = db.query_layerwise_detail(
+        "Qwen/Qwen3.6-35B-A3B",
+        "CTX",
+        2,
+        1,
+        128,
+        moe_weight_mode="noop",
+        max_num_batched_tokens=8192,
+        moe_tp_size=1,
+        moe_ep_size=2,
+    )
+
+    assert merged_detail["latency"] == pytest.approx(22.0)
+    assert tp_only_detail["latency"] == pytest.approx(14.0)
+    assert ep_detail["latency"] == pytest.approx(22.0)
+
+
 def test_layerwise_loader_rejects_multi_gpu_physical_rows(tmp_path):
     systems_root = tmp_path / "systems"
     data_dir = systems_root / "data" / "test_system" / "vllm" / "0.20.1"

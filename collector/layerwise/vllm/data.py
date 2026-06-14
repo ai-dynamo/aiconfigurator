@@ -69,7 +69,9 @@ class WorkUnit:
     model_layer_count: int | None = None
     max_num_seqs: int | None = None
     max_num_batched_tokens: int | None = None
+    cache_block_size: int | None = None
     max_model_len: int | None = None
+    gpu_memory_utilization: float | None = None
     gen_driver: str = "prefix_cache"
     extra_vllm_args: tuple[str, ...] = ()
     moe_noop: bool = False

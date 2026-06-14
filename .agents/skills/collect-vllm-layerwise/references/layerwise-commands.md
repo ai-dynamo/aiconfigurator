@@ -8,9 +8,10 @@ Use the Dynamo vLLM runtime plus host Nsight:
 export AIC_REPO="${AIC_REPO:-$PWD}"
 export AIC_LAYERWISE_ARTIFACTS="${AIC_LAYERWISE_ARTIFACTS:-$AIC_REPO/.tmp/layerwise-artifacts}"
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+export VLLM_CACHE_HOST="${VLLM_CACHE_HOST:-$HOME/.cache/aic-vllm}"
 export NSYS_VERSION="${NSYS_VERSION:-2025.6.3}"
 # export HF_TOKEN="$(tr -d '\n' < "$HF_TOKEN_FILE")"
-mkdir -p "$AIC_LAYERWISE_ARTIFACTS" "$HF_HOME"
+mkdir -p "$AIC_LAYERWISE_ARTIFACTS" "$HF_HOME" "$VLLM_CACHE_HOST/tilelang/tmp"
 
 docker run --rm --ipc=host --network=host \
   --gpus '"device=0"' \
@@ -18,8 +19,12 @@ docker run --rm --ipc=host --network=host \
   -v "$AIC_REPO:/workspace" \
   -v "$AIC_LAYERWISE_ARTIFACTS:/results" \
   -v "$HF_HOME:/hf-cache" \
+  -v "$VLLM_CACHE_HOST:/home/dynamo/.cache/vllm" \
+  -v "$VLLM_CACHE_HOST:/root/.cache/vllm" \
   -e HF_HOME=/hf-cache \
   -e HF_HUB_CACHE=/hf-cache/hub \
+  -e TILELANG_CACHE_DIR=/home/dynamo/.cache/vllm/tilelang \
+  -e TILELANG_TMP_DIR=/home/dynamo/.cache/vllm/tilelang/tmp \
   -e HF_TOKEN="${HF_TOKEN:?Set HF_TOKEN directly or export it from HF_TOKEN_FILE}" \
   -w /workspace \
   nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0 \
@@ -45,9 +50,10 @@ points and two decode points:
 export AIC_REPO="${AIC_REPO:-$PWD}"
 export HF_TOKEN="${HF_TOKEN:-$(tr -d '\n' < ~/hf.token)}"
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+export VLLM_CACHE_HOST="${VLLM_CACHE_HOST:-$HOME/.cache/aic-vllm}"
 export NSYS_VERSION="${NSYS_VERSION:-2025.6.3}"
 export RUN_DIR="$AIC_REPO/.tmp/smoke-layerwise-$(date -u +%Y%m%d_%H%M%S)"
-mkdir -p "$RUN_DIR" "$HF_HOME"
+mkdir -p "$RUN_DIR" "$HF_HOME" "$VLLM_CACHE_HOST/tilelang/tmp"
 
 docker run --rm --ipc=host --network=host \
   --gpus '"device=0"' \
@@ -55,12 +61,16 @@ docker run --rm --ipc=host --network=host \
   -v "$AIC_REPO:/workspace" \
   -v "$RUN_DIR:/results" \
   -v "$HF_HOME:/hf-cache" \
+  -v "$VLLM_CACHE_HOST:/home/dynamo/.cache/vllm" \
+  -v "$VLLM_CACHE_HOST:/root/.cache/vllm" \
   -e HF_HOME=/hf-cache \
   -e HF_HUB_CACHE=/hf-cache/hub \
+  -e TILELANG_CACHE_DIR=/home/dynamo/.cache/vllm/tilelang \
+  -e TILELANG_TMP_DIR=/home/dynamo/.cache/vllm/tilelang/tmp \
   -e HF_TOKEN="$HF_TOKEN" \
   -w /workspace \
   nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0 \
-  bash -lc 'export PATH=/opt/nvidia/nsight-systems/'"$NSYS_VERSION"'/target-linux-x64:$PATH; python3 -m collector.layerwise.vllm.collect --run-dir /results --models Qwen/Qwen3-32B --tp-sizes 1 --phases both --run-preset smoke --gpus 0 --max-workers 1'
+  bash -lc 'export PATH=/opt/nvidia/nsight-systems/'"$NSYS_VERSION"'/target-linux-x64:$PATH; python3 -m collector.layerwise.vllm.collect --run-dir /results --models Qwen/Qwen3-32B --tp-sizes 1 --phases both --run-preset smoke --gpus 0 --max-workers 1 --live-step-driver'
 ```
 
 Expected output:
@@ -80,7 +90,8 @@ success row has nonzero `kernel_count`. For `--latency-source gpu` or
 The default public entrypoint collects the registered production model set, currently dense Qwen3-32B and the Qwen MoE model. `--run-dir` is optional; when omitted the collector writes to a timestamped directory under `.tmp/layerwise-artifacts/runs/`.
 
 ```bash
-python3 -m collector.layerwise.vllm.collect
+python3 -m collector.layerwise.vllm.collect \
+  --live-step-driver
 ```
 
 Collect one model over TP 1/2/4/8:
@@ -88,7 +99,8 @@ Collect one model over TP 1/2/4/8:
 ```bash
 python3 -m collector.layerwise.vllm.collect \
   --models Qwen/Qwen3-32B \
-  --tp-sizes 1,2,4,8
+  --tp-sizes 1,2,4,8 \
+  --live-step-driver
 ```
 
 Collect MoE TP/EP points. `--ep-sizes auto` keeps EP at 1 for dense models and uses supported registry EP sizes for MoE models:
@@ -97,7 +109,8 @@ Collect MoE TP/EP points. `--ep-sizes auto` keeps EP at 1 for dense models and u
 python3 -m collector.layerwise.vllm.collect \
   --models Qwen/Qwen3.6-35B-A3B \
   --tp-sizes 1,2,4,8 \
-  --ep-sizes auto
+  --ep-sizes auto \
+  --live-step-driver
 ```
 
 Run a small smoke sweep before committing to the full grid:
@@ -106,7 +119,8 @@ Run a small smoke sweep before committing to the full grid:
 python3 -m collector.layerwise.vllm.collect \
   --models Qwen/Qwen3-32B \
   --tp-sizes 2 \
-  --run-preset smoke
+  --run-preset smoke \
+  --live-step-driver
 ```
 
 Use optional shape overrides only when narrowing or expanding a sweep:
@@ -117,7 +131,8 @@ python3 -m collector.layerwise.vllm.collect \
   --tp-sizes 2 \
   --phases ctx \
   --ctx-new-tokens 8192 \
-  --ctx-past-kv 0,8192
+  --ctx-past-kv 0,8192 \
+  --live-step-driver
 ```
 
 ## AIC Comparison Notes

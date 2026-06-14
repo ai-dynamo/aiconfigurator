@@ -10,6 +10,7 @@ model_paths:
   - Qwen/Qwen3-235B-A22B
   - Qwen/Qwen3-235B-A22B-FP8
   - Qwen/Qwen3-235B-A22B-Instruct-2507
+  - Qwen/Qwen3.6-35B-A3B
   - Qwen/Qwen3-Coder-480B-A35B-Instruct
   - nvidia/Qwen3-235B-A22B-NVFP4
 include_base: true
@@ -33,6 +34,12 @@ model_case_values:
       inter_size: 768
       topk: 8
       num_experts: 128
+    - model_path: Qwen/Qwen3.6-35B-A3B
+      hidden_size: 2048
+      inter_size: 512
+      topk: 8
+      num_experts: 256
+      shared_expert_inter_size: 512
     - model_paths:
         - Qwen/Qwen3-235B-A22B
         - Qwen/Qwen3-235B-A22B-FP8

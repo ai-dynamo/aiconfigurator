@@ -17,11 +17,17 @@ If missing, mount host Nsight Systems and expose both the CLI and target librari
 
 ```bash
 NSYS_HOME=/opt/nvidia/nsight-systems/2025.6.3
+VLLM_CACHE_HOST="${VLLM_CACHE_HOST:-$HOME/.cache/aic-vllm}"
+mkdir -p "$VLLM_CACHE_HOST/tilelang/tmp"
 docker run --rm --gpus '"device=0"' --ipc=host \
   --entrypoint /bin/bash \
   -e PATH="$NSYS_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   -e LD_LIBRARY_PATH="$NSYS_HOME/target-linux-x64:${LD_LIBRARY_PATH:-}" \
+  -e TILELANG_CACHE_DIR=/home/dynamo/.cache/vllm/tilelang \
+  -e TILELANG_TMP_DIR=/home/dynamo/.cache/vllm/tilelang/tmp \
   -v "$NSYS_HOME:$NSYS_HOME:ro" \
+  -v "$VLLM_CACHE_HOST:/home/dynamo/.cache/vllm" \
+  -v "$VLLM_CACHE_HOST:/root/.cache/vllm" \
   -v "$PWD:/work/aiconfigurator" \
   -w /work/aiconfigurator \
   IMAGE \

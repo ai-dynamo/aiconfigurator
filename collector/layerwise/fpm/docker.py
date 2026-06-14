@@ -10,7 +10,6 @@ from pathlib import Path
 
 from collector.layerwise.fpm.datapoint_generator import FpmCase
 
-
 DEFAULT_IMAGE = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0"
 
 
@@ -52,7 +51,13 @@ def build_collect_command(args, case: FpmCase, run_dir: Path) -> FpmShellCommand
         str(args.decode_repeats),
         "--image",
         args.image,
+        "--request-allow-failures",
+        str(args.request_allow_failures),
+        "--prompt-token-mode",
+        args.prompt_token_mode,
     ]
+    if args.include_sweep:
+        argv.append("--include-sweep")
     if args.real_workload:
         argv.extend([
             "--real-workload",

@@ -208,6 +208,7 @@ def _sum_kernels(cur, kernel_drop_re):
         step_wins_by_pid[pid].sort()
     all_step_wins.sort()
     step_starts = {tid: [s for s, _, _ in wins] for tid, wins in step_wins.items()}
+    mod_starts = {tid: [s for s, _, _ in ivs] for tid, ivs in mod_ivs.items()}
     step_starts_by_pid = {
         pid: [s for s, _, _ in wins] for pid, wins in step_wins_by_pid.items()
     }
@@ -259,7 +260,7 @@ def _sum_kernels(cur, kernel_drop_re):
         if key in kern_best_mod:
             continue  # already attributed via another instantiate's candidate
         mod_start_name = _innermost_module_at_with_start(
-            mod_ivs.get(tid, []), cap_s, cap_e
+            mod_ivs.get(tid, []), mod_starts.get(tid, []), cap_s, cap_e
         )
         if mod_start_name is None:
             continue
@@ -366,18 +367,15 @@ def _sum_nvtx_ranges(cur):
     return gpu_ns, rms_ns, span_start_ns, span_end_ns, n_k, n_rms_k
 
 
-def _innermost_module_at_with_start(mod_ivs_for_tid, capture_start, capture_end):
+def _innermost_module_at_with_start(mod_ivs_for_tid, starts, capture_start, capture_end):
     """Return the innermost Module NVTX range enclosing the capture interval."""
-    best = None
-    best_start = -1
-    starts = [s for s, _, _ in mod_ivs_for_tid]
     hi = bisect.bisect_right(starts, capture_start)
-    for i in range(hi):
+    for i in range(hi - 1, -1, -1):
         s, e, name = mod_ivs_for_tid[i]
-        if s <= capture_start and capture_end <= e and s > best_start:
-            best = name
-            best_start = s
-    return (best_start, best) if best is not None else None
+        if e < capture_end:
+            continue
+        return (s, name)
+    return None
 
 
 def _rollup_rows(

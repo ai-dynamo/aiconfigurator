@@ -8,8 +8,10 @@ context shape, and one decode batch at `past_kv=1024`:
 ```bash
 export HF_TOKEN="${HF_TOKEN:-$(tr -d '\n' < ~/hf.token)}"
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+export VLLM_CACHE_HOST="${VLLM_CACHE_HOST:-$HOME/.cache/aic-vllm}"
 export DYNAMO_VLLM_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
 export RUN_DIR="$PWD/.tmp/smoke-fpm-$(date -u +%Y%m%d_%H%M%S)"
+mkdir -p "$RUN_DIR" "$HF_HOME" "$VLLM_CACHE_HOST/tilelang/tmp"
 
 python3 -m collector.layerwise.fpm.collect \
   --model Qwen/Qwen3-32B \
@@ -43,11 +45,13 @@ Run from the `aiconfigurator` repo. Set `HF_TOKEN` directly, or set `HF_TOKEN_FI
 export AIC_REPO="${AIC_REPO:-$PWD}"
 export AIC_LAYERWISE_ARTIFACTS="${AIC_LAYERWISE_ARTIFACTS:-$AIC_REPO/.tmp/layerwise-artifacts}"
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+export VLLM_CACHE_HOST="${VLLM_CACHE_HOST:-$HOME/.cache/aic-vllm}"
 # export HF_TOKEN="$(tr -d '\n' < "$HF_TOKEN_FILE")"
-mkdir -p "$AIC_LAYERWISE_ARTIFACTS" "$HF_HOME"
+mkdir -p "$AIC_LAYERWISE_ARTIFACTS" "$HF_HOME" "$VLLM_CACHE_HOST/tilelang/tmp"
 
 HF_TOKEN="${HF_TOKEN:?Set HF_TOKEN directly or export it from HF_TOKEN_FILE}" \
 HF_HOME="$HF_HOME" \
+VLLM_CACHE_HOST="$VLLM_CACHE_HOST" \
 DYNAMO_VLLM_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0 \
 POST_REQUEST_COLLECT_SECONDS=5 \
 python3 -m collector.layerwise.fpm.collect \

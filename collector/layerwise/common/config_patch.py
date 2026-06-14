@@ -2,9 +2,10 @@
 
 Returns a local tmp dir containing a patched `config.json` plus every
 non-weight file from the HF repo (tokenizer, generation_config,
-preprocessor_config for multimodal archs, …). vLLM / sglang's model loader
-treats the tmp dir as a full local model path; weights come from
-`--load-format=dummy`.
+preprocessor_config for multimodal archs, …). Auxiliary files are linked by
+default, with copy fallback, so large tokenizer assets are not duplicated for
+every patched TP/EP variant. vLLM / sglang's model loader treats the tmp dir as
+a full local model path; weights come from `--load-format=dummy`.
 
 Override forms accepted by `patch_model_path(hf_id, overrides)`:
     {"num_hidden_layers": 4}                      # top-level
@@ -24,6 +25,7 @@ import shutil
 import tempfile
 
 _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
+_COPY_AUX_FILES_ENV = "AIC_LAYERWISE_PATCH_COPY_AUX_FILES"
 
 
 def _deep_merge(dst: dict, src: dict):
@@ -65,6 +67,20 @@ def _cache_target(
     digest = hashlib.sha256(_stable_json(key).encode("utf-8")).hexdigest()[:24]
     safe_model = model_id.replace("/", "_").replace(":", "_")
     return os.path.join(cache_dir, f"{safe_model}_{digest}")
+
+
+def _install_aux_file(src_path: str, dst_path: str) -> None:
+    """Install an auxiliary model file into a patched config dir."""
+
+    if os.path.exists(dst_path) or os.path.islink(dst_path):
+        return
+    if os.environ.get(_COPY_AUX_FILES_ENV) == "1":
+        shutil.copy2(src_path, dst_path)
+        return
+    try:
+        os.symlink(src_path, dst_path)
+    except OSError:
+        shutil.copy2(src_path, dst_path)
 
 
 def patch_model_path(model_id: str, overrides: dict | None = None,
@@ -168,8 +184,7 @@ def patch_model_path(model_id: str, overrides: dict | None = None,
         if fname == "config.json":
             continue  # we write the patched version below
         dst_path = os.path.join(tmp_dir, fname)
-        if not os.path.exists(dst_path):
-            shutil.copy2(src_path, dst_path)
+        _install_aux_file(src_path, dst_path)
 
     with open(os.path.join(tmp_dir, "config.json"), "w") as f:
         json.dump(config, f)

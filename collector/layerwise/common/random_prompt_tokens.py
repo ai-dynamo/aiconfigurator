@@ -36,6 +36,19 @@ def read_json_if_exists(path: Path) -> dict[str, Any]:
     return payload
 
 
+def read_hf_json_if_available(model: str, filename: str) -> dict[str, Any]:
+    try:
+        from huggingface_hub import hf_hub_download
+    except Exception:
+        return {}
+
+    try:
+        path = hf_hub_download(repo_id=model, filename=filename, local_files_only=True)
+    except Exception:
+        return {}
+    return read_json_if_exists(Path(path))
+
+
 def iter_token_ids(value: Any) -> Iterable[int]:
     if value is None:
         return
@@ -64,23 +77,45 @@ def load_random_prompt_token_config(
     config = read_json_if_exists(model_path / "config.json")
     generation_config = read_json_if_exists(model_path / "generation_config.json")
     tokenizer_config = read_json_if_exists(model_path / "tokenizer_config.json")
-    text_config = config.get("text_config")
-    if not isinstance(text_config, dict):
-        text_config = {}
 
     if allow_transformers_fallback and not config and not tokenizer_config:
+        fallback_error: Exception | None = None
         try:
             from transformers import AutoConfig, AutoTokenizer
 
-            hf_config = AutoConfig.from_pretrained(model, trust_remote_code=True)
-            config = dict(getattr(hf_config, "to_dict", lambda: {})())
-            tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-            tokenizer_config = {"vocab_size": getattr(tokenizer, "vocab_size", None)}
-            tokenizer_config["special_token_ids"] = list(getattr(tokenizer, "all_special_ids", []))
+            try:
+                hf_config = AutoConfig.from_pretrained(model, trust_remote_code=True)
+                config = dict(getattr(hf_config, "to_dict", lambda: {})())
+            except Exception as exc:
+                config = {}
+                fallback_error = exc
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+                tokenizer_config = {"vocab_size": getattr(tokenizer, "vocab_size", None)}
+                tokenizer_config["special_token_ids"] = list(getattr(tokenizer, "all_special_ids", []))
+            except Exception as exc:
+                fallback_error = exc
         except Exception as exc:
+            fallback_error = exc
+
+        if not config:
+            config = read_hf_json_if_available(model, "config.json")
+        if not generation_config:
+            generation_config = read_hf_json_if_available(model, "generation_config.json")
+        if not tokenizer_config:
+            tokenizer_config = read_hf_json_if_available(model, "tokenizer_config.json")
+        special_tokens_map = read_hf_json_if_available(model, "special_tokens_map.json")
+
+        if not config and not tokenizer_config:
             raise ValueError(
                 f"could not determine random prompt token vocabulary for {model!r}"
-            ) from exc
+            ) from fallback_error
+    else:
+        special_tokens_map = read_json_if_exists(model_path / "special_tokens_map.json")
+
+    text_config = config.get("text_config")
+    if not isinstance(text_config, dict):
+        text_config = {}
 
     raw_vocab_size = (
         config.get("vocab_size")
@@ -94,7 +129,7 @@ def load_random_prompt_token_config(
         raise ValueError(f"invalid vocab_size for random prompt IDs: {vocab_size}")
 
     excluded: set[int] = set()
-    for payload in (config, text_config, generation_config, tokenizer_config):
+    for payload in (config, text_config, generation_config, tokenizer_config, special_tokens_map):
         for key in SPECIAL_TOKEN_ID_KEYS:
             excluded.update(iter_token_ids(payload.get(key)))
     excluded.update(iter_token_ids(tokenizer_config.get("special_token_ids")))

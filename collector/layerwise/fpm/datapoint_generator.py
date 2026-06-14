@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 FULL_CONTEXTS = "128,1024,4096"
 FULL_CONTEXT_REPEATS = "6"
 FULL_DECODE_BATCHES = "1,4,16"
@@ -70,15 +69,15 @@ def default_shapes() -> dict[str, str]:
 def generate_fpm_cases(tp_sizes: str, ep_sizes: str, decode_past_kv: str) -> list[FpmCase]:
     """Expand TP/EP/KV filters into concrete vLLM-parity deployment cases.
 
-    vLLM supports TP-only MoE execution (ep=1) and expert-parallel execution
-    over the full TP/DP group (represented here as ep=tp). It does not expose
-    an independent MoE tensor-parallel axis, so intermediate ep values are not
-    generated.
+    vLLM does not expose an independent expert-parallel size flag. When expert
+    parallelism is enabled, EP is computed as ``TP * DP``. We therefore keep
+    ``ep_size`` as the requested total EP degree and only generate values that
+    can be represented by an integer DP size.
     """
     cases: list[FpmCase] = []
     for tp in parse_int_csv(tp_sizes):
         for ep in parse_int_csv(ep_sizes):
-            if ep != 1 and ep != tp:
+            if ep != 1 and (ep < tp or ep % tp != 0):
                 continue
             for past_kv in parse_int_csv(decode_past_kv):
                 cases.append(FpmCase(tp_size=tp, ep_size=ep, decode_past_kv=past_kv))

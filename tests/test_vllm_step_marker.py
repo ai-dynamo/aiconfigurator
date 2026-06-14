@@ -28,6 +28,46 @@ def _scheduler_output(*, req_ids, computed, scheduled, new_reqs=(), scheduled_re
 
 
 class VllmStepMarkerTests(unittest.TestCase):
+    def test_marked_step_records_execute_model_wall_time(self):
+        events = []
+
+        def fake_write_progress(event, **kwargs):
+            events.append((event, kwargs))
+
+        def fake_orig(runner, scheduler_output, intermediate_tensors):
+            return "ok"
+
+        with (
+            mock.patch.object(marker, "_write_progress", side_effect=fake_write_progress),
+            mock.patch.object(marker.torch.cuda, "synchronize") as sync,
+            mock.patch.object(marker.time, "perf_counter", side_effect=[10.0, 10.017]),
+        ):
+            result = marker._run_marked_step(
+                fake_orig,
+                SimpleNamespace(),
+                SimpleNamespace(),
+                None,
+                step=400,
+                batch_size=1,
+                past_kv=3696,
+                control={
+                    "phase": "ctx",
+                    "trigger": "ctx_chunk",
+                    "run": 3,
+                    "live_step_driver": True,
+                },
+            )
+
+        self.assertEqual(result, "ok")
+        sync.assert_called_once_with()
+        self.assertEqual(events[0][0], "started")
+        self.assertEqual(events[1][0], "completed_execution")
+        completed = events[1][1]
+        self.assertAlmostEqual(completed["execute_model_wall_time_ms"], 17.0)
+        self.assertEqual(completed["run"], 3)
+        self.assertEqual(completed["trigger"], "ctx_chunk")
+        self.assertTrue(completed["live_step_driver"])
+
     def test_decode_only_match_requires_target_past_before_step(self):
         runner = SimpleNamespace(
             requests={

@@ -17,6 +17,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _MODE_INDEX_KEY = "__mode_index__"
+_MAX_NUM_BATCHED_INDEX_KEY = "__max_num_batched_tokens_index__"
+_MAX_NUM_BATCHED_MODE_INDEX_KEY = "__max_num_batched_tokens_mode_index__"
+_PARALLEL_INDEX_KEY = "__parallel_index__"
+_PARALLEL_MODE_INDEX_KEY = "__parallel_mode_index__"
+_MAX_NUM_BATCHED_PARALLEL_INDEX_KEY = "__max_num_batched_tokens_parallel_index__"
+_MAX_NUM_BATCHED_PARALLEL_MODE_INDEX_KEY = "__max_num_batched_tokens_parallel_mode_index__"
 _ALLOW_PHYSICAL_GPUS_ENV = "AIC_LAYERWISE_ALLOW_PHYSICAL_GPUS"
 
 
@@ -101,6 +107,27 @@ def _entry_mode(entry: dict | None) -> str:
     return str(value)
 
 
+def _entry_max_num_batched_tokens(entry: dict | None) -> float | None:
+    """Return the context scheduler-token budget represented by an entry."""
+
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("max_num_batched_tokens")
+    if value in (None, ""):
+        return None
+    return float(value)
+
+
+def _store_layerwise_entry(index: dict, keys: tuple, entry: dict) -> None:
+    """Merge one layerwise entry into a nested index at ``keys``."""
+
+    cursor = index
+    for key in keys[:-1]:
+        cursor = cursor[key]
+    final_key = keys[-1]
+    cursor[final_key] = _merge_layerwise_entries(cursor.get(final_key), entry)
+
+
 def _preferred_default_entry(existing: dict, entry: dict) -> dict:
     """Pick the default row when alternative MoE row modes share one shape."""
 
@@ -120,6 +147,17 @@ def _merge_layerwise_entries(existing: dict | None, entry: dict) -> dict:
         result = dict(entry)
         result["components"] = [_entry_component(entry)]
         return result
+    existing_chunk = _entry_max_num_batched_tokens(existing)
+    entry_chunk = _entry_max_num_batched_tokens(entry)
+    if existing_chunk != entry_chunk:
+        # Different vLLM scheduler budgets are alternate measurements of the
+        # same public shape, not additive layer components. Explicit budget
+        # queries use the chunk index built during CSV load; legacy/default
+        # queries prefer the row without an explicit budget when available.
+        selected = existing if existing_chunk is None else entry if entry_chunk is None else existing
+        result = dict(selected)
+        result.setdefault("components", [_entry_component(result)])
+        return result
     if _entry_mode(existing) and _entry_mode(entry) and _entry_mode(existing) != _entry_mode(entry):
         return _preferred_default_entry(existing, entry)
     if _is_scheduler_envelope_entry(existing) != _is_scheduler_envelope_entry(entry):
@@ -130,7 +168,49 @@ def _merge_layerwise_entries(existing: dict | None, entry: dict) -> dict:
     def _scaled(value: dict, metric: str) -> float:
         return float(value.get(metric, 0.0) or 0.0) * _entry_scale(value)
 
+    def _copy_uniform_numeric_metrics(result: dict, components: list[dict], metrics: tuple[str, ...]) -> None:
+        for metric in metrics:
+            values = {
+                float(component[metric])
+                for component in components
+                if component.get(metric) not in (None, "")
+            }
+            if len(values) == 1:
+                result[metric] = values.pop()
+
     components = _entry_components(existing) + [_entry_component(entry)]
+    if _is_scheduler_envelope_entry(existing) and _is_scheduler_envelope_entry(entry):
+        # Scheduler/worker wall rows already include the common vLLM step
+        # envelope. Hybrid representative rows are alternate slices of that
+        # envelope, so summing them double-counts scheduler overhead.
+        result = {
+            "latency": max(_scaled(component, "latency") for component in components),
+            "energy": max(_scaled(component, "energy") for component in components),
+            "rms_latency": max(_scaled(component, "rms_latency") for component in components),
+            "rms_kernel_count": max(int(component.get("rms_kernel_count", 0) or 0) for component in components),
+            "includes_moe": any(bool(component.get("includes_moe", False)) for component in components),
+            "layer_type": "combined",
+            "layer_index": 0.0,
+            "measured_layer_count": 1.0,
+            "layer_multiplier": 1.0,
+            "components": components,
+        }
+        chunk_sizes = {
+            float(component["max_num_batched_tokens"])
+            for component in components
+            if component.get("max_num_batched_tokens") not in (None, "")
+        }
+        if len(chunk_sizes) == 1:
+            result["max_num_batched_tokens"] = chunk_sizes.pop()
+        sources = {
+            str(component.get("latency_source") or "")
+            for component in components
+            if component.get("latency_source") not in (None, "")
+        }
+        if len(sources) == 1:
+            result["latency_source"] = sources.pop()
+        _copy_uniform_numeric_metrics(result, components, ("seq_len_q", "seq_len_kv_cache"))
+        return result
 
     result = {
         "latency": sum(_scaled(component, "latency") for component in components),
@@ -151,6 +231,7 @@ def _merge_layerwise_entries(existing: dict | None, entry: dict) -> dict:
     }
     if len(chunk_sizes) == 1:
         result["max_num_batched_tokens"] = chunk_sizes.pop()
+    _copy_uniform_numeric_metrics(result, components, ("seq_len_q", "seq_len_kv_cache"))
     return result
 
 
@@ -183,10 +264,56 @@ def load_layerwise_data(layerwise_file):
     }
     data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
     mode_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
+    max_batched_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
+    )
+    max_batched_mode_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
+        )
+    )
+    parallel_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+            )
+        )
+    )
+    parallel_mode_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+                )
+            )
+        )
+    )
+    max_batched_parallel_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+                )
+            )
+        )
+    )
+    max_batched_parallel_mode_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+                    )
+                )
+            )
+        )
+    )
     for row in rows:
         model = str(row["model"]).lower()
         phase = str(row["phase"]).upper()
         tp_size = _parse_int(row.get("tp_size") or row.get("attn_tp") or row.get("moe_tp"), 1)
+        moe_tp_size = _parse_int(row.get("moe_tp") or row.get("moe_tp_size"), 1)
+        ep_size = _parse_int(row.get("ep") or row.get("moe_ep_size"), 1)
         batch_size = _parse_int(row["batch_size"])
         seq_len_q = _parse_int(row.get("seq_len_q") or row.get("new_tokens"), 1)
         seq_len_kv_cache = _parse_int(row.get("seq_len_kv_cache") or row.get("past_kv"), 0)
@@ -209,6 +336,8 @@ def load_layerwise_data(layerwise_file):
             entry["rms_kernel_count"] = int(float(row["rms_kernel_count"]))
         if row.get("layer_type") not in (None, ""):
             entry["layer_type"] = str(row["layer_type"])
+        entry["seq_len_q"] = float(seq_len_q)
+        entry["seq_len_kv_cache"] = float(seq_len_kv_cache)
         for metric in ("layer_index", "measured_layer_count", "layer_multiplier"):
             value = _parse_optional_float(row.get(metric))
             if value is not None:
@@ -220,6 +349,8 @@ def load_layerwise_data(layerwise_file):
         value = _parse_optional_float(row.get("max_num_batched_tokens"))
         if value is not None:
             entry["max_num_batched_tokens"] = value
+        entry["moe_tp_size"] = float(moe_tp_size)
+        entry["moe_ep_size"] = float(ep_size)
         entry["includes_moe"] = _parse_bool(row.get("includes_moe"))
         if row.get("moe_weight_mode") not in (None, ""):
             entry["moe_weight_mode"] = str(row["moe_weight_mode"])
@@ -229,6 +360,23 @@ def load_layerwise_data(layerwise_file):
         if phase == "CTX":
             existing = data[model][phase][tp_size][seq_len_q].get(seq_len_kv_cache)
             data[model][phase][tp_size][seq_len_q][seq_len_kv_cache] = _merge_layerwise_entries(existing, entry)
+            _store_layerwise_entry(
+                parallel_data,
+                (model, phase, tp_size, moe_tp_size, ep_size, seq_len_q, seq_len_kv_cache),
+                entry,
+            )
+            max_num_batched_tokens = entry.get("max_num_batched_tokens")
+            if max_num_batched_tokens not in (None, ""):
+                max_key = int(float(max_num_batched_tokens))
+                existing = max_batched_data[model][phase][tp_size][max_key][seq_len_q].get(seq_len_kv_cache)
+                max_batched_data[model][phase][tp_size][max_key][seq_len_q][seq_len_kv_cache] = (
+                    _merge_layerwise_entries(existing, entry)
+                )
+                _store_layerwise_entry(
+                    max_batched_parallel_data,
+                    (model, phase, tp_size, max_key, moe_tp_size, ep_size, seq_len_q, seq_len_kv_cache),
+                    entry,
+                )
             if entry.get("moe_weight_mode") not in (None, ""):
                 mode = str(entry["moe_weight_mode"])
                 existing = mode_data[model][phase][tp_size][mode][seq_len_q].get(seq_len_kv_cache)
@@ -236,9 +384,32 @@ def load_layerwise_data(layerwise_file):
                     existing,
                     entry,
                 )
+                _store_layerwise_entry(
+                    parallel_mode_data,
+                    (model, phase, tp_size, mode, moe_tp_size, ep_size, seq_len_q, seq_len_kv_cache),
+                    entry,
+                )
+                if max_num_batched_tokens not in (None, ""):
+                    max_key = int(float(max_num_batched_tokens))
+                    existing = max_batched_mode_data[model][phase][tp_size][mode][max_key][seq_len_q].get(
+                        seq_len_kv_cache
+                    )
+                    max_batched_mode_data[model][phase][tp_size][mode][max_key][seq_len_q][seq_len_kv_cache] = (
+                        _merge_layerwise_entries(existing, entry)
+                    )
+                    _store_layerwise_entry(
+                        max_batched_parallel_mode_data,
+                        (model, phase, tp_size, mode, max_key, moe_tp_size, ep_size, seq_len_q, seq_len_kv_cache),
+                        entry,
+                    )
         else:
             existing = data[model][phase][tp_size][batch_size].get(seq_len_kv_cache)
             data[model][phase][tp_size][batch_size][seq_len_kv_cache] = _merge_layerwise_entries(existing, entry)
+            _store_layerwise_entry(
+                parallel_data,
+                (model, phase, tp_size, moe_tp_size, ep_size, batch_size, seq_len_kv_cache),
+                entry,
+            )
             if entry.get("moe_weight_mode") not in (None, ""):
                 mode = str(entry["moe_weight_mode"])
                 existing = mode_data[model][phase][tp_size][mode][batch_size].get(seq_len_kv_cache)
@@ -246,9 +417,26 @@ def load_layerwise_data(layerwise_file):
                     existing,
                     entry,
                 )
+                _store_layerwise_entry(
+                    parallel_mode_data,
+                    (model, phase, tp_size, mode, moe_tp_size, ep_size, batch_size, seq_len_kv_cache),
+                    entry,
+                )
 
     if mode_data:
         data[_MODE_INDEX_KEY] = mode_data
+    if max_batched_data:
+        data[_MAX_NUM_BATCHED_INDEX_KEY] = max_batched_data
+    if max_batched_mode_data:
+        data[_MAX_NUM_BATCHED_MODE_INDEX_KEY] = max_batched_mode_data
+    if parallel_data:
+        data[_PARALLEL_INDEX_KEY] = parallel_data
+    if parallel_mode_data:
+        data[_PARALLEL_MODE_INDEX_KEY] = parallel_mode_data
+    if max_batched_parallel_data:
+        data[_MAX_NUM_BATCHED_PARALLEL_INDEX_KEY] = max_batched_parallel_data
+    if max_batched_parallel_mode_data:
+        data[_MAX_NUM_BATCHED_PARALLEL_MODE_INDEX_KEY] = max_batched_parallel_mode_data
     return data
 
 
@@ -411,6 +599,9 @@ class Layerwise(Operation):
         seq_len: int,
         seq_len_kv_cache: int = 0,
         moe_weight_mode: str | None = None,
+        max_num_batched_tokens: int | None = None,
+        moe_tp_size: int | None = None,
+        moe_ep_size: int | None = None,
     ) -> dict[str, float]:
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
@@ -423,7 +614,54 @@ class Layerwise(Operation):
 
         data = data_wrapper.data
         mode = str(moe_weight_mode or "")
-        if mode:
+        parallel_requested = moe_tp_size is not None or moe_ep_size is not None
+        if parallel_requested:
+            query_moe_tp = int(moe_tp_size or 1)
+            query_ep = int(moe_ep_size or 1)
+            try:
+                if phase == "CTX" and max_num_batched_tokens is not None and mode:
+                    max_key = int(max_num_batched_tokens)
+                    tp_data = data[_MAX_NUM_BATCHED_PARALLEL_MODE_INDEX_KEY][model][phase][tp_size][mode][max_key][
+                        query_moe_tp
+                    ][query_ep]
+                elif phase == "CTX" and max_num_batched_tokens is not None:
+                    max_key = int(max_num_batched_tokens)
+                    tp_data = data[_MAX_NUM_BATCHED_PARALLEL_INDEX_KEY][model][phase][tp_size][max_key][
+                        query_moe_tp
+                    ][query_ep]
+                elif mode:
+                    tp_data = data[_PARALLEL_MODE_INDEX_KEY][model][phase][tp_size][mode][query_moe_tp][query_ep]
+                else:
+                    tp_data = data[_PARALLEL_INDEX_KEY][model][phase][tp_size][query_moe_tp][query_ep]
+            except KeyError:
+                tp_data = None
+        else:
+            tp_data = None
+        if tp_data is not None:
+            pass
+        elif phase == "CTX" and max_num_batched_tokens is not None:
+            max_key = int(max_num_batched_tokens)
+            if mode:
+                max_mode_index = data.get(_MAX_NUM_BATCHED_MODE_INDEX_KEY, {})
+                try:
+                    data = max_mode_index[model][phase][tp_size][mode][max_key]
+                    tp_data = data
+                except KeyError as exc:
+                    raise PerfDataNotAvailableError(
+                        f"Layerwise data for moe_weight_mode={mode!r}, max_num_batched_tokens={max_key} "
+                        f"not found for {model}/{phase}/tp{tp_size}"
+                    ) from exc
+            else:
+                max_index = data.get(_MAX_NUM_BATCHED_INDEX_KEY, {})
+                try:
+                    data = max_index[model][phase][tp_size][max_key]
+                    tp_data = data
+                except KeyError as exc:
+                    raise PerfDataNotAvailableError(
+                        f"Layerwise data for max_num_batched_tokens={max_key} not found for "
+                        f"{model}/{phase}/tp{tp_size}"
+                    ) from exc
+        elif mode:
             mode_index = data.get(_MODE_INDEX_KEY, {})
             try:
                 data = mode_index[model][phase][tp_size][mode]
@@ -506,10 +744,21 @@ class Layerwise(Operation):
             "rms_latency": float(result.get("rms_latency", 0.0)),
             "rms_kernel_count": float(result.get("rms_kernel_count", 0.0)),
             "includes_moe": bool(result.get("includes_moe", False)),
+            "query_seq_len_q": float(seq_len),
+            "query_seq_len_kv_cache": float(seq_len_kv_cache),
         }
         if result.get("layer_type") not in (None, ""):
             out["layer_type"] = str(result["layer_type"])
-        for metric in ("layer_index", "measured_layer_count", "layer_multiplier", "max_num_batched_tokens"):
+        for metric in (
+            "layer_index",
+            "measured_layer_count",
+            "layer_multiplier",
+            "max_num_batched_tokens",
+            "seq_len_q",
+            "seq_len_kv_cache",
+            "query_seq_len_q",
+            "query_seq_len_kv_cache",
+        ):
             if result.get(metric) not in (None, ""):
                 out[metric] = float(result[metric])
         if result.get("physical_gpus") not in (None, ""):
@@ -542,6 +791,7 @@ class Layerwise(Operation):
             batch_size,
             seq_len,
             seq_len_kv_cache,
+            max_num_batched_tokens=None,
         )
 
         return PerformanceResult(result["latency"], energy=result["energy"], source="silicon")
