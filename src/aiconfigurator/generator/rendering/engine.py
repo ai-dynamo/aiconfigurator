@@ -451,7 +451,12 @@ def render_backend_templates(
             eng_tmpl = env.get_template(engine_template_file.name)
             for worker in worker_plan:
                 wc = build_engine_worker_context(worker)
-                rendered = eng_tmpl.render(**wc)
+                if backend == "trtllm" and engine_builder_covers(version):
+                    import yaml as _yaml
+                    from aiconfigurator.generator.builders.trtllm_engine_config import build_engine_config
+                    rendered = _yaml.safe_dump(build_engine_config(wc, role=worker, version=version), sort_keys=False)
+                else:
+                    rendered = eng_tmpl.render(**wc)
                 if worker == "agg":
                     out_name = "extra_engine_args_agg.yaml"
                 elif worker == "prefill":

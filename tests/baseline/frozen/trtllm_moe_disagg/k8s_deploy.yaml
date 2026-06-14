@@ -43,20 +43,17 @@ spec:
           - -c
           args:
           - "set -euo pipefail\nmkdir -p /workspace/engine_configs\ncat > /workspace/engine_configs/prefill_config.yaml\
-            \ <<'YAML'\nbackend: pytorch\n\n  # is_moe from sdk\nmoe_expert_parallel_size:\
-            \ 1\nmoe_tensor_parallel_size: 1\n\nmoe_config:\n    backend: CUTLASS\
-            \ # MOE backend to use (CUTLASS, CUTEDSL, WIDEEP, TRTLLM, VANILLA)\n\n\
-            tensor_parallel_size: 1\npipeline_parallel_size: 1\nenable_attention_dp:\
-            \ False\nenable_chunked_prefill: False\n\n\nmax_batch_size: 128\nmax_num_tokens:\
-            \ 4512\n\nkv_cache_config:\n  free_gpu_memory_fraction: 0.8  # Fraction\
-            \ of GPU memory usable for KV-cache\n  dtype: auto\n  tokens_per_block:\
-            \ 32\n  enable_block_reuse: False\n\ncache_transceiver_config:\n  backend:\
-            \ DEFAULT # The communication backend type to use for the cache transceiver\
-            \ (\"DEFAULT\",\"UCX\",\"NIXL\",\"MPI\")\n  max_tokens_in_buffer: 5504\n\
-            \ncuda_graph_config:\n  enable_padding: False # Pad CUDA graph\n  batch_sizes:\
-            \ [1,2,4,8,16,32,64,128,256]\n\ndisable_overlap_scheduler: True\nprint_iter_log:\
-            \ False\nYAML\nargs=(\n  --model-path \"Qwen/Qwen3-30B-A3B\"\n  --served-model-name\
-            \ \"Qwen/Qwen3-30B-A3B\"\n  --extra-engine-args \"/workspace/engine_configs/prefill_config.yaml\"\
+            \ <<'YAML'\nbackend: pytorch\nmoe_expert_parallel_size: 1\nmoe_tensor_parallel_size:\
+            \ 1\nmoe_config:\n  backend: CUTLASS\ntensor_parallel_size: 1\npipeline_parallel_size:\
+            \ 1\nenable_attention_dp: false\nenable_chunked_prefill: false\nmax_batch_size:\
+            \ 128\nmax_num_tokens: 4512\nkv_cache_config:\n  free_gpu_memory_fraction:\
+            \ 0.8\n  dtype: auto\n  tokens_per_block: 32\n  enable_block_reuse: false\n\
+            cache_transceiver_config:\n  backend: DEFAULT\n  max_tokens_in_buffer:\
+            \ 5504\ncuda_graph_config:\n  enable_padding: false\n  batch_sizes:\n\
+            \  - 1\n  - 2\n  - 4\n  - 8\n  - 16\n  - 32\n  - 64\n  - 128\n  - 256\n\
+            disable_overlap_scheduler: true\nprint_iter_log: false\nYAML\nargs=(\n\
+            \  --model-path \"Qwen/Qwen3-30B-A3B\"\n  --served-model-name \"Qwen/Qwen3-30B-A3B\"\
+            \n  --extra-engine-args \"/workspace/engine_configs/prefill_config.yaml\"\
             \n)\nargs+=(--disaggregation-mode prefill)\nexec python3 -m dynamo.trtllm\
             \ \"${args[@]}\"\n"
           startupProbe:
@@ -113,23 +110,24 @@ spec:
           - -c
           args:
           - "set -euo pipefail\nmkdir -p /workspace/engine_configs\ncat > /workspace/engine_configs/decode_config.yaml\
-            \ <<'YAML'\nbackend: pytorch\n\n  # is_moe from sdk\nmoe_expert_parallel_size:\
-            \ 1\nmoe_tensor_parallel_size: 1\n\nmoe_config:\n    backend: CUTLASS\
-            \ # MOE backend to use (CUTLASS, CUTEDSL, WIDEEP, TRTLLM, VANILLA)\n\n\
-            tensor_parallel_size: 1\npipeline_parallel_size: 1\nenable_attention_dp:\
-            \ False\nenable_chunked_prefill: False\n\n\nmax_batch_size: 128\nmax_num_tokens:\
-            \ 128\n\nkv_cache_config:\n  free_gpu_memory_fraction: 0.8  # Fraction\
-            \ of GPU memory usable for KV-cache\n  dtype: auto\n  tokens_per_block:\
-            \ 32\n  enable_block_reuse: False\n\ncache_transceiver_config:\n  backend:\
-            \ DEFAULT # The communication backend type to use for the cache transceiver\
-            \ (\"DEFAULT\",\"UCX\",\"NIXL\",\"MPI\")\n  max_tokens_in_buffer: 5504\n\
-            \ncuda_graph_config:\n  enable_padding: True # Pad CUDA graph\n  batch_sizes:\
-            \ [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,16,20,24,28,32,32,40,48,56,64,64,80,96,112,128,128,160,192,224,256,256,320,384,448,512,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136]\n\
-            \ndisable_overlap_scheduler: False\nprint_iter_log: False\nYAML\nargs=(\n\
-            \  --model-path \"Qwen/Qwen3-30B-A3B\"\n  --served-model-name \"Qwen/Qwen3-30B-A3B\"\
-            \n  --extra-engine-args \"/workspace/engine_configs/decode_config.yaml\"\
-            \n)\nargs+=(--disaggregation-mode decode)\nexec python3 -m dynamo.trtllm\
-            \ \"${args[@]}\"\n"
+            \ <<'YAML'\nbackend: pytorch\nmoe_expert_parallel_size: 1\nmoe_tensor_parallel_size:\
+            \ 1\nmoe_config:\n  backend: CUTLASS\ntensor_parallel_size: 1\npipeline_parallel_size:\
+            \ 1\nenable_attention_dp: false\nenable_chunked_prefill: false\nmax_batch_size:\
+            \ 128\nmax_num_tokens: 128\nkv_cache_config:\n  free_gpu_memory_fraction:\
+            \ 0.8\n  dtype: auto\n  tokens_per_block: 32\n  enable_block_reuse: false\n\
+            cache_transceiver_config:\n  backend: DEFAULT\n  max_tokens_in_buffer:\
+            \ 5504\ncuda_graph_config:\n  enable_padding: true\n  batch_sizes:\n \
+            \ - 1\n  - 2\n  - 3\n  - 4\n  - 5\n  - 6\n  - 7\n  - 8\n  - 9\n  - 10\n\
+            \  - 11\n  - 12\n  - 13\n  - 14\n  - 15\n  - 16\n  - 16\n  - 20\n  - 24\n\
+            \  - 28\n  - 32\n  - 32\n  - 40\n  - 48\n  - 56\n  - 64\n  - 64\n  - 80\n\
+            \  - 96\n  - 112\n  - 128\n  - 128\n  - 160\n  - 192\n  - 224\n  - 256\n\
+            \  - 256\n  - 320\n  - 384\n  - 448\n  - 512\n  - 120\n  - 121\n  - 122\n\
+            \  - 123\n  - 124\n  - 125\n  - 126\n  - 127\n  - 128\n  - 129\n  - 130\n\
+            \  - 131\n  - 132\n  - 133\n  - 134\n  - 135\n  - 136\ndisable_overlap_scheduler:\
+            \ false\nprint_iter_log: false\nYAML\nargs=(\n  --model-path \"Qwen/Qwen3-30B-A3B\"\
+            \n  --served-model-name \"Qwen/Qwen3-30B-A3B\"\n  --extra-engine-args\
+            \ \"/workspace/engine_configs/decode_config.yaml\"\n)\nargs+=(--disaggregation-mode\
+            \ decode)\nexec python3 -m dynamo.trtllm \"${args[@]}\"\n"
           startupProbe:
             httpGet:
               path: /health
