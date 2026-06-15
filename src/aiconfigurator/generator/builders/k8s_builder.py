@@ -17,6 +17,7 @@ template edit maps to exactly one builder.
 """
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any
 
@@ -170,8 +171,8 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
             extra_pod_spec=ExtraPodSpec(
                 volumes=volumes,
                 image_pull_secrets=image_pull_secrets,
-                node_selector=node_selector_fact,
-                tolerations=tolerations_fact,
+                node_selector=copy.deepcopy(node_selector_fact),
+                tolerations=copy.deepcopy(tolerations_fact),
                 main_container=MainContainer(
                     image=k8s.get("k8s_image"),
                     working_dir=runtime_working_dir,
@@ -202,8 +203,8 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
         extra_pod_spec=ExtraPodSpec(
             volumes=fe_volumes,
             image_pull_secrets=[{"name": image_pull_secret}] if image_pull_secret else None,
-            node_selector=node_selector_fact,
-            tolerations=tolerations_fact,
+            node_selector=copy.deepcopy(node_selector_fact),
+            tolerations=copy.deepcopy(tolerations_fact),
             main_container=MainContainer(
                 image=k8s.get("k8s_image"),
                 image_pull_policy="IfNotPresent",
@@ -363,8 +364,8 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
             extra_pod_spec=ExtraPodSpec(
                 volumes=volumes,
                 image_pull_secrets=image_pull_secrets,
-                node_selector=node_selector_fact,
-                tolerations=tolerations_fact,
+                node_selector=copy.deepcopy(node_selector_fact),
+                tolerations=copy.deepcopy(tolerations_fact),
                 main_container=MainContainer(
                     image=k8s.get("k8s_image"),
                     working_dir=runtime_working_dir,
@@ -393,8 +394,8 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
         extra_pod_spec=ExtraPodSpec(
             volumes=fe_volumes,
             image_pull_secrets=[{"name": image_pull_secret}] if image_pull_secret else None,
-            node_selector=node_selector_fact,
-            tolerations=tolerations_fact,
+            node_selector=copy.deepcopy(node_selector_fact),
+            tolerations=copy.deepcopy(tolerations_fact),
             main_container=MainContainer(
                 image=k8s.get("k8s_image"),
                 image_pull_policy="IfNotPresent",
@@ -605,8 +606,8 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
             extra_pod_spec=ExtraPodSpec(
                 volumes=render_volumes(),
                 image_pull_secrets=image_pull_secrets,
-                node_selector=node_selector_fact,
-                tolerations=tolerations_fact,
+                node_selector=copy.deepcopy(node_selector_fact),
+                tolerations=copy.deepcopy(tolerations_fact),
                 main_container=MainContainer(
                     image=k8s.get("k8s_image"),
                     working_dir=runtime_working_dir,
@@ -659,8 +660,8 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
         extra_pod_spec=ExtraPodSpec(
             volumes=fe_volumes,
             image_pull_secrets=[{"name": image_pull_secret}] if image_pull_secret else None,
-            node_selector=node_selector_fact,
-            tolerations=tolerations_fact,
+            node_selector=copy.deepcopy(node_selector_fact),
+            tolerations=copy.deepcopy(tolerations_fact),
             main_container=MainContainer(
                 image=k8s.get("k8s_image"),
                 image_pull_policy="IfNotPresent",

@@ -10,10 +10,10 @@ spec:
       componentType: frontend
       replicas: 1
       extraPodSpec:
-        nodeSelector: &id001
+        nodeSelector:
           kubernetes.io/arch: arm64
           nvidia.com/gpu.product: NVIDIA-GB200
-        tolerations: &id002
+        tolerations:
         - key: nvidia.com/gpu
           operator: Exists
           effect: NoSchedule
@@ -42,8 +42,17 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 10Gi
-        nodeSelector: *id001
-        tolerations: *id002
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
           workingDir: /workspace/components/backends/trtllm
@@ -126,8 +135,17 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 10Gi
-        nodeSelector: *id001
-        tolerations: *id002
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
           workingDir: /workspace/components/backends/trtllm

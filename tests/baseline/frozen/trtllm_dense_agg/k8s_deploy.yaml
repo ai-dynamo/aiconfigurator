@@ -10,9 +10,9 @@ spec:
       componentType: frontend
       replicas: 1
       extraPodSpec:
-        nodeSelector: &id001
+        nodeSelector:
           nvidia.com/gpu.product: NVIDIA-H200
-        tolerations: &id002
+        tolerations:
         - key: nvidia.com/gpu
           operator: Equal
           value: 'true'
@@ -37,8 +37,13 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 10Gi
-        nodeSelector: *id001
-        tolerations: *id002
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-H200
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: 'true'
+          effect: NoSchedule
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
           workingDir: /workspace/components/backends/trtllm
