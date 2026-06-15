@@ -160,19 +160,35 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
                 ["--is-decode-worker", "--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both"}']
             )
 
+        # Phase 4c-T2 EFA pod requirements (worker-only, opt-in). Only the efa
+        # transport profile carries a `pod` block; non-efa transports emit
+        # nothing. Replicated per backend (no shared helper, per PR#314->#340).
+        efa_pod = tr_facts.get("pod") if isinstance(tr_facts, dict) else None
+        resources = {"limits": {"gpu": str(gpu)}}
+        security_context = None
+        host_ipc = None
+        if isinstance(efa_pod, dict):
+            if efa_pod.get("privileged"):
+                security_context = {"privileged": True, "capabilities": {"add": ["IPC_LOCK"]}}
+            if efa_pod.get("host_ipc"):
+                host_ipc = True
+            if efa_pod.get("efa_resource"):
+                resources = {"limits": {"gpu": str(gpu), "custom": {efa_pod["efa_resource"]: str(gpu)}}}
+
         return DGDService(
             env_from_secret="hf-token-secret",
             envs=envs,
             component_type="worker",
             sub_component_type=role,
             replicas=replicas if replicas is not None else 1,
-            resources={"limits": {"gpu": str(gpu)}},
+            resources=resources,
             shared_memory=worker_shared_memory(role),
             extra_pod_spec=ExtraPodSpec(
                 volumes=volumes,
                 image_pull_secrets=image_pull_secrets,
                 node_selector=copy.deepcopy(node_selector_fact),
                 tolerations=copy.deepcopy(tolerations_fact),
+                host_ipc=host_ipc,
                 main_container=MainContainer(
                     image=k8s.get("k8s_image"),
                     working_dir=runtime_working_dir,
@@ -181,6 +197,7 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
                     command=["python3", "-m", "dynamo.vllm"],
                     args=args,
                     env=worker_main_env(role),
+                    security_context=security_context,
                 ),
             ),
         )
@@ -353,19 +370,35 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
         lines.append('exec python3 -m dynamo.sglang "${args[@]}"')
         script = "\n".join(lines) + "\n"
 
+        # Phase 4c-T2 EFA pod requirements (worker-only, opt-in). Only the efa
+        # transport profile carries a `pod` block; non-efa transports emit
+        # nothing. Replicated per backend (no shared helper, per PR#314->#340).
+        efa_pod = tr_facts.get("pod") if isinstance(tr_facts, dict) else None
+        resources = {"limits": {"gpu": str(gpu)}}
+        security_context = None
+        host_ipc = None
+        if isinstance(efa_pod, dict):
+            if efa_pod.get("privileged"):
+                security_context = {"privileged": True, "capabilities": {"add": ["IPC_LOCK"]}}
+            if efa_pod.get("host_ipc"):
+                host_ipc = True
+            if efa_pod.get("efa_resource"):
+                resources = {"limits": {"gpu": str(gpu), "custom": {efa_pod["efa_resource"]: str(gpu)}}}
+
         return DGDService(
             env_from_secret="hf-token-secret",
             envs=envs,
             component_type="worker",
             sub_component_type=role,
             replicas=replicas if replicas is not None else 1,
-            resources={"limits": {"gpu": str(gpu)}},
+            resources=resources,
             shared_memory=worker_shared_memory(role),
             extra_pod_spec=ExtraPodSpec(
                 volumes=volumes,
                 image_pull_secrets=image_pull_secrets,
                 node_selector=copy.deepcopy(node_selector_fact),
                 tolerations=copy.deepcopy(tolerations_fact),
+                host_ipc=host_ipc,
                 main_container=MainContainer(
                     image=k8s.get("k8s_image"),
                     working_dir=runtime_working_dir,
@@ -374,6 +407,7 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
                     command=["/bin/bash", "-c"],
                     args=[script],
                     env=worker_main_env(role),
+                    security_context=security_context,
                 ),
             ),
         )
@@ -595,19 +629,35 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
         script = "\n".join(lines) + "\n"
 
         probes = render_probes()
+        # Phase 4c-T2 EFA pod requirements (worker-only, opt-in). Only the efa
+        # transport profile carries a `pod` block; non-efa transports emit
+        # nothing. Replicated per backend (no shared helper, per PR#314->#340).
+        efa_pod = tr_facts.get("pod") if isinstance(tr_facts, dict) else None
+        resources = {"limits": {"gpu": str(gpu)}}
+        security_context = None
+        host_ipc = None
+        if isinstance(efa_pod, dict):
+            if efa_pod.get("privileged"):
+                security_context = {"privileged": True, "capabilities": {"add": ["IPC_LOCK"]}}
+            if efa_pod.get("host_ipc"):
+                host_ipc = True
+            if efa_pod.get("efa_resource"):
+                resources = {"limits": {"gpu": str(gpu), "custom": {efa_pod["efa_resource"]: str(gpu)}}}
+
         return DGDService(
             env_from_secret="hf-token-secret",
             envs=envs,
             component_type="worker",
             sub_component_type=sub_component_type,
             replicas=replicas,
-            resources={"limits": {"gpu": str(gpu)}},
+            resources=resources,
             shared_memory=worker_shared_memory(sub_component_type),
             extra_pod_spec=ExtraPodSpec(
                 volumes=render_volumes(),
                 image_pull_secrets=image_pull_secrets,
                 node_selector=copy.deepcopy(node_selector_fact),
                 tolerations=copy.deepcopy(tolerations_fact),
+                host_ipc=host_ipc,
                 main_container=MainContainer(
                     image=k8s.get("k8s_image"),
                     working_dir=runtime_working_dir,
@@ -619,6 +669,7 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
                     liveness_probe=probes["liveness_probe"],
                     readiness_probe=probes["readiness_probe"],
                     env=worker_main_env(sub_component_type),
+                    security_context=security_context,
                 ),
             ),
         )

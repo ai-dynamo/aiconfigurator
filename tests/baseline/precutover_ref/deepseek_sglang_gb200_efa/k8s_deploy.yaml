@@ -1,0 +1,123 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-ai-deepseek-v4-pro-agg
+  namespace: dynamo
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0
+          imagePullPolicy: IfNotPresent
+    SGLangWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 2
+      resources:
+        limits:
+          gpu: '4'
+          custom:
+            vpc.amazonaws.com/efa: '4'
+      sharedMemory:
+        size: 64Gi
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
+        hostIPC: true
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0
+          workingDir: /workspace/components/backends/sglang
+          imagePullPolicy: IfNotPresent
+          command:
+          - /bin/bash
+          - -c
+          args:
+          - "set -euo pipefail\nargs=(\n  --model-path \"deepseek-ai/DeepSeek-V4-Pro\"\
+            \n  --served-model-name \"deepseek-ai/DeepSeek-V4-Pro\"\n  --tensor-parallel-size\
+            \ 4 --pipeline-parallel-size 1 --data-parallel-size 1 --max-running-requests\
+            \ 512 --max-prefill-tokens 5500 --enable-mixed-chunk --expert-parallel-size\
+            \ 1 --cuda-graph-bs 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 16 20 24 28\
+            \ 32 32 40 48 56 64 64 80 96 112 128 128 160 192 224 256 256 320 384 448\
+            \ 512 120 121 122 123 124 125 126 127 128 129 130 131 132 133 134 135\
+            \ 136 --moe-runner-backend deepep_moe --trust-remote-code --disable-flashinfer-autotune\
+            \ --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk\
+            \ 1 --speculative-num-draft-tokens 4\n)\nexec python3 -m dynamo.sglang\
+            \ \"${args[@]}\"\n"
+          env:
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'
+          - name: NCCL_MNNVL_ENABLE
+            value: '1'
+          - name: NCCL_NVLS_ENABLE
+            value: '1'
+          - name: NCCL_P2P_LEVEL
+            value: NVL
+          - name: UCX_CUDA_IPC_ENABLE_MNNVL
+            value: y
+          - name: VLLM_USE_NCCL_SYMM_MEM
+            value: '1'
+          - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+            value: LIBFABRIC
+          - name: FI_PROVIDER
+            value: efa
+          - name: FI_EFA_USE_DEVICE_RDMA
+            value: '1'
+          - name: FI_EFA_ENABLE_SHM_TRANSFER
+            value: '0'
+          - name: FI_EFA_ENABLE_SHM
+            value: '0'
+          - name: FI_EFA_FORK_SAFE
+            value: '0'
+          - name: FI_EFA_USE_HUGE_PAGE
+            value: '0'
+          - name: FI_EFA_MR_MAX_CACHED_COUNT
+            value: '524288'
+          - name: FI_EFA_MR_MAX_CACHED_SIZE
+            value: '0'
+          - name: FI_HMEM
+            value: cuda
+          - name: FI_HMEM_CUDA_ENABLE_XFER
+            value: '1'
+          - name: FI_LOG_LEVEL
+            value: warn
+          - name: PATH
+            value: /opt/dynamo/venv/bin:/opt/amazon/efa/bin:/usr/local/bin:/usr/bin:/bin
+          - name: LD_LIBRARY_PATH
+            value: /opt/amazon/efa/lib:/opt/amazon/efa/lib64:/opt/aws-ofi-nccl/lib:/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins:/opt/nvidia/nvda_nixl/lib/aarch64-linux-gnu:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/lib64:/usr/local/lib
+          - name: NIXL_TELEMETRY_ENABLE
+            value: y
+          - name: NIXL_TELEMETRY_EXPORTER
+            value: prometheus
+          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+            value: '19090'
+          - name: NIXL_LOG_LEVEL
+            value: ERROR
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+              - IPC_LOCK

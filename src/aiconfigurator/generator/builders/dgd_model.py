@@ -50,6 +50,7 @@ class MainContainer:
     liveness_probe: dict[str, Any] | None = None
     readiness_probe: dict[str, Any] | None = None
     env: list[Any] | None = None
+    security_context: dict[str, Any] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     # Emission order of the legacy k8s_deploy.yaml.j2 render_worker macros
@@ -65,6 +66,7 @@ class MainContainer:
         ("livenessProbe", "liveness_probe"),
         ("readinessProbe", "readiness_probe"),
         ("env", "env"),
+        ("securityContext", "security_context"),
     )
 
     @classmethod
@@ -90,6 +92,7 @@ class ExtraPodSpec:
     main_container: MainContainer | None = None
     node_selector: dict[str, Any] | None = None
     tolerations: list[Any] | None = None
+    host_ipc: bool | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     _KEYS = (
@@ -97,6 +100,7 @@ class ExtraPodSpec:
         ("imagePullSecrets", "image_pull_secrets"),
         ("nodeSelector", "node_selector"),
         ("tolerations", "tolerations"),
+        ("hostIPC", "host_ipc"),
     )
 
     @classmethod

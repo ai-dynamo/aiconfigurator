@@ -118,4 +118,13 @@ CANARY_CASES: list[CanaryCase] = [
         backend_version="0.20.1",
         params=_make_params(_MOE_MODEL, "vllm", mode="agg", total_gpus=_TOTAL_GPUS, system_name="gb200", transport="ib"),
     ),
+    # Transport selector: efa transport injects FI_* env AND privileged pod
+    # requirements (hostIPC / IPC_LOCK / vpc.amazonaws.com/efa NIC) into WORKER
+    # pods only (frontend gets none).
+    CanaryCase(
+        name="deepseek_sglang_gb200_efa",
+        backend="sglang",
+        backend_version="0.5.11",
+        params=_make_params("deepseek-ai/DeepSeek-V4-Pro", "sglang", mode="agg", total_gpus=_TOTAL_GPUS, system_name="gb200", transport="efa"),
+    ),
 ]

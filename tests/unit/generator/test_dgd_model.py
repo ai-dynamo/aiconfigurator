@@ -32,6 +32,27 @@ def test_new_pod_fields_absent_when_unset():
     assert "env" not in s["extraPodSpec"]["mainContainer"]
 
 
+def test_efa_pod_fields_emit_when_set():
+    from aiconfigurator.generator.builders.dgd_model import DGD, DGDService, ExtraPodSpec, MainContainer, dgd_documents_to_yaml
+    import yaml
+    svc = DGDService(replicas=1, resources={"limits": {"gpu": "4", "custom": {"vpc.amazonaws.com/efa": "4"}}},
+        extra_pod_spec=ExtraPodSpec(host_ipc=True,
+            main_container=MainContainer(image="i", security_context={"privileged": True, "capabilities": {"add": ["IPC_LOCK"]}})))
+    s = yaml.safe_load(dgd_documents_to_yaml([DGD(name="d", services={"w": svc})]))["spec"]["services"]["w"]
+    assert s["extraPodSpec"]["hostIPC"] is True
+    assert s["extraPodSpec"]["mainContainer"]["securityContext"]["privileged"] is True
+    assert s["resources"]["limits"]["custom"]["vpc.amazonaws.com/efa"] == "4"
+
+
+def test_efa_pod_fields_absent_when_unset():
+    from aiconfigurator.generator.builders.dgd_model import DGD, DGDService, ExtraPodSpec, MainContainer, dgd_documents_to_yaml
+    import yaml
+    svc = DGDService(replicas=1, extra_pod_spec=ExtraPodSpec(main_container=MainContainer(image="i")))
+    s = yaml.safe_load(dgd_documents_to_yaml([DGD(name="d", services={"w": svc})]))["spec"]["services"]["w"]
+    assert "hostIPC" not in s["extraPodSpec"]
+    assert "securityContext" not in s["extraPodSpec"]["mainContainer"]
+
+
 def test_round_trip_via_from_dict():
     svc = DGDService(replicas=1, shared_memory={"size": "80Gi"},
                      extra_pod_spec=ExtraPodSpec(node_selector={"a": "b"}, main_container=MainContainer(image="i")))
